@@ -231,7 +231,6 @@ func main() {
 		Description:         "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
 		Instruction:         instruction,
 		Tools:               tools,
-		SubAgents:           remoteAgents,
 		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportFunc},
 	})
 	if err != nil {
@@ -243,8 +242,11 @@ func main() {
 		log.Printf("Unavailable agents: %s", strings.Join(unavailableAgents, ", "))
 	}
 
-	// Create the agent loader
-	agentLoader := agent.NewSingleLoader(rootAgent)
+	// Create the agent loader with all agents (root + remote sub-agents)
+	agentLoader, err := agent.NewMultiLoader(rootAgent, remoteAgents...)
+	if err != nil {
+		log.Fatalf("Failed to create agent loader: %v", err)
+	}
 
 	// Configure services
 	artifactService := artifact.InMemoryService()
