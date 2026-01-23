@@ -179,10 +179,11 @@ func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) {
 func main() {
 	ctx := context.Background()
 
+	modelVendor := os.Getenv("HELPDESK_MODEL_VENDOR")
 	modelName := os.Getenv("HELPDESK_MODEL_NAME")
 	apiKey := os.Getenv("HELPDESK_API_KEY")
-	if modelName == "" || apiKey == "" {
-		log.Fatalf("Please set the HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
+	if modelVendor == "" || modelName == "" || apiKey == "" {
+		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
 	}
 
 	// Configure available agents
@@ -203,10 +204,27 @@ func main() {
 		},
 	}
 
-	// Create the LLM model
-	llmModel, err := gemini.NewModel(ctx, p.modelName, &genai.ClientConfig{APIKey: p.apiKey})
-	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
+	// Create the LLM model based on vendor
+	var llmModel model.LLM
+	var err error
+
+	switch strings.ToLower(modelVendor) {
+	case "google", "gemini":
+		llmModel, err = gemini.NewModel(ctx, p.modelName, &genai.ClientConfig{APIKey: p.apiKey})
+		if err != nil {
+			log.Fatalf("Failed to create Gemini model: %v", err)
+		}
+		log.Printf("Using Google/Gemini model: %s", modelName)
+
+	case "anthropic":
+		llmModel, err = NewAnthropicModel(ctx, modelName, apiKey)
+		if err != nil {
+			log.Fatalf("Failed to create Anthropic model: %v", err)
+		}
+		log.Printf("Using Anthropic model: %s", modelName)
+
+	default:
+		log.Fatalf("Unknown LLM model vendor: %s (supported: google, gemini, anthropic)", modelVendor)
 	}
 
 	// Create remote agent proxies (with health checking)
@@ -219,18 +237,22 @@ func main() {
 			strings.Join(unavailableAgents, ", "))
 	}
 
-	// Create tools list - include Google Search for general queries
-	tools := []tool.Tool{
-		geminitool.GoogleSearch{},
+	// Create tools list
+	var tools []tool.Tool
+	// Google Search is only available with Gemini models
+	if strings.ToLower(modelVendor) == "google" || strings.ToLower(modelVendor) == "gemini" {
+		tools = append(tools, geminitool.GoogleSearch{})
 	}
 
-	// Create the root agent
+	// Create the root agent with sub-agents
+	// SubAgents must be set here for the ADK to make them available as transfer targets
 	rootAgent, err := llmagent.New(llmagent.Config{
 		Name:                "helpdesk_orchestrator",
 		Model:               llmModel,
 		Description:         "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
 		Instruction:         instruction,
 		Tools:               tools,
+		SubAgents:           remoteAgents,
 		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportFunc},
 	})
 	if err != nil {
