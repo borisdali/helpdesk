@@ -1,6 +1,6 @@
-# Helpdesk Multi-Agent System
+# aiHelpDesk Multi-Agent System
 
-A Go-based multi-agent self-service help system for troubleshooting PostgreSQL databases and Kubernetes infrastructure. Built using Google ADK and the A2A (Agent-to-Agent) protocol.
+An AI Go-based multi-agent self-service help system for troubleshooting PostgreSQL databases and Kubernetes infrastructure. Built using Google ADK and the A2A (Agent-to-Agent) protocol.
 
 ## Architecture
 
