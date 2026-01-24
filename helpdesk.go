@@ -112,6 +112,10 @@ func saveReportFunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, l
 		return llmResponse, llmResponseError
 	}
 	for _, part := range llmResponse.Content.Parts {
+		// Only save parts that have Text or InlineData - skip FunctionCall/FunctionResponse parts
+		if part.Text == "" && part.InlineData == nil {
+			continue
+		}
 		_, err := ctx.Artifacts().Save(ctx, uuid.NewString(), part)
 		if err != nil {
 			return nil, err

@@ -36,6 +36,8 @@ func (m *Model) Name() string {
 // GenerateContent implements the model.LLM interface.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		log.Printf("GenerateContent called: stream=%v (forcing non-streaming for Anthropic)", stream)
+
 		// Convert ADK request to Anthropic format
 		anthropicReq, err := m.convertRequest(req)
 		if err != nil {
@@ -43,11 +45,9 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 			return
 		}
 
-		if stream {
-			m.generateStreaming(ctx, anthropicReq, yield)
-		} else {
-			m.generateNonStreaming(ctx, anthropicReq, yield)
-		}
+		// Always use non-streaming for now - streaming has issues with tool calls
+		log.Printf("Using non-streaming mode")
+		m.generateNonStreaming(ctx, anthropicReq, yield)
 	}
 }
 
@@ -60,10 +60,45 @@ func (m *Model) convertRequest(req *model.LLMRequest) (anthropic.MessageNewParam
 	log.Printf("convertRequest - Contents count: %d", len(req.Contents))
 	for i, content := range req.Contents {
 		log.Printf("  Content[%d]: role=%s, parts=%d", i, content.Role, len(content.Parts))
+		for j, part := range content.Parts {
+			if part.Text != "" {
+				// Log first 500 chars of text to see system prompt
+				text := part.Text
+				if len(text) > 500 {
+					text = text[:500] + "..."
+				}
+				log.Printf("    Part[%d]: Text: %s", j, text)
+			}
+		}
+	}
+
+	// Check for SystemInstruction in Config
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		log.Printf("convertRequest - Config.SystemInstruction: role=%s, parts=%d", req.Config.SystemInstruction.Role, len(req.Config.SystemInstruction.Parts))
+		for j, part := range req.Config.SystemInstruction.Parts {
+			if part.Text != "" {
+				text := part.Text
+				if len(text) > 500 {
+					text = text[:500] + "..."
+				}
+				log.Printf("    SystemInstruction Part[%d]: Text: %s", j, text)
+			}
+		}
 	}
 
 	var messages []anthropic.MessageParam
 	var systemPrompts []anthropic.TextBlockParam
+
+	// Extract system instruction from Config if present
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, part := range req.Config.SystemInstruction.Parts {
+			if part.Text != "" {
+				systemPrompts = append(systemPrompts, anthropic.TextBlockParam{
+					Text: part.Text,
+				})
+			}
+		}
+	}
 
 	// Convert contents to Anthropic messages
 	for _, content := range req.Contents {
@@ -166,6 +201,17 @@ func (m *Model) convertContent(content *genai.Content) (anthropic.MessageParam, 
 	return anthropic.NewUserMessage(blocks...), nil
 }
 
+// toolInterface matches the tool.Tool interface from ADK
+type toolInterface interface {
+	Name() string
+	Description() string
+}
+
+// declarationProvider matches tools that have a Declaration method
+type declarationProvider interface {
+	Declaration() *genai.FunctionDeclaration
+}
+
 // convertTools converts ADK tools to Anthropic tool definitions.
 func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, error) {
 	var result []anthropic.ToolUnionParam
@@ -183,35 +229,56 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 			description = def.Description
 			parameters = def.Parameters
 		default:
-			// Try to extract via JSON marshaling for unknown types
-			toolBytes, err := json.Marshal(toolDef)
-			if err != nil {
-				log.Printf("Warning: could not marshal tool %s (type %T): %v", name, toolDef, err)
-				continue
+			// Try tool.Tool interface first (has Description() method)
+			if t, ok := toolDef.(toolInterface); ok {
+				description = t.Description()
+				log.Printf("Tool %s: got description from interface: %s", name, description)
 			}
-			var toolMap map[string]interface{}
-			if err := json.Unmarshal(toolBytes, &toolMap); err != nil {
-				log.Printf("Warning: could not unmarshal tool %s: %v", name, err)
-				continue
+
+			// Try to get Declaration() for parameters
+			if dp, ok := toolDef.(declarationProvider); ok {
+				if decl := dp.Declaration(); decl != nil {
+					if description == "" {
+						description = decl.Description
+					}
+					parameters = decl.Parameters
+					log.Printf("Tool %s: got declaration with params", name)
+				}
 			}
-			if desc, ok := toolMap["description"].(string); ok {
-				description = desc
+
+			// Fallback to JSON marshaling if we still don't have description
+			if description == "" {
+				toolBytes, err := json.Marshal(toolDef)
+				if err != nil {
+					log.Printf("Warning: could not marshal tool %s (type %T): %v", name, toolDef, err)
+					continue
+				}
+				var toolMap map[string]interface{}
+				if err := json.Unmarshal(toolBytes, &toolMap); err != nil {
+					log.Printf("Warning: could not unmarshal tool %s: %v", name, err)
+					continue
+				}
+				if desc, ok := toolMap["description"].(string); ok {
+					description = desc
+				}
+				if desc, ok := toolMap["Description"].(string); ok {
+					description = desc
+				}
+				// Try to get parameters/schema
+				if parameters == nil {
+					if params, ok := toolMap["parameters"]; ok {
+						paramBytes, _ := json.Marshal(params)
+						parameters = &genai.Schema{}
+						json.Unmarshal(paramBytes, parameters)
+					}
+					if params, ok := toolMap["Parameters"]; ok {
+						paramBytes, _ := json.Marshal(params)
+						parameters = &genai.Schema{}
+						json.Unmarshal(paramBytes, parameters)
+					}
+				}
+				log.Printf("Tool %s (type %T) used JSON fallback", name, toolDef)
 			}
-			if desc, ok := toolMap["Description"].(string); ok {
-				description = desc
-			}
-			// Try to get parameters/schema
-			if params, ok := toolMap["parameters"]; ok {
-				paramBytes, _ := json.Marshal(params)
-				parameters = &genai.Schema{}
-				json.Unmarshal(paramBytes, parameters)
-			}
-			if params, ok := toolMap["Parameters"]; ok {
-				paramBytes, _ := json.Marshal(params)
-				parameters = &genai.Schema{}
-				json.Unmarshal(paramBytes, parameters)
-			}
-			log.Printf("Tool %s (type %T) converted via JSON fallback", name, toolDef)
 		}
 
 		// Convert the schema
@@ -259,14 +326,36 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 
 // generateNonStreaming handles non-streaming response.
 func (m *Model) generateNonStreaming(ctx context.Context, req anthropic.MessageNewParams, yield func(*model.LLMResponse, error) bool) {
+	log.Printf("generateNonStreaming: making API call")
 	resp, err := m.client.Messages.New(ctx, req)
 	if err != nil {
+		log.Printf("generateNonStreaming: API error: %v", err)
 		yield(nil, fmt.Errorf("anthropic API error: %w", err))
 		return
 	}
 
+	log.Printf("generateNonStreaming: got response with %d content blocks, stop_reason=%s", len(resp.Content), resp.StopReason)
+	for i, block := range resp.Content {
+		log.Printf("  Block[%d]: type=%s", i, block.Type)
+		if block.Type == "tool_use" {
+			log.Printf("    tool_use: id=%s name=%s", block.ID, block.Name)
+		}
+	}
+
 	llmResp := m.convertResponse(resp)
-	yield(llmResp, nil)
+	log.Printf("generateNonStreaming: converted response has %d parts", len(llmResp.Content.Parts))
+	for i, part := range llmResp.Content.Parts {
+		if part.FunctionCall != nil {
+			log.Printf("  Part[%d]: FunctionCall name=%s id=%s args=%v", i, part.FunctionCall.Name, part.FunctionCall.ID, part.FunctionCall.Args)
+		} else if part.Text != "" {
+			log.Printf("  Part[%d]: Text (%d chars)", i, len(part.Text))
+		}
+	}
+	log.Printf("generateNonStreaming: FinishReason=%v TurnComplete=%v", llmResp.FinishReason, llmResp.TurnComplete)
+
+	log.Printf("generateNonStreaming: calling yield with response")
+	result := yield(llmResp, nil)
+	log.Printf("generateNonStreaming: yield returned %v", result)
 }
 
 // generateStreaming handles streaming response.
@@ -277,15 +366,26 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 	var finishReason genai.FinishReason
 	var toolCalls []*genai.Part
 
+	// Track current tool use block being built
+	var currentToolID string
+	var currentToolName string
+	var currentToolInput string
+
 	for stream.Next() {
 		event := stream.Current()
+
+		log.Printf("Stream event: %s", event.Type)
 
 		switch event.Type {
 		case "content_block_start":
 			// Handle tool use blocks starting
 			block := event.AsContentBlockStart()
+			log.Printf("  content_block_start: type=%s", block.ContentBlock.Type)
 			if block.ContentBlock.Type == "tool_use" {
-				// Tool use block starting - we'll get the full input in content_block_stop
+				currentToolID = block.ContentBlock.ID
+				currentToolName = block.ContentBlock.Name
+				currentToolInput = ""
+				log.Printf("  Tool use starting: id=%s name=%s", currentToolID, currentToolName)
 			}
 
 		case "content_block_delta":
@@ -302,11 +402,38 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 				if !yield(resp, nil) {
 					return
 				}
+			} else if delta.Delta.Type == "input_json_delta" {
+				// Accumulate tool input JSON
+				currentToolInput += delta.Delta.PartialJSON
+			}
+
+		case "content_block_stop":
+			// If we were building a tool call, finalize it
+			if currentToolName != "" {
+				log.Printf("  Tool use complete: id=%s name=%s input=%s", currentToolID, currentToolName, currentToolInput)
+				argsMap := make(map[string]any)
+				if currentToolInput != "" {
+					if err := json.Unmarshal([]byte(currentToolInput), &argsMap); err != nil {
+						log.Printf("  Warning: failed to parse tool input JSON: %v", err)
+					}
+				}
+				toolCalls = append(toolCalls, &genai.Part{
+					FunctionCall: &genai.FunctionCall{
+						ID:   currentToolID,
+						Name: currentToolName,
+						Args: argsMap,
+					},
+				})
+				// Reset for next tool
+				currentToolID = ""
+				currentToolName = ""
+				currentToolInput = ""
 			}
 
 		case "message_delta":
 			// Contains stop reason
 			msgDelta := event.AsMessageDelta()
+			log.Printf("  message_delta: stop_reason=%s", msgDelta.Delta.StopReason)
 			switch msgDelta.Delta.StopReason {
 			case "end_turn":
 				finishReason = genai.FinishReasonStop
@@ -323,6 +450,8 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 				parts = append(parts, &genai.Part{Text: accumulatedText})
 			}
 			parts = append(parts, toolCalls...)
+
+			log.Printf("  message_stop: text=%d chars, toolCalls=%d", len(accumulatedText), len(toolCalls))
 
 			resp := &model.LLMResponse{
 				Content: &genai.Content{
@@ -387,14 +516,21 @@ func (m *Model) convertResponse(resp *anthropic.Message) *model.LLMResponse {
 
 	// Map stop reason to finish reason
 	var finishReason genai.FinishReason
+	var turnComplete bool
 	switch resp.StopReason {
 	case "end_turn":
 		finishReason = genai.FinishReasonStop
+		turnComplete = true
 	case "tool_use":
+		// For tool_use, the turn is NOT complete - the tool needs to be executed
 		finishReason = genai.FinishReasonStop
+		turnComplete = false
 	case "max_tokens":
 		finishReason = genai.FinishReasonMaxTokens
+		turnComplete = true
 	}
+
+	log.Printf("convertResponse: stop_reason=%s -> turnComplete=%v", resp.StopReason, turnComplete)
 
 	return &model.LLMResponse{
 		Content: &genai.Content{
@@ -402,7 +538,7 @@ func (m *Model) convertResponse(resp *anthropic.Message) *model.LLMResponse {
 			Parts: parts,
 		},
 		FinishReason: finishReason,
-		TurnComplete: true,
+		TurnComplete: turnComplete,
 		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 			PromptTokenCount:     int32(resp.Usage.InputTokens),
 			CandidatesTokenCount: int32(resp.Usage.OutputTokens),
