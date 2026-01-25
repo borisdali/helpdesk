@@ -1,0 +1,28 @@
+[
+  {
+    "name": "postgres_database_agent",
+    "url": "http://localhost:1100",
+    "description": "PostgreSQL database troubleshooting agent for diagnosing connectivity, performance, configuration, and replication issues.",
+    "use_cases": [
+      "Connection problems",
+      "Performance issues (slow queries, high CPU, memory)",
+      "Configuration questions",
+      "Replication and high availability",
+      "Lock contention and deadlocks",
+      "Table bloat and vacuum issues"
+    ]
+  },
+  {
+    "name": "k8s_agent",
+    "url": "http://localhost:1102",
+    "description": "Kubernetes troubleshooting agent for diagnosing pod, service, endpoint, and infrastructure issues.",
+    "use_cases": [
+      "Pod status and health checks",
+      "Service and LoadBalancer configuration",
+      "Endpoint and networking issues",
+      "Container logs and debugging",
+      "Node status and resource issues",
+      "Events and cluster diagnostics"
+    ]
+  }
+]

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -30,30 +31,8 @@ import (
 	"google.golang.org/adk/tool/geminitool"
 )
 
-const rootAgentPrompt = `You are an expert in database and infrastructure troubleshooting.
+const baseAgentPrompt = `You are an expert in database and infrastructure troubleshooting.
 You help users diagnose and resolve issues with their database systems and the infrastructure they run on.
-
-## Available Specialist Agents
-
-You have access to the following specialist agents that you can delegate to:
-
-### postgres_database_agent
-Use this agent for PostgreSQL database issues including:
-- Connection problems
-- Performance issues (slow queries, high CPU, memory)
-- Configuration questions
-- Replication and high availability
-- Lock contention and deadlocks
-- Table bloat and vacuum issues
-
-### k8s_agent
-Use this agent for Kubernetes infrastructure issues including:
-- Pod status and health checks
-- Service and LoadBalancer configuration
-- Endpoint and networking issues
-- Container logs and debugging
-- Node status and resource issues
-- Events and cluster diagnostics
 
 ## Troubleshooting Workflow
 
@@ -64,10 +43,7 @@ When a user reports an issue:
    - What is the environment? (PostgreSQL version, K8s cluster, cloud provider)
    - When did it start? What changed recently?
 
-2. **Route to the right agent**:
-   - Database-specific issues → postgres_database_agent
-   - Infrastructure/K8s issues → k8s_agent
-   - If the database runs on K8s and you suspect infrastructure issues, try k8s_agent first
+2. **Route to the right agent**: Delegate to the appropriate specialist agent based on the problem domain.
 
 3. **Synthesize findings**: After getting information from sub-agents, explain the findings
    to the user in clear terms and suggest next steps.
@@ -81,9 +57,10 @@ When a user reports an issue:
 
 // AgentConfig holds configuration for a remote agent.
 type AgentConfig struct {
-	Name        string
-	URL         string
-	Description string
+	Name        string   `json:"name"`
+	URL         string   `json:"url"`
+	Description string   `json:"description"`
+	UseCases    []string `json:"use_cases,omitempty"`
 }
 
 // inputParams holds the orchestrator configuration.
@@ -91,6 +68,49 @@ type inputParams struct {
 	modelName string
 	apiKey    string
 	agents    []AgentConfig
+}
+
+// loadAgentsConfig loads agent configurations from a JSON file.
+func loadAgentsConfig(configPath string) ([]AgentConfig, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agents config file: %v", err)
+	}
+
+	var agents []AgentConfig
+	if err := json.Unmarshal(data, &agents); err != nil {
+		return nil, fmt.Errorf("failed to parse agents config: %v", err)
+	}
+
+	return agents, nil
+}
+
+// buildAgentPromptSection generates the "Available Specialist Agents" section
+// dynamically from the loaded agent configurations.
+func buildAgentPromptSection(agents []AgentConfig) string {
+	if len(agents) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## Available Specialist Agents\n\n")
+	sb.WriteString("You have access to the following specialist agents that you can delegate to:\n\n")
+
+	for _, agent := range agents {
+		sb.WriteString(fmt.Sprintf("### %s\n", agent.Name))
+		if agent.Description != "" {
+			sb.WriteString(fmt.Sprintf("%s\n", agent.Description))
+		}
+		if len(agent.UseCases) > 0 {
+			sb.WriteString("Use this agent for:\n")
+			for _, useCase := range agent.UseCases {
+				sb.WriteString(fmt.Sprintf("- %s\n", useCase))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
 // AuthInterceptor sets 'user' name needed for both a2a and webui launchers which share the same sessions service.
@@ -190,27 +210,31 @@ func main() {
 		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
 	}
 
-	// Configure available agents
+	// Load agents from config file
+	agentsConfigPath := os.Getenv("HELPDESK_AGENTS_CONFIG")
+	if agentsConfigPath == "" {
+		agentsConfigPath = "agents.json"
+	}
+
+	agentConfigs, err := loadAgentsConfig(agentsConfigPath)
+	if err != nil {
+		log.Fatalf("Failed to load agents config from %s: %v", agentsConfigPath, err)
+	}
+
+	agentNames := make([]string, len(agentConfigs))
+	for i, cfg := range agentConfigs {
+		agentNames[i] = cfg.Name
+	}
+	log.Printf("Discovered %d participating expert agent(s) from %s: %s", len(agentConfigs), agentsConfigPath, strings.Join(agentNames, ", "))
+
 	p := &inputParams{
 		modelName: modelName,
 		apiKey:    apiKey,
-		agents: []AgentConfig{
-			{
-				Name:        "postgres_database_agent",
-				URL:         "http://localhost:1100",
-				Description: "PostgreSQL database troubleshooting agent for diagnosing connectivity, performance, configuration, and replication issues.",
-			},
-			{
-				Name:        "k8s_agent",
-				URL:         "http://localhost:1102",
-				Description: "Kubernetes troubleshooting agent for diagnosing pod, service, endpoint, and infrastructure issues.",
-			},
-		},
+		agents:    agentConfigs,
 	}
 
 	// Create the LLM model based on vendor
 	var llmModel model.LLM
-	var err error
 
 	switch strings.ToLower(modelVendor) {
 	case "google", "gemini":
@@ -234,10 +258,10 @@ func main() {
 	// Create remote agent proxies (with health checking)
 	remoteAgents, unavailableAgents := createRemoteAgents(p.agents)
 
-	// Build the instruction with availability info
-	instruction := rootAgentPrompt
+	// Build the instruction with dynamic agent section and availability info
+	instruction := baseAgentPrompt + buildAgentPromptSection(p.agents)
 	if len(unavailableAgents) > 0 {
-		instruction += fmt.Sprintf("\n\n## Currently Unavailable Agents\nThe following agents are currently unavailable: %s\nIf you need these agents, inform the user and suggest they start the agent or try manual troubleshooting.\n",
+		instruction += fmt.Sprintf("\n## Currently Unavailable Agents\nThe following agents are currently unavailable: %s\nIf you need these agents, inform the user and suggest they start the agent or try manual troubleshooting.\n",
 			strings.Join(unavailableAgents, ", "))
 	}
 
