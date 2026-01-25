@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
@@ -308,7 +309,7 @@ func getNodesTool(ctx tool.Context, args GetNodesArgs) (KubectlResult, error) {
 }
 
 // newK8sAgent creates the Kubernetes troubleshooting agent with kubectl tools.
-func newK8sAgent(ctx context.Context, modelName, apiKey string) (agent.Agent, error) {
+func newK8sAgent(ctx context.Context, modelVendor, modelName, apiKey string) (agent.Agent, error) {
 	// Create kubectl tools
 	getPodsToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_pods",
@@ -374,10 +375,23 @@ func newK8sAgent(ctx context.Context, modelName, apiKey string) (agent.Agent, er
 		return nil, fmt.Errorf("failed to create get_nodes tool: %v", err)
 	}
 
-	// Create the model
-	model, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{APIKey: apiKey})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create model: %v", err)
+	// Create the LLM model based on vendor
+	var llmModel model.LLM
+	switch strings.ToLower(modelVendor) {
+	case "google", "gemini":
+		llmModel, err = gemini.NewModel(ctx, modelName, &genai.ClientConfig{APIKey: apiKey})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Gemini model: %v", err)
+		}
+		log.Printf("Using Google/Gemini model: %s", modelName)
+	case "anthropic":
+		llmModel, err = NewAnthropicModel(ctx, modelName, apiKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Anthropic model: %v", err)
+		}
+		log.Printf("Using Anthropic model: %s", modelName)
+	default:
+		return nil, fmt.Errorf("unknown LLM model vendor: %s (supported: google, gemini, anthropic)", modelVendor)
 	}
 
 	// Create the k8s agent with all tools
@@ -385,7 +399,7 @@ func newK8sAgent(ctx context.Context, modelName, apiKey string) (agent.Agent, er
 		Name:        "k8s_agent",
 		Description: "Kubernetes troubleshooting agent that can inspect pods, services, endpoints, events, and logs to diagnose infrastructure issues.",
 		Instruction: k8sAgentInstruction,
-		Model:       model,
+		Model:       llmModel,
 		Tools: []tool.Tool{
 			getPodsToolDef,
 			getServiceToolDef,
@@ -405,7 +419,7 @@ func newK8sAgent(ctx context.Context, modelName, apiKey string) (agent.Agent, er
 }
 
 // startK8sAgentServer starts an HTTP server exposing the k8s-agent via A2A protocol.
-func startK8sAgentServer(ctx context.Context, modelName, apiKey string) (string, error) {
+func startK8sAgentServer(ctx context.Context, modelVendor, modelName, apiKey string) (string, error) {
 	listener, err := net.Listen("tcp", "localhost:1102")
 	if err != nil {
 		return "", fmt.Errorf("failed to bind to port: %v", err)
@@ -415,7 +429,7 @@ func startK8sAgentServer(ctx context.Context, modelName, apiKey string) (string,
 
 	log.Printf("Starting K8s A2A server on %s", baseURL.String())
 
-	k8sAgent, err := newK8sAgent(ctx, modelName, apiKey)
+	k8sAgent, err := newK8sAgent(ctx, modelVendor, modelName, apiKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create k8s agent: %v", err)
 	}
@@ -453,13 +467,14 @@ func startK8sAgentServer(ctx context.Context, modelName, apiKey string) (string,
 
 func main() {
 	ctx := context.Background()
+	modelVendor := os.Getenv("HELPDESK_MODEL_VENDOR")
 	modelName := os.Getenv("HELPDESK_MODEL_NAME")
 	apiKey := os.Getenv("HELPDESK_API_KEY")
-	if modelName == "" || apiKey == "" {
-		log.Fatalf("Please set the HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
+	if modelVendor == "" || modelName == "" || apiKey == "" {
+		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
 	}
 
-	serverURL, err := startK8sAgentServer(ctx, modelName, apiKey)
+	serverURL, err := startK8sAgentServer(ctx, modelVendor, modelName, apiKey)
 	if err != nil {
 		log.Fatalf("Failed to start K8s A2A server: %v", err)
 	}

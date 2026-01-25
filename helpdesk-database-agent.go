@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
@@ -375,7 +376,7 @@ func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, er
 }
 
 // newDatabaseAgent creates the PostgreSQL troubleshooting agent with psql tools.
-func newDatabaseAgent(ctx context.Context, modelName, apiKey string) (agent.Agent, error) {
+func newDatabaseAgent(ctx context.Context, modelVendor, modelName, apiKey string) (agent.Agent, error) {
 	// Create psql tools
 	checkConnectionToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "check_connection",
@@ -449,10 +450,23 @@ func newDatabaseAgent(ctx context.Context, modelName, apiKey string) (agent.Agen
 		return nil, fmt.Errorf("failed to create get_table_stats tool: %v", err)
 	}
 
-	// Create the model
-	model, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{APIKey: apiKey})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create model: %v", err)
+	// Create the LLM model based on vendor
+	var llmModel model.LLM
+	switch strings.ToLower(modelVendor) {
+	case "google", "gemini":
+		llmModel, err = gemini.NewModel(ctx, modelName, &genai.ClientConfig{APIKey: apiKey})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Gemini model: %v", err)
+		}
+		log.Printf("Using Google/Gemini model: %s", modelName)
+	case "anthropic":
+		llmModel, err = NewAnthropicModel(ctx, modelName, apiKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Anthropic model: %v", err)
+		}
+		log.Printf("Using Anthropic model: %s", modelName)
+	default:
+		return nil, fmt.Errorf("unknown LLM model vendor: %s (supported: google, gemini, anthropic)", modelVendor)
 	}
 
 	// Create the database agent with all tools
@@ -460,7 +474,7 @@ func newDatabaseAgent(ctx context.Context, modelName, apiKey string) (agent.Agen
 		Name:        "postgres_database_agent",
 		Description: "PostgreSQL database troubleshooting agent that can check connections, query statistics, configuration, replication status, and diagnose performance issues.",
 		Instruction: databaseAgentInstruction,
-		Model:       model,
+		Model:       llmModel,
 		Tools: []tool.Tool{
 			checkConnectionToolDef,
 			getDatabaseInfoToolDef,
@@ -481,7 +495,7 @@ func newDatabaseAgent(ctx context.Context, modelName, apiKey string) (agent.Agen
 }
 
 // startDatabaseAgentServer starts an HTTP server exposing the database-agent via A2A protocol.
-func startDatabaseAgentServer(ctx context.Context, modelName, apiKey string) (string, error) {
+func startDatabaseAgentServer(ctx context.Context, modelVendor, modelName, apiKey string) (string, error) {
 	listener, err := net.Listen("tcp", "localhost:1100")
 	if err != nil {
 		return "", fmt.Errorf("failed to bind to port: %v", err)
@@ -491,7 +505,7 @@ func startDatabaseAgentServer(ctx context.Context, modelName, apiKey string) (st
 
 	log.Printf("Starting Database A2A server on %s", baseURL.String())
 
-	dbAgent, err := newDatabaseAgent(ctx, modelName, apiKey)
+	dbAgent, err := newDatabaseAgent(ctx, modelVendor, modelName, apiKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create database agent: %v", err)
 	}
@@ -529,13 +543,14 @@ func startDatabaseAgentServer(ctx context.Context, modelName, apiKey string) (st
 
 func main() {
 	ctx := context.Background()
+	modelVendor := os.Getenv("HELPDESK_MODEL_VENDOR")
 	modelName := os.Getenv("HELPDESK_MODEL_NAME")
 	apiKey := os.Getenv("HELPDESK_API_KEY")
-	if modelName == "" || apiKey == "" {
-		log.Fatalf("Please set the HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
+	if modelVendor == "" || modelName == "" || apiKey == "" {
+		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
 	}
 
-	serverURL, err := startDatabaseAgentServer(ctx, modelName, apiKey)
+	serverURL, err := startDatabaseAgentServer(ctx, modelVendor, modelName, apiKey)
 	if err != nil {
 		log.Fatalf("Failed to start Database A2A server: %v", err)
 	}
