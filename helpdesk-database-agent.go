@@ -495,8 +495,8 @@ func newDatabaseAgent(ctx context.Context, modelVendor, modelName, apiKey string
 }
 
 // startDatabaseAgentServer starts an HTTP server exposing the database-agent via A2A protocol.
-func startDatabaseAgentServer(ctx context.Context, modelVendor, modelName, apiKey string) (string, error) {
-	listener, err := net.Listen("tcp", "localhost:1100")
+func startDatabaseAgentServer(ctx context.Context, listenAddr, modelVendor, modelName, apiKey string) (string, error) {
+	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to bind to port: %v", err)
 	}
@@ -550,7 +550,13 @@ func main() {
 		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
 	}
 
-	serverURL, err := startDatabaseAgentServer(ctx, modelVendor, modelName, apiKey)
+	// Listen address: defaults to localhost:1100
+	listenAddr := os.Getenv("HELPDESK_AGENT_ADDR")
+	if listenAddr == "" {
+		listenAddr = "localhost:1100"
+	}
+
+	serverURL, err := startDatabaseAgentServer(ctx, listenAddr, modelVendor, modelName, apiKey)
 	if err != nil {
 		log.Fatalf("Failed to start Database A2A server: %v", err)
 	}

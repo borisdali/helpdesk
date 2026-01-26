@@ -49,7 +49,11 @@ For LoadBalancer services, pay attention to:
 Always explain your findings and suggest next steps to the user.`
 
 // runKubectl executes a kubectl command and returns the output.
-func runKubectl(args ...string) (string, error) {
+// If context is non-empty, it's passed as --context to kubectl.
+func runKubectl(kubeContext string, args ...string) (string, error) {
+	if kubeContext != "" {
+		args = append([]string{"--context", kubeContext}, args...)
+	}
 	cmd := exec.Command("kubectl", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -65,6 +69,7 @@ type KubectlResult struct {
 
 // GetPodsArgs defines arguments for the get_pods tool.
 type GetPodsArgs struct {
+	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace to list pods from. Use 'all' for all namespaces."`
 	Labels    string `json:"labels,omitempty" jsonschema:"Optional label selector to filter pods (e.g., 'app=postgres')."`
 }
@@ -83,7 +88,7 @@ func getPodsTool(ctx tool.Context, args GetPodsArgs) (KubectlResult, error) {
 		cmdArgs = append(cmdArgs, "-l", args.Labels)
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error getting pods: %v", err)}, nil
 	}
@@ -95,6 +100,7 @@ func getPodsTool(ctx tool.Context, args GetPodsArgs) (KubectlResult, error) {
 
 // GetServiceArgs defines arguments for the get_service tool.
 type GetServiceArgs struct {
+	Context     string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	Namespace   string `json:"namespace" jsonschema:"The Kubernetes namespace to list services from."`
 	ServiceName string `json:"service_name,omitempty" jsonschema:"Optional specific service name to get. If empty, lists all services."`
 	ServiceType string `json:"service_type,omitempty" jsonschema:"Optional filter by service type: ClusterIP, NodePort, LoadBalancer."`
@@ -112,7 +118,7 @@ func getServiceTool(ctx tool.Context, args GetServiceArgs) (KubectlResult, error
 		cmdArgs = append(cmdArgs, args.ServiceName)
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error getting services: %v", err)}, nil
 	}
@@ -137,6 +143,7 @@ func getServiceTool(ctx tool.Context, args GetServiceArgs) (KubectlResult, error
 
 // DescribeServiceArgs defines arguments for the describe_service tool.
 type DescribeServiceArgs struct {
+	Context     string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	Namespace   string `json:"namespace" jsonschema:"The Kubernetes namespace of the service."`
 	ServiceName string `json:"service_name" jsonschema:"The name of the service to describe."`
 }
@@ -149,7 +156,7 @@ func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlRes
 		cmdArgs = append(cmdArgs, "-n", args.Namespace)
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error describing service: %v", err)}, nil
 	}
@@ -158,6 +165,7 @@ func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlRes
 
 // GetEndpointsArgs defines arguments for the get_endpoints tool.
 type GetEndpointsArgs struct {
+	Context      string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	Namespace    string `json:"namespace" jsonschema:"The Kubernetes namespace to check endpoints in."`
 	EndpointName string `json:"endpoint_name,omitempty" jsonschema:"Optional specific endpoint name (usually matches service name)."`
 }
@@ -174,7 +182,7 @@ func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (KubectlResult, e
 		cmdArgs = append(cmdArgs, args.EndpointName)
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error getting endpoints: %v", err)}, nil
 	}
@@ -186,6 +194,7 @@ func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (KubectlResult, e
 
 // GetEventsArgs defines arguments for the get_events tool.
 type GetEventsArgs struct {
+	Context      string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	Namespace    string `json:"namespace" jsonschema:"The Kubernetes namespace to get events from."`
 	ResourceName string `json:"resource_name,omitempty" jsonschema:"Optional filter events related to a specific resource name."`
 	EventType    string `json:"event_type,omitempty" jsonschema:"Optional filter by event type: Normal or Warning."`
@@ -203,7 +212,7 @@ func getEventsTool(ctx tool.Context, args GetEventsArgs) (KubectlResult, error) 
 		cmdArgs = append(cmdArgs, "--field-selector", fmt.Sprintf("type=%s", args.EventType))
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error getting events: %v", err)}, nil
 	}
@@ -228,6 +237,7 @@ func getEventsTool(ctx tool.Context, args GetEventsArgs) (KubectlResult, error) 
 
 // GetPodLogsArgs defines arguments for the get_pod_logs tool.
 type GetPodLogsArgs struct {
+	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod."`
 	PodName   string `json:"pod_name" jsonschema:"The name of the pod to get logs from."`
 	Container string `json:"container,omitempty" jsonschema:"Optional container name if pod has multiple containers."`
@@ -257,7 +267,7 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 		cmdArgs = append(cmdArgs, "--previous")
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error getting pod logs: %v", err)}, nil
 	}
@@ -269,6 +279,7 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 
 // DescribePodArgs defines arguments for the describe_pod tool.
 type DescribePodArgs struct {
+	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod."`
 	PodName   string `json:"pod_name" jsonschema:"The name of the pod to describe."`
 }
@@ -281,7 +292,7 @@ func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, err
 		cmdArgs = append(cmdArgs, "-n", args.Namespace)
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error describing pod: %v", err)}, nil
 	}
@@ -290,7 +301,8 @@ func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, err
 
 // GetNodesArgs defines arguments for the get_nodes tool.
 type GetNodesArgs struct {
-	ShowLabels bool `json:"show_labels,omitempty" jsonschema:"If true, show node labels in output."`
+	Context    string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	ShowLabels bool   `json:"show_labels,omitempty" jsonschema:"If true, show node labels in output."`
 }
 
 // getNodesTool retrieves information about cluster nodes.
@@ -301,7 +313,7 @@ func getNodesTool(ctx tool.Context, args GetNodesArgs) (KubectlResult, error) {
 		cmdArgs = append(cmdArgs, "--show-labels")
 	}
 
-	output, err := runKubectl(cmdArgs...)
+	output, err := runKubectl(args.Context, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("Error getting nodes: %v", err)}, nil
 	}
@@ -419,8 +431,8 @@ func newK8sAgent(ctx context.Context, modelVendor, modelName, apiKey string) (ag
 }
 
 // startK8sAgentServer starts an HTTP server exposing the k8s-agent via A2A protocol.
-func startK8sAgentServer(ctx context.Context, modelVendor, modelName, apiKey string) (string, error) {
-	listener, err := net.Listen("tcp", "localhost:1102")
+func startK8sAgentServer(ctx context.Context, listenAddr, modelVendor, modelName, apiKey string) (string, error) {
+	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to bind to port: %v", err)
 	}
@@ -474,7 +486,13 @@ func main() {
 		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
 	}
 
-	serverURL, err := startK8sAgentServer(ctx, modelVendor, modelName, apiKey)
+	// Listen address: defaults to localhost:1102
+	listenAddr := os.Getenv("HELPDESK_AGENT_ADDR")
+	if listenAddr == "" {
+		listenAddr = "localhost:1102"
+	}
+
+	serverURL, err := startK8sAgentServer(ctx, listenAddr, modelVendor, modelName, apiKey)
 	if err != nil {
 		log.Fatalf("Failed to start K8s A2A server: %v", err)
 	}
