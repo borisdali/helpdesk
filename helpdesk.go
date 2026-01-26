@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -113,6 +114,86 @@ func buildAgentPromptSection(agents []AgentConfig) string {
 	return sb.String()
 }
 
+// agentCardResponse represents the relevant fields from /.well-known/agent-card.json
+type agentCardResponse struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	Skills      []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"skills,omitempty"`
+}
+
+// discoverAgentFromURL fetches the agent card from a URL and converts it to AgentConfig.
+func discoverAgentFromURL(baseURL string) (*AgentConfig, error) {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	cardURL := strings.TrimSuffix(baseURL, "/") + "/.well-known/agent-card.json"
+	resp, err := client.Get(cardURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch agent card: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("agent card returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agent card: %v", err)
+	}
+
+	var card agentCardResponse
+	if err := json.Unmarshal(body, &card); err != nil {
+		return nil, fmt.Errorf("failed to parse agent card: %v", err)
+	}
+
+	config := &AgentConfig{
+		Name:        card.Name,
+		Description: card.Description,
+		URL:         baseURL, // Use the base URL we probed, not the invoke URL from the card
+	}
+
+	// Convert skills to use cases
+	for _, skill := range card.Skills {
+		if skill.Description != "" {
+			config.UseCases = append(config.UseCases, skill.Description)
+		} else if skill.Name != "" {
+			config.UseCases = append(config.UseCases, skill.Name)
+		}
+	}
+
+	if config.Name == "" {
+		return nil, fmt.Errorf("agent card missing name")
+	}
+
+	return config, nil
+}
+
+// discoverAgents discovers agents from a list of base URLs by fetching their agent cards.
+func discoverAgents(urls []string) ([]AgentConfig, []string) {
+	var discovered []AgentConfig
+	var failed []string
+
+	for _, url := range urls {
+		log.Printf("Discovering agent at %s...", url)
+		config, err := discoverAgentFromURL(url)
+		if err != nil {
+			log.Printf("  SKIP: %v", err)
+			failed = append(failed, url)
+			continue
+		}
+		log.Printf("  OK: Found agent '%s'", config.Name)
+		discovered = append(discovered, *config)
+	}
+
+	return discovered, failed
+}
+
 // AuthInterceptor sets 'user' name needed for both a2a and webui launchers which share the same sessions service.
 type AuthInterceptor struct {
 	a2asrv.PassthroughCallInterceptor
@@ -210,22 +291,46 @@ func main() {
 		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
 	}
 
-	// Load agents from config file
-	agentsConfigPath := os.Getenv("HELPDESK_AGENTS_CONFIG")
-	if agentsConfigPath == "" {
-		agentsConfigPath = "agents.json"
+	// Discover agents from URLs or load from config file.
+	var agentConfigs []AgentConfig
+
+	// First attempt to find agents based on HELPDESK_AGENT_URLS env var.
+	agentURLs := os.Getenv("HELPDESK_AGENT_URLS")
+	if agentURLs != "" {
+		// URL-based discovery: probe each URL for agents.md
+		urls := strings.Split(agentURLs, ",")
+		for i := range urls {
+			urls[i] = strings.TrimSpace(urls[i])
+		}
+		discovered, failed := discoverAgents(urls)
+		if len(failed) > 0 {
+			log.Printf("Failed to discover agents at: %s", strings.Join(failed, ", "))
+		}
+		agentConfigs = discovered
+	} else {
+		// Fall back to config file.
+		log.Printf("No dynamic agent discover (HELPDESK_AGENT_URLS env var is not set), so falling back to a static config file")
+		agentsConfigPath := os.Getenv("HELPDESK_AGENTS_CONFIG")
+		if agentsConfigPath == "" {
+			agentsConfigPath = "agents.json"
+		}
+		var err error
+		agentConfigs, err = loadAgentsConfig(agentsConfigPath)
+		if err != nil {
+			log.Fatalf("Failed to load agents config from %s: %v", agentsConfigPath, err)
+		}
+		log.Printf("Loaded configs of expected to participate expert agents from config file: %s", agentsConfigPath)
 	}
 
-	agentConfigs, err := loadAgentsConfig(agentsConfigPath)
-	if err != nil {
-		log.Fatalf("Failed to load agents config from %s: %v", agentsConfigPath, err)
+	if len(agentConfigs) == 0 {
+		log.Printf("WARNING: No agents discovered or configured")
 	}
 
 	agentNames := make([]string, len(agentConfigs))
 	for i, cfg := range agentConfigs {
 		agentNames[i] = cfg.Name
 	}
-	log.Printf("Discovered %d participating expert agent(s) from %s: %s", len(agentConfigs), agentsConfigPath, strings.Join(agentNames, ", "))
+	log.Printf("Expert agent(s) expected to participate are: %s", strings.Join(agentNames, ", "))
 
 	p := &inputParams{
 		modelName: modelName,
@@ -235,6 +340,7 @@ func main() {
 
 	// Create the LLM model based on vendor
 	var llmModel model.LLM
+	var err error
 
 	switch strings.ToLower(modelVendor) {
 	case "google", "gemini":
