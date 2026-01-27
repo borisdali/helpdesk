@@ -33,6 +33,15 @@ import (
 const databaseAgentInstruction = `You are a PostgreSQL database troubleshooting expert. You help diagnose issues with
 PostgreSQL databases and their derivatives (like AlloyDB Omni).
 
+## CRITICAL: Fail fast on connectivity errors
+
+If ANY tool call returns an error indicating the database is unreachable, does not exist,
+credentials are invalid, or psql is not available, STOP IMMEDIATELY. Do NOT retry with different
+parameters or try other tools. Report the exact error back right away and explain what it means.
+The user (or orchestrating agent) needs to know the database is inaccessible so they can fix it.
+
+## Investigation workflow (only if the database is reachable)
+
 When investigating database issues:
 1. First check if the database is reachable (check_connection)
 2. Get basic database information (get_database_info)
@@ -40,6 +49,8 @@ When investigating database issues:
 4. Look at database statistics (get_database_stats)
 5. Check for configuration issues (get_config_parameter)
 6. Review replication status if applicable (get_replication_status)
+
+If step 1 fails with a connection or authentication error, skip all remaining steps and report the failure.
 
 For connection issues, check:
 - Is the database accepting connections?
@@ -53,6 +64,51 @@ For performance issues, examine:
 
 Always explain your findings clearly and suggest actionable next steps.`
 
+// diagnosePsqlError examines psql output for common failure patterns and returns
+// a clear, actionable error message alongside the raw output.
+func diagnosePsqlError(output string) string {
+	out := strings.ToLower(output)
+
+	switch {
+	case strings.Contains(out, "does not exist"):
+		// FATAL: database "xyz" does not exist
+		return "The requested database does not exist on this server. " +
+			"Verify the 'dbname' in the connection string is correct, or create the database first (e.g., CREATE DATABASE <name>)."
+
+	case strings.Contains(out, "connection refused"):
+		return "Connection refused. The PostgreSQL server may not be running, " +
+			"or the host/port in the connection string is wrong. " +
+			"Check that the server is started and listening on the expected address and port."
+
+	case strings.Contains(out, "could not translate host name"):
+		return "The hostname in the connection string could not be resolved. " +
+			"Check for typos in the 'host' parameter and ensure DNS is working."
+
+	case strings.Contains(out, "password authentication failed"):
+		return "Authentication failed. The username or password is incorrect. " +
+			"Verify the 'user' and 'password' in the connection string and the server's pg_hba.conf."
+
+	case strings.Contains(out, "no pg_hba.conf entry"):
+		return "Connection rejected by pg_hba.conf. The server does not allow connections " +
+			"from this host/user/database combination. Update pg_hba.conf and reload the server."
+
+	case strings.Contains(out, "timeout expired"), strings.Contains(out, "could not connect"):
+		return "Connection timed out. The server may be unreachable due to network issues, " +
+			"firewall rules, or an incorrect host/port."
+
+	case strings.Contains(out, "role") && strings.Contains(out, "does not exist"):
+		return "The specified user role does not exist on this server. " +
+			"Verify the 'user' in the connection string or create the role first."
+
+	case strings.Contains(out, "ssl") && (strings.Contains(out, "unsupported") || strings.Contains(out, "required")):
+		return "SSL configuration mismatch. The server and client disagree on SSL requirements. " +
+			"Check the 'sslmode' parameter in the connection string."
+
+	default:
+		return ""
+	}
+}
+
 // runPsql executes a psql command and returns the output.
 // Connection parameters are taken from environment or provided in args.
 func runPsql(connStr string, query string) (string, error) {
@@ -63,7 +119,11 @@ func runPsql(connStr string, query string) (string, error) {
 	cmd := exec.Command("psql", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(output), fmt.Errorf("psql error: %v, output: %s", err, string(output))
+		out := string(output)
+		if diagnosis := diagnosePsqlError(out); diagnosis != "" {
+			return out, fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		}
+		return out, fmt.Errorf("psql error: %v, output: %s", err, out)
 	}
 	return string(output), nil
 }

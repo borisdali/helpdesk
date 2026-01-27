@@ -34,6 +34,15 @@ import (
 const k8sAgentInstruction = `You are a Kubernetes troubleshooting expert. You help diagnose issues with
 databases and applications running in Kubernetes clusters.
 
+## CRITICAL: Fail fast on connectivity errors
+
+If ANY tool call returns an error indicating the cluster is unreachable, the context does not exist,
+credentials are invalid, or kubectl is not available, STOP IMMEDIATELY. Do NOT retry with different
+parameters or try other tools. Report the exact error back right away and explain what it means.
+The user (or orchestrating agent) needs to know the infrastructure is inaccessible so they can fix it.
+
+## Investigation workflow (only if the cluster is reachable)
+
 When investigating connectivity issues:
 1. First check if the pods are running (get_pods)
 2. Check the service configuration (get_service, describe_service)
@@ -41,12 +50,74 @@ When investigating connectivity issues:
 4. Look for recent events that might indicate problems (get_events)
 5. If needed, check pod logs for errors (get_pod_logs)
 
+If step 1 fails with a connection or authentication error, skip all remaining steps and report the failure.
+
 For LoadBalancer services, pay attention to:
 - Whether an external IP has been provisioned (look for "pending" status)
 - Port mappings between the service and target pods
 - Endpoint health
 
 Always explain your findings and suggest next steps to the user.`
+
+// diagnoseKubectlError examines kubectl output for common failure patterns and returns
+// a clear, actionable error message alongside the raw output.
+func diagnoseKubectlError(output string) string {
+	out := strings.ToLower(output)
+
+	switch {
+	case strings.Contains(out, "does not exist") && strings.Contains(out, "context"):
+		return "The specified Kubernetes context does not exist in the local kubeconfig. " +
+			"Run 'kubectl config get-contexts' to list available contexts, " +
+			"or check that the correct kubeconfig file is being used."
+
+	case strings.Contains(out, "connection refused"):
+		return "Connection refused by the Kubernetes API server. " +
+			"The cluster may be down, the API server address may be wrong, " +
+			"or a VPN/tunnel may need to be active."
+
+	case strings.Contains(out, "unable to connect to the server"):
+		return "Cannot reach the Kubernetes API server. " +
+			"Check network connectivity, verify the cluster is running, " +
+			"and confirm the server address in kubeconfig is correct."
+
+	case strings.Contains(out, "unauthorized") || strings.Contains(out, "you must be logged in"):
+		return "Authentication to the cluster failed. " +
+			"Credentials may have expired. Try re-authenticating (e.g., 'gcloud container clusters get-credentials' for GKE)."
+
+	case strings.Contains(out, "forbidden"):
+		return "Permission denied. The current user/service account does not have " +
+			"the required RBAC permissions for this operation."
+
+	case strings.Contains(out, "not found") && strings.Contains(out, "namespace"):
+		return "The specified namespace does not exist in this cluster. " +
+			"Run 'kubectl get namespaces' to list available namespaces."
+
+	case strings.Contains(out, "not found") && strings.Contains(out, "error from server"):
+		return "The requested resource was not found in the cluster. " +
+			"Verify the resource name, namespace, and that it has been created."
+
+	case strings.Contains(out, "executable file not found") || strings.Contains(out, "command not found"):
+		return "kubectl is not installed or not in the system PATH. " +
+			"Install kubectl and ensure it is accessible."
+
+	case strings.Contains(out, "invalid configuration") || strings.Contains(out, "no configuration"):
+		return "The kubeconfig file is invalid or missing. " +
+			"Check that ~/.kube/config exists and is correctly formatted, " +
+			"or set KUBECONFIG to point to the right file."
+
+	case strings.Contains(out, "i/o timeout") || strings.Contains(out, "deadline exceeded"):
+		return "Request to the Kubernetes API server timed out. " +
+			"The cluster may be under heavy load, or there may be network issues."
+
+	case strings.Contains(out, "certificate") && (strings.Contains(out, "expired") || strings.Contains(out, "invalid") || strings.Contains(out, "unknown authority")):
+		return "TLS certificate error communicating with the cluster. " +
+			"The cluster certificate may have expired or the CA is not trusted. " +
+			"Re-fetch cluster credentials or update the kubeconfig."
+
+	default:
+		return ""
+	}
+}
 
 // runKubectl executes a kubectl command and returns the output.
 // If context is non-empty, it's passed as --context to kubectl.
@@ -57,7 +128,11 @@ func runKubectl(kubeContext string, args ...string) (string, error) {
 	cmd := exec.Command("kubectl", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(output), fmt.Errorf("kubectl error: %v, output: %s", err, string(output))
+		out := string(output)
+		if diagnosis := diagnoseKubectlError(out); diagnosis != "" {
+			return out, fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		}
+		return out, fmt.Errorf("kubectl error: %v, output: %s", err, out)
 	}
 	return string(output), nil
 }
