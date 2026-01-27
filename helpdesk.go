@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -265,14 +265,14 @@ func discoverAgents(urls []string) ([]AgentConfig, []string) {
 	var failed []string
 
 	for _, url := range urls {
-		log.Printf("Discovering agent at %s...", url)
+		slog.Info("discovering agent", "url", url)
 		config, err := discoverAgentFromURL(url)
 		if err != nil {
-			log.Printf("  SKIP: %v", err)
+			slog.Warn("agent discovery failed", "url", url, "err", err)
 			failed = append(failed, url)
 			continue
 		}
-		log.Printf("  OK: Found agent '%s'", config.Name)
+		slog.Info("discovered agent", "name", config.Name, "url", url)
 		discovered = append(discovered, *config)
 	}
 
@@ -299,7 +299,7 @@ func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContex
 		UserName: username,
 	}
 
-	log.Printf("Authenticated user: %s", username)
+	slog.Info("authenticated user", "username", username)
 	return ctx, nil
 }
 
@@ -349,11 +349,11 @@ func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) {
 	var unavailable []string
 
 	for _, cfg := range configs {
-		log.Printf("Confirming availability of agent %s at %s...", cfg.Name, cfg.URL)
+		slog.Info("confirming agent availability", "agent", cfg.Name, "url", cfg.URL)
 
 		// Check if agent is healthy
 		if err := checkAgentHealth(cfg.URL); err != nil {
-			log.Printf("  WARNING: Agent %s is unavailable: %v", cfg.Name, err)
+			slog.Warn("agent unavailable", "agent", cfg.Name, "url", cfg.URL, "err", err)
 			unavailable = append(unavailable, cfg.Name)
 			continue
 		}
@@ -365,12 +365,12 @@ func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) {
 			AgentCardSource:  cfg.URL,
 		})
 		if err != nil {
-			log.Printf("  WARNING: Failed to create proxy for %s: %v", cfg.Name, err)
+			slog.Warn("failed to create agent proxy", "agent", cfg.Name, "err", err)
 			unavailable = append(unavailable, cfg.Name)
 			continue
 		}
 
-		log.Printf("  OK: Agent %s is available", cfg.Name)
+		slog.Info("agent available", "agent", cfg.Name)
 		agents = append(agents, remoteAgent)
 	}
 
@@ -378,13 +378,16 @@ func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) {
 }
 
 func main() {
+	remainingArgs := initLogging(os.Args[1:])
+
 	ctx := context.Background()
 
 	modelVendor := os.Getenv("HELPDESK_MODEL_VENDOR")
 	modelName := os.Getenv("HELPDESK_MODEL_NAME")
 	apiKey := os.Getenv("HELPDESK_API_KEY")
 	if modelVendor == "" || modelName == "" || apiKey == "" {
-		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
+		slog.Error("missing required environment variables: HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY")
+		os.Exit(1)
 	}
 
 	// Discover agents from URLs or load from config file.
@@ -400,12 +403,12 @@ func main() {
 		}
 		discovered, failed := discoverAgents(urls)
 		if len(failed) > 0 {
-			log.Printf("Failed to discover agents at: %s", strings.Join(failed, ", "))
+			slog.Warn("failed to discover some agents", "urls", strings.Join(failed, ", "))
 		}
 		agentConfigs = discovered
 	} else {
 		// Fall back to config file.
-		log.Printf("No dynamic agent discovery (HELPDESK_AGENT_URLS env var is not set), so falling back to a static config file")
+		slog.Info("no dynamic agent discovery (HELPDESK_AGENT_URLS not set), falling back to static config file")
 		agentsConfigPath := os.Getenv("HELPDESK_AGENTS_CONFIG")
 		if agentsConfigPath == "" {
 			agentsConfigPath = "agents.json"
@@ -413,20 +416,21 @@ func main() {
 		var err error
 		agentConfigs, err = loadAgentsConfig(agentsConfigPath)
 		if err != nil {
-			log.Fatalf("Failed to load agents config from %s: %v", agentsConfigPath, err)
+			slog.Error("failed to load agents config", "path", agentsConfigPath, "err", err)
+			os.Exit(1)
 		}
-		log.Printf("Loaded configs of expected to participate expert agents from config file: %s", agentsConfigPath)
+		slog.Info("loaded agent configs from file", "path", agentsConfigPath)
 	}
 
 	if len(agentConfigs) == 0 {
-		log.Printf("WARNING: No agents discovered or configured")
+		slog.Warn("no agents discovered or configured")
 	}
 
 	agentNames := make([]string, len(agentConfigs))
 	for i, cfg := range agentConfigs {
 		agentNames[i] = cfg.Name
 	}
-	log.Printf("Expert agent(s) expected to participate are: %s", strings.Join(agentNames, ", "))
+	slog.Info("expected expert agents", "agents", strings.Join(agentNames, ", "))
 
 	p := &inputParams{
 		modelName: modelName,
@@ -442,19 +446,22 @@ func main() {
 	case "google", "gemini":
 		llmModel, err = gemini.NewModel(ctx, p.modelName, &genai.ClientConfig{APIKey: p.apiKey})
 		if err != nil {
-			log.Fatalf("Failed to create Gemini model: %v", err)
+			slog.Error("failed to create model", "vendor", "gemini", "err", err)
+			os.Exit(1)
 		}
-		log.Printf("Using Google/Gemini model: %s", modelName)
+		slog.Info("using model", "vendor", "gemini", "model", modelName)
 
 	case "anthropic":
 		llmModel, err = NewAnthropicModel(ctx, modelName, apiKey)
 		if err != nil {
-			log.Fatalf("Failed to create Anthropic model: %v", err)
+			slog.Error("failed to create model", "vendor", "anthropic", "err", err)
+			os.Exit(1)
 		}
-		log.Printf("Using Anthropic model: %s", modelName)
+		slog.Info("using model", "vendor", "anthropic", "model", modelName)
 
 	default:
-		log.Fatalf("Unknown LLM model vendor: %s (supported: google, gemini, anthropic)", modelVendor)
+		slog.Error("unknown model vendor", "vendor", modelVendor, "supported", "google, gemini, anthropic")
+		os.Exit(1)
 	}
 
 	// Create remote agent proxies (with health checking)
@@ -467,10 +474,10 @@ func main() {
 		var err error
 		tenantsConfig, err = loadTenantsConfig(tenantsConfigPath)
 		if err != nil {
-			log.Fatalf("Failed to load tenants config from %s: %v", tenantsConfigPath, err)
+			slog.Error("failed to load tenants config", "path", tenantsConfigPath, "err", err)
+			os.Exit(1)
 		}
-		log.Printf("Multi-tenant mode: loaded %d tenants, %d users from %s",
-			len(tenantsConfig.Tenants), len(tenantsConfig.Users), tenantsConfigPath)
+		slog.Info("multi-tenant mode enabled", "tenants", len(tenantsConfig.Tenants), "users", len(tenantsConfig.Users), "path", tenantsConfigPath)
 	}
 
 	// Build the instruction with dynamic agent section and availability info
@@ -485,7 +492,7 @@ func main() {
 		if currentUser != "" {
 			tenant, tenantID, err := tenantsConfig.getTenantForUser(currentUser)
 			if err != nil {
-				log.Printf("WARNING: %v", err)
+				slog.Warn("user not mapped to tenant", "user", currentUser, "err", err)
 				instruction += fmt.Sprintf("\n## Current Session\n\nAuthenticated user: `%s` (WARNING: not mapped to any tenant)\n", currentUser)
 			} else {
 				instruction += fmt.Sprintf("\n## Current Session\n\n")
@@ -522,18 +529,20 @@ func main() {
 		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportFunc},
 	})
 	if err != nil {
-		log.Fatalf("Failed to create root agent: %v", err)
+		slog.Error("failed to create root agent", "err", err)
+		os.Exit(1)
 	}
 
-	log.Printf("Orchestrator initialized with %d available agent(s)", len(remoteAgents))
+	slog.Info("orchestrator initialized", "available_agents", len(remoteAgents))
 	if len(unavailableAgents) > 0 {
-		log.Printf("Unavailable agents: %s", strings.Join(unavailableAgents, ", "))
+		slog.Warn("some agents unavailable", "agents", strings.Join(unavailableAgents, ", "))
 	}
 
 	// Create the agent loader with all agents (root + remote sub-agents)
 	agentLoader, err := agent.NewMultiLoader(rootAgent, remoteAgents...)
 	if err != nil {
-		log.Fatalf("Failed to create agent loader: %v", err)
+		slog.Error("failed to create agent loader", "err", err)
+		os.Exit(1)
 	}
 
 	// Configure services
@@ -551,7 +560,8 @@ func main() {
 
 	// Launch the orchestrator
 	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Failed to launch: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, remainingArgs); err != nil {
+		slog.Error("failed to launch", "err", err, "usage", l.CommandLineSyntax())
+		os.Exit(1)
 	}
 }

@@ -7,7 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -470,13 +470,13 @@ func newK8sAgent(ctx context.Context, modelVendor, modelName, apiKey string) (ag
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Gemini model: %v", err)
 		}
-		log.Printf("Using Google/Gemini model: %s", modelName)
+		slog.Info("using model", "vendor", "gemini", "model", modelName)
 	case "anthropic":
 		llmModel, err = NewAnthropicModel(ctx, modelName, apiKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Anthropic model: %v", err)
 		}
-		log.Printf("Using Anthropic model: %s", modelName)
+		slog.Info("using model", "vendor", "anthropic", "model", modelName)
 	default:
 		return nil, fmt.Errorf("unknown LLM model vendor: %s (supported: google, gemini, anthropic)", modelVendor)
 	}
@@ -514,7 +514,7 @@ func startK8sAgentServer(ctx context.Context, listenAddr, modelVendor, modelName
 
 	baseURL := &url.URL{Scheme: "http", Host: listener.Addr().String()}
 
-	log.Printf("Starting K8s A2A server on %s", baseURL.String())
+	slog.Info("starting K8s A2A server", "url", baseURL.String())
 
 	k8sAgent, err := newK8sAgent(ctx, modelVendor, modelName, apiKey)
 	if err != nil {
@@ -544,21 +544,24 @@ func startK8sAgentServer(ctx context.Context, listenAddr, modelVendor, modelName
 	requestHandler := a2asrv.NewHandler(executor)
 	mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
 
-	log.Printf("Agent card available at: %s/.well-known/agent-card.json", baseURL.String())
+	slog.Info("agent card available", "url", baseURL.String()+"/.well-known/agent-card.json")
 
 	err = http.Serve(listener, mux)
 
-	log.Printf("K8s A2A server stopped: %v", err)
+	slog.Warn("K8s A2A server stopped", "err", err)
 	return baseURL.String(), nil
 }
 
 func main() {
+	initLogging(os.Args[1:])
+
 	ctx := context.Background()
 	modelVendor := os.Getenv("HELPDESK_MODEL_VENDOR")
 	modelName := os.Getenv("HELPDESK_MODEL_NAME")
 	apiKey := os.Getenv("HELPDESK_API_KEY")
 	if modelVendor == "" || modelName == "" || apiKey == "" {
-		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
+		slog.Error("missing required environment variables: HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY")
+		os.Exit(1)
 	}
 
 	// Listen address: defaults to localhost:1102
@@ -569,7 +572,8 @@ func main() {
 
 	serverURL, err := startK8sAgentServer(ctx, listenAddr, modelVendor, modelName, apiKey)
 	if err != nil {
-		log.Fatalf("Failed to start K8s A2A server: %v", err)
+		slog.Error("failed to start K8s A2A server", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("K8s A2A server started on URL: %s", serverURL)
+	slog.Info("K8s A2A server started", "url", serverURL)
 }

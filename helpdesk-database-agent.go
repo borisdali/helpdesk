@@ -7,7 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -518,13 +518,13 @@ func newDatabaseAgent(ctx context.Context, modelVendor, modelName, apiKey string
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Gemini model: %v", err)
 		}
-		log.Printf("Using Google/Gemini model: %s", modelName)
+		slog.Info("using model", "vendor", "gemini", "model", modelName)
 	case "anthropic":
 		llmModel, err = NewAnthropicModel(ctx, modelName, apiKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Anthropic model: %v", err)
 		}
-		log.Printf("Using Anthropic model: %s", modelName)
+		slog.Info("using model", "vendor", "anthropic", "model", modelName)
 	default:
 		return nil, fmt.Errorf("unknown LLM model vendor: %s (supported: google, gemini, anthropic)", modelVendor)
 	}
@@ -563,7 +563,7 @@ func startDatabaseAgentServer(ctx context.Context, listenAddr, modelVendor, mode
 
 	baseURL := &url.URL{Scheme: "http", Host: listener.Addr().String()}
 
-	log.Printf("Starting Database A2A server on %s", baseURL.String())
+	slog.Info("starting database A2A server", "url", baseURL.String())
 
 	dbAgent, err := newDatabaseAgent(ctx, modelVendor, modelName, apiKey)
 	if err != nil {
@@ -593,21 +593,24 @@ func startDatabaseAgentServer(ctx context.Context, listenAddr, modelVendor, mode
 	requestHandler := a2asrv.NewHandler(executor)
 	mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
 
-	log.Printf("Agent card available at: %s/.well-known/agent-card.json", baseURL.String())
+	slog.Info("agent card available", "url", baseURL.String()+"/.well-known/agent-card.json")
 
 	err = http.Serve(listener, mux)
 
-	log.Printf("Database A2A server stopped: %v", err)
+	slog.Warn("database A2A server stopped", "err", err)
 	return baseURL.String(), nil
 }
 
 func main() {
+	initLogging(os.Args[1:])
+
 	ctx := context.Background()
 	modelVendor := os.Getenv("HELPDESK_MODEL_VENDOR")
 	modelName := os.Getenv("HELPDESK_MODEL_NAME")
 	apiKey := os.Getenv("HELPDESK_API_KEY")
 	if modelVendor == "" || modelName == "" || apiKey == "" {
-		log.Fatalf("Please set the HELPDESK_MODEL_VENDOR (e.g. Google/Gemini, Anthropic, etc.), HELPDESK_MODEL_NAME and HELPDESK_API_KEY env variables.")
+		slog.Error("missing required environment variables: HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY")
+		os.Exit(1)
 	}
 
 	// Listen address: defaults to localhost:1100
@@ -618,7 +621,8 @@ func main() {
 
 	serverURL, err := startDatabaseAgentServer(ctx, listenAddr, modelVendor, modelName, apiKey)
 	if err != nil {
-		log.Fatalf("Failed to start Database A2A server: %v", err)
+		slog.Error("failed to start database A2A server", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("Database A2A server started on URL: %s", serverURL)
+	slog.Info("database A2A server started", "url", serverURL)
 }

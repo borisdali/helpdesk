@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"log"
+	"log/slog"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -36,7 +36,7 @@ func (m *Model) Name() string {
 // GenerateContent implements the model.LLM interface.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		log.Printf("GenerateContent called: stream=%v (forcing non-streaming for Anthropic)", stream)
+		slog.Debug("GenerateContent called", "stream", stream, "note", "forcing non-streaming for Anthropic")
 
 		// Convert ADK request to Anthropic format
 		anthropicReq, err := m.convertRequest(req)
@@ -46,20 +46,20 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 		}
 
 		// Always use non-streaming for now - streaming has issues with tool calls
-		log.Printf("Using non-streaming mode")
+		slog.Debug("using non-streaming mode")
 		m.generateNonStreaming(ctx, anthropicReq, yield)
 	}
 }
 
 // convertRequest converts an ADK LLMRequest to Anthropic message params.
 func (m *Model) convertRequest(req *model.LLMRequest) (anthropic.MessageNewParams, error) {
-	log.Printf("convertRequest called - Tools count: %d", len(req.Tools))
+	slog.Debug("converting request", "tools_count", len(req.Tools))
 	for name, tool := range req.Tools {
-		log.Printf("  Tool: %s (type: %T)", name, tool)
+		slog.Debug("tool found", "name", name, "type", fmt.Sprintf("%T", tool))
 	}
-	log.Printf("convertRequest - Contents count: %d", len(req.Contents))
+	slog.Debug("converting request contents", "contents_count", len(req.Contents))
 	for i, content := range req.Contents {
-		log.Printf("  Content[%d]: role=%s, parts=%d", i, content.Role, len(content.Parts))
+		slog.Debug("content entry", "index", i, "role", content.Role, "parts", len(content.Parts))
 		for j, part := range content.Parts {
 			if part.Text != "" {
 				// Log first 500 chars of text to see system prompt
@@ -67,21 +67,21 @@ func (m *Model) convertRequest(req *model.LLMRequest) (anthropic.MessageNewParam
 				if len(text) > 500 {
 					text = text[:500] + "..."
 				}
-				log.Printf("    Part[%d]: Text: %s", j, text)
+				slog.Debug("content part text", "content_index", i, "part_index", j, "text", text)
 			}
 		}
 	}
 
 	// Check for SystemInstruction in Config
 	if req.Config != nil && req.Config.SystemInstruction != nil {
-		log.Printf("convertRequest - Config.SystemInstruction: role=%s, parts=%d", req.Config.SystemInstruction.Role, len(req.Config.SystemInstruction.Parts))
+		slog.Debug("system instruction found", "role", req.Config.SystemInstruction.Role, "parts", len(req.Config.SystemInstruction.Parts))
 		for j, part := range req.Config.SystemInstruction.Parts {
 			if part.Text != "" {
 				text := part.Text
 				if len(text) > 500 {
 					text = text[:500] + "..."
 				}
-				log.Printf("    SystemInstruction Part[%d]: Text: %s", j, text)
+				slog.Debug("system instruction part", "part_index", j, "text", text)
 			}
 		}
 	}
@@ -232,7 +232,7 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 			// Try tool.Tool interface first (has Description() method)
 			if t, ok := toolDef.(toolInterface); ok {
 				description = t.Description()
-				log.Printf("Tool %s: got description from interface: %s", name, description)
+				slog.Debug("tool description from interface", "tool", name, "description", description)
 			}
 
 			// Try to get Declaration() for parameters
@@ -242,7 +242,7 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 						description = decl.Description
 					}
 					parameters = decl.Parameters
-					log.Printf("Tool %s: got declaration with params", name)
+					slog.Debug("tool declaration with params", "tool", name)
 				}
 			}
 
@@ -250,12 +250,12 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 			if description == "" {
 				toolBytes, err := json.Marshal(toolDef)
 				if err != nil {
-					log.Printf("Warning: could not marshal tool %s (type %T): %v", name, toolDef, err)
+					slog.Warn("could not marshal tool", "tool", name, "type", fmt.Sprintf("%T", toolDef), "err", err)
 					continue
 				}
 				var toolMap map[string]interface{}
 				if err := json.Unmarshal(toolBytes, &toolMap); err != nil {
-					log.Printf("Warning: could not unmarshal tool %s: %v", name, err)
+					slog.Warn("could not unmarshal tool", "tool", name, "err", err)
 					continue
 				}
 				if desc, ok := toolMap["description"].(string); ok {
@@ -277,7 +277,7 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 						json.Unmarshal(paramBytes, parameters)
 					}
 				}
-				log.Printf("Tool %s (type %T) used JSON fallback", name, toolDef)
+				slog.Debug("tool used JSON fallback", "tool", name, "type", fmt.Sprintf("%T", toolDef))
 			}
 		}
 
@@ -310,7 +310,7 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 			}
 		}
 
-		log.Printf("Adding tool: %s - %s", name, description)
+		slog.Debug("adding tool", "tool", name, "description", description)
 
 		result = append(result, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
@@ -326,36 +326,36 @@ func (m *Model) convertTools(tools map[string]any) ([]anthropic.ToolUnionParam, 
 
 // generateNonStreaming handles non-streaming response.
 func (m *Model) generateNonStreaming(ctx context.Context, req anthropic.MessageNewParams, yield func(*model.LLMResponse, error) bool) {
-	log.Printf("generateNonStreaming: making API call")
+	slog.Debug("making API call")
 	resp, err := m.client.Messages.New(ctx, req)
 	if err != nil {
-		log.Printf("generateNonStreaming: API error: %v", err)
+		slog.Error("API error", "err", err)
 		yield(nil, fmt.Errorf("anthropic API error: %w", err))
 		return
 	}
 
-	log.Printf("generateNonStreaming: got response with %d content blocks, stop_reason=%s", len(resp.Content), resp.StopReason)
+	slog.Debug("API response received", "content_blocks", len(resp.Content), "stop_reason", resp.StopReason)
 	for i, block := range resp.Content {
-		log.Printf("  Block[%d]: type=%s", i, block.Type)
+		slog.Debug("response block", "index", i, "type", block.Type)
 		if block.Type == "tool_use" {
-			log.Printf("    tool_use: id=%s name=%s", block.ID, block.Name)
+			slog.Debug("tool_use block", "index", i, "id", block.ID, "name", block.Name)
 		}
 	}
 
 	llmResp := m.convertResponse(resp)
-	log.Printf("generateNonStreaming: converted response has %d parts", len(llmResp.Content.Parts))
+	slog.Debug("converted response", "parts", len(llmResp.Content.Parts))
 	for i, part := range llmResp.Content.Parts {
 		if part.FunctionCall != nil {
-			log.Printf("  Part[%d]: FunctionCall name=%s id=%s args=%v", i, part.FunctionCall.Name, part.FunctionCall.ID, part.FunctionCall.Args)
+			slog.Debug("response part function_call", "index", i, "name", part.FunctionCall.Name, "id", part.FunctionCall.ID, "args", part.FunctionCall.Args)
 		} else if part.Text != "" {
-			log.Printf("  Part[%d]: Text (%d chars)", i, len(part.Text))
+			slog.Debug("response part text", "index", i, "chars", len(part.Text))
 		}
 	}
-	log.Printf("generateNonStreaming: FinishReason=%v TurnComplete=%v", llmResp.FinishReason, llmResp.TurnComplete)
+	slog.Debug("response metadata", "finish_reason", llmResp.FinishReason, "turn_complete", llmResp.TurnComplete)
 
-	log.Printf("generateNonStreaming: calling yield with response")
+	slog.Debug("calling yield with response")
 	result := yield(llmResp, nil)
-	log.Printf("generateNonStreaming: yield returned %v", result)
+	slog.Debug("yield returned", "result", result)
 }
 
 // generateStreaming handles streaming response.
@@ -374,18 +374,18 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 	for stream.Next() {
 		event := stream.Current()
 
-		log.Printf("Stream event: %s", event.Type)
+		slog.Debug("stream event", "type", event.Type)
 
 		switch event.Type {
 		case "content_block_start":
 			// Handle tool use blocks starting
 			block := event.AsContentBlockStart()
-			log.Printf("  content_block_start: type=%s", block.ContentBlock.Type)
+			slog.Debug("content block start", "type", block.ContentBlock.Type)
 			if block.ContentBlock.Type == "tool_use" {
 				currentToolID = block.ContentBlock.ID
 				currentToolName = block.ContentBlock.Name
 				currentToolInput = ""
-				log.Printf("  Tool use starting: id=%s name=%s", currentToolID, currentToolName)
+				slog.Debug("tool use starting", "id", currentToolID, "name", currentToolName)
 			}
 
 		case "content_block_delta":
@@ -410,11 +410,11 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 		case "content_block_stop":
 			// If we were building a tool call, finalize it
 			if currentToolName != "" {
-				log.Printf("  Tool use complete: id=%s name=%s input=%s", currentToolID, currentToolName, currentToolInput)
+				slog.Debug("tool use complete", "id", currentToolID, "name", currentToolName, "input", currentToolInput)
 				argsMap := make(map[string]any)
 				if currentToolInput != "" {
 					if err := json.Unmarshal([]byte(currentToolInput), &argsMap); err != nil {
-						log.Printf("  Warning: failed to parse tool input JSON: %v", err)
+						slog.Warn("failed to parse tool input JSON", "err", err)
 					}
 				}
 				toolCalls = append(toolCalls, &genai.Part{
@@ -433,7 +433,7 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 		case "message_delta":
 			// Contains stop reason
 			msgDelta := event.AsMessageDelta()
-			log.Printf("  message_delta: stop_reason=%s", msgDelta.Delta.StopReason)
+			slog.Debug("message delta", "stop_reason", msgDelta.Delta.StopReason)
 			switch msgDelta.Delta.StopReason {
 			case "end_turn":
 				finishReason = genai.FinishReasonStop
@@ -451,7 +451,7 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 			}
 			parts = append(parts, toolCalls...)
 
-			log.Printf("  message_stop: text=%d chars, toolCalls=%d", len(accumulatedText), len(toolCalls))
+			slog.Debug("message stop", "text_chars", len(accumulatedText), "tool_calls", len(toolCalls))
 
 			resp := &model.LLMResponse{
 				Content: &genai.Content{
@@ -530,7 +530,7 @@ func (m *Model) convertResponse(resp *anthropic.Message) *model.LLMResponse {
 		turnComplete = true
 	}
 
-	log.Printf("convertResponse: stop_reason=%s -> turnComplete=%v", resp.StopReason, turnComplete)
+	slog.Debug("converted response", "stop_reason", resp.StopReason, "turn_complete", turnComplete)
 
 	return &model.LLMResponse{
 		Content: &genai.Content{
