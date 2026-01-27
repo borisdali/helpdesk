@@ -86,6 +86,91 @@ func loadAgentsConfig(configPath string) ([]AgentConfig, error) {
 	return agents, nil
 }
 
+// TenantConfig holds resource configuration for a tenant.
+type TenantConfig struct {
+	Name               string `json:"name"`
+	PostgresConnection string `json:"postgres_connection"`
+	K8sContext         string `json:"k8s_context"`
+}
+
+// TenantsConfig holds the full tenant configuration file structure.
+type TenantsConfig struct {
+	Tenants map[string]TenantConfig `json:"tenants"`
+	Users   map[string]string       `json:"users"` // user -> tenant_id mapping
+}
+
+// loadTenantsConfig loads tenant configurations from a JSON file.
+func loadTenantsConfig(configPath string) (*TenantsConfig, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tenants config file: %v", err)
+	}
+
+	var config TenantsConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse tenants config: %v", err)
+	}
+
+	return &config, nil
+}
+
+// getTenantForUser returns the tenant config for a given username.
+func (tc *TenantsConfig) getTenantForUser(username string) (*TenantConfig, string, error) {
+	tenantID, ok := tc.Users[username]
+	if !ok {
+		return nil, "", fmt.Errorf("user %q not mapped to any tenant", username)
+	}
+
+	tenant, ok := tc.Tenants[tenantID]
+	if !ok {
+		return nil, "", fmt.Errorf("tenant %q not found in configuration", tenantID)
+	}
+
+	return &tenant, tenantID, nil
+}
+
+// buildTenantPromptSection generates tenant-specific instructions for a single tenant.
+func buildTenantPromptSection(tenantID string, tenant *TenantConfig) string {
+	var sb strings.Builder
+	sb.WriteString("\n## Current Tenant Context\n\n")
+	sb.WriteString(fmt.Sprintf("You are currently serving tenant: **%s** (%s)\n\n", tenant.Name, tenantID))
+	sb.WriteString("When calling sub-agents, always use these tenant-specific parameters:\n\n")
+	sb.WriteString(fmt.Sprintf("- For postgres_database_agent: use connection_string: `%s`\n", tenant.PostgresConnection))
+	sb.WriteString(fmt.Sprintf("- For k8s_agent: use context: `%s`\n", tenant.K8sContext))
+	sb.WriteString("\n**IMPORTANT**: Always include these parameters in your tool calls to ensure you're accessing the correct tenant's resources.\n")
+	return sb.String()
+}
+
+// buildTenantsPromptSection generates multi-tenant instructions with user-to-tenant mapping.
+func buildTenantsPromptSection(config *TenantsConfig) string {
+	var sb strings.Builder
+	sb.WriteString("\n## Multi-Tenant Mode\n\n")
+	sb.WriteString("This system serves multiple tenants. Each user is mapped to a specific tenant.\n")
+	sb.WriteString("You MUST use the correct tenant's resources based on the authenticated user.\n\n")
+
+	sb.WriteString("### User to Tenant Mapping\n\n")
+	for user, tenantID := range config.Users {
+		sb.WriteString(fmt.Sprintf("- User `%s` → Tenant `%s`\n", user, tenantID))
+	}
+
+	sb.WriteString("\n### Tenant Resources\n\n")
+	for tenantID, tenant := range config.Tenants {
+		sb.WriteString(fmt.Sprintf("**%s** (%s):\n", tenant.Name, tenantID))
+		sb.WriteString(fmt.Sprintf("- postgres connection_string: `%s`\n", tenant.PostgresConnection))
+		sb.WriteString(fmt.Sprintf("- k8s context: `%s`\n", tenant.K8sContext))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("### Instructions\n\n")
+	sb.WriteString("1. The current user's identity is set by the system (you'll see it in the session)\n")
+	sb.WriteString("2. Look up the user's tenant from the mapping above\n")
+	sb.WriteString("3. ALWAYS use that tenant's connection_string and context when calling sub-agents\n")
+	sb.WriteString("4. NEVER access resources from a different tenant\n")
+	sb.WriteString("5. If the user is not in the mapping, inform them they are not authorized\n")
+
+	return sb.String()
+}
+
 // buildAgentPromptSection generates the "Available Specialist Agents" section
 // dynamically from the loaded agent configurations.
 func buildAgentPromptSection(agents []AgentConfig) string {
@@ -194,16 +279,27 @@ func discoverAgents(urls []string) ([]AgentConfig, []string) {
 	return discovered, failed
 }
 
-// AuthInterceptor sets 'user' name needed for both a2a and webui launchers which share the same sessions service.
+// AuthInterceptor handles user authentication for multi-tenant support.
+// User identity is determined from (in order of priority):
+// 1. HELPDESK_USER environment variable (for testing/demo)
+// 2. Falls back to "anonymous"
 type AuthInterceptor struct {
 	a2asrv.PassthroughCallInterceptor
+	DefaultUser string // Set from HELPDESK_USER env var
 }
 
 // Before implements a before request callback.
 func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
-	callCtx.User = &a2asrv.AuthenticatedUser{
-		UserName: "user",
+	username := a.DefaultUser
+	if username == "" {
+		username = "anonymous"
 	}
+
+	callCtx.User = &a2asrv.AuthenticatedUser{
+		UserName: username,
+	}
+
+	log.Printf("Authenticated user: %s", username)
 	return ctx, nil
 }
 
@@ -253,7 +349,7 @@ func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) {
 	var unavailable []string
 
 	for _, cfg := range configs {
-		log.Printf("Checking agent %s at %s...", cfg.Name, cfg.URL)
+		log.Printf("Confirming availability of agent %s at %s...", cfg.Name, cfg.URL)
 
 		// Check if agent is healthy
 		if err := checkAgentHealth(cfg.URL); err != nil {
@@ -309,7 +405,7 @@ func main() {
 		agentConfigs = discovered
 	} else {
 		// Fall back to config file.
-		log.Printf("No dynamic agent discover (HELPDESK_AGENT_URLS env var is not set), so falling back to a static config file")
+		log.Printf("No dynamic agent discovery (HELPDESK_AGENT_URLS env var is not set), so falling back to a static config file")
 		agentsConfigPath := os.Getenv("HELPDESK_AGENTS_CONFIG")
 		if agentsConfigPath == "" {
 			agentsConfigPath = "agents.json"
@@ -364,8 +460,44 @@ func main() {
 	// Create remote agent proxies (with health checking)
 	remoteAgents, unavailableAgents := createRemoteAgents(p.agents)
 
+	// Load tenant configuration (optional - for multi-tenant mode)
+	var tenantsConfig *TenantsConfig
+	tenantsConfigPath := os.Getenv("HELPDESK_TENANTS_CONFIG")
+	if tenantsConfigPath != "" {
+		var err error
+		tenantsConfig, err = loadTenantsConfig(tenantsConfigPath)
+		if err != nil {
+			log.Fatalf("Failed to load tenants config from %s: %v", tenantsConfigPath, err)
+		}
+		log.Printf("Multi-tenant mode: loaded %d tenants, %d users from %s",
+			len(tenantsConfig.Tenants), len(tenantsConfig.Users), tenantsConfigPath)
+	}
+
 	// Build the instruction with dynamic agent section and availability info
 	instruction := baseAgentPrompt + buildAgentPromptSection(p.agents)
+
+	// Add tenant context if multi-tenant mode is enabled
+	currentUser := os.Getenv("HELPDESK_USER")
+	if tenantsConfig != nil {
+		instruction += buildTenantsPromptSection(tenantsConfig)
+
+		// Add current authenticated user to the prompt
+		if currentUser != "" {
+			tenant, tenantID, err := tenantsConfig.getTenantForUser(currentUser)
+			if err != nil {
+				log.Printf("WARNING: %v", err)
+				instruction += fmt.Sprintf("\n## Current Session\n\nAuthenticated user: `%s` (WARNING: not mapped to any tenant)\n", currentUser)
+			} else {
+				instruction += fmt.Sprintf("\n## Current Session\n\n")
+				instruction += fmt.Sprintf("Authenticated user: `%s`\n", currentUser)
+				instruction += fmt.Sprintf("Tenant: **%s** (`%s`)\n\n", tenant.Name, tenantID)
+				instruction += fmt.Sprintf("Use these parameters for ALL sub-agent calls:\n")
+				instruction += fmt.Sprintf("- postgres_database_agent → connection_string: `%s`\n", tenant.PostgresConnection)
+				instruction += fmt.Sprintf("- k8s_agent → context: `%s`\n", tenant.K8sContext)
+			}
+		}
+	}
+
 	if len(unavailableAgents) > 0 {
 		instruction += fmt.Sprintf("\n## Currently Unavailable Agents\nThe following agents are currently unavailable: %s\nIf you need these agents, inform the user and suggest they start the agent or try manual troubleshooting.\n",
 			strings.Join(unavailableAgents, ", "))
@@ -413,7 +545,7 @@ func main() {
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
 		A2AOptions: []a2asrv.RequestHandlerOption{
-			a2asrv.WithCallInterceptor(&AuthInterceptor{}),
+			a2asrv.WithCallInterceptor(&AuthInterceptor{DefaultUser: currentUser}),
 		},
 	}
 
