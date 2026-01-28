@@ -36,11 +36,16 @@ PostgreSQL databases and their derivatives (like AlloyDB Omni).
 ## CRITICAL: Fail fast on connectivity errors
 
 If ANY tool call returns an error, STOP IMMEDIATELY. Do NOT retry with different
-parameters or try other tools. Report the error using this exact format:
+parameters or try other tools. Do NOT narrate what you were about to do.
+Report ONLY the error, using this exact format (note the blank line at the start):
 
+---
 ERROR — <tool_name> failed for <connection_string>
+
 <paste the full error message from the tool, verbatim>
+
 This means: <one-sentence explanation>
+---
 
 Never paraphrase, summarize, or omit the error text. The orchestrating agent and the user
 need the exact error to diagnose the problem.

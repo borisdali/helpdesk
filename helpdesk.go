@@ -50,14 +50,9 @@ When a user reports an issue:
 
 ## Reporting errors from sub-agents
 
-When a sub-agent reports an error (cluster unreachable, database connection refused, etc.):
-- Lead with the error: start your response with "ERROR:" followed by what failed
-- Include the sub-agent's exact error text — do NOT paraphrase or soften it
-- Explain what it means in plain language
-- Suggest concrete next steps the user can take
-
-Do NOT say things like "I encountered an issue" or "there seems to be a problem".
-State the error directly.
+When a sub-agent reports an error, relay it verbatim. Do NOT paraphrase, summarize,
+or wrap it in narrative like "I encountered an issue". Pass through the sub-agent's
+error block exactly as received, then add your own recommendations on a new line after it.
 
 ## Important Notes
 
