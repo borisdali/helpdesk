@@ -1,0 +1,24 @@
+{
+  "postgres_servers": {
+    "global-corp-db": {
+      "name": "Global Corporation Production DB",
+      "connection_string": "host=db1.global.example.com port=5432 dbname=prod user=admin",
+      "k8s_cluster": "global-prod"
+    },
+    "local-co-db": {
+      "name": "Local Company Dev DB",
+      "connection_string": "host=db2.local.example.io port=5432 dbname=dev user=dba",
+      "k8s_cluster": "local-dev"
+    }
+  },
+  "k8s_clusters": {
+    "global-prod": {
+      "name": "Global Corp Production Cluster",
+      "context": "global-prod-cluster"
+    },
+    "local-dev": {
+      "name": "Local Company Dev Cluster",
+      "context": "local-dev-cluster"
+    }
+  }
+}

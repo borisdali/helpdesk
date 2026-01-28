@@ -36,11 +36,12 @@ func (m *Model) Name() string {
 // GenerateContent implements the model.LLM interface.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		slog.Debug("GenerateContent called", "stream", stream, "note", "forcing non-streaming for Anthropic")
+		slog.Debug("GenerateContent called", "stream", stream)
 
 		// Convert ADK request to Anthropic format
 		anthropicReq, err := m.convertRequest(req)
 		if err != nil {
+			slog.Error("failed to convert request", "err", err)
 			yield(nil, fmt.Errorf("failed to convert request: %w", err))
 			return
 		}
@@ -329,7 +330,7 @@ func (m *Model) generateNonStreaming(ctx context.Context, req anthropic.MessageN
 	slog.Debug("making API call")
 	resp, err := m.client.Messages.New(ctx, req)
 	if err != nil {
-		slog.Error("API error", "err", err)
+		slog.Error("anthropic API error", "err", err)
 		yield(nil, fmt.Errorf("anthropic API error: %w", err))
 		return
 	}
@@ -467,6 +468,7 @@ func (m *Model) generateStreaming(ctx context.Context, req anthropic.MessageNewP
 	}
 
 	if err := stream.Err(); err != nil {
+		slog.Error("stream error", "err", err)
 		yield(nil, fmt.Errorf("stream error: %w", err))
 		return
 	}

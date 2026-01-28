@@ -36,10 +36,15 @@ databases and applications running in Kubernetes clusters.
 
 ## CRITICAL: Fail fast on connectivity errors
 
-If ANY tool call returns an error indicating the cluster is unreachable, the context does not exist,
-credentials are invalid, or kubectl is not available, STOP IMMEDIATELY. Do NOT retry with different
-parameters or try other tools. Report the exact error back right away and explain what it means.
-The user (or orchestrating agent) needs to know the infrastructure is inaccessible so they can fix it.
+If ANY tool call returns an error, STOP IMMEDIATELY. Do NOT retry with different
+parameters or try other tools. Report the error using this exact format:
+
+ERROR — <tool_name> failed for cluster <context>
+<paste the full error message from the tool, verbatim>
+This means: <one-sentence explanation>
+
+Never paraphrase, summarize, or omit the error text. The orchestrating agent and the user
+need the exact error to diagnose the problem.
 
 ## Investigation workflow (only if the cluster is reachable)
 
@@ -121,18 +126,27 @@ func diagnoseKubectlError(output string) string {
 
 // runKubectl executes a kubectl command and returns the output.
 // If context is non-empty, it's passed as --context to kubectl.
-func runKubectl(kubeContext string, args ...string) (string, error) {
+// The provided ctx controls cancellation — if it expires, kubectl is killed.
+func runKubectl(ctx context.Context, kubeContext string, args ...string) (string, error) {
+	prefix := []string{"--request-timeout=10s"}
 	if kubeContext != "" {
-		args = append([]string{"--context", kubeContext}, args...)
+		prefix = append(prefix, "--context", kubeContext)
 	}
-	cmd := exec.Command("kubectl", args...)
+	args = append(prefix, args...)
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		out := string(output)
-		if diagnosis := diagnoseKubectlError(out); diagnosis != "" {
-			return out, fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		out := strings.TrimSpace(string(output))
+		if out == "" {
+			out = "(no output from kubectl)"
 		}
-		return out, fmt.Errorf("kubectl error: %v, output: %s", err, out)
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("kubectl timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
+		}
+		if diagnosis := diagnoseKubectlError(out); diagnosis != "" {
+			return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		}
+		return "", fmt.Errorf("kubectl failed: %v\nOutput: %s", err, out)
 	}
 	return string(output), nil
 }
@@ -163,9 +177,9 @@ func getPodsTool(ctx tool.Context, args GetPodsArgs) (KubectlResult, error) {
 		cmdArgs = append(cmdArgs, "-l", args.Labels)
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error getting pods: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error getting pods: %v", err)
 	}
 	if strings.TrimSpace(output) == "" {
 		return KubectlResult{Output: "No pods found matching the criteria."}, nil
@@ -193,9 +207,9 @@ func getServiceTool(ctx tool.Context, args GetServiceArgs) (KubectlResult, error
 		cmdArgs = append(cmdArgs, args.ServiceName)
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error getting services: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error getting services: %v", err)
 	}
 
 	// Filter by service type if specified
@@ -231,9 +245,9 @@ func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlRes
 		cmdArgs = append(cmdArgs, "-n", args.Namespace)
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error describing service: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error describing service: %v", err)
 	}
 	return KubectlResult{Output: output}, nil
 }
@@ -257,9 +271,9 @@ func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (KubectlResult, e
 		cmdArgs = append(cmdArgs, args.EndpointName)
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error getting endpoints: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error getting endpoints: %v", err)
 	}
 	if strings.TrimSpace(output) == "" {
 		return KubectlResult{Output: "No endpoints found. This may indicate no pods match the service selector."}, nil
@@ -287,9 +301,9 @@ func getEventsTool(ctx tool.Context, args GetEventsArgs) (KubectlResult, error) 
 		cmdArgs = append(cmdArgs, "--field-selector", fmt.Sprintf("type=%s", args.EventType))
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error getting events: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error getting events: %v", err)
 	}
 
 	// Filter by resource name if specified
@@ -342,9 +356,9 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 		cmdArgs = append(cmdArgs, "--previous")
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error getting pod logs: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", err)
 	}
 	if strings.TrimSpace(output) == "" {
 		return KubectlResult{Output: "No logs available for this pod."}, nil
@@ -367,9 +381,9 @@ func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, err
 		cmdArgs = append(cmdArgs, "-n", args.Namespace)
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error describing pod: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error describing pod: %v", err)
 	}
 	return KubectlResult{Output: output}, nil
 }
@@ -388,9 +402,9 @@ func getNodesTool(ctx tool.Context, args GetNodesArgs) (KubectlResult, error) {
 		cmdArgs = append(cmdArgs, "--show-labels")
 	}
 
-	output, err := runKubectl(args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, args.Context, cmdArgs...)
 	if err != nil {
-		return KubectlResult{Output: fmt.Sprintf("Error getting nodes: %v", err)}, nil
+		return KubectlResult{}, fmt.Errorf("error getting nodes: %v", err)
 	}
 	return KubectlResult{Output: output}, nil
 }

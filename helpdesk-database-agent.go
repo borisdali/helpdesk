@@ -35,10 +35,15 @@ PostgreSQL databases and their derivatives (like AlloyDB Omni).
 
 ## CRITICAL: Fail fast on connectivity errors
 
-If ANY tool call returns an error indicating the database is unreachable, does not exist,
-credentials are invalid, or psql is not available, STOP IMMEDIATELY. Do NOT retry with different
-parameters or try other tools. Report the exact error back right away and explain what it means.
-The user (or orchestrating agent) needs to know the database is inaccessible so they can fix it.
+If ANY tool call returns an error, STOP IMMEDIATELY. Do NOT retry with different
+parameters or try other tools. Report the error using this exact format:
+
+ERROR — <tool_name> failed for <connection_string>
+<paste the full error message from the tool, verbatim>
+This means: <one-sentence explanation>
+
+Never paraphrase, summarize, or omit the error text. The orchestrating agent and the user
+need the exact error to diagnose the problem.
 
 ## Investigation workflow (only if the database is reachable)
 
@@ -111,19 +116,27 @@ func diagnosePsqlError(output string) string {
 
 // runPsql executes a psql command and returns the output.
 // Connection parameters are taken from environment or provided in args.
-func runPsql(connStr string, query string) (string, error) {
+// The provided ctx controls cancellation — if it expires, psql is killed.
+func runPsql(ctx context.Context, connStr string, query string) (string, error) {
 	args := []string{"-c", query, "-x"}
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}
-	cmd := exec.Command("psql", args...)
+	cmd := exec.CommandContext(ctx, "psql", args...)
+	cmd.Env = append(os.Environ(), "PGCONNECT_TIMEOUT=10")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		out := string(output)
-		if diagnosis := diagnosePsqlError(out); diagnosis != "" {
-			return out, fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		out := strings.TrimSpace(string(output))
+		if out == "" {
+			out = "(no output from psql)"
 		}
-		return out, fmt.Errorf("psql error: %v, output: %s", err, out)
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("psql timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
+		}
+		if diagnosis := diagnosePsqlError(out); diagnosis != "" {
+			return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		}
+		return "", fmt.Errorf("psql failed: %v\nOutput: %s", err, out)
 	}
 	return string(output), nil
 }
@@ -141,9 +154,9 @@ type CheckConnectionArgs struct {
 // checkConnectionTool tests database connectivity.
 func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult, error) {
 	query := "SELECT version(), current_database(), current_user, inet_server_addr(), inet_server_port();"
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Connection failed: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("connection failed: %v", err)
 	}
 	return PsqlResult{Output: fmt.Sprintf("Connection successful!\n%s", output)}, nil
 }
@@ -167,9 +180,9 @@ func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult
 	WHERE d.datistemplate = false
 	ORDER BY pg_database_size(d.datname) DESC;`
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting database info: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting database info: %v", err)
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -203,9 +216,9 @@ func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (
 	ORDER BY query_start ASC NULLS LAST
 	LIMIT 50;`, stateFilter)
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting active connections: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting active connections: %v", err)
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
 		return PsqlResult{Output: "No active connections found."}, nil
@@ -232,9 +245,9 @@ func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (Psql
 	GROUP BY datname
 	ORDER BY total_connections DESC;`
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting connection stats: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting connection stats: %v", err)
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -265,9 +278,9 @@ func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResu
 	WHERE datname NOT LIKE 'template%'
 	ORDER BY numbackends DESC;`
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting database stats: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting database stats: %v", err)
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -299,9 +312,9 @@ func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (Psql
 			ORDER BY name;`
 	}
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting config parameters: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting config parameters: %v", err)
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -335,9 +348,9 @@ func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (
 		pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) as lag_bytes
 	FROM pg_replication_slots;`
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting replication status: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting replication status: %v", err)
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -373,9 +386,9 @@ func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error)
 	JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
 	WHERE NOT blocked_locks.granted;`
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting lock info: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting lock info: %v", err)
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
 		return PsqlResult{Output: "No blocking locks found."}, nil
@@ -428,9 +441,9 @@ func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, er
 		LIMIT 20;`, schemaFilter)
 	}
 
-	output, err := runPsql(args.ConnectionString, query)
+	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{Output: fmt.Sprintf("Error getting table stats: %v", err)}, nil
+		return PsqlResult{}, fmt.Errorf("error getting table stats: %v", err)
 	}
 	return PsqlResult{Output: output}, nil
 }

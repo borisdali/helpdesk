@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
@@ -48,6 +47,17 @@ When a user reports an issue:
 
 3. **Synthesize findings**: After getting information from sub-agents, explain the findings
    to the user in clear terms and suggest next steps.
+
+## Reporting errors from sub-agents
+
+When a sub-agent reports an error (cluster unreachable, database connection refused, etc.):
+- Lead with the error: start your response with "ERROR:" followed by what failed
+- Include the sub-agent's exact error text — do NOT paraphrase or soften it
+- Explain what it means in plain language
+- Suggest concrete next steps the user can take
+
+Do NOT say things like "I encountered an issue" or "there seems to be a problem".
+State the error directly.
 
 ## Important Notes
 
@@ -86,87 +96,75 @@ func loadAgentsConfig(configPath string) ([]AgentConfig, error) {
 	return agents, nil
 }
 
-// TenantConfig holds resource configuration for a tenant.
-type TenantConfig struct {
-	Name               string `json:"name"`
-	PostgresConnection string `json:"postgres_connection"`
-	K8sContext         string `json:"k8s_context"`
+// PostgresServer represents a managed PostgreSQL server (AlloyDB Omni or standalone).
+type PostgresServer struct {
+	Name             string `json:"name"`
+	ConnectionString string `json:"connection_string"`
+	K8sCluster       string `json:"k8s_cluster,omitempty"`
 }
 
-// TenantsConfig holds the full tenant configuration file structure.
-type TenantsConfig struct {
-	Tenants map[string]TenantConfig `json:"tenants"`
-	Users   map[string]string       `json:"users"` // user -> tenant_id mapping
+// K8sCluster represents a managed Kubernetes cluster.
+type K8sCluster struct {
+	Name    string `json:"name"`
+	Context string `json:"context"`
 }
 
-// loadTenantsConfig loads tenant configurations from a JSON file.
-func loadTenantsConfig(configPath string) (*TenantsConfig, error) {
-	data, err := os.ReadFile(configPath)
+// InfraConfig holds the infrastructure inventory.
+type InfraConfig struct {
+	PostgresServers map[string]PostgresServer `json:"postgres_servers"`
+	K8sClusters     map[string]K8sCluster     `json:"k8s_clusters"`
+}
+
+// loadInfraConfig loads infrastructure configuration from a JSON file.
+func loadInfraConfig(path string) (*InfraConfig, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read tenants config file: %v", err)
+		return nil, fmt.Errorf("failed to read infrastructure config file: %v", err)
 	}
 
-	var config TenantsConfig
+	var config InfraConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse tenants config: %v", err)
+		return nil, fmt.Errorf("failed to parse infrastructure config: %v", err)
 	}
 
 	return &config, nil
 }
 
-// getTenantForUser returns the tenant config for a given username.
-func (tc *TenantsConfig) getTenantForUser(username string) (*TenantConfig, string, error) {
-	tenantID, ok := tc.Users[username]
-	if !ok {
-		return nil, "", fmt.Errorf("user %q not mapped to any tenant", username)
-	}
-
-	tenant, ok := tc.Tenants[tenantID]
-	if !ok {
-		return nil, "", fmt.Errorf("tenant %q not found in configuration", tenantID)
-	}
-
-	return &tenant, tenantID, nil
-}
-
-// buildTenantPromptSection generates tenant-specific instructions for a single tenant.
-func buildTenantPromptSection(tenantID string, tenant *TenantConfig) string {
+// buildInfraPromptSection generates the managed infrastructure section for the agent prompt.
+func buildInfraPromptSection(config *InfraConfig) string {
 	var sb strings.Builder
-	sb.WriteString("\n## Current Tenant Context\n\n")
-	sb.WriteString(fmt.Sprintf("You are currently serving tenant: **%s** (%s)\n\n", tenant.Name, tenantID))
-	sb.WriteString("When calling sub-agents, always use these tenant-specific parameters:\n\n")
-	sb.WriteString(fmt.Sprintf("- For postgres_database_agent: use connection_string: `%s`\n", tenant.PostgresConnection))
-	sb.WriteString(fmt.Sprintf("- For k8s_agent: use context: `%s`\n", tenant.K8sContext))
-	sb.WriteString("\n**IMPORTANT**: Always include these parameters in your tool calls to ensure you're accessing the correct tenant's resources.\n")
-	return sb.String()
-}
+	sb.WriteString("\n## Managed Infrastructure\n\n")
 
-// buildTenantsPromptSection generates multi-tenant instructions with user-to-tenant mapping.
-func buildTenantsPromptSection(config *TenantsConfig) string {
-	var sb strings.Builder
-	sb.WriteString("\n## Multi-Tenant Mode\n\n")
-	sb.WriteString("This system serves multiple tenants. Each user is mapped to a specific tenant.\n")
-	sb.WriteString("You MUST use the correct tenant's resources based on the authenticated user.\n\n")
-
-	sb.WriteString("### User to Tenant Mapping\n\n")
-	for user, tenantID := range config.Users {
-		sb.WriteString(fmt.Sprintf("- User `%s` → Tenant `%s`\n", user, tenantID))
+	if len(config.PostgresServers) > 0 {
+		sb.WriteString("### PostgreSQL Servers\n\n")
+		for id, pg := range config.PostgresServers {
+			sb.WriteString(fmt.Sprintf("**%s** (%s)\n", id, pg.Name))
+			sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", pg.ConnectionString))
+			if pg.K8sCluster != "" {
+				if k8s, ok := config.K8sClusters[pg.K8sCluster]; ok {
+					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (context: `%s`)\n", pg.K8sCluster, k8s.Context))
+				} else {
+					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (not found in k8s_clusters)\n", pg.K8sCluster))
+				}
+			} else {
+				sb.WriteString("- Runs on VM (no K8s cluster)\n")
+			}
+			sb.WriteString("\n")
+		}
 	}
 
-	sb.WriteString("\n### Tenant Resources\n\n")
-	for tenantID, tenant := range config.Tenants {
-		sb.WriteString(fmt.Sprintf("**%s** (%s):\n", tenant.Name, tenantID))
-		sb.WriteString(fmt.Sprintf("- postgres connection_string: `%s`\n", tenant.PostgresConnection))
-		sb.WriteString(fmt.Sprintf("- k8s context: `%s`\n", tenant.K8sContext))
+	if len(config.K8sClusters) > 0 {
+		sb.WriteString("### Kubernetes Clusters\n\n")
+		for id, k8s := range config.K8sClusters {
+			sb.WriteString(fmt.Sprintf("**%s** (%s) — context: `%s`\n", id, k8s.Name, k8s.Context))
+		}
 		sb.WriteString("\n")
 	}
 
 	sb.WriteString("### Instructions\n\n")
-	sb.WriteString("1. The current user's identity is set by the system (you'll see it in the session)\n")
-	sb.WriteString("2. Look up the user's tenant from the mapping above\n")
-	sb.WriteString("3. ALWAYS use that tenant's connection_string and context when calling sub-agents\n")
-	sb.WriteString("4. NEVER access resources from a different tenant\n")
-	sb.WriteString("5. If the user is not in the mapping, inform them they are not authorized\n")
+	sb.WriteString("- When investigating a postgres server, use its connection_string with the database agent.\n")
+	sb.WriteString("- If the server has an associated K8s cluster, use that cluster's context with the K8s agent.\n")
+	sb.WriteString("- K8s clusters not tied to any postgres server can still be inspected independently.\n")
 
 	return sb.String()
 }
@@ -277,30 +275,6 @@ func discoverAgents(urls []string) ([]AgentConfig, []string) {
 	}
 
 	return discovered, failed
-}
-
-// AuthInterceptor handles user authentication for multi-tenant support.
-// User identity is determined from (in order of priority):
-// 1. HELPDESK_USER environment variable (for testing/demo)
-// 2. Falls back to "anonymous"
-type AuthInterceptor struct {
-	a2asrv.PassthroughCallInterceptor
-	DefaultUser string // Set from HELPDESK_USER env var
-}
-
-// Before implements a before request callback.
-func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
-	username := a.DefaultUser
-	if username == "" {
-		username = "anonymous"
-	}
-
-	callCtx.User = &a2asrv.AuthenticatedUser{
-		UserName: username,
-	}
-
-	slog.Info("authenticated user", "username", username)
-	return ctx, nil
 }
 
 // saveReportFunc saves LLM responses as artifacts.
@@ -467,42 +441,19 @@ func main() {
 	// Create remote agent proxies (with health checking)
 	remoteAgents, unavailableAgents := createRemoteAgents(p.agents)
 
-	// Load tenant configuration (optional - for multi-tenant mode)
-	var tenantsConfig *TenantsConfig
-	tenantsConfigPath := os.Getenv("HELPDESK_TENANTS_CONFIG")
-	if tenantsConfigPath != "" {
-		var err error
-		tenantsConfig, err = loadTenantsConfig(tenantsConfigPath)
-		if err != nil {
-			slog.Error("failed to load tenants config", "path", tenantsConfigPath, "err", err)
-			os.Exit(1)
-		}
-		slog.Info("multi-tenant mode enabled", "tenants", len(tenantsConfig.Tenants), "users", len(tenantsConfig.Users), "path", tenantsConfigPath)
-	}
-
 	// Build the instruction with dynamic agent section and availability info
 	instruction := baseAgentPrompt + buildAgentPromptSection(p.agents)
 
-	// Add tenant context if multi-tenant mode is enabled
-	currentUser := os.Getenv("HELPDESK_USER")
-	if tenantsConfig != nil {
-		instruction += buildTenantsPromptSection(tenantsConfig)
-
-		// Add current authenticated user to the prompt
-		if currentUser != "" {
-			tenant, tenantID, err := tenantsConfig.getTenantForUser(currentUser)
-			if err != nil {
-				slog.Warn("user not mapped to tenant", "user", currentUser, "err", err)
-				instruction += fmt.Sprintf("\n## Current Session\n\nAuthenticated user: `%s` (WARNING: not mapped to any tenant)\n", currentUser)
-			} else {
-				instruction += fmt.Sprintf("\n## Current Session\n\n")
-				instruction += fmt.Sprintf("Authenticated user: `%s`\n", currentUser)
-				instruction += fmt.Sprintf("Tenant: **%s** (`%s`)\n\n", tenant.Name, tenantID)
-				instruction += fmt.Sprintf("Use these parameters for ALL sub-agent calls:\n")
-				instruction += fmt.Sprintf("- postgres_database_agent → connection_string: `%s`\n", tenant.PostgresConnection)
-				instruction += fmt.Sprintf("- k8s_agent → context: `%s`\n", tenant.K8sContext)
-			}
+	// Load infrastructure configuration (optional)
+	infraConfigPath := os.Getenv("HELPDESK_INFRA_CONFIG")
+	if infraConfigPath != "" {
+		infraConfig, err := loadInfraConfig(infraConfigPath)
+		if err != nil {
+			slog.Error("failed to load infrastructure config", "path", infraConfigPath, "err", err)
+			os.Exit(1)
 		}
+		instruction += buildInfraPromptSection(infraConfig)
+		slog.Info("infrastructure config loaded", "pg_servers", len(infraConfig.PostgresServers), "k8s_clusters", len(infraConfig.K8sClusters))
 	}
 
 	if len(unavailableAgents) > 0 {
@@ -553,9 +504,6 @@ func main() {
 		ArtifactService: artifactService,
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
-		A2AOptions: []a2asrv.RequestHandlerOption{
-			a2asrv.WithCallInterceptor(&AuthInterceptor{DefaultUser: currentUser}),
-		},
 	}
 
 	// Launch the orchestrator
