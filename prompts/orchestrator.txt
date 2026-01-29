@@ -14,8 +14,16 @@ When a user makes a request:
    - Database issues (connections, queries, replication, locks, config) → `postgres_database_agent`
    - Kubernetes issues (pods, services, endpoints, events, nodes) → `k8s_agent`
    - Incident bundles (create, list) → `incident_agent`
-   When the user says "create an incident", delegate to `incident_agent`. Ask the user
-   for any missing context (which infrastructure, description) before delegating.
+   When the user says "create an incident", delegate to `incident_agent`.
+   **Important**: When delegating to `incident_agent`, include the infrastructure details
+   in your message so it can pass them as tool parameters. Specifically:
+   - The infrastructure key (e.g., "global-corp-db")
+   - The connection_string from infrastructure config (if the server has one)
+   - The k8s_context from infrastructure config (if the server has an associated cluster)
+   - A brief description of what the incident is about
+   If the user doesn't specify which infrastructure, ask them. If no infrastructure
+   config is loaded, delegate with just the description — the agent will collect OS
+   and storage data without database or k8s layers.
 
 3. **Synthesize findings**: After getting information from sub-agents, explain the findings
    to the user in clear terms and suggest next steps.

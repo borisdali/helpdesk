@@ -294,8 +294,8 @@ func collectStorageLayer(ctx context.Context) (map[string]string, []string) {
 
 // CreateIncidentBundleArgs defines arguments for the create_incident_bundle tool.
 type CreateIncidentBundleArgs struct {
-	InfraKey         string `json:"infra_key" jsonschema:"Identifier for the infrastructure being diagnosed (e.g., 'global-corp-db')."`
-	Description      string `json:"description" jsonschema:"Brief description of the incident or reason for the bundle."`
+	InfraKey         string `json:"infra_key,omitempty" jsonschema:"Identifier for the infrastructure being diagnosed (e.g., 'global-corp-db'). Defaults to 'unknown'."`
+	Description      string `json:"description,omitempty" jsonschema:"Brief description of the incident or reason for the bundle. Defaults to 'Diagnostic bundle'."`
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string for database layer collection. If empty, database layer is skipped."`
 	K8sContext       string `json:"k8s_context,omitempty" jsonschema:"Kubernetes context for k8s layer collection. If empty, k8s layer is skipped."`
 	K8sNamespace     string `json:"k8s_namespace,omitempty" jsonschema:"Kubernetes namespace for k8s commands. Defaults to 'default'."`
@@ -313,6 +313,13 @@ type IncidentBundleResult struct {
 func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (IncidentBundleResult, error) {
 	now := time.Now()
 	incidentID := generateShortID()
+
+	if args.InfraKey == "" {
+		args.InfraKey = "unknown"
+	}
+	if args.Description == "" {
+		args.Description = "Diagnostic bundle"
+	}
 
 	namespace := args.K8sNamespace
 	if namespace == "" {

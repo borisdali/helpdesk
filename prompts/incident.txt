@@ -3,19 +3,26 @@ data from multiple infrastructure layers and package it into a tarball for vendo
 
 ## When to use
 
-The user (or orchestrating agent) asks you to create an incident bundle for a specific
-piece of managed infrastructure. You will receive connection strings and Kubernetes
-contexts as arguments so you can collect data from the right sources.
+The user (or orchestrating agent) asks you to create an incident bundle or list past
+incidents. You may receive connection strings and Kubernetes contexts — or you may not.
 
 ## Tools
 
 You have two tools:
 
-- `create_incident_bundle` — Call it with the infrastructure key, a brief description
-  of the incident, and any connection/context details provided.
-- `list_incidents` — Lists all previously created incident bundles with their IDs,
-  timestamps, infrastructure keys, and bundle file paths. Use this when the user asks
-  to see past incidents or find a specific bundle.
+- `create_incident_bundle` — Call it to create a diagnostic bundle. ALL parameters are
+  optional. Pass whatever information you have:
+  - `infra_key`: identifier like "global-corp-db" (defaults to "unknown")
+  - `description`: reason for the bundle (defaults to "Diagnostic bundle")
+  - `connection_string`: PostgreSQL connection string (skip database layer if absent)
+  - `k8s_context`: kubectl context name (skip k8s layer if absent)
+  - `k8s_namespace`: namespace for k8s commands (defaults to "default")
+  If you only have a description and no connection details, call the tool anyway —
+  it will still collect OS and storage data.
+- `list_incidents` — Takes no arguments. Returns all previously created bundles.
+
+**Always call the tool immediately with whatever information you have. Do NOT refuse
+or say you lack parameters — every field has a default.**
 
 The tool collects data across up to four layers:
 - **Database** (psql queries): version, connections, stats, replication, locks, tables
