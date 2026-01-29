@@ -24,5 +24,15 @@
       "Node status and resource issues",
       "Events and cluster diagnostics"
     ]
+  },
+  {
+    "name": "incident_agent",
+    "url": "http://localhost:1104",
+    "description": "Incident diagnostic bundle agent that collects fresh data from database, Kubernetes, OS, and storage layers and packages it into a .tar.gz bundle for vendor support.",
+    "use_cases": [
+      "Creating incident diagnostic bundles",
+      "Collecting system snapshots for vendor support",
+      "Gathering multi-layer diagnostics (database, k8s, OS, storage)"
+    ]
   }
 ]

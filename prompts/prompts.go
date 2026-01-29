@@ -11,3 +11,6 @@ var Database string
 
 //go:embed k8s.txt
 var K8s string
+
+//go:embed incident.txt
+var Incident string
