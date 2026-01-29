@@ -100,7 +100,7 @@ func main() {
 			os.Exit(1)
 		}
 		instruction += buildInfraPromptSection(infraConfig)
-		slog.Info("infrastructure config loaded", "pg_servers", len(infraConfig.PostgresServers), "k8s_clusters", len(infraConfig.K8sClusters))
+		slog.Info("infrastructure config loaded", "db_servers", len(infraConfig.DBServers), "k8s_clusters", len(infraConfig.K8sClusters), "vms", len(infraConfig.VMs))
 	}
 
 	if len(unavailableAgents) > 0 {

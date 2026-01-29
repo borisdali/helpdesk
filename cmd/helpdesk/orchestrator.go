@@ -44,11 +44,14 @@ func loadAgentsConfig(configPath string) ([]AgentConfig, error) {
 	return agents, nil
 }
 
-// PostgresServer represents a managed PostgreSQL server (AlloyDB Omni or standalone).
-type PostgresServer struct {
+// DBServer represents a managed database server (AlloyDB Omni, standalone PostgreSQL, etc.).
+// Each server runs on either a Kubernetes cluster or a VM — never both.
+type DBServer struct {
 	Name             string `json:"name"`
 	ConnectionString string `json:"connection_string"`
 	K8sCluster       string `json:"k8s_cluster,omitempty"`
+	K8sNamespace     string `json:"k8s_namespace,omitempty"`
+	VMName           string `json:"vm_name,omitempty"`
 }
 
 // K8sCluster represents a managed Kubernetes cluster.
@@ -57,10 +60,17 @@ type K8sCluster struct {
 	Context string `json:"context"`
 }
 
+// VM represents a virtual machine hosting infrastructure.
+type VM struct {
+	Name string `json:"name"`
+	Host string `json:"host"`
+}
+
 // InfraConfig holds the infrastructure inventory.
 type InfraConfig struct {
-	PostgresServers map[string]PostgresServer `json:"postgres_servers"`
-	K8sClusters     map[string]K8sCluster     `json:"k8s_clusters"`
+	DBServers   map[string]DBServer   `json:"db_servers"`
+	K8sClusters map[string]K8sCluster `json:"k8s_clusters"`
+	VMs         map[string]VM         `json:"vms"`
 }
 
 // loadInfraConfig loads infrastructure configuration from a JSON file.
@@ -83,19 +93,28 @@ func buildInfraPromptSection(config *InfraConfig) string {
 	var sb strings.Builder
 	sb.WriteString("\n## Managed Infrastructure\n\n")
 
-	if len(config.PostgresServers) > 0 {
-		sb.WriteString("### PostgreSQL Servers\n\n")
-		for id, pg := range config.PostgresServers {
-			sb.WriteString(fmt.Sprintf("**%s** (%s)\n", id, pg.Name))
-			sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", pg.ConnectionString))
-			if pg.K8sCluster != "" {
-				if k8s, ok := config.K8sClusters[pg.K8sCluster]; ok {
-					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (context: `%s`)\n", pg.K8sCluster, k8s.Context))
+	if len(config.DBServers) > 0 {
+		sb.WriteString("### Database Servers\n\n")
+		for id, db := range config.DBServers {
+			sb.WriteString(fmt.Sprintf("**%s** (%s)\n", id, db.Name))
+			sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", db.ConnectionString))
+			if db.K8sCluster != "" {
+				if k8s, ok := config.K8sClusters[db.K8sCluster]; ok {
+					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (context: `%s`)", db.K8sCluster, k8s.Context))
 				} else {
-					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (not found in k8s_clusters)\n", pg.K8sCluster))
+					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (not found in k8s_clusters)", db.K8sCluster))
 				}
-			} else {
-				sb.WriteString("- Runs on VM (no K8s cluster)\n")
+				ns := db.K8sNamespace
+				if ns == "" {
+					ns = "default"
+				}
+				sb.WriteString(fmt.Sprintf(", namespace: `%s`\n", ns))
+			} else if db.VMName != "" {
+				if vm, ok := config.VMs[db.VMName]; ok {
+					sb.WriteString(fmt.Sprintf("- Runs on VM: **%s** (%s, host: `%s`)\n", db.VMName, vm.Name, vm.Host))
+				} else {
+					sb.WriteString(fmt.Sprintf("- Runs on VM: **%s** (not found in vms)\n", db.VMName))
+				}
 			}
 			sb.WriteString("\n")
 		}
@@ -109,10 +128,19 @@ func buildInfraPromptSection(config *InfraConfig) string {
 		sb.WriteString("\n")
 	}
 
+	if len(config.VMs) > 0 {
+		sb.WriteString("### Virtual Machines\n\n")
+		for id, vm := range config.VMs {
+			sb.WriteString(fmt.Sprintf("**%s** (%s) — host: `%s`\n", id, vm.Name, vm.Host))
+		}
+		sb.WriteString("\n")
+	}
+
 	sb.WriteString("### Instructions\n\n")
-	sb.WriteString("- When investigating a postgres server, use its connection_string with the database agent.\n")
-	sb.WriteString("- If the server has an associated K8s cluster, use that cluster's context with the K8s agent.\n")
-	sb.WriteString("- K8s clusters not tied to any postgres server can still be inspected independently.\n")
+	sb.WriteString("- When investigating a database server, use its connection_string with the database agent.\n")
+	sb.WriteString("- If the server has an associated K8s cluster, use that cluster's context and namespace with the K8s agent.\n")
+	sb.WriteString("- If the server runs on a VM, no K8s context is available — use the database agent and OS-level diagnostics.\n")
+	sb.WriteString("- K8s clusters not tied to any database server can still be inspected independently.\n")
 
 	return sb.String()
 }

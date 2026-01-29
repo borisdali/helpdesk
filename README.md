@@ -38,17 +38,23 @@ Kubernetes contexts are passed per-request, not configured at startup. This mean
 ### Infrastructure Inventory
 
 The orchestrator loads an infrastructure inventory (`infrastructure.json`) that maps
-managed PostgreSQL servers and Kubernetes clusters. When the user asks about a specific
-system, the orchestrator passes the right connection string or kubectl context to the
-sub-agent:
+managed database servers, Kubernetes clusters, and VMs. When the user asks about a
+specific system, the orchestrator passes the right connection string, kubectl context,
+or VM info to the sub-agent:
 
 ```json
 {
-  "postgres_servers": {
+  "db_servers": {
     "global-corp-db": {
       "name": "Global Corp Production DB",
       "connection_string": "host=db1.example.com port=5432 dbname=prod user=admin",
-      "k8s_cluster": "global-prod"
+      "k8s_cluster": "global-prod",
+      "k8s_namespace": "database"
+    },
+    "local-co-db": {
+      "name": "Local Company Dev DB",
+      "connection_string": "host=db2.local.example.io port=5432 dbname=dev user=dba",
+      "vm_name": "vm-db-dev-01"
     }
   },
   "k8s_clusters": {
@@ -56,9 +62,19 @@ sub-agent:
       "name": "Global Corp Production Cluster",
       "context": "global-prod-cluster"
     }
+  },
+  "vms": {
+    "vm-db-dev-01": {
+      "name": "Dev Database VM",
+      "host": "db2.local.example.io"
+    }
   }
 }
 ```
+
+Each database server runs on either a Kubernetes cluster (with `k8s_cluster` and optional
+`k8s_namespace`) or a VM (with `vm_name`) — never both. The `k8s_namespace` defaults to
+`"default"` when not specified.
 
 ### Agent Discovery
 
@@ -98,7 +114,7 @@ export HELPDESK_API_KEY="your-anthropic-api-key"
 ### Orchestrator
 
 ```bash
-# Infrastructure inventory (PostgreSQL servers + K8s clusters)
+# Infrastructure inventory (database servers, K8s clusters, VMs)
 export HELPDESK_INFRA_CONFIG="infrastructure.json"
 
 # Agent discovery: static config file (default)

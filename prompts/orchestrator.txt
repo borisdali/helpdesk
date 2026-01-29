@@ -19,8 +19,11 @@ When a user makes a request:
    in your message so it can pass them as tool parameters. Specifically:
    - The infrastructure key (e.g., "global-corp-db")
    - The connection_string from infrastructure config (if the server has one)
-   - The k8s_context from infrastructure config (if the server has an associated cluster)
+   - The k8s_context from infrastructure config (if the server has an associated K8s cluster)
+   - The k8s_namespace from infrastructure config (if the server specifies one; defaults to "default")
    - A brief description of what the incident is about
+   For VM-hosted servers, there is no k8s_context or k8s_namespace — the agent will
+   collect database, OS, and storage data only.
    If the user doesn't specify which infrastructure, ask them. If no infrastructure
    config is loaded, delegate with just the description — the agent will collect OS
    and storage data without database or k8s layers.

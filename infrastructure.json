@@ -1,24 +1,33 @@
 {
-  "postgres_servers": {
-    "global-corp-db": {
-      "name": "Global Corporation Production DB",
-      "connection_string": "host=db1.global.example.com port=5432 dbname=prod user=admin",
-      "k8s_cluster": "global-prod"
+  "db_servers": {
+    "global-corp-db-01": {
+      "name": "Global Corporation Main Production DB hosted on K8s",
+      "connection_string": "host=db01.global.example.com port=5432 dbname=prod01 user=admin",
+      "k8s_cluster": "global-prod",
+      "k8s_namespace": "db1"
+    },
+    "global-corp-db-02": {
+      "name": "Global Corporation Secondary Production DB hosted on K8s",
+      "connection_string": "host=db02.global.example.com port=5432 dbname=prod02 user=admin",
+      "k8s_cluster": "global-prod",
+      "k8s_namespace": "db2"
     },
     "local-co-db": {
-      "name": "Local Company Dev DB",
+      "name": "Local Company Dev DB hosted on a VM",
       "connection_string": "host=db2.local.example.io port=5432 dbname=dev user=dba",
-      "k8s_cluster": "local-dev"
+      "vm_name": "vm-db-dev-01"
     }
   },
   "k8s_clusters": {
     "global-prod": {
       "name": "Global Corp Production Cluster",
       "context": "global-prod-cluster"
-    },
-    "local-dev": {
-      "name": "Local Company Dev Cluster",
-      "context": "local-dev-cluster"
+    }
+  },
+  "vms": {
+    "vm-db-dev-01": {
+      "name": "Dev Database VM",
+      "host": "db2.local.example.io"
     }
   }
 }
