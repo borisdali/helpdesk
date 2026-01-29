@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/adk/agent/llmagent"
 
 	"helpdesk/agentutil"
@@ -43,7 +44,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := agentutil.Serve(ctx, incidentAgent, cfg); err != nil {
+	cardOpts := agentutil.CardOptions{
+		Version:  "1.0.0",
+		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
+		SkillTags: map[string][]string{
+			"incident_agent":                        {"incident", "diagnostics", "bundle"},
+			"incident_agent-create_incident_bundle": {"incident", "bundle", "diagnostics", "tarball"},
+			"incident_agent-list_incidents":          {"incident", "listing", "history"},
+		},
+		SkillExamples: map[string][]string{
+			"incident_agent-create_incident_bundle": {
+				"Create a diagnostic bundle for the production database",
+				"Collect incident data for the database running on Kubernetes",
+			},
+			"incident_agent-list_incidents": {"Show me all previous incident bundles"},
+		},
+	}
+
+	if err := agentutil.Serve(ctx, incidentAgent, cfg, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

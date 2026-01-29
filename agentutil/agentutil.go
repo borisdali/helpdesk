@@ -85,9 +85,53 @@ func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 	}
 }
 
+// CardOptions allows agents to customize the AgentCard beyond the defaults
+// that Serve derives automatically from the ADK agent.
+type CardOptions struct {
+	// Version is the agent's version string (e.g., "1.0.0").
+	Version string
+
+	// DocumentationURL points to the agent's documentation.
+	DocumentationURL string
+
+	// Provider describes the organization providing this agent.
+	Provider *a2a.AgentProvider
+
+	// SkillTags maps a skill ID to additional tags to merge onto the
+	// auto-generated skills. Skill IDs follow the ADK pattern:
+	// "agentName" for the model skill, "agentName-toolName" for tool skills.
+	SkillTags map[string][]string
+
+	// SkillExamples maps a skill ID to example prompts/scenarios.
+	SkillExamples map[string][]string
+}
+
+// applyCardOptions merges optional metadata onto an AgentCard.
+func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
+	if opts.Version != "" {
+		card.Version = opts.Version
+	}
+	if opts.DocumentationURL != "" {
+		card.DocumentationURL = opts.DocumentationURL
+	}
+	if opts.Provider != nil {
+		card.Provider = opts.Provider
+	}
+	for i := range card.Skills {
+		skill := &card.Skills[i]
+		if tags, ok := opts.SkillTags[skill.ID]; ok {
+			skill.Tags = append(skill.Tags, tags...)
+		}
+		if examples, ok := opts.SkillExamples[skill.ID]; ok {
+			skill.Examples = examples
+		}
+	}
+}
+
 // Serve starts an A2A server for the given agent on cfg.ListenAddr.
 // It sets up the agent card, JSON-RPC handler, in-memory session service, and blocks.
-func Serve(ctx context.Context, a agent.Agent, cfg Config) error {
+// An optional CardOptions can be passed to enrich the agent card with additional metadata.
+func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) error {
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
@@ -103,6 +147,10 @@ func Serve(ctx context.Context, a agent.Agent, cfg Config) error {
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
 		URL:                baseURL.JoinPath(agentPath).String(),
 		Capabilities:       a2a.AgentCapabilities{Streaming: true},
+	}
+
+	if len(opts) > 0 {
+		applyCardOptions(agentCard, opts[0])
 	}
 
 	mux := http.NewServeMux()

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -299,6 +301,7 @@ type CreateIncidentBundleArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string for database layer collection. If empty, database layer is skipped."`
 	K8sContext       string `json:"k8s_context,omitempty" jsonschema:"Kubernetes context for k8s layer collection. If empty, k8s layer is skipped."`
 	K8sNamespace     string `json:"k8s_namespace,omitempty" jsonschema:"Kubernetes namespace for k8s commands. Defaults to 'default'."`
+	CallbackURL      string `json:"callback_url,omitempty" jsonschema:"Optional HTTP(S) URL. When set, the agent POSTs the IncidentBundleResult JSON to this URL after the bundle is created. Best-effort: failures are logged but do not affect the tool result."`
 }
 
 // IncidentBundleResult is the output of create_incident_bundle.
@@ -404,13 +407,44 @@ func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (
 		"error_count", len(allErrors),
 	)
 
-	return IncidentBundleResult{
+	result := IncidentBundleResult{
 		IncidentID: incidentID,
 		BundlePath: bundlePath,
 		Timestamp:  now.Format("20060102-150405"),
 		Layers:     collectedLayers,
 		Errors:     allErrors,
-	}, nil
+	}
+
+	if args.CallbackURL != "" {
+		go postCallback(args.CallbackURL, result, incidentID)
+	}
+
+	return result, nil
+}
+
+// postCallback POSTs the incident result to a callback URL. Best-effort: failures
+// are logged but do not affect the tool result.
+func postCallback(callbackURL string, result IncidentBundleResult, incidentID string) {
+	body, err := json.Marshal(result)
+	if err != nil {
+		slog.Warn("callback: failed to marshal result", "incident_id", incidentID, "err", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(callbackURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("callback: POST failed", "incident_id", incidentID, "url", callbackURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		slog.Warn("callback: non-success status", "incident_id", incidentID, "url", callbackURL, "status", resp.StatusCode)
+		return
+	}
+
+	slog.Info("callback: delivered", "incident_id", incidentID, "url", callbackURL, "status", resp.StatusCode)
 }
 
 // generateShortID returns an 8-character hex string using crypto/rand.

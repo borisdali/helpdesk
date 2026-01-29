@@ -17,6 +17,10 @@ You have two tools:
   - `connection_string`: PostgreSQL connection string (skip database layer if absent)
   - `k8s_context`: kubectl context name (skip k8s layer if absent)
   - `k8s_namespace`: namespace for k8s commands (defaults to "default")
+  - `callback_url`: optional HTTP(S) URL; when set, the agent POSTs the result
+    JSON to this URL after the bundle is created. Best-effort — failures are
+    logged but do not affect the tool result. Used for fire-and-forget by
+    upstream agents.
   If you only have a description and no connection details, call the tool anyway —
   it will still collect OS and storage data.
 - `list_incidents` — Takes no arguments. Returns all previously created bundles.

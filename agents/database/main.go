@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -45,7 +46,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := agentutil.Serve(ctx, dbAgent, cfg); err != nil {
+	cardOpts := agentutil.CardOptions{
+		Version:  "1.0.0",
+		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
+		SkillTags: map[string][]string{
+			"postgres_database_agent":                          {"postgresql", "database", "diagnostics"},
+			"postgres_database_agent-check_connection":         {"postgresql", "connectivity"},
+			"postgres_database_agent-get_database_info":        {"postgresql", "metadata"},
+			"postgres_database_agent-get_active_connections":   {"postgresql", "performance", "connections"},
+			"postgres_database_agent-get_connection_stats":     {"postgresql", "performance", "connections"},
+			"postgres_database_agent-get_database_stats":       {"postgresql", "performance", "statistics"},
+			"postgres_database_agent-get_config_parameter":     {"postgresql", "configuration"},
+			"postgres_database_agent-get_replication_status":   {"postgresql", "replication", "ha"},
+			"postgres_database_agent-get_lock_info":            {"postgresql", "locks", "contention"},
+			"postgres_database_agent-get_table_stats":          {"postgresql", "tables", "performance"},
+		},
+		SkillExamples: map[string][]string{
+			"postgres_database_agent-check_connection":       {"Check if the production database is reachable"},
+			"postgres_database_agent-get_active_connections": {"Show me all long-running queries"},
+			"postgres_database_agent-get_lock_info":          {"Are there any blocking locks on the database?"},
+			"postgres_database_agent-get_replication_status": {"What is the replication lag?"},
+		},
+	}
+
+	if err := agentutil.Serve(ctx, dbAgent, cfg, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

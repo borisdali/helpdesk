@@ -124,6 +124,16 @@ export HELPDESK_AGENTS_CONFIG="agents.json"
 export HELPDESK_AGENT_URLS="http://host1:1100,http://host2:1102,http://host3:1104"
 ```
 
+### REST Gateway
+
+```bash
+# Listen address (default: localhost:8080)
+export HELPDESK_GATEWAY_ADDR="0.0.0.0:8080"
+
+# Required: agent discovery (same as orchestrator dynamic discovery)
+export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
+```
+
 ### Agent-specific
 
 ```bash
@@ -303,10 +313,14 @@ Incident bundle created:
 
 ```
 helpdesk/
-├── cmd/helpdesk/            # Orchestrator binary
-│   ├── main.go              # Entry point, LLM + launcher setup
-│   ├── orchestrator.go      # Config types, infra loading, prompt building
-│   └── discovery.go         # Agent card fetching, health checks
+├── cmd/
+│   ├── helpdesk/            # Orchestrator binary (human-facing)
+│   │   ├── main.go          # Entry point, LLM + launcher setup
+│   │   ├── orchestrator.go  # Config types, infra loading, prompt building
+│   │   └── discovery.go     # Agent card fetching, health checks
+│   └── gateway/             # REST gateway binary (programmatic access)
+│       ├── main.go          # Entry point, agent discovery, HTTP server
+│       └── gateway.go       # REST handlers, A2A call proxy, response extraction
 ├── agents/
 │   ├── database/            # PostgreSQL agent binary
 │   │   ├── main.go          # Entry point, uses agentutil SDK
@@ -319,8 +333,10 @@ helpdesk/
 │       ├── tools.go         # 2 tools, layer collectors, command helpers
 │       └── bundle.go        # Manifest, tarball assembly (archive/tar + gzip)
 ├── agentutil/               # SDK for agent authors
-│   └── agentutil.go         # Config, NewLLM, Serve
+│   └── agentutil.go         # Config, CardOptions, NewLLM, Serve
 ├── internal/
+│   ├── discovery/           # Shared agent card discovery
+│   │   └── discovery.go     # Fetch and parse /.well-known/agent-card.json
 │   ├── model/anthropic.go   # Anthropic LLM adapter
 │   └── logging/logging.go   # Shared log setup
 ├── prompts/                 # Agent instruction files
@@ -372,6 +388,120 @@ helpdesk/
 2. Implement the tool function returning `(ResultStruct, error)`
 3. Create the tool with `functiontool.New()`
 4. Add to the agent's `Tools` slice in `createTools()`
+
+## Agent-to-Agent Integration
+
+The helpdesk sub-agents can be called directly by upstream programmatic agents
+(e.g., an observability agent, a CI/CD pipeline, or a chatbot). The orchestrator
+is a UX layer for humans — external agents should bypass it and talk A2A to the
+sub-agents directly. There are two integration paths: native A2A and the REST
+gateway.
+
+### Direct A2A Integration
+
+Each sub-agent serves an agent card at `/.well-known/agent-card.json` that
+describes its capabilities, tools, tags, and example prompts. An upstream agent
+can discover sub-agents dynamically:
+
+1. **Discover**: Fetch `http://<agent-host>:<port>/.well-known/agent-card.json`
+2. **Inspect skills**: Each skill has `tags` (e.g., `"postgresql"`, `"kubernetes"`,
+   `"incident"`) and `examples` to help the caller decide which agent to use
+3. **Call**: Send a JSON-RPC `message/send` request to the agent's `url` field
+
+#### Agent Card Schema (key fields)
+
+| Field                | Description                                       |
+|----------------------|---------------------------------------------------|
+| `name`               | Agent identifier (e.g., `postgres_database_agent`) |
+| `description`        | What the agent does                                |
+| `url`                | JSON-RPC invoke endpoint                           |
+| `version`            | Agent version                                      |
+| `provider`           | Organization info                                  |
+| `skills[].id`        | Unique skill identifier                            |
+| `skills[].tags`      | Keywords (e.g., `"postgresql"`, `"locks"`)         |
+| `skills[].examples`  | Example prompts                                    |
+
+#### Example: A2A JSON-RPC call
+
+```bash
+curl -X POST http://localhost:1100/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "messageId": "msg-001",
+        "role": "user",
+        "parts": [{"kind": "text", "text": "Check database connectivity for host=db1.example.com port=5432 dbname=prod user=admin"}]
+      }
+    }
+  }'
+```
+
+#### Example: O11y Agent Workflow
+
+An observability agent detects a database anomaly and investigates automatically:
+
+1. **Detect**: O11y system fires an alert for high query latency on `prod-db`
+2. **Discover**: Fetch agent cards from known helpdesk URLs, find
+   `postgres_database_agent` by matching the `postgresql` tag
+3. **Diagnose**: Send A2A message to database agent: "Check active connections
+   and lock contention for host=db1.example.com..."
+4. **Analyze**: Parse the agent's response (text in task history/artifacts)
+5. **Escalate**: If the issue warrants it, call `incident_agent` with
+   `create_incident_bundle` (including `callback_url` for async notification)
+6. **Notify**: The incident agent POSTs the bundle result to the callback URL
+   when complete
+
+#### Callback URL (fire-and-forget)
+
+The incident agent's `create_incident_bundle` tool supports an optional
+`callback_url` parameter. When set, the agent POSTs the `IncidentBundleResult`
+JSON to that URL after the bundle is created. This is best-effort: callback
+failures are logged but do not affect the tool result.
+
+### REST Gateway
+
+For consumers that prefer plain REST over JSON-RPC, the optional REST gateway
+(`cmd/gateway/`) provides HTTP endpoints that proxy to the A2A sub-agents:
+
+| Method | Endpoint              | Description                    |
+|--------|-----------------------|--------------------------------|
+| GET    | `/api/v1/agents`      | List discovered agents + cards |
+| POST   | `/api/v1/incidents`   | Create incident bundle         |
+| GET    | `/api/v1/incidents`   | List incident bundles          |
+| POST   | `/api/v1/db/{tool}`   | Call database agent tool       |
+| POST   | `/api/v1/k8s/{tool}`  | Call K8s agent tool            |
+
+Start the gateway:
+```bash
+HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104" \
+  go run ./cmd/gateway/
+```
+
+Example REST calls:
+```bash
+# List available agents
+curl -s http://localhost:8080/api/v1/agents | jq '.[].name'
+
+# Check database connectivity
+curl -X POST http://localhost:8080/api/v1/db/check_connection \
+  -d '{"connection_string": "host=db1.example.com port=5432 dbname=prod user=admin"}'
+
+# Create an incident bundle
+curl -X POST http://localhost:8080/api/v1/incidents \
+  -d '{"description": "High latency on prod-db", "connection_string": "host=db1.example.com port=5432 dbname=prod user=admin"}'
+
+# List past incidents
+curl -s http://localhost:8080/api/v1/incidents
+```
+
+**Note**: Each REST call triggers an LLM invocation in the sub-agent, which adds
+latency and cost compared to direct A2A calls. The REST gateway is best suited
+for integration testing, simple automation, and consumers that don't implement
+A2A natively.
 
 ## Troubleshooting
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -44,7 +45,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := agentutil.Serve(ctx, k8sAgent, cfg); err != nil {
+	cardOpts := agentutil.CardOptions{
+		Version:  "1.0.0",
+		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
+		SkillTags: map[string][]string{
+			"k8s_agent":                  {"kubernetes", "infrastructure", "diagnostics"},
+			"k8s_agent-get_pods":         {"kubernetes", "pods", "workloads"},
+			"k8s_agent-get_service":      {"kubernetes", "services", "networking"},
+			"k8s_agent-describe_service": {"kubernetes", "services", "networking"},
+			"k8s_agent-get_endpoints":    {"kubernetes", "endpoints", "networking"},
+			"k8s_agent-get_events":       {"kubernetes", "events", "cluster"},
+			"k8s_agent-get_pod_logs":     {"kubernetes", "logs", "debugging"},
+			"k8s_agent-describe_pod":     {"kubernetes", "pods", "debugging"},
+			"k8s_agent-get_nodes":        {"kubernetes", "nodes", "cluster"},
+		},
+		SkillExamples: map[string][]string{
+			"k8s_agent-get_pods":      {"List all pods in the database namespace"},
+			"k8s_agent-get_events":    {"Show recent warning events in the cluster"},
+			"k8s_agent-get_pod_logs":  {"Get the last 100 lines of logs from the postgres pod"},
+			"k8s_agent-get_endpoints": {"Check if the database service has healthy endpoints"},
+		},
+	}
+
+	if err := agentutil.Serve(ctx, k8sAgent, cfg, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
