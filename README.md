@@ -52,7 +52,7 @@ export PGDATABASE="postgres"
 
 ```bash
 cd ~/cassiopeia/helpdesk
-go run helpdesk-database-agent.go
+go run ./agents/database/
 ```
 
 Output:
@@ -65,7 +65,7 @@ Agent card available at: http://localhost:1100/.well-known/agent-card.json
 
 ```bash
 cd ~/cassiopeia/helpdesk
-go run helpdesk-k8s-agent.go
+go run ./agents/k8s/
 ```
 
 Output:
@@ -78,7 +78,7 @@ Agent card available at: http://localhost:1102/.well-known/agent-card.json
 
 ```bash
 cd ~/cassiopeia/helpdesk
-go run helpdesk.go
+go run ./cmd/helpdesk/
 ```
 
 Output:
@@ -178,10 +178,29 @@ service exposure first, then verify the database is accepting connections...
 
 ```
 helpdesk/
-├── helpdesk.go                      # Main orchestrator
-├── helpdesk-database-agent.go       # PostgreSQL troubleshooting agent
-├── helpdesk-k8s-agent.go            # Kubernetes troubleshooting agent
-├── helpdesk-postgres-database-agent.go  # (legacy) Alternative DB agent
+├── cmd/helpdesk/            # Orchestrator binary
+│   ├── main.go              # Entry point, LLM + launcher setup
+│   ├── orchestrator.go      # Config types, infra loading, prompt building
+│   └── discovery.go         # Agent card fetching, health checks
+├── agents/
+│   ├── database/            # PostgreSQL agent binary
+│   │   ├── main.go          # Entry point, uses agentutil SDK
+│   │   └── tools.go         # 9 psql tools, runPsql, diagnosePsqlError
+│   └── k8s/                 # Kubernetes agent binary
+│       ├── main.go          # Entry point, uses agentutil SDK
+│       └── tools.go         # 8 kubectl tools, runKubectl, diagnoseKubectlError
+├── agentutil/               # SDK for agent authors
+│   └── agentutil.go         # Config, NewLLM, Serve
+├── internal/
+│   ├── model/anthropic.go   # Anthropic LLM adapter
+│   └── logging/logging.go   # Shared log setup
+├── prompts/                 # Agent instruction files
+│   ├── prompts.go           # Embeds all .txt files
+│   ├── orchestrator.txt
+│   ├── database.txt
+│   └── k8s.txt
+├── agents.json              # Static agent endpoint config
+├── infrastructure.json      # Managed infrastructure inventory
 ├── go.mod
 ├── go.sum
 └── README.md
@@ -191,21 +210,38 @@ helpdesk/
 
 ### Adding a New Agent
 
-1. Create a new file (e.g., `helpdesk-newagent.go`)
-2. Define tools using `functiontool.New()` with the signature:
+1. Create a new directory under `agents/` (e.g., `agents/myagent/`)
+2. Write `main.go` using the `agentutil` SDK:
+   ```go
+   package main
+
+   import (
+       "context"
+       "helpdesk/agentutil"
+       "google.golang.org/adk/agent/llmagent"
+   )
+
+   func main() {
+       cfg := agentutil.MustLoadConfig("localhost:1200")
+       ctx := context.Background()
+       llm, _ := agentutil.NewLLM(ctx, cfg)
+       // create tools with functiontool.New(...)
+       agent, _ := llmagent.New(llmagent.Config{...})
+       agentutil.Serve(ctx, agent, cfg)
+   }
+   ```
+3. Define tools in `tools.go` using `functiontool.New()` with the signature:
    ```go
    func myTool(ctx tool.Context, args MyArgs) (MyResult, error)
    ```
-3. Create the agent with `llmagent.New()` and include your tools
-4. Expose via A2A using the same pattern as existing agents
-5. Add the agent config to the orchestrator's `agents` slice
+4. Add the agent's URL to `agents.json` or `HELPDESK_AGENT_URLS`
 
 ### Adding Tools to Existing Agents
 
 1. Define the args struct with JSON schema tags
 2. Implement the tool function returning `(ResultStruct, error)`
 3. Create the tool with `functiontool.New()`
-4. Add to the agent's `Tools` slice
+4. Add to the agent's `Tools` slice in `createTools()`
 
 ## Troubleshooting
 
