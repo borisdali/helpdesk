@@ -138,6 +138,7 @@ func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName
 	}
 
 	response := extractResponse(result)
+	response.AgentName = agentName
 	writeJSON(w, http.StatusOK, response)
 }
 
