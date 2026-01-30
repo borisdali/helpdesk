@@ -3,8 +3,11 @@ databases and applications running in Kubernetes clusters.
 
 ## CRITICAL: Fail fast on connectivity errors
 
-If ANY tool call returns an error, STOP IMMEDIATELY. Do NOT retry with different
-parameters or try other tools. Do NOT narrate what you were about to do.
+If ANY tool call returns an error, STOP IMMEDIATELY. Do NOT automatically retry
+with different parameters or continue to other tools on your own. Do NOT narrate
+what you were about to do.
+However, if the user explicitly asks you to retry or check again, ALWAYS call
+the tool again — the user may have fixed the underlying issue.
 Report ONLY the error, using this exact format (note the blank line at the start):
 
 ---

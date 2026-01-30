@@ -111,27 +111,8 @@ type GetPodsArgs struct {
 	Labels    string `json:"labels,omitempty" jsonschema:"Optional label selector to filter pods (e.g., 'app=postgres')."`
 }
 
-func getPodsTool(ctx tool.Context, args GetPodsArgs) (KubectlResult, error) {
-	cmdArgs := []string{"get", "pods", "-o", "wide"}
-
-	if args.Namespace == "all" {
-		cmdArgs = append(cmdArgs, "--all-namespaces")
-	} else if args.Namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", args.Namespace)
-	}
-
-	if args.Labels != "" {
-		cmdArgs = append(cmdArgs, "-l", args.Labels)
-	}
-
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
-	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error getting pods: %v", err)
-	}
-	if strings.TrimSpace(output) == "" {
-		return KubectlResult{Output: "No pods found matching the criteria."}, nil
-	}
-	return KubectlResult{Output: output}, nil
+func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
+	return fetchPods(ctx, args.Context, args.Namespace, args.Labels)
 }
 
 // GetServiceArgs defines arguments for the get_service tool.
@@ -142,37 +123,8 @@ type GetServiceArgs struct {
 	ServiceType string `json:"service_type,omitempty" jsonschema:"Optional filter by service type: ClusterIP, NodePort, LoadBalancer."`
 }
 
-func getServiceTool(ctx tool.Context, args GetServiceArgs) (KubectlResult, error) {
-	cmdArgs := []string{"get", "svc", "-o", "wide"}
-
-	if args.Namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", args.Namespace)
-	}
-
-	if args.ServiceName != "" {
-		cmdArgs = append(cmdArgs, args.ServiceName)
-	}
-
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
-	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error getting services: %v", err)
-	}
-
-	if args.ServiceType != "" && args.ServiceName == "" {
-		lines := strings.Split(output, "\n")
-		var filtered []string
-		for i, line := range lines {
-			if i == 0 || strings.Contains(line, args.ServiceType) {
-				filtered = append(filtered, line)
-			}
-		}
-		output = strings.Join(filtered, "\n")
-	}
-
-	if strings.TrimSpace(output) == "" {
-		return KubectlResult{Output: "No services found matching the criteria."}, nil
-	}
-	return KubectlResult{Output: output}, nil
+func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
+	return fetchServices(ctx, args.Context, args.Namespace, args.ServiceName, args.ServiceType)
 }
 
 // DescribeServiceArgs defines arguments for the describe_service tool.
@@ -203,25 +155,8 @@ type GetEndpointsArgs struct {
 	EndpointName string `json:"endpoint_name,omitempty" jsonschema:"Optional specific endpoint name (usually matches service name)."`
 }
 
-func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (KubectlResult, error) {
-	cmdArgs := []string{"get", "endpoints", "-o", "wide"}
-
-	if args.Namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", args.Namespace)
-	}
-
-	if args.EndpointName != "" {
-		cmdArgs = append(cmdArgs, args.EndpointName)
-	}
-
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
-	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error getting endpoints: %v", err)
-	}
-	if strings.TrimSpace(output) == "" {
-		return KubectlResult{Output: "No endpoints found. This may indicate no pods match the service selector."}, nil
-	}
-	return KubectlResult{Output: output}, nil
+func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
+	return fetchEndpoints(ctx, args.Context, args.Namespace, args.EndpointName)
 }
 
 // GetEventsArgs defines arguments for the get_events tool.
@@ -232,37 +167,8 @@ type GetEventsArgs struct {
 	EventType    string `json:"event_type,omitempty" jsonschema:"Optional filter by event type: Normal or Warning."`
 }
 
-func getEventsTool(ctx tool.Context, args GetEventsArgs) (KubectlResult, error) {
-	cmdArgs := []string{"get", "events", "--sort-by=.lastTimestamp"}
-
-	if args.Namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", args.Namespace)
-	}
-
-	if args.EventType != "" {
-		cmdArgs = append(cmdArgs, "--field-selector", fmt.Sprintf("type=%s", args.EventType))
-	}
-
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
-	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error getting events: %v", err)
-	}
-
-	if args.ResourceName != "" {
-		lines := strings.Split(output, "\n")
-		var filtered []string
-		for i, line := range lines {
-			if i == 0 || strings.Contains(line, args.ResourceName) {
-				filtered = append(filtered, line)
-			}
-		}
-		output = strings.Join(filtered, "\n")
-	}
-
-	if strings.TrimSpace(output) == "" {
-		return KubectlResult{Output: "No events found matching the criteria."}, nil
-	}
-	return KubectlResult{Output: output}, nil
+func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
+	return fetchEvents(ctx, args.Context, args.Namespace, args.ResourceName, args.EventType)
 }
 
 // GetPodLogsArgs defines arguments for the get_pod_logs tool.
@@ -333,16 +239,6 @@ type GetNodesArgs struct {
 	ShowLabels bool   `json:"show_labels,omitempty" jsonschema:"If true, show node labels in output."`
 }
 
-func getNodesTool(ctx tool.Context, args GetNodesArgs) (KubectlResult, error) {
-	cmdArgs := []string{"get", "nodes", "-o", "wide"}
-
-	if args.ShowLabels {
-		cmdArgs = append(cmdArgs, "--show-labels")
-	}
-
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
-	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error getting nodes: %v", err)
-	}
-	return KubectlResult{Output: output}, nil
+func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
+	return fetchNodes(ctx, args.Context, args.ShowLabels)
 }
