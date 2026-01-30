@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: helpdesk-test
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres
+          resources:
+            limits:
+              memory: "10Mi"
+              cpu: "500m"
+            requests:
+              memory: "10Mi"
+              cpu: "100m"

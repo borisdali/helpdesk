@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: helpdesk-test
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres
+          command: ["/bin/sh", "-c", "echo 'FATAL: invalid configuration'; exit 1"]

@@ -1,0 +1,565 @@
+version: "1"
+
+failures:
+  # ── Database failures (9) ──────────────────────────────────────────────
+
+  - id: db-max-connections
+    name: "Max connections exhausted"
+    category: database
+    severity: high
+    description: >
+      All available PostgreSQL connections are consumed by idle sessions,
+      preventing new clients from connecting.
+    inject:
+      type: sql
+      exec_via: pgloader
+      script: sql/inject_max_connections.sql
+    teardown:
+      type: sql
+      exec_via: pgloader
+      script: sql/teardown_max_connections.sql
+    prompt: >
+      The database at {{connection_string}} is not accepting new connections.
+      Users are getting "too many clients" errors. Please investigate.
+    evaluation:
+      expected_tools:
+        - check_connection
+        - get_connection_stats
+      expected_keywords:
+        any_of:
+          - "max_connections"
+          - "too many"
+          - "connection limit"
+          - "connection pool"
+          - "exhausted"
+      expected_diagnosis:
+        category: "connection_exhaustion"
+    timeout: 60s
+
+  - id: db-long-running-query
+    name: "Long-running query blocking"
+    category: database
+    severity: high
+    description: >
+      A query holding an ACCESS EXCLUSIVE lock blocks all other access to
+      the table, causing application timeouts.
+    inject:
+      type: sql
+      exec_via: pgloader
+      script: sql/inject_long_running_query.sql
+    teardown:
+      type: sql
+      exec_via: pgloader
+      script: sql/teardown_long_running_query.sql
+    prompt: >
+      The database at {{connection_string}} has queries that seem to hang
+      indefinitely. Users report that certain tables are inaccessible.
+      Please investigate.
+    evaluation:
+      expected_tools:
+        - get_active_connections
+        - get_lock_info
+      expected_keywords:
+        any_of:
+          - "long-running"
+          - "pg_sleep"
+          - "ACCESS EXCLUSIVE"
+          - "lock"
+          - "blocking"
+          - "blocked"
+      expected_diagnosis:
+        category: "lock_blocking"
+    timeout: 60s
+
+  - id: db-lock-contention
+    name: "Lock contention / deadlock"
+    category: database
+    severity: high
+    description: >
+      Two transactions are each waiting for a lock held by the other,
+      causing a deadlock that PostgreSQL detects and resolves by killing
+      one session.
+    inject:
+      type: sql
+      exec_via: pgloader
+      script: sql/inject_lock_contention.sql
+    teardown:
+      type: sql
+      exec_via: pgloader
+      script: sql/teardown_lock_contention.sql
+    prompt: >
+      The database at {{connection_string}} is experiencing intermittent
+      "deadlock detected" errors. Please investigate.
+    evaluation:
+      expected_tools:
+        - get_lock_info
+        - get_active_connections
+      expected_keywords:
+        any_of:
+          - "deadlock"
+          - "lock contention"
+          - "waiting"
+          - "blocked"
+          - "lock"
+      expected_diagnosis:
+        category: "deadlock"
+    timeout: 60s
+
+  - id: db-table-bloat
+    name: "Table bloat / dead tuples"
+    category: database
+    severity: medium
+    description: >
+      A table has accumulated a large number of dead tuples because
+      autovacuum is disabled, wasting disk space and degrading performance.
+    inject:
+      type: sql
+      script: sql/inject_table_bloat.sql
+    teardown:
+      type: sql
+      script: sql/teardown_table_bloat.sql
+    prompt: >
+      The database at {{connection_string}} seems to be using more disk
+      than expected and some queries are getting slower. Please investigate
+      table health.
+    evaluation:
+      expected_tools:
+        - get_table_stats
+      expected_keywords:
+        any_of:
+          - "dead tuples"
+          - "bloat"
+          - "autovacuum"
+          - "vacuum"
+          - "n_dead_tup"
+      expected_diagnosis:
+        category: "table_bloat"
+    timeout: 60s
+
+  - id: db-high-cache-miss
+    name: "High cache miss ratio"
+    category: database
+    severity: medium
+    description: >
+      The database cache hit ratio is low because queries scan tables
+      larger than shared_buffers, causing excessive disk I/O.
+    inject:
+      type: sql
+      script: sql/inject_high_cache_miss.sql
+    teardown:
+      type: sql
+      script: sql/teardown_high_cache_miss.sql
+    prompt: >
+      The database at {{connection_string}} feels sluggish. Users report
+      slow query performance. Please check database health and performance
+      metrics.
+    evaluation:
+      expected_tools:
+        - get_database_stats
+      expected_keywords:
+        any_of:
+          - "cache hit"
+          - "cache miss"
+          - "hit ratio"
+          - "shared_buffers"
+          - "blks_read"
+      expected_diagnosis:
+        category: "cache_performance"
+    timeout: 60s
+
+  - id: db-connection-refused
+    name: "Database connection refused"
+    category: database
+    severity: critical
+    description: >
+      The PostgreSQL server is stopped and not accepting connections.
+    inject:
+      type: docker
+      action: stop
+      service: postgres
+    teardown:
+      type: docker
+      action: start
+      service: postgres
+    prompt: >
+      The database at {{connection_string}} is unreachable. Users are
+      getting connection refused errors. Please investigate.
+    evaluation:
+      expected_tools:
+        - check_connection
+      expected_keywords:
+        any_of:
+          - "connection refused"
+          - "unreachable"
+          - "could not connect"
+          - "server closed"
+          - "not accepting"
+      expected_diagnosis:
+        category: "connection_refused"
+    timeout: 30s
+
+  - id: db-auth-failure
+    name: "Authentication failure"
+    category: database
+    severity: critical
+    description: >
+      The connection string has incorrect credentials, causing
+      authentication failures.
+    inject:
+      type: config
+      override:
+        connection_string: "host=localhost port=15432 dbname=testdb user=postgres password=wrongpassword"
+    teardown:
+      type: config
+      restore: true
+    prompt: >
+      The database at {{connection_string}} is returning authentication
+      errors. Please investigate.
+    evaluation:
+      expected_tools:
+        - check_connection
+      expected_keywords:
+        any_of:
+          - "authentication"
+          - "password"
+          - "auth"
+          - "denied"
+          - "failed"
+      expected_diagnosis:
+        category: "authentication_failure"
+    timeout: 30s
+
+  - id: db-not-exist
+    name: "Database does not exist"
+    category: database
+    severity: critical
+    description: >
+      The connection string references a database name that doesn't exist
+      on the server.
+    inject:
+      type: config
+      override:
+        connection_string: "host=localhost port=15432 dbname=nonexistent_db user=postgres password=testpass"
+    teardown:
+      type: config
+      restore: true
+    prompt: >
+      The database at {{connection_string}} is returning errors when
+      applications try to connect. Please investigate.
+    evaluation:
+      expected_tools:
+        - check_connection
+      expected_keywords:
+        any_of:
+          - "does not exist"
+          - "not found"
+          - "no database"
+          - "nonexistent"
+      expected_diagnosis:
+        category: "database_not_found"
+    timeout: 30s
+
+  - id: db-replication-lag
+    name: "Replication lag"
+    category: database
+    severity: high
+    description: >
+      The streaming replica has fallen behind the primary due to paused
+      WAL replay, causing stale reads.
+    inject:
+      type: sql
+      target: replica
+      script_inline: "SELECT pg_wal_replay_pause();"
+    teardown:
+      type: sql
+      target: replica
+      script_inline: "SELECT pg_wal_replay_resume();"
+    prompt: >
+      The replica database at {{replica_connection_string}} seems to be
+      returning stale data. Users report that recent writes on the primary
+      are not visible on the replica. Please investigate replication status
+      on the primary at {{connection_string}}.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "replication lag"
+          - "replay"
+          - "wal"
+          - "standby"
+          - "behind"
+          - "lag"
+      expected_diagnosis:
+        category: "replication_lag"
+    timeout: 60s
+
+  # ── Kubernetes failures (6) ────────────────────────────────────────────
+
+  - id: k8s-crashloop
+    name: "CrashLoopBackOff"
+    category: kubernetes
+    severity: critical
+    description: >
+      The postgres pod is in CrashLoopBackOff because the container
+      command exits immediately with an error.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/crashloop
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/crashloop
+      restore: k8s/base
+    prompt: >
+      The database pod in namespace helpdesk-test is not running.
+      Users report the database is completely unreachable.
+      Please investigate the Kubernetes cluster.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - get_events
+      expected_keywords:
+        any_of:
+          - "CrashLoopBackOff"
+          - "crash"
+          - "BackOff"
+          - "restarting"
+          - "exit code"
+      expected_diagnosis:
+        category: "pod_crash_loop"
+    timeout: 60s
+
+  - id: k8s-pending
+    name: "Pending pod (unschedulable)"
+    category: kubernetes
+    severity: critical
+    description: >
+      The postgres pod is stuck in Pending state because it requests
+      256Gi of RAM, which no node can satisfy.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/pending-pod
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/pending-pod
+      restore: k8s/base
+    prompt: >
+      The database pod in namespace helpdesk-test has been in a non-ready
+      state for a while. Please investigate.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - get_events
+      expected_keywords:
+        any_of:
+          - "Pending"
+          - "Insufficient"
+          - "unschedulable"
+          - "node"
+          - "memory"
+          - "resource"
+      expected_diagnosis:
+        category: "pod_unschedulable"
+    timeout: 60s
+
+  - id: k8s-image-pull
+    name: "ImagePullBackOff"
+    category: kubernetes
+    severity: critical
+    description: >
+      The postgres pod cannot start because it references a nonexistent
+      container image tag.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/image-pull-backoff
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/image-pull-backoff
+      restore: k8s/base
+    prompt: >
+      The database pod in namespace helpdesk-test is not starting.
+      Please check what's happening with the pods.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - get_events
+      expected_keywords:
+        any_of:
+          - "ImagePullBackOff"
+          - "ErrImagePull"
+          - "image"
+          - "pull"
+          - "not found"
+          - "manifest unknown"
+      expected_diagnosis:
+        category: "image_pull_failure"
+    timeout: 60s
+
+  - id: k8s-no-endpoints
+    name: "Service with no endpoints"
+    category: kubernetes
+    severity: high
+    description: >
+      The postgres service selector doesn't match any pod labels,
+      so the service has no backends and connections time out.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/no-endpoints
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/no-endpoints
+      restore: k8s/base
+    prompt: >
+      Applications in namespace helpdesk-test cannot reach the postgres
+      service. Connections to the service IP time out. Please investigate
+      the service and its endpoints.
+    evaluation:
+      expected_tools:
+        - get_service
+        - get_endpoints
+      expected_keywords:
+        any_of:
+          - "no endpoints"
+          - "endpoint"
+          - "selector"
+          - "mismatch"
+          - "no backends"
+          - "empty"
+      expected_diagnosis:
+        category: "no_endpoints"
+    timeout: 60s
+
+  - id: k8s-pvc-pending
+    name: "PVC pending (bad StorageClass)"
+    category: kubernetes
+    severity: critical
+    description: >
+      The postgres pod's PVC references a nonexistent StorageClass,
+      so the volume cannot be provisioned and the pod stays Pending.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/pvc-pending
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/pvc-pending
+      restore: k8s/base
+    prompt: >
+      The database pod in namespace helpdesk-test is stuck and not
+      starting. Please investigate.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - get_events
+      expected_keywords:
+        any_of:
+          - "Pending"
+          - "PersistentVolumeClaim"
+          - "PVC"
+          - "StorageClass"
+          - "provision"
+          - "unbound"
+      expected_diagnosis:
+        category: "pvc_pending"
+    timeout: 60s
+
+  - id: k8s-oomkilled
+    name: "OOMKilled"
+    category: kubernetes
+    severity: critical
+    description: >
+      The postgres container is killed by the OOM killer because
+      its memory limit (10Mi) is too low for PostgreSQL to start.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/oomkilled
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/oomkilled
+      restore: k8s/base
+    prompt: >
+      The database pod in namespace helpdesk-test keeps restarting.
+      Please investigate what's causing the instability.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - get_events
+      expected_keywords:
+        any_of:
+          - "OOMKilled"
+          - "out of memory"
+          - "memory limit"
+          - "killed"
+          - "OOM"
+      expected_diagnosis:
+        category: "oom_killed"
+    timeout: 60s
+
+  # ── Compound failures (2) ──────────────────────────────────────────────
+
+  - id: compound-db-pod-crash
+    name: "DB unreachable + pod crashing"
+    category: compound
+    severity: critical
+    description: >
+      The database is unreachable because the pod is in CrashLoopBackOff.
+      Requires both the DB agent (to report connection failure) and the
+      K8s agent (to diagnose the pod crash).
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/crashloop
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/crashloop
+      restore: k8s/base
+    prompt: >
+      The database is completely unreachable. The connection string is
+      {{connection_string}} and it's running in Kubernetes namespace
+      helpdesk-test. Please investigate both the database connectivity
+      and the Kubernetes infrastructure.
+    evaluation:
+      expected_tools:
+        - check_connection
+        - get_pods
+        - get_events
+      expected_keywords:
+        any_of:
+          - "CrashLoopBackOff"
+          - "crash"
+          - "connection refused"
+          - "unreachable"
+      expected_diagnosis:
+        category: "compound_crash"
+    timeout: 90s
+
+  - id: compound-db-no-endpoints
+    name: "DB timeout + no endpoints"
+    category: compound
+    severity: critical
+    description: >
+      The database connection times out because the Kubernetes service
+      has no endpoints due to a selector mismatch.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/no-endpoints
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/no-endpoints
+      restore: k8s/base
+    prompt: >
+      The database at {{connection_string}} is timing out. It's running
+      in Kubernetes namespace helpdesk-test. Please investigate both the
+      database connectivity and the Kubernetes service configuration.
+    evaluation:
+      expected_tools:
+        - check_connection
+        - get_service
+        - get_endpoints
+      expected_keywords:
+        any_of:
+          - "no endpoints"
+          - "timeout"
+          - "selector"
+          - "mismatch"
+      expected_diagnosis:
+        category: "compound_no_endpoints"
+    timeout: 90s

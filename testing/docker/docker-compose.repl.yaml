@@ -1,0 +1,60 @@
+# Overlay: adds a streaming replica to the base postgres setup.
+# Usage: docker compose -f docker-compose.yaml -f docker-compose.repl.yaml up -d
+
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - max_connections=20
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=3
+      - -c
+      - hot_standby=on
+      - -c
+      - log_statement=all
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+      # Allow replication connections from the replica container.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata-primary:/var/lib/postgresql/data
+      - ./init-primary.sh:/docker-entrypoint-initdb.d/init-primary.sh
+
+  replica:
+    image: postgres:16
+    container_name: helpdesk-test-replica
+    environment:
+      PGPASSWORD: testpass
+    ports:
+      - "15433:5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # Wait for primary, then base backup
+        until pg_isready -h postgres -U postgres; do sleep 1; done
+        rm -rf /var/lib/postgresql/data/*
+        pg_basebackup -h postgres -U postgres -D /var/lib/postgresql/data -Fp -Xs -R
+        chown -R postgres:postgres /var/lib/postgresql/data
+        exec postgres
+    volumes:
+      - pgdata-replica:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata-primary:
+  pgdata-replica:
