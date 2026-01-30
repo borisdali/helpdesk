@@ -19,8 +19,9 @@ failures:
       exec_via: pgloader
       script: sql/teardown_max_connections.sql
     prompt: >
-      The database at {{connection_string}} is not accepting new connections.
-      Users are getting "too many clients" errors. Please investigate.
+      Users are getting "too many clients" errors connecting to the database.
+      The connection_string is `{{connection_string}}` — use it verbatim for
+      all tool calls. Please investigate.
     evaluation:
       expected_tools:
         - check_connection
@@ -52,9 +53,9 @@ failures:
       exec_via: pgloader
       script: sql/teardown_long_running_query.sql
     prompt: >
-      The database at {{connection_string}} has queries that seem to hang
-      indefinitely. Users report that certain tables are inaccessible.
-      Please investigate.
+      Queries seem to hang indefinitely and certain tables are inaccessible.
+      The connection_string is `{{connection_string}}` — use it verbatim for
+      all tool calls. Please investigate.
     evaluation:
       expected_tools:
         - get_active_connections
@@ -88,8 +89,9 @@ failures:
       exec_via: pgloader
       script: sql/teardown_lock_contention.sql
     prompt: >
-      The database at {{connection_string}} is experiencing intermittent
-      "deadlock detected" errors. Please investigate.
+      The database is experiencing intermittent "deadlock detected" errors.
+      The connection_string is `{{connection_string}}` — use it verbatim for
+      all tool calls. Please investigate.
     evaluation:
       expected_tools:
         - get_lock_info
@@ -119,9 +121,9 @@ failures:
       type: sql
       script: sql/teardown_table_bloat.sql
     prompt: >
-      The database at {{connection_string}} seems to be using more disk
-      than expected and some queries are getting slower. Please investigate
-      table health.
+      The database seems to be using more disk than expected and some queries
+      are getting slower. The connection_string is `{{connection_string}}` —
+      use it verbatim for all tool calls. Please investigate table health.
     evaluation:
       expected_tools:
         - get_table_stats
@@ -150,9 +152,9 @@ failures:
       type: sql
       script: sql/teardown_high_cache_miss.sql
     prompt: >
-      The database at {{connection_string}} feels sluggish. Users report
-      slow query performance. Please check database health and performance
-      metrics.
+      Users report slow query performance. The connection_string is
+      `{{connection_string}}` — use it verbatim for all tool calls.
+      Please check database health and performance metrics.
     evaluation:
       expected_tools:
         - get_database_stats
@@ -182,8 +184,9 @@ failures:
       action: start
       service: postgres
     prompt: >
-      The database at {{connection_string}} is unreachable. Users are
-      getting connection refused errors. Please investigate.
+      The database is unreachable and users are getting connection refused
+      errors. The connection_string is `{{connection_string}}` — use it
+      verbatim for all tool calls. Please investigate.
     evaluation:
       expected_tools:
         - check_connection
@@ -213,8 +216,9 @@ failures:
       type: config
       restore: true
     prompt: >
-      The database at {{connection_string}} is returning authentication
-      errors. Please investigate.
+      The database is returning authentication errors. The connection_string
+      is `{{connection_string}}` — use it verbatim for all tool calls.
+      Please investigate.
     evaluation:
       expected_tools:
         - check_connection
@@ -244,8 +248,9 @@ failures:
       type: config
       restore: true
     prompt: >
-      The database at {{connection_string}} is returning errors when
-      applications try to connect. Please investigate.
+      Applications are getting errors when connecting to the database.
+      The connection_string is `{{connection_string}}` — use it verbatim
+      for all tool calls. Please investigate.
     evaluation:
       expected_tools:
         - check_connection
@@ -275,10 +280,10 @@ failures:
       target: replica
       script_inline: "SELECT pg_wal_replay_resume();"
     prompt: >
-      The replica database at {{replica_connection_string}} seems to be
-      returning stale data. Users report that recent writes on the primary
-      are not visible on the replica. Please investigate replication status
-      on the primary at {{connection_string}}.
+      The replica seems to be returning stale data — recent writes on the
+      primary are not visible. The primary connection_string is
+      `{{connection_string}}` — use it verbatim for all tool calls.
+      Please investigate replication status.
     evaluation:
       expected_tools:
         - get_replication_status
@@ -512,10 +517,11 @@ failures:
       overlay: k8s/overlays/crashloop
       restore: k8s/base
     prompt: >
-      The database is completely unreachable. The connection string is
-      {{connection_string}} and it's running in Kubernetes namespace
-      helpdesk-test. Please investigate both the database connectivity
-      and the Kubernetes infrastructure.
+      The database is completely unreachable. It's running in Kubernetes
+      namespace helpdesk-test. The connection_string is
+      `{{connection_string}}` — use it verbatim for all tool calls.
+      Please investigate both the database connectivity and the
+      Kubernetes infrastructure.
     evaluation:
       expected_tools:
         - check_connection
@@ -546,8 +552,9 @@ failures:
       overlay: k8s/overlays/no-endpoints
       restore: k8s/base
     prompt: >
-      The database at {{connection_string}} is timing out. It's running
-      in Kubernetes namespace helpdesk-test. Please investigate both the
+      The database is timing out. It's running in Kubernetes namespace
+      helpdesk-test. The connection_string is `{{connection_string}}` —
+      use it verbatim for all tool calls. Please investigate both the
       database connectivity and the Kubernetes service configuration.
     evaluation:
       expected_tools:

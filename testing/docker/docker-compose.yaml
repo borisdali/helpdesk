@@ -29,6 +29,8 @@ services:
   pgloader:
     image: postgres:16
     container_name: helpdesk-test-pgloader
+    environment:
+      PGPASSWORD: testpass
     entrypoint: ["sleep", "infinity"]
     depends_on:
       postgres:
