@@ -22,10 +22,26 @@ The phase descriptions are as follows:
 ```
   Phase 1 — Agent Discovery: GET /api/v1/agents to list available agents.
   Phase 2 — Health Check: POST /api/v1/db/check_connection with the connection string. If no anomaly keywords are found in the response, it reports "all clear" and exits (unless -force is set).
-  Phase 3 — Deep Inspection: Calls get_database_stats and get_active_connections to gather more context.
+  Phase 3 — AI Diagnosis: POST /api/v1/query  →  DB agent investigates autonomously
   Phase 4 — Create Incident Bundle: Starts a callback HTTP server on :9090, then POST /api/v1/incidents with callback_url pointing back to itself.
   Phase 5 — Await Callback: Blocks until the incident agent's async callback arrives with the IncidentBundleResult payload, or times out after 120s.
 ```
+
+Note in particular the phase 3, which sends a natural language
+problem description, e.g.
+
+ "Users are reporting errors connecting to the database.
+  The connection_string is host=localhost... 
+  Please investigate and report your findings."
+
+ The DB agent then autonomously calls its tools (check_connection,
+ get_active_connections, get_database_stats, etc.), analyzes the results,
+ and returns a diagnostic summary. The SRE bot prints this diagnosis.
+
+ The flag `-symptom` is designed to override the default symptom
+ description sent to the AI agent
+ (default: "Users are reporting database connectivity issues").
+
 
 ## Sample Run #1: ask aiHelpDesk for a Database status report
 
