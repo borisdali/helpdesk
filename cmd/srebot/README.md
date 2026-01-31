@@ -1,14 +1,24 @@
 # aiHelpDesk: demo O11y watcher / SRE boot app
 
-The goal of this demo app is to showcase iHelpDesk
+The goal of this demo app is to showcase aiHelpDesk
 self diagnostic and troubleshooting funcionality.
+
+The demo is an SRE bot that not just calls individual aiHelpDesk tools
+(e.g. `check_connection`, `get_database_stats`) directly, but it also
+showcases AI agents's ability to reason through and diagnose a problem.
+That's the whole point of aiHelpDesk: accept a symptom (e.g. from
+a monitoring system) and trigger and autonomous investigation
+using its tools.
+
+To that end, the gateway not only has tool-specific endpoints (`/api/v1/db/{tool}`),
+but it also accepts "here's a problem, please diagnose it" endpoint.
 
 ## Architecture
 
-If an upstream agent or an app doesn't tlak A2A natively,
+If an upstream agent or an app doesn't talk A2A natively,
 the way to send requests to iHelpDesk is via the REST/gRPC gateway
 The gateway is a stateless HTTP endpoint that translates POST
-/api/v1/incidents into an A2A tool call.
+requests like `/api/v1/incidents` into an A2A tool calls.
 
 The demo app consists of five sequential phases, all called
 via the gateway, where the normal run only triggers the first two:
@@ -31,11 +41,11 @@ Note in particular the phase 3, which sends a natural language
 problem description, e.g.
 
  "Users are reporting errors connecting to the database.
-  The connection_string is host=localhost... 
+  The `connection_string` is `host=localhost...` 
   Please investigate and report your findings."
 
- The DB agent then autonomously calls its tools (check_connection,
- get_active_connections, get_database_stats, etc.), analyzes the results,
+ The DB agent then autonomously calls its tools (`check_connection`,
+ `get_active_connections`, `get_database_stats`, etc.), analyzes the results,
  and returns a diagnostic summary. The SRE bot prints this diagnosis.
 
  The flag `-symptom` is designed to override the default symptom
