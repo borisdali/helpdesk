@@ -1,6 +1,7 @@
 // Command srebot simulates an observability watcher / SRE bot that calls the
 // Helpdesk gateway REST API to check database health. When anomalies are
-// detected it triggers an incident bundle and waits for the async callback.
+// detected it asks the AI-powered database agent to investigate autonomously,
+// then triggers an incident bundle and waits for the async callback.
 package main
 
 import (
@@ -50,6 +51,8 @@ func main() {
 	infraKey := flag.String("infra-key", "srebot-demo", "Infrastructure identifier for incident bundles")
 	cbTimeout := flag.Duration("timeout", 120*time.Second, "How long to wait for the callback")
 	force := flag.Bool("force", false, "Skip anomaly check — always run all phases")
+	symptom := flag.String("symptom", "Users are reporting database connectivity issues.",
+		"Symptom description sent to the AI agent for diagnosis")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -98,7 +101,6 @@ func main() {
 		lower := strings.ToLower(resp.Text)
 		for _, kw := range anomalyKeywords {
 			if idx := strings.Index(lower, kw); idx != -1 {
-				// Show up to 60 chars around the keyword.
 				start := idx - 20
 				if start < 0 {
 					start = 0
@@ -111,7 +113,6 @@ func main() {
 				break
 			}
 		}
-		logf("Continuing to deep inspection...")
 	} else {
 		logf("Health check OK")
 		if !*force {
@@ -122,27 +123,32 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 3: Deep Inspection ──────────────────────────────────────
-	logPhase(3, "Deep Inspection")
+	// ── Phase 3: AI Diagnosis ─────────────────────────────────────────
+	logPhase(3, "AI Diagnosis")
 
-	for _, tool := range []string{"get_database_stats", "get_active_connections"} {
-		logf("POST /api/v1/db/%s", tool)
-		r, err := gatewayPOST(*gateway, "/api/v1/db/"+tool, map[string]any{
-			"connection_string": *conn,
-		})
-		if err != nil {
-			logf("  WARNING: %v", err)
-			continue
-		}
-		logf("  Response: %d chars", len(r.Text))
+	prompt := fmt.Sprintf(
+		"%s The connection_string is `%s`. Please investigate and report your findings.",
+		*symptom, *conn,
+	)
+	logf("POST /api/v1/query  agent=database")
+	logf("Prompt: %q", truncate(prompt, 120))
+
+	diagResp, err := gatewayPOST(*gateway, "/api/v1/query", map[string]any{
+		"agent":   "database",
+		"message": prompt,
+	})
+	if err != nil {
+		logf("WARNING: AI diagnosis failed: %v", err)
+		logf("Continuing to incident bundle...")
+	} else {
+		logf("Agent response (%d chars):", len(diagResp.Text))
+		printBox(diagResp.Text)
 	}
 	fmt.Println()
 
 	// ── Phase 4: Create Incident Bundle ───────────────────────────────
 	logPhase(4, "Create Incident Bundle")
 
-	// Determine callback URL. Use the listen address but resolve the host
-	// so the incident agent can reach us.
 	callbackHost, callbackPort := callbackAddr(*listen)
 	callbackURL := fmt.Sprintf("http://%s:%s/callback", callbackHost, callbackPort)
 
@@ -165,7 +171,7 @@ func main() {
 		logf("FATAL: %v", err)
 		os.Exit(1)
 	}
-	logf("Incident agent responded: %d chars", len(incResp.Text))
+	logf("Incident agent responded (%d chars)", len(incResp.Text))
 	fmt.Println()
 
 	// ── Phase 5: Awaiting Callback ────────────────────────────────────
@@ -255,7 +261,6 @@ func startCallbackServer(addr string, ch chan<- callbackPayload) *http.Server {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"received"}`))
 
-		// Non-blocking send; buffer size 1 so first callback wins.
 		select {
 		case ch <- p:
 		default:
@@ -267,9 +272,6 @@ func startCallbackServer(addr string, ch chan<- callbackPayload) *http.Server {
 	return srv
 }
 
-// callbackAddr resolves the listen address into a host:port pair that can be
-// used in a callback URL. If the listen address binds to all interfaces
-// (e.g. ":9090"), it picks a non-loopback IP.
 func callbackAddr(listen string) (host, port string) {
 	h, p, err := net.SplitHostPort(listen)
 	if err != nil {
@@ -284,8 +286,6 @@ func callbackAddr(listen string) (host, port string) {
 	return h, p
 }
 
-// outboundIP returns the preferred outbound IP of this machine by dialing
-// a UDP socket (no actual traffic). Returns "" on failure.
 func outboundIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
@@ -296,7 +296,7 @@ func outboundIP() string {
 	return addr.IP.String()
 }
 
-// ── Logging ───────────────────────────────────────────────────────────────
+// ── Output formatting ─────────────────────────────────────────────────────
 
 func logf(format string, args ...any) {
 	ts := time.Now().Format("15:04:05")
@@ -310,4 +310,66 @@ func logPhase(num int, name string) {
 		pad = 4
 	}
 	logf("%s %s %s", strings.Repeat("\u2500", 2), line, strings.Repeat("\u2500", pad))
+}
+
+// printBox prints text inside a Unicode box, indented to align with log output.
+func printBox(text string) {
+	const indent = "           " // align with log timestamp prefix
+	const maxWidth = 68
+
+	lines := wrapText(text, maxWidth)
+	border := strings.Repeat("\u2500", maxWidth+2)
+
+	fmt.Printf("%s\u250c%s\u2510\n", indent, border)
+	for _, line := range lines {
+		pad := maxWidth - displayWidth(line)
+		if pad < 0 {
+			pad = 0
+		}
+		fmt.Printf("%s\u2502 %s%s \u2502\n", indent, line, strings.Repeat(" ", pad))
+	}
+	fmt.Printf("%s\u2514%s\u2518\n", indent, border)
+}
+
+// wrapText splits text into lines no wider than maxWidth, preserving existing
+// line breaks.
+func wrapText(text string, maxWidth int) []string {
+	var result []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		if paragraph == "" {
+			result = append(result, "")
+			continue
+		}
+		for len(paragraph) > 0 {
+			if displayWidth(paragraph) <= maxWidth {
+				result = append(result, paragraph)
+				break
+			}
+			// Find a break point.
+			cut := maxWidth
+			if cut > len(paragraph) {
+				cut = len(paragraph)
+			}
+			// Try to break at a space.
+			if idx := strings.LastIndex(paragraph[:cut], " "); idx > 0 {
+				cut = idx
+			}
+			result = append(result, paragraph[:cut])
+			paragraph = strings.TrimLeft(paragraph[cut:], " ")
+		}
+	}
+	return result
+}
+
+// displayWidth returns the visible width of a string (byte length; good enough
+// for ASCII-dominant agent output).
+func displayWidth(s string) int {
+	return len(s)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

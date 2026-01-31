@@ -44,9 +44,19 @@ func NewGateway(agents map[string]*discovery.Agent) *Gateway {
 	return &Gateway{agents: agents, clients: clients}
 }
 
+// agentAliases maps short names (used in the /query endpoint) to internal
+// agent names used for client lookup.
+var agentAliases = map[string]string{
+	"database": agentNameDB,
+	"db":       agentNameDB,
+	"k8s":      agentNameK8s,
+	"incident": agentNameIncident,
+}
+
 // RegisterRoutes sets up the REST endpoint handlers.
 func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/agents", g.handleListAgents)
+	mux.HandleFunc("POST /api/v1/query", g.handleQuery)
 	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
 	mux.HandleFunc("GET /api/v1/incidents", g.handleListIncidents)
 	mux.HandleFunc("POST /api/v1/db/{tool}", g.handleDBTool)
@@ -54,6 +64,29 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 }
 
 // --- Handlers ---
+
+func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Agent   string `json:"agent"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.Message == "" {
+		writeError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+
+	agentName, ok := agentAliases[req.Agent]
+	if !ok {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, incident)", req.Agent))
+		return
+	}
+
+	g.proxyToAgent(w, r, agentName, req.Message)
+}
 
 func (g *Gateway) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	type agentInfo struct {
@@ -184,6 +217,11 @@ func extractResponse(result a2a.SendMessageResult) a2aResponse {
 				"name":  a.Name,
 				"parts": extractText(a.Parts),
 			})
+		}
+
+		// If still no text, use the first artifact's content.
+		if resp.Text == "" && len(v.Artifacts) > 0 {
+			resp.Text = extractText(v.Artifacts[0].Parts)
 		}
 
 	case *a2a.Message:
