@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-config
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+data:
+  agents.json: |
+    [
+      {
+        "name": "postgres_database_agent",
+        "url": "http://{{ include "helpdesk.fullname" . }}-database-agent:{{ .Values.agents.database.port }}",
+        "description": "PostgreSQL database troubleshooting agent"
+      },
+      {
+        "name": "k8s_agent",
+        "url": "http://{{ include "helpdesk.fullname" . }}-k8s-agent:{{ .Values.agents.k8s.port }}",
+        "description": "Kubernetes troubleshooting agent"
+      },
+      {
+        "name": "incident_agent",
+        "url": "http://{{ include "helpdesk.fullname" . }}-incident-agent:{{ .Values.agents.incident.port }}",
+        "description": "Incident diagnostic bundle agent"
+      }
+    ]

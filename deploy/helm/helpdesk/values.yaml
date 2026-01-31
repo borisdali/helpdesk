@@ -1,0 +1,43 @@
+image:
+  repository: helpdesk
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# LLM model configuration. All agents and the orchestrator use these.
+model:
+  vendor: google        # "google" or "anthropic"
+  name: gemini-2.5-flash
+  # Name and key of a pre-existing Kubernetes Secret containing the API key.
+  apiKeySecret: helpdesk-api-key
+  apiKeyKey: api-key
+
+agents:
+  database:
+    replicas: 1
+    port: 1100
+
+  k8s:
+    replicas: 1
+    port: 1102
+    rbac:
+      # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so the
+      # K8s agent can query cluster resources via in-cluster kubectl.
+      create: true
+
+  incident:
+    replicas: 1
+    port: 1104
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""    # empty string = use cluster default
+
+gateway:
+  replicas: 1
+  port: 8080
+  service:
+    type: ClusterIP       # set to LoadBalancer for external access
+
+orchestrator:
+  # Deploy an interactive pod that users can exec into.
+  enabled: true

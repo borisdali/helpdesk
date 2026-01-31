@@ -1,0 +1,86 @@
+services:
+  database-agent:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: helpdesk:latest
+    command: ["/usr/local/bin/database-agent"]
+    environment:
+      HELPDESK_AGENT_ADDR: "0.0.0.0:1100"
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+    ports:
+      - "1100:1100"
+    restart: unless-stopped
+
+  k8s-agent:
+    image: helpdesk:latest
+    command: ["/usr/local/bin/k8s-agent"]
+    environment:
+      HELPDESK_AGENT_ADDR: "0.0.0.0:1102"
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+    volumes:
+      - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
+    ports:
+      - "1102:1102"
+    restart: unless-stopped
+    depends_on:
+      - database-agent
+
+  incident-agent:
+    image: helpdesk:latest
+    command: ["/usr/local/bin/incident-agent"]
+    environment:
+      HELPDESK_AGENT_ADDR: "0.0.0.0:1104"
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_INCIDENT_DIR: /data/incidents
+    volumes:
+      - incidents:/data/incidents
+      - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
+    ports:
+      - "1104:1104"
+    restart: unless-stopped
+    depends_on:
+      - database-agent
+
+  gateway:
+    image: helpdesk:latest
+    command: ["/usr/local/bin/gateway"]
+    environment:
+      HELPDESK_GATEWAY_ADDR: "0.0.0.0:8080"
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104"
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      - database-agent
+      - k8s-agent
+      - incident-agent
+
+  orchestrator:
+    image: helpdesk:latest
+    command: ["/usr/local/bin/helpdesk"]
+    environment:
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104"
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+    stdin_open: true
+    tty: true
+    profiles:
+      - interactive
+    depends_on:
+      - database-agent
+      - k8s-agent
+      - incident-agent
+
+volumes:
+  incidents:

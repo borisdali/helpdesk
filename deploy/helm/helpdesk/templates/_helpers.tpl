@@ -1,0 +1,39 @@
+{{/*
+Fullname: release-name prefixed resource name.
+*/}}
+{{- define "helpdesk.fullname" -}}
+{{- printf "%s" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Common labels applied to all resources.
+*/}}
+{{- define "helpdesk.labels" -}}
+app.kubernetes.io/name: helpdesk
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+{{- end -}}
+
+{{/*
+Agent URL list for gateway and orchestrator environment variables.
+*/}}
+{{- define "helpdesk.agentURLs" -}}
+http://{{ include "helpdesk.fullname" . }}-database-agent:{{ .Values.agents.database.port }},http://{{ include "helpdesk.fullname" . }}-k8s-agent:{{ .Values.agents.k8s.port }},http://{{ include "helpdesk.fullname" . }}-incident-agent:{{ .Values.agents.incident.port }}
+{{- end -}}
+
+{{/*
+Common model environment variables injected into every agent/orchestrator pod.
+*/}}
+{{- define "helpdesk.modelEnv" -}}
+- name: HELPDESK_MODEL_VENDOR
+  value: {{ .Values.model.vendor | quote }}
+- name: HELPDESK_MODEL_NAME
+  value: {{ .Values.model.name | quote }}
+- name: HELPDESK_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.model.apiKeySecret }}
+      key: {{ .Values.model.apiKeyKey }}
+{{- end -}}

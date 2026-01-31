@@ -1,0 +1,34 @@
+{{- if .Values.orchestrator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-orchestrator
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: orchestrator
+    spec:
+      containers:
+        - name: orchestrator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sleep", "infinity"]
+          env:
+            - name: HELPDESK_AGENT_URLS
+              value: {{ include "helpdesk.agentURLs" . | quote }}
+            {{- include "helpdesk.modelEnv" . | nindent 12 }}
+          stdin: true
+          tty: true
+          # No ports — interactive use only via:
+          #   kubectl exec -it deploy/{{ include "helpdesk.fullname" . }}-orchestrator -- /usr/local/bin/helpdesk
+{{- end }}
