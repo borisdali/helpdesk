@@ -1,6 +1,6 @@
 # aiHelpDesk: AI DB SRE in a box: a Multi-Agent Support System
 
-An Go-based AI multi-agent self-service help/support system for troubleshooting PostgreSQL databases hosted on Kubernetes or VM infrastructure, with incident diagnostic bundle creation for vendor support and a built-in failure testing framework. aiHelpDesk is implemented using Google ADK and the A2A (Agent-to-Agent) protocol.
+An Go-based AI multi-agent self-service help/support system for troubleshooting PostgreSQL databases hosted on Kubernetes or VM infrastructure, with incident diagnostic bundle management for vendor support and a built-in failure testing injection framework. aiHelpDesk is implemented using Google ADK and the A2A (Agent-to-Agent) protocol for extensibility where agents can be added or replaced in addition to those provided out of the box with aiHelpDesk.
 
 ## Architecture
 
