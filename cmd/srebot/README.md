@@ -1,4 +1,4 @@
-# aiHelpDesk: demo O11y watcher / SRE boot app
+# aiHelpDesk: demo O11y watcher / SRE bot app
 
 The goal of this demo app is to showcase aiHelpDesk
 self diagnostic and troubleshooting funcionality.

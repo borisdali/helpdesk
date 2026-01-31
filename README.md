@@ -10,5 +10,6 @@ See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configura
 ## Testing
 See [testing/README.md](testing/README.md) for the failure injection testing framework included with aiHelpDesk.
 
-## Testing
+## Demo app calling aiHelpDesk
+aiHelpDesk can certainly be used by humans directly and that's what the LLM-powred orchestrator is there for. Additionally however, an upstream agent or a program call call aiHelpDesk subagents directly.
 See [cmd/srebot/README.md](cmd/srebot/README.md) for a sample of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
