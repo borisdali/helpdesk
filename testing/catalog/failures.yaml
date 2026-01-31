@@ -11,13 +11,14 @@ failures:
       All available PostgreSQL connections are consumed by idle sessions,
       preventing new clients from connecting.
     inject:
-      type: sql
-      exec_via: pgloader
-      script: sql/inject_max_connections.sql
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/inject_max_connections.sh
+      detach: true
     teardown:
-      type: sql
-      exec_via: pgloader
-      script: sql/teardown_max_connections.sql
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/teardown_max_connections.sh
     prompt: >
       Users are getting "too many clients" errors connecting to the database.
       The connection_string is `{{connection_string}}` — use it verbatim for
@@ -45,13 +46,14 @@ failures:
       A query holding an ACCESS EXCLUSIVE lock blocks all other access to
       the table, causing application timeouts.
     inject:
-      type: sql
-      exec_via: pgloader
-      script: sql/inject_long_running_query.sql
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/inject_long_running_query.sh
+      detach: true
     teardown:
-      type: sql
-      exec_via: pgloader
-      script: sql/teardown_long_running_query.sql
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/teardown_long_running_query.sh
     prompt: >
       Queries seem to hang indefinitely and certain tables are inaccessible.
       The connection_string is `{{connection_string}}` — use it verbatim for
@@ -81,13 +83,14 @@ failures:
       causing a deadlock that PostgreSQL detects and resolves by killing
       one session.
     inject:
-      type: sql
-      exec_via: pgloader
-      script: sql/inject_lock_contention.sql
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/inject_lock_contention.sh
+      detach: true
     teardown:
-      type: sql
-      exec_via: pgloader
-      script: sql/teardown_lock_contention.sql
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/teardown_lock_contention.sh
     prompt: >
       The database is experiencing intermittent "deadlock detected" errors.
       The connection_string is `{{connection_string}}` — use it verbatim for

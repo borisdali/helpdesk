@@ -50,6 +50,7 @@ type InjectSpec struct {
 	Restore      interface{}       `yaml:"restore,omitempty"`
 	Target       string            `yaml:"target,omitempty"`
 	Override     map[string]string `yaml:"override,omitempty"`
+	Detach       bool              `yaml:"detach,omitempty"`
 }
 
 // EvalSpec describes how to evaluate the agent's response.

@@ -4,8 +4,11 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // DockerComposeDir is the path to the docker-compose files relative to the
@@ -50,4 +53,46 @@ func DockerExec(ctx context.Context, container string, cmd ...string) (string, e
 			container, strings.Join(cmd, " "), err, output)
 	}
 	return string(output), nil
+}
+
+// DockerCopyAndExec copies a script into a container and executes it.
+// If detach is true, the script runs in the background (docker exec -d)
+// and the function returns immediately without waiting for completion.
+func DockerCopyAndExec(ctx context.Context, container, scriptPath string, detach bool) error {
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return fmt.Errorf("reading script %s: %v", scriptPath, err)
+	}
+
+	// Copy script into the container.
+	destPath := "/tmp/" + filepath.Base(scriptPath)
+	cpCmd := exec.CommandContext(ctx, "docker", "cp", scriptPath, container+":"+destPath)
+	if out, err := cpCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker cp %s: %v\n%s", scriptPath, err, out)
+	}
+	_ = script // validated above via ReadFile
+
+	// Make it executable.
+	chmodCmd := exec.CommandContext(ctx, "docker", "exec", container, "chmod", "+x", destPath)
+	if out, err := chmodCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("chmod in container: %v\n%s", err, out)
+	}
+
+	if detach {
+		// Run in background — docker exec -d doesn't wait.
+		execCmd := exec.CommandContext(ctx, "docker", "exec", "-d", container, "bash", destPath)
+		if out, err := execCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("docker exec -d: %v\n%s", err, out)
+		}
+		// Give background processes a moment to spawn.
+		time.Sleep(2 * time.Second)
+		return nil
+	}
+
+	// Run in foreground and wait.
+	execCmd := exec.CommandContext(ctx, "docker", "exec", container, "bash", destPath)
+	if out, err := execCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker exec: %v\n%s", err, out)
+	}
+	return nil
 }

@@ -37,6 +37,8 @@ func (inj *Injector) exec(ctx context.Context, spec InjectSpec, f Failure) error
 		return inj.execSQL(ctx, spec)
 	case "docker":
 		return inj.execDocker(ctx, spec)
+	case "docker_exec":
+		return inj.execDockerExec(ctx, spec)
 	case "kustomize":
 		return inj.execKustomize(ctx, spec)
 	case "kustomize_delete":
@@ -81,6 +83,20 @@ func (inj *Injector) execDocker(ctx context.Context, spec InjectSpec) error {
 	default:
 		return fmt.Errorf("unknown docker action: %s", spec.Action)
 	}
+}
+
+func (inj *Injector) execDockerExec(ctx context.Context, spec InjectSpec) error {
+	scriptPath := filepath.Join(inj.cfg.TestingDir, spec.Script)
+	container := spec.ExecVia
+	if container == "" {
+		container = "helpdesk-test-pgloader"
+	}
+
+	// Copy script into container and execute it.
+	if err := testutil.DockerCopyAndExec(ctx, container, scriptPath, spec.Detach); err != nil {
+		return fmt.Errorf("docker exec in %s: %v", container, err)
+	}
+	return nil
 }
 
 func (inj *Injector) execKustomize(ctx context.Context, spec InjectSpec) error {

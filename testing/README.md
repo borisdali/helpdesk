@@ -99,10 +99,12 @@ exit
 ----------
         1
 (1 row)
+```
 
-  3. Test inject/teardown manually (no agents needed)
+## Manual: Test inject/teardown manually (no agents needed)
 
-  # Inject a failure
+  # Inject a failure#1: table bloat
+```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-table-bloat --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
 time=2026-01-30T12:49:39.902-05:00 level=INFO msg="injecting failure" id=db-table-bloat type=sql
 Failure injected: Table bloat / dead tuples
@@ -114,11 +116,10 @@ The database at host=localhost port=15432 dbname=testdb user=postgres password=t
 To tear down: faulttest teardown --id db-table-bloat [same flags]
 ```
 
-Let's feed the suggested prompt to aiHelpDesk:
+  # Feed the suggested prompt to aiHelpDesk:
 
 ```
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,htt
-p://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
+[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
 Fri Jan 30 16:20:03 EST 2026
 time=2026-01-30T16:20:04.489-05:00 level=INFO msg="discovering agent" url=http://localhost:1100
 time=2026-01-30T16:20:04.504-05:00 level=INFO msg="discovered agent" name=postgres_database_agent url=http://localhost:1100
@@ -181,7 +182,6 @@ ALTER TABLE test_bloat_table SET (
   autovacuum_vacuum_scale_factor = 0.01,
   autovacuum_analyze_scale_factor = 0.005
 );
-```
 
 **Monitoring:**
 - Monitor the dead row count and table size over time
@@ -191,8 +191,9 @@ The database itself is healthy (99.95% cache hit ratio, no deadlocks), but this 
 ```
 
 
-  # Run the recommended action and verify that it took effect:
+  # Run the aiHelpDesk recommended action and verify that it indeed worked:
 
+```
 [boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT relname, n_dead_tup, n_live_tup FROM pg_stat_user_tables WHERE relname = 'test_bloat_table'"
      relname      | n_dead_tup | n_live_tup
 ------------------+------------+------------
@@ -207,5 +208,86 @@ VACUUM
 ------------------+------------+------------
  test_bloat_table |          0 |      10000
 (1 row)
+```
 
+
+  # Inject a failure: too many client connections
+
+```
+[boris@cassiopeia ~/cassiopeia/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d pgloader
+[+] Running 2/2
+ ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 0.5s
+ ✔ Container helpdesk-test-pgloader  Running                                                                                                                                                                                                 0.0s
+
+[boris@cassiopeia ~/cassiopeia/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml ps
+NAME                     IMAGE         COMMAND                  SERVICE    CREATED             STATUS                 PORTS
+helpdesk-test-pg         postgres:16   "docker-entrypoint.s…"   postgres   5 hours ago         Up 5 hours (healthy)   0.0.0.0:15432->5432/tcp
+helpdesk-test-pgloader   postgres:16   "sleep infinity"         pgloader   About an hour ago   Up About an hour       5432/tcp
+
+[boris@cassiopeia ~/cassiopeia/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-max-connections --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
+time=2026-01-30T18:43:39.439-05:00 level=INFO msg="injecting failure" id=db-max-connections type=docker_exec
+Failure injected: Max connections exhausted
+
+Suggested prompt for the agent:
+Users are getting "too many clients" errors connecting to the database. The connection_string is `host=localhost port=15432 dbname=testdb user=postgres password=testpass` — use it verbatim for all tool calls. Please investigate.
+
+
+To tear down: faulttest teardown --id db-max-connections [same flags]
+
+[boris@cassiopeia ~/cassiopeia/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT 1"
+psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
+```
+
+  # Feed the suggested prompt to aiHelpDesk:
+
+```
+[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
+Fri Jan 30 18:59:16 EST 2026
+time=2026-01-30T18:59:16.492-05:00 level=INFO msg="discovering agent" url=http://localhost:1100
+time=2026-01-30T18:59:16.497-05:00 level=INFO msg="discovered agent" name=postgres_database_agent url=http://localhost:1100
+time=2026-01-30T18:59:16.497-05:00 level=INFO msg="discovering agent" url=http://localhost:1102
+time=2026-01-30T18:59:16.498-05:00 level=INFO msg="discovered agent" name=k8s_agent url=http://localhost:1102                                                                                                                                     time=2026-01-30T18:59:16.498-05:00 level=INFO msg="discovering agent" url=http://localhost:1104
+time=2026-01-30T18:59:16.500-05:00 level=INFO msg="discovered agent" name=incident_agent url=http://localhost:1104
+time=2026-01-30T18:59:16.500-05:00 level=INFO msg="expected expert agents" agents="postgres_database_agent,sk8s_agent, incident_ngent"                                                                                                            time=2026-01-30T18:59:16.503-05:00 level=INFO msg="using model" vendor=anthropic model=claude-haiku-4-5-20251001
+time=2026-01-30T18:59:16.503-05:00 level=INFO msg="confirming agent availability" agent=postgres_database_agent url=http://localhost:1100
+time=2026-01-30T18:59:16.503-05:00 level=INFO msg="agent available" agent=postgres_database_agent
+time=2026-01-30T18:59:16.503-05:00 level=INFO msg="confirming agent availability" agent=k8s_agent url=http://localhost:1102
+time=2026-01-30T18:59:16.503-05:00 level=INFO msg="agent available" agent=k8s_agent
+time=2026-01-30T18:59:16.503-05:00 level=INFO msg="confirming agent availability" agent=incident_agent url=http://localhost:1104
+time=2026-01-30T18:59:16.503-05:00 level=INFO msg="agent available" agent=incident_agent
+time=2026-01-30T18:59:16.504-05:00 level=INFO msg="infrastructure config loaded" db_servers=3 k8s_clusters=1 vms=1
+time=2026-01-30T18:59:16.504-05:00 level=INFO msg="orchestrator initialized" available_agents=3
+
+User -> Users are getting "too many clients" errors connecting to the database. The connection_string is `host=localhost port=15432 dbname=testdb user=postgres password=testpass` — use it verbatim for all tool calls. Please investigate.
+
+Agent -> **Incident bundle created successfully.**
+
+**Incident ID:** `ebb2f437`
+**Bundle Path:** `/tmp/incident-ebb2f437-20260130-185951.tar.gz`
+
+**Key Findings:**
+
+The database server at `localhost:15432` **is running and accessible**, but it has **reached its maximum connection limit**. New connections are being rejected with `FATAL: sorry, too many clients already`.
+
+**Root Cause:** PostgreSQL's `max_connections` parameter has been exceeded. All available connection slots are occupied, preventing new clients from connecting.
+
+**Recommended Actions:**
+
+1. **Immediate relief:**
+   - Identify and terminate idle connections on the server
+   - Restart the PostgreSQL service (if safe in your environment) to free all connections
+   - Implement a connection pooler (PgBouncer, pgPool-II) to manage connections more efficiently
+
+2. **Long-term fix:**
+   - Increase `max_connections` in `postgresql.conf` (currently at the limit)
+   - Recalculate appropriate `max_connections` based on: `max_connections = (Available RAM / shared_buffers) × 0.25` or similar sizing
+   - Review application connection handling for connection leaks
+   - Monitor connection usage to prevent this situation recurring
+
+3. **Diagnostic bundle:**
+   - The incident bundle (ID: `ebb2f437`) has been created and contains OS, storage, and attempted database diagnostics
+   - Share this with your database vendor or support team if needed
+
+Once you increase `max_connections` or reduce active connections, users should be able to reconnect.
+User ->
 ```
