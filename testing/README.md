@@ -8,11 +8,7 @@ Once a failure occurs, use aiHelpDesk to see if it can rectify
 a failure automatically or at least provide guidance on how
 to proceed.
 
-## Manual: List Failure Modes
-
-This is a good start as it because in this step we verify the
-faulttest CLI is built properly and can read and parse the catalog
-of failure modes successfully.
+## Manual Testing: List available fault injection tests
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest list
@@ -39,10 +35,14 @@ compound-db-no-endpoints       compound     critical   DB timeout + no endpoints
 Total: 17 failure modes
 ```
 
-## Manual: Start the test database
+This is a good start because in this step we verify the
+faulttest CLI is built properly and can read and parse the catalog
+of failure modes successfully.
+
+
+## Manual Testing: Start the test database
 
 ```
-  2. Start the test database
   docker compose -f testing/docker/docker-compose.yaml up -d
 
 [boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d
@@ -101,9 +101,9 @@ exit
 (1 row)
 ```
 
-## Manual: Test inject/teardown manually (no agents needed)
+## Manual Testing: Inject/teardown manually (no agents needed)
 
-  # Inject a failure#1: table bloat
+  ### Inject a failure#1: table bloat
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-table-bloat --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
 time=2026-01-30T12:49:39.902-05:00 level=INFO msg="injecting failure" id=db-table-bloat type=sql
@@ -116,7 +116,7 @@ The database at host=localhost port=15432 dbname=testdb user=postgres password=t
 To tear down: faulttest teardown --id db-table-bloat [same flags]
 ```
 
-  # Feed the suggested prompt to aiHelpDesk:
+  ### Feed the suggested prompt to aiHelpDesk:
 
 ```
 [boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
@@ -191,7 +191,7 @@ The database itself is healthy (99.95% cache hit ratio, no deadlocks), but this 
 ```
 
 
-  # Run the aiHelpDesk recommended action and verify that it indeed worked:
+  ### Run the aiHelpDesk recommended action and verify that it indeed worked:
 
 ```
 [boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT relname, n_dead_tup, n_live_tup FROM pg_stat_user_tables WHERE relname = 'test_bloat_table'"
@@ -211,20 +211,20 @@ VACUUM
 ```
 
 
-  # Inject a failure: too many client connections
+  ### Inject a failure#2: too many client connections
 
 ```
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d pgloader
+[boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d pgloader
 [+] Running 2/2
  ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 0.5s
  ✔ Container helpdesk-test-pgloader  Running                                                                                                                                                                                                 0.0s
 
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml ps
+[boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml ps
 NAME                     IMAGE         COMMAND                  SERVICE    CREATED             STATUS                 PORTS
 helpdesk-test-pg         postgres:16   "docker-entrypoint.s…"   postgres   5 hours ago         Up 5 hours (healthy)   0.0.0.0:15432->5432/tcp
 helpdesk-test-pgloader   postgres:16   "sleep infinity"         pgloader   About an hour ago   Up About an hour       5432/tcp
 
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-max-connections --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-max-connections --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
 time=2026-01-30T18:43:39.439-05:00 level=INFO msg="injecting failure" id=db-max-connections type=docker_exec
 Failure injected: Max connections exhausted
 
@@ -234,11 +234,11 @@ Users are getting "too many clients" errors connecting to the database. The conn
 
 To tear down: faulttest teardown --id db-max-connections [same flags]
 
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT 1"
+[boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT 1"
 psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
 ```
 
-  # Feed the suggested prompt to aiHelpDesk:
+  ### Feed the suggested prompt to aiHelpDesk:
 
 ```
 [boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
