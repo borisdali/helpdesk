@@ -27,8 +27,25 @@ spec:
             - name: HELPDESK_AGENT_URLS
               value: {{ include "helpdesk.agentURLs" . | quote }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- if .Values.infrastructure }}
+            - name: HELPDESK_INFRA_CONFIG
+              value: /etc/helpdesk/infrastructure.json
+            {{- end }}
           stdin: true
           tty: true
+          {{- if .Values.infrastructure }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/helpdesk/infrastructure.json
+              subPath: infrastructure.json
+              readOnly: true
+          {{- end }}
           # No ports — interactive use only via:
           #   kubectl exec -it deploy/{{ include "helpdesk.fullname" . }}-orchestrator -- /usr/local/bin/helpdesk
+      {{- if .Values.infrastructure }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "helpdesk.fullname" . }}-config
+      {{- end }}
 {{- end }}

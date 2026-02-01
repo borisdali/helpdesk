@@ -23,3 +23,6 @@ data:
         "description": "Incident diagnostic bundle agent"
       }
     ]
+  {{- if .Values.infrastructure }}
+  infrastructure.json: {{ .Values.infrastructure | toJson | quote }}
+  {{- end }}

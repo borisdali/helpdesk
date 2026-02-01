@@ -1,10 +1,15 @@
+# Build context must be the cassiopeia root (parent of helpdesk/) so that
+# both helpdesk/ and ADK/ are accessible. Example:
+#   docker build -t helpdesk:dev -f helpdesk/Dockerfile .
+# Or via Docker Compose (see deploy/docker-compose/docker-compose.yaml).
+
 # Stage 1: Build all helpdesk binaries.
 FROM golang:1.25 AS builder
 
 WORKDIR /src
 
 # Copy the local ADK source (referenced by go.mod replace directive).
-COPY ../ADK/github/adk-go /src/adk-go
+COPY ADK/github/adk-go /src/adk-go
 
 # Copy helpdesk source.
 COPY helpdesk /src/helpdesk

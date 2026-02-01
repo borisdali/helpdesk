@@ -1,8 +1,8 @@
 services:
   database-agent:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
     command: ["/usr/local/bin/database-agent"]
     environment:
@@ -15,6 +15,9 @@ services:
     restart: unless-stopped
 
   k8s-agent:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
     command: ["/usr/local/bin/k8s-agent"]
     environment:
@@ -31,6 +34,9 @@ services:
       - database-agent
 
   incident-agent:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
     command: ["/usr/local/bin/incident-agent"]
     environment:
@@ -49,6 +55,9 @@ services:
       - database-agent
 
   gateway:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
     command: ["/usr/local/bin/gateway"]
     environment:
@@ -66,6 +75,9 @@ services:
       - incident-agent
 
   orchestrator:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
     command: ["/usr/local/bin/helpdesk"]
     environment:
@@ -73,6 +85,9 @@ services:
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+    volumes:
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     stdin_open: true
     tty: true
     profiles:

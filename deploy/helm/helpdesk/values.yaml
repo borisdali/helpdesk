@@ -41,3 +41,22 @@ gateway:
 orchestrator:
   # Deploy an interactive pod that users can exec into.
   enabled: true
+
+# Infrastructure inventory — database servers, K8s clusters, and VMs the
+# orchestrator knows about. Passed to the LLM so it can pick the right
+# connection strings when calling agents. Leave empty to skip.
+#
+# Example:
+#   infrastructure:
+#     db_servers:
+#       prod-db:
+#         name: "Production Database"
+#         connection_string: "host=db.example.com port=5432 dbname=app user=admin"
+#         k8s_cluster: "prod"
+#         k8s_namespace: "databases"
+#     k8s_clusters:
+#       prod:
+#         name: "Production Cluster"
+#         context: "prod-cluster"
+#     vms: {}
+infrastructure: {}
