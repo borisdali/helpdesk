@@ -28,7 +28,8 @@ func Discover(baseURLs []string) (map[string]*Agent, error) {
 	agents := make(map[string]*Agent)
 
 	for _, baseURL := range baseURLs {
-		cardURL := strings.TrimSuffix(baseURL, "/") + "/.well-known/agent-card.json"
+		base := strings.TrimSuffix(baseURL, "/")
+		cardURL := base + "/.well-known/agent-card.json"
 		slog.Info("discovering agent", "url", cardURL)
 
 		resp, err := client.Get(cardURL)
@@ -50,12 +51,18 @@ func Discover(baseURLs []string) (map[string]*Agent, error) {
 			continue
 		}
 
+		// Use the discovery base URL rather than the agent's self-reported
+		// card.URL, which is typically a container-local address like
+		// http://[::]:1100 that isn't reachable from other containers.
+		invokeURL := base + "/invoke"
+		card.URL = invokeURL
+
 		agents[card.Name] = &Agent{
 			Name:      card.Name,
-			InvokeURL: card.URL,
+			InvokeURL: invokeURL,
 			Card:      &card,
 		}
-		slog.Info("discovered agent", "name", card.Name, "invoke_url", card.URL)
+		slog.Info("discovered agent", "name", card.Name, "invoke_url", invokeURL)
 	}
 
 	if len(agents) == 0 {
