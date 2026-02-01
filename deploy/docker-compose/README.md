@@ -1,6 +1,6 @@
 # aiHelpDesk: Deployment for VM-based (non-K8s) databases
 
-## Deployment from source (by cloning the repo):
+## 1. Deployment from source (by cloning the repo):
 
 ```
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml up -d
@@ -113,7 +113,7 @@ Compose can now delegate builds to bake for better performance.
  => CACHED [gateway builder  4/13] COPY helpdesk /src/helpdesk                                                                                                                                                                               0.0s
  => CACHED [gateway builder  5/13] WORKDIR /src/helpdesk                                                                                                                                                                                     0.0s
  => CACHED [gateway builder  6/13] RUN go mod edit -replace google.golang.org/adk=/src/adk-go                                                                                                                                                0.0s
-=> CACHED [gateway builder  7/13] RUN go mod download                                                                                                                                                                                       0.0s
+ => CACHED [gateway builder  7/13] RUN go mod download                                                                                                                                                                                       0.0s
  => CACHED [gateway builder  8/13] RUN CGO_ENABLED=0 go build -o /out/database-agent  ./agents/database/                                                                                                                                     0.0s
  => CACHED [gateway builder  9/13] RUN CGO_ENABLED=0 go build -o /out/k8s-agent       ./agents/k8s/                                                                                                                                          0.0s
  => CACHED [gateway builder 10/13] RUN CGO_ENABLED=0 go build -o /out/incident-agent   ./agents/incident/                                                                                                                                    0.0s
@@ -151,6 +151,7 @@ Compose can now delegate builds to bake for better performance.
 
 This deployment should result in downloading the helpdesk image and the four agents running in the Docker containers:
 
+```
 [boris@ ~/helpdesk]$ docker images
 REPOSITORY                      TAG       IMAGE ID       CREATED         SIZE
 helpdesk                        latest    7c835ad8018e   3 hours ago     582MB
@@ -163,7 +164,7 @@ fd3b782c0d49   helpdesk:latest                      "/usr/local/bin/inci…"   7
 9dda96b44913   helpdesk:latest                      "/usr/local/bin/data…"   8 seconds ago   Up 7 seconds            0.0.0.0:1100->1100/tcp    docker-compose-database-agent-1
 ```
 
-## Interactive/Human: Deployment from source (by cloning the repo)
+## 2. Interactive/Human session: Deployment from source (by cloning the repo)
 
 First off, copy and adjust the .env file and the infrastructure.json file.
 The former contains the LLM info (e.g. Anthropic, Gemini, etc.), while
@@ -271,8 +272,9 @@ Agent -> I'm aware of the following managed databases:
 All three are PostgreSQL databases (or PostgreSQL derivatives). I can investigate any of them using their connection strings and associated infrastructure contexts.
 
 Would you like me to check the status or diagnose an issue with any of these databases?
+```
 
-## SRE bot demo: Deployment from source (by cloning the repo)
+## 3. SRE bot demo: Deployment from source (by cloning the repo)
 
 ```
 [boris@ ~/helpdesk]$ docker run --rm --network docker-compose_default helpdesk:latest /usr/local/bin/srebot -gateway http://gateway:8080 -conn 'host=db.example.com port=5432 dbname=myapp user=admin'

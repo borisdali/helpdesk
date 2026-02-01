@@ -19,7 +19,7 @@ aiHelpDesk can be deployed on K8s or VMs depending on where you run your databas
 
   ### On K8s
 
-  ### on VMs
+  ### On VMs
 ```
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml up -d
 ```
