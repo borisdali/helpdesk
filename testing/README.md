@@ -4,6 +4,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 
   ## Architecture & Testing Boundaries
 
+```
   ┌─────────────────┬─────────────────────────────────────────┐
   │ Human Operator  │ Upstream Agent / O11y Watcher / SRE Bot │
   ├─────     ───────┤─────────      ──────────────────────────┤
@@ -18,6 +19,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   │ Common:  LLM API (Claude / Gemini)                        │  ← External
   │          PostgreSQL, Kubernetes cluster                   │  ← External
   └───────────────────────────────────────────────────────────┘
+```
 
   Each boundary is a test seam. The strategy covers 5 layers, each progressively requiring more infrastructure.
 
@@ -274,6 +276,7 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
 
   ## Summary: Test Pyramid
 
+```
             /\
            /  \     E2E (Layer 5)
           / 5c \    LLM + full stack, non-deterministic
@@ -305,4 +308,4 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
   ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
   │ 5. E2E             │ ~5      │ Full stack + LLM API      │ ~5min   │ Manual / nightly │
   └────────────────────┴─────────┴───────────────────────────┴─────────┴──────────────────┘
-
+```

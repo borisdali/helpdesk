@@ -56,7 +56,7 @@ See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instruct
 See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configuration, API reference, and extension guide.
 
 ## Testing
-See [testing/README.md](testing/README.md) for the failure injection testing framework included with aiHelpDesk.
+aiHelpDesk features a comprehensive testing strategy, see [here](testing/README.md), including a built-in failure injection testing framework, see [here](testing/FAILURE_INJECTION_TESTING.md).
 
 ## Demo app calling aiHelpDesk
 aiHelpDesk can certainly be used by humans and that's what the LLM-powered orchestrator is there for. Additionally however, an upstream agent or a program can call aiHelpDesk agents directly.
