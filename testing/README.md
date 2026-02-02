@@ -1,293 +1,308 @@
-# aiHelpDesk: Testing
+# aiHepDesk Testing Strategy
 
-This page outlines the Failure Testing Framework included
-with aiHelpDesk. There's a list of currated failure modes,
-the injection mechanism and the way to inject failures
-manually or automatically (e.g. as part of the CI/CD pipeline).
-Once a failure occurs, use aiHelpDesk to see if it can rectify
-a failure automatically or at least provide guidance on how
-to proceed.
+aiHelpDesk offers a comprehensive testing strategy that is broken into five distinct layers as follows:
 
-## Manual Testing: List available fault injection tests
+  ## Architecture & Testing Boundaries
 
-```
-[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest list
-ID                             CATEGORY     SEVERITY   NAME
---------------------------------------------------------------------------------
-db-max-connections             database     high       Max connections exhausted
-db-long-running-query          database     high       Long-running query blocking
-db-lock-contention             database     high       Lock contention / deadlock
-db-table-bloat                 database     medium     Table bloat / dead tuples
-db-high-cache-miss             database     medium     High cache miss ratio
-db-connection-refused          database     critical   Database connection refused
-db-auth-failure                database     critical   Authentication failure
-db-not-exist                   database     critical   Database does not exist
-db-replication-lag             database     high       Replication lag
-k8s-crashloop                  kubernetes   critical   CrashLoopBackOff
-k8s-pending                    kubernetes   critical   Pending pod (unschedulable)
-k8s-image-pull                 kubernetes   critical   ImagePullBackOff
-k8s-no-endpoints               kubernetes   high       Service with no endpoints
-k8s-pvc-pending                kubernetes   critical   PVC pending (bad StorageClass)
-k8s-oomkilled                  kubernetes   critical   OOMKilled
-compound-db-pod-crash          compound     critical   DB unreachable + pod crashing
-compound-db-no-endpoints       compound     critical   DB timeout + no endpoints
+  ┌─────────────────┬─────────────────────────────────────────┐
+  │ Human Operator  │ Upstream Agent / O11y Watcher / SRE Bot │
+  ├─────     ───────┤─────────      ──────────────────────────┤
+  │ Orchestrator    │ Gateway (REST)                          │  ← Layer 5: E2E
+  ├─────────────────┴─────────────────────────────────────────┤
+  │ Common:  A2A protocol,  (JSON-RPC 2.0)                    │  ← Layer 4: Protocol
+  ├───────────────────────────────────────────────────────────│
+  │ Common:  DB Agent,  K8s Agent, Incident Agent             │  ← Layer 3: Integration
+  ├───────────────────────────────── ─────────────────────────│
+  │ Common:  psql,  kubectl, OS (storage, compute, network)   │  ← Layer 2: Tool exec
+  ├───────────────────────────────────────────────────────────│
+  │ Common:  LLM API (Claude / Gemini)                        │  ← External
+  │          PostgreSQL, Kubernetes cluster                   │  ← External
+  └───────────────────────────────────────────────────────────┘
 
-Total: 17 failure modes
-```
+  Each boundary is a test seam. The strategy covers 5 layers, each progressively requiring more infrastructure.
 
-This is a good start because in this step we verify the
-faulttest CLI is built properly and can read and parse the catalog
-of failure modes successfully.
+  ### Layer 1: Unit Tests
 
+  Goal: Test all deterministic logic without any I/O. Run in go test ./... with zero external dependencies.
+  Coverage target: 35-40% of statements.
 
-## Manual Testing: Start the test database
+  ### Layer 2: Component Tests (mock external commands)
+
+  Goal: Test the tool functions (the ones that call psql, kubectl, OS commands) by mocking the command execution. No real PostgreSQL or Kubernetes needed.
+  Approach — command injection pattern:
+
+  Instead of each agent's tool functions calling exec.Command("psql", ...) or exec.Command("kubectl", ...) directly, make them testable, extract the command runner into an interface:
 
 ```
-  docker compose -f testing/docker/docker-compose.yaml up -d
+  // In agents/database/tools.go (or a shared package):
+  type CommandRunner interface {
+      Run(ctx context.Context, name string, args ...string) (string, error)
+  }
 
-[boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d
-[+] Running 16/16
- ✔ postgres Pulled                                                                                                                                                                                                                          15.5s
-   ✔ c52040205004 Pull complete                                                                                                                                                                                                             10.7s
-   ✔ 43a5a9e2423c Pull complete                                                                                                                                                                                                              8.5s
- ✔ pgloader Pulled                                                                                                                                                                                                                          15.5s
-   ✔ dd1cde76fb45 Pull complete                                                                                                                                                                                                              8.4s
-   ✔ d637807aba98 Pull complete                                                                                                                                                                                                             10.4s
-   ✔ 085035fb9611 Pull complete                                                                                                                                                                                                              8.4s
-   ✔ 1f84dfb38d07 Pull complete                                                                                                                                                                                                              8.4s
-   ✔ b281ae1a88da Pull complete                                                                                                                                                                                                              8.5s
-   ✔ 9ef0fad1d65b Pull complete                                                                                                                                                                                                              8.5s
-   ✔ 5b8592097c2e Pull complete                                                                                                                                                                                                              8.5s
-   ✔ 7f59970af9fd Pull complete                                                                                                                                                                                                              8.5s
-   ✔ c69e06bff6d2 Pull complete                                                                                                                                                                                                             13.6s
-   ✔ 83d2335820b1 Pull complete                                                                                                                                                                                                              8.4s
-   ✔ 8b1fea7561e1 Pull complete                                                                                                                                                                                                             10.5s
-   ✔ 64a2748449a1 Pull complete                                                                                                                                                                                                              8.5s
-[+] Running 4/4
- ✔ Network docker_default            Created                                                                                                                                                                                                 0.2s
- ✔ Volume "docker_pgdata"            Created                                                                                                                                                                                                 0.0s
- ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 6.2s
- ✔ Container helpdesk-test-pgloader  Started                                                                                                                                                                                                 5.9s
-
-[boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml ps
-NAME                     IMAGE         COMMAND                  SERVICE    CREATED         STATUS                   PORTS
-helpdesk-test-pg         postgres:16   "docker-entrypoint.s…"   postgres   8 minutes ago   Up 8 minutes (healthy)   0.0.0.0:15432->5432/tcp
-helpdesk-test-pgloader   postgres:16   "sleep infinity"         pgloader   8 minutes ago   Up 8 minutes             5432/tcp
-
-[boris@ ~/helpdesk]$ docker exec -ti helpdesk-test-pg /bin/bash
-root@5d080375a8f4:/# ps -elfH
-F S UID        PID  PPID  C PRI  NI ADDR SZ WCHAN  STIME TTY          TIME CMD
-4 S root      3827     0  0  80   0 -  1796 do_wai 18:41 pts/0    00:00:00 /bin/bash
-4 R root      3841  3827  0  80   0 -  2262 -      18:41 pts/0    00:00:00   ps -elfH
-4 S postgres     1     0  0  80   0 - 27428 -      18:02 ?        00:00:00 postgres -c max_connections=20 -c shared_buffers=32MB -c log_statement=all
-1 S postgres    62     1  0  80   0 - 27461 -      18:02 ?        00:00:00   postgres: checkpointer
-1 S postgres    63     1  0  80   0 - 27462 -      18:02 ?        00:00:00   postgres: background writer
-1 S postgres    65     1  0  80   0 - 27428 -      18:02 ?        00:00:00   postgres: walwriter
-1 S postgres    66     1  0  80   0 - 27822 -      18:02 ?        00:00:00   postgres: autovacuum launcher
-1 S postgres    67     1  0  80   0 - 27784 -      18:02 ?        00:00:00   postgres: logical replication launcher
-
-root@5d080375a8f4:/# psql -U postgres
-psql (16.11 (Debian 16.11-1.pgdg13+1))
-Type "help" for help.
-
-postgres-# \q
-root@5d080375a8f4:/# exit
-exit
-
-[boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT 1"
- ?column?
-----------
-        1
-(1 row)
+  type execRunner struct{}
+  func (execRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+      cmd := exec.CommandContext(ctx, name, args...)
+      out, err := cmd.CombinedOutput()
+      return string(out), err
+  }
 ```
 
-## Manual Testing: Inject/teardown manually (no agents needed)
-
-  ### Inject a failure#1: table bloat
-```
-[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-table-bloat --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
-time=2026-01-30T12:49:39.902-05:00 level=INFO msg="injecting failure" id=db-table-bloat type=sql
-Failure injected: Table bloat / dead tuples
-
-Suggested prompt for the agent:
-The database at host=localhost port=15432 dbname=testdb user=postgres password=testpass seems to be using more disk than expected and some queries are getting slower. Please investigate table health.
-
-
-To tear down: faulttest teardown --id db-table-bloat [same flags]
-```
-
-  ### Feed the suggested prompt to aiHelpDesk:
+  Then in tests, provide a mock runner that returns canned output:
 
 ```
-[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
-Fri Jan 30 16:20:03 EST 2026
-time=2026-01-30T16:20:04.489-05:00 level=INFO msg="discovering agent" url=http://localhost:1100
-time=2026-01-30T16:20:04.504-05:00 level=INFO msg="discovered agent" name=postgres_database_agent url=http://localhost:1100
-time=2026-01-30T16:20:04.504-05:00 level=INFO msg="discovering agent" url=http://localhost:1102
-time=2026-01-30T16:20:04.518-05:00 level=INFO msg="discovered agent" name=k8s_agent url=http://localhost:1102
-time=2026-01-30T16:20:04.518-05:00 level=INFO msg="discovering agent" url=http://localhost:1104
-time=2026-01-30T16:20:04.536-05:00 level=INFO msg="discovered agent" name=incident_agent url=http://localhost:1104
-time=2026-01-30T16:20:04.536-05:00 level=INFO msg="expected expert agents" agents="postgres_database_agent, k8s_agent, incident_agent"
-time=2026-01-30T16:20:04.536-05:00 level=INFO msg="using model" vendor=anthropic model=claude-haiku-4-5-20251001
-time=2026-01-30T16:20:04.536-05:00 level=INFO msg="confirming agent availability" agent=postgres_database_agent url=http://localhost:1100
-time=2026-01-30T16:20:04.537-05:00 level=INFO msg="agent available" agent=postgres_database_agent
-time=2026-01-30T16:20:04.537-05:00 level=INFO msg="confirming agent availability" agent=k8s_agent url=http://localhost:1102
-time=2026-01-30T16:20:04.537-05:00 level=INFO msg="agent available" agent=k8s_agent
-time=2026-01-30T16:20:04.537-05:00 level=INFO msg="confirming agent availability" agent=incident_agent url=http://localhost:1104
-time=2026-01-30T16:20:04.537-05:00 level=INFO msg="agent available" agent=incident_agent
-time=2026-01-30T16:20:04.537-05:00 level=INFO msg="infrastructure config loaded" db_servers=3 k8s_clusters=1 vms=1
-time=2026-01-30T16:20:04.537-05:00 level=INFO msg="orchestrator initialized" available_agents=3
+  type mockRunner struct {
+      output string
+      err    error
+  }
+  func (m mockRunner) Run(_ context.Context, _ string, _ ...string) (string, error) {
+      return m.output, m.err
+  }
+```
 
-User -> The database at host=localhost port=15432 dbname=testdb user=postgres password=testpass seems to be using more disk than expected and some queries are getting slower. Please investigate table health.
+  What these tests verify:
+  - Correct arguments passed to psql/kubectl
+  - Output parsing and formatting
+  - Error diagnosis triggered on failure
+  - Tool return values match expected format
 
-Agent -> I'll investigate the database at localhost:15432 to check table health and identify potential disk usage issues. Let me start by checking connectivity and then examining table statistics.I'll investigate the database health,         focusing on table statistics and disk usage. Let me start by checking connectivity and then examining the tables.I'll investigate the database health, focusing on table statistics and disk usage. Let me start by checking connectivity and     then examining the tables.Good! The database is accessible. Now let me examine the table statistics to identify which tables are consuming the most disk space and have unhealthy statistics.## Investigation Summary
+  Coverage target: 50-60% of statements.
 
-I've identified **significant table health issues** that are causing your increased disk usage and slower queries:
 
-### **Critical Finding: Severe Table Bloat** 🚨
+  ### Layer 3: Integration Tests (real infrastructure, no LLM)
 
-**Table: `test_bloat_table`**
-- **Total Size:** 25 MB (76% of your entire database)
-- **Live Rows:** 10,000
-- **Dead Rows:** 90,000 ⚠️
-- **Dead Row Ratio:** 90% of the table is dead tuples!
-- **Disk Waste:** ~22.5 MB of wasted space from dead rows
+  Goal: Test agents against real PostgreSQL and Kubernetes, but bypass the LLM. Send tool calls directly via A2A without the reasoning step.
+  Infrastructure needed:
+  - Docker Compose stack
+  - Optional: kind cluster for K8s tests
 
-### Root Cause Analysis
+  3a. Database agent integration tests:
 
-The high number of dead rows (90,000) indicates:
-1. **Deleted or updated rows** have not been cleaned up
-2. **VACUUM has not been run** (or is insufficient) to reclaim space
-3. **Query performance suffers** because PostgreSQL must scan through dead tuples
+```
+  testing/integration/database_test.go
 
-This explains:
-- ✓ Higher disk usage than expected
-- ✓ Slower query performance (more I/O scanning dead rows)
-- ✓ High delete activity: 90,000 rows deleted in this workload
+  Uses Go testing + build tag //go:build integration:
 
-### Actionable Recommendations
-**Immediate Actions (Priority 1):**
+  //go:build integration
 
--- Run a full VACUUM to reclaim space
-VACUUM FULL ANALYZE test_bloat_table;
+  func TestCheckConnection_RealDB(t *testing.T) {
+      // Start agent, send A2A message: "Call the check_connection tool
+      // with connection_string=host=localhost port=15432 ..."
+      // Verify response contains "version" and "PostgreSQL 16"
+  }
+```
 
--- Or for minimal downtime, use regular VACUUM multiple times
-VACUUM ANALYZE test_bloat_table;
+  Test cases:
+  - `check_connection` → healthy DB returns version
+  - `get_active_connections` → returns at least the test connection
+  - `get_database_stats` → returns cache hit ratio
+  - `get_table_stats` → returns tuple counts for test table
+  - `check_connection with bad password` → returns auth failure diagnosis
+  - `check_connection with stopped DB` → returns connection refused diagnosis
 
-**Medium-term (Priority 2):**
-```sql
--- Check and tune autovacuum settings
--- Consider lowering vacuum costs or increasing frequency for this table
-ALTER TABLE test_bloat_table SET (
-  autovacuum_vacuum_scale_factor = 0.01,
-  autovacuum_analyze_scale_factor = 0.005
-);
+  3b. Gateway integration tests:
 
-**Monitoring:**
-- Monitor the dead row count and table size over time
-- Consider enabling `log_autovacuum_min_duration = 0` to track vacuum operations
+```
+  testing/integration/gateway_test.go
 
-The database itself is healthy (99.95% cache hit ratio, no deadlocks), but this table bloat is the primary performance bottleneck.
+  Start gateway + agents in-process or via Docker, send REST requests:
+
+  func TestGateway_ListAgents(t *testing.T) {
+      // GET /api/v1/agents → returns discovered agents
+  }
+
+  func TestGateway_QueryDBAgent(t *testing.T) {
+      // POST /api/v1/query {agent: "database_agent", message: "..."}
+      // Verify response has task_id, state, text
+  }
+
+  func TestGateway_DBTool(t *testing.T) {
+      // POST /api/v1/db/check_connection {connection_string: "..."}
+      // Verify response text
+  }
+
+  func TestGateway_UnknownAgent(t *testing.T) {
+      // POST /api/v1/query {agent: "nonexistent"} → 400
+  }
+```
+
+  3c. Incident bundle integration test:
+
+```
+  testing/integration/incident_test.go
+```
+
+  - Call `create_incident_bundle` with real DB connection + optional K8s context
+  - Verify tarball is created, extract it, check `manifest.json`, verify layer files
+  - Test callback: start local HTTP server, pass as `callback_url`, verify POST received
+
+  3d. A2A protocol conformance tests:
+
+```
+  testing/integration/a2a_test.go
+```
+
+  - Verify each agent serves /.well-known/agent-card.json with correct schema
+  - Verify POST /invoke with valid JSON-RPC returns well-formed Task/Message
+  - Verify POST /invoke with malformed JSON returns JSON-RPC error
+  - Verify discovery → invoke round-trip works for each agent
+
+  Makefile target:
+
+```
+  integration:
+      docker compose -f testing/docker/docker-compose.yaml up -d --wait
+      go test -tags integration -timeout 120s ./testing/integration/...
+      docker compose -f testing/docker/docker-compose.yaml down -v
 ```
 
 
-  ### Run the aiHelpDesk recommended action and verify that it indeed worked:
+  ### Layer 4: Fault Injection Tests (with the wired faulttest into go test)
+
+  Goal: Run failure scenarios from failures.yaml (presently 17 of them, still missing SSL mismatch, DNS resolution failure, read-only replica queries, K8s RBAC denial, etc.) as Go tests, producing standard `go test` output alongside the existing JSON report.
+  Approach: Create a Go test file that loads the catalog and runs each failure as a subtest:
 
 ```
-[boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT relname, n_dead_tup, n_live_tup FROM pg_stat_user_tables WHERE relname = 'test_bloat_table'"
-     relname      | n_dead_tup | n_live_tup
-------------------+------------+------------
- test_bloat_table |      90000 |      10000
-(1 row)
+  testing/faulttest/faulttest_test.go
 
-[boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "VACUUM FULL ANALYZE test_bloat_table"
-VACUUM
+  //go:build faulttest
 
-[boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT relname, n_dead_tup, n_live_tup FROM pg_stat_user_tables WHERE relname = 'test_bloat_table'"
-     relname      | n_dead_tup | n_live_tup
-------------------+------------+------------
- test_bloat_table |          0 |      10000
-(1 row)
+  func TestFailures(t *testing.T) {
+      catalog, _ := LoadCatalog("../catalog/failures.yaml")
+      for _, f := range catalog.Failures {
+          t.Run(f.ID, func(t *testing.T) {
+              // inject → run → evaluate → teardown
+              // t.Fatal on injection error
+              // t.Errorf on eval failure
+          })
+      }
+  }
 ```
 
+  Benefits:
+  - Each failure becomes a named subtest: TestFailures/db-max-connections
+  - Can run a single failure: `go test -run TestFailures/db-lock-contention`
+  - Integrates with CI test reporting
+  - Parallelizable per-category (database failures can't run in parallel with each other, but database and K8s categories can)
 
-  ### Inject a failure#2: too many client connections
-
-```
-[boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d pgloader
-[+] Running 2/2
- ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 0.5s
- ✔ Container helpdesk-test-pgloader  Running                                                                                                                                                                                                 0.0s
-
-[boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml ps
-NAME                     IMAGE         COMMAND                  SERVICE    CREATED             STATUS                 PORTS
-helpdesk-test-pg         postgres:16   "docker-entrypoint.s…"   postgres   5 hours ago         Up 5 hours (healthy)   0.0.0.0:15432->5432/tcp
-helpdesk-test-pgloader   postgres:16   "sleep infinity"         pgloader   About an hour ago   Up About an hour       5432/tcp
-
-[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-max-connections --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
-time=2026-01-30T18:43:39.439-05:00 level=INFO msg="injecting failure" id=db-max-connections type=docker_exec
-Failure injected: Max connections exhausted
-
-Suggested prompt for the agent:
-Users are getting "too many clients" errors connecting to the database. The connection_string is `host=localhost port=15432 dbname=testdb user=postgres password=testpass` — use it verbatim for all tool calls. Please investigate.
-
-
-To tear down: faulttest teardown --id db-max-connections [same flags]
-
-[boris@ ~/helpdesk]$ PGPASSWORD=testpass psql -h localhost -p 15432 -d testdb -U postgres -c "SELECT 1"
-psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-```
-
-  ### Feed the suggested prompt to aiHelpDesk:
+  Makefile target:
 
 ```
-[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
-Fri Jan 30 18:59:16 EST 2026
-time=2026-01-30T18:59:16.492-05:00 level=INFO msg="discovering agent" url=http://localhost:1100
-time=2026-01-30T18:59:16.497-05:00 level=INFO msg="discovered agent" name=postgres_database_agent url=http://localhost:1100
-time=2026-01-30T18:59:16.497-05:00 level=INFO msg="discovering agent" url=http://localhost:1102
-time=2026-01-30T18:59:16.498-05:00 level=INFO msg="discovered agent" name=k8s_agent url=http://localhost:1102                                                                                                                                     time=2026-01-30T18:59:16.498-05:00 level=INFO msg="discovering agent" url=http://localhost:1104
-time=2026-01-30T18:59:16.500-05:00 level=INFO msg="discovered agent" name=incident_agent url=http://localhost:1104
-time=2026-01-30T18:59:16.500-05:00 level=INFO msg="expected expert agents" agents="postgres_database_agent,sk8s_agent, incident_ngent"                                                                                                            time=2026-01-30T18:59:16.503-05:00 level=INFO msg="using model" vendor=anthropic model=claude-haiku-4-5-20251001
-time=2026-01-30T18:59:16.503-05:00 level=INFO msg="confirming agent availability" agent=postgres_database_agent url=http://localhost:1100
-time=2026-01-30T18:59:16.503-05:00 level=INFO msg="agent available" agent=postgres_database_agent
-time=2026-01-30T18:59:16.503-05:00 level=INFO msg="confirming agent availability" agent=k8s_agent url=http://localhost:1102
-time=2026-01-30T18:59:16.503-05:00 level=INFO msg="agent available" agent=k8s_agent
-time=2026-01-30T18:59:16.503-05:00 level=INFO msg="confirming agent availability" agent=incident_agent url=http://localhost:1104
-time=2026-01-30T18:59:16.503-05:00 level=INFO msg="agent available" agent=incident_agent
-time=2026-01-30T18:59:16.504-05:00 level=INFO msg="infrastructure config loaded" db_servers=3 k8s_clusters=1 vms=1
-time=2026-01-30T18:59:16.504-05:00 level=INFO msg="orchestrator initialized" available_agents=3
-
-User -> Users are getting "too many clients" errors connecting to the database. The connection_string is `host=localhost port=15432 dbname=testdb user=postgres password=testpass` — use it verbatim for all tool calls. Please investigate.
-
-Agent -> **Incident bundle created successfully.**
-
-**Incident ID:** `ebb2f437`
-**Bundle Path:** `/tmp/incident-ebb2f437-20260130-185951.tar.gz`
-
-**Key Findings:**
-
-The database server at `localhost:15432` **is running and accessible**, but it has **reached its maximum connection limit**. New connections are being rejected with `FATAL: sorry, too many clients already`.
-
-**Root Cause:** PostgreSQL's `max_connections` parameter has been exceeded. All available connection slots are occupied, preventing new clients from connecting.
-
-**Recommended Actions:**
-
-1. **Immediate relief:**
-   - Identify and terminate idle connections on the server
-   - Restart the PostgreSQL service (if safe in your environment) to free all connections
-   - Implement a connection pooler (PgBouncer, pgPool-II) to manage connections more efficiently
-
-2. **Long-term fix:**
-   - Increase `max_connections` in `postgresql.conf` (currently at the limit)
-   - Recalculate appropriate `max_connections` based on: `max_connections = (Available RAM / shared_buffers) × 0.25` or similar sizing
-   - Review application connection handling for connection leaks
-   - Monitor connection usage to prevent this situation recurring
-
-3. **Diagnostic bundle:**
-   - The incident bundle (ID: `ebb2f437`) has been created and contains OS, storage, and attempted database diagnostics
-   - Share this with your database vendor or support team if needed
-
-Once you increase `max_connections` or reduce active connections, users should be able to reconnect.
-User ->
+  faulttest:
+      docker compose -f testing/docker/docker-compose.yaml up -d --wait
+      go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
+      docker compose -f testing/docker/docker-compose.yaml down -v
 ```
+
+See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk fault injection mechanism.
+
+
+  ### Layer 5: End-to-End Tests
+
+  Goal: Test complete user-visible workflows. These involve the LLM, so results are non-deterministic. Use assertion relaxation (keyword matching, not exact string matching — which the evaluator already does).
+
+  5a. SRE Bot workflow test:
+
+```
+  testing/e2e/srebot_test.go
+```
+
+  Start full stack (agents + gateway), run the SRE bot against it:
+  - Phase 1: health check → verify agents listed
+  - Phase 2: AI diagnosis → verify response mentions the injected fault
+  - Phase 3: incident bundle → verify tarball created + callback received
+
+  5b. Orchestrator delegation test:
+
+  Test that the orchestrator correctly routes to sub-agents:
+
+```
+  testing/e2e/orchestrator_test.go
+```
+
+  - Send `check the database at [conn_string]` → orchestrator delegates to DB agent
+  - Send `list pods in namespace X` → orchestrator delegates to K8s agent
+  - Send compound prompt → orchestrator uses both agents
+
+  Since these involve real LLM calls, they're expensive and non-deterministic. Run them gated behind a build tag and treat failures as warnings, not blockers:
+
+```
+  //go:build e2e
+
+  func TestOrchestratorDelegation(t *testing.T) {
+      if os.Getenv("HELPDESK_API_KEY") == "" {
+          t.Skip("HELPDESK_API_KEY not set")
+      }
+      // ...
+  }
+```
+
+  5c. Multi-agent incident response test:
+
+  Inject a compound failure (e.g., `compound-db-pod-crash`), send to orchestrator, verify it:
+  1. Calls the database agent (gets connection refused)
+  2. Calls the K8s agent (identifies CrashLoopBackOff)
+  3. Synthesizes a root cause explanation
+  4. Optionally creates an incident bundle
+
+  This is the most realistic test — it validates the entire system including LLM reasoning quality.
+
+  ### Build tags and make targets:
+
+  Testing build tags and make targets:
+
+```
+  test:                             # Unit tests (no infra needed)
+      go test ./...
+
+  integration:                      # Real DB, no LLM
+      docker compose -f testing/docker/docker-compose.yaml up -d --wait
+      go test -tags integration -timeout 120s ./testing/integration/... || true
+      docker compose -f testing/docker/docker-compose.yaml down -v
+
+  faulttest:                        # Fault injection (real DB + agents + LLM)
+      docker compose -f testing/docker/docker-compose.yaml up -d --wait
+      go test -tags faulttest -timeout 600s -v ./testing/faulttest/... || true
+      docker compose -f testing/docker/docker-compose.yaml down -v
+
+  e2e:                              # Full stack (requires HELPDESK_API_KEY)
+      docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+      go test -tags e2e -timeout 300s -v ./testing/e2e/... || true
+      docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+
+  test-all: test integration faulttest
+```
+
+  ## Summary: Test Pyramid
+
+            /\
+           /  \     E2E (Layer 5)
+          / 5c \    LLM + full stack, non-deterministic
+         /──────\   ~5 tests, run manually or nightly
+        /  5a 5b \
+       /──────────\
+      /  Layer 4   \  Fault injection
+     / 17 scenarios \  Real DB + agents + LLM
+    /────────────────\  ~17 tests, run in CI weekly
+   /    Layer 3       \  Integration
+  /  DB + K8s + A2A    \  Real DB, no LLM
+  /──────────────────────\  ~20 tests, run in CI per-PR
+  / Layer 2: Component    \  Mock commands
+  / psql/kubectl mocked    \  ~30 tests, fast, no infra
+  /──────────────────────────\
+  /  Layer 1: Unit Tests      \  Pure logic
+  / diagnosePsqlError, formatAge \  ~80 tests, <2s
+  /────────────────────────────────\
+  ┌────────────────────┬─────────┬───────────────────────────┬─────────┬──────────────────┐
+  │       Layer        │ # Tests │           Infra           │ Runtime │     Trigger      │
+  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
+  │ 1. Unit            │ ~80     │ None                      │ <2s     │ Every commit     │
+  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
+  │ 2. Component       │ ~30     │ None                      │ <5s     │ Every commit     │
+  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
+  │ 3. Integration     │ ~20     │ Docker (PostgreSQL)       │ ~30s    │ Per PR           │
+  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
+  │ 4. Fault injection │ 17      │ Docker + agents + LLM API │ ~15min  │ Weekly / release │
+  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
+  │ 5. E2E             │ ~5      │ Full stack + LLM API      │ ~5min   │ Manual / nightly │
+  └────────────────────┴─────────┴───────────────────────────┴─────────┴──────────────────┘
+
