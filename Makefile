@@ -6,6 +6,7 @@
 #   make binaries               Cross-compile Go binaries (4 platforms)
 #   make bundle                 Package deploy files for end-users
 #   make release VERSION=v1.0.0 All of the above
+#   make github-release VERSION=v1.0.0  release + create GitHub Release
 #   make clean                  Remove dist/
 
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -23,13 +24,13 @@ BIN_PKGS := \
 	helpdesk:./cmd/helpdesk/ \
 	srebot:./cmd/srebot/
 
-.PHONY: image push binaries bundle release clean
+.PHONY: image push binaries bundle release github-release clean
 
 # ---------------------------------------------------------------------------
 # Docker image (local, current arch)
 # ---------------------------------------------------------------------------
 image:
-	docker build -t $(IMAGE):$(VERSION) -f Dockerfile ..
+	docker build --load -t $(IMAGE):$(VERSION) -t helpdesk:latest -f Dockerfile ..
 
 # ---------------------------------------------------------------------------
 # Docker image (multi-arch, push to GHCR)
@@ -37,6 +38,7 @@ image:
 push:
 	docker buildx build \
 		--platform linux/amd64,linux/arm64 \
+		--provenance=false \
 		-t $(IMAGE):$(VERSION) \
 		-t $(IMAGE):latest \
 		-f Dockerfile --push ..
@@ -99,6 +101,16 @@ release: push binaries bundle
 	@echo ""
 	@echo "Release $(VERSION) complete. Artifacts in $(DIST)/:"
 	@ls -1 $(DIST)/
+
+# ---------------------------------------------------------------------------
+# GitHub Release (requires gh CLI: https://cli.github.com)
+# ---------------------------------------------------------------------------
+github-release: release
+	git tag -f $(VERSION)
+	git push origin $(VERSION)
+	gh release create $(VERSION) $(DIST)/*.tar.gz \
+		--title "$(VERSION)" \
+		--generate-notes
 
 # ---------------------------------------------------------------------------
 # Clean

@@ -149,7 +149,7 @@ Compose can now delegate builds to bake for better performance.
  ✔ Container docker-compose-gateway-1         Started                                                                                                                                                                                        0.4s
 ```
 
-This deployment should result in downloading the helpdesk image and the four agents running in the Docker containers:
+This deployment should result in downloading the latest `helpdesk` image and the four agents running in the Docker containers (the exact number of agents may vary depending on the deployment bundle):
 
 ```
 [boris@ ~/helpdesk]$ docker images
@@ -166,7 +166,7 @@ fd3b782c0d49   helpdesk:latest                      "/usr/local/bin/inci…"   7
 
 ## 2. Interactive/Human session: Deployment from source (by cloning the repo)
 
-First off, copy and adjust the .env file and the infrastructure.json file.
+First off, copy and adjust the `.env` file and the `infrastructure.json` file.
 The former contains the LLM info (e.g. Anthropic, Gemini, etc.), while
 the latter file contains the databases that aiHelpDesk needs to be are of.
 
@@ -175,8 +175,26 @@ the latter file contains the databases that aiHelpDesk needs to be are of.
 [boris@ ~/helpdesk]$ cp deploy/docker-compose/infrastructure.json.example deploy/docker-compose/infrastructure.json
 ```
 
-Next, as a human operator, run the interactive session by invoking
-the Orchestator:
+If you prefer the list of databases (that go into `infrastructure.json` file) to reside elsewhere, set the `HELPDESK_INFRA_CONFIG` env variable as explained in `.env` file (ignore the Kube stuff, which isn't relevant for the VM deployment):
+
+```
+[boris@ ~/helpdesk/deploy/docker-compose]$ cat .env.example
+# Model configuration (required)
+HELPDESK_MODEL_VENDOR=anthropic
+HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001
+HELPDESK_API_KEY=<your-api-key-here>
+
+# Kubeconfig path for K8s and incident agents (optional)
+KUBECONFIG=~/.kube/config
+
+# Infrastructure inventory for the orchestrator (optional).
+# Path to a JSON file describing your database servers, K8s clusters, and VMs.
+# Copy the example and edit it with your real servers:
+#   cp infrastructure.json.example infrastructure.json
+HELPDESK_INFRA_CONFIG=./infrastructure.json
+```
+
+Next, as a human operator, run the interactive session by invoking the Orchestator:
 
 ```
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
@@ -274,7 +292,27 @@ All three are PostgreSQL databases (or PostgreSQL derivatives). I can investigat
 Would you like me to check the status or diagnose an issue with any of these databases?
 ```
 
+It's easy to confirm that the list of your databases were indeed made available to aiHelpDesk (to the Orchestrator in particular) with the following command:
+
+```
+[boris@ ~/helpdesk/deploy/docker-compose]$ docker ps|grep docker-compose-orchestrator
+c958e495047e   helpdesk:latest                      "/usr/local/bin/help…"   2 hours ago    Up 2 hours                                       docker-compose-orchestrator-run-b4b14664980c
+
+[boris@ ~/helpdesk]$ docker exec -ti docker-compose-orchestrator-run-b4b14664980c cat /etc/helpdesk/infrastructure.json
+{
+  "db_servers": {
+    "global-corp-db-01": {
+      "name": "Global Corporation Main Production DB hosted on K8s",
+      "connection_string": "host=db01.global.example.com port=5432 dbname=prod01 user=admin",
+      "k8s_cluster": "global-prod",
+      "k8s_namespace": "db1"
+    },
+...
+```
+
 ## 3. SRE bot demo: Deployment from source (by cloning the repo)
+
+Here's an example of an SRE bot detecting that the `db.example.com` going offline, which results in a failure to establish a connection. As a result, aiHelpDesk automatically records an incident and creates a troubelshooting bundle to investigate further either interally or by sending to a vendor:
 
 ```
 [boris@ ~/helpdesk]$ docker run --rm --network docker-compose_default helpdesk:latest /usr/local/bin/srebot -gateway http://gateway:8080 -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
@@ -369,5 +407,4 @@ ERROR — check_connection failed for host=db..."
 Output: psql: error: could not translate host name "db.example.com" to address: Name or service not known
 ...
 [02:51:21] Done.
-
 ```
