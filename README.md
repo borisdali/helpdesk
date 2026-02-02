@@ -22,7 +22,13 @@ aiHelpDesk can be deployed on K8s or VMs. The binary packages are provided for L
 
   ### On K8s
 
-...
+```
+  tar xzf helpdesk-v1.0.0-deploy.tar.gz
+  kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
+  helm install helpdesk helpdesk-v1.0.0-deploy/helm/helpdesk \
+    --set model.vendor=anthropic \
+    --set model.name=claude-haiku-4-5-20251001
+```
 
 See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on how to deploy aiHelpDesk on K8s.
 
@@ -32,8 +38,8 @@ There are two options to run aiHelpDesk on non-K8s environments, either in the D
 For the former, this single Docker Compose command brings up all aiHelpDesk agents (except the Orchestrator, which is designed to run interactively by a human operator and hence the second command):
 
 ```
-[boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml up -d
-[boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
+  docker compose -f deploy/docker-compose/docker-compose.yaml up -d
+  docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
 ```
 
 For the latter, there's a small helper `startall.sh` script that brings up all the agent Go binaries in the background including the optional Gateway and the interfactive aiHelpDesk session too:
