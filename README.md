@@ -1,8 +1,8 @@
-# aiHelpDesk: AI DB SRE in a box: a Multi-Agent Support System
+# aiHelpDesk: AI DB SRE in a box: a Multi-Agent Support and HelpDesk System
 
 A Go-based AI multi-agent self-service help and support system for troubleshooting PostgreSQL and PostgreSQL based databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
 
-* aiHelpDesk is an implementation of the shift-left support paradigm for AI-Assisted database management products (see next section).
+* aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
 * aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
 * aiHelpDesk features a built-in failure testing injection framework. 
@@ -22,27 +22,27 @@ aiHelpDesk can be deployed on K8s or VMs. The binary packages are provided for L
 
   ### On K8s
 
+...
+
+See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on how to deploy aiHelpDesk on K8s.
+
   ### On VMs
 There are two options to run aiHelpDesk on non-K8s environments, either in the Docker containers or straight on the host.
 
-TL;DR: of the former where this one Docker Compose command brings up all aiHelpDesk agents (except the Orchestrator, which is designed to run interactively by a human operator and hence the second command):
+For the former, this single Docker Compose command brings up all aiHelpDesk agents (except the Orchestrator, which is designed to run interactively by a human operator and hence the second command):
 
 ```
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml up -d
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
 ```
 
-TL;DR: of the latter is starting all agents, the optional gateway and the interfactive aiHelpDesk as sepaparte Go binaries:
+For the latter, there's a small helper `startall.sh` script that brings up all the agent Go binaries in the background including the optional Gateway and the interfactive aiHelpDesk session too:
 
 ```
-  ./database-agent &
-  ./k8s-agent &
-  ./incident-agent &
-  ./gateway &
-
-  # Interactive orchestrator
-  ./helpdesk
+  ./startall.sh
 ```
+
+Please be sure to review this helper script and set your desired LLM model for aiHelpDesk (it defaults to Anthropic's Haiku) and your API key.
 
 See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instructions on how to deploy aiHelpDesk either as binaries (simpler) or manually by cloning the repo.
 

@@ -60,6 +60,7 @@ binaries:
 			GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
 				go build -ldflags="$(LDFLAGS)" -o $$outdir/$$bin $$pkg || exit 1; \
 		done; \
+		cp deploy/docker-compose/startall.sh $$outdir/; \
 		tar -czf $(DIST)/helpdesk-$(VERSION)-$$os-$$arch.tar.gz \
 			-C $(DIST) helpdesk-$(VERSION)-$$os-$$arch; \
 		rm -rf $$outdir; \
@@ -76,6 +77,7 @@ bundle:
 	echo "==> docker-compose files"; \
 	cp deploy/docker-compose/.env.example $$bundledir/docker-compose/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/docker-compose/; \
+	cp deploy/docker-compose/startall.sh $$bundledir/docker-compose/; \
 	sed -e '/^    build:/,/^      dockerfile:/d' \
 	    -e 's|image: helpdesk:latest|image: $(IMAGE):$(VERSION)|' \
 	    deploy/docker-compose/docker-compose.yaml \
