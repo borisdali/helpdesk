@@ -1,6 +1,8 @@
 # helpdesk release Makefile
 #
 # Usage:
+#   make test                   Run all unit tests
+#   make cover                  Run tests with coverage report (dist/coverage.html)
 #   make image                  Build Docker image locally
 #   make push                   Build multi-arch image and push to GHCR
 #   make binaries               Cross-compile Go binaries (4 platforms)
@@ -24,7 +26,20 @@ BIN_PKGS := \
 	helpdesk:./cmd/helpdesk/ \
 	srebot:./cmd/srebot/
 
-.PHONY: image push binaries bundle release github-release clean
+.PHONY: test cover image push binaries bundle release github-release clean
+
+# ---------------------------------------------------------------------------
+# Tests and coverage
+# ---------------------------------------------------------------------------
+test:
+	go test ./...
+
+cover:
+	@mkdir -p $(DIST)
+	go test -coverprofile=$(DIST)/coverage.out $$(go list ./... | xargs -I{} sh -c 'ls $$(go list -f "{{.Dir}}" {})/*_test.go 2>/dev/null && echo {}' | grep -v '_test\.go$$')
+	go tool cover -func=$(DIST)/coverage.out
+	go tool cover -html=$(DIST)/coverage.out -o $(DIST)/coverage.html
+	@echo "Coverage report: $(DIST)/coverage.html"
 
 # ---------------------------------------------------------------------------
 # Docker image (local, current arch)

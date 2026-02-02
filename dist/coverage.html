@@ -1,0 +1,3930 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>database: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">helpdesk/agents/database/main.go (0.0%)</option>
+				
+				<option value="file1">helpdesk/agents/database/tools.go (11.2%)</option>
+				
+				<option value="file2">helpdesk/agents/incident/bundle.go (78.8%)</option>
+				
+				<option value="file3">helpdesk/agents/incident/main.go (0.0%)</option>
+				
+				<option value="file4">helpdesk/agents/incident/tools.go (0.0%)</option>
+				
+				<option value="file5">helpdesk/agents/k8s/k8sclient.go (17.5%)</option>
+				
+				<option value="file6">helpdesk/agents/k8s/k8stypes.go (91.3%)</option>
+				
+				<option value="file7">helpdesk/agents/k8s/main.go (0.0%)</option>
+				
+				<option value="file8">helpdesk/agents/k8s/tools.go (20.9%)</option>
+				
+				<option value="file9">helpdesk/agentutil/agentutil.go (25.5%)</option>
+				
+				<option value="file10">helpdesk/cmd/gateway/gateway.go (29.6%)</option>
+				
+				<option value="file11">helpdesk/cmd/gateway/main.go (0.0%)</option>
+				
+				<option value="file12">helpdesk/cmd/helpdesk/discovery.go (0.0%)</option>
+				
+				<option value="file13">helpdesk/cmd/helpdesk/main.go (0.0%)</option>
+				
+				<option value="file14">helpdesk/cmd/helpdesk/orchestrator.go (67.8%)</option>
+				
+				<option value="file15">helpdesk/cmd/srebot/main.go (13.8%)</option>
+				
+				<option value="file16">helpdesk/internal/discovery/discovery.go (100.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">// Package main implements the PostgreSQL database troubleshooting agent.
+// It exposes psql-based tools via the A2A protocol for diagnosing database
+// connectivity, performance, and configuration issues.
+package main
+
+import (
+        "context"
+        "log/slog"
+        "os"
+
+        "github.com/a2aproject/a2a-go/a2a"
+        "google.golang.org/adk/agent/llmagent"
+        "google.golang.org/adk/tool"
+        "google.golang.org/adk/tool/functiontool"
+
+        "helpdesk/agentutil"
+        "helpdesk/prompts"
+)
+
+func main() <span class="cov0" title="0">{
+        cfg := agentutil.MustLoadConfig("localhost:1100")
+        ctx := context.Background()
+
+        llmModel, err := agentutil.NewLLM(ctx, cfg)
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create LLM model", "err", err)
+                os.Exit(1)
+        }</span>
+
+        // Create psql tools
+        <span class="cov0" title="0">tools, err := createTools()
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create tools", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">dbAgent, err := llmagent.New(llmagent.Config{
+                Name:        "postgres_database_agent",
+                Description: "PostgreSQL database troubleshooting agent that can check connections, query statistics, configuration, replication status, and diagnose performance issues.",
+                Instruction: prompts.Database,
+                Model:       llmModel,
+                Tools:       tools,
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create database agent", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">cardOpts := agentutil.CardOptions{
+                Version:  "1.0.0",
+                Provider: &amp;a2a.AgentProvider{Org: "Helpdesk"},
+                SkillTags: map[string][]string{
+                        "postgres_database_agent":                          {"postgresql", "database", "diagnostics"},
+                        "postgres_database_agent-check_connection":         {"postgresql", "connectivity"},
+                        "postgres_database_agent-get_database_info":        {"postgresql", "metadata"},
+                        "postgres_database_agent-get_active_connections":   {"postgresql", "performance", "connections"},
+                        "postgres_database_agent-get_connection_stats":     {"postgresql", "performance", "connections"},
+                        "postgres_database_agent-get_database_stats":       {"postgresql", "performance", "statistics"},
+                        "postgres_database_agent-get_config_parameter":     {"postgresql", "configuration"},
+                        "postgres_database_agent-get_replication_status":   {"postgresql", "replication", "ha"},
+                        "postgres_database_agent-get_lock_info":            {"postgresql", "locks", "contention"},
+                        "postgres_database_agent-get_table_stats":          {"postgresql", "tables", "performance"},
+                },
+                SkillExamples: map[string][]string{
+                        "postgres_database_agent-check_connection":       {"Check if the production database is reachable"},
+                        "postgres_database_agent-get_active_connections": {"Show me all long-running queries"},
+                        "postgres_database_agent-get_lock_info":          {"Are there any blocking locks on the database?"},
+                        "postgres_database_agent-get_replication_status": {"What is the replication lag?"},
+                },
+        }
+
+        if err := agentutil.Serve(ctx, dbAgent, cfg, cardOpts); err != nil </span><span class="cov0" title="0">{
+                slog.Error("server stopped", "err", err)
+                os.Exit(1)
+        }</span>
+}
+
+func createTools() ([]tool.Tool, error) <span class="cov0" title="0">{
+        checkConnectionToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "check_connection",
+                Description: "Test database connectivity and get basic server information including version, current database, user, and server address.",
+        }, checkConnectionTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getDatabaseInfoToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_database_info",
+                Description: "List all databases with their sizes, owners, encoding, and whether the server is in recovery mode.",
+        }, getDatabaseInfoTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getActiveConnectionsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_active_connections",
+                Description: "Show active database connections and running queries from pg_stat_activity. Useful for finding long-running queries.",
+        }, getActiveConnectionsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getConnectionStatsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_connection_stats",
+                Description: "Get connection statistics summary: total connections, active, idle, waiting on locks per database.",
+        }, getConnectionStatsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getDatabaseStatsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_database_stats",
+                Description: "Get database-level statistics including commits, rollbacks, cache hit ratio, row operations, conflicts, and deadlocks.",
+        }, getDatabaseStatsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getConfigParameterToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_config_parameter",
+                Description: "Get PostgreSQL configuration parameters. Can search for specific parameter or show common important settings.",
+        }, getConfigParameterTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getReplicationStatusToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_replication_status",
+                Description: "Get replication status: primary/replica role, replication slots, and lag information.",
+        }, getReplicationStatusTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getLockInfoToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_lock_info",
+                Description: "Find blocking locks and which queries are waiting on which other queries.",
+        }, getLockInfoTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getTableStatsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_table_stats",
+                Description: "Get table-level statistics: size, row counts, dead tuples, vacuum times, and scan types.",
+        }, getTableStatsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">return []tool.Tool{
+                checkConnectionToolDef,
+                getDatabaseInfoToolDef,
+                getActiveConnectionsToolDef,
+                getConnectionStatsToolDef,
+                getDatabaseStatsToolDef,
+                getConfigParameterToolDef,
+                getReplicationStatusToolDef,
+                getLockInfoToolDef,
+                getTableStatsToolDef,
+        }, nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package main
+
+import (
+        "context"
+        "fmt"
+        "log/slog"
+        "os"
+        "os/exec"
+        "strings"
+
+        "google.golang.org/adk/tool"
+)
+
+// diagnosePsqlError examines psql output for common failure patterns and returns
+// a clear, actionable error message alongside the raw output.
+func diagnosePsqlError(output string) string <span class="cov8" title="1">{
+        out := strings.ToLower(output)
+
+        switch </span>{
+        case strings.Contains(out, "does not exist"):<span class="cov8" title="1">
+                return "The requested database does not exist on this server. " +
+                        "Verify the 'dbname' in the connection string is correct, or create the database first (e.g., CREATE DATABASE &lt;name&gt;)."</span>
+
+        case strings.Contains(out, "connection refused"):<span class="cov8" title="1">
+                return "Connection refused. The PostgreSQL server may not be running, " +
+                        "or the host/port in the connection string is wrong. " +
+                        "Check that the server is started and listening on the expected address and port."</span>
+
+        case strings.Contains(out, "could not translate host name"):<span class="cov8" title="1">
+                return "The hostname in the connection string could not be resolved. " +
+                        "Check for typos in the 'host' parameter and ensure DNS is working."</span>
+
+        case strings.Contains(out, "password authentication failed"):<span class="cov8" title="1">
+                return "Authentication failed. The username or password is incorrect. " +
+                        "Verify the 'user' and 'password' in the connection string and the server's pg_hba.conf."</span>
+
+        case strings.Contains(out, "no pg_hba.conf entry"):<span class="cov8" title="1">
+                return "Connection rejected by pg_hba.conf. The server does not allow connections " +
+                        "from this host/user/database combination. Update pg_hba.conf and reload the server."</span>
+
+        case strings.Contains(out, "timeout expired"), strings.Contains(out, "could not connect"):<span class="cov8" title="1">
+                return "Connection timed out. The server may be unreachable due to network issues, " +
+                        "firewall rules, or an incorrect host/port."</span>
+
+        case strings.Contains(out, "role") &amp;&amp; strings.Contains(out, "does not exist"):<span class="cov0" title="0">
+                return "The specified user role does not exist on this server. " +
+                        "Verify the 'user' in the connection string or create the role first."</span>
+
+        case strings.Contains(out, "ssl") &amp;&amp; (strings.Contains(out, "unsupported") || strings.Contains(out, "required")):<span class="cov8" title="1">
+                return "SSL configuration mismatch. The server and client disagree on SSL requirements. " +
+                        "Check the 'sslmode' parameter in the connection string."</span>
+
+        default:<span class="cov8" title="1">
+                return ""</span>
+        }
+}
+
+// runPsql executes a psql command and returns the output.
+// The provided ctx controls cancellation — if it expires, psql is killed.
+func runPsql(ctx context.Context, connStr string, query string) (string, error) <span class="cov0" title="0">{
+        args := []string{"-c", query, "-x"}
+        if connStr != "" </span><span class="cov0" title="0">{
+                args = append([]string{connStr}, args...)
+        }</span>
+        <span class="cov0" title="0">cmd := exec.CommandContext(ctx, "psql", args...)
+        cmd.Env = append(os.Environ(), "PGCONNECT_TIMEOUT=10")
+        output, err := cmd.CombinedOutput()
+        if err != nil </span><span class="cov0" title="0">{
+                out := strings.TrimSpace(string(output))
+                if out == "" </span><span class="cov0" title="0">{
+                        out = "(no output from psql)"
+                }</span>
+                <span class="cov0" title="0">slog.Error("psql command failed", "connStr", connStr, "err", err, "output", out)
+                if ctx.Err() != nil </span><span class="cov0" title="0">{
+                        return "", fmt.Errorf("psql timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
+                }</span>
+                <span class="cov0" title="0">if diagnosis := diagnosePsqlError(out); diagnosis != "" </span><span class="cov0" title="0">{
+                        return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+                }</span>
+                <span class="cov0" title="0">return "", fmt.Errorf("psql failed: %v\nOutput: %s", err, out)</span>
+        }
+        <span class="cov0" title="0">return string(output), nil</span>
+}
+
+// PsqlResult is the standard output type for all psql tools.
+type PsqlResult struct {
+        Output string `json:"output"`
+}
+
+// CheckConnectionArgs defines arguments for the check_connection tool.
+type CheckConnectionArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string (e.g., 'host=localhost port=5432 dbname=postgres user=postgres'). If empty, uses environment defaults."`
+}
+
+func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        query := "SELECT version(), current_database(), current_user, inet_server_addr(), inet_server_port();"
+        output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("connection failed: %v", err)
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: fmt.Sprintf("Connection successful!\n%s", output)}, nil</span>
+}
+
+// GetDatabaseInfoArgs defines arguments for the get_database_info tool.
+type GetDatabaseInfoArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        query := `SELECT
+                d.datname as database,
+                pg_size_pretty(pg_database_size(d.datname)) as size,
+                pg_catalog.pg_get_userbyid(d.datdba) as owner,
+                pg_catalog.pg_encoding_to_char(d.encoding) as encoding,
+                d.datcollate as collation,
+                d.datconnlimit as connection_limit,
+                CASE WHEN pg_is_in_recovery() THEN 'Yes' ELSE 'No' END as in_recovery
+        FROM pg_database d
+        WHERE d.datistemplate = false
+        ORDER BY pg_database_size(d.datname) DESC;`
+
+        output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting database info: %v", err)
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+
+// GetActiveConnectionsArgs defines arguments for the get_active_connections tool.
+type GetActiveConnectionsArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+        IncludeIdle      bool   `json:"include_idle,omitempty" jsonschema:"If true, include idle connections. Default shows only active queries."`
+}
+
+func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        stateFilter := "AND state != 'idle'"
+        if args.IncludeIdle </span><span class="cov0" title="0">{
+                stateFilter = ""
+        }</span>
+
+        <span class="cov0" title="0">query := fmt.Sprintf(`SELECT
+                pid,
+                usename as user,
+                datname as database,
+                client_addr,
+                state,
+                wait_event_type,
+                wait_event,
+                EXTRACT(EPOCH FROM (now() - query_start))::int as query_seconds,
+                LEFT(query, 100) as query_preview
+        FROM pg_stat_activity
+        WHERE pid != pg_backend_pid()
+        %s
+        ORDER BY query_start ASC NULLS LAST
+        LIMIT 50;`, stateFilter)
+
+        output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting active connections: %v", err)
+        }</span>
+        <span class="cov0" title="0">if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") </span><span class="cov0" title="0">{
+                return PsqlResult{Output: "No active connections found."}, nil
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+
+// GetConnectionStatsArgs defines arguments for the get_connection_stats tool.
+type GetConnectionStatsArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        query := `SELECT
+                datname as database,
+                COUNT(*) as total_connections,
+                COUNT(*) FILTER (WHERE state = 'active') as active,
+                COUNT(*) FILTER (WHERE state = 'idle') as idle,
+                COUNT(*) FILTER (WHERE state = 'idle in transaction') as idle_in_transaction,
+                COUNT(*) FILTER (WHERE wait_event_type = 'Lock') as waiting_on_lock,
+                (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') as max_connections
+        FROM pg_stat_activity
+        GROUP BY datname
+        ORDER BY total_connections DESC;`
+
+        output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting connection stats: %v", err)
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+
+// GetDatabaseStatsArgs defines arguments for the get_database_stats tool.
+type GetDatabaseStatsArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        query := `SELECT
+                datname as database,
+                numbackends as connections,
+                xact_commit as commits,
+                xact_rollback as rollbacks,
+                blks_read as blocks_read,
+                blks_hit as cache_hits,
+                ROUND(100.0 * blks_hit / NULLIF(blks_read + blks_hit, 0), 2) as cache_hit_ratio,
+                tup_returned as rows_returned,
+                tup_fetched as rows_fetched,
+                tup_inserted as rows_inserted,
+                tup_updated as rows_updated,
+                tup_deleted as rows_deleted,
+                conflicts,
+                deadlocks
+        FROM pg_stat_database
+        WHERE datname NOT LIKE 'template%'
+        ORDER BY numbackends DESC;`
+
+        output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting database stats: %v", err)
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+
+// GetConfigParameterArgs defines arguments for the get_config_parameter tool.
+type GetConfigParameterArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+        ParameterName    string `json:"parameter_name,omitempty" jsonschema:"Specific parameter name to retrieve (e.g., 'max_connections'). If empty, shows common important parameters."`
+}
+
+func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        var query string
+        if args.ParameterName != "" </span><span class="cov0" title="0">{
+                query = fmt.Sprintf(`SELECT name, setting, unit, short_desc
+                        FROM pg_settings
+                        WHERE name ILIKE '%%%s%%'
+                        ORDER BY name;`, args.ParameterName)
+        }</span> else<span class="cov0" title="0"> {
+                query = `SELECT name, setting, unit, short_desc
+                        FROM pg_settings
+                        WHERE name IN (
+                                'max_connections', 'shared_buffers', 'effective_cache_size',
+                                'work_mem', 'maintenance_work_mem', 'wal_level',
+                                'max_wal_senders', 'max_replication_slots', 'hot_standby',
+                                'listen_addresses', 'port', 'log_min_duration_statement',
+                                'statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'
+                        )
+                        ORDER BY name;`
+        }</span>
+
+        <span class="cov0" title="0">output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting config parameters: %v", err)
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+
+// GetReplicationStatusArgs defines arguments for the get_replication_status tool.
+type GetReplicationStatusArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        query := `SELECT
+                CASE WHEN pg_is_in_recovery() THEN 'Replica' ELSE 'Primary' END as role,
+                pg_is_in_recovery() as is_in_recovery;
+
+        SELECT
+                client_addr,
+                usename as user,
+                application_name,
+                state,
+                sync_state,
+                pg_wal_lsn_diff(sent_lsn, write_lsn) as write_lag_bytes,
+                pg_wal_lsn_diff(sent_lsn, flush_lsn) as flush_lag_bytes,
+                pg_wal_lsn_diff(sent_lsn, replay_lsn) as replay_lag_bytes
+        FROM pg_stat_replication;
+
+        SELECT
+                slot_name,
+                slot_type,
+                active,
+                pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) as lag_bytes
+        FROM pg_replication_slots;`
+
+        output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting replication status: %v", err)
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+
+// GetLockInfoArgs defines arguments for the get_lock_info tool.
+type GetLockInfoArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        query := `SELECT
+                blocked_locks.pid AS blocked_pid,
+                blocked_activity.usename AS blocked_user,
+                blocking_locks.pid AS blocking_pid,
+                blocking_activity.usename AS blocking_user,
+                blocked_activity.query AS blocked_query,
+                blocking_activity.query AS blocking_query
+        FROM pg_catalog.pg_locks blocked_locks
+        JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+        JOIN pg_catalog.pg_locks blocking_locks
+                ON blocking_locks.locktype = blocked_locks.locktype
+                AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+                AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+                AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+                AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+                AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+                AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+                AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+                AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+                AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+                AND blocking_locks.pid != blocked_locks.pid
+        JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+        WHERE NOT blocked_locks.granted;`
+
+        output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting lock info: %v", err)
+        }</span>
+        <span class="cov0" title="0">if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") </span><span class="cov0" title="0">{
+                return PsqlResult{Output: "No blocking locks found."}, nil
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+
+// GetTableStatsArgs defines arguments for the get_table_stats tool.
+type GetTableStatsArgs struct {
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+        SchemaName       string `json:"schema_name,omitempty" jsonschema:"Schema name to filter tables. Default is 'public'."`
+        TableName        string `json:"table_name,omitempty" jsonschema:"Specific table name to get stats for."`
+}
+
+func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, error) <span class="cov0" title="0">{
+        schemaFilter := "public"
+        if args.SchemaName != "" </span><span class="cov0" title="0">{
+                schemaFilter = args.SchemaName
+        }</span>
+
+        <span class="cov0" title="0">var query string
+        if args.TableName != "" </span><span class="cov0" title="0">{
+                query = fmt.Sprintf(`SELECT
+                        schemaname,
+                        relname as table_name,
+                        pg_size_pretty(pg_total_relation_size(relid)) as total_size,
+                        n_live_tup as live_rows,
+                        n_dead_tup as dead_rows,
+                        ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) as dead_ratio,
+                        last_vacuum,
+                        last_autovacuum,
+                        last_analyze,
+                        last_autoanalyze,
+                        seq_scan,
+                        idx_scan
+                FROM pg_stat_user_tables
+                WHERE schemaname = '%s' AND relname = '%s';`, schemaFilter, args.TableName)
+        }</span> else<span class="cov0" title="0"> {
+                query = fmt.Sprintf(`SELECT
+                        relname as table_name,
+                        pg_size_pretty(pg_total_relation_size(relid)) as total_size,
+                        n_live_tup as live_rows,
+                        n_dead_tup as dead_rows,
+                        seq_scan,
+                        idx_scan
+                FROM pg_stat_user_tables
+                WHERE schemaname = '%s'
+                ORDER BY pg_total_relation_size(relid) DESC
+                LIMIT 20;`, schemaFilter)
+        }</span>
+
+        <span class="cov0" title="0">output, err := runPsql(ctx, args.ConnectionString, query)
+        if err != nil </span><span class="cov0" title="0">{
+                return PsqlResult{}, fmt.Errorf("error getting table stats: %v", err)
+        }</span>
+        <span class="cov0" title="0">return PsqlResult{Output: output}, nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">package main
+
+import (
+        "archive/tar"
+        "compress/gzip"
+        "encoding/json"
+        "fmt"
+        "os"
+        "path/filepath"
+        "strings"
+        "time"
+)
+
+// Manifest describes the incident bundle contents.
+type Manifest struct {
+        IncidentID  string    `json:"incident_id"`
+        InfraKey    string    `json:"infra_key"`
+        Description string    `json:"description"`
+        Timestamp   time.Time `json:"timestamp"`
+        Layers      []string  `json:"layers"`
+        Errors      []string  `json:"errors,omitempty"`
+}
+
+// assembleTarball creates a .tar.gz bundle from collected layer data.
+// layers is a map of layer name → (filename → content).
+// Returns the path to the written tarball.
+func assembleTarball(manifest Manifest, layers map[string]map[string]string, outputDir string) (string, error) <span class="cov8" title="1">{
+        ts := manifest.Timestamp.Format("20060102-150405")
+        prefix := fmt.Sprintf("incident-%s-%s", manifest.IncidentID, ts)
+        filename := prefix + ".tar.gz"
+        outPath := filepath.Join(outputDir, filename)
+
+        f, err := os.Create(outPath)
+        if err != nil </span><span class="cov0" title="0">{
+                return "", fmt.Errorf("failed to create tarball: %v", err)
+        }</span>
+        <span class="cov8" title="1">defer f.Close()
+
+        gw := gzip.NewWriter(f)
+        defer gw.Close()
+
+        tw := tar.NewWriter(gw)
+        defer tw.Close()
+
+        // Write manifest.json
+        manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+        if err != nil </span><span class="cov0" title="0">{
+                return "", fmt.Errorf("failed to marshal manifest: %v", err)
+        }</span>
+        <span class="cov8" title="1">if err := addFileToTar(tw, filepath.Join(prefix, "manifest.json"), manifestJSON); err != nil </span><span class="cov0" title="0">{
+                return "", err
+        }</span>
+
+        // Write layer files
+        <span class="cov8" title="1">for layerName, files := range layers </span><span class="cov8" title="1">{
+                for fname, content := range files </span><span class="cov8" title="1">{
+                        path := filepath.Join(prefix, layerName, fname)
+                        if err := addFileToTar(tw, path, []byte(content)); err != nil </span><span class="cov0" title="0">{
+                                return "", err
+                        }</span>
+                }
+        }
+
+        // Write errors.txt if there were any errors
+        <span class="cov8" title="1">if len(manifest.Errors) &gt; 0 </span><span class="cov8" title="1">{
+                errContent := strings.Join(manifest.Errors, "\n")
+                if err := addFileToTar(tw, filepath.Join(prefix, "errors.txt"), []byte(errContent)); err != nil </span><span class="cov0" title="0">{
+                        return "", err
+                }</span>
+        }
+
+        <span class="cov8" title="1">return outPath, nil</span>
+}
+
+// addFileToTar writes a single file entry to the tar archive.
+func addFileToTar(tw *tar.Writer, name string, data []byte) error <span class="cov8" title="1">{
+        hdr := &amp;tar.Header{
+                Name:    name,
+                Mode:    0644,
+                Size:    int64(len(data)),
+                ModTime: time.Now(),
+        }
+        if err := tw.WriteHeader(hdr); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to write tar header for %s: %v", name, err)
+        }</span>
+        <span class="cov8" title="1">if _, err := tw.Write(data); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to write tar content for %s: %v", name, err)
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">// Package main implements the incident diagnostic bundle agent.
+// It collects fresh diagnostic data from multiple infrastructure layers
+// (database, Kubernetes, OS, storage) and packages them into a .tar.gz
+// bundle for vendor support.
+package main
+
+import (
+        "context"
+        "log/slog"
+        "os"
+
+        "github.com/a2aproject/a2a-go/a2a"
+        "google.golang.org/adk/agent/llmagent"
+
+        "helpdesk/agentutil"
+        "helpdesk/prompts"
+)
+
+func main() <span class="cov0" title="0">{
+        cfg := agentutil.MustLoadConfig("localhost:1104")
+        ctx := context.Background()
+
+        llmModel, err := agentutil.NewLLM(ctx, cfg)
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create LLM model", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">tools, err := createTools()
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create tools", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">incidentAgent, err := llmagent.New(llmagent.Config{
+                Name:        "incident_agent",
+                Description: "Incident diagnostic bundle agent that collects data from database, Kubernetes, OS, and storage layers and packages it into a tarball for vendor support.",
+                Instruction: prompts.Incident,
+                Model:       llmModel,
+                Tools:       tools,
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create incident agent", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">cardOpts := agentutil.CardOptions{
+                Version:  "1.0.0",
+                Provider: &amp;a2a.AgentProvider{Org: "Helpdesk"},
+                SkillTags: map[string][]string{
+                        "incident_agent":                        {"incident", "diagnostics", "bundle"},
+                        "incident_agent-create_incident_bundle": {"incident", "bundle", "diagnostics", "tarball"},
+                        "incident_agent-list_incidents":          {"incident", "listing", "history"},
+                },
+                SkillExamples: map[string][]string{
+                        "incident_agent-create_incident_bundle": {
+                                "Create a diagnostic bundle for the production database",
+                                "Collect incident data for the database running on Kubernetes",
+                        },
+                        "incident_agent-list_incidents": {"Show me all previous incident bundles"},
+                },
+        }
+
+        if err := agentutil.Serve(ctx, incidentAgent, cfg, cardOpts); err != nil </span><span class="cov0" title="0">{
+                slog.Error("server stopped", "err", err)
+                os.Exit(1)
+        }</span>
+}
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">package main
+
+import (
+        "bytes"
+        "context"
+        "crypto/rand"
+        "encoding/hex"
+        "encoding/json"
+        "fmt"
+        "log/slog"
+        "net/http"
+        "os"
+        "os/exec"
+        "path/filepath"
+        "strings"
+        "time"
+
+        "google.golang.org/adk/tool"
+        "google.golang.org/adk/tool/functiontool"
+)
+
+// --- Command helpers ---
+
+// runPsql executes a psql command and returns the output.
+func runPsql(ctx context.Context, connStr string, query string) (string, error) <span class="cov0" title="0">{
+        args := []string{"-c", query, "-x"}
+        if connStr != "" </span><span class="cov0" title="0">{
+                args = append([]string{connStr}, args...)
+        }</span>
+        <span class="cov0" title="0">cmd := exec.CommandContext(ctx, "psql", args...)
+        cmd.Env = append(os.Environ(), "PGCONNECT_TIMEOUT=10")
+        output, err := cmd.CombinedOutput()
+        if err != nil </span><span class="cov0" title="0">{
+                out := strings.TrimSpace(string(output))
+                if out == "" </span><span class="cov0" title="0">{
+                        out = "(no output from psql)"
+                }</span>
+                <span class="cov0" title="0">slog.Error("psql command failed", "err", err, "output", out)
+                return "", fmt.Errorf("psql failed: %v\nOutput: %s", err, out)</span>
+        }
+        <span class="cov0" title="0">return string(output), nil</span>
+}
+
+// runKubectl executes a kubectl command and returns the output.
+func runKubectl(ctx context.Context, kubeContext string, args ...string) (string, error) <span class="cov0" title="0">{
+        prefix := []string{"--request-timeout=10s"}
+        if kubeContext != "" </span><span class="cov0" title="0">{
+                prefix = append(prefix, "--context", kubeContext)
+        }</span>
+        <span class="cov0" title="0">args = append(prefix, args...)
+        cmd := exec.CommandContext(ctx, "kubectl", args...)
+        output, err := cmd.CombinedOutput()
+        if err != nil </span><span class="cov0" title="0">{
+                out := strings.TrimSpace(string(output))
+                if out == "" </span><span class="cov0" title="0">{
+                        out = "(no output from kubectl)"
+                }</span>
+                <span class="cov0" title="0">slog.Error("kubectl command failed", "args", args, "err", err, "output", out)
+                return "", fmt.Errorf("kubectl failed: %v\nOutput: %s", err, out)</span>
+        }
+        <span class="cov0" title="0">return string(output), nil</span>
+}
+
+// runCommand executes a generic command and returns the output.
+func runCommand(ctx context.Context, name string, args ...string) (string, error) <span class="cov0" title="0">{
+        cmd := exec.CommandContext(ctx, name, args...)
+        output, err := cmd.CombinedOutput()
+        if err != nil </span><span class="cov0" title="0">{
+                out := strings.TrimSpace(string(output))
+                if out == "" </span><span class="cov0" title="0">{
+                        out = "(no output)"
+                }</span>
+                <span class="cov0" title="0">slog.Error("command failed", "cmd", name, "args", args, "err", err, "output", out)
+                return "", fmt.Errorf("%s failed: %v\nOutput: %s", name, err, out)</span>
+        }
+        <span class="cov0" title="0">return string(output), nil</span>
+}
+
+// --- Layer collectors ---
+// Each returns (filename→content, errors).
+
+func collectDatabaseLayer(ctx context.Context, connStr string) (map[string]string, []string) <span class="cov0" title="0">{
+        files := make(map[string]string)
+        var errs []string
+
+        queries := []struct {
+                filename string
+                query    string
+        }{
+                {"version.txt", "SELECT version(), current_database(), current_user, inet_server_addr(), inet_server_port();"},
+                {"databases.txt", `SELECT
+                        d.datname as database,
+                        pg_size_pretty(pg_database_size(d.datname)) as size,
+                        pg_catalog.pg_get_userbyid(d.datdba) as owner,
+                        pg_catalog.pg_encoding_to_char(d.encoding) as encoding,
+                        d.datcollate as collation,
+                        d.datconnlimit as connection_limit,
+                        CASE WHEN pg_is_in_recovery() THEN 'Yes' ELSE 'No' END as in_recovery
+                FROM pg_database d
+                WHERE d.datistemplate = false
+                ORDER BY pg_database_size(d.datname) DESC;`},
+                {"active_connections.txt", `SELECT
+                        pid, usename as user, datname as database, client_addr, state,
+                        wait_event_type, wait_event,
+                        EXTRACT(EPOCH FROM (now() - query_start))::int as query_seconds,
+                        LEFT(query, 200) as query_preview
+                FROM pg_stat_activity
+                WHERE pid != pg_backend_pid() AND state != 'idle'
+                ORDER BY query_start ASC NULLS LAST
+                LIMIT 100;`},
+                {"connection_stats.txt", `SELECT
+                        datname as database,
+                        COUNT(*) as total_connections,
+                        COUNT(*) FILTER (WHERE state = 'active') as active,
+                        COUNT(*) FILTER (WHERE state = 'idle') as idle,
+                        COUNT(*) FILTER (WHERE state = 'idle in transaction') as idle_in_transaction,
+                        COUNT(*) FILTER (WHERE wait_event_type = 'Lock') as waiting_on_lock,
+                        (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') as max_connections
+                FROM pg_stat_activity
+                GROUP BY datname
+                ORDER BY total_connections DESC;`},
+                {"database_stats.txt", `SELECT
+                        datname as database, numbackends as connections,
+                        xact_commit as commits, xact_rollback as rollbacks,
+                        blks_read as blocks_read, blks_hit as cache_hits,
+                        ROUND(100.0 * blks_hit / NULLIF(blks_read + blks_hit, 0), 2) as cache_hit_ratio,
+                        tup_returned as rows_returned, tup_fetched as rows_fetched,
+                        tup_inserted as rows_inserted, tup_updated as rows_updated, tup_deleted as rows_deleted,
+                        conflicts, deadlocks
+                FROM pg_stat_database
+                WHERE datname NOT LIKE 'template%'
+                ORDER BY numbackends DESC;`},
+                {"config_params.txt", `SELECT name, setting, unit, short_desc
+                FROM pg_settings
+                WHERE name IN (
+                        'max_connections', 'shared_buffers', 'effective_cache_size',
+                        'work_mem', 'maintenance_work_mem', 'wal_level',
+                        'max_wal_senders', 'max_replication_slots', 'hot_standby',
+                        'listen_addresses', 'port', 'log_min_duration_statement',
+                        'statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'
+                )
+                ORDER BY name;`},
+                {"replication_status.txt", `SELECT
+                        CASE WHEN pg_is_in_recovery() THEN 'Replica' ELSE 'Primary' END as role,
+                        pg_is_in_recovery() as is_in_recovery;
+                SELECT client_addr, usename as user, application_name, state, sync_state,
+                        pg_wal_lsn_diff(sent_lsn, write_lsn) as write_lag_bytes,
+                        pg_wal_lsn_diff(sent_lsn, flush_lsn) as flush_lag_bytes,
+                        pg_wal_lsn_diff(sent_lsn, replay_lsn) as replay_lag_bytes
+                FROM pg_stat_replication;
+                SELECT slot_name, slot_type, active,
+                        pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) as lag_bytes
+                FROM pg_replication_slots;`},
+                {"locks.txt", `SELECT
+                        blocked_locks.pid AS blocked_pid,
+                        blocked_activity.usename AS blocked_user,
+                        blocking_locks.pid AS blocking_pid,
+                        blocking_activity.usename AS blocking_user,
+                        blocked_activity.query AS blocked_query,
+                        blocking_activity.query AS blocking_query
+                FROM pg_catalog.pg_locks blocked_locks
+                JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+                JOIN pg_catalog.pg_locks blocking_locks
+                        ON blocking_locks.locktype = blocked_locks.locktype
+                        AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+                        AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+                        AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+                        AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+                        AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+                        AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+                        AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+                        AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+                        AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+                        AND blocking_locks.pid != blocked_locks.pid
+                JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+                WHERE NOT blocked_locks.granted;`},
+                {"table_stats.txt", `SELECT
+                        schemaname, relname as table_name,
+                        pg_size_pretty(pg_total_relation_size(relid)) as total_size,
+                        n_live_tup as live_rows, n_dead_tup as dead_rows,
+                        ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) as dead_ratio,
+                        last_vacuum, last_autovacuum, last_analyze, last_autoanalyze,
+                        seq_scan, idx_scan
+                FROM pg_stat_user_tables
+                ORDER BY pg_total_relation_size(relid) DESC
+                LIMIT 30;`},
+        }
+
+        for _, q := range queries </span><span class="cov0" title="0">{
+                output, err := runPsql(ctx, connStr, q.query)
+                if err != nil </span><span class="cov0" title="0">{
+                        errs = append(errs, fmt.Sprintf("database/%s: %v", q.filename, err))
+                        files[q.filename] = fmt.Sprintf("ERROR: %v", err)
+                }</span> else<span class="cov0" title="0"> {
+                        files[q.filename] = output
+                }</span>
+        }
+
+        <span class="cov0" title="0">return files, errs</span>
+}
+
+func collectKubernetesLayer(ctx context.Context, kubeContext, namespace string) (map[string]string, []string) <span class="cov0" title="0">{
+        files := make(map[string]string)
+        var errs []string
+
+        commands := []struct {
+                filename string
+                args     []string
+        }{
+                {"pods.txt", []string{"get", "pods", "-o", "wide", "-n", namespace}},
+                {"pods_all.txt", []string{"get", "pods", "-o", "wide", "--all-namespaces"}},
+                {"services.txt", []string{"get", "svc", "-o", "wide", "-n", namespace}},
+                {"endpoints.txt", []string{"get", "endpoints", "-o", "wide", "-n", namespace}},
+                {"events.txt", []string{"get", "events", "--sort-by=.lastTimestamp", "-n", namespace}},
+                {"nodes.txt", []string{"get", "nodes", "-o", "wide"}},
+                {"top_nodes.txt", []string{"top", "nodes"}},
+                {"top_pods.txt", []string{"top", "pods", "-n", namespace}},
+        }
+
+        for _, c := range commands </span><span class="cov0" title="0">{
+                output, err := runKubectl(ctx, kubeContext, c.args...)
+                if err != nil </span><span class="cov0" title="0">{
+                        errs = append(errs, fmt.Sprintf("kubernetes/%s: %v", c.filename, err))
+                        files[c.filename] = fmt.Sprintf("ERROR: %v", err)
+                }</span> else<span class="cov0" title="0"> {
+                        files[c.filename] = output
+                }</span>
+        }
+
+        <span class="cov0" title="0">return files, errs</span>
+}
+
+func collectOSLayer(ctx context.Context) (map[string]string, []string) <span class="cov0" title="0">{
+        files := make(map[string]string)
+        var errs []string
+
+        commands := []struct {
+                filename string
+                name     string
+                args     []string
+        }{
+                {"uname.txt", "uname", []string{"-a"}},
+                {"uptime.txt", "uptime", nil},
+                {"hostname.txt", "hostname", nil},
+                {"top.txt", "top", []string{"-b", "-n", "1"}},
+                {"ps.txt", "ps", []string{"aux", "--sort=-pcpu"}},
+                {"free.txt", "free", []string{"-h"}},
+                {"vmstat.txt", "vmstat", []string{"1", "3"}},
+                {"dmesg.txt", "dmesg", []string{"--time-format=iso", "-T"}},
+                {"sysctl.txt", "sysctl", []string{"-a"}},
+        }
+
+        for _, c := range commands </span><span class="cov0" title="0">{
+                output, err := runCommand(ctx, c.name, c.args...)
+                if err != nil </span><span class="cov0" title="0">{
+                        errs = append(errs, fmt.Sprintf("os/%s: %v", c.filename, err))
+                        files[c.filename] = fmt.Sprintf("ERROR: %v", err)
+                }</span> else<span class="cov0" title="0"> {
+                        files[c.filename] = output
+                }</span>
+        }
+
+        <span class="cov0" title="0">return files, errs</span>
+}
+
+func collectStorageLayer(ctx context.Context) (map[string]string, []string) <span class="cov0" title="0">{
+        files := make(map[string]string)
+        var errs []string
+
+        commands := []struct {
+                filename string
+                name     string
+                args     []string
+        }{
+                {"df.txt", "df", []string{"-h"}},
+                {"df_inodes.txt", "df", []string{"-i"}},
+                {"mount.txt", "mount", nil},
+                {"lsblk.txt", "lsblk", []string{"-f"}},
+                {"iostat.txt", "iostat", []string{"-x", "1", "3"}},
+        }
+
+        for _, c := range commands </span><span class="cov0" title="0">{
+                output, err := runCommand(ctx, c.name, c.args...)
+                if err != nil </span><span class="cov0" title="0">{
+                        errs = append(errs, fmt.Sprintf("storage/%s: %v", c.filename, err))
+                        files[c.filename] = fmt.Sprintf("ERROR: %v", err)
+                }</span> else<span class="cov0" title="0"> {
+                        files[c.filename] = output
+                }</span>
+        }
+
+        <span class="cov0" title="0">return files, errs</span>
+}
+
+// --- Tool definition ---
+
+// CreateIncidentBundleArgs defines arguments for the create_incident_bundle tool.
+type CreateIncidentBundleArgs struct {
+        InfraKey         string `json:"infra_key,omitempty" jsonschema:"Identifier for the infrastructure being diagnosed (e.g., 'global-corp-db'). Defaults to 'unknown'."`
+        Description      string `json:"description,omitempty" jsonschema:"Brief description of the incident or reason for the bundle. Defaults to 'Diagnostic bundle'."`
+        ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string for database layer collection. If empty, database layer is skipped."`
+        K8sContext       string `json:"k8s_context,omitempty" jsonschema:"Kubernetes context for k8s layer collection. If empty, k8s layer is skipped."`
+        K8sNamespace     string `json:"k8s_namespace,omitempty" jsonschema:"Kubernetes namespace for k8s commands. Defaults to 'default'."`
+        CallbackURL      string `json:"callback_url,omitempty" jsonschema:"Optional HTTP(S) URL. When set, the agent POSTs the IncidentBundleResult JSON to this URL after the bundle is created. Best-effort: failures are logged but do not affect the tool result."`
+}
+
+// IncidentBundleResult is the output of create_incident_bundle.
+type IncidentBundleResult struct {
+        IncidentID string   `json:"incident_id"`
+        BundlePath string   `json:"bundle_path"`
+        Timestamp  string   `json:"timestamp"`
+        Layers     []string `json:"layers"`
+        Errors     []string `json:"errors,omitempty"`
+}
+
+func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (IncidentBundleResult, error) <span class="cov0" title="0">{
+        now := time.Now()
+        incidentID := generateShortID()
+
+        if args.InfraKey == "" </span><span class="cov0" title="0">{
+                args.InfraKey = "unknown"
+        }</span>
+        <span class="cov0" title="0">if args.Description == "" </span><span class="cov0" title="0">{
+                args.Description = "Diagnostic bundle"
+        }</span>
+
+        <span class="cov0" title="0">namespace := args.K8sNamespace
+        if namespace == "" </span><span class="cov0" title="0">{
+                namespace = "default"
+        }</span>
+
+        <span class="cov0" title="0">outputDir := os.Getenv("HELPDESK_INCIDENT_DIR")
+        if outputDir == "" </span><span class="cov0" title="0">{
+                outputDir = "."
+        }</span>
+
+        <span class="cov0" title="0">slog.Info("creating incident bundle",
+                "incident_id", incidentID,
+                "infra_key", args.InfraKey,
+                "description", args.Description,
+        )
+
+        layers := make(map[string]map[string]string)
+        var collectedLayers []string
+        var allErrors []string
+
+        // Database layer
+        if args.ConnectionString != "" </span><span class="cov0" title="0">{
+                slog.Info("collecting database layer", "incident_id", incidentID)
+                files, errs := collectDatabaseLayer(ctx, args.ConnectionString)
+                layers["database"] = files
+                collectedLayers = append(collectedLayers, "database")
+                allErrors = append(allErrors, errs...)
+        }</span>
+
+        // Kubernetes layer
+        <span class="cov0" title="0">if args.K8sContext != "" </span><span class="cov0" title="0">{
+                slog.Info("collecting kubernetes layer", "incident_id", incidentID)
+                files, errs := collectKubernetesLayer(ctx, args.K8sContext, namespace)
+                layers["kubernetes"] = files
+                collectedLayers = append(collectedLayers, "kubernetes")
+                allErrors = append(allErrors, errs...)
+        }</span>
+
+        // OS layer (always collected)
+        <span class="cov0" title="0">slog.Info("collecting os layer", "incident_id", incidentID)
+        </span><span class="cov0" title="0">{
+                files, errs := collectOSLayer(ctx)
+                layers["os"] = files
+                collectedLayers = append(collectedLayers, "os")
+                allErrors = append(allErrors, errs...)
+        }</span>
+
+        // Storage layer (always collected)
+        <span class="cov0" title="0">slog.Info("collecting storage layer", "incident_id", incidentID)
+        </span><span class="cov0" title="0">{
+                files, errs := collectStorageLayer(ctx)
+                layers["storage"] = files
+                collectedLayers = append(collectedLayers, "storage")
+                allErrors = append(allErrors, errs...)
+        }</span>
+
+        <span class="cov0" title="0">manifest := Manifest{
+                IncidentID:  incidentID,
+                InfraKey:    args.InfraKey,
+                Description: args.Description,
+                Timestamp:   now,
+                Layers:      collectedLayers,
+                Errors:      allErrors,
+        }
+
+        bundlePath, err := assembleTarball(manifest, layers, outputDir)
+        if err != nil </span><span class="cov0" title="0">{
+                return IncidentBundleResult{}, fmt.Errorf("failed to assemble tarball: %v", err)
+        }</span>
+
+        // Record in incidents.json index.
+        <span class="cov0" title="0">if err := appendToIndex(outputDir, manifest, bundlePath); err != nil </span><span class="cov0" title="0">{
+                slog.Warn("failed to update incidents.json index", "err", err)
+                // Non-fatal: the tarball was already written successfully.
+        }</span>
+
+        <span class="cov0" title="0">slog.Info("incident bundle created",
+                "incident_id", incidentID,
+                "bundle_path", bundlePath,
+                "layers", collectedLayers,
+                "error_count", len(allErrors),
+        )
+
+        result := IncidentBundleResult{
+                IncidentID: incidentID,
+                BundlePath: bundlePath,
+                Timestamp:  now.Format("20060102-150405"),
+                Layers:     collectedLayers,
+                Errors:     allErrors,
+        }
+
+        if args.CallbackURL != "" </span><span class="cov0" title="0">{
+                go postCallback(args.CallbackURL, result, incidentID)
+        }</span>
+
+        <span class="cov0" title="0">return result, nil</span>
+}
+
+// postCallback POSTs the incident result to a callback URL. Best-effort: failures
+// are logged but do not affect the tool result.
+func postCallback(callbackURL string, result IncidentBundleResult, incidentID string) <span class="cov0" title="0">{
+        body, err := json.Marshal(result)
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Warn("callback: failed to marshal result", "incident_id", incidentID, "err", err)
+                return
+        }</span>
+
+        <span class="cov0" title="0">client := &amp;http.Client{Timeout: 30 * time.Second}
+        resp, err := client.Post(callbackURL, "application/json", bytes.NewReader(body))
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Warn("callback: POST failed", "incident_id", incidentID, "url", callbackURL, "err", err)
+                return
+        }</span>
+        <span class="cov0" title="0">defer resp.Body.Close()
+
+        if resp.StatusCode &gt;= 300 </span><span class="cov0" title="0">{
+                slog.Warn("callback: non-success status", "incident_id", incidentID, "url", callbackURL, "status", resp.StatusCode)
+                return
+        }</span>
+
+        <span class="cov0" title="0">slog.Info("callback: delivered", "incident_id", incidentID, "url", callbackURL, "status", resp.StatusCode)</span>
+}
+
+// generateShortID returns an 8-character hex string using crypto/rand.
+func generateShortID() string <span class="cov0" title="0">{
+        b := make([]byte, 4)
+        if _, err := rand.Read(b); err != nil </span><span class="cov0" title="0">{
+                // Fallback to timestamp if crypto/rand fails (should never happen).
+                return fmt.Sprintf("%08x", time.Now().UnixNano()&amp;0xffffffff)
+        }</span>
+        <span class="cov0" title="0">return hex.EncodeToString(b)</span>
+}
+
+// --- Index file (incidents.json) ---
+
+const indexFileName = "incidents.json"
+
+// IndexEntry is one record in the incidents.json append-only log.
+type IndexEntry struct {
+        IncidentID  string   `json:"incident_id"`
+        InfraKey    string   `json:"infra_key"`
+        Description string   `json:"description"`
+        Timestamp   string   `json:"timestamp"`
+        BundlePath  string   `json:"bundle_path"`
+        Layers      []string `json:"layers"`
+        ErrorCount  int      `json:"error_count"`
+}
+
+// appendToIndex reads the existing incidents.json (if any), appends a new entry, and writes it back.
+func appendToIndex(outputDir string, m Manifest, bundlePath string) error <span class="cov0" title="0">{
+        indexPath := filepath.Join(outputDir, indexFileName)
+
+        var entries []IndexEntry
+        if data, err := os.ReadFile(indexPath); err == nil </span><span class="cov0" title="0">{
+                if err := json.Unmarshal(data, &amp;entries); err != nil </span><span class="cov0" title="0">{
+                        slog.Warn("incidents.json is corrupted, starting fresh", "err", err)
+                        entries = nil
+                }</span>
+        }
+
+        <span class="cov0" title="0">entries = append(entries, IndexEntry{
+                IncidentID:  m.IncidentID,
+                InfraKey:    m.InfraKey,
+                Description: m.Description,
+                Timestamp:   m.Timestamp.Format("20060102-150405"),
+                BundlePath:  bundlePath,
+                Layers:      m.Layers,
+                ErrorCount:  len(m.Errors),
+        })
+
+        data, err := json.MarshalIndent(entries, "", "  ")
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to marshal index: %v", err)
+        }</span>
+        <span class="cov0" title="0">return os.WriteFile(indexPath, data, 0644)</span>
+}
+
+// --- list_incidents tool ---
+
+// ListIncidentsArgs defines arguments for the list_incidents tool.
+type ListIncidentsArgs struct{}
+
+// ListIncidentsResult is the output of list_incidents.
+type ListIncidentsResult struct {
+        Incidents []IndexEntry `json:"incidents"`
+}
+
+func listIncidentsTool(ctx tool.Context, args ListIncidentsArgs) (ListIncidentsResult, error) <span class="cov0" title="0">{
+        outputDir := os.Getenv("HELPDESK_INCIDENT_DIR")
+        if outputDir == "" </span><span class="cov0" title="0">{
+                outputDir = "."
+        }</span>
+
+        <span class="cov0" title="0">indexPath := filepath.Join(outputDir, indexFileName)
+        data, err := os.ReadFile(indexPath)
+        if err != nil </span><span class="cov0" title="0">{
+                if os.IsNotExist(err) </span><span class="cov0" title="0">{
+                        return ListIncidentsResult{}, nil
+                }</span>
+                <span class="cov0" title="0">return ListIncidentsResult{}, fmt.Errorf("failed to read incidents index: %v", err)</span>
+        }
+
+        <span class="cov0" title="0">var entries []IndexEntry
+        if err := json.Unmarshal(data, &amp;entries); err != nil </span><span class="cov0" title="0">{
+                return ListIncidentsResult{}, fmt.Errorf("failed to parse incidents index: %v", err)
+        }</span>
+
+        <span class="cov0" title="0">return ListIncidentsResult{Incidents: entries}, nil</span>
+}
+
+// --- Tool registration ---
+
+func createTools() ([]tool.Tool, error) <span class="cov0" title="0">{
+        bundleTool, err := functiontool.New(functiontool.Config{
+                Name:        "create_incident_bundle",
+                Description: "Collect diagnostic data from database, Kubernetes, OS, and storage layers, then package everything into a timestamped .tar.gz bundle for vendor support.",
+        }, createIncidentBundleTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">listTool, err := functiontool.New(functiontool.Config{
+                Name:        "list_incidents",
+                Description: "List all previously created incident bundles with their IDs, timestamps, infrastructure keys, and bundle file paths.",
+        }, listIncidentsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">return []tool.Tool{bundleTool, listTool}, nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file5" style="display: none">package main
+
+import (
+        "context"
+        "errors"
+        "fmt"
+        "log/slog"
+        "net"
+        "os"
+        "sort"
+        "strings"
+        "sync"
+        "time"
+
+        corev1 "k8s.io/api/core/v1"
+        apierrors "k8s.io/apimachinery/pkg/api/errors"
+        metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+        "k8s.io/client-go/kubernetes"
+        "k8s.io/client-go/tools/clientcmd"
+)
+
+// k8sClient provides cached Kubernetes clientsets keyed by kubeconfig context.
+type k8sClient struct {
+        mu      sync.Mutex
+        clients map[string]*kubernetes.Clientset
+}
+
+var sharedClient = &amp;k8sClient{
+        clients: make(map[string]*kubernetes.Clientset),
+}
+
+// clientset returns a cached *kubernetes.Clientset for the given context.
+// If kubeContext is "", it uses the current default context.
+func (kc *k8sClient) clientset(kubeContext string) (*kubernetes.Clientset, error) <span class="cov0" title="0">{
+        kc.mu.Lock()
+        defer kc.mu.Unlock()
+
+        if cs, ok := kc.clients[kubeContext]; ok </span><span class="cov0" title="0">{
+                return cs, nil
+        }</span>
+
+        <span class="cov0" title="0">loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+        overrides := &amp;clientcmd.ConfigOverrides{}
+        if kubeContext != "" </span><span class="cov0" title="0">{
+                overrides.CurrentContext = kubeContext
+        }</span>
+
+        <span class="cov0" title="0">config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+                loadingRules, overrides,
+        ).ClientConfig()
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, diagnoseClientError(err)
+        }</span>
+
+        <span class="cov0" title="0">config.Timeout = 10 * time.Second
+
+        cs, err := kubernetes.NewForConfig(config)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, diagnoseClientError(err)
+        }</span>
+
+        <span class="cov0" title="0">kc.clients[kubeContext] = cs
+        slog.Info("k8s clientset created", "context", kubeContext)
+        return cs, nil</span>
+}
+
+// diagnoseClientError translates client-go errors into actionable messages.
+func diagnoseClientError(err error) error <span class="cov8" title="1">{
+        if err == nil </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+
+        <span class="cov8" title="1">msg := err.Error()
+        lower := strings.ToLower(msg)
+
+        // Kubeconfig / context errors.
+        if strings.Contains(lower, "context") &amp;&amp; strings.Contains(lower, "does not exist") </span><span class="cov8" title="1">{
+                return fmt.Errorf("The specified Kubernetes context does not exist in the local kubeconfig. "+
+                        "Run 'kubectl config get-contexts' to list available contexts, "+
+                        "or check that the correct kubeconfig file is being used.\n\nRaw error: %v", err)
+        }</span>
+
+        // Network errors.
+        <span class="cov8" title="1">var netErr *net.OpError
+        if errors.As(err, &amp;netErr) </span><span class="cov8" title="1">{
+                if strings.Contains(lower, "connection refused") </span><span class="cov8" title="1">{
+                        return fmt.Errorf("Connection refused by the Kubernetes API server. "+
+                                "The cluster may be down, the API server address may be wrong, "+
+                                "or a VPN/tunnel may need to be active.\n\nRaw error: %v", err)
+                }</span>
+                <span class="cov8" title="1">return fmt.Errorf("Cannot reach the Kubernetes API server. "+
+                        "Check network connectivity, verify the cluster is running, "+
+                        "and confirm the server address in kubeconfig is correct.\n\nRaw error: %v", err)</span>
+        }
+
+        // Connection refused without *net.OpError wrapper.
+        <span class="cov8" title="1">if strings.Contains(lower, "connection refused") </span><span class="cov8" title="1">{
+                return fmt.Errorf("Connection refused by the Kubernetes API server. "+
+                        "The cluster may be down, the API server address may be wrong, "+
+                        "or a VPN/tunnel may need to be active.\n\nRaw error: %v", err)
+        }</span>
+
+        // Unable to connect.
+        <span class="cov8" title="1">if strings.Contains(lower, "unable to connect to the server") </span><span class="cov8" title="1">{
+                return fmt.Errorf("Cannot reach the Kubernetes API server. "+
+                        "Check network connectivity, verify the cluster is running, "+
+                        "and confirm the server address in kubeconfig is correct.\n\nRaw error: %v", err)
+        }</span>
+
+        // Kubernetes API status errors.
+        <span class="cov8" title="1">var statusErr *apierrors.StatusError
+        if errors.As(err, &amp;statusErr) </span><span class="cov0" title="0">{
+                switch </span>{
+                case apierrors.IsUnauthorized(statusErr):<span class="cov0" title="0">
+                        return fmt.Errorf("Authentication to the cluster failed. "+
+                                "Credentials may have expired. Try re-authenticating "+
+                                "(e.g., 'gcloud container clusters get-credentials' for GKE).\n\nRaw error: %v", err)</span>
+                case apierrors.IsForbidden(statusErr):<span class="cov0" title="0">
+                        return fmt.Errorf("Permission denied. The current user/service account does not have "+
+                                "the required RBAC permissions for this operation.\n\nRaw error: %v", err)</span>
+                case apierrors.IsNotFound(statusErr):<span class="cov0" title="0">
+                        if strings.Contains(lower, "namespace") </span><span class="cov0" title="0">{
+                                return fmt.Errorf("The specified namespace does not exist in this cluster. "+
+                                        "Run 'kubectl get namespaces' to list available namespaces.\n\nRaw error: %v", err)
+                        }</span>
+                        <span class="cov0" title="0">return fmt.Errorf("The requested resource was not found in the cluster. "+
+                                "Verify the resource name, namespace, and that it has been created.\n\nRaw error: %v", err)</span>
+                }
+        }
+
+        // Timeout / deadline.
+        <span class="cov8" title="1">if os.IsTimeout(err) || strings.Contains(lower, "deadline exceeded") || strings.Contains(lower, "i/o timeout") </span><span class="cov8" title="1">{
+                return fmt.Errorf("Request to the Kubernetes API server timed out. "+
+                        "The cluster may be under heavy load, or there may be network issues.\n\nRaw error: %v", err)
+        }</span>
+
+        // TLS / certificate.
+        <span class="cov8" title="1">if strings.Contains(lower, "certificate") &amp;&amp; (strings.Contains(lower, "expired") ||
+                strings.Contains(lower, "invalid") || strings.Contains(lower, "unknown authority")) </span><span class="cov8" title="1">{
+                return fmt.Errorf("TLS certificate error communicating with the cluster. "+
+                        "The cluster certificate may have expired or the CA is not trusted. "+
+                        "Re-fetch cluster credentials or update the kubeconfig.\n\nRaw error: %v", err)
+        }</span>
+
+        // Missing kubeconfig.
+        <span class="cov8" title="1">if strings.Contains(lower, "no configuration") || strings.Contains(lower, "invalid configuration") </span><span class="cov8" title="1">{
+                return fmt.Errorf("The kubeconfig file is invalid or missing. "+
+                        "Check that ~/.kube/config exists and is correctly formatted, "+
+                        "or set KUBECONFIG to point to the right file.\n\nRaw error: %v", err)
+        }</span>
+
+        <span class="cov8" title="1">return err</span>
+}
+
+// --- Fetch functions ---
+
+// fetchPods lists pods using client-go and returns structured results.
+func fetchPods(ctx context.Context, kubeContext, namespace, labels string) (GetPodsResult, error) <span class="cov0" title="0">{
+        cs, err := sharedClient.clientset(kubeContext)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetPodsResult{}, err
+        }</span>
+
+        <span class="cov0" title="0">opts := metav1.ListOptions{}
+        if labels != "" </span><span class="cov0" title="0">{
+                opts.LabelSelector = labels
+        }</span>
+
+        <span class="cov0" title="0">ns := namespace
+        if ns == "all" </span><span class="cov0" title="0">{
+                ns = "" // empty namespace = all namespaces in client-go
+        }</span>
+
+        <span class="cov0" title="0">podList, err := cs.CoreV1().Pods(ns).List(ctx, opts)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetPodsResult{}, diagnoseClientError(err)
+        }</span>
+
+        <span class="cov0" title="0">if len(podList.Items) == 0 </span><span class="cov0" title="0">{
+                return GetPodsResult{Message: "No pods found matching the criteria."}, nil
+        }</span>
+
+        <span class="cov0" title="0">pods := make([]PodInfo, 0, len(podList.Items))
+        for _, p := range podList.Items </span><span class="cov0" title="0">{
+                pods = append(pods, PodInfo{
+                        Name:       p.Name,
+                        Namespace:  p.Namespace,
+                        Phase:      string(p.Status.Phase),
+                        Ready:      podReadyString(p.Status.ContainerStatuses),
+                        Restarts:   totalRestarts(p.Status.ContainerStatuses),
+                        Age:        formatAge(p.CreationTimestamp.Time),
+                        IP:         p.Status.PodIP,
+                        Node:       p.Spec.NodeName,
+                        Labels:     p.Labels,
+                        Conditions: formatPodConditions(p.Status.Conditions),
+                })
+        }</span>
+
+        <span class="cov0" title="0">return GetPodsResult{Pods: pods, Count: len(pods)}, nil</span>
+}
+
+// fetchServices lists services using client-go and returns structured results.
+func fetchServices(ctx context.Context, kubeContext, namespace, serviceName, serviceType string) (GetServiceResult, error) <span class="cov0" title="0">{
+        cs, err := sharedClient.clientset(kubeContext)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetServiceResult{}, err
+        }</span>
+
+        <span class="cov0" title="0">opts := metav1.ListOptions{}
+        if serviceName != "" </span><span class="cov0" title="0">{
+                opts.FieldSelector = fmt.Sprintf("metadata.name=%s", serviceName)
+        }</span>
+
+        <span class="cov0" title="0">svcList, err := cs.CoreV1().Services(namespace).List(ctx, opts)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetServiceResult{}, diagnoseClientError(err)
+        }</span>
+
+        <span class="cov0" title="0">var services []ServiceInfo
+        for _, svc := range svcList.Items </span><span class="cov0" title="0">{
+                if serviceType != "" &amp;&amp; string(svc.Spec.Type) != serviceType </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+
+                <span class="cov0" title="0">ports := make([]ServicePortInfo, 0, len(svc.Spec.Ports))
+                for _, p := range svc.Spec.Ports </span><span class="cov0" title="0">{
+                        ports = append(ports, ServicePortInfo{
+                                Name:       p.Name,
+                                Protocol:   string(p.Protocol),
+                                Port:       p.Port,
+                                TargetPort: p.TargetPort.String(),
+                                NodePort:   p.NodePort,
+                        })
+                }</span>
+
+                <span class="cov0" title="0">services = append(services, ServiceInfo{
+                        Name:        svc.Name,
+                        Namespace:   svc.Namespace,
+                        Type:        string(svc.Spec.Type),
+                        ClusterIP:   svc.Spec.ClusterIP,
+                        ExternalIPs: externalAddresses(svc),
+                        Ports:       ports,
+                        Selector:    svc.Spec.Selector,
+                        Age:         formatAge(svc.CreationTimestamp.Time),
+                })</span>
+        }
+
+        <span class="cov0" title="0">if len(services) == 0 </span><span class="cov0" title="0">{
+                return GetServiceResult{Message: "No services found matching the criteria."}, nil
+        }</span>
+        <span class="cov0" title="0">return GetServiceResult{Services: services, Count: len(services)}, nil</span>
+}
+
+// fetchEndpoints lists endpoints using client-go and returns structured results.
+func fetchEndpoints(ctx context.Context, kubeContext, namespace, endpointName string) (GetEndpointsResult, error) <span class="cov0" title="0">{
+        cs, err := sharedClient.clientset(kubeContext)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetEndpointsResult{}, err
+        }</span>
+
+        <span class="cov0" title="0">opts := metav1.ListOptions{}
+        if endpointName != "" </span><span class="cov0" title="0">{
+                opts.FieldSelector = fmt.Sprintf("metadata.name=%s", endpointName)
+        }</span>
+
+        <span class="cov0" title="0">epList, err := cs.CoreV1().Endpoints(namespace).List(ctx, opts)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetEndpointsResult{}, diagnoseClientError(err)
+        }</span>
+
+        <span class="cov0" title="0">if len(epList.Items) == 0 </span><span class="cov0" title="0">{
+                return GetEndpointsResult{Message: "No endpoints found. This may indicate no pods match the service selector."}, nil
+        }</span>
+
+        <span class="cov0" title="0">endpoints := make([]EndpointInfo, 0, len(epList.Items))
+        for _, ep := range epList.Items </span><span class="cov0" title="0">{
+                var addresses []EndpointAddress
+                var ports []EndpointPortInfo
+
+                for _, subset := range ep.Subsets </span><span class="cov0" title="0">{
+                        for _, addr := range subset.Addresses </span><span class="cov0" title="0">{
+                                ea := EndpointAddress{
+                                        IP:    addr.IP,
+                                        Ready: true,
+                                }
+                                if addr.NodeName != nil </span><span class="cov0" title="0">{
+                                        ea.NodeName = *addr.NodeName
+                                }</span>
+                                <span class="cov0" title="0">if addr.TargetRef != nil &amp;&amp; addr.TargetRef.Kind == "Pod" </span><span class="cov0" title="0">{
+                                        ea.PodName = addr.TargetRef.Name
+                                }</span>
+                                <span class="cov0" title="0">addresses = append(addresses, ea)</span>
+                        }
+                        <span class="cov0" title="0">for _, addr := range subset.NotReadyAddresses </span><span class="cov0" title="0">{
+                                ea := EndpointAddress{
+                                        IP:    addr.IP,
+                                        Ready: false,
+                                }
+                                if addr.NodeName != nil </span><span class="cov0" title="0">{
+                                        ea.NodeName = *addr.NodeName
+                                }</span>
+                                <span class="cov0" title="0">if addr.TargetRef != nil &amp;&amp; addr.TargetRef.Kind == "Pod" </span><span class="cov0" title="0">{
+                                        ea.PodName = addr.TargetRef.Name
+                                }</span>
+                                <span class="cov0" title="0">addresses = append(addresses, ea)</span>
+                        }
+                        <span class="cov0" title="0">for _, p := range subset.Ports </span><span class="cov0" title="0">{
+                                ports = append(ports, EndpointPortInfo{
+                                        Name:     p.Name,
+                                        Port:     p.Port,
+                                        Protocol: string(p.Protocol),
+                                })
+                        }</span>
+                }
+
+                <span class="cov0" title="0">endpoints = append(endpoints, EndpointInfo{
+                        Name:      ep.Name,
+                        Namespace: ep.Namespace,
+                        Addresses: addresses,
+                        Ports:     ports,
+                })</span>
+        }
+
+        <span class="cov0" title="0">return GetEndpointsResult{Endpoints: endpoints, Count: len(endpoints)}, nil</span>
+}
+
+// fetchEvents lists events using client-go and returns structured results.
+func fetchEvents(ctx context.Context, kubeContext, namespace, resourceName, eventType string) (GetEventsResult, error) <span class="cov0" title="0">{
+        cs, err := sharedClient.clientset(kubeContext)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetEventsResult{}, err
+        }</span>
+
+        <span class="cov0" title="0">opts := metav1.ListOptions{}
+        if eventType != "" </span><span class="cov0" title="0">{
+                opts.FieldSelector = fmt.Sprintf("type=%s", eventType)
+        }</span>
+
+        <span class="cov0" title="0">eventList, err := cs.CoreV1().Events(namespace).List(ctx, opts)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetEventsResult{}, diagnoseClientError(err)
+        }</span>
+
+        // Sort by LastTimestamp descending.
+        <span class="cov0" title="0">sort.Slice(eventList.Items, func(i, j int) bool </span><span class="cov0" title="0">{
+                ti := eventTimestamp(eventList.Items[i])
+                tj := eventTimestamp(eventList.Items[j])
+                return tj.Before(ti)
+        }</span>)
+
+        <span class="cov0" title="0">var events []EventInfo
+        for _, e := range eventList.Items </span><span class="cov0" title="0">{
+                if resourceName != "" &amp;&amp; !strings.Contains(e.InvolvedObject.Name, resourceName) </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+                <span class="cov0" title="0">events = append(events, EventInfo{
+                        Type:      e.Type,
+                        Reason:    e.Reason,
+                        Message:   e.Message,
+                        Object:    fmt.Sprintf("%s/%s", e.InvolvedObject.Kind, e.InvolvedObject.Name),
+                        Source:    e.Source.Component,
+                        FirstSeen: formatEventTime(e.FirstTimestamp.Time),
+                        LastSeen:  formatEventTime(e.LastTimestamp.Time),
+                        Count:     e.Count,
+                })</span>
+        }
+
+        <span class="cov0" title="0">if len(events) == 0 </span><span class="cov0" title="0">{
+                return GetEventsResult{Message: "No events found matching the criteria."}, nil
+        }</span>
+        <span class="cov0" title="0">return GetEventsResult{Events: events, Count: len(events)}, nil</span>
+}
+
+// eventTimestamp returns the most meaningful timestamp for sorting.
+// Prefers LastTimestamp, falls back to EventTime, then CreationTimestamp.
+func eventTimestamp(e corev1.Event) time.Time <span class="cov8" title="1">{
+        if !e.LastTimestamp.IsZero() </span><span class="cov8" title="1">{
+                return e.LastTimestamp.Time
+        }</span>
+        <span class="cov8" title="1">if e.EventTime.Time.IsZero() </span><span class="cov8" title="1">{
+                return e.CreationTimestamp.Time
+        }</span>
+        <span class="cov8" title="1">return e.EventTime.Time</span>
+}
+
+// formatEventTime formats a time for event display. Returns empty string for zero times.
+func formatEventTime(t time.Time) string <span class="cov0" title="0">{
+        if t.IsZero() </span><span class="cov0" title="0">{
+                return ""
+        }</span>
+        <span class="cov0" title="0">return t.Format(time.RFC3339)</span>
+}
+
+// fetchNodes lists nodes using client-go and returns structured results.
+func fetchNodes(ctx context.Context, kubeContext string, showLabels bool) (GetNodesResult, error) <span class="cov0" title="0">{
+        cs, err := sharedClient.clientset(kubeContext)
+        if err != nil </span><span class="cov0" title="0">{
+                return GetNodesResult{}, err
+        }</span>
+
+        <span class="cov0" title="0">nodeList, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+        if err != nil </span><span class="cov0" title="0">{
+                return GetNodesResult{}, diagnoseClientError(err)
+        }</span>
+
+        <span class="cov0" title="0">nodes := make([]NodeInfo, 0, len(nodeList.Items))
+        for _, n := range nodeList.Items </span><span class="cov0" title="0">{
+                info := NodeInfo{
+                        Name:             n.Name,
+                        Status:           nodeStatus(n.Status.Conditions, n.Spec.Unschedulable),
+                        Roles:            nodeRoles(n.Labels),
+                        Age:              formatAge(n.CreationTimestamp.Time),
+                        KubeletVersion:   n.Status.NodeInfo.KubeletVersion,
+                        OSImage:          n.Status.NodeInfo.OSImage,
+                        ContainerRuntime: n.Status.NodeInfo.ContainerRuntimeVersion,
+                }
+
+                for _, addr := range n.Status.Addresses </span><span class="cov0" title="0">{
+                        switch addr.Type </span>{
+                        case corev1.NodeInternalIP:<span class="cov0" title="0">
+                                info.InternalIP = addr.Address</span>
+                        case corev1.NodeExternalIP:<span class="cov0" title="0">
+                                info.ExternalIP = addr.Address</span>
+                        }
+                }
+
+                <span class="cov0" title="0">if showLabels </span><span class="cov0" title="0">{
+                        info.Labels = n.Labels
+                }</span>
+
+                <span class="cov0" title="0">nodes = append(nodes, info)</span>
+        }
+
+        <span class="cov0" title="0">return GetNodesResult{Nodes: nodes, Count: len(nodes)}, nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file6" style="display: none">package main
+
+import (
+        "fmt"
+        "sort"
+        "strings"
+        "time"
+
+        corev1 "k8s.io/api/core/v1"
+)
+
+// --- Pod types ---
+
+// PodInfo contains structured information about a Kubernetes pod.
+type PodInfo struct {
+        Name       string            `json:"name"`
+        Namespace  string            `json:"namespace"`
+        Phase      string            `json:"phase"`
+        Ready      string            `json:"ready"`
+        Restarts   int32             `json:"restarts"`
+        Age        string            `json:"age"`
+        IP         string            `json:"ip"`
+        Node       string            `json:"node"`
+        Labels     map[string]string `json:"labels,omitempty"`
+        Conditions []string          `json:"conditions,omitempty"`
+}
+
+// GetPodsResult is the structured result for the get_pods tool.
+type GetPodsResult struct {
+        Pods    []PodInfo `json:"pods"`
+        Count   int       `json:"count"`
+        Message string    `json:"message,omitempty"`
+}
+
+// --- Service types ---
+
+// ServicePortInfo describes a single port on a Kubernetes service.
+type ServicePortInfo struct {
+        Name       string `json:"name,omitempty"`
+        Protocol   string `json:"protocol"`
+        Port       int32  `json:"port"`
+        TargetPort string `json:"target_port"`
+        NodePort   int32  `json:"node_port,omitempty"`
+}
+
+// ServiceInfo contains structured information about a Kubernetes service.
+type ServiceInfo struct {
+        Name        string            `json:"name"`
+        Namespace   string            `json:"namespace"`
+        Type        string            `json:"type"`
+        ClusterIP   string            `json:"cluster_ip"`
+        ExternalIPs []string          `json:"external_ips,omitempty"`
+        Ports       []ServicePortInfo `json:"ports"`
+        Selector    map[string]string `json:"selector,omitempty"`
+        Age         string            `json:"age"`
+}
+
+// GetServiceResult is the structured result for the get_service tool.
+type GetServiceResult struct {
+        Services []ServiceInfo `json:"services"`
+        Count    int           `json:"count"`
+        Message  string        `json:"message,omitempty"`
+}
+
+// --- Endpoint types ---
+
+// EndpointAddress describes a single endpoint backend address.
+type EndpointAddress struct {
+        IP       string `json:"ip"`
+        NodeName string `json:"node_name,omitempty"`
+        PodName  string `json:"pod_name,omitempty"`
+        Ready    bool   `json:"ready"`
+}
+
+// EndpointPortInfo describes a port exposed by an endpoint.
+type EndpointPortInfo struct {
+        Name     string `json:"name,omitempty"`
+        Port     int32  `json:"port"`
+        Protocol string `json:"protocol"`
+}
+
+// EndpointInfo contains structured information about a Kubernetes endpoint.
+type EndpointInfo struct {
+        Name      string             `json:"name"`
+        Namespace string             `json:"namespace"`
+        Addresses []EndpointAddress  `json:"addresses"`
+        Ports     []EndpointPortInfo `json:"ports"`
+}
+
+// GetEndpointsResult is the structured result for the get_endpoints tool.
+type GetEndpointsResult struct {
+        Endpoints []EndpointInfo `json:"endpoints"`
+        Count     int            `json:"count"`
+        Message   string         `json:"message,omitempty"`
+}
+
+// --- Event types ---
+
+// EventInfo contains structured information about a Kubernetes event.
+type EventInfo struct {
+        Type      string `json:"type"`
+        Reason    string `json:"reason"`
+        Message   string `json:"message"`
+        Object    string `json:"object"`
+        Source    string `json:"source"`
+        FirstSeen string `json:"first_seen"`
+        LastSeen  string `json:"last_seen"`
+        Count     int32  `json:"count"`
+}
+
+// GetEventsResult is the structured result for the get_events tool.
+type GetEventsResult struct {
+        Events  []EventInfo `json:"events"`
+        Count   int         `json:"count"`
+        Message string      `json:"message,omitempty"`
+}
+
+// --- Node types ---
+
+// NodeInfo contains structured information about a Kubernetes node.
+type NodeInfo struct {
+        Name             string            `json:"name"`
+        Status           string            `json:"status"`
+        Roles            []string          `json:"roles"`
+        Age              string            `json:"age"`
+        KubeletVersion   string            `json:"kubelet_version"`
+        InternalIP       string            `json:"internal_ip"`
+        ExternalIP       string            `json:"external_ip,omitempty"`
+        OSImage          string            `json:"os_image"`
+        ContainerRuntime string            `json:"container_runtime"`
+        Labels           map[string]string `json:"labels,omitempty"`
+}
+
+// GetNodesResult is the structured result for the get_nodes tool.
+type GetNodesResult struct {
+        Nodes []NodeInfo `json:"nodes"`
+        Count int        `json:"count"`
+}
+
+// --- Conversion helpers ---
+
+// formatAge converts a creation timestamp to a human-readable age string.
+func formatAge(created time.Time) string <span class="cov8" title="1">{
+        d := time.Since(created)
+        switch </span>{
+        case d &lt; time.Minute:<span class="cov8" title="1">
+                return fmt.Sprintf("%ds", int(d.Seconds()))</span>
+        case d &lt; time.Hour:<span class="cov8" title="1">
+                return fmt.Sprintf("%dm", int(d.Minutes()))</span>
+        case d &lt; 24*time.Hour:<span class="cov8" title="1">
+                return fmt.Sprintf("%dh", int(d.Hours()))</span>
+        default:<span class="cov8" title="1">
+                return fmt.Sprintf("%dd", int(d.Hours()/24))</span>
+        }
+}
+
+// podReadyString returns "N/M" where N is ready containers and M is total.
+func podReadyString(statuses []corev1.ContainerStatus) string <span class="cov8" title="1">{
+        ready := 0
+        for _, s := range statuses </span><span class="cov8" title="1">{
+                if s.Ready </span><span class="cov8" title="1">{
+                        ready++
+                }</span>
+        }
+        <span class="cov8" title="1">return fmt.Sprintf("%d/%d", ready, len(statuses))</span>
+}
+
+// totalRestarts sums restart counts across all container statuses.
+func totalRestarts(statuses []corev1.ContainerStatus) int32 <span class="cov8" title="1">{
+        var total int32
+        for _, s := range statuses </span><span class="cov8" title="1">{
+                total += s.RestartCount
+        }</span>
+        <span class="cov8" title="1">return total</span>
+}
+
+// formatPodConditions converts pod conditions to "Type=Status" strings.
+func formatPodConditions(conditions []corev1.PodCondition) []string <span class="cov0" title="0">{
+        result := make([]string, 0, len(conditions))
+        for _, c := range conditions </span><span class="cov0" title="0">{
+                result = append(result, fmt.Sprintf("%s=%s", c.Type, c.Status))
+        }</span>
+        <span class="cov0" title="0">return result</span>
+}
+
+// nodeRoles extracts roles from the standard node-role.kubernetes.io/* labels.
+func nodeRoles(labels map[string]string) []string <span class="cov8" title="1">{
+        const prefix = "node-role.kubernetes.io/"
+        var roles []string
+        for k := range labels </span><span class="cov8" title="1">{
+                if strings.HasPrefix(k, prefix) </span><span class="cov8" title="1">{
+                        roles = append(roles, strings.TrimPrefix(k, prefix))
+                }</span>
+        }
+        <span class="cov8" title="1">sort.Strings(roles)
+        if len(roles) == 0 </span><span class="cov8" title="1">{
+                roles = append(roles, "&lt;none&gt;")
+        }</span>
+        <span class="cov8" title="1">return roles</span>
+}
+
+// nodeStatus returns the human-readable status string for a node.
+func nodeStatus(conditions []corev1.NodeCondition, unschedulable bool) string <span class="cov8" title="1">{
+        status := "Unknown"
+        for _, c := range conditions </span><span class="cov8" title="1">{
+                if c.Type == corev1.NodeReady </span><span class="cov8" title="1">{
+                        if c.Status == corev1.ConditionTrue </span><span class="cov8" title="1">{
+                                status = "Ready"
+                        }</span> else<span class="cov8" title="1"> {
+                                status = "NotReady"
+                        }</span>
+                        <span class="cov8" title="1">break</span>
+                }
+        }
+        <span class="cov8" title="1">if unschedulable </span><span class="cov8" title="1">{
+                status += ",SchedulingDisabled"
+        }</span>
+        <span class="cov8" title="1">return status</span>
+}
+
+// externalAddresses extracts external IPs from a service's spec and status.
+func externalAddresses(svc corev1.Service) []string <span class="cov8" title="1">{
+        var addrs []string
+        addrs = append(addrs, svc.Spec.ExternalIPs...)
+        for _, ing := range svc.Status.LoadBalancer.Ingress </span><span class="cov8" title="1">{
+                if ing.IP != "" </span><span class="cov8" title="1">{
+                        addrs = append(addrs, ing.IP)
+                }</span> else<span class="cov8" title="1"> if ing.Hostname != "" </span><span class="cov8" title="1">{
+                        addrs = append(addrs, ing.Hostname)
+                }</span>
+        }
+        <span class="cov8" title="1">return addrs</span>
+}
+</pre>
+		
+		<pre class="file" id="file7" style="display: none">// Package main implements the Kubernetes troubleshooting agent.
+// It exposes kubectl-based tools via the A2A protocol for diagnosing
+// infrastructure issues in Kubernetes environments.
+package main
+
+import (
+        "context"
+        "log/slog"
+        "os"
+
+        "github.com/a2aproject/a2a-go/a2a"
+        "google.golang.org/adk/agent/llmagent"
+        "google.golang.org/adk/tool"
+        "google.golang.org/adk/tool/functiontool"
+
+        "helpdesk/agentutil"
+        "helpdesk/prompts"
+)
+
+func main() <span class="cov0" title="0">{
+        cfg := agentutil.MustLoadConfig("localhost:1102")
+        ctx := context.Background()
+
+        llmModel, err := agentutil.NewLLM(ctx, cfg)
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create LLM model", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">tools, err := createTools()
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create tools", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">k8sAgent, err := llmagent.New(llmagent.Config{
+                Name:        "k8s_agent",
+                Description: "Kubernetes troubleshooting agent that can inspect pods, services, endpoints, events, and logs to diagnose infrastructure issues.",
+                Instruction: prompts.K8s,
+                Model:       llmModel,
+                Tools:       tools,
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create k8s agent", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">cardOpts := agentutil.CardOptions{
+                Version:  "1.0.0",
+                Provider: &amp;a2a.AgentProvider{Org: "Helpdesk"},
+                SkillTags: map[string][]string{
+                        "k8s_agent":                  {"kubernetes", "infrastructure", "diagnostics"},
+                        "k8s_agent-get_pods":         {"kubernetes", "pods", "workloads"},
+                        "k8s_agent-get_service":      {"kubernetes", "services", "networking"},
+                        "k8s_agent-describe_service": {"kubernetes", "services", "networking"},
+                        "k8s_agent-get_endpoints":    {"kubernetes", "endpoints", "networking"},
+                        "k8s_agent-get_events":       {"kubernetes", "events", "cluster"},
+                        "k8s_agent-get_pod_logs":     {"kubernetes", "logs", "debugging"},
+                        "k8s_agent-describe_pod":     {"kubernetes", "pods", "debugging"},
+                        "k8s_agent-get_nodes":        {"kubernetes", "nodes", "cluster"},
+                },
+                SkillExamples: map[string][]string{
+                        "k8s_agent-get_pods":      {"List all pods in the database namespace"},
+                        "k8s_agent-get_events":    {"Show recent warning events in the cluster"},
+                        "k8s_agent-get_pod_logs":  {"Get the last 100 lines of logs from the postgres pod"},
+                        "k8s_agent-get_endpoints": {"Check if the database service has healthy endpoints"},
+                },
+        }
+
+        if err := agentutil.Serve(ctx, k8sAgent, cfg, cardOpts); err != nil </span><span class="cov0" title="0">{
+                slog.Error("server stopped", "err", err)
+                os.Exit(1)
+        }</span>
+}
+
+func createTools() ([]tool.Tool, error) <span class="cov0" title="0">{
+        getPodsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_pods",
+                Description: "List Kubernetes pods in a namespace with optional label filtering. Shows pod status, restarts, age, and node placement.",
+        }, getPodsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getServiceToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_service",
+                Description: "List Kubernetes services showing type, cluster IP, external IP, and ports. Use to check LoadBalancer status and port mappings.",
+        }, getServiceTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">describeServiceToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "describe_service",
+                Description: "Get detailed information about a Kubernetes service including selectors, endpoints, and events.",
+        }, describeServiceTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getEndpointsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_endpoints",
+                Description: "List Kubernetes endpoints to verify which pod IPs are registered as backends for a service. Empty endpoints indicate selector mismatch or no ready pods.",
+        }, getEndpointsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getEventsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_events",
+                Description: "List Kubernetes events sorted by time. Useful for finding warnings, errors, and recent changes that might explain issues.",
+        }, getEventsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getPodLogsToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_pod_logs",
+                Description: "Retrieve logs from a Kubernetes pod. Can get logs from specific containers and previous crashed instances.",
+        }, getPodLogsTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">describePodToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "describe_pod",
+                Description: "Get detailed information about a Kubernetes pod including status, conditions, events, and container details.",
+        }, describePodTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">getNodesToolDef, err := functiontool.New(functiontool.Config{
+                Name:        "get_nodes",
+                Description: "List Kubernetes cluster nodes showing status, roles, age, version, and resource capacity.",
+        }, getNodesTool)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov0" title="0">return []tool.Tool{
+                getPodsToolDef,
+                getServiceToolDef,
+                describeServiceToolDef,
+                getEndpointsToolDef,
+                getEventsToolDef,
+                getPodLogsToolDef,
+                describePodToolDef,
+                getNodesToolDef,
+        }, nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file8" style="display: none">package main
+
+import (
+        "context"
+        "fmt"
+        "log/slog"
+        "os/exec"
+        "strconv"
+        "strings"
+
+        "google.golang.org/adk/tool"
+)
+
+// diagnoseKubectlError examines kubectl output for common failure patterns and returns
+// a clear, actionable error message alongside the raw output.
+func diagnoseKubectlError(output string) string <span class="cov8" title="1">{
+        out := strings.ToLower(output)
+
+        switch </span>{
+        case strings.Contains(out, "does not exist") &amp;&amp; strings.Contains(out, "context"):<span class="cov8" title="1">
+                return "The specified Kubernetes context does not exist in the local kubeconfig. " +
+                        "Run 'kubectl config get-contexts' to list available contexts, " +
+                        "or check that the correct kubeconfig file is being used."</span>
+
+        case strings.Contains(out, "connection refused"):<span class="cov8" title="1">
+                return "Connection refused by the Kubernetes API server. " +
+                        "The cluster may be down, the API server address may be wrong, " +
+                        "or a VPN/tunnel may need to be active."</span>
+
+        case strings.Contains(out, "unable to connect to the server"):<span class="cov8" title="1">
+                return "Cannot reach the Kubernetes API server. " +
+                        "Check network connectivity, verify the cluster is running, " +
+                        "and confirm the server address in kubeconfig is correct."</span>
+
+        case strings.Contains(out, "unauthorized") || strings.Contains(out, "you must be logged in"):<span class="cov8" title="1">
+                return "Authentication to the cluster failed. " +
+                        "Credentials may have expired. Try re-authenticating (e.g., 'gcloud container clusters get-credentials' for GKE)."</span>
+
+        case strings.Contains(out, "forbidden"):<span class="cov8" title="1">
+                return "Permission denied. The current user/service account does not have " +
+                        "the required RBAC permissions for this operation."</span>
+
+        case strings.Contains(out, "not found") &amp;&amp; strings.Contains(out, "namespace"):<span class="cov8" title="1">
+                return "The specified namespace does not exist in this cluster. " +
+                        "Run 'kubectl get namespaces' to list available namespaces."</span>
+
+        case strings.Contains(out, "not found") &amp;&amp; strings.Contains(out, "error from server"):<span class="cov8" title="1">
+                return "The requested resource was not found in the cluster. " +
+                        "Verify the resource name, namespace, and that it has been created."</span>
+
+        case strings.Contains(out, "executable file not found") || strings.Contains(out, "command not found"):<span class="cov8" title="1">
+                return "kubectl is not installed or not in the system PATH. " +
+                        "Install kubectl and ensure it is accessible."</span>
+
+        case strings.Contains(out, "invalid configuration") || strings.Contains(out, "no configuration"):<span class="cov8" title="1">
+                return "The kubeconfig file is invalid or missing. " +
+                        "Check that ~/.kube/config exists and is correctly formatted, " +
+                        "or set KUBECONFIG to point to the right file."</span>
+
+        case strings.Contains(out, "i/o timeout") || strings.Contains(out, "deadline exceeded"):<span class="cov8" title="1">
+                return "Request to the Kubernetes API server timed out. " +
+                        "The cluster may be under heavy load, or there may be network issues."</span>
+
+        case strings.Contains(out, "certificate") &amp;&amp; (strings.Contains(out, "expired") || strings.Contains(out, "invalid") || strings.Contains(out, "unknown authority")):<span class="cov8" title="1">
+                return "TLS certificate error communicating with the cluster. " +
+                        "The cluster certificate may have expired or the CA is not trusted. " +
+                        "Re-fetch cluster credentials or update the kubeconfig."</span>
+
+        default:<span class="cov8" title="1">
+                return ""</span>
+        }
+}
+
+// runKubectl executes a kubectl command and returns the output.
+// If context is non-empty, it's passed as --context to kubectl.
+// The provided ctx controls cancellation — if it expires, kubectl is killed.
+func runKubectl(ctx context.Context, kubeContext string, args ...string) (string, error) <span class="cov0" title="0">{
+        prefix := []string{"--request-timeout=10s"}
+        if kubeContext != "" </span><span class="cov0" title="0">{
+                prefix = append(prefix, "--context", kubeContext)
+        }</span>
+        <span class="cov0" title="0">args = append(prefix, args...)
+        cmd := exec.CommandContext(ctx, "kubectl", args...)
+        output, err := cmd.CombinedOutput()
+        if err != nil </span><span class="cov0" title="0">{
+                out := strings.TrimSpace(string(output))
+                if out == "" </span><span class="cov0" title="0">{
+                        out = "(no output from kubectl)"
+                }</span>
+                <span class="cov0" title="0">slog.Error("kubectl command failed", "args", args, "err", err, "output", out)
+                if ctx.Err() != nil </span><span class="cov0" title="0">{
+                        return "", fmt.Errorf("kubectl timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
+                }</span>
+                <span class="cov0" title="0">if diagnosis := diagnoseKubectlError(out); diagnosis != "" </span><span class="cov0" title="0">{
+                        return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+                }</span>
+                <span class="cov0" title="0">return "", fmt.Errorf("kubectl failed: %v\nOutput: %s", err, out)</span>
+        }
+        <span class="cov0" title="0">return string(output), nil</span>
+}
+
+// KubectlResult is the standard output type for all kubectl tools.
+type KubectlResult struct {
+        Output string `json:"output"`
+}
+
+// GetPodsArgs defines arguments for the get_pods tool.
+type GetPodsArgs struct {
+        Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace to list pods from. Use 'all' for all namespaces."`
+        Labels    string `json:"labels,omitempty" jsonschema:"Optional label selector to filter pods (e.g., 'app=postgres')."`
+}
+
+func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) <span class="cov0" title="0">{
+        return fetchPods(ctx, args.Context, args.Namespace, args.Labels)
+}</span>
+
+// GetServiceArgs defines arguments for the get_service tool.
+type GetServiceArgs struct {
+        Context     string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        Namespace   string `json:"namespace" jsonschema:"The Kubernetes namespace to list services from."`
+        ServiceName string `json:"service_name,omitempty" jsonschema:"Optional specific service name to get. If empty, lists all services."`
+        ServiceType string `json:"service_type,omitempty" jsonschema:"Optional filter by service type: ClusterIP, NodePort, LoadBalancer."`
+}
+
+func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) <span class="cov0" title="0">{
+        return fetchServices(ctx, args.Context, args.Namespace, args.ServiceName, args.ServiceType)
+}</span>
+
+// DescribeServiceArgs defines arguments for the describe_service tool.
+type DescribeServiceArgs struct {
+        Context     string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        Namespace   string `json:"namespace" jsonschema:"The Kubernetes namespace of the service."`
+        ServiceName string `json:"service_name" jsonschema:"The name of the service to describe."`
+}
+
+func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) <span class="cov0" title="0">{
+        cmdArgs := []string{"describe", "svc", args.ServiceName}
+
+        if args.Namespace != "" </span><span class="cov0" title="0">{
+                cmdArgs = append(cmdArgs, "-n", args.Namespace)
+        }</span>
+
+        <span class="cov0" title="0">output, err := runKubectl(ctx, args.Context, cmdArgs...)
+        if err != nil </span><span class="cov0" title="0">{
+                return KubectlResult{}, fmt.Errorf("error describing service: %v", err)
+        }</span>
+        <span class="cov0" title="0">return KubectlResult{Output: output}, nil</span>
+}
+
+// GetEndpointsArgs defines arguments for the get_endpoints tool.
+type GetEndpointsArgs struct {
+        Context      string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        Namespace    string `json:"namespace" jsonschema:"The Kubernetes namespace to check endpoints in."`
+        EndpointName string `json:"endpoint_name,omitempty" jsonschema:"Optional specific endpoint name (usually matches service name)."`
+}
+
+func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) <span class="cov0" title="0">{
+        return fetchEndpoints(ctx, args.Context, args.Namespace, args.EndpointName)
+}</span>
+
+// GetEventsArgs defines arguments for the get_events tool.
+type GetEventsArgs struct {
+        Context      string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        Namespace    string `json:"namespace" jsonschema:"The Kubernetes namespace to get events from."`
+        ResourceName string `json:"resource_name,omitempty" jsonschema:"Optional filter events related to a specific resource name."`
+        EventType    string `json:"event_type,omitempty" jsonschema:"Optional filter by event type: Normal or Warning."`
+}
+
+func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) <span class="cov0" title="0">{
+        return fetchEvents(ctx, args.Context, args.Namespace, args.ResourceName, args.EventType)
+}</span>
+
+// GetPodLogsArgs defines arguments for the get_pod_logs tool.
+type GetPodLogsArgs struct {
+        Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod."`
+        PodName   string `json:"pod_name" jsonschema:"The name of the pod to get logs from."`
+        Container string `json:"container,omitempty" jsonschema:"Optional container name if pod has multiple containers."`
+        TailLines int    `json:"tail_lines,omitempty" jsonschema:"Number of recent log lines to retrieve (default 50)."`
+        Previous  bool   `json:"previous,omitempty" jsonschema:"If true, get logs from the previous container instance (useful for crash loops)."`
+}
+
+func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) <span class="cov0" title="0">{
+        cmdArgs := []string{"logs", args.PodName}
+
+        if args.Namespace != "" </span><span class="cov0" title="0">{
+                cmdArgs = append(cmdArgs, "-n", args.Namespace)
+        }</span>
+
+        <span class="cov0" title="0">if args.Container != "" </span><span class="cov0" title="0">{
+                cmdArgs = append(cmdArgs, "-c", args.Container)
+        }</span>
+
+        <span class="cov0" title="0">tailLines := args.TailLines
+        if tailLines &lt;= 0 </span><span class="cov0" title="0">{
+                tailLines = 50
+        }</span>
+        <span class="cov0" title="0">cmdArgs = append(cmdArgs, "--tail", strconv.Itoa(tailLines))
+
+        if args.Previous </span><span class="cov0" title="0">{
+                cmdArgs = append(cmdArgs, "--previous")
+        }</span>
+
+        <span class="cov0" title="0">output, err := runKubectl(ctx, args.Context, cmdArgs...)
+        if err != nil </span><span class="cov0" title="0">{
+                return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", err)
+        }</span>
+        <span class="cov0" title="0">if strings.TrimSpace(output) == "" </span><span class="cov0" title="0">{
+                return KubectlResult{Output: "No logs available for this pod."}, nil
+        }</span>
+        <span class="cov0" title="0">return KubectlResult{Output: output}, nil</span>
+}
+
+// DescribePodArgs defines arguments for the describe_pod tool.
+type DescribePodArgs struct {
+        Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod."`
+        PodName   string `json:"pod_name" jsonschema:"The name of the pod to describe."`
+}
+
+func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) <span class="cov0" title="0">{
+        cmdArgs := []string{"describe", "pod", args.PodName}
+
+        if args.Namespace != "" </span><span class="cov0" title="0">{
+                cmdArgs = append(cmdArgs, "-n", args.Namespace)
+        }</span>
+
+        <span class="cov0" title="0">output, err := runKubectl(ctx, args.Context, cmdArgs...)
+        if err != nil </span><span class="cov0" title="0">{
+                return KubectlResult{}, fmt.Errorf("error describing pod: %v", err)
+        }</span>
+        <span class="cov0" title="0">return KubectlResult{Output: output}, nil</span>
+}
+
+// GetNodesArgs defines arguments for the get_nodes tool.
+type GetNodesArgs struct {
+        Context    string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+        ShowLabels bool   `json:"show_labels,omitempty" jsonschema:"If true, show node labels in output."`
+}
+
+func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) <span class="cov0" title="0">{
+        return fetchNodes(ctx, args.Context, args.ShowLabels)
+}</span>
+</pre>
+		
+		<pre class="file" id="file9" style="display: none">// Package agentutil provides the SDK surface for building helpdesk agents.
+// It extracts the boilerplate duplicated across sub-agents: config loading,
+// LLM creation, and A2A server startup.
+package agentutil
+
+import (
+        "context"
+        "fmt"
+        "log/slog"
+        "net"
+        "net/http"
+        "net/url"
+        "os"
+        "strings"
+
+        "github.com/a2aproject/a2a-go/a2a"
+        "github.com/a2aproject/a2a-go/a2asrv"
+        "google.golang.org/genai"
+
+        "google.golang.org/adk/agent"
+        adkmodel "google.golang.org/adk/model"
+        "google.golang.org/adk/model/gemini"
+        "google.golang.org/adk/runner"
+        "google.golang.org/adk/server/adka2a"
+        "google.golang.org/adk/session"
+
+        "helpdesk/internal/logging"
+        "helpdesk/internal/model"
+)
+
+// Config holds common agent configuration from HELPDESK_* env vars.
+type Config struct {
+        ModelVendor string
+        ModelName   string
+        APIKey      string
+        ListenAddr  string
+}
+
+// MustLoadConfig reads env vars. defaultAddr is used when HELPDESK_AGENT_ADDR is unset.
+// Exits the process if required vars (MODEL_VENDOR, MODEL_NAME, API_KEY) are missing.
+// It also initialises structured logging via logging.InitLogging.
+func MustLoadConfig(defaultAddr string) Config <span class="cov0" title="0">{
+        logging.InitLogging(os.Args[1:])
+
+        cfg := Config{
+                ModelVendor: os.Getenv("HELPDESK_MODEL_VENDOR"),
+                ModelName:   os.Getenv("HELPDESK_MODEL_NAME"),
+                APIKey:      os.Getenv("HELPDESK_API_KEY"),
+                ListenAddr:  os.Getenv("HELPDESK_AGENT_ADDR"),
+        }
+
+        if cfg.ModelVendor == "" || cfg.ModelName == "" || cfg.APIKey == "" </span><span class="cov0" title="0">{
+                slog.Error("missing required environment variables: HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY")
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">if cfg.ListenAddr == "" </span><span class="cov0" title="0">{
+                cfg.ListenAddr = defaultAddr
+        }</span>
+
+        <span class="cov0" title="0">return cfg</span>
+}
+
+// NewLLM creates an LLM model based on Config.ModelVendor (gemini or anthropic).
+func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) <span class="cov0" title="0">{
+        switch strings.ToLower(cfg.ModelVendor) </span>{
+        case "google", "gemini":<span class="cov0" title="0">
+                llm, err := gemini.NewModel(ctx, cfg.ModelName, &amp;genai.ClientConfig{APIKey: cfg.APIKey})
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("failed to create Gemini model: %v", err)
+                }</span>
+                <span class="cov0" title="0">slog.Info("using model", "vendor", "gemini", "model", cfg.ModelName)
+                return llm, nil</span>
+
+        case "anthropic":<span class="cov0" title="0">
+                llm, err := model.NewAnthropicModel(ctx, cfg.ModelName, cfg.APIKey)
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, fmt.Errorf("failed to create Anthropic model: %v", err)
+                }</span>
+                <span class="cov0" title="0">slog.Info("using model", "vendor", "anthropic", "model", cfg.ModelName)
+                return llm, nil</span>
+
+        default:<span class="cov0" title="0">
+                return nil, fmt.Errorf("unknown model vendor: %s (supported: google, gemini, anthropic)", cfg.ModelVendor)</span>
+        }
+}
+
+// CardOptions allows agents to customize the AgentCard beyond the defaults
+// that Serve derives automatically from the ADK agent.
+type CardOptions struct {
+        // Version is the agent's version string (e.g., "1.0.0").
+        Version string
+
+        // DocumentationURL points to the agent's documentation.
+        DocumentationURL string
+
+        // Provider describes the organization providing this agent.
+        Provider *a2a.AgentProvider
+
+        // SkillTags maps a skill ID to additional tags to merge onto the
+        // auto-generated skills. Skill IDs follow the ADK pattern:
+        // "agentName" for the model skill, "agentName-toolName" for tool skills.
+        SkillTags map[string][]string
+
+        // SkillExamples maps a skill ID to example prompts/scenarios.
+        SkillExamples map[string][]string
+}
+
+// applyCardOptions merges optional metadata onto an AgentCard.
+func applyCardOptions(card *a2a.AgentCard, opts CardOptions) <span class="cov8" title="1">{
+        if opts.Version != "" </span><span class="cov8" title="1">{
+                card.Version = opts.Version
+        }</span>
+        <span class="cov8" title="1">if opts.DocumentationURL != "" </span><span class="cov8" title="1">{
+                card.DocumentationURL = opts.DocumentationURL
+        }</span>
+        <span class="cov8" title="1">if opts.Provider != nil </span><span class="cov8" title="1">{
+                card.Provider = opts.Provider
+        }</span>
+        <span class="cov8" title="1">for i := range card.Skills </span><span class="cov8" title="1">{
+                skill := &amp;card.Skills[i]
+                if tags, ok := opts.SkillTags[skill.ID]; ok </span><span class="cov8" title="1">{
+                        skill.Tags = append(skill.Tags, tags...)
+                }</span>
+                <span class="cov8" title="1">if examples, ok := opts.SkillExamples[skill.ID]; ok </span><span class="cov8" title="1">{
+                        skill.Examples = examples
+                }</span>
+        }
+}
+
+// Serve starts an A2A server for the given agent on cfg.ListenAddr.
+// It sets up the agent card, JSON-RPC handler, in-memory session service, and blocks.
+// An optional CardOptions can be passed to enrich the agent card with additional metadata.
+func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) error <span class="cov0" title="0">{
+        listener, err := net.Listen("tcp", cfg.ListenAddr)
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
+        }</span>
+
+        <span class="cov0" title="0">baseURL := &amp;url.URL{Scheme: "http", Host: listener.Addr().String()}
+
+        agentPath := "/invoke"
+        agentCard := &amp;a2a.AgentCard{
+                Name:               a.Name(),
+                Description:        a.Description(),
+                Skills:             adka2a.BuildAgentSkills(a),
+                PreferredTransport: a2a.TransportProtocolJSONRPC,
+                URL:                baseURL.JoinPath(agentPath).String(),
+                Capabilities:       a2a.AgentCapabilities{Streaming: true},
+        }
+
+        if len(opts) &gt; 0 </span><span class="cov0" title="0">{
+                applyCardOptions(agentCard, opts[0])
+        }</span>
+
+        <span class="cov0" title="0">mux := http.NewServeMux()
+        mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+        executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+                RunnerConfig: runner.Config{
+                        AppName:        a.Name(),
+                        Agent:          a,
+                        SessionService: session.InMemoryService(),
+                },
+        })
+        requestHandler := a2asrv.NewHandler(executor)
+        mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
+
+        slog.Info("starting A2A server",
+                "agent", a.Name(),
+                "url", baseURL.String(),
+                "card", baseURL.String()+"/.well-known/agent-card.json",
+        )
+
+        return http.Serve(listener, mux)</span>
+}
+</pre>
+		
+		<pre class="file" id="file10" style="display: none">package main
+
+import (
+        "context"
+        "encoding/json"
+        "fmt"
+        "log/slog"
+        "net/http"
+        "strings"
+
+        "github.com/a2aproject/a2a-go/a2a"
+        "github.com/a2aproject/a2a-go/a2aclient"
+
+        "helpdesk/internal/discovery"
+)
+
+// agentNameDB is the expected name for the database agent.
+const agentNameDB = "postgres_database_agent"
+
+// agentNameK8s is the expected name for the k8s agent.
+const agentNameK8s = "k8s_agent"
+
+// agentNameIncident is the expected name for the incident agent.
+const agentNameIncident = "incident_agent"
+
+// Gateway translates REST requests into A2A calls to sub-agents.
+type Gateway struct {
+        agents  map[string]*discovery.Agent
+        clients map[string]*a2aclient.Client
+}
+
+// NewGateway creates a Gateway and establishes A2A clients for each agent.
+func NewGateway(agents map[string]*discovery.Agent) *Gateway <span class="cov0" title="0">{
+        clients := make(map[string]*a2aclient.Client, len(agents))
+        for name, agent := range agents </span><span class="cov0" title="0">{
+                client, err := a2aclient.NewFromCard(context.Background(), agent.Card)
+                if err != nil </span><span class="cov0" title="0">{
+                        slog.Warn("failed to create A2A client", "agent", name, "err", err)
+                        continue</span>
+                }
+                <span class="cov0" title="0">clients[name] = client
+                slog.Info("A2A client ready", "agent", name)</span>
+        }
+        <span class="cov0" title="0">return &amp;Gateway{agents: agents, clients: clients}</span>
+}
+
+// agentAliases maps short names (used in the /query endpoint) to internal
+// agent names used for client lookup.
+var agentAliases = map[string]string{
+        "database": agentNameDB,
+        "db":       agentNameDB,
+        "k8s":      agentNameK8s,
+        "incident": agentNameIncident,
+}
+
+// RegisterRoutes sets up the REST endpoint handlers.
+func (g *Gateway) RegisterRoutes(mux *http.ServeMux) <span class="cov0" title="0">{
+        mux.HandleFunc("GET /api/v1/agents", g.handleListAgents)
+        mux.HandleFunc("POST /api/v1/query", g.handleQuery)
+        mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
+        mux.HandleFunc("GET /api/v1/incidents", g.handleListIncidents)
+        mux.HandleFunc("POST /api/v1/db/{tool}", g.handleDBTool)
+        mux.HandleFunc("POST /api/v1/k8s/{tool}", g.handleK8sTool)
+}</span>
+
+// --- Handlers ---
+
+func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) <span class="cov0" title="0">{
+        var req struct {
+                Agent   string `json:"agent"`
+                Message string `json:"message"`
+        }
+        if err := json.NewDecoder(r.Body).Decode(&amp;req); err != nil </span><span class="cov0" title="0">{
+                writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+                return
+        }</span>
+        <span class="cov0" title="0">if req.Message == "" </span><span class="cov0" title="0">{
+                writeError(w, http.StatusBadRequest, "message is required")
+                return
+        }</span>
+
+        <span class="cov0" title="0">agentName, ok := agentAliases[req.Agent]
+        if !ok </span><span class="cov0" title="0">{
+                writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, incident)", req.Agent))
+                return
+        }</span>
+
+        <span class="cov0" title="0">g.proxyToAgent(w, r, agentName, req.Message)</span>
+}
+
+func (g *Gateway) handleListAgents(w http.ResponseWriter, r *http.Request) <span class="cov0" title="0">{
+        type agentInfo struct {
+                Name        string          `json:"name"`
+                InvokeURL   string          `json:"invoke_url"`
+                Description string          `json:"description,omitempty"`
+                Version     string          `json:"version,omitempty"`
+                Skills      []a2a.AgentSkill `json:"skills,omitempty"`
+        }
+
+        var agents []agentInfo
+        for _, agent := range g.agents </span><span class="cov0" title="0">{
+                info := agentInfo{
+                        Name:      agent.Name,
+                        InvokeURL: agent.InvokeURL,
+                }
+                if agent.Card != nil </span><span class="cov0" title="0">{
+                        info.Description = agent.Card.Description
+                        info.Version = agent.Card.Version
+                        info.Skills = agent.Card.Skills
+                }</span>
+                <span class="cov0" title="0">agents = append(agents, info)</span>
+        }
+        <span class="cov0" title="0">writeJSON(w, http.StatusOK, agents)</span>
+}
+
+func (g *Gateway) handleCreateIncident(w http.ResponseWriter, r *http.Request) <span class="cov0" title="0">{
+        var args map[string]any
+        if err := json.NewDecoder(r.Body).Decode(&amp;args); err != nil </span><span class="cov0" title="0">{
+                writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+                return
+        }</span>
+
+        <span class="cov0" title="0">prompt := buildToolPrompt("create_incident_bundle", args)
+        g.proxyToAgent(w, r, agentNameIncident, prompt)</span>
+}
+
+func (g *Gateway) handleListIncidents(w http.ResponseWriter, r *http.Request) <span class="cov0" title="0">{
+        g.proxyToAgent(w, r, agentNameIncident, "List all previously created incident bundles.")
+}</span>
+
+func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) <span class="cov0" title="0">{
+        toolName := r.PathValue("tool")
+        var args map[string]any
+        if err := json.NewDecoder(r.Body).Decode(&amp;args); err != nil </span><span class="cov0" title="0">{
+                writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+                return
+        }</span>
+        <span class="cov0" title="0">prompt := buildToolPrompt(toolName, args)
+        g.proxyToAgent(w, r, agentNameDB, prompt)</span>
+}
+
+func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) <span class="cov0" title="0">{
+        toolName := r.PathValue("tool")
+        var args map[string]any
+        if err := json.NewDecoder(r.Body).Decode(&amp;args); err != nil </span><span class="cov0" title="0">{
+                writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+                return
+        }</span>
+        <span class="cov0" title="0">prompt := buildToolPrompt(toolName, args)
+        g.proxyToAgent(w, r, agentNameK8s, prompt)</span>
+}
+
+// --- A2A call ---
+
+// proxyToAgent sends a text message to an agent and returns the response.
+func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName, prompt string) <span class="cov0" title="0">{
+        client, ok := g.clients[agentName]
+        if !ok </span><span class="cov0" title="0">{
+                writeError(w, http.StatusBadGateway, fmt.Sprintf("agent %q not available", agentName))
+                return
+        }</span>
+
+        <span class="cov0" title="0">slog.Info("gateway: proxying request", "agent", agentName, "prompt_len", len(prompt))
+
+        msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
+        result, err := client.SendMessage(r.Context(), &amp;a2a.MessageSendParams{Message: msg})
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("gateway: A2A call failed", "agent", agentName, "err", err)
+                writeError(w, http.StatusBadGateway, fmt.Sprintf("A2A call to %s failed: %v", agentName, err))
+                return
+        }</span>
+
+        <span class="cov0" title="0">response := extractResponse(result)
+        response.AgentName = agentName
+        writeJSON(w, http.StatusOK, response)</span>
+}
+
+// --- Response extraction ---
+
+// a2aResponse is the structured response returned by the gateway.
+type a2aResponse struct {
+        AgentName string `json:"agent"`
+        TaskID    string `json:"task_id,omitempty"`
+        State     string `json:"state,omitempty"`
+        Text      string `json:"text,omitempty"`
+        Artifacts []any  `json:"artifacts,omitempty"`
+}
+
+// extractResponse pulls text and artifacts from a SendMessageResult.
+func extractResponse(result a2a.SendMessageResult) a2aResponse <span class="cov8" title="1">{
+        resp := a2aResponse{}
+
+        switch v := result.(type) </span>{
+        case *a2a.Task:<span class="cov8" title="1">
+                resp.TaskID = string(v.ID)
+                resp.State = string(v.Status.State)
+
+                // Extract text from status message.
+                if v.Status.Message != nil </span><span class="cov8" title="1">{
+                        resp.Text = extractText(v.Status.Message.Parts)
+                }</span>
+
+                // If no status text, try history (last agent message).
+                <span class="cov8" title="1">if resp.Text == "" </span><span class="cov8" title="1">{
+                        for i := len(v.History) - 1; i &gt;= 0; i-- </span><span class="cov8" title="1">{
+                                if v.History[i].Role == a2a.MessageRoleAgent </span><span class="cov8" title="1">{
+                                        resp.Text = extractText(v.History[i].Parts)
+                                        break</span>
+                                }
+                        }
+                }
+
+                // Extract artifacts.
+                <span class="cov8" title="1">for _, a := range v.Artifacts </span><span class="cov8" title="1">{
+                        resp.Artifacts = append(resp.Artifacts, map[string]any{
+                                "id":    a.ID,
+                                "name":  a.Name,
+                                "parts": extractText(a.Parts),
+                        })
+                }</span>
+
+                // If still no text, use the first artifact's content.
+                <span class="cov8" title="1">if resp.Text == "" &amp;&amp; len(v.Artifacts) &gt; 0 </span><span class="cov8" title="1">{
+                        resp.Text = extractText(v.Artifacts[0].Parts)
+                }</span>
+
+        case *a2a.Message:<span class="cov8" title="1">
+                resp.Text = extractText(v.Parts)</span>
+        }
+
+        <span class="cov8" title="1">return resp</span>
+}
+
+// extractText concatenates all text parts from a content parts slice.
+func extractText(parts a2a.ContentParts) string <span class="cov8" title="1">{
+        var texts []string
+        for _, p := range parts </span><span class="cov8" title="1">{
+                if tp, ok := p.(a2a.TextPart); ok </span><span class="cov8" title="1">{
+                        texts = append(texts, tp.Text)
+                }</span>
+        }
+        <span class="cov8" title="1">return strings.Join(texts, "\n")</span>
+}
+
+// --- Prompt construction ---
+
+// buildToolPrompt constructs a clear instruction for the agent to call a specific tool.
+func buildToolPrompt(toolName string, args map[string]any) string <span class="cov8" title="1">{
+        var sb strings.Builder
+        sb.WriteString(fmt.Sprintf("Call the %s tool", toolName))
+
+        if len(args) &gt; 0 </span><span class="cov8" title="1">{
+                sb.WriteString(" with the following parameters: ")
+                pairs := make([]string, 0, len(args))
+                for k, v := range args </span><span class="cov8" title="1">{
+                        pairs = append(pairs, fmt.Sprintf("%s=%v", k, v))
+                }</span>
+                <span class="cov8" title="1">sb.WriteString(strings.Join(pairs, ", "))</span>
+        }
+
+        <span class="cov8" title="1">sb.WriteString(".")
+        return sb.String()</span>
+}
+
+// --- Utilities ---
+
+func writeJSON(w http.ResponseWriter, status int, data any) <span class="cov0" title="0">{
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(status)
+        json.NewEncoder(w).Encode(data)
+}</span>
+
+func writeError(w http.ResponseWriter, status int, message string) <span class="cov0" title="0">{
+        writeJSON(w, status, map[string]string{"error": message})
+}</span>
+</pre>
+		
+		<pre class="file" id="file11" style="display: none">// Package main implements the REST gateway — a thin HTTP layer that translates
+// REST requests into A2A JSON-RPC calls to the helpdesk sub-agents.
+// No LLM is needed in the gateway itself; sub-agents handle AI reasoning.
+package main
+
+import (
+        "log/slog"
+        "net/http"
+        "os"
+        "strings"
+
+        "helpdesk/internal/discovery"
+        "helpdesk/internal/logging"
+)
+
+func main() <span class="cov0" title="0">{
+        logging.InitLogging(os.Args[1:])
+
+        listenAddr := os.Getenv("HELPDESK_GATEWAY_ADDR")
+        if listenAddr == "" </span><span class="cov0" title="0">{
+                listenAddr = "localhost:8080"
+        }</span>
+
+        <span class="cov0" title="0">agentURLs := os.Getenv("HELPDESK_AGENT_URLS")
+        if agentURLs == "" </span><span class="cov0" title="0">{
+                slog.Error("HELPDESK_AGENT_URLS is required (comma-separated agent base URLs)")
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">urls := strings.Split(agentURLs, ",")
+        for i := range urls </span><span class="cov0" title="0">{
+                urls[i] = strings.TrimSpace(urls[i])
+        }</span>
+
+        <span class="cov0" title="0">registry, err := discovery.Discover(urls)
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to discover agents", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">gw := NewGateway(registry)
+        mux := http.NewServeMux()
+        gw.RegisterRoutes(mux)
+
+        slog.Info("starting REST gateway", "addr", listenAddr, "agents", len(registry))
+        if err := http.ListenAndServe(listenAddr, mux); err != nil </span><span class="cov0" title="0">{
+                slog.Error("gateway stopped", "err", err)
+                os.Exit(1)
+        }</span>
+}
+</pre>
+		
+		<pre class="file" id="file12" style="display: none">package main
+
+import (
+        "encoding/json"
+        "fmt"
+        "io"
+        "log/slog"
+        "net/http"
+        "strings"
+        "time"
+)
+
+// agentCardResponse represents the relevant fields from /.well-known/agent-card.json
+type agentCardResponse struct {
+        Name        string `json:"name"`
+        Description string `json:"description"`
+        URL         string `json:"url"`
+        Skills      []struct {
+                Name        string `json:"name"`
+                Description string `json:"description"`
+        } `json:"skills,omitempty"`
+}
+
+// discoverAgentFromURL fetches the agent card from a URL and converts it to AgentConfig.
+func discoverAgentFromURL(baseURL string) (*AgentConfig, error) <span class="cov0" title="0">{
+        client := &amp;http.Client{
+                Timeout: 5 * time.Second,
+        }
+
+        cardURL := strings.TrimSuffix(baseURL, "/") + "/.well-known/agent-card.json"
+        resp, err := client.Get(cardURL)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to fetch agent card: %v", err)
+        }</span>
+        <span class="cov0" title="0">defer resp.Body.Close()
+
+        if resp.StatusCode != http.StatusOK </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("agent card returned status %d", resp.StatusCode)
+        }</span>
+
+        <span class="cov0" title="0">body, err := io.ReadAll(resp.Body)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to read agent card: %v", err)
+        }</span>
+
+        <span class="cov0" title="0">var card agentCardResponse
+        if err := json.Unmarshal(body, &amp;card); err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to parse agent card: %v", err)
+        }</span>
+
+        <span class="cov0" title="0">config := &amp;AgentConfig{
+                Name:        card.Name,
+                Description: card.Description,
+                URL:         baseURL,
+        }
+
+        for _, skill := range card.Skills </span><span class="cov0" title="0">{
+                if skill.Description != "" </span><span class="cov0" title="0">{
+                        config.UseCases = append(config.UseCases, skill.Description)
+                }</span> else<span class="cov0" title="0"> if skill.Name != "" </span><span class="cov0" title="0">{
+                        config.UseCases = append(config.UseCases, skill.Name)
+                }</span>
+        }
+
+        <span class="cov0" title="0">if config.Name == "" </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("agent card missing name")
+        }</span>
+
+        <span class="cov0" title="0">return config, nil</span>
+}
+
+// discoverAgents discovers agents from a list of base URLs by fetching their agent cards.
+func discoverAgents(urls []string) ([]AgentConfig, []string) <span class="cov0" title="0">{
+        var discovered []AgentConfig
+        var failed []string
+
+        for _, url := range urls </span><span class="cov0" title="0">{
+                slog.Info("discovering agent", "url", url)
+                config, err := discoverAgentFromURL(url)
+                if err != nil </span><span class="cov0" title="0">{
+                        slog.Warn("agent discovery failed", "url", url, "err", err)
+                        failed = append(failed, url)
+                        continue</span>
+                }
+                <span class="cov0" title="0">slog.Info("discovered agent", "name", config.Name, "url", url)
+                discovered = append(discovered, *config)</span>
+        }
+
+        <span class="cov0" title="0">return discovered, failed</span>
+}
+
+// checkAgentHealth verifies that an agent is reachable by fetching its agent card.
+func checkAgentHealth(agentURL string) error <span class="cov0" title="0">{
+        client := &amp;http.Client{
+                Timeout: 5 * time.Second,
+        }
+
+        cardURL := strings.TrimSuffix(agentURL, "/") + "/.well-known/agent-card.json"
+        resp, err := client.Get(cardURL)
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("failed to reach agent at %s: %v", agentURL, err)
+        }</span>
+        <span class="cov0" title="0">defer resp.Body.Close()
+
+        if resp.StatusCode != http.StatusOK </span><span class="cov0" title="0">{
+                return fmt.Errorf("agent at %s returned status %d", agentURL, resp.StatusCode)
+        }</span>
+
+        <span class="cov0" title="0">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file13" style="display: none">// Package main implements the helpdesk orchestrator — a multi-agent system for
+// troubleshooting database and infrastructure issues. It routes user queries
+// to specialized sub-agents based on the problem domain.
+package main
+
+import (
+        "context"
+        "fmt"
+        "log/slog"
+        "os"
+        "strings"
+
+        "google.golang.org/adk/agent"
+        "google.golang.org/adk/agent/llmagent"
+        "google.golang.org/adk/artifact"
+        "google.golang.org/adk/cmd/launcher"
+        "google.golang.org/adk/cmd/launcher/full"
+        "google.golang.org/adk/session"
+        "google.golang.org/adk/tool"
+        "google.golang.org/adk/tool/geminitool"
+
+        "helpdesk/agentutil"
+        "helpdesk/internal/logging"
+        "helpdesk/prompts"
+)
+
+func main() <span class="cov0" title="0">{
+        remainingArgs := logging.InitLogging(os.Args[1:])
+
+        ctx := context.Background()
+
+        cfg := agentutil.Config{
+                ModelVendor: os.Getenv("HELPDESK_MODEL_VENDOR"),
+                ModelName:   os.Getenv("HELPDESK_MODEL_NAME"),
+                APIKey:      os.Getenv("HELPDESK_API_KEY"),
+        }
+        if cfg.ModelVendor == "" || cfg.ModelName == "" || cfg.APIKey == "" </span><span class="cov0" title="0">{
+                slog.Error("missing required environment variables: HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY")
+                os.Exit(1)
+        }</span>
+
+        // Discover agents from URLs or load from config file.
+        <span class="cov0" title="0">var agentConfigs []AgentConfig
+
+        agentURLs := os.Getenv("HELPDESK_AGENT_URLS")
+        if agentURLs != "" </span><span class="cov0" title="0">{
+                urls := strings.Split(agentURLs, ",")
+                for i := range urls </span><span class="cov0" title="0">{
+                        urls[i] = strings.TrimSpace(urls[i])
+                }</span>
+                <span class="cov0" title="0">discovered, failed := discoverAgents(urls)
+                if len(failed) &gt; 0 </span><span class="cov0" title="0">{
+                        slog.Warn("failed to discover some agents", "urls", strings.Join(failed, ", "))
+                }</span>
+                <span class="cov0" title="0">agentConfigs = discovered</span>
+        } else<span class="cov0" title="0"> {
+                slog.Info("no dynamic agent discovery (HELPDESK_AGENT_URLS not set), falling back to static config file")
+                agentsConfigPath := os.Getenv("HELPDESK_AGENTS_CONFIG")
+                if agentsConfigPath == "" </span><span class="cov0" title="0">{
+                        agentsConfigPath = "agents.json"
+                }</span>
+                <span class="cov0" title="0">var err error
+                agentConfigs, err = loadAgentsConfig(agentsConfigPath)
+                if err != nil </span><span class="cov0" title="0">{
+                        slog.Error("failed to load agents config", "path", agentsConfigPath, "err", err)
+                        os.Exit(1)
+                }</span>
+                <span class="cov0" title="0">slog.Info("loaded agent configs from file", "path", agentsConfigPath)</span>
+        }
+
+        <span class="cov0" title="0">if len(agentConfigs) == 0 </span><span class="cov0" title="0">{
+                slog.Warn("no agents discovered or configured")
+        }</span>
+
+        <span class="cov0" title="0">agentNames := make([]string, len(agentConfigs))
+        for i, c := range agentConfigs </span><span class="cov0" title="0">{
+                agentNames[i] = c.Name
+        }</span>
+        <span class="cov0" title="0">slog.Info("expected expert agents", "agents", strings.Join(agentNames, ", "))
+
+        // Create the LLM model
+        llmModel, err := agentutil.NewLLM(ctx, cfg)
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create model", "err", err)
+                os.Exit(1)
+        }</span>
+
+        // Create remote agent proxies (with health checking)
+        <span class="cov0" title="0">remoteAgents, unavailableAgents := createRemoteAgents(agentConfigs)
+
+        // Build the instruction with dynamic agent section and availability info
+        instruction := prompts.Orchestrator + buildAgentPromptSection(agentConfigs)
+
+        // Load infrastructure configuration (optional)
+        infraConfigPath := os.Getenv("HELPDESK_INFRA_CONFIG")
+        if infraConfigPath != "" </span><span class="cov0" title="0">{
+                infraConfig, err := loadInfraConfig(infraConfigPath)
+                if err != nil </span><span class="cov0" title="0">{
+                        slog.Error("failed to load infrastructure config", "path", infraConfigPath, "err", err)
+                        os.Exit(1)
+                }</span>
+                <span class="cov0" title="0">instruction += buildInfraPromptSection(infraConfig)
+                slog.Info("infrastructure config loaded", "db_servers", len(infraConfig.DBServers), "k8s_clusters", len(infraConfig.K8sClusters), "vms", len(infraConfig.VMs))</span>
+        }
+
+        <span class="cov0" title="0">if len(unavailableAgents) &gt; 0 </span><span class="cov0" title="0">{
+                instruction += fmt.Sprintf("\n## Currently Unavailable Agents\nThe following agents are currently unavailable: %s\nIf you need these agents, inform the user and suggest they start the agent or try manual troubleshooting.\n",
+                        strings.Join(unavailableAgents, ", "))
+        }</span>
+
+        // Create tools list
+        <span class="cov0" title="0">var tools []tool.Tool
+        if strings.ToLower(cfg.ModelVendor) == "google" || strings.ToLower(cfg.ModelVendor) == "gemini" </span><span class="cov0" title="0">{
+                tools = append(tools, geminitool.GoogleSearch{})
+        }</span>
+
+        // Create the root agent with sub-agents
+        <span class="cov0" title="0">rootAgent, err := llmagent.New(llmagent.Config{
+                Name:                "helpdesk_orchestrator",
+                Model:               llmModel,
+                Description:         "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
+                Instruction:         instruction,
+                Tools:               tools,
+                SubAgents:           remoteAgents,
+                AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportFunc},
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create root agent", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">slog.Info("orchestrator initialized", "available_agents", len(remoteAgents))
+        if len(unavailableAgents) &gt; 0 </span><span class="cov0" title="0">{
+                slog.Warn("some agents unavailable", "agents", strings.Join(unavailableAgents, ", "))
+        }</span>
+
+        <span class="cov0" title="0">agentLoader, err := agent.NewMultiLoader(rootAgent, remoteAgents...)
+        if err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to create agent loader", "err", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">artifactService := artifact.InMemoryService()
+        sessionService := session.InMemoryService()
+
+        config := &amp;launcher.Config{
+                ArtifactService: artifactService,
+                SessionService:  sessionService,
+                AgentLoader:     agentLoader,
+        }
+
+        l := full.NewLauncher()
+        if err = l.Execute(ctx, config, remainingArgs); err != nil </span><span class="cov0" title="0">{
+                slog.Error("failed to launch", "err", err, "usage", l.CommandLineSyntax())
+                os.Exit(1)
+        }</span>
+}
+</pre>
+		
+		<pre class="file" id="file14" style="display: none">package main
+
+import (
+        "encoding/json"
+        "fmt"
+        "log/slog"
+        "os"
+        "strings"
+
+        "github.com/google/uuid"
+        "google.golang.org/adk/agent"
+        "google.golang.org/adk/agent/llmagent"
+        "google.golang.org/adk/agent/remoteagent"
+        "google.golang.org/adk/model"
+)
+
+// AgentConfig holds configuration for a remote agent.
+type AgentConfig struct {
+        Name        string   `json:"name"`
+        URL         string   `json:"url"`
+        Description string   `json:"description"`
+        UseCases    []string `json:"use_cases,omitempty"`
+}
+
+// inputParams holds the orchestrator configuration.
+type inputParams struct {
+        modelName string
+        apiKey    string
+        agents    []AgentConfig
+}
+
+// loadAgentsConfig loads agent configurations from a JSON file.
+func loadAgentsConfig(configPath string) ([]AgentConfig, error) <span class="cov8" title="1">{
+        data, err := os.ReadFile(configPath)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("failed to read agents config file: %v", err)
+        }</span>
+
+        <span class="cov8" title="1">var agents []AgentConfig
+        if err := json.Unmarshal(data, &amp;agents); err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to parse agents config: %v", err)
+        }</span>
+
+        <span class="cov8" title="1">return agents, nil</span>
+}
+
+// DBServer represents a managed database server (AlloyDB Omni, standalone PostgreSQL, etc.).
+// Each server runs on either a Kubernetes cluster or a VM — never both.
+type DBServer struct {
+        Name             string `json:"name"`
+        ConnectionString string `json:"connection_string"`
+        K8sCluster       string `json:"k8s_cluster,omitempty"`
+        K8sNamespace     string `json:"k8s_namespace,omitempty"`
+        VMName           string `json:"vm_name,omitempty"`
+}
+
+// K8sCluster represents a managed Kubernetes cluster.
+type K8sCluster struct {
+        Name    string `json:"name"`
+        Context string `json:"context"`
+}
+
+// VM represents a virtual machine hosting infrastructure.
+type VM struct {
+        Name string `json:"name"`
+        Host string `json:"host"`
+}
+
+// InfraConfig holds the infrastructure inventory.
+type InfraConfig struct {
+        DBServers   map[string]DBServer   `json:"db_servers"`
+        K8sClusters map[string]K8sCluster `json:"k8s_clusters"`
+        VMs         map[string]VM         `json:"vms"`
+}
+
+// loadInfraConfig loads infrastructure configuration from a JSON file.
+func loadInfraConfig(path string) (*InfraConfig, error) <span class="cov8" title="1">{
+        data, err := os.ReadFile(path)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("failed to read infrastructure config file: %v", err)
+        }</span>
+
+        <span class="cov8" title="1">var config InfraConfig
+        if err := json.Unmarshal(data, &amp;config); err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("failed to parse infrastructure config: %v", err)
+        }</span>
+
+        <span class="cov8" title="1">return &amp;config, nil</span>
+}
+
+// buildInfraPromptSection generates the managed infrastructure section for the agent prompt.
+func buildInfraPromptSection(config *InfraConfig) string <span class="cov8" title="1">{
+        var sb strings.Builder
+        sb.WriteString("\n## Managed Infrastructure\n\n")
+
+        if len(config.DBServers) &gt; 0 </span><span class="cov8" title="1">{
+                sb.WriteString("### Database Servers\n\n")
+                for id, db := range config.DBServers </span><span class="cov8" title="1">{
+                        sb.WriteString(fmt.Sprintf("**%s** (%s)\n", id, db.Name))
+                        sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", db.ConnectionString))
+                        if db.K8sCluster != "" </span><span class="cov8" title="1">{
+                                if k8s, ok := config.K8sClusters[db.K8sCluster]; ok </span><span class="cov8" title="1">{
+                                        sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (context: `%s`)", db.K8sCluster, k8s.Context))
+                                }</span> else<span class="cov0" title="0"> {
+                                        sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (not found in k8s_clusters)", db.K8sCluster))
+                                }</span>
+                                <span class="cov8" title="1">ns := db.K8sNamespace
+                                if ns == "" </span><span class="cov0" title="0">{
+                                        ns = "default"
+                                }</span>
+                                <span class="cov8" title="1">sb.WriteString(fmt.Sprintf(", namespace: `%s`\n", ns))</span>
+                        } else<span class="cov8" title="1"> if db.VMName != "" </span><span class="cov8" title="1">{
+                                if vm, ok := config.VMs[db.VMName]; ok </span><span class="cov8" title="1">{
+                                        sb.WriteString(fmt.Sprintf("- Runs on VM: **%s** (%s, host: `%s`)\n", db.VMName, vm.Name, vm.Host))
+                                }</span> else<span class="cov0" title="0"> {
+                                        sb.WriteString(fmt.Sprintf("- Runs on VM: **%s** (not found in vms)\n", db.VMName))
+                                }</span>
+                        }
+                        <span class="cov8" title="1">sb.WriteString("\n")</span>
+                }
+        }
+
+        <span class="cov8" title="1">if len(config.K8sClusters) &gt; 0 </span><span class="cov8" title="1">{
+                sb.WriteString("### Kubernetes Clusters\n\n")
+                for id, k8s := range config.K8sClusters </span><span class="cov8" title="1">{
+                        sb.WriteString(fmt.Sprintf("**%s** (%s) — context: `%s`\n", id, k8s.Name, k8s.Context))
+                }</span>
+                <span class="cov8" title="1">sb.WriteString("\n")</span>
+        }
+
+        <span class="cov8" title="1">if len(config.VMs) &gt; 0 </span><span class="cov8" title="1">{
+                sb.WriteString("### Virtual Machines\n\n")
+                for id, vm := range config.VMs </span><span class="cov8" title="1">{
+                        sb.WriteString(fmt.Sprintf("**%s** (%s) — host: `%s`\n", id, vm.Name, vm.Host))
+                }</span>
+                <span class="cov8" title="1">sb.WriteString("\n")</span>
+        }
+
+        <span class="cov8" title="1">sb.WriteString("### Instructions\n\n")
+        sb.WriteString("- When investigating a database server, use its connection_string with the database agent.\n")
+        sb.WriteString("- If the server has an associated K8s cluster, use that cluster's context and namespace with the K8s agent.\n")
+        sb.WriteString("- If the server runs on a VM, no K8s context is available — use the database agent and OS-level diagnostics.\n")
+        sb.WriteString("- K8s clusters not tied to any database server can still be inspected independently.\n")
+
+        return sb.String()</span>
+}
+
+// buildAgentPromptSection generates the "Available Specialist Agents" section
+// dynamically from the loaded agent configurations.
+func buildAgentPromptSection(agents []AgentConfig) string <span class="cov8" title="1">{
+        if len(agents) == 0 </span><span class="cov8" title="1">{
+                return ""
+        }</span>
+
+        <span class="cov8" title="1">var sb strings.Builder
+        sb.WriteString("\n## Available Specialist Agents\n\n")
+        sb.WriteString("You have access to the following specialist agents that you can delegate to:\n\n")
+
+        for _, agent := range agents </span><span class="cov8" title="1">{
+                sb.WriteString(fmt.Sprintf("### %s\n", agent.Name))
+                if agent.Description != "" </span><span class="cov8" title="1">{
+                        sb.WriteString(fmt.Sprintf("%s\n", agent.Description))
+                }</span>
+                <span class="cov8" title="1">if len(agent.UseCases) &gt; 0 </span><span class="cov8" title="1">{
+                        sb.WriteString("Use this agent for:\n")
+                        for _, useCase := range agent.UseCases </span><span class="cov8" title="1">{
+                                sb.WriteString(fmt.Sprintf("- %s\n", useCase))
+                        }</span>
+                }
+                <span class="cov8" title="1">sb.WriteString("\n")</span>
+        }
+
+        <span class="cov8" title="1">return sb.String()</span>
+}
+
+// saveReportFunc saves LLM responses as artifacts.
+func saveReportFunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) <span class="cov0" title="0">{
+        if llmResponse == nil || llmResponse.Content == nil || llmResponseError != nil </span><span class="cov0" title="0">{
+                return llmResponse, llmResponseError
+        }</span>
+        <span class="cov0" title="0">for _, part := range llmResponse.Content.Parts </span><span class="cov0" title="0">{
+                if part.Text == "" &amp;&amp; part.InlineData == nil </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+                <span class="cov0" title="0">_, err := ctx.Artifacts().Save(ctx, uuid.NewString(), part)
+                if err != nil </span><span class="cov0" title="0">{
+                        return nil, err
+                }</span>
+        }
+        <span class="cov0" title="0">return llmResponse, llmResponseError</span>
+}
+
+// createRemoteAgents creates remote agent proxies for available agents.
+// It checks agent health and only returns agents that are reachable.
+func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) <span class="cov0" title="0">{
+        var agents []agent.Agent
+        var unavailable []string
+
+        for _, cfg := range configs </span><span class="cov0" title="0">{
+                slog.Info("confirming agent availability", "agent", cfg.Name, "url", cfg.URL)
+
+                if err := checkAgentHealth(cfg.URL); err != nil </span><span class="cov0" title="0">{
+                        slog.Warn("agent unavailable", "agent", cfg.Name, "url", cfg.URL, "err", err)
+                        unavailable = append(unavailable, cfg.Name)
+                        continue</span>
+                }
+
+                <span class="cov0" title="0">remoteAgent, err := remoteagent.NewA2A(remoteagent.A2AConfig{
+                        Name:            cfg.Name,
+                        Description:     cfg.Description,
+                        AgentCardSource: cfg.URL,
+                })
+                if err != nil </span><span class="cov0" title="0">{
+                        slog.Warn("failed to create agent proxy", "agent", cfg.Name, "err", err)
+                        unavailable = append(unavailable, cfg.Name)
+                        continue</span>
+                }
+
+                <span class="cov0" title="0">slog.Info("agent available", "agent", cfg.Name)
+                agents = append(agents, remoteAgent)</span>
+        }
+
+        <span class="cov0" title="0">return agents, unavailable</span>
+}
+
+// Ensure saveReportFunc has the correct signature.
+var _ llmagent.AfterModelCallback = saveReportFunc
+</pre>
+		
+		<pre class="file" id="file15" style="display: none">// Command srebot simulates an observability watcher / SRE bot that calls the
+// Helpdesk gateway REST API to check database health. When anomalies are
+// detected it asks the AI-powered database agent to investigate autonomously,
+// then triggers an incident bundle and waits for the async callback.
+package main
+
+import (
+        "bytes"
+        "context"
+        "encoding/json"
+        "flag"
+        "fmt"
+        "io"
+        "net"
+        "net/http"
+        "os"
+        "os/signal"
+        "strings"
+        "time"
+)
+
+// a2aResponse mirrors the gateway JSON response shape.
+type a2aResponse struct {
+        Agent     string `json:"agent"`
+        TaskID    string `json:"task_id,omitempty"`
+        State     string `json:"state,omitempty"`
+        Text      string `json:"text,omitempty"`
+        Artifacts []any  `json:"artifacts,omitempty"`
+}
+
+// callbackPayload mirrors IncidentBundleResult from the incident agent.
+type callbackPayload struct {
+        IncidentID string   `json:"incident_id"`
+        BundlePath string   `json:"bundle_path"`
+        Timestamp  string   `json:"timestamp"`
+        Layers     []string `json:"layers"`
+        Errors     []string `json:"errors,omitempty"`
+}
+
+// anomalyKeywords are substrings that indicate something is wrong in the
+// agent's response text. Matching is case-insensitive.
+var anomalyKeywords = []string{
+        "error", "fail", "refused", "timeout", "too many",
+        "denied", "unreachable", "crash", "oom", "killed",
+}
+
+func main() <span class="cov0" title="0">{
+        gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
+        conn := flag.String("conn", "host=localhost port=15432 dbname=testdb user=postgres password=testpass", "PostgreSQL libpq connection string")
+        listen := flag.String("listen", ":9090", "Callback listener address")
+        infraKey := flag.String("infra-key", "srebot-demo", "Infrastructure identifier for incident bundles")
+        cbTimeout := flag.Duration("timeout", 120*time.Second, "How long to wait for the callback")
+        force := flag.Bool("force", false, "Skip anomaly check — always run all phases")
+        symptom := flag.String("symptom", "Users are reporting database connectivity issues.",
+                "Symptom description sent to the AI agent for diagnosis")
+        flag.Parse()
+
+        ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+        defer cancel()
+
+        // ── Phase 1: Agent Discovery ──────────────────────────────────────
+        logPhase(1, "Agent Discovery")
+        logf("GET /api/v1/agents")
+
+        body, err := gatewayGET(*gateway, "/api/v1/agents")
+        if err != nil </span><span class="cov0" title="0">{
+                logf("FATAL: %v", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">var agents []struct {
+                Name string `json:"name"`
+        }
+        if err := json.Unmarshal(body, &amp;agents); err != nil </span><span class="cov0" title="0">{
+                logf("FATAL: bad agents response: %v", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">names := make([]string, len(agents))
+        for i, a := range agents </span><span class="cov0" title="0">{
+                names[i] = a.Name
+        }</span>
+        <span class="cov0" title="0">logf("Found %d agents: %s", len(agents), strings.Join(names, ", "))
+        fmt.Println()
+
+        // ── Phase 2: Health Check ─────────────────────────────────────────
+        logPhase(2, "Health Check")
+        logf("POST /api/v1/db/check_connection")
+
+        resp, err := gatewayPOST(*gateway, "/api/v1/db/check_connection", map[string]any{
+                "connection_string": *conn,
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                logf("FATAL: %v", err)
+                os.Exit(1)
+        }</span>
+
+        <span class="cov0" title="0">anomaly := hasAnomaly(resp.Text)
+        if anomaly </span><span class="cov0" title="0">{
+                // Find the first matching keyword to show context.
+                lower := strings.ToLower(resp.Text)
+                for _, kw := range anomalyKeywords </span><span class="cov0" title="0">{
+                        if idx := strings.Index(lower, kw); idx != -1 </span><span class="cov0" title="0">{
+                                start := idx - 20
+                                if start &lt; 0 </span><span class="cov0" title="0">{
+                                        start = 0
+                                }</span>
+                                <span class="cov0" title="0">end := idx + len(kw) + 40
+                                if end &gt; len(resp.Text) </span><span class="cov0" title="0">{
+                                        end = len(resp.Text)
+                                }</span>
+                                <span class="cov0" title="0">logf("Anomaly detected: \"...%s...\"", strings.TrimSpace(resp.Text[start:end]))
+                                break</span>
+                        }
+                }
+        } else<span class="cov0" title="0"> {
+                logf("Health check OK")
+                if !*force </span><span class="cov0" title="0">{
+                        logf("No anomalies — all clear.")
+                        os.Exit(0)
+                }</span>
+                <span class="cov0" title="0">logf("-force flag set, continuing anyway...")</span>
+        }
+        <span class="cov0" title="0">fmt.Println()
+
+        // ── Phase 3: AI Diagnosis ─────────────────────────────────────────
+        logPhase(3, "AI Diagnosis")
+
+        prompt := fmt.Sprintf(
+                "%s The connection_string is `%s`. Please investigate and report your findings.",
+                *symptom, *conn,
+        )
+        logf("POST /api/v1/query  agent=database")
+        logf("Prompt: %q", truncate(prompt, 120))
+
+        diagResp, err := gatewayPOST(*gateway, "/api/v1/query", map[string]any{
+                "agent":   "database",
+                "message": prompt,
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                logf("WARNING: AI diagnosis failed: %v", err)
+                logf("Continuing to incident bundle...")
+        }</span> else<span class="cov0" title="0"> {
+                logf("Agent response (%d chars):", len(diagResp.Text))
+                printBox(diagResp.Text)
+        }</span>
+        <span class="cov0" title="0">fmt.Println()
+
+        // ── Phase 4: Create Incident Bundle ───────────────────────────────
+        logPhase(4, "Create Incident Bundle")
+
+        callbackHost, callbackPort := callbackAddr(*listen)
+        callbackURL := fmt.Sprintf("http://%s:%s/callback", callbackHost, callbackPort)
+
+        // Start callback server before the POST so it's ready to receive.
+        callbackCh := make(chan callbackPayload, 1)
+        srv := startCallbackServer(*listen, callbackCh)
+        defer srv.Shutdown(context.Background())
+
+        logf("POST /api/v1/incidents")
+        logf("  infra_key:    %s", *infraKey)
+        logf("  callback_url: %s", callbackURL)
+
+        incResp, err := gatewayPOST(*gateway, "/api/v1/incidents", map[string]any{
+                "infra_key":         *infraKey,
+                "description":       fmt.Sprintf("SRE bot auto-investigation (anomaly=%v)", anomaly),
+                "connection_string": *conn,
+                "callback_url":      callbackURL,
+        })
+        if err != nil </span><span class="cov0" title="0">{
+                logf("FATAL: %v", err)
+                os.Exit(1)
+        }</span>
+        <span class="cov0" title="0">logf("Incident agent responded (%d chars)", len(incResp.Text))
+        fmt.Println()
+
+        // ── Phase 5: Awaiting Callback ────────────────────────────────────
+        logPhase(5, "Awaiting Callback")
+        logf("Listening on %s for POST /callback ...", *listen)
+
+        select </span>{
+        case cb := &lt;-callbackCh:<span class="cov0" title="0">
+                logf("Callback received!")
+                logf("  incident_id: %s", cb.IncidentID)
+                logf("  bundle_path: %s", cb.BundlePath)
+                logf("  layers:      [%s]", strings.Join(cb.Layers, ", "))
+                logf("  errors:      %d", len(cb.Errors))
+                for _, e := range cb.Errors </span><span class="cov0" title="0">{
+                        logf("    - %s", e)
+                }</span>
+        case &lt;-time.After(*cbTimeout):<span class="cov0" title="0">
+                logf("WARNING: Timed out waiting for callback after %s", *cbTimeout)</span>
+        case &lt;-ctx.Done():<span class="cov0" title="0">
+                logf("Interrupted.")</span>
+        }
+
+        <span class="cov0" title="0">logf("Done.")</span>
+}
+
+// ── HTTP helpers ──────────────────────────────────────────────────────────
+
+func gatewayGET(baseURL, path string) ([]byte, error) <span class="cov0" title="0">{
+        resp, err := http.Get(baseURL + path)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("GET %s: %w", path, err)
+        }</span>
+        <span class="cov0" title="0">defer resp.Body.Close()
+        body, _ := io.ReadAll(resp.Body)
+        if resp.StatusCode &gt;= 300 </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, string(body))
+        }</span>
+        <span class="cov0" title="0">return body, nil</span>
+}
+
+func gatewayPOST(baseURL, path string, payload map[string]any) (*a2aResponse, error) <span class="cov0" title="0">{
+        data, err := json.Marshal(payload)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("marshal: %w", err)
+        }</span>
+
+        <span class="cov0" title="0">resp, err := http.Post(baseURL+path, "application/json", bytes.NewReader(data))
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("POST %s: %w", path, err)
+        }</span>
+        <span class="cov0" title="0">defer resp.Body.Close()
+        body, _ := io.ReadAll(resp.Body)
+
+        if resp.StatusCode &gt;= 300 </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("POST %s: HTTP %d: %s", path, resp.StatusCode, string(body))
+        }</span>
+
+        <span class="cov0" title="0">var result a2aResponse
+        if err := json.Unmarshal(body, &amp;result); err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("POST %s: decode: %w", path, err)
+        }</span>
+        <span class="cov0" title="0">return &amp;result, nil</span>
+}
+
+// ── Anomaly detection ─────────────────────────────────────────────────────
+
+func hasAnomaly(text string) bool <span class="cov8" title="1">{
+        lower := strings.ToLower(text)
+        for _, kw := range anomalyKeywords </span><span class="cov8" title="1">{
+                if strings.Contains(lower, kw) </span><span class="cov8" title="1">{
+                        return true
+                }</span>
+        }
+        <span class="cov8" title="1">return false</span>
+}
+
+// ── Callback server ───────────────────────────────────────────────────────
+
+func startCallbackServer(addr string, ch chan&lt;- callbackPayload) *http.Server <span class="cov0" title="0">{
+        mux := http.NewServeMux()
+        mux.HandleFunc("POST /callback", func(w http.ResponseWriter, r *http.Request) </span><span class="cov0" title="0">{
+                var p callbackPayload
+                if err := json.NewDecoder(r.Body).Decode(&amp;p); err != nil </span><span class="cov0" title="0">{
+                        http.Error(w, "bad request", http.StatusBadRequest)
+                        return
+                }</span>
+                <span class="cov0" title="0">w.WriteHeader(http.StatusOK)
+                w.Write([]byte(`{"status":"received"}`))
+
+                select </span>{
+                case ch &lt;- p:<span class="cov0" title="0"></span>
+                default:<span class="cov0" title="0"></span>
+                }
+        })
+
+        <span class="cov0" title="0">srv := &amp;http.Server{Addr: addr, Handler: mux}
+        go srv.ListenAndServe()
+        return srv</span>
+}
+
+func callbackAddr(listen string) (host, port string) <span class="cov0" title="0">{
+        h, p, err := net.SplitHostPort(listen)
+        if err != nil </span><span class="cov0" title="0">{
+                return "localhost", "9090"
+        }</span>
+        <span class="cov0" title="0">if h == "" || h == "0.0.0.0" || h == "::" </span><span class="cov0" title="0">{
+                if ip := outboundIP(); ip != "" </span><span class="cov0" title="0">{
+                        return ip, p
+                }</span>
+                <span class="cov0" title="0">return "localhost", p</span>
+        }
+        <span class="cov0" title="0">return h, p</span>
+}
+
+func outboundIP() string <span class="cov0" title="0">{
+        conn, err := net.Dial("udp", "8.8.8.8:80")
+        if err != nil </span><span class="cov0" title="0">{
+                return ""
+        }</span>
+        <span class="cov0" title="0">defer conn.Close()
+        addr := conn.LocalAddr().(*net.UDPAddr)
+        return addr.IP.String()</span>
+}
+
+// ── Output formatting ─────────────────────────────────────────────────────
+
+func logf(format string, args ...any) <span class="cov0" title="0">{
+        ts := time.Now().Format("15:04:05")
+        fmt.Printf("[%s] %s\n", ts, fmt.Sprintf(format, args...))
+}</span>
+
+func logPhase(num int, name string) <span class="cov0" title="0">{
+        line := fmt.Sprintf("Phase %d: %s", num, name)
+        pad := 50 - len(line)
+        if pad &lt; 4 </span><span class="cov0" title="0">{
+                pad = 4
+        }</span>
+        <span class="cov0" title="0">logf("%s %s %s", strings.Repeat("\u2500", 2), line, strings.Repeat("\u2500", pad))</span>
+}
+
+// printBox prints text inside a Unicode box, indented to align with log output.
+func printBox(text string) <span class="cov0" title="0">{
+        const indent = "           " // align with log timestamp prefix
+        const maxWidth = 68
+
+        lines := wrapText(text, maxWidth)
+        border := strings.Repeat("\u2500", maxWidth+2)
+
+        fmt.Printf("%s\u250c%s\u2510\n", indent, border)
+        for _, line := range lines </span><span class="cov0" title="0">{
+                pad := maxWidth - displayWidth(line)
+                if pad &lt; 0 </span><span class="cov0" title="0">{
+                        pad = 0
+                }</span>
+                <span class="cov0" title="0">fmt.Printf("%s\u2502 %s%s \u2502\n", indent, line, strings.Repeat(" ", pad))</span>
+        }
+        <span class="cov0" title="0">fmt.Printf("%s\u2514%s\u2518\n", indent, border)</span>
+}
+
+// wrapText splits text into lines no wider than maxWidth, preserving existing
+// line breaks.
+func wrapText(text string, maxWidth int) []string <span class="cov8" title="1">{
+        var result []string
+        for _, paragraph := range strings.Split(text, "\n") </span><span class="cov8" title="1">{
+                if paragraph == "" </span><span class="cov8" title="1">{
+                        result = append(result, "")
+                        continue</span>
+                }
+                <span class="cov8" title="1">for len(paragraph) &gt; 0 </span><span class="cov8" title="1">{
+                        if displayWidth(paragraph) &lt;= maxWidth </span><span class="cov8" title="1">{
+                                result = append(result, paragraph)
+                                break</span>
+                        }
+                        // Find a break point.
+                        <span class="cov8" title="1">cut := maxWidth
+                        if cut &gt; len(paragraph) </span><span class="cov0" title="0">{
+                                cut = len(paragraph)
+                        }</span>
+                        // Try to break at a space.
+                        <span class="cov8" title="1">if idx := strings.LastIndex(paragraph[:cut], " "); idx &gt; 0 </span><span class="cov8" title="1">{
+                                cut = idx
+                        }</span>
+                        <span class="cov8" title="1">result = append(result, paragraph[:cut])
+                        paragraph = strings.TrimLeft(paragraph[cut:], " ")</span>
+                }
+        }
+        <span class="cov8" title="1">return result</span>
+}
+
+// displayWidth returns the visible width of a string (byte length; good enough
+// for ASCII-dominant agent output).
+func displayWidth(s string) int <span class="cov8" title="1">{
+        return len(s)
+}</span>
+
+func truncate(s string, n int) string <span class="cov8" title="1">{
+        if len(s) &lt;= n </span><span class="cov8" title="1">{
+                return s
+        }</span>
+        <span class="cov8" title="1">return s[:n] + "..."</span>
+}
+</pre>
+		
+		<pre class="file" id="file16" style="display: none">// Package discovery provides agent card fetching and parsing for A2A agents.
+package discovery
+
+import (
+        "encoding/json"
+        "fmt"
+        "io"
+        "log/slog"
+        "net/http"
+        "strings"
+        "time"
+
+        "github.com/a2aproject/a2a-go/a2a"
+)
+
+// Agent holds the discovered agent metadata.
+type Agent struct {
+        Name      string
+        InvokeURL string
+        Card      *a2a.AgentCard
+}
+
+// Discover fetches agent cards from a list of base URLs and returns
+// a map keyed by agent name. Agents that cannot be reached are logged
+// and skipped.
+func Discover(baseURLs []string) (map[string]*Agent, error) <span class="cov8" title="1">{
+        client := &amp;http.Client{Timeout: 5 * time.Second}
+        agents := make(map[string]*Agent)
+
+        for _, baseURL := range baseURLs </span><span class="cov8" title="1">{
+                base := strings.TrimSuffix(baseURL, "/")
+                cardURL := base + "/.well-known/agent-card.json"
+                slog.Info("discovering agent", "url", cardURL)
+
+                resp, err := client.Get(cardURL)
+                if err != nil </span><span class="cov8" title="1">{
+                        slog.Warn("discovery: failed to fetch agent card", "url", cardURL, "err", err)
+                        continue</span>
+                }
+                <span class="cov8" title="1">body, _ := io.ReadAll(resp.Body)
+                resp.Body.Close()
+
+                if resp.StatusCode != http.StatusOK </span><span class="cov8" title="1">{
+                        slog.Warn("discovery: non-200 status", "url", cardURL, "status", resp.StatusCode)
+                        continue</span>
+                }
+
+                <span class="cov8" title="1">var card a2a.AgentCard
+                if err := json.Unmarshal(body, &amp;card); err != nil </span><span class="cov8" title="1">{
+                        slog.Warn("discovery: failed to parse agent card", "url", cardURL, "err", err)
+                        continue</span>
+                }
+
+                // Use the discovery base URL rather than the agent's self-reported
+                // card.URL, which is typically a container-local address like
+                // http://[::]:1100 that isn't reachable from other containers.
+                <span class="cov8" title="1">invokeURL := base + "/invoke"
+                card.URL = invokeURL
+
+                agents[card.Name] = &amp;Agent{
+                        Name:      card.Name,
+                        InvokeURL: invokeURL,
+                        Card:      &amp;card,
+                }
+                slog.Info("discovered agent", "name", card.Name, "invoke_url", invokeURL)</span>
+        }
+
+        <span class="cov8" title="1">if len(agents) == 0 </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("no agents discovered from %d URLs", len(baseURLs))
+        }</span>
+        <span class="cov8" title="1">return agents, nil</span>
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
