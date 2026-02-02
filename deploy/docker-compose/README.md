@@ -1,6 +1,52 @@
 # aiHelpDesk: Deployment for VM-based (non-K8s) databases
 
-## 1. Deployment from source (by cloning the repo):
+## 1. Deployment from binary
+
+There are two ways to deploy and run aiHelpDesk on non-K8s environments, i.e. VMs or bare metal. In both cases the first step is downloading the right tarball for your platform from [here](https://github.com/borisdali/helpdesk/releases/). Then...
+
+  ### 1.1 The Docker route (relies on Docker Compose with the pull of the pre-built image from GHCR)
+
+```
+  tar xzf helpdesk-v1.0.0-deploy.tar.gz
+  cd helpdesk-v1.0.0-deploy/docker-compose
+  cp .env.example .env
+  cp infrastructure.json.example infrastructure.json
+  # edit both files
+  docker compose up -d
+```
+
+  ### 1.2 The non-Docker route to run the pre-built binaries on a host
+
+```
+  tar xzf helpdesk-v0.1.0-darwin-arm64.tar.gz   # pick your platform
+  cd helpdesk-v0.1.0-darwin-arm64
+
+  # Set env vars
+  export HELPDESK_MODEL_VENDOR=anthropic
+  export HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001
+  export HELPDESK_API_KEY=<your-API-key>
+
+  # Start agents (each in its own terminal or in a background)
+  ./database-agent &
+  ./k8s-agent &
+  ./incident-agent &
+
+  # Start gateway pointing at the agents
+  HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104" ./gateway &
+
+  # Interactive orchestrator
+  HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104" \
+    HELPDESK_INFRA_CONFIG=path/to/infrastructure.json ./helpdesk
+```
+
+N.B: Please note that the binary tarballs expect `psql` and `kubectl` already installed on the host — those are baked into the Docker image (see option 1.1), but not into the Go binaries.
+
+
+## 2. Deployment from source (by cloning the repo):
+
+ ### 2.1 Clone the aiHelpDesk repo :-)
+
+ ### 2.2 Run Docker Compose to start all aiHelpDesk agents
 
 ```
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml up -d
@@ -164,7 +210,7 @@ fd3b782c0d49   helpdesk:latest                      "/usr/local/bin/inci…"   7
 9dda96b44913   helpdesk:latest                      "/usr/local/bin/data…"   8 seconds ago   Up 7 seconds            0.0.0.0:1100->1100/tcp    docker-compose-database-agent-1
 ```
 
-## 2. Interactive/Human session: Deployment from source (by cloning the repo)
+  ## 2.3 Interactive/Human session: Deployment from source (by cloning the repo)
 
 First off, copy and adjust the `.env` file and the `infrastructure.json` file.
 The former contains the LLM info (e.g. Anthropic, Gemini, etc.), while
@@ -310,7 +356,7 @@ c958e495047e   helpdesk:latest                      "/usr/local/bin/help…"   2
 ...
 ```
 
-## 3. SRE bot demo: Deployment from source (by cloning the repo)
+  ### 2.4 SRE bot demo: Deployment from source (by cloning the repo)
 
 Here's an example of an SRE bot detecting that the `db.example.com` going offline, which results in a failure to establish a connection. As a result, aiHelpDesk automatically records an incident and creates a troubelshooting bundle to investigate further either interally or by sending to a vendor:
 

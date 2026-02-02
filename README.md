@@ -1,9 +1,9 @@
 # aiHelpDesk: AI DB SRE in a box: a Multi-Agent Support System
 
-A Go-based AI multi-agent self-service help and support system for troubleshooting PostgreSQL and PostgreSQL based databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure:
+A Go-based AI multi-agent self-service help and support system for troubleshooting PostgreSQL and PostgreSQL based databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
 
-* aiHelpDesk is an implementation of the shift-left support paradigm for AI-Assisted products (see next section).
-* aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them when they occur.
+* aiHelpDesk is an implementation of the shift-left support paradigm for AI-Assisted database management products (see next section).
+* aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
 * aiHelpDesk features a built-in failure testing injection framework. 
 * aiHelpDesk is implemented using Google ADK and the A2A (Agent-to-Agent) protocol for extensibility where agents can be added or replaced in addition to those provided with aiHelpDesk out of the box.
@@ -23,11 +23,27 @@ aiHelpDesk can be deployed on K8s or VMs. The binary packages are provided for L
   ### On K8s
 
   ### On VMs
-TL;DR: this one Docker Compose command brings up all aiHelpDesk agents (except the Orchestrator, which is designed to run interactively by a human operator and hence the second command):
+There are two options to run aiHelpDesk on non-K8s environments, either in the Docker containers or straight on the host.
+
+TL;DR: of the former where this one Docker Compose command brings up all aiHelpDesk agents (except the Orchestrator, which is designed to run interactively by a human operator and hence the second command):
+
 ```
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml up -d
 [boris@ ~/helpdesk]$ docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
 ```
+
+TL;DR: of the latter is starting all agents, the optional gateway and the interfactive aiHelpDesk as sepaparte Go binaries:
+
+```
+  ./database-agent &
+  ./k8s-agent &
+  ./incident-agent &
+  ./gateway &
+
+  # Interactive orchestrator
+  ./helpdesk
+```
+
 See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instructions on how to deploy aiHelpDesk either as binaries (simpler) or manually by cloning the repo.
 
 ## Architecture
