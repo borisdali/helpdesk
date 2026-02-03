@@ -52,32 +52,35 @@ To run aiHelpDesk directly on a host (without Docker), download the right platfo
   tar xzf helpdesk-v0.1.0-darwin-arm64.tar.gz   # pick your platform
   cd helpdesk-v0.1.0-darwin-arm64
 
+  (Mac specific): depending on your Mac OS version, you may need to remove the quarantine flag that Mac automatically puts on the software downloaded from the Internet:
+	`xattr -d com.apple.quarantine *`
+
   # Option A: set env vars directly
-  export HELPDESK_MODEL_VENDOR=anthropic
-  export HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001
-  export HELPDESK_API_KEY=<your-API-key>
-  ./startall.sh
+export HELPDESK_MODEL_VENDOR=anthropic
+export HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001
+export HELPDESK_API_KEY=<your-API-key>
+./startall.sh
 
   # Option B: use a .env file
-  cat > .env <<EOF
-  HELPDESK_MODEL_VENDOR=anthropic
-  HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001
-  HELPDESK_API_KEY=your-key
-  HELPDESK_INFRA_CONFIG=./infrastructure.json
-  EOF
-  ./startall.sh
+cat > .env <<EOF
+HELPDESK_MODEL_VENDOR=anthropic
+HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001
+HELPDESK_API_KEY=your-key
+HELPDESK_INFRA_CONFIG=./infrastructure.json
+EOF
+./startall.sh
 ```
 
   The script:
-  - Sources .env if present
+  - Sources `.env` if present
   - Validates required env vars
-  - Starts all 3 agents + gateway in the background (logs to /tmp/helpdesk-*.log)
+  - Starts all 3 agents + Gateway in the background (logs go to `/tmp/helpdesk-*.log`)
   - Launches the interactive orchestrator in the foreground
-  - Cleans up all background processes on exit/Ctrl-C
-  - --no-repl runs headless (gateway only, no orchestrator)
-  - --stop kills any running helpdesk processes
+  - Cleans up all background processes on exit/`Ctrl-C`
+  - `--no-repl` runs headless (gateway only, no orchestrator)
+  - `--stop` kills any running helpdesk processes
 
-N.B: Please note that the binary tarballs expect `psql` and `kubectl` already installed on the host — those are baked into the Docker image (see option 1.1), but not into the Go binaries.
+N.B: Please note that the binary tarballs expect `psql` and `kubectl` already installed on the host — those are baked into the Docker image (see option 1.1), but not into the Go binaries (this option 1.2).
 
 
 ## 2. Deployment from source (by cloning the repo):

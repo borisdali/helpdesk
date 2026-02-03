@@ -7,7 +7,7 @@ A Go-based AI multi-agent self-service help and support system for troubleshooti
 * aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
 * aiHelpDesk features a built-in fault injection framework. 
-* aiHelpDesk is implemented using Google ADK and the A2A (Agent-to-Agent) protocol for extensibility where agents can be added or replaced in addition to those provided with aiHelpDesk out of the box.
+* aiHelpDesk is implemented using Google ADK and the A2A (Agent-to-Agent) protocol for modularity and extensibility where agents can be added or replaced in addition to those provided with aiHelpDesk out of the box.
 
 aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs.
 
@@ -65,3 +65,12 @@ aiHelpDesk can certainly be used by humans and that's what the interactive LLM-p
 Additionally however, an upstream agent or a program can call aiHelpDesk agents directly.
 
 See [cmd/srebot/README.md](cmd/srebot/README.md) for a sample of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a Gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
+
+## Sample interactive dialog with a human operator
+aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](INTRO_DIALOG.md) with a human operator (aka "Hello World").
+
+## LLM
+aiHelpDesk relies on Google's ADK, which was built around Gemini modesl. Since aiHelpDesk customers so far prefer Anthropic modesl, we extended aiHelpDesk to work with `claude-haiku-4-5-20251001`, `claude-sonnet-4-5-20250929`, `claude-opus-4-5-20251101`. Support for other models can pretty easily added as well if required (ADK's LLM interface is simple and can be implemented for other LLMs, like we did for Anthropic). Please note that aiHelpDesk offers the flexibility for individual expert agents (e.g. a Database agent, a K8s agent, an Incident Management agent) to run with different LLMs if needed or if an agent's provider recommends or tests their agent with a particular LLM. The sample deployment scripts assumes the same LLM for all agents, but that can be easily adjusted with setting env variables before starting each agent.
+
+Please contact aiHelpDesk if you or your customer would like to see a support for a particular LLM.
+
