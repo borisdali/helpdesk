@@ -11,6 +11,12 @@ to proceed.
 ## Manual Testing: List available fault injection tests
 
 ```
+  go run ./testing/cmd/faulttest list
+```
+
+Sample log of running the above command:
+
+```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest list
 ID                             CATEGORY     SEVERITY   NAME
 --------------------------------------------------------------------------------
@@ -36,7 +42,7 @@ Total: 17 failure modes
 ```
 
 This is a good start because in this step we verify the
-faulttest CLI is built properly and can read and parse the catalog
+`faulttest` CLI is built properly and can read and parse the catalog
 of failure modes successfully.
 
 
@@ -44,7 +50,11 @@ of failure modes successfully.
 
 ```
   docker compose -f testing/docker/docker-compose.yaml up -d
+```
 
+Sample log of running the above command:
+
+```
 [boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d
 [+] Running 16/16
  ✔ postgres Pulled                                                                                                                                                                                                                          15.5s
@@ -104,6 +114,14 @@ exit
 ## Manual Testing: Inject/teardown manually (no agents needed)
 
   ### Inject a failure#1: table bloat
+There are 17 failure modes listed above. Here are a few examples of injecting some of these faults:
+
+```
+  go run ./testing/cmd/faulttest inject --id db-table-bloat --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
+```
+
+Sample log of running the above command:
+
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-table-bloat --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
 time=2026-01-30T12:49:39.902-05:00 level=INFO msg="injecting failure" id=db-table-bloat type=sql
@@ -212,6 +230,14 @@ VACUUM
 
 
   ### Inject a failure#2: too many client connections
+
+Here's another example of injecting a fault, this time with the helpf of `pgloader`:
+
+```
+  docker compose -f testing/docker/docker-compose.yaml up -d pgloader
+```
+
+Sample log of running the above command:
 
 ```
 [boris@ ~/helpdesk]$ docker compose -f testing/docker/docker-compose.yaml up -d pgloader

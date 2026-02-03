@@ -13,7 +13,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   │ Common:  A2A protocol,  (JSON-RPC 2.0)                    │  ← Layer 4: Protocol
   ├───────────────────────────────────────────────────────────│
   │ Common:  DB Agent,  K8s Agent, Incident Agent             │  ← Layer 3: Integration
-  ├───────────────────────────────── ─────────────────────────│
+  ├───────────────────────────────────────────────────────────│
   │ Common:  psql,  kubectl, OS (storage, compute, network)   │  ← Layer 2: Tool exec
   ├───────────────────────────────────────────────────────────│
   │ Common:  LLM API (Claude / Gemini)                        │  ← External
@@ -21,16 +21,18 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   └───────────────────────────────────────────────────────────┘
 ```
 
-  Each boundary is a test seam. The strategy covers 5 layers, each progressively requiring more infrastructure.
+  In this strategy each boundary is a test seam. Each of the five layers progressively require more infrastructure.
 
   ### Layer 1: Unit Tests
 
   Goal: Test all deterministic logic without any I/O. Run in go test ./... with zero external dependencies.
+
   Coverage target: 35-40% of statements.
 
   ### Layer 2: Component Tests (mock external commands)
 
   Goal: Test the tool functions (the ones that call psql, kubectl, OS commands) by mocking the command execution. No real PostgreSQL or Kubernetes needed.
+
   Approach — command injection pattern:
 
   Instead of each agent's tool functions calling exec.Command("psql", ...) or exec.Command("kubectl", ...) directly, make them testable, extract the command runner into an interface:
@@ -62,7 +64,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 ```
 
   What these tests verify:
-  - Correct arguments passed to psql/kubectl
+  - Correct arguments passed to `psql/kubectl`
   - Output parsing and formatting
   - Error diagnosis triggered on failure
   - Tool return values match expected format
@@ -73,6 +75,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   ### Layer 3: Integration Tests (real infrastructure, no LLM)
 
   Goal: Test agents against real PostgreSQL and Kubernetes, but bypass the LLM. Send tool calls directly via A2A without the reasoning step.
+
   Infrastructure needed:
   - Docker Compose stack
   - Optional: kind cluster for K8s tests
@@ -81,9 +84,11 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 
 ```
   testing/integration/database_test.go
+```
 
   Uses Go testing + build tag //go:build integration:
 
+```
   //go:build integration
 
   func TestCheckConnection_RealDB(t *testing.T) {
@@ -105,9 +110,11 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 
 ```
   testing/integration/gateway_test.go
+```
 
   Start gateway + agents in-process or via Docker, send REST requests:
 
+```
   func TestGateway_ListAgents(t *testing.T) {
       // GET /api/v1/agents → returns discovered agents
   }
@@ -161,11 +168,14 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   ### Layer 4: Fault Injection Tests (with the wired faulttest into go test)
 
   Goal: Run failure scenarios from failures.yaml (presently 17 of them, still missing SSL mismatch, DNS resolution failure, read-only replica queries, K8s RBAC denial, etc.) as Go tests, producing standard `go test` output alongside the existing JSON report.
+
   Approach: Create a Go test file that loads the catalog and runs each failure as a subtest:
 
 ```
   testing/faulttest/faulttest_test.go
+```
 
+```
   //go:build faulttest
 
   func TestFailures(t *testing.T) {
@@ -200,7 +210,7 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
 
   ### Layer 5: End-to-End Tests
 
-  Goal: Test complete user-visible workflows. These involve the LLM, so results are non-deterministic. Use assertion relaxation (keyword matching, not exact string matching — which the evaluator already does).
+  Goal: Test complete user-visible workflows. These involve the LLM, so results are non-deterministic. Use assertion relaxation (keyword matching, not exact string matching, see the evaluator logic for details).
 
   5a. SRE Bot workflow test:
 
@@ -215,7 +225,7 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
 
   5b. Orchestrator delegation test:
 
-  Test that the orchestrator correctly routes to sub-agents:
+  Test that the aiHelpDesk orchestrator correctly routes to sub-agents:
 
 ```
   testing/e2e/orchestrator_test.go
@@ -225,7 +235,7 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
   - Send `list pods in namespace X` → orchestrator delegates to K8s agent
   - Send compound prompt → orchestrator uses both agents
 
-  Since these involve real LLM calls, they're expensive and non-deterministic. Run them gated behind a build tag and treat failures as warnings, not blockers:
+  Since these involve real LLM calls, they're expensive and non-deterministic. As such aiHelpDesk runs them gated behind a build tag and treats failures as warnings, not blockers:
 
 ```
   //go:build e2e
@@ -241,8 +251,8 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
   5c. Multi-agent incident response test:
 
   Inject a compound failure (e.g., `compound-db-pod-crash`), send to orchestrator, verify it:
-  1. Calls the database agent (gets connection refused)
-  2. Calls the K8s agent (identifies CrashLoopBackOff)
+  1. Calls the database agent (gets `connection refused`)
+  2. Calls the K8s agent (identifies `CrashLoopBackOff`)
   3. Synthesizes a root cause explanation
   4. Optionally creates an incident bundle
 
@@ -274,27 +284,27 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
   test-all: test integration faulttest
 ```
 
-  ## Summary: Test Pyramid
+  ## Summary: aiHelpDesk Five-Layer Test Pyramid
 
 ```
-            /\
-           /  \     E2E (Layer 5)
-          / 5c \    LLM + full stack, non-deterministic
-         /──────\   ~5 tests, run manually or nightly
-        /  5a 5b \
-       /──────────\
-      /  Layer 4   \  Fault injection
-     / 17 scenarios \  Real DB + agents + LLM
-    /────────────────\  ~17 tests, run in CI weekly
-   /    Layer 3       \  Integration
-  /  DB + K8s + A2A    \  Real DB, no LLM
-  /──────────────────────\  ~20 tests, run in CI per-PR
-  / Layer 2: Component    \  Mock commands
-  / psql/kubectl mocked    \  ~30 tests, fast, no infra
-  /──────────────────────────\
-  /  Layer 1: Unit Tests      \  Pure logic
-  / diagnosePsqlError, formatAge \  ~80 tests, <2s
-  /────────────────────────────────\
+                                  /\
+                                 /  \     E2E (Layer 5)
+                                / 5c \    LLM + full stack, non-deterministic
+                               /──────\   ~5 tests, run manually or nightly
+                              /  5a 5b \
+                             /──────────\
+                            /  Layer 4   \  Fault injection
+                           / 17 scenarios \  Real DB + agents + LLM
+                          /────────────────\  ~17 tests, run in CI weekly
+                         /     Layer 3      \  Integration
+                        /   DB + K8s + A2A   \  Real DB, no LLM
+                       /──────────────────────\  ~20 tests, run in CI per-PR
+                      /    Layer 2: Component  \  Mock commands
+                     /     psql/kubectl mocked  \  ~30 tests, fast, no infra
+                    /────────────────────────────\
+                   /      Layer 1: Unit Tests     \  Pure logic
+                  /  diagnosePsqlError, formatAge  \  ~80 tests, <2s
+                 /──────────────────────────────────\
   ┌────────────────────┬─────────┬───────────────────────────┬─────────┬──────────────────┐
   │       Layer        │ # Tests │           Infra           │ Runtime │     Trigger      │
   ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤

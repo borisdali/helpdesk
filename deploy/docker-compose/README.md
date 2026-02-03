@@ -2,9 +2,32 @@
 
 ## 1. Deployment from binary
 
-There are two ways to deploy and run aiHelpDesk on non-K8s environments, i.e. VMs or bare metal. In both cases the first step is downloading the right tarball for your platform from [here](https://github.com/borisdali/helpdesk/releases/). Then...
+There are two ways to deploy and run aiHelpDesk on non-K8s environments, i.e. VMs or bare metal. In both cases the first step is downloading the right tarball for your platform. There are five tarballs available for every aiHelpDesk release. The first one that ends with "-deploy.tar.gz" is intended for section 1.1 below (run aiHelpDesk agents in Docker containers). The other four tarballs are binaries specific to a platform and are intended for section 1.2
+
+```
+  ┌─────────────────────────────────────┬──────────────────────────────┐──────────────────────────────────────┐────────────┐
+  │           Tarball Name              │               For            │               Platform               │ See section│
+  ├─────────────────────────────────────┼──────────────────────────────┤──────────────────────────────────────┤────────────┤
+  │ helpdesk-vX.Y.Z-deploy.tar.gz       │ running in Docker containers │ Agnostic                             │    1.1     │
+  ├─────────────────────────────────────┼──────────────────────────────┤──────────────────────────────────────┤────────────┤
+  │ helpdesk-vX.Y.Z-linux-amd64.tar.gz  │ running on a host            │ Linux on x86_64 (most servers, VMs)  │    1.2     │
+  ├─────────────────────────────────────┼                              ┤──────────────────────────────────────┤            │
+  │ helpdesk-vX.Y.Z-linux-arm64.tar.gz  │                              │ Linux on ARM (Graviton, Ampere)      │            │
+  ├─────────────────────────────────────┼                              ┤──────────────────────────────────────┤            │
+  │ helpdesk-vX.Y.Z-darwin-amd64.tar.gz │                              │ macOS on Intel                       │            │
+  ├─────────────────────────────────────┼                              ┤──────────────────────────────────────┤            │
+  │ helpdesk-vX.Y.Z-darwin-arm64.tar.gz │                              │ macOS on Apple Silicon               │            │
+  └─────────────────────────────────────┴──────────────────────────────┘──────────────────────────────────────┘────────────┘
+```
+
+The last four tarballs are platform specific and are intended for users who want to run the agents directly on a host without Docker.
+
+Here's the aiHelpDesk release [download page](https://github.com/borisdali/helpdesk/releases/).
+
 
   ### 1.1 The Docker route (relies on Docker Compose with the pull of the pre-built image from GHCR)
+
+To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform agnostic tarball and run the following commands:
 
 ```
   tar xzf helpdesk-v1.0.0-deploy.tar.gz
@@ -13,9 +36,17 @@ There are two ways to deploy and run aiHelpDesk on non-K8s environments, i.e. VM
   cp infrastructure.json.example infrastructure.json
   # edit both files
   docker compose up -d
+
+  source ./.env
+  docker compose --profile interactive run orchestrator
 ```
 
+The last two commands are optional and intended for the human operators as it starts an interactive aiHelpDesk session.
+
+
   ### 1.2 The non-Docker route to run the pre-built binaries on a host
+
+To run aiHelpDesk directly on a host (without Docker), download the right platform-specific tarballs and run the following commands:
 
 ```
   tar xzf helpdesk-v0.1.0-darwin-arm64.tar.gz   # pick your platform
