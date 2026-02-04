@@ -26,7 +26,7 @@ BIN_PKGS := \
 	helpdesk:./cmd/helpdesk/ \
 	srebot:./cmd/srebot/
 
-.PHONY: test cover image push binaries bundle release github-release clean
+.PHONY: test cover integration faulttest image push binaries bundle release github-release clean
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
@@ -40,6 +40,28 @@ cover:
 	go tool cover -func=$(DIST)/coverage.out
 	go tool cover -html=$(DIST)/coverage.out -o $(DIST)/coverage.html
 	@echo "Coverage report: $(DIST)/coverage.html"
+
+# ---------------------------------------------------------------------------
+# Integration tests (requires Docker)
+# ---------------------------------------------------------------------------
+integration:
+	@echo "Starting test infrastructure..."
+	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	@echo "Running integration tests..."
+	-go test -tags integration -timeout 120s ./testing/integration/...
+	@echo "Stopping test infrastructure..."
+	docker compose -f testing/docker/docker-compose.yaml down -v
+
+# ---------------------------------------------------------------------------
+# Fault injection tests (requires Docker + agents + LLM API key)
+# ---------------------------------------------------------------------------
+faulttest:
+	@echo "Starting test infrastructure..."
+	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	@echo "Running fault tests..."
+	-go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
+	@echo "Stopping test infrastructure..."
+	docker compose -f testing/docker/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Docker image (local, current arch)

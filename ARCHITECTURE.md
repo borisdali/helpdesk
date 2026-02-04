@@ -1,11 +1,12 @@
 # Architecture
 
-Sub-agents are standalone A2A servers. They are stateless — connection strings and
-Kubernetes contexts are passed per-request, not configured at startup. This means:
+aiHelpDesk is built on the idea of delegating specialized tasks to the expert sub-agents and coordinating them via the central Orchestrator. Sub-agents don't know or depend on each other, are stateless by nature and receive the requests and funnel their findings strictly through the Orchrestrator. This is powerful because by delegating a subtask to a separate agent, the details of that task in a confined to a separate context window. Once the subtask in question is done, the result is added to your main context window of the Orchtestrator and all the details of the subtask are discarded. This is better for context management because it avoids polution of the Orchtestrator's main context the irrelevant details of the subtasks.  
 
-- **Multiple orchestrators** can share the same sub-agent instances
+Sub-agents are standalone A2A servers. That means that if a provider with the deep domain expertise (e.g. K8s) can offer and swap aiHelpDesk's K8s agent with their own, as long it offers Agent Card at `/.well-known/agent-card.json` and abides by the other rules of the A2A protocol. Sub-agents are explicitly stateless — connection strings and Kubernetes contexts are passed per-request, not configured at startup. This means:
+
+- **Multiple Orchestrators** can share the same sub-agent instances
 - **Sub-agents can run anywhere** — same machine, different host, container, etc.
-- **The orchestrator manages the infrastructure inventory**, not the sub-agents
+- **The Orchestrator manages the infrastructure inventory**, not the sub-agents
 
 ```
     ┌──────────────────┐          ┌──────────────────┐
@@ -33,9 +34,9 @@ Kubernetes contexts are passed per-request, not configured at startup. This mean
 
 ## Infrastructure Inventory
 
-The orchestrator loads an infrastructure inventory (`infrastructure.json`) that maps
+The Orchestrator loads an infrastructure inventory (`infrastructure.json`) that maps
 managed database servers, Kubernetes clusters, and VMs. When the user asks about a
-specific system, the orchestrator passes the right connection string, kubectl context,
+specific system, the Orchestrator passes the right connection string, kubectl context,
 or VM info to the sub-agent:
 
 ```json
@@ -74,15 +75,14 @@ Each database server runs on either a Kubernetes cluster (with `k8s_cluster` and
 
 ## Agent Discovery
 
-The orchestrator finds sub-agents in two ways:
+The Orchestrator finds sub-agents in two ways:
 
 1. **Static config** (`agents.json`) — a list of agent names, URLs, and descriptions
 2. **Dynamic discovery** (`HELPDESK_AGENT_URLS`) — comma-separated base URLs; the
-   orchestrator fetches each agent's `/.well-known/agent-card.json` to learn its name,
+   Orchestrator fetches each agent's `/.well-known/agent-card.json` to learn its name,
    description, and capabilities
 
-At startup, the orchestrator health-checks all agents and gracefully handles any that
-are unavailable.
+At startup, the Orchestrator health-checks all agents and gracefully handles any that are unavailable.
 
 ## Prerequisites
 
@@ -93,7 +93,7 @@ are unavailable.
 
 ## Environment Variables
 
-### Required (all agents and orchestrator)
+### Required (all agents and Orchestrator)
 
 ```bash
 # Google Gemini
@@ -126,7 +126,7 @@ export HELPDESK_AGENT_URLS="http://host1:1100,http://host2:1102,http://host3:110
 # Listen address (default: localhost:8080)
 export HELPDESK_GATEWAY_ADDR="0.0.0.0:8080"
 
-# Required: agent discovery (same as orchestrator dynamic discovery)
+# Required: agent discovery (same as Orchestrator dynamic discovery)
 export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
 ```
 
@@ -146,7 +146,7 @@ provided.
 
 ## Running the System
 
-Each agent is an independent process. Start them in any order — the orchestrator
+Each agent is an independent process. Start them in any order — the Orchestrator
 health-checks agents at startup and works with whatever is available. Agents can run
 on the same machine or on different hosts.
 
@@ -168,14 +168,14 @@ To run an agent on a different address:
 HELPDESK_AGENT_ADDR="0.0.0.0:2100" go run ./agents/database/
 ```
 
-### Start the orchestrator
+### Start the Orchestrator
 
 ```bash
 # Terminal 4
 go run ./cmd/helpdesk/
 ```
 
-The orchestrator discovers agents from `agents.json` (or `HELPDESK_AGENT_URLS` for
+The Orchestrator discovers agents from `agents.json` (or `HELPDESK_AGENT_URLS` for
 dynamic discovery), checks each one, and reports availability:
 
 ```
@@ -185,7 +185,7 @@ Checking agent incident_agent at http://localhost:1104...  OK
 Orchestrator initialized with 3 available agent(s)
 ```
 
-Unavailable agents are noted but don't prevent the orchestrator from starting — it
+Unavailable agents are noted but don't prevent the Orchestrator from starting — it
 works with the agents that are reachable.
 
 ## Available Tools
@@ -397,7 +397,7 @@ helpdesk/
 ## Agent-to-Agent Integration
 
 The helpdesk sub-agents can be called directly by upstream programmatic agents
-(e.g., an observability agent, a CI/CD pipeline, or a chatbot). The orchestrator
+(e.g., an observability agent, a CI/CD pipeline, or a chatbot). The Orchestrator
 is a UX layer for humans — external agents should bypass it and talk A2A to the
 sub-agents directly. There are two integration paths: native A2A and the REST
 gateway.
@@ -517,7 +517,7 @@ A2A natively.
 
 ### Agent Unavailable
 
-If the orchestrator reports an agent as unavailable:
+If the Orchestrator reports an agent as unavailable:
 1. Check if the agent process is running
 2. Verify the port is not in use by another process
 3. Check firewall rules if running on different machines

@@ -21,8 +21,10 @@ import (
 
 // --- Command helpers ---
 
-// runPsql executes a psql command and returns the output.
-func runPsql(ctx context.Context, connStr string, query string) (string, error) {
+// runPsql executes a psql command. Tests can replace this variable.
+var runPsql = runPsqlExec
+
+func runPsqlExec(ctx context.Context, connStr string, query string) (string, error) {
 	args := []string{"-c", query, "-x"}
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
@@ -41,8 +43,10 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 	return string(output), nil
 }
 
-// runKubectl executes a kubectl command and returns the output.
-func runKubectl(ctx context.Context, kubeContext string, args ...string) (string, error) {
+// runKubectl executes a kubectl command. Tests can replace this variable.
+var runKubectl = runKubectlExec
+
+func runKubectlExec(ctx context.Context, kubeContext string, args ...string) (string, error) {
 	prefix := []string{"--request-timeout=10s"}
 	if kubeContext != "" {
 		prefix = append(prefix, "--context", kubeContext)
@@ -61,8 +65,10 @@ func runKubectl(ctx context.Context, kubeContext string, args ...string) (string
 	return string(output), nil
 }
 
-// runCommand executes a generic command and returns the output.
-func runCommand(ctx context.Context, name string, args ...string) (string, error) {
+// runCommand executes a generic command. Tests can replace this variable.
+var runCommand = runCommandExec
+
+func runCommandExec(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

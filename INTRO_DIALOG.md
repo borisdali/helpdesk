@@ -1,4 +1,6 @@
-# aiHelpDesk Intro chat, aka "who are you?"
+# aiHelpDesk Intro chat, aka "Hello World"
+
+This particular dialog comes from aiHelpDesk deployed on a VM and running as binaries on a host (aka option 1.2, see [here](deploy/docker-compose/README.md)).
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.1.0-darwin-arm64]$ ./startall.sh

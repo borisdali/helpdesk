@@ -4,41 +4,41 @@ The goal of this demo app is to showcase aiHelpDesk
 self diagnostic and troubleshooting funcionality.
 
 The demo is an SRE bot that not just calls individual aiHelpDesk tools
-(e.g. `check_connection`, `get_database_stats`) directly, but it also
+(e.g. `check_connection`, `get_database_stats`) directly, but also
 showcases AI agents's ability to reason through and diagnose a problem.
 That's the whole point of aiHelpDesk: accept a symptom (e.g. from
-a monitoring system) and trigger and autonomous investigation
-using its tools.
+a monitoring system) and trigger an autonomous investigation
+using the tools available at its disposal.
 
-To that end, the gateway not only has tool-specific endpoints (`/api/v1/db/{tool}`),
+To that end, the Gateway not only has tool-specific endpoints (`/api/v1/db/{tool}`),
 but it also accepts "here's a problem, please diagnose it" endpoint.
 
 ## Architecture
 
 If an upstream agent or an app doesn't talk A2A natively,
-the way to send requests to iHelpDesk is via the REST/gRPC gateway
-The gateway is a stateless HTTP endpoint that translates POST
+the way to send requests to iHelpDesk is via the REST/gRPC Gateway.
+The Gateway is a stateless HTTP endpoint that translates POST
 requests like `/api/v1/incidents` into an A2A tool calls.
 
 The demo app consists of five sequential phases, all called
-via the gateway, where the normal run only triggers the first two:
+via the Gateway, where the normal run only triggers the first two:
 the agents discovery and the database health check.
 
-All five phases can be also triggered with the '-force' flag.
+All five phases can be also triggered with the `-force` flag.
 
-## Phase Descriptions
+## SRE bot <-> aiHelpDesk interaction
 
-The phase descriptions are as follows:
+The SRE bot is a sample high level agent that initiates a discussion with aiHelpDesk in the attempt to find the state, diagnose a problem and figure out a solution for a particular database. There are a total of five phases in this "chat", which are described below:
+
 ```
-  Phase 1 — Agent Discovery: GET /api/v1/agents to list available agents.
-  Phase 2 — Health Check: POST /api/v1/db/check_connection with the connection string. If no anomaly keywords are found in the response, it reports "all clear" and exits (unless -force is set).
-  Phase 3 — AI Diagnosis: POST /api/v1/query  →  DB agent investigates autonomously
-  Phase 4 — Create Incident Bundle: Starts a callback HTTP server on :9090, then POST /api/v1/incidents with callback_url pointing back to itself.
-  Phase 5 — Await Callback: Blocks until the incident agent's async callback arrives with the IncidentBundleResult payload, or times out after 120s.
+  Phase 1 — Agent Discovery: `GET /api/v1/agents` to list available agents.
+  Phase 2 — Health Check: `POST /api/v1/db/check_connection` with the connection string. If no anomaly keywords are found in the response, aiHelpDesk reports "all clear" and exits (unless `-force` flag is set).
+  Phase 3 — AI Diagnosis: `POST /api/v1/query`  →  DB agent starts an autonomous investigation.
+  Phase 4 — Create Incident Bundle: aiHelpDesk starts a callback HTTP server on port :9090, then `POST /api/v1/incidents` with `callback_url` pointing back to itself.
+  Phase 5 — Await Callback: Blocks until the aiHelpDesk Incident agent's async callback arrives with the `IncidentBundleResult` payload (or it times out after 120s by default).
 ```
 
-Note in particular the phase 3, which sends a natural language
-problem description, e.g.
+Note in particular the phase 3, which sends a natural language problem description, similar to the following, as an example:
 
  "Users are reporting errors connecting to the database.
   The `connection_string` is `host=localhost...` 
@@ -50,10 +50,12 @@ problem description, e.g.
 
  The flag `-symptom` is designed to override the default symptom
  description sent to the AI agent
- (default: "Users are reporting database connectivity issues").
+ (the default is "Users are reporting database connectivity issues").
 
 
 ## Sample Run #1: ask aiHelpDesk for a Database status report
+
+In example below both SRE bot demo app and aiHelpDesk were deployed via cloning the repo, but there are similer ways to run both using the pre-built binaries, see [VM-based Deployment](../../deploy/docker-compose/README.md) for details.
 
 ```
 [boris@ ~/helpdesk]$ curl -s http://localhost:8080/api/v1/query -d '{"agent":"database","message":"Check the database health. The connection_string is `host=localhost port=15432 dbname=testdb user=postgres password=testpass`."}'| jq -r '.artifacts[0].parts'
@@ -120,8 +122,8 @@ Great! The connection is successful. Now let me gather detailed health metrics.
 
 ## Sample Run #2: ask aiHelpDesk to troubleshoot
 
-First, simulate a "too many clients" PostgreSQL error via
-the iHelpDesk built-in Failure Testing Injection Framework:
+First, let's simulate a "too many clients" PostgreSQL error via
+the iHelpDesk built-in [Fault Injection Framework](../../testing/FAULT_INJECTION_TESTING.md):
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-max-connections --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
@@ -236,66 +238,8 @@ ERROR — check_connection failed for host=lo..."
 [23:11:27]   incident_id: d19a6ce8
 [23:11:27]   bundle_path: /tmp/incident-d19a6ce8-20260130-231123.tar.gz
 [23:11:27]   layers:      [database, os, storage]
-[23:11:27]   errors:      16
-[23:11:27]     - database/version.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/databases.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/active_connections.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/connection_stats.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/database_stats.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/config_params.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/replication_status.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/locks.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - database/table_stats.txt: psql failed: exit status 2
-Output: psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL:  sorry, too many clients already
-[23:11:27]     - os/top.txt: top failed: exit status 1
-Output: invalid option or syntax: -b
-top usage: top
-		[-a | -d | -e | -c <mode>]
-		[-F | -f]
-		[-h]
-		[-i <interval>]
-		[-l <samples>]
-		[-ncols <columns>]
-		[-o <key>] [-O <secondaryKey>]
-			keys: pid (default), command, cpu, cpu_me, cpu_others, csw,
-				time, threads, ports, mregion, mem, rprvt, purg, vsize, vprvt,
-				kprvt, kshrd, pgrp, ppid, state, uid, wq, faults, cow, user,
-				msgsent, msgrecv, sysbsd, sysmach, pageins, boosts, instrs, cycles
-		[-R | -r]
-		[-S]
-		[-s <delay>]
-		[-n <nprocs>]
-		[-stats <key(s)>]
-		[-pid <processid>]
-		[-user <username>]
-		[-U <username>]
-		[-u]
-		[-W]
-[23:11:27]     - os/ps.txt: ps failed: exit status 1
-Output: ps: illegal option -- -
-usage: ps [-AaCcEefhjlMmrSTvwXx] [-O fmt | -o fmt] [-G gid[,gid...]]
-          [-u]
-          [-p pid[,pid...]] [-t tty[,tty...]] [-U user[,user...]]
-       ps [-L]
-[23:11:27]     - os/free.txt: free failed: exec: "free": executable file not found in $PATH
-Output: (no output)
-[23:11:27]     - os/vmstat.txt: vmstat failed: exec: "vmstat": executable file not found in $PATH
-Output: (no output)
-[23:11:27]     - os/dmesg.txt: dmesg failed: exit status 1
-Output: usage: sudo dmesg
-[23:11:27]     - storage/lsblk.txt: lsblk failed: exec: "lsblk": executable file not found in $PATH
-Output: (no output)
-[23:11:27]     - storage/iostat.txt: iostat failed: exit status 1
-Output: iostat: illegal option -- x
-usage: iostat [-CUdIKoT?] [-c count] [-n devs]
-	      [-w wait] [drives]
+...
 [23:11:27] Done.
 ```
+
+Please note that an incident was automatically created by aiHelpDesk in response to a problem detected with the database connections.
