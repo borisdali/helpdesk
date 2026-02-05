@@ -109,6 +109,8 @@ binaries:
 				go build -ldflags="$(LDFLAGS)" -o $$outdir/$$bin $$pkg || exit 1; \
 		done; \
 		cp deploy/docker-compose/startall.sh $$outdir/; \
+		cp deploy/docker-compose/.env.example $$outdir/; \
+		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
 		tar -czf $(DIST)/helpdesk-$(VERSION)-$$os-$$arch.tar.gz \
 			-C $(DIST) helpdesk-$(VERSION)-$$os-$$arch; \
 		rm -rf $$outdir; \

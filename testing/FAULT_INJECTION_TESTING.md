@@ -137,7 +137,7 @@ To tear down: faulttest teardown --id db-table-bloat [same flags]
   ### Feed the suggested prompt to aiHelpDesk:
 
 ```
-[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
+[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$HELPDESK_API_KEY HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=deploy/docker-compose/infrastructure.json go run ./cmd/helpdesk
 Fri Jan 30 16:20:03 EST 2026
 time=2026-01-30T16:20:04.489-05:00 level=INFO msg="discovering agent" url=http://localhost:1100
 time=2026-01-30T16:20:04.504-05:00 level=INFO msg="discovered agent" name=postgres_database_agent url=http://localhost:1100
@@ -267,7 +267,7 @@ psql: error: connection to server at "localhost" (::1), port 15432 failed: FATAL
   ### Feed the suggested prompt to aiHelpDesk:
 
 ```
-[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$(cat ../llm/boris_claude_console_onboarding_api_key) HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=infrastructure.json go run ./cmd/helpdesk
+[boris@ ~/helpdesk]$ date; HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 HELPDESK_API_KEY=$HELPDESK_API_KEY HELPDESK_AGENT_URLS=http://localhost:1100,http://localhost:1102,http://localhost:1104  HELPDESK_INFRA_CONFIG=deploy/docker-compose/infrastructure.json go run ./cmd/helpdesk
 Fri Jan 30 18:59:16 EST 2026
 time=2026-01-30T18:59:16.492-05:00 level=INFO msg="discovering agent" url=http://localhost:1100
 time=2026-01-30T18:59:16.497-05:00 level=INFO msg="discovered agent" name=postgres_database_agent url=http://localhost:1100

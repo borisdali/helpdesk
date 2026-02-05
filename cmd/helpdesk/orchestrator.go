@@ -89,58 +89,49 @@ func loadInfraConfig(path string) (*InfraConfig, error) {
 }
 
 // buildInfraPromptSection generates the managed infrastructure section for the agent prompt.
+// Only database servers are listed — K8s clusters and VMs are referenced inline where applicable.
 func buildInfraPromptSection(config *InfraConfig) string {
-	var sb strings.Builder
-	sb.WriteString("\n## Managed Infrastructure\n\n")
+	if len(config.DBServers) == 0 {
+		return ""
+	}
 
-	if len(config.DBServers) > 0 {
-		sb.WriteString("### Database Servers\n\n")
-		for id, db := range config.DBServers {
-			sb.WriteString(fmt.Sprintf("**%s** (%s)\n", id, db.Name))
-			sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", db.ConnectionString))
-			if db.K8sCluster != "" {
-				if k8s, ok := config.K8sClusters[db.K8sCluster]; ok {
-					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (context: `%s`)", db.K8sCluster, k8s.Context))
-				} else {
-					sb.WriteString(fmt.Sprintf("- Runs on K8s cluster: **%s** (not found in k8s_clusters)", db.K8sCluster))
-				}
+	var sb strings.Builder
+	sb.WriteString("\n## Managed Databases\n\n")
+	sb.WriteString("When asked about databases you manage, refer ONLY to this list:\n\n")
+
+	for id, db := range config.DBServers {
+		sb.WriteString(fmt.Sprintf("**%s** — %s\n", id, db.Name))
+		sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", db.ConnectionString))
+
+		if db.K8sCluster != "" {
+			// Expand the K8s cluster reference inline.
+			if k8s, ok := config.K8sClusters[db.K8sCluster]; ok {
 				ns := db.K8sNamespace
 				if ns == "" {
 					ns = "default"
 				}
-				sb.WriteString(fmt.Sprintf(", namespace: `%s`\n", ns))
-			} else if db.VMName != "" {
-				if vm, ok := config.VMs[db.VMName]; ok {
-					sb.WriteString(fmt.Sprintf("- Runs on VM: **%s** (%s, host: `%s`)\n", db.VMName, vm.Name, vm.Host))
-				} else {
-					sb.WriteString(fmt.Sprintf("- Runs on VM: **%s** (not found in vms)\n", db.VMName))
-				}
+				sb.WriteString(fmt.Sprintf("- Hosted on Kubernetes: cluster=%s, context=`%s`, namespace=`%s`\n",
+					k8s.Name, k8s.Context, ns))
+			} else {
+				sb.WriteString(fmt.Sprintf("- Hosted on Kubernetes: cluster=%s (details not configured)\n", db.K8sCluster))
 			}
-			sb.WriteString("\n")
-		}
-	}
-
-	if len(config.K8sClusters) > 0 {
-		sb.WriteString("### Kubernetes Clusters\n\n")
-		for id, k8s := range config.K8sClusters {
-			sb.WriteString(fmt.Sprintf("**%s** (%s) — context: `%s`\n", id, k8s.Name, k8s.Context))
-		}
-		sb.WriteString("\n")
-	}
-
-	if len(config.VMs) > 0 {
-		sb.WriteString("### Virtual Machines\n\n")
-		for id, vm := range config.VMs {
-			sb.WriteString(fmt.Sprintf("**%s** (%s) — host: `%s`\n", id, vm.Name, vm.Host))
+		} else if db.VMName != "" {
+			// Expand the VM reference inline.
+			if vm, ok := config.VMs[db.VMName]; ok {
+				sb.WriteString(fmt.Sprintf("- Hosted on VM: %s (host: `%s`)\n", vm.Name, vm.Host))
+			} else {
+				sb.WriteString(fmt.Sprintf("- Hosted on VM: %s (details not configured)\n", db.VMName))
+			}
+		} else {
+			sb.WriteString("- Hosting: standalone (no K8s cluster or VM specified)\n")
 		}
 		sb.WriteString("\n")
 	}
 
 	sb.WriteString("### Instructions\n\n")
-	sb.WriteString("- When investigating a database server, use its connection_string with the database agent.\n")
-	sb.WriteString("- If the server has an associated K8s cluster, use that cluster's context and namespace with the K8s agent.\n")
-	sb.WriteString("- If the server runs on a VM, no K8s context is available — use the database agent and OS-level diagnostics.\n")
-	sb.WriteString("- K8s clusters not tied to any database server can still be inspected independently.\n")
+	sb.WriteString("- Use the connection_string with the database agent for DB diagnostics.\n")
+	sb.WriteString("- For K8s-hosted databases, use the context and namespace with the K8s agent for pod/cluster issues.\n")
+	sb.WriteString("- For VM-hosted databases, only database-level diagnostics are available (no K8s agent).\n")
 
 	return sb.String()
 }

@@ -30,8 +30,8 @@ Here's the aiHelpDesk release [download page](https://github.com/borisdali/helpd
 To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform agnostic tarball and run the following commands:
 
 ```
-  tar xzf helpdesk-v1.0.0-deploy.tar.gz
-  cd helpdesk-v1.0.0-deploy/docker-compose
+  tar xzf helpdesk-v.0.1.0-deploy.tar.gz
+  cd helpdesk-v0.1.0-deploy/docker-compose
   cp .env.example .env
   cp infrastructure.json.example infrastructure.json
   # edit both files

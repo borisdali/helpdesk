@@ -154,11 +154,9 @@ func TestBuildInfraPromptSection_Full(t *testing.T) {
 
 	result := buildInfraPromptSection(config)
 
-	if !strings.Contains(result, "Managed Infrastructure") {
-		t.Error("missing 'Managed Infrastructure' header")
-	}
-	if !strings.Contains(result, "Database Servers") {
-		t.Error("missing 'Database Servers' section")
+	// New behavior: only shows "Managed Databases" with db_servers
+	if !strings.Contains(result, "Managed Databases") {
+		t.Error("missing 'Managed Databases' header")
 	}
 	if !strings.Contains(result, "prod-db") {
 		t.Error("missing db server ID")
@@ -166,17 +164,19 @@ func TestBuildInfraPromptSection_Full(t *testing.T) {
 	if !strings.Contains(result, "host=db.example.com") {
 		t.Error("missing connection string")
 	}
+	// K8s info should be expanded inline for the database
 	if !strings.Contains(result, "gke_prod") {
-		t.Error("missing k8s context")
+		t.Error("missing k8s context (should be expanded inline)")
 	}
-	if !strings.Contains(result, "Kubernetes Clusters") {
-		t.Error("missing K8s section")
+	if !strings.Contains(result, "Hosted on Kubernetes") {
+		t.Error("missing 'Hosted on Kubernetes' for K8s-hosted DB")
 	}
-	if !strings.Contains(result, "Virtual Machines") {
-		t.Error("missing VMs section")
+	// Should NOT have separate K8s/VM sections anymore
+	if strings.Contains(result, "Kubernetes Clusters") {
+		t.Error("should not have separate 'Kubernetes Clusters' section")
 	}
-	if !strings.Contains(result, "10.0.0.5") {
-		t.Error("missing VM host")
+	if strings.Contains(result, "Virtual Machines") {
+		t.Error("should not have separate 'Virtual Machines' section")
 	}
 }
 
@@ -184,11 +184,9 @@ func TestBuildInfraPromptSection_Empty(t *testing.T) {
 	config := &InfraConfig{}
 	result := buildInfraPromptSection(config)
 
-	if !strings.Contains(result, "Managed Infrastructure") {
-		t.Error("missing header even for empty config")
-	}
-	if strings.Contains(result, "Database Servers") {
-		t.Error("should not have DB section for empty config")
+	// New behavior: returns empty string when no db_servers
+	if result != "" {
+		t.Errorf("expected empty string for empty db_servers, got %q", result)
 	}
 }
 
@@ -207,8 +205,46 @@ func TestBuildInfraPromptSection_DBOnVM(t *testing.T) {
 	}
 
 	result := buildInfraPromptSection(config)
-	if !strings.Contains(result, "Runs on VM") {
-		t.Error("missing VM reference for DB")
+	// New behavior: VM info is expanded inline
+	if !strings.Contains(result, "Hosted on VM") {
+		t.Error("missing 'Hosted on VM' for VM-hosted DB")
+	}
+	if !strings.Contains(result, "10.0.0.5") {
+		t.Error("missing VM host in expanded reference")
+	}
+}
+
+func TestBuildInfraPromptSection_StandaloneDB(t *testing.T) {
+	config := &InfraConfig{
+		DBServers: map[string]DBServer{
+			"local-db": {
+				Name:             "Local Dev DB",
+				ConnectionString: "host=localhost port=5432",
+			},
+		},
+	}
+
+	result := buildInfraPromptSection(config)
+	if !strings.Contains(result, "standalone") {
+		t.Error("missing 'standalone' for DB without K8s or VM")
+	}
+}
+
+func TestBuildInfraPromptSection_MissingK8sCluster(t *testing.T) {
+	config := &InfraConfig{
+		DBServers: map[string]DBServer{
+			"orphan-db": {
+				Name:             "Orphan DB",
+				ConnectionString: "host=db.example.com",
+				K8sCluster:       "nonexistent-cluster",
+			},
+		},
+		K8sClusters: map[string]K8sCluster{},
+	}
+
+	result := buildInfraPromptSection(config)
+	if !strings.Contains(result, "details not configured") {
+		t.Error("missing 'details not configured' for missing K8s cluster reference")
 	}
 }
 
