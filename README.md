@@ -46,7 +46,7 @@ See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instruct
 ```
   tar xzf helpdesk-v0.1.0-deploy.tar.gz
   kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
-  helm install helpdesk ./helpdesk-v0.1.1-deploy/helm/helpdesk \
+  helm install helpdesk ./helpdesk-v0.1.0-deploy/helm/helpdesk \
     --set model.vendor=anthropic \
     --set model.name=claude-haiku-4-5-20251001
 ```

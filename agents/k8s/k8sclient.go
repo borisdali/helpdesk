@@ -177,7 +177,7 @@ func fetchPods(ctx context.Context, kubeContext, namespace, labels string) (GetP
 	}
 
 	if len(podList.Items) == 0 {
-		return GetPodsResult{Message: "No pods found matching the criteria."}, nil
+		return GetPodsResult{Pods: []PodInfo{}, Message: "No pods found matching the criteria."}, nil
 	}
 
 	pods := make([]PodInfo, 0, len(podList.Items))
@@ -246,7 +246,7 @@ func fetchServices(ctx context.Context, kubeContext, namespace, serviceName, ser
 	}
 
 	if len(services) == 0 {
-		return GetServiceResult{Message: "No services found matching the criteria."}, nil
+		return GetServiceResult{Services: []ServiceInfo{}, Message: "No services found matching the criteria."}, nil
 	}
 	return GetServiceResult{Services: services, Count: len(services)}, nil
 }
@@ -269,7 +269,7 @@ func fetchEndpoints(ctx context.Context, kubeContext, namespace, endpointName st
 	}
 
 	if len(epList.Items) == 0 {
-		return GetEndpointsResult{Message: "No endpoints found. This may indicate no pods match the service selector."}, nil
+		return GetEndpointsResult{Endpoints: []EndpointInfo{}, Message: "No endpoints found. This may indicate no pods match the service selector."}, nil
 	}
 
 	endpoints := make([]EndpointInfo, 0, len(epList.Items))
@@ -366,7 +366,7 @@ func fetchEvents(ctx context.Context, kubeContext, namespace, resourceName, even
 	}
 
 	if len(events) == 0 {
-		return GetEventsResult{Message: "No events found matching the criteria."}, nil
+		return GetEventsResult{Events: []EventInfo{}, Message: "No events found matching the criteria."}, nil
 	}
 	return GetEventsResult{Events: events, Count: len(events)}, nil
 }
