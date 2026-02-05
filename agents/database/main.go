@@ -84,6 +84,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getServerInfoToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_server_info",
+		Description: "Get PostgreSQL server information including uptime, start time, version, data directory, role (primary/replica), and connection counts.",
+	}, getServerInfoTool)
+	if err != nil {
+		return nil, err
+	}
+
 	getDatabaseInfoToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_database_info",
 		Description: "List all databases with their sizes, owners, encoding, and whether the server is in recovery mode.",
@@ -150,6 +158,7 @@ func createTools() ([]tool.Tool, error) {
 
 	return []tool.Tool{
 		checkConnectionToolDef,
+		getServerInfoToolDef,
 		getDatabaseInfoToolDef,
 		getActiveConnectionsToolDef,
 		getConnectionStatsToolDef,

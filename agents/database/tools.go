@@ -120,6 +120,31 @@ func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult
 	return PsqlResult{Output: fmt.Sprintf("Connection successful!\n%s", output)}, nil
 }
 
+// GetServerInfoArgs defines arguments for the get_server_info tool.
+type GetServerInfoArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, error) {
+	query := `SELECT
+		version() as version,
+		pg_postmaster_start_time() as server_started,
+		now() - pg_postmaster_start_time() as uptime,
+		current_setting('data_directory') as data_directory,
+		current_setting('config_file') as config_file,
+		pg_size_pretty(pg_database_size(current_database())) as current_db_size,
+		CASE WHEN pg_is_in_recovery() THEN 'replica' ELSE 'primary' END as role,
+		(SELECT count(*) FROM pg_stat_activity) as total_connections,
+		(SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_connections,
+		current_setting('max_connections') as max_connections;`
+
+	output, err := runPsql(ctx, args.ConnectionString, query)
+	if err != nil {
+		return PsqlResult{}, fmt.Errorf("error getting server info: %v", err)
+	}
+	return PsqlResult{Output: output}, nil
+}
+
 // GetDatabaseInfoArgs defines arguments for the get_database_info tool.
 type GetDatabaseInfoArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`

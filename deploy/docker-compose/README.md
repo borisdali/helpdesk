@@ -43,6 +43,20 @@ To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform a
 
 The last two commands are optional and intended for the human operators as it starts an interactive aiHelpDesk session.
 
+N.B: Optional: To avoid being prompted by the aiHelpDesk Orchtestator for password every time its Database Agent needs to access PostgreSQL, just create ~/.pgpass on the host running the agent (following the standard PostgreSQL approach and works automatically with psql):
+
+```
+  # Format: hostname:port:database:username:password
+  orders-db.prod.example.com:5432:orders:app_user:secretpass
+  users-db.prod.example.com:5432:users:app_user:secretpass
+  *:5432:*:postgres:localdevpass
+```
+
+  Then secure it:
+
+```
+  chmod 600 ~/.pgpass
+```
 
   ### 1.2 The non-Docker route to run the pre-built binaries on a host
 
@@ -81,6 +95,8 @@ EOF
   - `--stop` kills any running helpdesk processes
 
 N.B: Please note that the binary tarballs expect `psql` and `kubectl` already installed on the host — those are baked into the Docker image (see option 1.1), but not into the Go binaries (this option 1.2).
+
+N.B: Please see the note above in section 1.1 regarding the password prompts.
 
 
 ## 2. Deployment from source (by cloning the repo):

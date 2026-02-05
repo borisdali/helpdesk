@@ -249,6 +249,47 @@ func TestCheckConnectionTool_Failure(t *testing.T) {
 	}
 }
 
+func TestGetServerInfoTool_Success(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]------+------------------------------
+version            | PostgreSQL 16.1
+server_started     | 2024-01-15 08:30:00+00
+uptime             | 3 days 14:25:33
+data_directory     | /var/lib/postgresql/16/main
+config_file        | /etc/postgresql/16/main/postgresql.conf
+current_db_size    | 250 MB
+role               | primary
+total_connections  | 15
+active_connections | 3
+max_connections    | 100
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getServerInfoTool(ctx, GetServerInfoArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getServerInfoTool() error = %v, want nil", err)
+	}
+	if !strings.Contains(result.Output, "uptime") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'uptime'", result.Output)
+	}
+	if !strings.Contains(result.Output, "primary") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'primary'", result.Output)
+	}
+}
+
+func TestGetServerInfoTool_Failure(t *testing.T) {
+	defer withMockRunner("connection refused", errors.New("exit status 1"))()
+
+	ctx := newTestContext()
+	_, err := getServerInfoTool(ctx, GetServerInfoArgs{ConnectionString: "host=localhost"})
+	if err == nil {
+		t.Fatal("getServerInfoTool() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "error getting server info") {
+		t.Errorf("getServerInfoTool() error = %v, want to contain 'error getting server info'", err)
+	}
+}
+
 func TestGetActiveConnectionsTool_WithConnections(t *testing.T) {
 	mockOutput := `-[ RECORD 1 ]---+----------------------------------------
 pid             | 12345
@@ -578,6 +619,7 @@ func TestToolsErrorHandling(t *testing.T) {
 		name string
 		fn   func() error
 	}{
+		{"getServerInfoTool", func() error { _, err := getServerInfoTool(ctx, GetServerInfoArgs{}); return err }},
 		{"getDatabaseInfoTool", func() error { _, err := getDatabaseInfoTool(ctx, GetDatabaseInfoArgs{}); return err }},
 		{"getActiveConnectionsTool", func() error { _, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{}); return err }},
 		{"getConnectionStatsTool", func() error { _, err := getConnectionStatsTool(ctx, GetConnectionStatsArgs{}); return err }},
