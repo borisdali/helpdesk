@@ -5,8 +5,8 @@ image:
 
 # LLM model configuration. All agents and the orchestrator use these.
 model:
-  vendor: google        # "google" or "anthropic"
-  name: gemini-2.5-flash
+  vendor: anthropic        # "google" or "anthropic"
+  name: claude-haiku-4-5-20251001
   # Name and key of a pre-existing Kubernetes Secret containing the API key.
   apiKeySecret: helpdesk-api-key
   apiKeyKey: api-key

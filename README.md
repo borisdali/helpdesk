@@ -21,18 +21,6 @@ aiHelpDesk is the first product from the DDS Group that starts on the path of im
 ## Deployment and Supported Platforms
 aiHelpDesk can be deployed on K8s or VMs / bare metal. The binary packages are provided for Linux x86-64 and ARM (Graviton, Ampere), as well as for macOS (Intel and Apple Silicon).
 
-  ### On K8s
-
-```
-  tar xzf helpdesk-v0.1.0-deploy.tar.gz
-  kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
-  helm install helpdesk ./helpdesk-v0.1.1-deploy/helm/helpdesk \
-    --set model.vendor=anthropic \
-    --set model.name=claude-haiku-4-5-20251001
-```
-
-See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on how to deploy aiHelpDesk on K8s.
-
   ### On VMs
 There are two options to run aiHelpDesk on non-K8s environments, either in the Docker containers or straight on the host.
 
@@ -52,6 +40,18 @@ For the latter (i.e. for running aiHelpDesk with no Docker, straight on a host),
 Please be sure to set your desired LLM model (it defaults to Anthropic's Haiku), the API key and the database inventory.
 
 See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instructions on how to deploy aiHelpDesk either as binaries (simpler) or manually by cloning the repo.
+
+  ### On K8s
+
+```
+  tar xzf helpdesk-v0.1.0-deploy.tar.gz
+  kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
+  helm install helpdesk ./helpdesk-v0.1.1-deploy/helm/helpdesk \
+    --set model.vendor=anthropic \
+    --set model.name=claude-haiku-4-5-20251001
+```
+
+See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on how to deploy aiHelpDesk on K8s.
 
 ## Architecture
 See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configuration, API reference, and extension guide.

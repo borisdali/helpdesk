@@ -31,8 +31,8 @@ helm install helpdesk ./helm/helpdesk \
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `model.vendor` | LLM provider: `anthropic` or `google` | `google` |
-| `model.name` | Model name (e.g., `claude-haiku-4-5-20251001`) | `gemini-2.5-flash` |
+| `model.vendor` | LLM provider: `anthropic` or `google` | `anthropic` |
+| `model.name` | Model name (e.g. `gemini-2.5-flash`) | `claude-haiku-4-5-20251001` |
 | `model.apiKeySecret` | Name of K8s Secret containing API key | `helpdesk-api-key` |
 | `model.apiKeyKey` | Key within the Secret | `api-key` |
 
@@ -118,13 +118,13 @@ helm install helpdesk ./helm/helpdesk \
 
 ## Interactive Session
 
-To start an interactive troubleshooting session:
+For a human operator to start an interactive troubleshooting session run the following command:
 
 ```bash
 kubectl -n helpdesk-system exec -it deploy/helpdesk-orchestrator -- helpdesk
 ```
 
-## Architecture
+## Architecture Recap
 
 ```
                     ┌─────────────────┐
@@ -152,7 +152,9 @@ kubectl -n helpdesk-system exec -it deploy/helpdesk-orchestrator -- helpdesk
 └─────────────────────────────────────────────────────┘
 ```
 
-Only the **orchestrator** needs the infrastructure inventory. Agents receive connection details as parameters when called.
+Only the **Orchestrator** needs the infrastructure inventory. Agents receive connection details as parameters when called.
+
+Please see the complete aiHelpDesk architecture description [here](../../ARCHITECTURE.md).
 
 ## Uninstall
 
