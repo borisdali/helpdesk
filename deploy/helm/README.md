@@ -219,7 +219,69 @@ helm install helpdesk ./deploy/helm/helpdesk \
 
 To include infrastructure config, create a `my-values.yaml` as shown above and add `-f my-values.yaml` to the helm install command.
 
-## 7. Uninstall
+## 7. Using the Gateway API
+
+While the interactive orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation:
+
+```bash
+# Port-forward the gateway
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
+
+# In another terminal, query the system
+curl -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What databases are you aware of?"}'
+
+# List available agents
+curl http://localhost:8080/api/v1/agents
+
+# Call database agent tools directly
+curl -X POST http://localhost:8080/api/v1/db/get_server_info \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string": "host=mydb.example.com port=5432 dbname=mydb user=admin"}'
+
+# Call K8s agent tools directly
+curl -X POST http://localhost:8080/api/v1/k8s/get_pods \
+  -H "Content-Type: application/json" \
+  -d '{"namespace": "default"}'
+```
+
+The Gateway API is the recommended interface for:
+- CI/CD pipelines and automation scripts
+- Integration with monitoring/alerting systems (see [srebot example](../../cmd/srebot/README.md))
+- Environments where interactive TTY access is limited
+
+## 8. Troubleshooting
+
+### Interactive REPL Shows Empty Responses
+
+**Symptom:** When running the interactive orchestrator in a container, agent responses appear empty and require pressing Enter to display.
+
+**Cause:** This is a known issue with the ADK (Agent Development Kit) REPL in containerized environments where TTY handling differs from local execution.
+
+**Workaround:** Use the Gateway REST API instead of the interactive REPL (see Section 7 above). The Gateway API provides full functionality and works reliably in all environments.
+
+### Agents Not Discovered
+
+**Symptom:** Orchestrator logs show "agent not available" or discovery failures.
+
+**Solution:** Check that all agent pods are running and services are correctly configured:
+```bash
+kubectl -n helpdesk-system get pods
+kubectl -n helpdesk-system get svc
+kubectl -n helpdesk-system logs deploy/helpdesk-orchestrator
+```
+
+### API Key Issues
+
+**Symptom:** Agents fail with authentication errors to the LLM provider.
+
+**Solution:** Verify the secret exists and contains the correct key:
+```bash
+kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
+```
+
+## 9. Uninstall
 
 ```bash
 helm uninstall helpdesk --namespace helpdesk-system

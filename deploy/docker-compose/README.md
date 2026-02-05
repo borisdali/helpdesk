@@ -160,3 +160,59 @@ Here's an example of an SRE bot detecting that the `db.example.com` is going off
 
 See the [sample log](INSTALL_from_source_sample_SRE_bot_log.md)  of running the above commands.
 
+
+## 3. Using the Gateway API
+
+In addition to the interactive orchestrator REPL, the Gateway provides a REST API for programmatic access:
+
+```bash
+# Query the system
+curl -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What databases are you aware of?"}'
+
+# List available agents
+curl http://localhost:8080/api/v1/agents
+
+# Call database agent tools directly
+curl -X POST http://localhost:8080/api/v1/db/get_server_info \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string": "host=mydb.example.com port=5432 dbname=mydb user=admin"}'
+
+# Call K8s agent tools directly
+curl -X POST http://localhost:8080/api/v1/k8s/get_pods \
+  -H "Content-Type: application/json" \
+  -d '{"namespace": "default"}'
+```
+
+The Gateway API is useful for:
+- CI/CD pipelines and automation scripts
+- Integration with monitoring/alerting systems (see [srebot example](../../cmd/srebot/README.md))
+- Environments where interactive TTY access is limited
+
+## 4. Troubleshooting
+
+### Interactive REPL Shows Empty Responses
+
+**Symptom:** When running the interactive orchestrator in a Docker container, agent responses appear empty and require pressing Enter to display.
+
+**Cause:** This is a known issue with the ADK (Agent Development Kit) REPL in containerized environments where TTY handling differs from local execution.
+
+**Workaround:** Use the Gateway REST API instead of the interactive REPL (see Section 3 above). The Gateway API provides full functionality and works reliably in all environments.
+
+### Database Agent Prompts for Password
+
+**Symptom:** The database agent asks for a password every time it connects to a database.
+
+**Solution:** Create a `~/.pgpass` file as described in Section 1.1 above.
+
+### Agents Not Discovered
+
+**Symptom:** Orchestrator logs show "agent not available" or discovery failures.
+
+**Solution:** Check that all agent containers are running:
+```bash
+docker compose ps
+docker compose logs orchestrator
+```
+

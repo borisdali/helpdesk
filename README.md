@@ -59,12 +59,30 @@ See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configura
 ## Testing
 aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework, see [here](testing/FAULT_INJECTION_TESTING.md).
 
+## Gateway REST API
+In addition to the interactive orchestrator, aiHelpDesk provides a Gateway REST API for programmatic access:
+
+```bash
+# Query the system
+curl -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What databases are you aware of?"}'
+
+# List agents
+curl http://localhost:8080/api/v1/agents
+
+# Direct tool calls
+curl -X POST http://localhost:8080/api/v1/db/get_server_info \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string": "host=db.example.com port=5432 dbname=mydb user=admin"}'
+```
+
+The Gateway API is recommended for CI/CD pipelines, automation, and containerized environments. See deployment READMEs for details.
+
 ## Demo app calling aiHelpDesk
-aiHelpDesk can certainly be used by humans and that's what the interactive LLM-powered Orchestrator is there for. 
+aiHelpDesk can certainly be used by humans and that's what the interactive LLM-powered Orchestrator is there for. Additionally however, an upstream agent or a program can call aiHelpDesk agents directly as well.
 
-Additionally however, an upstream agent or a program can call aiHelpDesk agents directly as well.
-
-See [cmd/srebot/README.md](cmd/srebot/README.md) for a sample of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a Gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
+See [a sample](cmd/srebot/README.md) of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a Gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
 
 ## Sample interactive dialog with a human operator
 aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").
