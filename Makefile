@@ -26,7 +26,7 @@ BIN_PKGS := \
 	helpdesk:./cmd/helpdesk/ \
 	srebot:./cmd/srebot/
 
-.PHONY: test cover integration faulttest image push binaries bundle release github-release clean
+.PHONY: test cover integration faulttest e2e image push binaries bundle release github-release clean
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
@@ -62,6 +62,17 @@ faulttest:
 	-go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml down -v
+
+# ---------------------------------------------------------------------------
+# End-to-end tests (requires full stack + LLM API key)
+# ---------------------------------------------------------------------------
+e2e:
+	@echo "Starting full stack..."
+	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	@echo "Running E2E tests..."
+	-go test -tags e2e -timeout 300s -v ./testing/e2e/...
+	@echo "Stopping full stack..."
+	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Docker image (local, current arch)

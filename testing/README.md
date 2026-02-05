@@ -1,5 +1,153 @@
 # aiHepDesk Testing Strategy
 
+  ## TL;DR: as they say, a picture is worth a thousand words
+
+```
+[boris@ ~/helpdesk]$ make test
+go test ./...
+ok  	helpdesk/agents/database	(cached)
+ok  	helpdesk/agents/incident	(cached)
+ok  	helpdesk/agents/k8s	(cached)
+ok  	helpdesk/agentutil	(cached)
+ok  	helpdesk/cmd/gateway	(cached)
+ok  	helpdesk/cmd/helpdesk	(cached)
+ok  	helpdesk/cmd/srebot	(cached)
+ok  	helpdesk/internal/discovery	(cached)
+?   	helpdesk/internal/logging	[no test files]
+?   	helpdesk/internal/model	[no test files]
+ok  	helpdesk/prompts	(cached)
+ok  	helpdesk/testing/cmd/faulttest	(cached)
+ok  	helpdesk/testing/faultlib	(cached)
+?   	helpdesk/testing/testutil	[no test files]
+
+
+[boris@ ~/helpdesk]$ make integration
+Starting test infrastructure...
+docker compose -f testing/docker/docker-compose.yaml up -d --wait
+[+] Running 4/4
+ ✔ Network docker_default            Created                                                                                                                                                                                                 0.0s
+ ✔ Volume "docker_pgdata"            Created                                                                                                                                                                                                 0.0s
+ ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 6.4s
+ ✔ Container helpdesk-test-pgloader  Healthy                                                                                                                                                                                                 6.3s
+Running integration tests...
+go test -tags integration -timeout 120s ./testing/integration/...
+ok  	helpdesk/testing/integration	(cached)
+Stopping test infrastructure...
+docker compose -f testing/docker/docker-compose.yaml down -v
+[+] Running 4/4
+ ✔ Container helpdesk-test-pgloader  Removed                                                                                                                                                                                                10.2s
+ ✔ Container helpdesk-test-pg        Removed                                                                                                                                                                                                 0.1s
+ ✔ Volume docker_pgdata              Removed                                                                                                                                                                                                 0.0s
+ ✔ Network docker_default            Removed                                                                                                                                                                                                 0.2s
+
+
+[boris@ ~/helpdesk]$ make faulttest
+Starting test infrastructure...
+docker compose -f testing/docker/docker-compose.yaml up -d --wait
+[+] Running 4/4
+ ✔ Network docker_default            Created                                                                                                                                                                                                 0.0s
+ ✔ Volume "docker_pgdata"            Created                                                                                                                                                                                                 0.0s
+ ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 6.3s
+ ✔ Container helpdesk-test-pgloader  Healthy                                                                                                                                                                                                 6.3s
+Running fault tests...
+go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
+SKIP: No agent URLs configured
+Set FAULTTEST_DB_AGENT_URL, FAULTTEST_K8S_AGENT_URL, or FAULTTEST_ORCHESTRATOR_URL
+ok  	helpdesk/testing/faulttest	0.332s
+Stopping test infrastructure...
+docker compose -f testing/docker/docker-compose.yaml down -v
+[+] Running 4/4
+ ✔ Container helpdesk-test-pgloader  Removed                                                                                                                                                                                                10.2s
+ ✔ Container helpdesk-test-pg        Removed                                                                                                                                                                                                 0.1s
+ ✔ Volume docker_pgdata              Removed                                                                                                                                                                                                 0.0s
+ ✔ Network docker_default            Removed                                                                                                                                                                                                 0.2s
+
+
+[boris@ ~/helpdesk]$ make e2e
+Starting full stack...
+docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+WARN[0000] Found orphan containers ([docker-compose-orchestrator-run-99b1ef4892c5 docker-compose-orchestrator-run-296f690d90bf docker-compose-orchestrator-run-6d987d8ddd8d docker-compose-orchestrator-run-c7adaf6e28cb docker-compose-orchestrator-run-512a3586c5d0 docker-compose-orchestrator-run-f64674e022dc docker-compose-orchestrator-run-ed295ecc6bbf docker-compose-orchestrator-run-626c276b2cbd docker-compose-orchestrator-run-51d7fe36fe77 docker-compose-orchestrator-run-b4b14664980c docker-compose-orchestrator-run-3c37c363f25e docker-compose-orchestrator-run-41c75715fe0a docker-compose-orchestrator-run-372c4614d7b2 docker-compose-orchestrator-run-b0bcea4f740a]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up.
+[+] Running 6/6
+ ✔ Network docker-compose_default             Created                                                                                                                                                                                        0.0s
+ ✔ Volume "docker-compose_incidents"          Created                                                                                                                                                                                        0.0s
+ ✔ Container docker-compose-database-agent-1  Healthy                                                                                                                                                                                        1.0s
+ ✔ Container docker-compose-k8s-agent-1       Healthy                                                                                                                                                                                        1.0s
+ ✔ Container docker-compose-incident-agent-1  Healthy                                                                                                                                                                                        1.0s
+ ✔ Container docker-compose-gateway-1         Healthy                                                                                                                                                                                        0.9s
+Running E2E tests...
+go test -tags e2e -timeout 300s -v ./testing/e2e/...
+=== RUN   TestGatewayDiscovery
+    gateway_test.go:42: Discovered 3 agents:
+    gateway_test.go:44:   - postgres_database_agent
+    gateway_test.go:44:   - k8s_agent
+    gateway_test.go:44:   - incident_agent
+--- PASS: TestGatewayDiscovery (0.01s)
+=== RUN   TestGatewayHealthCheck
+    gateway_test.go:84: Response (1073 chars): ---
+        ERROR — check_connection failed for host=localhost port=15432 dbname=testdb user=postgres password=testpass
+
+        connection failed: Connection refused. The PostgreSQL server may not be running, or t...
+--- PASS: TestGatewayHealthCheck (2.70s)
+=== RUN   TestGatewayAIDiagnosis
+    gateway_test.go:111: Sending diagnosis prompt to database agent...
+    gateway_test.go:118: Agent response (1963 chars)
+--- PASS: TestGatewayAIDiagnosis (6.13s)
+=== RUN   TestGatewayQueryUnknownAgent
+--- PASS: TestGatewayQueryUnknownAgent (0.00s)
+=== RUN   TestGatewayIncidentBundle
+    gateway_test.go:196: Creating incident bundle with callback: http://127.0.0.1:51055/callback
+    gateway_test.go:208: Incident agent responded (700 chars)
+    gateway_test.go:221: Warning: No callback received within 60s (may be expected if incident agent not configured)
+--- PASS: TestGatewayIncidentBundle (63.77s)
+=== RUN   TestSREBotWorkflow
+=== RUN   TestSREBotWorkflow/Phase1_Discovery
+    gateway_test.go:250: Found 3 agents
+=== RUN   TestSREBotWorkflow/Phase2_HealthCheck
+    gateway_test.go:274: Anomaly detected in health check response
+=== RUN   TestSREBotWorkflow/Phase3_AIDiagnosis
+    gateway_test.go:298: Diagnosis response (2307 chars)
+--- PASS: TestSREBotWorkflow (8.00s)
+    --- PASS: TestSREBotWorkflow/Phase1_Discovery (0.00s)
+    --- PASS: TestSREBotWorkflow/Phase2_HealthCheck (2.62s)
+    --- PASS: TestSREBotWorkflow/Phase3_AIDiagnosis (5.37s)
+=== RUN   TestMultiAgentIncidentResponse
+    multi_agent_test.go:32: E2E_ORCHESTRATOR_URL not set
+--- SKIP: TestMultiAgentIncidentResponse (0.00s)
+=== RUN   TestFaultInjectionE2E
+    multi_agent_test.go:129: Test infrastructure not running (need testing/docker/docker-compose.yaml with pgloader)
+--- SKIP: TestFaultInjectionE2E (0.16s)
+=== RUN   TestOrchestratorDelegation
+    orchestrator_test.go:21: E2E_ORCHESTRATOR_URL not set
+--- SKIP: TestOrchestratorDelegation (0.00s)
+=== RUN   TestOrchestratorCompoundPrompt
+    orchestrator_test.go:86: E2E_ORCHESTRATOR_URL not set
+--- SKIP: TestOrchestratorCompoundPrompt (0.00s)
+=== RUN   TestDirectAgentCall
+    orchestrator_test.go:141: Note: Direct A2A calls may return empty if agent requires specific session context
+=== RUN   TestDirectAgentCall/database_agent_direct
+    orchestrator_test.go:184: Response (0 chars, 4.69650775s)
+    orchestrator_test.go:189: Warning: Agent returned empty response (may be expected for direct A2A without session)
+    orchestrator_test.go:190: Empty response from direct A2A call - use gateway tests for reliable E2E testing
+=== RUN   TestDirectAgentCall/k8s_agent_direct
+    orchestrator_test.go:169: Agent URL or required config not set
+--- PASS: TestDirectAgentCall (4.70s)
+    --- SKIP: TestDirectAgentCall/database_agent_direct (4.70s)
+    --- SKIP: TestDirectAgentCall/k8s_agent_direct (0.00s)
+PASS
+ok  	helpdesk/testing/e2e	85.983s
+Stopping full stack...
+docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+[+] Running 6/6
+ ✔ Container docker-compose-gateway-1         Removed                                                                                                                                                                                        0.2s
+ ✔ Container docker-compose-k8s-agent-1       Removed                                                                                                                                                                                        0.2s
+ ✔ Container docker-compose-incident-agent-1  Removed                                                                                                                                                                                        0.1s
+ ✔ Container docker-compose-database-agent-1  Removed                                                                                                                                                                                        0.1s
+ ✔ Volume docker-compose_incidents            Removed                                                                                                                                                                                        0.0s
+ ✔ Network docker-compose_default             Removed                                                                                                                                                                                        0.1s
+
+
+```
+
 aiHelpDesk offers a comprehensive testing strategy that is broken into five distinct layers as follows:
 
   ## Architecture & Testing Boundaries
