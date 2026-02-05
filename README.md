@@ -1,13 +1,13 @@
 # aiHelpDesk: AI DB SRE in a box
 
-A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and PostgreSQL-based databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
+A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and its derivatives databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
 
 * aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
 * aiHelpDesk is designed for human operators as well as for the upstream agents.
 * aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
 * aiHelpDesk features a built-in fault injection framework. 
-* aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those provided with aiHelpDesk out of the box.
+* aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those shipped with aiHelpDesk out of the box.
 
 aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs.
 
@@ -24,9 +24,9 @@ aiHelpDesk can be deployed on K8s or VMs / bare metal. The binary packages are p
   ### On K8s
 
 ```
-  tar xzf helpdesk-v1.0.0-deploy.tar.gz
+  tar xzf helpdesk-v0.1.0-deploy.tar.gz
   kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
-  helm install helpdesk helpdesk-v1.0.0-deploy/helm/helpdesk \
+  helm install helpdesk ./helpdesk-v0.1.1-deploy/helm/helpdesk \
     --set model.vendor=anthropic \
     --set model.name=claude-haiku-4-5-20251001
 ```

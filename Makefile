@@ -135,6 +135,7 @@ bundle:
 	\
 	echo "==> helm chart"; \
 	cp -r deploy/helm/helpdesk $$bundledir/helm/; \
+	cp deploy/docker-compose/infrastructure.json.example $$bundledir/helm/; \
 	sed -i.bak \
 	    -e 's|^  repository: helpdesk|  repository: $(IMAGE)|' \
 	    -e 's|^  tag: latest|  tag: $(VERSION)|' \
