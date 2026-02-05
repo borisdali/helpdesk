@@ -174,9 +174,9 @@ func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error
 // GetPodLogsArgs defines arguments for the get_pod_logs tool.
 type GetPodLogsArgs struct {
 	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
-	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod."`
-	PodName   string `json:"pod_name" jsonschema:"The name of the pod to get logs from."`
-	Container string `json:"container,omitempty" jsonschema:"Optional container name if pod has multiple containers."`
+	Namespace string `json:"namespace,omitempty" jsonschema:"The Kubernetes namespace of the pod (e.g., 'default', 'kube-system')."`
+	PodName   string `json:"pod_name" jsonschema:"required,The exact pod name to get logs from (e.g., 'nginx-7d6877d777-abc12')."`
+	Container string `json:"container,omitempty" jsonschema:"Container name, only needed if pod has multiple containers."`
 	TailLines int    `json:"tail_lines,omitempty" jsonschema:"Number of recent log lines to retrieve (default 50)."`
 	Previous  bool   `json:"previous,omitempty" jsonschema:"If true, get logs from the previous container instance (useful for crash loops)."`
 }
@@ -215,8 +215,8 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 // DescribePodArgs defines arguments for the describe_pod tool.
 type DescribePodArgs struct {
 	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
-	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod."`
-	PodName   string `json:"pod_name" jsonschema:"The name of the pod to describe."`
+	Namespace string `json:"namespace,omitempty" jsonschema:"The Kubernetes namespace of the pod (e.g., 'default', 'kube-system')."`
+	PodName   string `json:"pod_name" jsonschema:"required,The exact pod name to describe."`
 }
 
 func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
