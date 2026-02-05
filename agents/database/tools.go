@@ -11,6 +11,26 @@ import (
 	"google.golang.org/adk/tool"
 )
 
+// CommandRunner abstracts command execution for testing.
+type CommandRunner interface {
+	Run(ctx context.Context, name string, args []string, env []string) (string, error)
+}
+
+// execRunner is the production implementation that calls os/exec.
+type execRunner struct{}
+
+func (execRunner) Run(ctx context.Context, name string, args []string, env []string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+// cmdRunner is the active command runner. Override in tests.
+var cmdRunner CommandRunner = execRunner{}
+
 // diagnosePsqlError examines psql output for common failure patterns and returns
 // a clear, actionable error message alongside the raw output.
 func diagnosePsqlError(output string) string {
@@ -62,11 +82,10 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}
-	cmd := exec.CommandContext(ctx, "psql", args...)
-	cmd.Env = append(os.Environ(), "PGCONNECT_TIMEOUT=10")
-	output, err := cmd.CombinedOutput()
+	env := []string{"PGCONNECT_TIMEOUT=10"}
+	output, err := cmdRunner.Run(ctx, "psql", args, env)
 	if err != nil {
-		out := strings.TrimSpace(string(output))
+		out := strings.TrimSpace(output)
 		if out == "" {
 			out = "(no output from psql)"
 		}
@@ -79,7 +98,7 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 		}
 		return "", fmt.Errorf("psql failed: %v\nOutput: %s", err, out)
 	}
-	return string(output), nil
+	return output, nil
 }
 
 // PsqlResult is the standard output type for all psql tools.

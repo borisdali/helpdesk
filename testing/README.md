@@ -25,17 +25,17 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 
   ### Layer 1: Unit Tests
 
-  Goal: Test all deterministic logic without any I/O. Run in go test ./... with zero external dependencies.
+  Goal: Test all deterministic logic without any I/O. Run in `go test ./...` with zero external dependencies.
 
   Coverage target: 35-40% of statements.
 
   ### Layer 2: Component Tests (mock external commands)
 
-  Goal: Test the tool functions (the ones that call psql, kubectl, OS commands) by mocking the command execution. No real PostgreSQL or Kubernetes needed.
+  Goal: Test the tool functions (the ones that call `psql`, `kubectl`, OS commands) by mocking the command execution. No real PostgreSQL or K8s needed.
 
   Approach — command injection pattern:
 
-  Instead of each agent's tool functions calling exec.Command("psql", ...) or exec.Command("kubectl", ...) directly, make them testable, extract the command runner into an interface:
+  Instead of each agent's tool functions calling `exec.Command("psql", ...)` or `exec.Command("kubectl", ...)` directly, make them testable, extract the command runner into an interface:
 
 ```
   // In agents/database/tools.go (or a shared package):
@@ -86,7 +86,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   testing/integration/database_test.go
 ```
 
-  Uses Go testing + build tag //go:build integration:
+  Uses Go testing + build tag `//go:build` integration:
 
 ```
   //go:build integration
@@ -150,7 +150,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   testing/integration/a2a_test.go
 ```
 
-  - Verify each agent serves /.well-known/agent-card.json with correct schema
+  - Verify each agent serves `/.well-known/agent-card.json` with correct schema
   - Verify POST /invoke with valid JSON-RPC returns well-formed Task/Message
   - Verify POST /invoke with malformed JSON returns JSON-RPC error
   - Verify discovery → invoke round-trip works for each agent
@@ -225,15 +225,15 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
 
   5b. Orchestrator delegation test:
 
-  Test that the aiHelpDesk orchestrator correctly routes to sub-agents:
+  Test that the aiHelpDesk Orchestrator correctly routes to sub-agents:
 
 ```
   testing/e2e/orchestrator_test.go
 ```
 
-  - Send `check the database at [conn_string]` → orchestrator delegates to DB agent
-  - Send `list pods in namespace X` → orchestrator delegates to K8s agent
-  - Send compound prompt → orchestrator uses both agents
+  - Send `check the database at [conn_string]` → Orchestrator delegates to DB agent
+  - Send `list pods in namespace X` → Orchestrator delegates to K8s agent
+  - Send compound prompt → Orchestrator uses both agents
 
   Since these involve real LLM calls, they're expensive and non-deterministic. As such aiHelpDesk runs them gated behind a build tag and treats failures as warnings, not blockers:
 
@@ -250,7 +250,7 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
 
   5c. Multi-agent incident response test:
 
-  Inject a compound failure (e.g., `compound-db-pod-crash`), send to orchestrator, verify it:
+  Inject a compound failure (e.g., `compound-db-pod-crash`), send to Orchestrator, verify it:
   1. Calls the database agent (gets `connection refused`)
   2. Calls the K8s agent (identifies `CrashLoopBackOff`)
   3. Synthesizes a root cause explanation

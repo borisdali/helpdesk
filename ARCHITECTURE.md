@@ -1,6 +1,6 @@
 # Architecture
 
-aiHelpDesk is built on the idea of delegating specialized tasks to the expert sub-agents and coordinating them via the central Orchestrator. Sub-agents don't know or depend on each other, are stateless by nature and receive the requests and funnel their findings strictly through the Orchrestrator. This is powerful because by delegating a subtask to a separate agent, the details of that task in a confined to a separate context window. Once the subtask in question is done, the result is added to your main context window of the Orchtestrator and all the details of the subtask are discarded. This is better for context management because it avoids polution of the Orchtestrator's main context the irrelevant details of the subtasks.  
+aiHelpDesk is built on the idea of delegating specialized tasks to the expert sub-agents and coordinating them via the central Orchestrator. Sub-agents don't know or depend on each other, are stateless in nature and receive the requests and funnel their findings strictly through the Orchrestrator. This is powerful because by delegating a subtask to a separate agent, the details of that task in a confined to a separate context window. Once the subtask in question is done, the result is added to your main context window of the Orchtestrator and all the details of the subtask are discarded. This is better for context management because it avoids polution of the Orchtestrator's main context the irrelevant details of the subtasks.  
 
 Sub-agents are standalone A2A servers. That means that if a provider with the deep domain expertise (e.g. K8s) can offer and swap aiHelpDesk's K8s agent with their own, as long it offers Agent Card at `/.well-known/agent-card.json` and abides by the other rules of the A2A protocol. Sub-agents are explicitly stateless — connection strings and Kubernetes contexts are passed per-request, not configured at startup. This means:
 
@@ -36,7 +36,7 @@ Sub-agents are standalone A2A servers. That means that if a provider with the de
 
 The Orchestrator loads an infrastructure inventory (`infrastructure.json`) that maps
 managed database servers, Kubernetes clusters, and VMs. When the user asks about a
-specific system, the Orchestrator passes the right connection string, kubectl context,
+specific system, the Orchestrator passes the right connection string, `kubectl context`,
 or VM info to the sub-agent:
 
 ```json

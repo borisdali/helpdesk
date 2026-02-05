@@ -1,13 +1,13 @@
 # aiHelpDesk: AI DB SRE in a box
 
-A Go-based AI multi-agent self-service help and support system for troubleshooting PostgreSQL and PostgreSQL-based databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
+A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and PostgreSQL-based databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
 
 * aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
 * aiHelpDesk is designed for human operators as well as for the upstream agents.
 * aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
 * aiHelpDesk features a built-in fault injection framework. 
-* aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped in favor to those provided with aiHelpDesk out of the box.
+* aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those provided with aiHelpDesk out of the box.
 
 aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs.
 
@@ -36,7 +36,7 @@ See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on h
   ### On VMs
 There are two options to run aiHelpDesk on non-K8s environments, either in the Docker containers or straight on the host.
 
-For the former, the first Docker Compose command brings up all the aiHelpDesk agents. The second command starts an interactive session of the aiHelpDesk Orchestrator for a human operator:
+For the former, the first Docker Compose command brings up all the aiHelpDesk agents. The second command starts an interactive session of the aiHelpDesk Orchestrator to talk to a human operator:
 
 ```
   docker compose -f deploy/docker-compose/docker-compose.yaml up -d
