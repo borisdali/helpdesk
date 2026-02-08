@@ -42,14 +42,56 @@ by aiHelpDesk via a ConfigMap from the Helm's `my-values.yaml`).
 | `model.apiKeySecret` | Name of K8s Secret containing API key | `helpdesk-api-key` |
 | `model.apiKeyKey` | Key within the Secret | `api-key` |
 
-### 3.2 Infrastructure Inventory
+### 3.2 K8s Agent Cluster Access
+
+The K8s agent automatically uses **in-cluster configuration** when deployed in Kubernetes. This means:
+
+- **Same cluster access**: Use empty context (`""`) in `infrastructure.json` for databases running in the same cluster as aiHelpDesk. The agent uses its service account (configured via RBAC in the Helm chart).
+
+- **Multi-cluster access**: To query other clusters, mount a kubeconfig file:
+  ```bash
+  # Create secret from kubeconfig
+  kubectl -n helpdesk-system create secret generic kubeconfig \
+    --from-file=config=$HOME/.kube/config
+  ```
+  Then reference the context name in `infrastructure.json`.
+
+Example `infrastructure.json` with both:
+```json
+{
+  "db_servers": {
+    "local-db": {
+      "name": "Database in same cluster",
+      "k8s_cluster": "local",
+      "k8s_namespace": "db"
+    },
+    "remote-db": {
+      "name": "Database in GKE",
+      "k8s_cluster": "gke-prod",
+      "k8s_namespace": "postgres"
+    }
+  },
+  "k8s_clusters": {
+    "local": {
+      "name": "Local (same cluster)",
+      "context": ""
+    },
+    "gke-prod": {
+      "name": "Production GKE",
+      "context": "gke_myproject_us-central1_prod"
+    }
+  }
+}
+```
+
+### 3.3 Infrastructure Inventory
 
 The Orchestrator needs to know which databases it manages. Configure this via `values.yaml` or `--set-json`.
 While it's possible for the human operator's interactive session to ask adhoc questions about "unknown"
-databases (subject to the rules defined by an administrator in the governance module, it's 
+databases (subject to the rules defined by an administrator in the governance module, it's
 more convenient, secure and structured to define the set of databases ahead of time):
 
-**3.2.1 Option A: Using a values file**
+**3.3.1 Option A: Using a values file**
 
 Create `my-values.yaml`:
 ```yaml
@@ -100,7 +142,7 @@ helm install helpdesk ./helm/helpdesk \
     -f ./helm/helpdesk/values.yaml
 ```
 
-**3.2.2 Option B: Using --set-json (for simple configs)**
+**3.3.2 Option B: Using --set-json (for simple configs)**
 
 ```bash
 helm install helpdesk ./helm/helpdesk \
@@ -112,7 +154,7 @@ helm install helpdesk ./helm/helpdesk \
 
 See `infrastructure.json.example` in the bundle for a complete reference.
 
-### 3.3 Custom Namespace
+### 3.4 Custom Namespace
 
 Install to any namespace using `--namespace` and `--create-namespace`:
 
@@ -124,7 +166,7 @@ helm install helpdesk ./helm/helpdesk \
     --set model.name=claude-haiku-4-5-20251001
 ```
 
-### 3.4 Gateway Access
+### 3.5 Gateway Access
 
 By default, the gateway uses `ClusterIP`. For external access:
 
@@ -280,6 +322,16 @@ kubectl -n helpdesk-system logs deploy/helpdesk-orchestrator
 ```bash
 kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 ```
+
+### K8s Context Not Found
+
+**Symptom:** K8s agent reports "context does not exist" when querying pods.
+
+**Cause:** The K8s agent runs inside a pod and doesn't have access to your laptop's kubeconfig.
+
+**Solution:**
+- For databases in the **same cluster** as aiHelpDesk: use empty context (`""`) in `infrastructure.json`. The agent will use in-cluster authentication via its service account.
+- For databases in **other clusters**: mount a kubeconfig as a secret (see Section 3.2).
 
 ## 9. Uninstall
 

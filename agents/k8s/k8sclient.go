@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -30,7 +31,8 @@ var sharedClient = &k8sClient{
 }
 
 // clientset returns a cached *kubernetes.Clientset for the given context.
-// If kubeContext is "", it uses the current default context.
+// If kubeContext is "", it tries in-cluster config first (for running in K8s),
+// then falls back to the default kubeconfig context.
 func (kc *k8sClient) clientset(kubeContext string) (*kubernetes.Clientset, error) {
 	kc.mu.Lock()
 	defer kc.mu.Unlock()
@@ -39,17 +41,35 @@ func (kc *k8sClient) clientset(kubeContext string) (*kubernetes.Clientset, error
 		return cs, nil
 	}
 
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	overrides := &clientcmd.ConfigOverrides{}
-	if kubeContext != "" {
-		overrides.CurrentContext = kubeContext
-	}
+	var config *rest.Config
+	var err error
 
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		loadingRules, overrides,
-	).ClientConfig()
-	if err != nil {
-		return nil, diagnoseClientError(err)
+	if kubeContext == "" {
+		// Try in-cluster config first (when running inside K8s)
+		config, err = rest.InClusterConfig()
+		if err == nil {
+			slog.Info("using in-cluster config")
+		} else {
+			slog.Debug("in-cluster config not available, falling back to kubeconfig", "err", err)
+			// Fall back to default kubeconfig
+			config, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				clientcmd.NewDefaultClientConfigLoadingRules(),
+				&clientcmd.ConfigOverrides{},
+			).ClientConfig()
+			if err != nil {
+				return nil, diagnoseClientError(err)
+			}
+		}
+	} else {
+		// Use specified context from kubeconfig
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		overrides := &clientcmd.ConfigOverrides{CurrentContext: kubeContext}
+		config, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			loadingRules, overrides,
+		).ClientConfig()
+		if err != nil {
+			return nil, diagnoseClientError(err)
+		}
 	}
 
 	config.Timeout = 10 * time.Second
