@@ -66,10 +66,13 @@ In addition to the interactive orchestrator, aiHelpDesk provides a Gateway REST 
 # Query the system
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "What databases are you aware of?"}'
+  -d '{"agent": "database", "message": "What is the server uptime?"}'
 
 # List agents
 curl http://localhost:8080/api/v1/agents
+
+# List managed databases
+curl http://localhost:8080/api/v1/databases
 
 # Direct tool calls
 curl -X POST http://localhost:8080/api/v1/db/get_server_info \
@@ -78,6 +81,17 @@ curl -X POST http://localhost:8080/api/v1/db/get_server_info \
 ```
 
 The Gateway API is recommended for CI/CD pipelines, automation, and containerized environments. See deployment READMEs for details.
+
+## Helper Scripts
+
+aiHelpDesk includes helper scripts for working around the ADK REPL bug in containers:
+
+| Script | Description |
+|--------|-------------|
+| `scripts/gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
+| `scripts/k8s-local-repl.sh` | Run orchestrator locally with K8s agents port-forwarded |
+
+See [scripts/README.md](scripts/README.md) for detailed usage.
 
 ## Demo app calling aiHelpDesk
 aiHelpDesk can certainly be used by humans and that's what the interactive LLM-powered Orchestrator is there for. Additionally however, an upstream agent or a program can call aiHelpDesk agents directly as well.

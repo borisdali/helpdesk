@@ -122,7 +122,7 @@ binaries:
 # ---------------------------------------------------------------------------
 bundle:
 	@bundledir=$(DIST)/helpdesk-$(VERSION)-deploy; \
-	mkdir -p $$bundledir/docker-compose $$bundledir/helm; \
+	mkdir -p $$bundledir/docker-compose $$bundledir/helm $$bundledir/scripts; \
 	\
 	echo "==> docker-compose files"; \
 	cp deploy/docker-compose/.env.example $$bundledir/docker-compose/; \
@@ -141,6 +141,12 @@ bundle:
 	    -e 's|^  tag: latest|  tag: $(VERSION)|' \
 	    $$bundledir/helm/helpdesk/values.yaml; \
 	rm -f $$bundledir/helm/helpdesk/values.yaml.bak; \
+	\
+	echo "==> helper scripts"; \
+	cp scripts/gateway-repl.sh $$bundledir/scripts/; \
+	cp scripts/k8s-local-repl.sh $$bundledir/scripts/; \
+	cp scripts/README.md $$bundledir/scripts/; \
+	chmod +x $$bundledir/scripts/*.sh; \
 	\
 	tar -czf $(DIST)/helpdesk-$(VERSION)-deploy.tar.gz \
 		-C $(DIST) helpdesk-$(VERSION)-deploy; \

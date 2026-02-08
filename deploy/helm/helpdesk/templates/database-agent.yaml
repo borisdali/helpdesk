@@ -25,7 +25,18 @@ spec:
           env:
             - name: HELPDESK_AGENT_ADDR
               value: "0.0.0.0:{{ .Values.agents.database.port }}"
+            {{- if .Values.agents.database.pgpassSecret }}
+            - name: HOME
+              value: /home/helpdesk
+            {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+          {{- if .Values.agents.database.pgpassSecret }}
+          volumeMounts:
+            - name: pgpass
+              mountPath: /home/helpdesk/.pgpass
+              subPath: .pgpass
+              readOnly: true
+          {{- end }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.database.port }}
@@ -42,6 +53,13 @@ spec:
               port: a2a
             initialDelaySeconds: 3
             periodSeconds: 10
+      {{- if .Values.agents.database.pgpassSecret }}
+      volumes:
+        - name: pgpass
+          secret:
+            secretName: {{ .Values.agents.database.pgpassSecret }}
+            defaultMode: 0600
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

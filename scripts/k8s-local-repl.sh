@@ -88,6 +88,15 @@ if ! kubectl -n "$NAMESPACE" get pods | grep -q "Running"; then
     exit 1
 fi
 
+# Kill any existing port-forwards on these ports
+for port in 1100 1102 1104; do
+    if lsof -i ":$port" >/dev/null 2>&1; then
+        log "Killing existing process on port $port..."
+        lsof -ti ":$port" | xargs kill -9 2>/dev/null || true
+        sleep 0.5
+    fi
+done
+
 # Start port-forwards
 log "Starting port-forwards..."
 
@@ -117,16 +126,15 @@ log "  - Database agent: localhost:1100"
 log "  - K8s agent:      localhost:1102"
 log "  - Incident agent: localhost:1104"
 
-# Set agent URLs for local orchestrator
-export HELPDESK_DATABASE_AGENT_URL="http://localhost:1100"
-export HELPDESK_K8S_AGENT_URL="http://localhost:1102"
-export HELPDESK_INCIDENT_AGENT_URL="http://localhost:1104"
+# Set agent URLs for local orchestrator (comma-separated list)
+export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
 
 # Copy infrastructure config from ConfigMap if not present locally
 if [[ -z "$HELPDESK_INFRA_CONFIG" ]]; then
     INFRA_TMP="/tmp/helpdesk-infrastructure.json"
     log "Fetching infrastructure config from ConfigMap..."
-    if kubectl -n "$NAMESPACE" get configmap helpdesk-infrastructure -o jsonpath='{.data.infrastructure\.json}' > "$INFRA_TMP" 2>/dev/null; then
+    # ConfigMap is named helpdesk-config (from Helm chart)
+    if kubectl -n "$NAMESPACE" get configmap helpdesk-config -o jsonpath='{.data.infrastructure\.json}' > "$INFRA_TMP" 2>/dev/null && [[ -s "$INFRA_TMP" ]]; then
         export HELPDESK_INFRA_CONFIG="$INFRA_TMP"
         log "Infrastructure config: $INFRA_TMP"
     else

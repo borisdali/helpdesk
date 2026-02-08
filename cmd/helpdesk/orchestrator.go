@@ -129,9 +129,12 @@ func buildInfraPromptSection(config *InfraConfig) string {
 	}
 
 	sb.WriteString("### Instructions\n\n")
-	sb.WriteString("- Use the connection_string with the database agent for DB diagnostics.\n")
+	sb.WriteString("- IMPORTANT: When delegating to the database agent, ALWAYS include the connection_string in your request.\n")
+	sb.WriteString("  Example: \"Check if the database is up using connection_string: host=... port=5432 dbname=... user=...\"\n")
 	sb.WriteString("- For K8s-hosted databases, use the context and namespace with the K8s agent for pod/cluster issues.\n")
+	sb.WriteString("  Example: \"Check pods in namespace 'db' with context ''\"\n")
 	sb.WriteString("- For VM-hosted databases, only database-level diagnostics are available (no K8s agent).\n")
+	sb.WriteString("- When a user asks about a database by name (e.g., 'is staging-db up?'), look up the connection_string above and include it in your delegation.\n")
 
 	return sb.String()
 }

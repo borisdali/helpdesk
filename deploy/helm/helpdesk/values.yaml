@@ -15,6 +15,10 @@ agents:
   database:
     replicas: 1
     port: 1100
+    # Optional: Name of a Secret containing .pgpass file for passwordless auth.
+    # Create the secret with: kubectl create secret generic pgpass --from-file=.pgpass=./pgpass
+    # File format: hostname:port:database:username:password
+    pgpassSecret: ""
 
   k8s:
     replicas: 1

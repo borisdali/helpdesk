@@ -293,7 +293,24 @@ The Gateway API is the recommended interface for:
 - Integration with monitoring/alerting systems (see [srebot example](../../cmd/srebot/README.md))
 - Environments where interactive TTY access is limited
 
-## 8. Troubleshooting
+## 8. Helper Scripts
+
+The deploy bundle includes helper scripts in the `scripts/` directory:
+
+| Script | Description |
+|--------|-------------|
+| `gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
+| `k8s-local-repl.sh` | Run orchestrator locally with K8s agents port-forwarded |
+
+See `scripts/README.md` for detailed usage.
+
+**Quick start with gateway-repl.sh:**
+```bash
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
+./scripts/gateway-repl.sh
+```
+
+## 9. Troubleshooting
 
 ### Interactive REPL Shows Empty Responses
 
@@ -346,7 +363,7 @@ kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 - For databases in the **same cluster** as aiHelpDesk: use empty context (`""`) in `infrastructure.json`. The agent will use in-cluster authentication via its service account.
 - For databases in **other clusters**: mount a kubeconfig as a secret (see Section 3.2).
 
-## 9. Uninstall
+## 10. Uninstall
 
 ```bash
 helm uninstall helpdesk --namespace helpdesk-system
