@@ -198,7 +198,16 @@ The Gateway API is useful for:
 
 **Cause:** This is a known issue with the ADK (Agent Development Kit) REPL in containerized environments where TTY handling differs from local execution.
 
-**Workaround:** Use the Gateway REST API instead of the interactive REPL (see Section 3 above). The Gateway API provides full functionality and works reliably in all environments.
+**Workarounds:**
+
+1. **Gateway REPL** (recommended) - Interactive wrapper around the Gateway API:
+   ```bash
+   ./scripts/gateway-repl.sh http://localhost:8080
+   ```
+
+2. **Direct API calls** - Use curl with the Gateway REST API (see Section 3).
+
+3. **Run binaries directly** - Use section 1.2 (non-Docker route) which runs natively on the host.
 
 ### Database Agent Prompts for Password
 

@@ -12,6 +12,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/infra"
 )
 
 // agentNameDB is the expected name for the database agent.
@@ -27,6 +28,7 @@ const agentNameIncident = "incident_agent"
 type Gateway struct {
 	agents  map[string]*discovery.Agent
 	clients map[string]*a2aclient.Client
+	infra   *infra.Config
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -42,6 +44,11 @@ func NewGateway(agents map[string]*discovery.Agent) *Gateway {
 		slog.Info("A2A client ready", "agent", name)
 	}
 	return &Gateway{agents: agents, clients: clients}
+}
+
+// SetInfraConfig sets the infrastructure configuration for inventory queries.
+func (g *Gateway) SetInfraConfig(config *infra.Config) {
+	g.infra = config
 }
 
 // agentAliases maps short names (used in the /query endpoint) to internal
@@ -61,6 +68,8 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/incidents", g.handleListIncidents)
 	mux.HandleFunc("POST /api/v1/db/{tool}", g.handleDBTool)
 	mux.HandleFunc("POST /api/v1/k8s/{tool}", g.handleK8sTool)
+	mux.HandleFunc("GET /api/v1/infrastructure", g.handleListInfrastructure)
+	mux.HandleFunc("GET /api/v1/databases", g.handleListDatabases)
 }
 
 // --- Handlers ---
@@ -148,6 +157,40 @@ func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
 	}
 	prompt := buildToolPrompt(toolName, args)
 	g.proxyToAgent(w, r, agentNameK8s, prompt)
+}
+
+func (g *Gateway) handleListInfrastructure(w http.ResponseWriter, r *http.Request) {
+	if g.infra == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": false,
+			"message":    "No infrastructure configuration loaded. Set HELPDESK_INFRA_CONFIG.",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured":   true,
+		"db_servers":   len(g.infra.DBServers),
+		"k8s_clusters": len(g.infra.K8sClusters),
+		"vms":          len(g.infra.VMs),
+		"databases":    g.infra.ListDatabases(),
+		"summary":      g.infra.Summary(),
+	})
+}
+
+func (g *Gateway) handleListDatabases(w http.ResponseWriter, r *http.Request) {
+	if g.infra == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"databases": []any{},
+			"message":   "No infrastructure configuration loaded.",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"databases": g.infra.ListDatabases(),
+		"count":     len(g.infra.DBServers),
+	})
 }
 
 // --- A2A call ---

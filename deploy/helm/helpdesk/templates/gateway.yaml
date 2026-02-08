@@ -27,7 +27,17 @@ spec:
               value: "0.0.0.0:{{ .Values.gateway.port }}"
             - name: HELPDESK_AGENT_URLS
               value: {{ include "helpdesk.agentURLs" . | quote }}
+            {{- if .Values.infrastructure }}
+            - name: HELPDESK_INFRA_CONFIG
+              value: /etc/helpdesk/infrastructure.json
+            {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+          {{- if .Values.infrastructure }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/helpdesk
+              readOnly: true
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.gateway.port }}
@@ -44,6 +54,15 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+      {{- if .Values.infrastructure }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "helpdesk.fullname" . }}-config
+            items:
+              - key: infrastructure.json
+                path: infrastructure.json
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

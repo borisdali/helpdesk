@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/infra"
 	"helpdesk/internal/logging"
 )
 
@@ -39,6 +40,22 @@ func main() {
 	}
 
 	gw := NewGateway(registry)
+
+	// Load infrastructure config if available.
+	if infraPath := os.Getenv("HELPDESK_INFRA_CONFIG"); infraPath != "" {
+		infraConfig, err := infra.Load(infraPath)
+		if err != nil {
+			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
+		} else {
+			gw.SetInfraConfig(infraConfig)
+			slog.Info("infrastructure config loaded",
+				"path", infraPath,
+				"db_servers", len(infraConfig.DBServers),
+				"k8s_clusters", len(infraConfig.K8sClusters),
+				"vms", len(infraConfig.VMs))
+		}
+	}
+
 	mux := http.NewServeMux()
 	gw.RegisterRoutes(mux)
 

@@ -88,8 +88,8 @@ Example `infrastructure.json` with both:
 
 The Orchestrator needs to know which databases it manages. Configure this via `values.yaml` or `--set-json`.
 While it's possible for the human operator's interactive session to ask adhoc questions about "unknown"
-databases (subject to the rules defined by an administrator in the governance module, it's
-more convenient, secure and structured to define the set of databases ahead of time):
+databases (subject to the rules defined by an administrator in the governance module), it's
+more convenient, secure and structured to define the set of databases ahead of time:
 
 **3.3.1 Option A: Using a values file**
 
@@ -301,7 +301,20 @@ The Gateway API is the recommended interface for:
 
 **Cause:** This is a known issue with the ADK (Agent Development Kit) REPL in containerized environments where TTY handling differs from local execution.
 
-**Workaround:** Use the Gateway REST API instead of the interactive REPL (see Section 7 above). The Gateway API provides full functionality and works reliably in all environments.
+**Workarounds:**
+
+1. **Gateway REPL** (recommended) - Interactive wrapper around the Gateway API:
+   ```bash
+   kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
+   ./scripts/gateway-repl.sh
+   ```
+
+2. **Local orchestrator** - Run orchestrator locally with port-forwarded agents:
+   ```bash
+   ./scripts/k8s-local-repl.sh [namespace]
+   ```
+
+3. **Direct API calls** - Use curl with the Gateway REST API (see Section 7).
 
 ### Agents Not Discovered
 
