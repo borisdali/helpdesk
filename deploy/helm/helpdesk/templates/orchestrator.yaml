@@ -26,6 +26,8 @@ spec:
           env:
             - name: HELPDESK_AGENT_URLS
               value: {{ include "helpdesk.agentURLs" . | quote }}
+            - name: HELPDESK_STREAMING_MODE
+              value: {{ .Values.orchestrator.streamingMode | default "none" | quote }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
             {{- if .Values.infrastructure }}
             - name: HELPDESK_INFRA_CONFIG

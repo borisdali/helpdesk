@@ -1,15 +1,15 @@
 # aiHelpDesk Helper Scripts
 
-These scripts provide workarounds for the ADK REPL bug in containerized environments and make it easier to interact with aiHelpDesk.
+These scripts provide workarounds for [the ADK REPL bug](https://github.com/google/adk-go/issues/536) in containerized environments and make it easier to interact with aiHelpDesk.
 
 ## gateway-repl.sh
 
-An interactive REPL-like interface for the Gateway REST API. This is the **recommended** way to interact with aiHelpDesk when running in Docker or Kubernetes.
+This script is for the human operators as it offers an interactive REPL-like interface for the Gateway REST API. This is the **recommended** way to interact with aiHelpDesk when running in Docker containers on a VM or on Kubernetes.
 
 ### Usage
 
 ```bash
-# Start port-forward to the gateway (if running in K8s)
+# Start port-forward to the Gateway (if running in K8s)
 kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
 
 # Run the interactive REPL
@@ -44,10 +44,15 @@ kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
 ```
 $ ./scripts/gateway-repl.sh
 
-aiHelpDesk Gateway REPL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Type natural language queries (auto-routes to db/k8s/incident agent based on keywords)
-Commands: /databases, /agents, /tools, /db <tool>, /k8s <tool>, /help, /quit
+  Connecting to Gateway at http://localhost:8080...
+  Handling connection for 8080
+  Handling connection for 8080
+  Connected! Available agents: postgres_database_agent,k8s_agent,incident_agent
+
+  aiHelpDesk Gateway REPL
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Type natural language queries (auto-routes to db/k8s/incident agent based on keywords)
+  Commands: /databases, /agents, /tools, /db <tool>, /k8s <tool>, /help, /quit
 
 User -> /databases
 

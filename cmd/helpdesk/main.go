@@ -88,10 +88,11 @@ func main() {
 	// Create remote agent proxies (with health checking)
 	remoteAgents, unavailableAgents := createRemoteAgents(agentConfigs)
 
-	// Build the instruction with dynamic agent section and availability info
-	instruction := prompts.Orchestrator + buildAgentPromptSection(agentConfigs)
+	// Build the instruction: infrastructure first (so model sees the data before workflow),
+	// then agents, then base prompt with workflow and examples.
+	var instruction string
 
-	// Load infrastructure configuration (optional)
+	// Load infrastructure configuration first (optional)
 	infraConfigPath := os.Getenv("HELPDESK_INFRA_CONFIG")
 	if infraConfigPath != "" {
 		infraConfig, err := loadInfraConfig(infraConfigPath)
@@ -99,9 +100,12 @@ func main() {
 			slog.Error("failed to load infrastructure config", "path", infraConfigPath, "err", err)
 			os.Exit(1)
 		}
-		instruction += buildInfraPromptSection(infraConfig)
+		instruction = buildInfraPromptSection(infraConfig)
 		slog.Info("infrastructure config loaded", "db_servers", len(infraConfig.DBServers), "k8s_clusters", len(infraConfig.K8sClusters), "vms", len(infraConfig.VMs))
 	}
+
+	// Add base prompt and agent section
+	instruction += prompts.Orchestrator + buildAgentPromptSection(agentConfigs)
 
 	if len(unavailableAgents) > 0 {
 		instruction += fmt.Sprintf("\n## Currently Unavailable Agents\nThe following agents are currently unavailable: %s\nIf you need these agents, inform the user and suggest they start the agent or try manual troubleshooting.\n",
@@ -149,8 +153,20 @@ func main() {
 		AgentLoader:     agentLoader,
 	}
 
+	// Build launcher arguments
+	launcherArgs := remainingArgs
+
+	// Add streaming mode from env var if set (for container deployments)
+	if streamingMode := os.Getenv("HELPDESK_STREAMING_MODE"); streamingMode != "" {
+		// Prepend "console -streaming_mode=X" if no subcommand specified
+		if len(launcherArgs) == 0 || (launcherArgs[0] != "console" && launcherArgs[0] != "web") {
+			launcherArgs = append([]string{"console", "-streaming_mode=" + streamingMode}, launcherArgs...)
+		}
+		slog.Info("streaming mode configured", "mode", streamingMode)
+	}
+
 	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, remainingArgs); err != nil {
+	if err = l.Execute(ctx, config, launcherArgs); err != nil {
 		slog.Error("failed to launch", "err", err, "usage", l.CommandLineSyntax())
 		os.Exit(1)
 	}

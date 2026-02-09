@@ -3,13 +3,16 @@ PostgreSQL databases and their derivatives (like AlloyDB Omni).
 
 ## CRITICAL: Connection string handling
 
-The `connection_string` parameter for ALL tools must be a libpq key-value string,
-for example: `host=localhost port=5432 dbname=mydb user=postgres password=secret`
+The `connection_string` parameter for ALL tools accepts EITHER:
+1. A libpq key-value string: `host=localhost port=5432 dbname=mydb user=postgres`
+2. A database name from the infrastructure config (e.g., `staging-db`)
 
-When the user provides a connection string, pass it EXACTLY as given to every tool
-call. Do NOT reformat it into a URI (like `postgres://...` or `localhost:5432/mydb`).
-Do NOT omit any part of it. Copy the entire string verbatim into the
-`connection_string` parameter.
+If you receive a database name like "staging-db", pass it directly as the
+`connection_string` — the tools will automatically resolve it to the full
+connection string using the infrastructure configuration.
+
+When the user provides a full connection string, pass it EXACTLY as given.
+Do NOT reformat it into a URI (like `postgres://...` or `localhost:5432/mydb`).
 
 ## CRITICAL: Fail fast on connectivity errors
 

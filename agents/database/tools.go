@@ -11,6 +11,29 @@ import (
 	"google.golang.org/adk/tool"
 )
 
+// resolveConnectionString checks if the input looks like a database name (no "=" sign)
+// and attempts to resolve it using the infrastructure config. If resolution fails or
+// the input is already a connection string, it's returned unchanged.
+func resolveConnectionString(connStrOrName string) string {
+	connStrOrName = strings.TrimSpace(connStrOrName)
+
+	// If it contains "=" it's already a connection string
+	if strings.Contains(connStrOrName, "=") {
+		return connStrOrName
+	}
+
+	// If we have infrastructure config, try to look up the database name
+	if infraConfig != nil {
+		if db, ok := infraConfig.DBServers[connStrOrName]; ok {
+			slog.Info("resolved database name to connection string", "name", connStrOrName)
+			return db.ConnectionString
+		}
+	}
+
+	// Return as-is (might be a simple hostname or invalid input)
+	return connStrOrName
+}
+
 // CommandRunner abstracts command execution for testing.
 type CommandRunner interface {
 	Run(ctx context.Context, name string, args []string, env []string) (string, error)
@@ -77,7 +100,12 @@ func diagnosePsqlError(output string) string {
 
 // runPsql executes a psql command and returns the output.
 // The provided ctx controls cancellation — if it expires, psql is killed.
+// If connStr looks like a database name (no "=" sign), it will be resolved
+// using the infrastructure config.
 func runPsql(ctx context.Context, connStr string, query string) (string, error) {
+	// Resolve database name to connection string if needed
+	connStr = resolveConnectionString(connStr)
+
 	args := []string{"-c", query, "-x"}
 	if connStr != "" {
 		args = append([]string{connStr}, args...)

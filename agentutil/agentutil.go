@@ -34,6 +34,7 @@ type Config struct {
 	ModelName   string
 	APIKey      string
 	ListenAddr  string
+	ExternalURL string // Optional: externally reachable URL for the agent card
 }
 
 // MustLoadConfig reads env vars. defaultAddr is used when HELPDESK_AGENT_ADDR is unset.
@@ -47,6 +48,7 @@ func MustLoadConfig(defaultAddr string) Config {
 		ModelName:   os.Getenv("HELPDESK_MODEL_NAME"),
 		APIKey:      os.Getenv("HELPDESK_API_KEY"),
 		ListenAddr:  os.Getenv("HELPDESK_AGENT_ADDR"),
+		ExternalURL: os.Getenv("HELPDESK_AGENT_URL"),
 	}
 
 	if cfg.ModelVendor == "" || cfg.ModelName == "" || cfg.APIKey == "" {
@@ -131,13 +133,24 @@ func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
 // Serve starts an A2A server for the given agent on cfg.ListenAddr.
 // It sets up the agent card, JSON-RPC handler, in-memory session service, and blocks.
 // An optional CardOptions can be passed to enrich the agent card with additional metadata.
+// If cfg.ExternalURL is set, it will be used in the agent card instead of the listener address.
 func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) error {
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
 	}
 
-	baseURL := &url.URL{Scheme: "http", Host: listener.Addr().String()}
+	// Use ExternalURL if set, otherwise fall back to listener address.
+	// ExternalURL is required in Kubernetes where pods communicate via service names.
+	var baseURL *url.URL
+	if cfg.ExternalURL != "" {
+		baseURL, err = url.Parse(cfg.ExternalURL)
+		if err != nil {
+			return fmt.Errorf("invalid HELPDESK_AGENT_URL: %v", err)
+		}
+	} else {
+		baseURL = &url.URL{Scheme: "http", Host: listener.Addr().String()}
+	}
 
 	agentPath := "/invoke"
 	agentCard := &a2a.AgentCard{

@@ -28,6 +28,8 @@ spec:
           env:
             - name: HELPDESK_AGENT_ADDR
               value: "0.0.0.0:{{ .Values.agents.k8s.port }}"
+            - name: HELPDESK_AGENT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-k8s-agent:{{ .Values.agents.k8s.port }}"
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
           ports:
             - name: a2a

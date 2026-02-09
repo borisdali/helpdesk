@@ -7,6 +7,7 @@ services:
     command: ["/usr/local/bin/database-agent"]
     environment:
       HELPDESK_AGENT_ADDR: "0.0.0.0:1100"
+      HELPDESK_AGENT_URL: "http://database-agent:1100"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
@@ -22,6 +23,7 @@ services:
     command: ["/usr/local/bin/k8s-agent"]
     environment:
       HELPDESK_AGENT_ADDR: "0.0.0.0:1102"
+      HELPDESK_AGENT_URL: "http://k8s-agent:1102"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
@@ -41,6 +43,7 @@ services:
     command: ["/usr/local/bin/incident-agent"]
     environment:
       HELPDESK_AGENT_ADDR: "0.0.0.0:1104"
+      HELPDESK_AGENT_URL: "http://incident-agent:1104"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
@@ -86,6 +89,9 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      # Streaming mode: "sse" (streaming) or "none" (disabled, default)
+      # Set to "none" to work around ADK REPL bug in containers
+      HELPDESK_STREAMING_MODE: ${HELPDESK_STREAMING_MODE:-none}
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     stdin_open: true

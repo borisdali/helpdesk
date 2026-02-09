@@ -96,12 +96,22 @@ func buildInfraPromptSection(config *InfraConfig) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("\n## Managed Databases\n\n")
-	sb.WriteString("When asked about databases you manage, refer ONLY to this list:\n\n")
+	sb.WriteString("# STOP — READ THIS FIRST\n\n")
+	sb.WriteString("You manage these databases: ")
+	dbNames := make([]string, 0, len(config.DBServers))
+	for id := range config.DBServers {
+		dbNames = append(dbNames, id)
+	}
+	sb.WriteString(strings.Join(dbNames, ", "))
+	sb.WriteString("\n\nIf the user asks about ANY of these databases, you ALREADY HAVE their connection details.\n")
+	sb.WriteString("DO NOT ask for connection strings or passwords. Look up the database below and delegate.\n\n")
+	sb.WriteString("## Managed Databases\n\n")
 
 	for id, db := range config.DBServers {
 		sb.WriteString(fmt.Sprintf("**%s** — %s\n", id, db.Name))
 		sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", db.ConnectionString))
+		// Add a ready-to-use delegation example for this specific database
+		sb.WriteString(fmt.Sprintf("- To check this database, delegate: \"Check if the database is reachable using connection_string: %s\"\n", db.ConnectionString))
 
 		if db.K8sCluster != "" {
 			// Expand the K8s cluster reference inline.
@@ -112,6 +122,7 @@ func buildInfraPromptSection(config *InfraConfig) string {
 				}
 				sb.WriteString(fmt.Sprintf("- Hosted on Kubernetes: cluster=%s, context=`%s`, namespace=`%s`\n",
 					k8s.Name, k8s.Context, ns))
+				sb.WriteString(fmt.Sprintf("- To check K8s pods, delegate: \"Check pods in namespace '%s' using context '%s'\"\n", ns, k8s.Context))
 			} else {
 				sb.WriteString(fmt.Sprintf("- Hosted on Kubernetes: cluster=%s (details not configured)\n", db.K8sCluster))
 			}
@@ -128,13 +139,14 @@ func buildInfraPromptSection(config *InfraConfig) string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("### Instructions\n\n")
-	sb.WriteString("- IMPORTANT: When delegating to the database agent, ALWAYS include the connection_string in your request.\n")
-	sb.WriteString("  Example: \"Check if the database is up using connection_string: host=... port=5432 dbname=... user=...\"\n")
-	sb.WriteString("- For K8s-hosted databases, use the context and namespace with the K8s agent for pod/cluster issues.\n")
-	sb.WriteString("  Example: \"Check pods in namespace 'db' with context ''\"\n")
-	sb.WriteString("- For VM-hosted databases, only database-level diagnostics are available (no K8s agent).\n")
-	sb.WriteString("- When a user asks about a database by name (e.g., 'is staging-db up?'), look up the connection_string above and include it in your delegation.\n")
+	sb.WriteString("### CRITICAL: How to Delegate\n\n")
+	sb.WriteString("You MUST include the connection_string when delegating to postgres_database_agent.\n")
+	sb.WriteString("Copy the EXACT connection_string from the database entry above into your delegation.\n\n")
+	sb.WriteString("**Template for database checks:**\n")
+	sb.WriteString("\"Check if the database is reachable using connection_string: <paste the connection_string here>\"\n\n")
+	sb.WriteString("**Template for K8s checks:**\n")
+	sb.WriteString("\"Check pods in namespace '<namespace>' using context '<context>'\"\n\n")
+	sb.WriteString("For VM-hosted databases, only database-level diagnostics are available (no K8s agent).\n")
 
 	return sb.String()
 }

@@ -45,6 +45,10 @@ gateway:
 orchestrator:
   # Deploy an interactive pod that users can exec into.
   enabled: true
+  # Streaming mode for LLM responses: "sse" (streaming) or "none" (disabled).
+  # Default "none" works around ADK REPL bug in containers.
+  # Set to "sse" to enable streaming if the bug is fixed.
+  streamingMode: "none"
 
 # Infrastructure inventory — database servers, K8s clusters, and VMs the
 # orchestrator knows about. Passed to the LLM so it can pick the right

@@ -25,6 +25,8 @@ spec:
           env:
             - name: HELPDESK_AGENT_ADDR
               value: "0.0.0.0:{{ .Values.agents.incident.port }}"
+            - name: HELPDESK_AGENT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-incident-agent:{{ .Values.agents.incident.port }}"
             - name: HELPDESK_INCIDENT_DIR
               value: /data/incidents
             {{- include "helpdesk.modelEnv" . | nindent 12 }}

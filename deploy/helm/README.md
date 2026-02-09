@@ -302,7 +302,7 @@ The deploy bundle includes helper scripts in the `scripts/` directory:
 | `gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
 | `k8s-local-repl.sh` | Run orchestrator locally with K8s agents port-forwarded |
 
-See `scripts/README.md` for detailed usage.
+See [scripts/README.md](../../scripts/README.md) for detailed usage.
 
 **Quick start with gateway-repl.sh:**
 ```bash

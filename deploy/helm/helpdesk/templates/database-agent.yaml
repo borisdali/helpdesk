@@ -25,18 +25,30 @@ spec:
           env:
             - name: HELPDESK_AGENT_ADDR
               value: "0.0.0.0:{{ .Values.agents.database.port }}"
+            - name: HELPDESK_AGENT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-database-agent:{{ .Values.agents.database.port }}"
+            {{- if .Values.infrastructure }}
+            - name: HELPDESK_INFRA_CONFIG
+              value: /etc/helpdesk/infrastructure.json
+            {{- end }}
             {{- if .Values.agents.database.pgpassSecret }}
             - name: HOME
               value: /home/helpdesk
             {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
-          {{- if .Values.agents.database.pgpassSecret }}
           volumeMounts:
+            {{- if .Values.infrastructure }}
+            - name: infra-config
+              mountPath: /etc/helpdesk/infrastructure.json
+              subPath: infrastructure.json
+              readOnly: true
+            {{- end }}
+            {{- if .Values.agents.database.pgpassSecret }}
             - name: pgpass
               mountPath: /home/helpdesk/.pgpass
               subPath: .pgpass
               readOnly: true
-          {{- end }}
+            {{- end }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.database.port }}
@@ -53,13 +65,18 @@ spec:
               port: a2a
             initialDelaySeconds: 3
             periodSeconds: 10
-      {{- if .Values.agents.database.pgpassSecret }}
       volumes:
+        {{- if .Values.infrastructure }}
+        - name: infra-config
+          configMap:
+            name: {{ include "helpdesk.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.agents.database.pgpassSecret }}
         - name: pgpass
           secret:
             secretName: {{ .Values.agents.database.pgpassSecret }}
             defaultMode: 0600
-      {{- end }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
