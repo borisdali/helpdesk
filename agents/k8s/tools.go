@@ -11,6 +11,49 @@ import (
 	"google.golang.org/adk/tool"
 )
 
+// resolveNamespace checks if the input looks like a database name from the
+// infrastructure config and returns the associated K8s namespace. If not found
+// or not a database name, returns the input unchanged.
+func resolveNamespace(namespaceOrDBName string) string {
+	namespaceOrDBName = strings.TrimSpace(namespaceOrDBName)
+	if namespaceOrDBName == "" {
+		return namespaceOrDBName
+	}
+
+	// Try to look up as a database name in the infrastructure config
+	if infraConfig != nil {
+		if db, ok := infraConfig.DBServers[namespaceOrDBName]; ok {
+			if db.K8sNamespace != "" {
+				slog.Info("resolved database name to namespace", "name", namespaceOrDBName, "namespace", db.K8sNamespace)
+				return db.K8sNamespace
+			}
+		}
+	}
+
+	return namespaceOrDBName
+}
+
+// resolveContext checks if the input looks like a database name from the
+// infrastructure config and returns the associated K8s context. If not found
+// or not a database name, returns the input unchanged.
+func resolveContext(contextOrDBName string) string {
+	contextOrDBName = strings.TrimSpace(contextOrDBName)
+
+	// Try to look up as a database name in the infrastructure config
+	if infraConfig != nil {
+		if db, ok := infraConfig.DBServers[contextOrDBName]; ok {
+			if db.K8sCluster != "" {
+				if cluster, ok := infraConfig.K8sClusters[db.K8sCluster]; ok {
+					slog.Info("resolved database name to context", "name", contextOrDBName, "context", cluster.Context)
+					return cluster.Context
+				}
+			}
+		}
+	}
+
+	return contextOrDBName
+}
+
 // diagnoseKubectlError examines kubectl output for common failure patterns and returns
 // a clear, actionable error message alongside the raw output.
 func diagnoseKubectlError(output string) string {
@@ -112,7 +155,10 @@ type GetPodsArgs struct {
 }
 
 func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
-	return fetchPods(ctx, args.Context, args.Namespace, args.Labels)
+	// Resolve database name to namespace/context if applicable
+	namespace := resolveNamespace(args.Namespace)
+	context := resolveContext(args.Context)
+	return fetchPods(ctx, context, namespace, args.Labels)
 }
 
 // GetServiceArgs defines arguments for the get_service tool.
@@ -124,7 +170,9 @@ type GetServiceArgs struct {
 }
 
 func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
-	return fetchServices(ctx, args.Context, args.Namespace, args.ServiceName, args.ServiceType)
+	namespace := resolveNamespace(args.Namespace)
+	context := resolveContext(args.Context)
+	return fetchServices(ctx, context, namespace, args.ServiceName, args.ServiceType)
 }
 
 // DescribeServiceArgs defines arguments for the describe_service tool.
@@ -135,13 +183,15 @@ type DescribeServiceArgs struct {
 }
 
 func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
+	namespace := resolveNamespace(args.Namespace)
+	kubeContext := resolveContext(args.Context)
 	cmdArgs := []string{"describe", "svc", args.ServiceName}
 
-	if args.Namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", args.Namespace)
+	if namespace != "" {
+		cmdArgs = append(cmdArgs, "-n", namespace)
 	}
 
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, kubeContext, cmdArgs...)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("error describing service: %v", err)
 	}
@@ -156,7 +206,9 @@ type GetEndpointsArgs struct {
 }
 
 func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
-	return fetchEndpoints(ctx, args.Context, args.Namespace, args.EndpointName)
+	namespace := resolveNamespace(args.Namespace)
+	kubeContext := resolveContext(args.Context)
+	return fetchEndpoints(ctx, kubeContext, namespace, args.EndpointName)
 }
 
 // GetEventsArgs defines arguments for the get_events tool.
@@ -168,7 +220,9 @@ type GetEventsArgs struct {
 }
 
 func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
-	return fetchEvents(ctx, args.Context, args.Namespace, args.ResourceName, args.EventType)
+	namespace := resolveNamespace(args.Namespace)
+	kubeContext := resolveContext(args.Context)
+	return fetchEvents(ctx, kubeContext, namespace, args.ResourceName, args.EventType)
 }
 
 // GetPodLogsArgs defines arguments for the get_pod_logs tool.
@@ -182,10 +236,12 @@ type GetPodLogsArgs struct {
 }
 
 func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
+	namespace := resolveNamespace(args.Namespace)
+	kubeContext := resolveContext(args.Context)
 	cmdArgs := []string{"logs", args.PodName}
 
-	if args.Namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", args.Namespace)
+	if namespace != "" {
+		cmdArgs = append(cmdArgs, "-n", namespace)
 	}
 
 	if args.Container != "" {
@@ -202,7 +258,7 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 		cmdArgs = append(cmdArgs, "--previous")
 	}
 
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, kubeContext, cmdArgs...)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", err)
 	}
@@ -220,13 +276,15 @@ type DescribePodArgs struct {
 }
 
 func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
+	namespace := resolveNamespace(args.Namespace)
+	kubeContext := resolveContext(args.Context)
 	cmdArgs := []string{"describe", "pod", args.PodName}
 
-	if args.Namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", args.Namespace)
+	if namespace != "" {
+		cmdArgs = append(cmdArgs, "-n", namespace)
 	}
 
-	output, err := runKubectl(ctx, args.Context, cmdArgs...)
+	output, err := runKubectl(ctx, kubeContext, cmdArgs...)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("error describing pod: %v", err)
 	}
@@ -240,5 +298,6 @@ type GetNodesArgs struct {
 }
 
 func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
-	return fetchNodes(ctx, args.Context, args.ShowLabels)
+	kubeContext := resolveContext(args.Context)
+	return fetchNodes(ctx, kubeContext, args.ShowLabels)
 }

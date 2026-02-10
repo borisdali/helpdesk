@@ -14,12 +14,28 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/infra"
 	"helpdesk/prompts"
 )
+
+// infraConfig holds the loaded infrastructure configuration (if available).
+// Used to resolve database names to K8s namespace/context.
+var infraConfig *infra.Config
 
 func main() {
 	cfg := agentutil.MustLoadConfig("localhost:1102")
 	ctx := context.Background()
+
+	// Load infrastructure config if available (enables database name resolution)
+	if infraPath := os.Getenv("HELPDESK_INFRA_CONFIG"); infraPath != "" {
+		var err error
+		infraConfig, err = infra.Load(infraPath)
+		if err != nil {
+			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
+		} else {
+			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers))
+		}
+	}
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {

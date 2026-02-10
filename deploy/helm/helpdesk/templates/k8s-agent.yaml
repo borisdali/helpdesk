@@ -30,7 +30,18 @@ spec:
               value: "0.0.0.0:{{ .Values.agents.k8s.port }}"
             - name: HELPDESK_AGENT_URL
               value: "http://{{ include "helpdesk.fullname" . }}-k8s-agent:{{ .Values.agents.k8s.port }}"
+            {{- if .Values.infrastructure }}
+            - name: HELPDESK_INFRA_CONFIG
+              value: /etc/helpdesk/infrastructure.json
+            {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+          {{- if .Values.infrastructure }}
+          volumeMounts:
+            - name: infra-config
+              mountPath: /etc/helpdesk/infrastructure.json
+              subPath: infrastructure.json
+              readOnly: true
+          {{- end }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.k8s.port }}
@@ -47,6 +58,12 @@ spec:
               port: a2a
             initialDelaySeconds: 3
             periodSeconds: 10
+      {{- if .Values.infrastructure }}
+      volumes:
+        - name: infra-config
+          configMap:
+            name: {{ include "helpdesk.fullname" . }}-config
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
