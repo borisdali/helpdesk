@@ -8,9 +8,12 @@ services:
     environment:
       HELPDESK_AGENT_ADDR: "0.0.0.0:1100"
       HELPDESK_AGENT_URL: "http://database-agent:1100"
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+    volumes:
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     ports:
       - "1100:1100"
     restart: unless-stopped
@@ -24,11 +27,13 @@ services:
     environment:
       HELPDESK_AGENT_ADDR: "0.0.0.0:1102"
       HELPDESK_AGENT_URL: "http://k8s-agent:1102"
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
     volumes:
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     ports:
       - "1102:1102"
     restart: unless-stopped
