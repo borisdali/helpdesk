@@ -1,6 +1,6 @@
 # aiHelpDesk: AI DB SRE in a box
 
-A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and its derivatives databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
+A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and its derivative databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
 
 * aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
 * aiHelpDesk is designed for human operators as well as for the upstream agents.

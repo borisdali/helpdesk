@@ -43,19 +43,29 @@ To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform a
 
 The last two commands are optional and intended for the human operators as it starts an interactive aiHelpDesk session.
 
-N.B: Optional: To avoid being prompted by the aiHelpDesk Orchtestator for password every time its Database Agent needs to access PostgreSQL, just create ~/.pgpass on the host running the agent (following the standard PostgreSQL approach and works automatically with psql):
+**Docker Networking Note:** When running in Docker containers, `localhost` in a connection string refers to the container itself, not the host machine. To connect to a database on the host:
+- **Docker Desktop (Mac/Windows):** Use `host.docker.internal` as the hostname
+- **Linux:** Use `172.17.0.1` (Docker bridge gateway) or the host's actual IP
 
-```
-  # Format: hostname:port:database:username:password
-  orders-db.prod.example.com:5432:orders:app_user:secretpass
-  users-db.prod.example.com:5432:users:app_user:secretpass
-  *:5432:*:postgres:localdevpass
+**Password Authentication:** To avoid password prompts, create a `.pgpass` file and mount it into the database-agent container. The hostname must **exactly match** the hostname in your connection string:
+
+```bash
+# Create .pgpass in the docker-compose directory
+cat > .pgpass << 'EOF'
+# Format: hostname:port:database:username:password
+host.docker.internal:5432:postgres:postgres:YourPassword
+orders-db.prod.example.com:5432:orders:app_user:secretpass
+EOF
+chmod 600 .pgpass
 ```
 
-  Then secure it:
-
-```
-  chmod 600 ~/.pgpass
+Add to `docker-compose.yaml` under the database-agent service:
+```yaml
+database-agent:
+  environment:
+    HOME: /home/helpdesk
+  volumes:
+    - ./.pgpass:/home/helpdesk/.pgpass:ro
 ```
 
   ### 1.2 The non-Docker route to run the pre-built binaries on a host
@@ -213,7 +223,35 @@ The Gateway API is useful for:
 
 **Symptom:** The database agent asks for a password every time it connects to a database.
 
-**Solution:** Create a `~/.pgpass` file as described in Section 1.1 above.
+**Solution:** Create a `.pgpass` file with entries matching your connection strings.
+
+**Important for Docker deployments:** The hostname in `.pgpass` must **exactly match** the hostname in your `infrastructure.json` connection strings:
+
+```
+# If infrastructure.json uses host.docker.internal (to reach host from container):
+host.docker.internal:5432:postgres:postgres:YourPassword
+
+# If infrastructure.json uses localhost (for native binary deployment):
+localhost:5432:postgres:postgres:YourPassword
+
+# Wildcard for any host (less secure, useful for testing):
+*:5432:*:postgres:YourPassword
+```
+
+For Docker Compose, mount the `.pgpass` file into the database-agent container by adding to `docker-compose.yaml`:
+
+```yaml
+database-agent:
+  environment:
+    HOME: /home/helpdesk
+  volumes:
+    - ./.pgpass:/home/helpdesk/.pgpass:ro
+```
+
+Then secure the local file:
+```bash
+chmod 600 .pgpass
+```
 
 ### Agents Not Discovered
 

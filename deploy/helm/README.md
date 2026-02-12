@@ -139,7 +139,7 @@ Then install:
 cd helpdesk-v0.1.0-deploy
 helm install helpdesk ./helm/helpdesk \
     --namespace helpdesk-system \
-    -f ./helm/helpdesk/values.yaml
+    -f ./helm/helpdesk/my-values.yaml
 ```
 
 **3.3.2 Option B: Using --set-json (for simple configs)**
