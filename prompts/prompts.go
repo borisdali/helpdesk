@@ -14,3 +14,6 @@ var K8s string
 
 //go:embed incident.txt
 var Incident string
+
+//go:embed research.txt
+var Research string

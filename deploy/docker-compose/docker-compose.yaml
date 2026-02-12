@@ -62,6 +62,27 @@ services:
     depends_on:
       - database-agent
 
+  # Research agent for Gemini models - provides web search via GoogleSearch.
+  # GoogleSearch cannot be combined with function declarations, so this agent
+  # handles web searches separately. Harmless to run with Anthropic models.
+  research-agent:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
+    image: helpdesk:latest
+    command: ["/usr/local/bin/research-agent"]
+    environment:
+      HELPDESK_AGENT_ADDR: "0.0.0.0:1106"
+      HELPDESK_AGENT_URL: "http://research-agent:1106"
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+    ports:
+      - "1106:1106"
+    restart: unless-stopped
+    depends_on:
+      - database-agent
+
   gateway:
     build:
       context: ../../..
@@ -70,7 +91,7 @@ services:
     command: ["/usr/local/bin/gateway"]
     environment:
       HELPDESK_GATEWAY_ADDR: "0.0.0.0:8080"
-      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104"
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
@@ -81,6 +102,7 @@ services:
       - database-agent
       - k8s-agent
       - incident-agent
+      - research-agent
 
   orchestrator:
     build:
@@ -89,7 +111,7 @@ services:
     image: helpdesk:latest
     command: ["/usr/local/bin/helpdesk"]
     environment:
-      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104"
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
@@ -107,6 +129,7 @@ services:
       - database-agent
       - k8s-agent
       - incident-agent
+      - research-agent
 
 volumes:
   incidents:

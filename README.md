@@ -102,9 +102,24 @@ See [a sample](cmd/srebot/README.md) of a O11y watcher program or an SRE bot tha
 aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").
 
 ## LLM
-aiHelpDesk relies on Google ADK (Agent Developent Kit) for Go, which was built around Gemini models. Since aiHelpDesk customers so far prefer Anthropic models, we extended aiHelpDesk to work with `claude-haiku-4-5-20251001`, `claude-sonnet-4-5-20250929`, `claude-opus-4-5-20251101`. 
+aiHelpDesk relies on Google ADK (Agent Development Kit) for Go, which was built around Gemini models. We've extended aiHelpDesk to work with both Anthropic and Gemini models.
 
-Beyond Anthropic, support for other models can be pretty easily added as well (ADK's LLM interface is simple and can be implemented for other providers, just as we did for Anthropic). 
+**Supported models:**
+
+| Vendor | Model Name | Notes |
+|--------|------------|-------|
+| Anthropic | `claude-haiku-4-5-20251001` | Fast, cost-effective |
+| Anthropic | `claude-sonnet-4-20250514` | Balanced performance |
+| Anthropic | `claude-opus-4-5-20251101` | Most capable |
+| Gemini | `gemini-2.5-flash` | Fast, recommended for most use cases |
+| Gemini | `gemini-2.5-flash-lite` | Fastest, lower cost |
+| Gemini | `gemini-2.5-pro` | Most capable 2.5 model |
+| Gemini | `gemini-3-flash-preview` | Latest 3.0 series, fast |
+| Gemini | `gemini-3-pro-preview` | Latest 3.0 series, most capable |
+
+**Note:** Gemini 1.x and 2.0 models are retired and will return errors.
+
+Beyond these, support for other models can be easily added (ADK's LLM interface is simple and can be implemented for other providers, just as we did for Anthropic). 
 
 Please note that aiHelpDesk offers the flexibility for individual expert agents (e.g. a Database agent, a K8s agent, an Incident Management agent) to run with different LLMs if needed or if an agent's provider recommends or tests their agent with a particular LLM. The sample deployment scripts assumes the same LLM for all agents, but that can be easily adjusted with setting env variables before starting each agent.
 

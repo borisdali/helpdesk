@@ -37,10 +37,16 @@ by aiHelpDesk via a ConfigMap from the Helm's `my-values.yaml`).
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `model.vendor` | LLM provider: `anthropic` or `google` | `anthropic` |
-| `model.name` | Model name (e.g. `gemini-2.5-flash`) | `claude-haiku-4-5-20251001` |
+| `model.vendor` | LLM provider: `anthropic` or `gemini` | `anthropic` |
+| `model.name` | Model name (see below) | `claude-haiku-4-5-20251001` |
 | `model.apiKeySecret` | Name of K8s Secret containing API key | `helpdesk-api-key` |
 | `model.apiKeyKey` | Key within the Secret | `api-key` |
+
+**Supported model names:**
+- **Anthropic:** `claude-haiku-4-5-20251001`, `claude-sonnet-4-20250514`, `claude-opus-4-5-20251101`
+- **Gemini:** `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`, `gemini-3-flash-preview`, `gemini-3-pro-preview`
+
+**Note:** Gemini 1.x and 2.0 models are retired and will return errors.
 
 ### 3.2 K8s Agent Cluster Access
 

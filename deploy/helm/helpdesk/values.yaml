@@ -5,7 +5,13 @@ image:
 
 # LLM model configuration. All agents and the orchestrator use these.
 model:
-  vendor: anthropic        # "google" or "anthropic"
+  # Supported vendors: anthropic, gemini (or google)
+  vendor: anthropic
+  # Model names by vendor:
+  #   Anthropic: claude-haiku-4-5-20251001, claude-sonnet-4-20250514, claude-opus-4-5-20251101
+  #   Gemini:    gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro,
+  #              gemini-3-flash-preview, gemini-3-pro-preview
+  # Note: Gemini 1.x and 2.0 models are retired and will return errors.
   name: claude-haiku-4-5-20251001
   # Name and key of a pre-existing Kubernetes Secret containing the API key.
   apiKeySecret: helpdesk-api-key

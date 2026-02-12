@@ -16,8 +16,6 @@ import (
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/geminitool"
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/logging"
@@ -113,10 +111,9 @@ func main() {
 	}
 
 	// Create tools list
-	var tools []tool.Tool
-	if strings.ToLower(cfg.ModelVendor) == "google" || strings.ToLower(cfg.ModelVendor) == "gemini" {
-		tools = append(tools, geminitool.GoogleSearch{})
-	}
+	// Note: GoogleSearch is NOT added here because it cannot be combined with
+	// function declarations (sub-agents) on Gemini 2.5+ models. The orchestrator
+	// relies on sub-agent delegation, so we prioritize that over web search.
 
 	// Create the root agent with sub-agents
 	rootAgent, err := llmagent.New(llmagent.Config{
@@ -124,7 +121,6 @@ func main() {
 		Model:               llmModel,
 		Description:         "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
 		Instruction:         instruction,
-		Tools:               tools,
 		SubAgents:           remoteAgents,
 		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportFunc},
 	})

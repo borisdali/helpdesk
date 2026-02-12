@@ -39,6 +39,14 @@ if [[ ${#missing[@]} -gt 0 ]]; then
 fi
 
 AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
+
+# Add research agent for Gemini models (GoogleSearch can't be combined with
+# function declarations, so we need a dedicated agent for web search)
+VENDOR_LC=$(echo "${HELPDESK_MODEL_VENDOR}" | tr '[:upper:]' '[:lower:]')
+if [[ "$VENDOR_LC" == "gemini" || "$VENDOR_LC" == "google" ]]; then
+    AGENT_URLS="${AGENT_URLS},http://localhost:1106"
+fi
+
 PIDS=()
 LOGDIR="/tmp"
 
@@ -67,7 +75,7 @@ start_bg() {
 # --stop: kill any running helpdesk processes
 # ---------------------------------------------------------------------------
 if [[ "${1:-}" == "--stop" ]]; then
-    for name in database-agent k8s-agent incident-agent gateway; do
+    for name in database-agent k8s-agent incident-agent research-agent gateway; do
         pkill -f "helpdesk.*${name}\|${SCRIPT_DIR}/${name}" 2>/dev/null || true
     done
     echo "Sent stop signal to helpdesk services."
@@ -84,6 +92,11 @@ echo "Starting helpdesk services..."
 start_bg database-agent "$SCRIPT_DIR/database-agent"
 start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
 start_bg incident-agent "$SCRIPT_DIR/incident-agent"
+
+# Start research agent for Gemini models
+if [[ "$VENDOR_LC" == "gemini" || "$VENDOR_LC" == "google" ]]; then
+    start_bg research-agent "$SCRIPT_DIR/research-agent"
+fi
 
 # Give agents a moment to bind their ports.
 sleep 2

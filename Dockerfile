@@ -23,10 +23,11 @@ RUN go mod edit -replace google.golang.org/adk=/src/adk-go
 RUN go mod download
 RUN CGO_ENABLED=0 go build -o /out/database-agent  ./agents/database/
 RUN CGO_ENABLED=0 go build -o /out/k8s-agent       ./agents/k8s/
-RUN CGO_ENABLED=0 go build -o /out/incident-agent   ./agents/incident/
-RUN CGO_ENABLED=0 go build -o /out/gateway          ./cmd/gateway/
-RUN CGO_ENABLED=0 go build -o /out/helpdesk         ./cmd/helpdesk/
-RUN CGO_ENABLED=0 go build -o /out/srebot           ./cmd/srebot/
+RUN CGO_ENABLED=0 go build -o /out/incident-agent  ./agents/incident/
+RUN CGO_ENABLED=0 go build -o /out/research-agent  ./agents/research/
+RUN CGO_ENABLED=0 go build -o /out/gateway         ./cmd/gateway/
+RUN CGO_ENABLED=0 go build -o /out/helpdesk        ./cmd/helpdesk/
+RUN CGO_ENABLED=0 go build -o /out/srebot          ./cmd/srebot/
 
 # Stage 2: Runtime image with psql and kubectl.
 FROM debian:bookworm-slim
@@ -57,6 +58,7 @@ RUN ARCH=$(dpkg --print-architecture) \
 COPY --from=builder /out/database-agent  /usr/local/bin/database-agent
 COPY --from=builder /out/k8s-agent       /usr/local/bin/k8s-agent
 COPY --from=builder /out/incident-agent  /usr/local/bin/incident-agent
+COPY --from=builder /out/research-agent  /usr/local/bin/research-agent
 COPY --from=builder /out/gateway         /usr/local/bin/gateway
 COPY --from=builder /out/helpdesk        /usr/local/bin/helpdesk
 COPY --from=builder /out/srebot          /usr/local/bin/srebot
