@@ -14,6 +14,7 @@
 //   - E2E_GATEWAY_URL: Gateway REST API URL (default: http://localhost:8080)
 //   - E2E_DB_AGENT_URL: Database agent A2A URL (default: http://localhost:1100)
 //   - E2E_K8S_AGENT_URL: Kubernetes agent A2A URL (default: http://localhost:1102)
+//   - E2E_RESEARCH_AGENT_URL: Research agent A2A URL (default: http://localhost:1106)
 //   - E2E_ORCHESTRATOR_URL: Orchestrator A2A URL (optional)
 //   - E2E_CONN_STR: PostgreSQL connection string
 //   - E2E_KUBE_CONTEXT: Kubernetes context (optional)
@@ -35,24 +36,26 @@ import (
 
 // Config holds E2E test configuration from environment.
 type Config struct {
-	GatewayURL      string
-	DBAgentURL      string
-	K8sAgentURL     string
-	OrchestratorURL string
-	ConnStr         string
-	KubeContext     string
-	Categories      []string
+	GatewayURL       string
+	DBAgentURL       string
+	K8sAgentURL      string
+	ResearchAgentURL string
+	OrchestratorURL  string
+	ConnStr          string
+	KubeContext      string
+	Categories       []string
 }
 
 // LoadConfig reads configuration from environment variables.
 func LoadConfig() *Config {
 	cfg := &Config{
-		GatewayURL:      getEnvDefault("E2E_GATEWAY_URL", "http://localhost:8080"),
-		DBAgentURL:      getEnvDefault("E2E_DB_AGENT_URL", "http://localhost:1100"),
-		K8sAgentURL:     getEnvDefault("E2E_K8S_AGENT_URL", "http://localhost:1102"),
-		OrchestratorURL: os.Getenv("E2E_ORCHESTRATOR_URL"),
-		ConnStr:         getEnvDefault("E2E_CONN_STR", "host=localhost port=15432 dbname=testdb user=postgres password=testpass"),
-		KubeContext:     os.Getenv("E2E_KUBE_CONTEXT"),
+		GatewayURL:       getEnvDefault("E2E_GATEWAY_URL", "http://localhost:8080"),
+		DBAgentURL:       getEnvDefault("E2E_DB_AGENT_URL", "http://localhost:1100"),
+		K8sAgentURL:      getEnvDefault("E2E_K8S_AGENT_URL", "http://localhost:1102"),
+		ResearchAgentURL: getEnvDefault("E2E_RESEARCH_AGENT_URL", "http://localhost:1106"),
+		OrchestratorURL:  os.Getenv("E2E_ORCHESTRATOR_URL"),
+		ConnStr:          getEnvDefault("E2E_CONN_STR", "host=localhost port=15432 dbname=testdb user=postgres password=testpass"),
+		KubeContext:      os.Getenv("E2E_KUBE_CONTEXT"),
 	}
 
 	if cats := os.Getenv("E2E_CATEGORIES"); cats != "" {

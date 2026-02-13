@@ -303,6 +303,17 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   - Verify POST /invoke with malformed JSON returns JSON-RPC error
   - Verify discovery → invoke round-trip works for each agent
 
+  3e. Research agent integration tests (Gemini only):
+
+```
+  testing/integration/research_agent_test.go
+```
+
+  - Verify agent card is served with correct name and description
+  - Test basic queries work via A2A protocol
+  - Test web search capability (GoogleSearch tool)
+  - Note: These tests require a Gemini API key since the research agent uses GoogleSearch which only works with Gemini models
+
   Makefile target:
 
 ```
@@ -405,6 +416,19 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk 
   4. Optionally creates an incident bundle
 
   This is the most realistic test — it validates the entire system including LLM reasoning quality.
+
+  5d. Research agent E2E tests (Gemini only):
+
+```
+  testing/e2e/research_agent_test.go
+```
+
+  - Test gateway discovery of research agent
+  - Test direct queries to research agent via A2A
+  - Test web search capability for real-time information
+  - Test orchestrator delegation to research agent for version/release questions
+  - Test gateway routing to research agent
+  - Note: These tests require Gemini models since GoogleSearch is only available on Gemini
 
   ### Build tags and make targets:
 
