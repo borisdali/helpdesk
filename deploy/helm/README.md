@@ -25,6 +25,9 @@ helm install helpdesk ./helm/helpdesk \
     --namespace helpdesk-system \
     --set model.vendor=anthropic \
     --set model.name=claude-haiku-4-5-20251001
+
+# Start the interactive session:
+kubectl -n helpdesk-system exec -it deploy/helpdesk-orchestrator -- helpdesk
 ```
 
 Please see below for details and in particular on how to setup and

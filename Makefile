@@ -22,6 +22,7 @@ BIN_PKGS := \
 	database-agent:./agents/database/ \
 	k8s-agent:./agents/k8s/ \
 	incident-agent:./agents/incident/ \
+	research-agent:./agents/research/ \
 	gateway:./cmd/gateway/ \
 	helpdesk:./cmd/helpdesk/ \
 	srebot:./cmd/srebot/

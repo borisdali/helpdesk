@@ -42,6 +42,13 @@ agents:
       size: 10Gi
       storageClass: ""    # empty string = use cluster default
 
+  # Research agent for Gemini models - provides web search via GoogleSearch.
+  # GoogleSearch cannot be combined with function declarations, so this agent
+  # handles web searches separately. Automatically included when using Gemini.
+  research:
+    replicas: 1
+    port: 1106
+
 gateway:
   replicas: 1
   port: 8080

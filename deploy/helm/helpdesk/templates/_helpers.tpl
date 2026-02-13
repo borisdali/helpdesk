@@ -20,7 +20,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 Agent URL list for gateway and orchestrator environment variables.
 */}}
 {{- define "helpdesk.agentURLs" -}}
-http://{{ include "helpdesk.fullname" . }}-database-agent:{{ .Values.agents.database.port }},http://{{ include "helpdesk.fullname" . }}-k8s-agent:{{ .Values.agents.k8s.port }},http://{{ include "helpdesk.fullname" . }}-incident-agent:{{ .Values.agents.incident.port }}
+http://{{ include "helpdesk.fullname" . }}-database-agent:{{ .Values.agents.database.port }},http://{{ include "helpdesk.fullname" . }}-k8s-agent:{{ .Values.agents.k8s.port }},http://{{ include "helpdesk.fullname" . }}-incident-agent:{{ .Values.agents.incident.port }},http://{{ include "helpdesk.fullname" . }}-research-agent:{{ .Values.agents.research.port }}
 {{- end -}}
 
 {{/*
