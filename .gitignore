@@ -1,1 +1,5 @@
 infrastructure.json
+audit.db
+audit.db-wal
+audit.db-shm
+audit.sock

@@ -8,16 +8,20 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/logging"
 	"helpdesk/prompts"
 )
@@ -83,8 +87,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create remote agent proxies (with health checking)
-	remoteAgents, unavailableAgents := createRemoteAgents(agentConfigs)
+	// Check if audit mode is enabled
+	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED") == "true" || os.Getenv("HELPDESK_AUDIT_ENABLED") == "1"
+
+	// Initialize audit store if enabled
+	var auditStore *audit.Store
+	if auditEnabled {
+		auditDir := os.Getenv("HELPDESK_AUDIT_DIR")
+		if auditDir == "" {
+			auditDir = "."
+		}
+		auditCfg := audit.StoreConfig{
+			DBPath:     filepath.Join(auditDir, "audit.db"),
+			SocketPath: filepath.Join(auditDir, "audit.sock"),
+		}
+		var err error
+		auditStore, err = audit.NewStore(auditCfg)
+		if err != nil {
+			slog.Error("failed to create audit store", "err", err)
+			os.Exit(1)
+		}
+		defer auditStore.Close()
+		slog.Info("audit logging enabled", "db", auditCfg.DBPath, "socket", auditCfg.SocketPath)
+	}
+
+	// Create agent registry for delegate tool
+	agentRegistry := audit.NewAgentRegistry()
+	var unavailableAgents []string
+	for _, cfg := range agentConfigs {
+		if err := checkAgentHealth(cfg.URL); err != nil {
+			slog.Warn("agent unavailable", "agent", cfg.Name, "url", cfg.URL, "err", err)
+			unavailableAgents = append(unavailableAgents, cfg.Name)
+			continue
+		}
+		agentRegistry.Register(cfg.Name, cfg.URL)
+		slog.Info("agent available", "agent", cfg.Name)
+	}
+
+	// Create remote agent proxies for non-audit mode
+	var remoteAgents []agent.Agent
+	if !auditEnabled {
+		remoteAgents, _ = createRemoteAgents(agentConfigs)
+	}
 
 	// Build the instruction: infrastructure first (so model sees the data before workflow),
 	// then agents, then base prompt with workflow and examples.
@@ -103,7 +147,12 @@ func main() {
 	}
 
 	// Add base prompt and agent section
-	instruction += prompts.Orchestrator + buildAgentPromptSection(agentConfigs)
+	if auditEnabled {
+		// Use audit-aware prompt that requires delegate_to_agent tool
+		instruction += prompts.OrchestratorAudit + buildAgentPromptSection(agentConfigs)
+	} else {
+		instruction += prompts.Orchestrator + buildAgentPromptSection(agentConfigs)
+	}
 
 	if len(unavailableAgents) > 0 {
 		instruction += fmt.Sprintf("\n## Currently Unavailable Agents\nThe following agents are currently unavailable: %s\nIf you need these agents, inform the user and suggest they start the agent or try manual troubleshooting.\n",
@@ -111,19 +160,38 @@ func main() {
 	}
 
 	// Create tools list
-	// Note: GoogleSearch is NOT added here because it cannot be combined with
-	// function declarations (sub-agents) on Gemini 2.5+ models. The orchestrator
-	// relies on sub-agent delegation, so we prioritize that over web search.
+	var tools []tool.Tool
+	if auditEnabled {
+		// Create delegate tool with audit logging
+		sessionID := "sess_" + uuid.New().String()[:8]
+		userID := os.Getenv("USER")
+		delegateTool, err := audit.DelegateTool(auditStore, agentRegistry, sessionID, userID)
+		if err != nil {
+			slog.Error("failed to create delegate tool", "err", err)
+			os.Exit(1)
+		}
+		tools = append(tools, delegateTool)
+		slog.Info("delegate_to_agent tool created", "session_id", sessionID)
+	}
 
-	// Create the root agent with sub-agents
-	rootAgent, err := llmagent.New(llmagent.Config{
+	// Create the root agent
+	agentConfig := llmagent.Config{
 		Name:                "helpdesk_orchestrator",
 		Model:               llmModel,
 		Description:         "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
 		Instruction:         instruction,
-		SubAgents:           remoteAgents,
 		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportFunc},
-	})
+	}
+
+	if auditEnabled {
+		// Use delegate tool instead of sub-agents for auditable routing
+		agentConfig.Tools = tools
+	} else {
+		// Use direct sub-agent calls (original behavior)
+		agentConfig.SubAgents = remoteAgents
+	}
+
+	rootAgent, err := llmagent.New(agentConfig)
 	if err != nil {
 		slog.Error("failed to create root agent", "err", err)
 		os.Exit(1)

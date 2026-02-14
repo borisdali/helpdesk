@@ -134,6 +134,15 @@ type PsqlResult struct {
 	Output string `json:"output"`
 }
 
+// errorResult formats an error as a PsqlResult that the LLM can see.
+// We return errors as output text rather than Go errors because ADK may not
+// properly relay Go errors to the orchestrator, causing empty responses.
+func errorResult(toolName, connStr string, err error) PsqlResult {
+	return PsqlResult{
+		Output: fmt.Sprintf("---\nERROR — %s failed for %s\n\n%v\n---", toolName, connStr, err),
+	}
+}
+
 // CheckConnectionArgs defines arguments for the check_connection tool.
 type CheckConnectionArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string (e.g., 'host=localhost port=5432 dbname=postgres user=postgres'). If empty, uses environment defaults."`
@@ -143,7 +152,7 @@ func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult
 	query := "SELECT version(), current_database(), current_user, inet_server_addr(), inet_server_port();"
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("connection failed: %v", err)
+		return errorResult("check_connection", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: fmt.Sprintf("Connection successful!\n%s", output)}, nil
 }
@@ -168,7 +177,7 @@ func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, er
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting server info: %v", err)
+		return errorResult("get_server_info", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -193,7 +202,7 @@ func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting database info: %v", err)
+		return errorResult("get_database_info", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -228,7 +237,7 @@ func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting active connections: %v", err)
+		return errorResult("get_active_connections", args.ConnectionString, err), nil
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
 		return PsqlResult{Output: "No active connections found."}, nil
@@ -256,7 +265,7 @@ func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (Psql
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting connection stats: %v", err)
+		return errorResult("get_connection_stats", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -288,7 +297,7 @@ func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResu
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting database stats: %v", err)
+		return errorResult("get_database_stats", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -321,7 +330,7 @@ func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (Psql
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting config parameters: %v", err)
+		return errorResult("get_config_parameter", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -356,7 +365,7 @@ func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting replication status: %v", err)
+		return errorResult("get_replication_status", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }
@@ -393,7 +402,7 @@ func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error)
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting lock info: %v", err)
+		return errorResult("get_lock_info", args.ConnectionString, err), nil
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
 		return PsqlResult{Output: "No blocking locks found."}, nil
@@ -447,7 +456,7 @@ func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, er
 
 	output, err := runPsql(ctx, args.ConnectionString, query)
 	if err != nil {
-		return PsqlResult{}, fmt.Errorf("error getting table stats: %v", err)
+		return errorResult("get_table_stats", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }

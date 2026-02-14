@@ -240,12 +240,16 @@ func TestCheckConnectionTool_Failure(t *testing.T) {
 	defer withMockRunner("password authentication failed", errors.New("exit status 1"))()
 
 	ctx := newTestContext()
-	_, err := checkConnectionTool(ctx, CheckConnectionArgs{ConnectionString: "host=localhost"})
-	if err == nil {
-		t.Fatal("checkConnectionTool() error = nil, want error")
+	result, err := checkConnectionTool(ctx, CheckConnectionArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("checkConnectionTool() unexpected Go error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "connection failed") {
-		t.Errorf("checkConnectionTool() error = %v, want to contain 'connection failed'", err)
+	// Errors are now returned in the output, not as Go errors
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("checkConnectionTool() output = %q, want to contain 'ERROR'", result.Output)
+	}
+	if !strings.Contains(result.Output, "check_connection") {
+		t.Errorf("checkConnectionTool() output = %q, want to contain 'check_connection'", result.Output)
 	}
 }
 
@@ -281,12 +285,16 @@ func TestGetServerInfoTool_Failure(t *testing.T) {
 	defer withMockRunner("connection refused", errors.New("exit status 1"))()
 
 	ctx := newTestContext()
-	_, err := getServerInfoTool(ctx, GetServerInfoArgs{ConnectionString: "host=localhost"})
-	if err == nil {
-		t.Fatal("getServerInfoTool() error = nil, want error")
+	result, err := getServerInfoTool(ctx, GetServerInfoArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getServerInfoTool() unexpected Go error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "error getting server info") {
-		t.Errorf("getServerInfoTool() error = %v, want to contain 'error getting server info'", err)
+	// Errors are now returned in the output, not as Go errors
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'ERROR'", result.Output)
+	}
+	if !strings.Contains(result.Output, "get_server_info") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'get_server_info'", result.Output)
 	}
 }
 
@@ -611,30 +619,39 @@ replay_lag_bytes| 1024
 }
 
 // Test error handling for all tools
+// Note: Errors are now returned in the output text (not as Go errors)
+// so that the LLM can see them when orchestrator calls sub-agents.
 func TestToolsErrorHandling(t *testing.T) {
 	defer withMockRunner("connection refused", errors.New("exit status 1"))()
 	ctx := newTestContext()
 
 	tests := []struct {
-		name string
-		fn   func() error
+		name     string
+		fn       func() (PsqlResult, error)
+		toolName string
 	}{
-		{"getServerInfoTool", func() error { _, err := getServerInfoTool(ctx, GetServerInfoArgs{}); return err }},
-		{"getDatabaseInfoTool", func() error { _, err := getDatabaseInfoTool(ctx, GetDatabaseInfoArgs{}); return err }},
-		{"getActiveConnectionsTool", func() error { _, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{}); return err }},
-		{"getConnectionStatsTool", func() error { _, err := getConnectionStatsTool(ctx, GetConnectionStatsArgs{}); return err }},
-		{"getDatabaseStatsTool", func() error { _, err := getDatabaseStatsTool(ctx, GetDatabaseStatsArgs{}); return err }},
-		{"getConfigParameterTool", func() error { _, err := getConfigParameterTool(ctx, GetConfigParameterArgs{}); return err }},
-		{"getReplicationStatusTool", func() error { _, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{}); return err }},
-		{"getLockInfoTool", func() error { _, err := getLockInfoTool(ctx, GetLockInfoArgs{}); return err }},
-		{"getTableStatsTool", func() error { _, err := getTableStatsTool(ctx, GetTableStatsArgs{}); return err }},
+		{"getServerInfoTool", func() (PsqlResult, error) { return getServerInfoTool(ctx, GetServerInfoArgs{}) }, "get_server_info"},
+		{"getDatabaseInfoTool", func() (PsqlResult, error) { return getDatabaseInfoTool(ctx, GetDatabaseInfoArgs{}) }, "get_database_info"},
+		{"getActiveConnectionsTool", func() (PsqlResult, error) { return getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{}) }, "get_active_connections"},
+		{"getConnectionStatsTool", func() (PsqlResult, error) { return getConnectionStatsTool(ctx, GetConnectionStatsArgs{}) }, "get_connection_stats"},
+		{"getDatabaseStatsTool", func() (PsqlResult, error) { return getDatabaseStatsTool(ctx, GetDatabaseStatsArgs{}) }, "get_database_stats"},
+		{"getConfigParameterTool", func() (PsqlResult, error) { return getConfigParameterTool(ctx, GetConfigParameterArgs{}) }, "get_config_parameter"},
+		{"getReplicationStatusTool", func() (PsqlResult, error) { return getReplicationStatusTool(ctx, GetReplicationStatusArgs{}) }, "get_replication_status"},
+		{"getLockInfoTool", func() (PsqlResult, error) { return getLockInfoTool(ctx, GetLockInfoArgs{}) }, "get_lock_info"},
+		{"getTableStatsTool", func() (PsqlResult, error) { return getTableStatsTool(ctx, GetTableStatsArgs{}) }, "get_table_stats"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.fn()
-			if err == nil {
-				t.Errorf("%s() error = nil, want error", tt.name)
+			result, err := tt.fn()
+			if err != nil {
+				t.Errorf("%s() unexpected Go error: %v", tt.name, err)
+			}
+			if !strings.Contains(result.Output, "ERROR") {
+				t.Errorf("%s() output = %q, want to contain 'ERROR'", tt.name, result.Output)
+			}
+			if !strings.Contains(result.Output, tt.toolName) {
+				t.Errorf("%s() output = %q, want to contain %q", tt.name, result.Output, tt.toolName)
 			}
 		})
 	}

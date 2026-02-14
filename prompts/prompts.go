@@ -6,6 +6,9 @@ import _ "embed"
 //go:embed orchestrator.txt
 var Orchestrator string
 
+//go:embed orchestrator_audit.txt
+var OrchestratorAudit string
+
 //go:embed database.txt
 var Database string
 
