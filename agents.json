@@ -34,5 +34,16 @@
       "Collecting system snapshots for vendor support",
       "Gathering multi-layer diagnostics (database, k8s, OS, storage)"
     ]
+  },
+  {
+    "name": "research_agent",
+    "url": "http://localhost:1106",
+    "description": "Web research agent for finding current information about software versions, release notes, CVEs, best practices, and documentation.",
+    "use_cases": [
+      "Software version and release information",
+      "CVE lookups and security advisories",
+      "Documentation and best practices",
+      "Current events and recent changes"
+    ]
   }
 ]

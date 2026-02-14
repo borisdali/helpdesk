@@ -25,7 +25,8 @@ BIN_PKGS := \
 	research-agent:./agents/research/ \
 	gateway:./cmd/gateway/ \
 	helpdesk:./cmd/helpdesk/ \
-	srebot:./cmd/srebot/
+	srebot:./cmd/srebot/ \
+	auditor:./cmd/auditor/
 
 .PHONY: test cover integration faulttest e2e image push binaries bundle release github-release clean
 
