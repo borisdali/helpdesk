@@ -224,6 +224,61 @@ func TestGatewayIncidentBundle(t *testing.T) {
 	}
 }
 
+// TestGatewayResearch tests the research agent endpoint.
+func TestGatewayResearch(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("Gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	query := "What is the latest stable version of PostgreSQL?"
+	t.Logf("Sending research query: %s", query)
+
+	resp, err := client.Research(ctx, query)
+	if err != nil {
+		t.Fatalf("Research failed: %v", err)
+	}
+
+	t.Logf("Research response (%d chars): %s", len(resp.Text), truncate(resp.Text, 300))
+
+	// Verify the response is substantial.
+	if len(resp.Text) < 50 {
+		t.Errorf("Response too short: %s", resp.Text)
+	}
+
+	// The response should mention PostgreSQL or version.
+	researchKeywords := []string{"postgresql", "postgres", "version", "release", "17", "16", "15"}
+	AssertContainsAny(t, resp.Text, researchKeywords)
+}
+
+// TestGatewayResearchMissingQuery tests error handling for empty query.
+func TestGatewayResearchMissingQuery(t *testing.T) {
+	cfg := LoadConfig()
+
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("Gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.Research(ctx, "")
+	if err == nil {
+		t.Error("Expected error for empty query, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "400") {
+		t.Logf("Error (acceptable): %v", err)
+	}
+}
+
 // TestSREBotWorkflow runs the complete SRE Bot workflow:
 // 1. Discovery - list agents
 // 2. Health check - call check_connection

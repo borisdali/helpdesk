@@ -143,6 +143,13 @@ func (c *GatewayClient) CreateIncident(ctx context.Context, args map[string]any)
 	return c.post(ctx, "/api/v1/incidents", args)
 }
 
+// Research calls POST /api/v1/research.
+func (c *GatewayClient) Research(ctx context.Context, query string) (*A2AResponse, error) {
+	return c.post(ctx, "/api/v1/research", map[string]any{
+		"query": query,
+	})
+}
+
 func (c *GatewayClient) get(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {

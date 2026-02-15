@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
+	"github.com/google/uuid"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/infra"
 )
@@ -24,11 +27,15 @@ const agentNameK8s = "k8s_agent"
 // agentNameIncident is the expected name for the incident agent.
 const agentNameIncident = "incident_agent"
 
+// agentNameResearch is the expected name for the research agent.
+const agentNameResearch = "research_agent"
+
 // Gateway translates REST requests into A2A calls to sub-agents.
 type Gateway struct {
 	agents  map[string]*discovery.Agent
 	clients map[string]*a2aclient.Client
 	infra   *infra.Config
+	auditor *audit.GatewayAuditor
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -51,6 +58,11 @@ func (g *Gateway) SetInfraConfig(config *infra.Config) {
 	g.infra = config
 }
 
+// SetAuditor sets the audit logger for the gateway.
+func (g *Gateway) SetAuditor(auditor *audit.GatewayAuditor) {
+	g.auditor = auditor
+}
+
 // agentAliases maps short names (used in the /query endpoint) to internal
 // agent names used for client lookup.
 var agentAliases = map[string]string{
@@ -68,6 +80,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/incidents", g.handleListIncidents)
 	mux.HandleFunc("POST /api/v1/db/{tool}", g.handleDBTool)
 	mux.HandleFunc("POST /api/v1/k8s/{tool}", g.handleK8sTool)
+	mux.HandleFunc("POST /api/v1/research", g.handleResearch)
 	mux.HandleFunc("GET /api/v1/infrastructure", g.handleListInfrastructure)
 	mux.HandleFunc("GET /api/v1/databases", g.handleListDatabases)
 }
@@ -159,6 +172,21 @@ func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
 	g.proxyToAgent(w, r, agentNameK8s, prompt)
 }
 
+func (g *Gateway) handleResearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query string `json:"query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.Query == "" {
+		writeError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+	g.proxyToAgent(w, r, agentNameResearch, req.Query)
+}
+
 func (g *Gateway) handleListInfrastructure(w http.ResponseWriter, r *http.Request) {
 	if g.infra == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -197,8 +225,23 @@ func (g *Gateway) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 
 // proxyToAgent sends a text message to an agent and returns the response.
 func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName, prompt string) {
+	start := time.Now()
+	requestID := uuid.New().String()[:8]
+
 	client, ok := g.clients[agentName]
 	if !ok {
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID: requestID,
+			Endpoint:  r.URL.Path,
+			Method:    r.Method,
+			Agent:     agentName,
+			Message:   prompt,
+			StartTime: start,
+			Duration:  time.Since(start),
+			Status:    "error",
+			Error:     "agent not available",
+			HTTPCode:  http.StatusBadGateway,
+		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("agent %q not available", agentName))
 		return
 	}
@@ -209,13 +252,50 @@ func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName
 	result, err := client.SendMessage(r.Context(), &a2a.MessageSendParams{Message: msg})
 	if err != nil {
 		slog.Error("gateway: A2A call failed", "agent", agentName, "err", err)
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID: requestID,
+			Endpoint:  r.URL.Path,
+			Method:    r.Method,
+			Agent:     agentName,
+			Message:   prompt,
+			StartTime: start,
+			Duration:  time.Since(start),
+			Status:    "error",
+			Error:     err.Error(),
+			HTTPCode:  http.StatusBadGateway,
+		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("A2A call to %s failed: %v", agentName, err))
 		return
 	}
 
 	response := extractResponse(result)
 	response.AgentName = agentName
+
+	// Record successful request with response
+	g.recordAudit(r.Context(), &audit.GatewayRequest{
+		RequestID: requestID,
+		Endpoint:  r.URL.Path,
+		Method:    r.Method,
+		Agent:     agentName,
+		Message:   prompt,
+		Response:  response.Text,
+		StartTime: start,
+		Duration:  time.Since(start),
+		Status:    "success",
+		HTTPCode:  http.StatusOK,
+	})
+
 	writeJSON(w, http.StatusOK, response)
+}
+
+// recordAudit sends a request to the auditor if configured.
+func (g *Gateway) recordAudit(ctx context.Context, req *audit.GatewayRequest) {
+	if g.auditor == nil {
+		return
+	}
+	if err := g.auditor.RecordRequest(ctx, req); err != nil {
+		slog.Debug("failed to record audit", "error", err)
+	}
 }
 
 // --- Response extraction ---

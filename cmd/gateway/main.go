@@ -7,8 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/logging"
@@ -40,6 +42,28 @@ func main() {
 	}
 
 	gw := NewGateway(registry)
+
+	// Initialize audit store if enabled.
+	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED") == "true" || os.Getenv("HELPDESK_AUDIT_ENABLED") == "1"
+	if auditEnabled {
+		auditDir := os.Getenv("HELPDESK_AUDIT_DIR")
+		if auditDir == "" {
+			auditDir = "."
+		}
+		auditCfg := audit.StoreConfig{
+			DBPath:     filepath.Join(auditDir, "audit.db"),
+			SocketPath: filepath.Join(auditDir, "audit.sock"),
+		}
+		store, err := audit.NewStore(auditCfg)
+		if err != nil {
+			slog.Error("failed to initialize audit store", "err", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+
+		gw.SetAuditor(audit.NewGatewayAuditor(store))
+		slog.Info("audit logging enabled", "db", auditCfg.DBPath, "socket", auditCfg.SocketPath)
+	}
 
 	// Load infrastructure config if available.
 	if infraPath := os.Getenv("HELPDESK_INFRA_CONFIG"); infraPath != "" {

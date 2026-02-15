@@ -10,8 +10,9 @@ import (
 type EventType string
 
 const (
-	EventTypeDelegation EventType = "delegation_decision"
-	EventTypeOutcome    EventType = "delegation_outcome"
+	EventTypeDelegation     EventType = "delegation_decision"
+	EventTypeOutcome        EventType = "delegation_outcome"
+	EventTypeGatewayRequest EventType = "gateway_request"
 )
 
 // RequestCategory classifies the type of user request.
@@ -55,6 +56,11 @@ type Input struct {
 	InfrastructureContext []string `json:"infrastructure_context,omitempty"`
 }
 
+// Output captures the agent's response.
+type Output struct {
+	Response string `json:"response,omitempty"`
+}
+
 // Outcome captures the result of a delegation (filled in after completion).
 type Outcome struct {
 	Status       string        `json:"status"` // success, error, timeout
@@ -70,6 +76,7 @@ type Event struct {
 
 	Session  Session   `json:"session"`
 	Input    Input     `json:"input"`
+	Output   *Output   `json:"output,omitempty"`
 	Decision *Decision `json:"decision,omitempty"`
 	Outcome  *Outcome  `json:"outcome,omitempty"`
 }

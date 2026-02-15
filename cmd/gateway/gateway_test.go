@@ -1,10 +1,15 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/a2aclient"
+
+	"helpdesk/internal/discovery"
 )
 
 // --- extractText tests ---
@@ -148,5 +153,77 @@ func TestExtractResponse_Message(t *testing.T) {
 	}
 	if resp.TaskID != "" {
 		t.Errorf("TaskID = %q, want empty for Message type", resp.TaskID)
+	}
+}
+
+// --- Handler validation tests ---
+
+func TestHandleResearch_MissingQuery(t *testing.T) {
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	// Test empty body
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/research", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "query is required") {
+		t.Errorf("body = %q, want error about missing query", rec.Body.String())
+	}
+}
+
+func TestHandleResearch_InvalidJSON(t *testing.T) {
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/research", strings.NewReader(`not json`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "invalid JSON") {
+		t.Errorf("body = %q, want error about invalid JSON", rec.Body.String())
+	}
+}
+
+func TestHandleResearch_AgentNotAvailable(t *testing.T) {
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client), // empty - no research agent
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/research", strings.NewReader(`{"query":"test query"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if !strings.Contains(rec.Body.String(), "not available") {
+		t.Errorf("body = %q, want error about agent not available", rec.Body.String())
 	}
 }

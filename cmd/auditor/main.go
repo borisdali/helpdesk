@@ -802,7 +802,13 @@ func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
 }
 
 // checkEmptyReasoning alerts when no reasoning chain is provided.
+// Only applies to orchestrator delegations, not gateway requests (which are deterministic).
 func (a *Auditor) checkEmptyReasoning(event *audit.Event) {
+	// Gateway requests don't have reasoning chains - they use deterministic routing
+	if event.EventType == audit.EventTypeGatewayRequest {
+		return
+	}
+
 	if event.Decision == nil {
 		return
 	}
