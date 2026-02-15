@@ -11,13 +11,25 @@ import (
 
 // GatewayAuditor provides audit logging for gateway requests.
 type GatewayAuditor struct {
-	store *Store
+	store           *Store
+	approvalManager *ApprovalManager
 }
 
 // NewGatewayAuditor creates a new gateway auditor.
 // If store is nil, auditing is disabled (no-op).
 func NewGatewayAuditor(store *Store) *GatewayAuditor {
-	return &GatewayAuditor{store: store}
+	return &GatewayAuditor{
+		store:           store,
+		approvalManager: NewApprovalManager(nil), // Use default policy
+	}
+}
+
+// NewGatewayAuditorWithPolicy creates a gateway auditor with a custom approval policy.
+func NewGatewayAuditorWithPolicy(store *Store, policy *ApprovalPolicy) *GatewayAuditor {
+	return &GatewayAuditor{
+		store:           store,
+		approvalManager: NewApprovalManager(policy),
+	}
 }
 
 // RecordRequest records a gateway request to the audit store.
@@ -26,12 +38,58 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 		return nil
 	}
 
+	// Generate trace ID if not provided
+	traceID := req.TraceID
+	if traceID == "" {
+		traceID = NewTraceID()
+	}
+
+	// Determine action class
+	actionClass := req.ActionClass
+	if actionClass == "" {
+		if req.ToolName != "" {
+			actionClass = ClassifyTool(req.ToolName)
+		} else {
+			actionClass = ClassifyEndpoint(req.Method, req.Endpoint)
+		}
+	}
+
+	// Build tool execution if we have tool info
+	var toolExec *ToolExecution
+	if req.ToolName != "" {
+		toolExec = &ToolExecution{
+			Name:       req.ToolName,
+			Parameters: req.ToolParameters,
+			Result:     truncateString(req.Response, 500), // Summary of result
+			Duration:   req.Duration,
+		}
+		if req.Status == "error" {
+			toolExec.Error = req.Error
+		}
+	}
+
+	// Evaluate approval policy
+	var approval *Approval
+	if a.approvalManager != nil {
+		approval = a.approvalManager.CheckApproval(ApprovalRequest{
+			ActionClass: actionClass,
+			Agent:       req.Agent,
+			Tool:        req.ToolName,
+			Environment: req.Environment,
+			Principal:   req.Principal,
+		})
+	}
+
 	event := &Event{
-		EventID:   "gw_" + uuid.New().String()[:8],
-		Timestamp: req.StartTime,
-		EventType: EventTypeGatewayRequest,
+		EventID:     "gw_" + uuid.New().String()[:8],
+		Timestamp:   req.StartTime,
+		EventType:   EventTypeGatewayRequest,
+		TraceID:     traceID,
+		ParentID:    req.ParentID,
+		ActionClass: actionClass,
 		Session: Session{
-			ID: req.RequestID,
+			ID:     req.RequestID,
+			UserID: req.Principal,
 		},
 		Input: Input{
 			UserQuery: req.Message,
@@ -39,6 +97,8 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 		Output: &Output{
 			Response: req.Response,
 		},
+		Tool:     toolExec,
+		Approval: approval,
 		Decision: &Decision{
 			Agent:           req.Agent,
 			RequestCategory: categorizeAgent(req.Agent),
@@ -62,17 +122,32 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 
 // GatewayRequest contains the data for a gateway audit event.
 type GatewayRequest struct {
-	RequestID string
-	Endpoint  string
-	Method    string
-	Agent     string
-	Message   string
-	Response  string // Agent's response text
-	StartTime time.Time
-	Duration  time.Duration
-	Status    string // "success" or "error"
-	Error     string
-	HTTPCode  int
+	RequestID      string
+	TraceID        string         // end-to-end trace ID
+	ParentID       string         // parent event ID (if this is a child event)
+	Principal      string         // authenticated user or API key
+	Environment    string         // environment context (e.g., "prod", "staging")
+	Endpoint       string
+	Method         string
+	Agent          string
+	ToolName       string         // specific tool being called (e.g., "check_connection")
+	ToolParameters map[string]any // parameters passed to the tool
+	ActionClass    ActionClass    // read, write, destructive
+	Message        string
+	Response       string // Agent's response text
+	StartTime      time.Time
+	Duration       time.Duration
+	Status         string // "success" or "error"
+	Error          string
+	HTTPCode       int
+}
+
+// truncateString truncates a string to maxLen characters.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // categorizeAgent maps agent names to request categories.

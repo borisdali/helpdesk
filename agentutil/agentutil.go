@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/logging"
 	"helpdesk/internal/model"
 )
@@ -35,6 +37,10 @@ type Config struct {
 	APIKey      string
 	ListenAddr  string
 	ExternalURL string // Optional: externally reachable URL for the agent card
+
+	// Audit configuration
+	AuditEnabled bool
+	AuditDir     string
 }
 
 // MustLoadConfig reads env vars. defaultAddr is used when HELPDESK_AGENT_ADDR is unset.
@@ -43,12 +49,15 @@ type Config struct {
 func MustLoadConfig(defaultAddr string) Config {
 	logging.InitLogging(os.Args[1:])
 
+	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED")
 	cfg := Config{
-		ModelVendor: os.Getenv("HELPDESK_MODEL_VENDOR"),
-		ModelName:   os.Getenv("HELPDESK_MODEL_NAME"),
-		APIKey:      os.Getenv("HELPDESK_API_KEY"),
-		ListenAddr:  os.Getenv("HELPDESK_AGENT_ADDR"),
-		ExternalURL: os.Getenv("HELPDESK_AGENT_URL"),
+		ModelVendor:  os.Getenv("HELPDESK_MODEL_VENDOR"),
+		ModelName:    os.Getenv("HELPDESK_MODEL_NAME"),
+		APIKey:       os.Getenv("HELPDESK_API_KEY"),
+		ListenAddr:   os.Getenv("HELPDESK_AGENT_ADDR"),
+		ExternalURL:  os.Getenv("HELPDESK_AGENT_URL"),
+		AuditEnabled: auditEnabled == "true" || auditEnabled == "1",
+		AuditDir:     os.Getenv("HELPDESK_AUDIT_DIR"),
 	}
 
 	if cfg.ModelVendor == "" || cfg.ModelName == "" || cfg.APIKey == "" {
@@ -85,6 +94,30 @@ func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 	default:
 		return nil, fmt.Errorf("unknown model vendor: %s (supported: google, gemini, anthropic)", cfg.ModelVendor)
 	}
+}
+
+// InitAuditStore initializes an audit store for an agent if auditing is enabled.
+// Returns nil if auditing is disabled. The caller should defer store.Close() if non-nil.
+func InitAuditStore(cfg Config) (*audit.Store, error) {
+	if !cfg.AuditEnabled {
+		return nil, nil
+	}
+
+	auditDir := cfg.AuditDir
+	if auditDir == "" {
+		auditDir = "."
+	}
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(auditDir, "audit.db"),
+		// No socket for agents - only the orchestrator needs the socket
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create audit store: %w", err)
+	}
+
+	slog.Info("agent audit logging enabled", "db", filepath.Join(auditDir, "audit.db"))
+	return store, nil
 }
 
 // CardOptions allows agents to customize the AgentCard beyond the defaults

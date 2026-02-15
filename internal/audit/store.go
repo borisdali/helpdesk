@@ -21,6 +21,8 @@ type Store struct {
 	socketPath string
 	listeners  []net.Conn
 	mu         sync.RWMutex
+	lastHash   string // hash of the last recorded event (for chain)
+	hashMu     sync.Mutex // protects lastHash
 }
 
 // StoreConfig configures the audit store.
@@ -68,6 +70,13 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	s := &Store{
 		db:         db,
 		socketPath: cfg.SocketPath,
+		lastHash:   GenesisHash,
+	}
+
+	// Initialize lastHash from the most recent event
+	if err := s.initLastHash(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init last hash: %w", err)
 	}
 
 	// Start Unix socket listener if configured.
@@ -81,6 +90,30 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	return s, nil
 }
 
+// initLastHash loads the hash of the most recent event from the database.
+func (s *Store) initLastHash() error {
+	var hash sql.NullString
+	err := s.db.QueryRow(`
+		SELECT event_hash FROM audit_events
+		ORDER BY id DESC LIMIT 1
+	`).Scan(&hash)
+
+	if err == sql.ErrNoRows {
+		s.lastHash = GenesisHash
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if hash.Valid && hash.String != "" {
+		s.lastHash = hash.String
+	} else {
+		s.lastHash = GenesisHash
+	}
+	return nil
+}
+
 func createTables(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS audit_events (
@@ -88,9 +121,18 @@ func createTables(db *sql.DB) error {
 		event_id TEXT UNIQUE NOT NULL,
 		timestamp TEXT NOT NULL,
 		event_type TEXT NOT NULL,
+		trace_id TEXT,
+		parent_id TEXT,
+		action_class TEXT,
+		prev_hash TEXT,
+		event_hash TEXT,
 		session_id TEXT NOT NULL,
 		user_id TEXT,
 		user_query TEXT,
+		tool_name TEXT,
+		tool_json TEXT,
+		approval_status TEXT,
+		approval_json TEXT,
 		decision_agent TEXT,
 		decision_category TEXT,
 		decision_confidence REAL,
@@ -101,13 +143,41 @@ func createTables(db *sql.DB) error {
 		raw_json TEXT NOT NULL,
 		created_at TEXT DEFAULT CURRENT_TIMESTAMP
 	);
+	`
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
 
+	// Migrate existing tables: add columns that may not exist
+	migrations := []string{
+		"ALTER TABLE audit_events ADD COLUMN trace_id TEXT",
+		"ALTER TABLE audit_events ADD COLUMN parent_id TEXT",
+		"ALTER TABLE audit_events ADD COLUMN action_class TEXT",
+		"ALTER TABLE audit_events ADD COLUMN prev_hash TEXT",
+		"ALTER TABLE audit_events ADD COLUMN event_hash TEXT",
+		"ALTER TABLE audit_events ADD COLUMN tool_name TEXT",
+		"ALTER TABLE audit_events ADD COLUMN tool_json TEXT",
+		"ALTER TABLE audit_events ADD COLUMN approval_status TEXT",
+		"ALTER TABLE audit_events ADD COLUMN approval_json TEXT",
+	}
+	for _, m := range migrations {
+		// Ignore "duplicate column" errors - column already exists
+		db.Exec(m)
+	}
+
+	// Create indexes (safe to run multiple times with IF NOT EXISTS)
+	indexes := `
 	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON audit_events(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_events_session ON audit_events(session_id);
 	CREATE INDEX IF NOT EXISTS idx_events_type ON audit_events(event_type);
 	CREATE INDEX IF NOT EXISTS idx_events_agent ON audit_events(decision_agent);
+	CREATE INDEX IF NOT EXISTS idx_events_trace ON audit_events(trace_id);
+	CREATE INDEX IF NOT EXISTS idx_events_parent ON audit_events(parent_id);
+	CREATE INDEX IF NOT EXISTS idx_events_action_class ON audit_events(action_class);
+	CREATE INDEX IF NOT EXISTS idx_events_tool ON audit_events(tool_name);
+	CREATE INDEX IF NOT EXISTS idx_events_approval ON audit_events(approval_status);
 	`
-	_, err := db.Exec(schema)
+	_, err := db.Exec(indexes)
 	return err
 }
 
@@ -120,6 +190,13 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
+
+	// Compute hash chain
+	s.hashMu.Lock()
+	event.PrevHash = s.lastHash
+	event.EventHash = ComputeEventHash(event)
+	s.lastHash = event.EventHash
+	s.hashMu.Unlock()
 
 	rawJSON, err := json.Marshal(event)
 	if err != nil {
@@ -144,19 +221,46 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		outcomeDurationMs = event.Outcome.Duration.Milliseconds()
 	}
 
+	var toolName string
+	var toolJSON []byte
+	if event.Tool != nil {
+		toolName = event.Tool.Name
+		toolJSON, _ = json.Marshal(event.Tool)
+	}
+
+	var approvalStatus string
+	var approvalJSON []byte
+	if event.Approval != nil {
+		approvalStatus = string(event.Approval.Status)
+		approvalJSON, _ = json.Marshal(event.Approval)
+	}
+
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO audit_events (
-			event_id, timestamp, event_type, session_id, user_id, user_query,
+			event_id, timestamp, event_type, trace_id, parent_id, action_class,
+			prev_hash, event_hash,
+			session_id, user_id, user_query,
+			tool_name, tool_json,
+			approval_status, approval_json,
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		event.EventID,
 		event.Timestamp.Format(time.RFC3339Nano),
 		string(event.EventType),
+		event.TraceID,
+		event.ParentID,
+		string(event.ActionClass),
+		event.PrevHash,
+		event.EventHash,
 		event.Session.ID,
 		event.Session.UserID,
 		event.Input.UserQuery,
+		toolName,
+		string(toolJSON),
+		approvalStatus,
+		string(approvalJSON),
 		decisionAgent,
 		decisionCategory,
 		decisionConfidence,
@@ -220,8 +324,29 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		query += " AND decision_confidence <= ?"
 		args = append(args, opts.MaxConfidence)
 	}
+	if opts.TraceID != "" {
+		query += " AND trace_id = ?"
+		args = append(args, opts.TraceID)
+	}
+	if opts.ActionClass != "" {
+		query += " AND action_class = ?"
+		args = append(args, string(opts.ActionClass))
+	}
+	if opts.ToolName != "" {
+		query += " AND tool_name = ?"
+		args = append(args, opts.ToolName)
+	}
+	if opts.ApprovalStatus != "" {
+		query += " AND approval_status = ?"
+		args = append(args, string(opts.ApprovalStatus))
+	}
 
-	query += " ORDER BY timestamp DESC"
+	// Chronological order for trace queries, reverse chronological otherwise
+	if opts.TraceID != "" {
+		query += " ORDER BY timestamp ASC"
+	} else {
+		query += " ORDER BY timestamp DESC"
+	}
 
 	if opts.Limit > 0 {
 		query += " LIMIT ?"
@@ -253,13 +378,40 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 
 // QueryOptions specifies filters for querying events.
 type QueryOptions struct {
-	SessionID     string
-	EventType     EventType
-	Agent         string
-	Since         time.Time
-	MinConfidence float64
-	MaxConfidence float64
-	Limit         int
+	SessionID      string
+	EventType      EventType
+	Agent          string
+	Since          time.Time
+	MinConfidence  float64
+	MaxConfidence  float64
+	Limit          int
+	TraceID        string         // filter by trace ID for end-to-end correlation
+	ActionClass    ActionClass    // filter by action class (read, write, destructive)
+	ToolName       string         // filter by tool name
+	ApprovalStatus ApprovalStatus // filter by approval status
+}
+
+// VerifyIntegrity verifies the hash chain integrity of the audit log.
+func (s *Store) VerifyIntegrity(ctx context.Context) (ChainStatus, error) {
+	// Query all events in chronological order
+	events, err := s.Query(ctx, QueryOptions{})
+	if err != nil {
+		return ChainStatus{}, fmt.Errorf("query events: %w", err)
+	}
+
+	// Events from Query are in DESC order, reverse for chain verification
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
+
+	return VerifyChainStatus(events), nil
+}
+
+// GetLastHash returns the hash of the most recent event.
+func (s *Store) GetLastHash() string {
+	s.hashMu.Lock()
+	defer s.hashMu.Unlock()
+	return s.lastHash
 }
 
 // Close closes the store and releases resources.

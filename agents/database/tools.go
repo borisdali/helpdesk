@@ -7,9 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"google.golang.org/adk/tool"
+
+	"helpdesk/internal/audit"
 )
+
+// toolAuditor is set during initialization if auditing is enabled.
+var toolAuditor *audit.ToolAuditor
 
 // resolveConnectionString checks if the input looks like a database name (no "=" sign)
 // and attempts to resolve it using the infrastructure config. If resolution fails or
@@ -103,6 +109,14 @@ func diagnosePsqlError(output string) string {
 // If connStr looks like a database name (no "=" sign), it will be resolved
 // using the infrastructure config.
 func runPsql(ctx context.Context, connStr string, query string) (string, error) {
+	return runPsqlWithToolName(ctx, connStr, query, "")
+}
+
+// runPsqlWithToolName executes a psql command with auditing support.
+// toolName is used for audit logging; if empty, a generic name is used.
+func runPsqlWithToolName(ctx context.Context, connStr string, query string, toolName string) (string, error) {
+	start := time.Now()
+
 	// Resolve database name to connection string if needed
 	connStr = resolveConnectionString(connStr)
 
@@ -112,6 +126,24 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 	}
 	env := []string{"PGCONNECT_TIMEOUT=10"}
 	output, err := cmdRunner.Run(ctx, "psql", args, env)
+	duration := time.Since(start)
+
+	// Audit the tool execution
+	if toolAuditor != nil && toolName != "" {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       toolName,
+			Parameters: map[string]any{"connection_string": maskPassword(connStr)},
+			RawCommand: query,
+		}, audit.ToolResult{
+			Output: truncateForAudit(output, 500),
+			Error:  errMsg,
+		}, duration)
+	}
+
 	if err != nil {
 		out := strings.TrimSpace(output)
 		if out == "" {
@@ -127,6 +159,26 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 		return "", fmt.Errorf("psql failed: %v\nOutput: %s", err, out)
 	}
 	return output, nil
+}
+
+// maskPassword removes password from connection string for audit logging.
+func maskPassword(connStr string) string {
+	// Simple masking - replace password=xxx with password=***
+	parts := strings.Split(connStr, " ")
+	for i, part := range parts {
+		if strings.HasPrefix(part, "password=") {
+			parts[i] = "password=***"
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// truncateForAudit truncates a string for audit logging.
+func truncateForAudit(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // PsqlResult is the standard output type for all psql tools.
@@ -150,7 +202,7 @@ type CheckConnectionArgs struct {
 
 func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult, error) {
 	query := "SELECT version(), current_database(), current_user, inet_server_addr(), inet_server_port();"
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "check_connection")
 	if err != nil {
 		return errorResult("check_connection", args.ConnectionString, err), nil
 	}
@@ -175,7 +227,7 @@ func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, er
 		(SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_connections,
 		current_setting('max_connections') as max_connections;`
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_server_info")
 	if err != nil {
 		return errorResult("get_server_info", args.ConnectionString, err), nil
 	}
@@ -200,7 +252,7 @@ func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult
 	WHERE d.datistemplate = false
 	ORDER BY pg_database_size(d.datname) DESC;`
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_database_info")
 	if err != nil {
 		return errorResult("get_database_info", args.ConnectionString, err), nil
 	}
@@ -235,7 +287,7 @@ func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (
 	ORDER BY query_start ASC NULLS LAST
 	LIMIT 50;`, stateFilter)
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_active_connections")
 	if err != nil {
 		return errorResult("get_active_connections", args.ConnectionString, err), nil
 	}
@@ -263,7 +315,7 @@ func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (Psql
 	GROUP BY datname
 	ORDER BY total_connections DESC;`
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_connection_stats")
 	if err != nil {
 		return errorResult("get_connection_stats", args.ConnectionString, err), nil
 	}
@@ -295,7 +347,7 @@ func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResu
 	WHERE datname NOT LIKE 'template%'
 	ORDER BY numbackends DESC;`
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_database_stats")
 	if err != nil {
 		return errorResult("get_database_stats", args.ConnectionString, err), nil
 	}
@@ -328,7 +380,7 @@ func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (Psql
 			ORDER BY name;`
 	}
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_config_parameter")
 	if err != nil {
 		return errorResult("get_config_parameter", args.ConnectionString, err), nil
 	}
@@ -363,7 +415,7 @@ func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (
 		pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) as lag_bytes
 	FROM pg_replication_slots;`
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_replication_status")
 	if err != nil {
 		return errorResult("get_replication_status", args.ConnectionString, err), nil
 	}
@@ -400,7 +452,7 @@ func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error)
 	JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
 	WHERE NOT blocked_locks.granted;`
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_lock_info")
 	if err != nil {
 		return errorResult("get_lock_info", args.ConnectionString, err), nil
 	}
@@ -454,7 +506,7 @@ func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, er
 		LIMIT 20;`, schemaFilter)
 	}
 
-	output, err := runPsql(ctx, args.ConnectionString, query)
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_table_stats")
 	if err != nil {
 		return errorResult("get_table_stats", args.ConnectionString, err), nil
 	}

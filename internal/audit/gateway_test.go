@@ -115,3 +115,139 @@ func TestCategorizeAgent(t *testing.T) {
 		}
 	}
 }
+
+func TestGatewayAuditor_ToolExecution(t *testing.T) {
+	// Create temp directory for test database.
+	tmpDir, err := os.MkdirTemp("", "audit-tool-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "audit.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	auditor := NewGatewayAuditor(store)
+
+	// Record a request with tool execution details
+	req := &GatewayRequest{
+		RequestID: "test-tool-1",
+		TraceID:   NewTraceID(),
+		Endpoint:  "/api/v1/db/check_connection",
+		Agent:     "postgres_database_agent",
+		ToolName:  "check_connection",
+		ToolParameters: map[string]any{
+			"connection_string": "host=localhost dbname=test",
+			"timeout":           30,
+		},
+		Message:   "Check database connection",
+		Response:  "Connection successful. PostgreSQL 15.2",
+		StartTime: time.Now(),
+		Duration:  250 * time.Millisecond,
+		Status:    "success",
+	}
+
+	if err := auditor.RecordRequest(context.Background(), req); err != nil {
+		t.Fatalf("record request: %v", err)
+	}
+
+	// Query and verify tool details
+	events, err := store.Query(context.Background(), QueryOptions{ToolName: "check_connection"})
+	if err != nil {
+		t.Fatalf("query by tool: %v", err)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	event := events[0]
+	if event.Tool == nil {
+		t.Fatal("expected tool execution, got nil")
+	}
+	if event.Tool.Name != "check_connection" {
+		t.Errorf("tool name = %q, want %q", event.Tool.Name, "check_connection")
+	}
+	if event.Tool.Parameters["timeout"] != float64(30) { // JSON numbers are float64
+		t.Errorf("tool param timeout = %v, want 30", event.Tool.Parameters["timeout"])
+	}
+	if event.ActionClass != ActionRead {
+		t.Errorf("action class = %q, want %q", event.ActionClass, ActionRead)
+	}
+}
+
+func TestGatewayAuditor_TraceID(t *testing.T) {
+	// Create temp directory for test database.
+	tmpDir, err := os.MkdirTemp("", "audit-trace-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "audit.db")
+
+	store, err := NewStore(StoreConfig{DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	auditor := NewGatewayAuditor(store)
+	traceID := NewTraceID()
+
+	// Record two requests with same trace ID
+	req1 := &GatewayRequest{
+		RequestID: "req-1",
+		TraceID:   traceID,
+		Endpoint:  "/api/v1/db/check_connection",
+		Agent:     "postgres_database_agent",
+		Message:   "Check connection",
+		Response:  "Connected",
+		StartTime: time.Now(),
+		Duration:  100 * time.Millisecond,
+		Status:    "success",
+	}
+
+	req2 := &GatewayRequest{
+		RequestID: "req-2",
+		TraceID:   traceID,
+		ParentID:  "gw_req-1", // child of first request
+		Endpoint:  "/api/v1/db/run_query",
+		Agent:     "postgres_database_agent",
+		Message:   "SELECT 1",
+		Response:  "1",
+		StartTime: time.Now().Add(100 * time.Millisecond),
+		Duration:  50 * time.Millisecond,
+		Status:    "success",
+	}
+
+	if err := auditor.RecordRequest(context.Background(), req1); err != nil {
+		t.Fatalf("record req1: %v", err)
+	}
+	if err := auditor.RecordRequest(context.Background(), req2); err != nil {
+		t.Fatalf("record req2: %v", err)
+	}
+
+	// Query by trace ID
+	events, err := store.Query(context.Background(), QueryOptions{TraceID: traceID})
+	if err != nil {
+		t.Fatalf("query by trace: %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events for trace, got %d", len(events))
+	}
+
+	// Should be in chronological order
+	if events[0].TraceID != traceID {
+		t.Errorf("event[0] trace ID = %q, want %q", events[0].TraceID, traceID)
+	}
+	if events[1].TraceID != traceID {
+		t.Errorf("event[1] trace ID = %q, want %q", events[1].TraceID, traceID)
+	}
+}

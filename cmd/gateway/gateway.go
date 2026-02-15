@@ -158,7 +158,7 @@ func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt := buildToolPrompt(toolName, args)
-	g.proxyToAgent(w, r, agentNameDB, prompt)
+	g.proxyToAgentWithTool(w, r, agentNameDB, toolName, args, prompt)
 }
 
 func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
@@ -169,7 +169,7 @@ func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt := buildToolPrompt(toolName, args)
-	g.proxyToAgent(w, r, agentNameK8s, prompt)
+	g.proxyToAgentWithTool(w, r, agentNameK8s, toolName, args, prompt)
 }
 
 func (g *Gateway) handleResearch(w http.ResponseWriter, r *http.Request) {
@@ -225,22 +225,36 @@ func (g *Gateway) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 
 // proxyToAgent sends a text message to an agent and returns the response.
 func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName, prompt string) {
+	g.proxyToAgentWithTool(w, r, agentName, "", nil, prompt)
+}
+
+// proxyToAgentWithTool sends a text message to an agent with tool name for classification.
+func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, agentName, toolName string, toolParams map[string]any, prompt string) {
 	start := time.Now()
 	requestID := uuid.New().String()[:8]
+
+	// Generate or extract trace ID for end-to-end correlation
+	traceID := r.Header.Get("X-Trace-ID")
+	if traceID == "" {
+		traceID = audit.NewTraceID()
+	}
 
 	client, ok := g.clients[agentName]
 	if !ok {
 		g.recordAudit(r.Context(), &audit.GatewayRequest{
-			RequestID: requestID,
-			Endpoint:  r.URL.Path,
-			Method:    r.Method,
-			Agent:     agentName,
-			Message:   prompt,
-			StartTime: start,
-			Duration:  time.Since(start),
-			Status:    "error",
-			Error:     "agent not available",
-			HTTPCode:  http.StatusBadGateway,
+			RequestID:      requestID,
+			TraceID:        traceID,
+			Endpoint:       r.URL.Path,
+			Method:         r.Method,
+			Agent:          agentName,
+			ToolName:       toolName,
+			ToolParameters: toolParams,
+			Message:        prompt,
+			StartTime:      start,
+			Duration:       time.Since(start),
+			Status:         "error",
+			Error:          "agent not available",
+			HTTPCode:       http.StatusBadGateway,
 		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("agent %q not available", agentName))
 		return
@@ -253,16 +267,19 @@ func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName
 	if err != nil {
 		slog.Error("gateway: A2A call failed", "agent", agentName, "err", err)
 		g.recordAudit(r.Context(), &audit.GatewayRequest{
-			RequestID: requestID,
-			Endpoint:  r.URL.Path,
-			Method:    r.Method,
-			Agent:     agentName,
-			Message:   prompt,
-			StartTime: start,
-			Duration:  time.Since(start),
-			Status:    "error",
-			Error:     err.Error(),
-			HTTPCode:  http.StatusBadGateway,
+			RequestID:      requestID,
+			TraceID:        traceID,
+			Endpoint:       r.URL.Path,
+			Method:         r.Method,
+			Agent:          agentName,
+			ToolName:       toolName,
+			ToolParameters: toolParams,
+			Message:        prompt,
+			StartTime:      start,
+			Duration:       time.Since(start),
+			Status:         "error",
+			Error:          err.Error(),
+			HTTPCode:       http.StatusBadGateway,
 		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("A2A call to %s failed: %v", agentName, err))
 		return
@@ -273,18 +290,23 @@ func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName
 
 	// Record successful request with response
 	g.recordAudit(r.Context(), &audit.GatewayRequest{
-		RequestID: requestID,
-		Endpoint:  r.URL.Path,
-		Method:    r.Method,
-		Agent:     agentName,
-		Message:   prompt,
-		Response:  response.Text,
-		StartTime: start,
-		Duration:  time.Since(start),
-		Status:    "success",
-		HTTPCode:  http.StatusOK,
+		RequestID:      requestID,
+		TraceID:        traceID,
+		Endpoint:       r.URL.Path,
+		Method:         r.Method,
+		Agent:          agentName,
+		ToolName:       toolName,
+		ToolParameters: toolParams,
+		Message:        prompt,
+		Response:       response.Text,
+		StartTime:      start,
+		Duration:       time.Since(start),
+		Status:         "success",
+		HTTPCode:       http.StatusOK,
 	})
 
+	// Include trace ID in response for client correlation
+	w.Header().Set("X-Trace-ID", traceID)
 	writeJSON(w, http.StatusOK, response)
 }
 

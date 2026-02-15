@@ -9,11 +9,13 @@ import (
 	"os"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/google/uuid"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
 )
@@ -35,6 +37,20 @@ func main() {
 		} else {
 			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers))
 		}
+	}
+
+	// Initialize audit store if enabled
+	auditStore, err := agentutil.InitAuditStore(cfg)
+	if err != nil {
+		slog.Error("failed to initialize audit store", "err", err)
+		os.Exit(1)
+	}
+	if auditStore != nil {
+		defer auditStore.Close()
+		// Create tool auditor for this agent instance
+		sessionID := "dbagent_" + uuid.New().String()[:8]
+		toolAuditor = audit.NewToolAuditor(auditStore, "postgres_database_agent", sessionID, "")
+		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)

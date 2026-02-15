@@ -205,16 +205,20 @@ func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) {
 	for _, cfg := range configs {
 		slog.Info("confirming agent availability", "agent", cfg.Name, "url", cfg.URL)
 
-		if err := checkAgentHealth(cfg.URL); err != nil {
+		// Fetch the agent card and override the URL to use our discovered URL.
+		// This handles cases where agents advertise K8s service names but we're
+		// connecting via localhost.
+		card, err := fetchAgentCard(cfg.URL)
+		if err != nil {
 			slog.Warn("agent unavailable", "agent", cfg.Name, "url", cfg.URL, "err", err)
 			unavailable = append(unavailable, cfg.Name)
 			continue
 		}
 
 		remoteAgent, err := remoteagent.NewA2A(remoteagent.A2AConfig{
-			Name:            cfg.Name,
-			Description:     cfg.Description,
-			AgentCardSource: cfg.URL,
+			Name:        cfg.Name,
+			Description: cfg.Description,
+			AgentCard:   card,
 		})
 		if err != nil {
 			slog.Warn("failed to create agent proxy", "agent", cfg.Name, "err", err)

@@ -88,22 +88,39 @@ func (r *AgentRegistry) List() []string {
 
 // DelegateTool creates the delegate_to_agent tool with audit logging.
 func DelegateTool(store *Store, registry *AgentRegistry, sessionID, userID string) (tool.Tool, error) {
+	return DelegateToolWithTrace(store, registry, sessionID, userID, "")
+}
+
+// DelegateToolWithTrace creates the delegate_to_agent tool with audit logging and trace ID.
+func DelegateToolWithTrace(store *Store, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, error) {
 	delegationCount := 0
+
+	// Generate trace ID if not provided (top-level orchestrator request)
+	if traceID == "" {
+		traceID = NewTraceID()
+	}
 
 	delegateFunc := func(ctx tool.Context, args DelegateArgs) (DelegateResult, error) {
 		start := time.Now()
 		delegationCount++
+
+		// Classify the action based on the message content
+		actionClass := ClassifyDelegation(args.Agent, args.Message)
+
 		slog.Debug("delegate_to_agent tool called",
 			"agent", args.Agent,
 			"category", args.RequestCategory,
 			"confidence", args.Confidence,
+			"action_class", actionClass,
 			"reasoning", args.ReasoningChain)
 
 		// Create audit event
 		event := &Event{
-			EventID:   "evt_" + uuid.New().String()[:8],
-			Timestamp: start,
-			EventType: EventTypeDelegation,
+			EventID:     "evt_" + uuid.New().String()[:8],
+			Timestamp:   start,
+			EventType:   EventTypeDelegation,
+			TraceID:     traceID,
+			ActionClass: actionClass,
 			Session: Session{
 				ID:              sessionID,
 				UserID:          userID,
@@ -224,6 +241,15 @@ func callAgent(ctx context.Context, agentURL, message string) (string, error) {
 	card, err := fetchAgentCard(ctx, cardURL)
 	if err != nil {
 		return "", fmt.Errorf("fetching agent card: %w", err)
+	}
+
+	// Override the URL in the card with our known-good URL.
+	// This handles cases where agents advertise K8s service names (e.g., database-agent:1100)
+	// but we're connecting via localhost.
+	correctURL := strings.TrimSuffix(agentURL, "/") + "/invoke"
+	if card.URL != correctURL {
+		slog.Debug("overriding agent card URL", "original", card.URL, "override", correctURL)
+		card.URL = correctURL
 	}
 
 	// Create A2A client

@@ -61,6 +61,28 @@ type Output struct {
 	Response string `json:"response,omitempty"`
 }
 
+// ToolExecution captures details of a tool invocation.
+type ToolExecution struct {
+	// Name is the tool that was called (e.g., "check_connection", "get_pods").
+	Name string `json:"name"`
+
+	// Parameters are the arguments passed to the tool.
+	Parameters map[string]any `json:"parameters,omitempty"`
+
+	// RawCommand is the actual command executed (e.g., SQL query, kubectl command).
+	// This is filled in by the agent when available.
+	RawCommand string `json:"raw_command,omitempty"`
+
+	// Result is a summary of the tool's output.
+	Result string `json:"result,omitempty"`
+
+	// Error contains any error message if the tool failed.
+	Error string `json:"error,omitempty"`
+
+	// Duration is how long the tool execution took.
+	Duration time.Duration `json:"duration_ms,omitempty"`
+}
+
 // Outcome captures the result of a delegation (filled in after completion).
 type Outcome struct {
 	Status       string        `json:"status"` // success, error, timeout
@@ -74,9 +96,22 @@ type Event struct {
 	Timestamp time.Time `json:"timestamp"`
 	EventType EventType `json:"event_type"`
 
+	// Trace fields for end-to-end correlation
+	TraceID  string `json:"trace_id,omitempty"`  // correlates all events in a request chain
+	ParentID string `json:"parent_id,omitempty"` // immediate parent event (causality)
+
+	// Action classification for approval workflow
+	ActionClass ActionClass `json:"action_class,omitempty"` // read, write, destructive
+
+	// Hash chain for tamper evidence
+	PrevHash  string `json:"prev_hash,omitempty"`  // hash of previous event
+	EventHash string `json:"event_hash,omitempty"` // hash of this event
+
 	Session  Session   `json:"session"`
 	Input    Input     `json:"input"`
 	Output   *Output   `json:"output,omitempty"`
+	Tool     *ToolExecution `json:"tool,omitempty"`
+	Approval *Approval `json:"approval,omitempty"`
 	Decision *Decision `json:"decision,omitempty"`
 	Outcome  *Outcome  `json:"outcome,omitempty"`
 }

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 // agentCardResponse represents the relevant fields from /.well-known/agent-card.json
@@ -107,4 +109,43 @@ func checkAgentHealth(agentURL string) error {
 	}
 
 	return nil
+}
+
+// fetchAgentCard fetches the agent card and overrides the URL with the discovery URL.
+// This ensures the orchestrator uses the correct URL even if the agent advertises
+// a different URL (e.g., a Kubernetes service name when running locally).
+func fetchAgentCard(baseURL string) (*a2a.AgentCard, error) {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	cardURL := strings.TrimSuffix(baseURL, "/") + "/.well-known/agent-card.json"
+	resp, err := client.Get(cardURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch agent card: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("agent card returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agent card: %v", err)
+	}
+
+	var card a2a.AgentCard
+	if err := json.Unmarshal(body, &card); err != nil {
+		return nil, fmt.Errorf("failed to parse agent card: %v", err)
+	}
+
+	// Override the URL with our discovered URL to handle cases where the agent
+	// advertises a different URL (e.g., K8s service name vs localhost).
+	originalURL := card.URL
+	card.URL = strings.TrimSuffix(baseURL, "/") + "/invoke"
+
+	slog.Info("agent card URL override", "agent", card.Name, "original", originalURL, "override", card.URL)
+
+	return &card, nil
 }

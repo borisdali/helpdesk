@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -28,6 +29,10 @@ type Config struct {
 	SocketPath string
 	LogAll     bool
 	OutputJSON bool
+
+	// Verification mode
+	Verify bool   // Run chain integrity verification
+	DBPath string // Path to audit database (for verify mode)
 
 	// Webhook configuration
 	WebhookURL  string
@@ -60,6 +65,10 @@ func main() {
 	flag.StringVar(&cfg.SocketPath, "socket", "audit.sock", "Path to audit Unix socket")
 	flag.BoolVar(&cfg.LogAll, "log-all", false, "Log all events, not just alerts")
 	flag.BoolVar(&cfg.OutputJSON, "json", false, "Output events as JSON lines")
+
+	// Verification mode
+	flag.BoolVar(&cfg.Verify, "verify", false, "Verify audit chain integrity and exit")
+	flag.StringVar(&cfg.DBPath, "db", "audit.db", "Path to audit database (for verify mode)")
 
 	// Webhook
 	flag.StringVar(&cfg.WebhookURL, "webhook", "", "Webhook URL for alerts (Slack, PagerDuty, etc.)")
@@ -94,6 +103,12 @@ func main() {
 	// Allow SMTP password from environment
 	if cfg.SMTPPassword == "" {
 		cfg.SMTPPassword = os.Getenv("SMTP_PASSWORD")
+	}
+
+	// Handle verify mode
+	if cfg.Verify {
+		runVerifyMode(cfg)
+		return
 	}
 
 	slog.Info("starting auditor", "socket", cfg.SocketPath, "log_all", cfg.LogAll)
@@ -220,6 +235,60 @@ func main() {
 	}
 
 	slog.Info("auditor stopped (socket closed)")
+}
+
+// runVerifyMode verifies the integrity of the audit chain and exits.
+func runVerifyMode(cfg Config) {
+	fmt.Println("Audit Chain Verification")
+	fmt.Println("========================")
+	fmt.Printf("Database: %s\n\n", cfg.DBPath)
+
+	// Open the audit store
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: cfg.DBPath,
+	})
+	if err != nil {
+		fmt.Printf("ERROR: Failed to open database: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Verify the chain
+	ctx := context.Background()
+	status, err := store.VerifyIntegrity(ctx)
+	if err != nil {
+		fmt.Printf("ERROR: Verification failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display results
+	fmt.Printf("Total Events:   %d\n", status.TotalEvents)
+	fmt.Printf("Hashed Events:  %d\n", status.HashedEvents)
+	fmt.Printf("Legacy Events:  %d (no hash chain)\n", status.LegacyEvents)
+	fmt.Println()
+
+	if status.TotalEvents > 0 {
+		fmt.Printf("First Event:    %s\n", status.FirstEventID)
+		fmt.Printf("Last Event:     %s\n", status.LastEventID)
+		if status.LastHash != "" {
+			fmt.Printf("Last Hash:      %s...%s\n", status.LastHash[:16], status.LastHash[len(status.LastHash)-8:])
+		}
+		fmt.Println()
+	}
+
+	if status.Valid {
+		fmt.Println("Status: ✓ VALID")
+		fmt.Println("The audit chain has not been tampered with.")
+		os.Exit(0)
+	} else {
+		fmt.Println("Status: ✗ INVALID")
+		fmt.Printf("Chain broken at event index: %d\n", status.BrokenAt)
+		fmt.Printf("Error: %s\n", status.Error)
+		fmt.Println()
+		fmt.Println("⚠️  The audit chain may have been tampered with!")
+		fmt.Println("   Investigate the event at the broken link for potential issues.")
+		os.Exit(1)
+	}
 }
 
 // --- Notifiers ---
@@ -519,6 +588,7 @@ type Auditor struct {
 	agentErrorCount map[string]int
 	agentCallCount  map[string]int
 	sessionQueries  map[string][]string
+	lastEventHash   string // For chain integrity verification
 }
 
 // NewAuditor creates a new auditor with initialized state.
@@ -565,6 +635,9 @@ func (a *Auditor) Analyze(event *audit.Event) {
 	a.checkLongDuration(event)
 	a.checkRepeatedQueries(event)
 	a.checkEmptyReasoning(event)
+	a.checkDangerousAction(event)
+	a.checkApprovalStatus(event)
+	a.checkChainIntegrity(event)
 }
 
 // outputJSON prints the event as a JSON line.
@@ -636,15 +709,107 @@ func (a *Auditor) logEvent(event *audit.Event) {
 	}
 
 	fmt.Printf("\n[EVENT] %s\n", event.EventID)
+	if event.TraceID != "" {
+		fmt.Printf("  Trace:      %s\n", event.TraceID)
+	}
 	fmt.Printf("  Time:       %s\n", event.Timestamp.Format("15:04:05"))
+	fmt.Printf("  Type:       %s\n", event.EventType)
+	if event.ActionClass != "" {
+		actionIcon := actionClassIcon(event.ActionClass)
+		fmt.Printf("  Action:     %s %s\n", actionIcon, event.ActionClass)
+	}
 	fmt.Printf("  Session:    %s (user: %s)\n", event.Session.ID, event.Session.UserID)
 	fmt.Printf("  Agent:      %s (confidence: %.0f%%)\n", agent, confidence*100)
 	fmt.Printf("  Intent:     %s\n", intent)
 	if outcome != "" {
 		fmt.Printf("  Outcome:    %s (%s)\n", outcome, duration)
 	}
+	if event.Tool != nil {
+		fmt.Printf("  Tool:       %s\n", event.Tool.Name)
+		if len(event.Tool.Parameters) > 0 {
+			fmt.Printf("  Params:     %v\n", formatParams(event.Tool.Parameters))
+		}
+		if event.Tool.RawCommand != "" {
+			fmt.Printf("  Command:    %s\n", truncate(event.Tool.RawCommand, 100))
+		}
+	}
+	if event.Approval != nil {
+		approvalIcon := approvalStatusIcon(event.Approval.Status)
+		fmt.Printf("  Approval:   %s %s", approvalIcon, event.Approval.Status)
+		if event.Approval.ApprovedBy != "" {
+			fmt.Printf(" (by %s)", event.Approval.ApprovedBy)
+		}
+		if event.Approval.PolicyName != "" {
+			fmt.Printf(" [%s]", event.Approval.PolicyName)
+		}
+		fmt.Println()
+	}
 	if event.Decision != nil && len(event.Decision.ReasoningChain) > 0 {
 		fmt.Printf("  Reasoning:  %s\n", strings.Join(event.Decision.ReasoningChain, " -> "))
+	}
+	// Display hash chain info if present
+	if event.EventHash != "" {
+		fmt.Printf("  Hash:       %s...%s\n", event.EventHash[:12], event.EventHash[len(event.EventHash)-6:])
+		if event.PrevHash != "" && event.PrevHash != audit.GenesisHash {
+			fmt.Printf("  PrevHash:   %s...\n", event.PrevHash[:12])
+		}
+	}
+}
+
+// approvalStatusIcon returns an icon for the approval status.
+func approvalStatusIcon(status audit.ApprovalStatus) string {
+	switch status {
+	case audit.ApprovalApproved, audit.ApprovalAutoApproved:
+		return "[OK]"
+	case audit.ApprovalPending:
+		return "[??]"
+	case audit.ApprovalDenied:
+		return "[NO]"
+	default:
+		return "[--]"
+	}
+}
+
+// formatParams formats tool parameters for display.
+func formatParams(params map[string]any) string {
+	if len(params) == 0 {
+		return "{}"
+	}
+	var parts []string
+	for k, v := range params {
+		// Mask sensitive parameters
+		if isSensitiveParam(k) {
+			parts = append(parts, fmt.Sprintf("%s=***", k))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// isSensitiveParam returns true if the parameter name suggests sensitive data.
+func isSensitiveParam(name string) bool {
+	lower := strings.ToLower(name)
+	sensitive := []string{"password", "secret", "token", "key", "credential", "auth"}
+	for _, s := range sensitive {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionClassIcon returns an icon for the action class.
+func actionClassIcon(ac audit.ActionClass) string {
+	switch ac {
+	case audit.ActionRead:
+		return "[R]"
+	case audit.ActionWrite:
+		return "[W]"
+	case audit.ActionDestructive:
+		return "[D]"
+	default:
+		return "[?]"
 	}
 }
 
@@ -817,6 +982,76 @@ func (a *Auditor) checkEmptyReasoning(event *audit.Event) {
 		a.alert(AlertWarning, "delegation without reasoning chain", event,
 			"agent", event.Decision.Agent)
 	}
+}
+
+// checkDangerousAction alerts on write or destructive operations.
+func (a *Auditor) checkDangerousAction(event *audit.Event) {
+	switch event.ActionClass {
+	case audit.ActionWrite:
+		a.alert(AlertWarning, "write operation detected", event,
+			"action_class", string(event.ActionClass),
+			"trace_id", event.TraceID)
+	case audit.ActionDestructive:
+		a.alert(AlertCritical, "DESTRUCTIVE operation detected", event,
+			"action_class", string(event.ActionClass),
+			"trace_id", event.TraceID)
+	}
+}
+
+// checkApprovalStatus alerts on approval issues.
+func (a *Auditor) checkApprovalStatus(event *audit.Event) {
+	if event.Approval == nil {
+		return
+	}
+
+	switch event.Approval.Status {
+	case audit.ApprovalPending:
+		a.alert(AlertWarning, "action pending approval", event,
+			"approval_status", string(event.Approval.Status),
+			"requested_by", event.Approval.RequestedBy)
+	case audit.ApprovalDenied:
+		a.alert(AlertCritical, "action was DENIED", event,
+			"approval_status", string(event.Approval.Status),
+			"denied_by", event.Approval.ApprovedBy,
+			"reason", event.Approval.Justification)
+	}
+
+	// Check for expired approvals
+	if event.Approval.Status == audit.ApprovalApproved && !event.Approval.ExpiresAt.IsZero() {
+		if time.Now().After(event.Approval.ExpiresAt) {
+			a.alert(AlertWarning, "approval has expired", event,
+				"expired_at", event.Approval.ExpiresAt.Format(time.RFC3339))
+		}
+	}
+}
+
+// checkChainIntegrity verifies the hash chain in real-time.
+func (a *Auditor) checkChainIntegrity(event *audit.Event) {
+	// Skip if event has no hash chain (legacy event)
+	if event.EventHash == "" {
+		return
+	}
+
+	// Verify the event's own hash
+	if !audit.VerifyEventHash(event) {
+		a.alert(AlertCritical, "EVENT HASH MISMATCH - possible tampering!", event,
+			"event_hash", truncate(event.EventHash, 20),
+			"trace_id", event.TraceID)
+	}
+
+	// Verify chain continuity
+	if a.lastEventHash != "" && event.PrevHash != "" {
+		// PrevHash should match the last event's hash we saw
+		if event.PrevHash != a.lastEventHash {
+			a.alert(AlertCritical, "CHAIN LINK BROKEN - possible tampering!", event,
+				"prev_hash", truncate(event.PrevHash, 20),
+				"expected", truncate(a.lastEventHash, 20),
+				"trace_id", event.TraceID)
+		}
+	}
+
+	// Update last hash for next event
+	a.lastEventHash = event.EventHash
 }
 
 // AlertLevel represents the severity of an alert.
