@@ -56,6 +56,11 @@ See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on h
 ## Architecture
 See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configuration, API reference, and extension guide.
 
+## AI Governance 
+aiHelpDesk is proud to feature a sophisticated AI Governanance system,
+which rests on eight separate subsystems, including the full
+auditing. Please see [here](AIGOVERNANCE.md) for details.
+
 ## Testing
 aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework, see [here](testing/FAULT_INJECTION_TESTING.md).
 

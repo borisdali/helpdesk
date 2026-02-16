@@ -1,6 +1,6 @@
 # AI Governance Architecture
 
-Please refer to [here](ARHCITECTURE.md) for the general overview of
+Please refer to [here](ARCHITECTURE.md) for the general overview of
 aiHelpDesk Architecture. This page is dedicated to aiHelpDesk's very
 important subsystem that we refer to as AI Governance.
 
@@ -388,7 +388,7 @@ guardrails:
 
 ## Audit System
 
-The helpdesk includes a tamper-evident audit system that records all tool executions
+aiHelpDesk includes a tamper-evident audit system that records all tool executions
 across agents, providing accountability, compliance support, and security monitoring.
 The audit system uses hash chains to detect tampering with the audit log.
 
@@ -786,7 +786,7 @@ go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
 
 ## Troubleshooting
 
-Please refer to [here](ARHITECTURE.md#troubleshooting) for the general purpose
+Please refer to [here](ARCHITECTURE.md#troubleshooting) for the general purpose
 troubleshooting tips and known issues beyond AI Governance and Audit.
 This troubleshooting section is specific to just these two topics.
 
