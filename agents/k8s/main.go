@@ -9,11 +9,13 @@ import (
 	"os"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/google/uuid"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
 )
@@ -35,6 +37,24 @@ func main() {
 		} else {
 			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers))
 		}
+	}
+
+	// Initialize audit store if enabled
+	auditStore, err := agentutil.InitAuditStore(cfg)
+	if err != nil {
+		slog.Error("failed to initialize audit store", "err", err)
+		os.Exit(1)
+	}
+
+	// Create trace store for propagating trace_id from incoming requests
+	traceStore := &audit.CurrentTraceStore{}
+
+	if auditStore != nil {
+		defer auditStore.Close()
+		// Create tool auditor with trace store for dynamic trace_id
+		sessionID := "k8sagent_" + uuid.New().String()[:8]
+		toolAuditor = audit.NewToolAuditorWithTraceStore(auditStore, "k8s_agent", sessionID, traceStore)
+		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
@@ -83,7 +103,7 @@ func main() {
 		},
 	}
 
-	if err := agentutil.Serve(ctx, k8sAgent, cfg, cardOpts); err != nil {
+	if err := agentutil.ServeWithTracing(ctx, k8sAgent, cfg, traceStore, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

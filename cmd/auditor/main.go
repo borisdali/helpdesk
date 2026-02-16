@@ -49,6 +49,14 @@ type Config struct {
 	SyslogTag     string
 	SyslogTest    bool // Send test message on startup
 
+	// Security monitoring
+	AuditServiceURL    string        // URL of central audit service for periodic verification
+	VerifyInterval     time.Duration // How often to verify chain integrity (0 = disabled)
+	IncidentWebhookURL string        // URL to POST security incidents
+	MaxEventsPerMinute int           // Alert threshold for high-volume activity (0 = disabled)
+	AllowedHoursStart  int           // Start of allowed hours (0-23), -1 to disable
+	AllowedHoursEnd    int           // End of allowed hours (0-23)
+
 	// Email configuration
 	SMTPHost     string
 	SMTPPort     string
@@ -93,6 +101,14 @@ func main() {
 	flag.StringVar(&cfg.EmailFrom, "email-from", "", "Email sender address")
 	flag.StringVar(&cfg.EmailTo, "email-to", "", "Email recipients (comma-separated)")
 	flag.BoolVar(&cfg.EmailTest, "email-test", false, "Send test email on startup")
+
+	// Security monitoring
+	flag.StringVar(&cfg.AuditServiceURL, "audit-service", "", "URL of central audit service for periodic verification (e.g., http://localhost:1199)")
+	flag.DurationVar(&cfg.VerifyInterval, "verify-interval", 0, "How often to verify chain integrity (e.g., 5m, 1h). 0 = disabled")
+	flag.StringVar(&cfg.IncidentWebhookURL, "incident-webhook", "", "URL to POST security incidents for automated response")
+	flag.IntVar(&cfg.MaxEventsPerMinute, "max-events-per-minute", 0, "Alert on high event volume (0 = disabled)")
+	flag.IntVar(&cfg.AllowedHoursStart, "allowed-hours-start", -1, "Start of allowed operating hours (0-23), -1 = disabled")
+	flag.IntVar(&cfg.AllowedHoursEnd, "allowed-hours-end", -1, "End of allowed operating hours (0-23)")
 
 	// Initialize logging first (strips --log-level from args)
 	args := logging.InitLogging(os.Args[1:])
@@ -212,6 +228,12 @@ func main() {
 	slog.Info("connected to audit socket, monitoring events...")
 
 	auditor := NewAuditor(cfg, notifiers, metrics)
+
+	// Start periodic chain verification if configured
+	if cfg.VerifyInterval > 0 && cfg.AuditServiceURL != "" {
+		go auditor.runPeriodicVerification(cfg.AuditServiceURL, cfg.VerifyInterval)
+	}
+
 	scanner := bufio.NewScanner(conn)
 
 	for scanner.Scan() {
@@ -589,6 +611,25 @@ type Auditor struct {
 	agentCallCount  map[string]int
 	sessionQueries  map[string][]string
 	lastEventHash   string // For chain integrity verification
+	lastEventTime   time.Time
+	lastEventID     int64 // Sequence tracking
+
+	// Security monitoring
+	eventsThisMinute int
+	minuteStart      time.Time
+	securityAlerts   []SecurityAlert // Recent security alerts for incident creation
+	mu               sync.Mutex
+}
+
+// SecurityAlert represents a security-related alert for incident creation.
+type SecurityAlert struct {
+	Type      string    `json:"type"`
+	Severity  string    `json:"severity"`
+	Message   string    `json:"message"`
+	EventID   string    `json:"event_id"`
+	TraceID   string    `json:"trace_id"`
+	Details   map[string]any `json:"details"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // NewAuditor creates a new auditor with initialized state.
@@ -601,6 +642,8 @@ func NewAuditor(cfg Config, notifiers []Notifier, metrics *Metrics) *Auditor {
 		agentErrorCount: make(map[string]int),
 		agentCallCount:  make(map[string]int),
 		sessionQueries:  make(map[string][]string),
+		minuteStart:     time.Now(),
+		securityAlerts:  make([]SecurityAlert, 0),
 	}
 }
 
@@ -638,6 +681,12 @@ func (a *Auditor) Analyze(event *audit.Event) {
 	a.checkDangerousAction(event)
 	a.checkApprovalStatus(event)
 	a.checkChainIntegrity(event)
+
+	// Security-specific checks
+	a.checkHighVolume(event)
+	a.checkOffHours(event)
+	a.checkUnauthorizedDestructive(event)
+	a.checkTimestampGap(event)
 }
 
 // outputJSON prints the event as a JSON line.
@@ -1058,6 +1107,260 @@ func (a *Auditor) checkChainIntegrity(event *audit.Event) {
 
 	// Update last hash for next event
 	a.lastEventHash = event.EventHash
+}
+
+// checkHighVolume detects unusually high event rates (potential attack or data exfiltration).
+func (a *Auditor) checkHighVolume(event *audit.Event) {
+	if a.cfg.MaxEventsPerMinute <= 0 {
+		return
+	}
+
+	var shouldAlert bool
+	var eventCount int
+
+	a.mu.Lock()
+	now := time.Now()
+	if now.Sub(a.minuteStart) >= time.Minute {
+		// Reset counter for new minute
+		a.eventsThisMinute = 0
+		a.minuteStart = now
+	}
+
+	a.eventsThisMinute++
+	eventCount = a.eventsThisMinute
+
+	// Only alert once per minute (when we first exceed threshold)
+	if a.eventsThisMinute == a.cfg.MaxEventsPerMinute+1 {
+		shouldAlert = true
+	}
+	a.mu.Unlock()
+
+	if shouldAlert {
+		a.recordSecurityAlert("high_volume", AlertCritical, "High volume activity detected - possible attack or data exfiltration", event,
+			"events_per_minute", eventCount,
+			"threshold", a.cfg.MaxEventsPerMinute)
+	}
+}
+
+// checkOffHours detects activity outside allowed operating hours.
+func (a *Auditor) checkOffHours(event *audit.Event) {
+	if a.cfg.AllowedHoursStart < 0 || a.cfg.AllowedHoursEnd < 0 {
+		return
+	}
+
+	// Convert to local time for off-hours checking
+	localTime := event.Timestamp.Local()
+	hour := localTime.Hour()
+	inAllowedHours := false
+
+	if a.cfg.AllowedHoursStart <= a.cfg.AllowedHoursEnd {
+		// Simple range (e.g., 9-17)
+		inAllowedHours = hour >= a.cfg.AllowedHoursStart && hour < a.cfg.AllowedHoursEnd
+	} else {
+		// Overnight range (e.g., 22-6)
+		inAllowedHours = hour >= a.cfg.AllowedHoursStart || hour < a.cfg.AllowedHoursEnd
+	}
+
+	if !inAllowedHours {
+		a.recordSecurityAlert("off_hours", AlertWarning, "Activity detected outside allowed hours", event,
+			"event_hour_local", hour,
+			"allowed_start", a.cfg.AllowedHoursStart,
+			"allowed_end", a.cfg.AllowedHoursEnd)
+	}
+}
+
+// checkUnauthorizedDestructive detects destructive operations without proper approval.
+func (a *Auditor) checkUnauthorizedDestructive(event *audit.Event) {
+	if event.ActionClass != audit.ActionDestructive {
+		return
+	}
+
+	// Check if approval exists and is valid
+	if event.Approval == nil {
+		a.recordSecurityAlert("unauthorized_destructive", AlertCritical,
+			"DESTRUCTIVE operation without approval record", event,
+			"action_class", string(event.ActionClass))
+		return
+	}
+
+	if event.Approval.Status != audit.ApprovalApproved && event.Approval.Status != audit.ApprovalAutoApproved {
+		a.recordSecurityAlert("unauthorized_destructive", AlertCritical,
+			"DESTRUCTIVE operation not approved", event,
+			"action_class", string(event.ActionClass),
+			"approval_status", string(event.Approval.Status))
+	}
+}
+
+// checkTimestampGap detects suspicious gaps in event timestamps (potential deletion).
+func (a *Auditor) checkTimestampGap(event *audit.Event) {
+	if a.lastEventTime.IsZero() {
+		a.lastEventTime = event.Timestamp
+		return
+	}
+
+	gap := event.Timestamp.Sub(a.lastEventTime)
+
+	// Negative gap indicates time manipulation or out-of-order events
+	if gap < -time.Second {
+		a.recordSecurityAlert("timestamp_anomaly", AlertCritical,
+			"Event timestamp is before previous event - possible manipulation", event,
+			"gap", gap.String(),
+			"previous_time", a.lastEventTime.Format(time.RFC3339))
+	}
+
+	// Large gap might indicate deleted events (only flag if > 1 hour and during business hours)
+	if gap > time.Hour {
+		hour := event.Timestamp.Hour()
+		if hour >= 8 && hour <= 18 { // During typical working hours
+			a.recordSecurityAlert("timestamp_gap", AlertWarning,
+				"Large gap between events - possible event deletion", event,
+				"gap", gap.String(),
+				"previous_time", a.lastEventTime.Format(time.RFC3339))
+		}
+	}
+
+	a.lastEventTime = event.Timestamp
+}
+
+// recordSecurityAlert records a security alert and optionally sends to incident webhook.
+func (a *Auditor) recordSecurityAlert(alertType string, level AlertLevel, message string, event *audit.Event, keyvals ...any) {
+	// Build details map
+	details := make(map[string]any)
+	for i := 0; i < len(keyvals)-1; i += 2 {
+		if key, ok := keyvals[i].(string); ok {
+			details[key] = keyvals[i+1]
+		}
+	}
+
+	secAlert := SecurityAlert{
+		Type:      alertType,
+		Severity:  string(level),
+		Message:   message,
+		EventID:   event.EventID,
+		TraceID:   event.TraceID,
+		Details:   details,
+		Timestamp: time.Now(),
+	}
+
+	// Store alert
+	a.mu.Lock()
+	a.securityAlerts = append(a.securityAlerts, secAlert)
+	// Keep only last 100 alerts
+	if len(a.securityAlerts) > 100 {
+		a.securityAlerts = a.securityAlerts[1:]
+	}
+	a.mu.Unlock()
+
+	// Send to incident webhook if configured
+	if a.cfg.IncidentWebhookURL != "" && level == AlertCritical {
+		go a.sendSecurityIncident(secAlert)
+	}
+
+	// Also send through normal alert mechanism
+	a.alert(level, message, event, keyvals...)
+}
+
+// sendSecurityIncident POSTs a security incident to the configured webhook.
+func (a *Auditor) sendSecurityIncident(alert SecurityAlert) {
+	incident := map[string]any{
+		"type":        "security_incident",
+		"alert_type":  alert.Type,
+		"severity":    alert.Severity,
+		"message":     alert.Message,
+		"event_id":    alert.EventID,
+		"trace_id":    alert.TraceID,
+		"details":     alert.Details,
+		"timestamp":   alert.Timestamp.Format(time.RFC3339),
+		"source":      "audit_monitor",
+	}
+
+	body, err := json.Marshal(incident)
+	if err != nil {
+		slog.Error("failed to marshal security incident", "err", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(a.cfg.IncidentWebhookURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		slog.Error("failed to send security incident", "url", a.cfg.IncidentWebhookURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		slog.Error("security incident webhook returned error", "status", resp.StatusCode)
+	} else {
+		slog.Info("security incident sent", "type", alert.Type, "severity", alert.Severity)
+	}
+}
+
+// runPeriodicVerification periodically verifies the audit chain integrity.
+func (a *Auditor) runPeriodicVerification(auditServiceURL string, interval time.Duration) {
+	slog.Info("starting periodic chain verification", "interval", interval, "url", auditServiceURL)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Run once at startup
+	a.verifyChainFromService(auditServiceURL)
+
+	for range ticker.C {
+		a.verifyChainFromService(auditServiceURL)
+	}
+}
+
+// verifyChainFromService calls the audit service's /v1/verify endpoint.
+func (a *Auditor) verifyChainFromService(auditServiceURL string) {
+	url := strings.TrimSuffix(auditServiceURL, "/") + "/v1/verify"
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		slog.Error("failed to verify chain", "url", url, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("chain verification request failed", "status", resp.StatusCode)
+		return
+	}
+
+	var status audit.ChainStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		slog.Error("failed to parse verification response", "err", err)
+		return
+	}
+
+	if status.Valid {
+		slog.Info("periodic chain verification passed",
+			"total_events", status.TotalEvents,
+			"hashed_events", status.HashedEvents,
+			"legacy_events", status.LegacyEvents)
+	} else {
+		// Chain is broken - this is a critical security alert
+		slog.Error("CHAIN INTEGRITY VIOLATION DETECTED",
+			"broken_at", status.BrokenAt,
+			"error", status.Error,
+			"total_events", status.TotalEvents)
+
+		// Create a synthetic event for alerting
+		syntheticEvent := &audit.Event{
+			EventID:   fmt.Sprintf("verify_%d", time.Now().Unix()),
+			Timestamp: time.Now(),
+			EventType: "security_alert",
+			TraceID:   "periodic_verification",
+		}
+
+		a.recordSecurityAlert("chain_tampering", AlertCritical,
+			"AUDIT CHAIN TAMPERING DETECTED - Periodic verification failed",
+			syntheticEvent,
+			"broken_at_index", status.BrokenAt,
+			"error", status.Error,
+			"total_events", status.TotalEvents,
+			"hashed_events", status.HashedEvents)
+	}
 }
 
 // AlertLevel represents the severity of an alert.

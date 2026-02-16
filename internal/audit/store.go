@@ -191,12 +191,12 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		event.Timestamp = time.Now().UTC()
 	}
 
-	// Compute hash chain
+	// Compute hash chain - hold lock through DB write to prevent race conditions
 	s.hashMu.Lock()
+	defer s.hashMu.Unlock()
+
 	event.PrevHash = s.lastHash
 	event.EventHash = ComputeEventHash(event)
-	s.lastHash = event.EventHash
-	s.hashMu.Unlock()
 
 	rawJSON, err := json.Marshal(event)
 	if err != nil {
@@ -279,6 +279,9 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 	if err != nil {
 		return fmt.Errorf("insert event: %w", err)
 	}
+
+	// Update lastHash only after successful write
+	s.lastHash = event.EventHash
 
 	// Notify listeners.
 	s.notifyListeners(rawJSON)

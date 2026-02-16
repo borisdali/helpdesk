@@ -7,9 +7,15 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/adk/tool"
+
+	"helpdesk/internal/audit"
 )
+
+// toolAuditor is set during initialization if auditing is enabled.
+var toolAuditor *audit.ToolAuditor
 
 // resolveNamespace checks if the input looks like a database name from the
 // infrastructure config and returns the associated K8s namespace. If not found
@@ -118,19 +124,53 @@ func diagnoseKubectlError(output string) string {
 // If context is non-empty, it's passed as --context to kubectl.
 // The provided ctx controls cancellation — if it expires, kubectl is killed.
 func runKubectl(ctx context.Context, kubeContext string, args ...string) (string, error) {
+	return runKubectlWithToolName(ctx, kubeContext, "", args...)
+}
+
+// runKubectlWithToolName executes a kubectl command with auditing support.
+// toolName is used for audit logging; if empty, no audit is recorded.
+func runKubectlWithToolName(ctx context.Context, kubeContext, toolName string, args ...string) (string, error) {
+	start := time.Now()
+
 	prefix := []string{"--request-timeout=10s"}
 	if kubeContext != "" {
 		prefix = append(prefix, "--context", kubeContext)
 	}
-	args = append(prefix, args...)
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	fullArgs := append(prefix, args...)
+	cmd := exec.CommandContext(ctx, "kubectl", fullArgs...)
 	output, err := cmd.CombinedOutput()
+	duration := time.Since(start)
+
+	// Build raw command for audit logging
+	rawCommand := "kubectl " + strings.Join(fullArgs, " ")
+
+	// Audit the tool execution
+	if toolAuditor != nil && toolName != "" {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       toolName,
+			Parameters: map[string]any{"context": kubeContext, "args": args},
+			RawCommand: rawCommand,
+		}, audit.ToolResult{
+			Output: truncateForAudit(string(output), 500),
+			Error:  errMsg,
+		}, duration)
+	}
+
+	// Log successful tool execution at INFO level
+	if err == nil && toolName != "" {
+		slog.Info("tool ok", "name", toolName, "ms", duration.Milliseconds())
+	}
+
 	if err != nil {
 		out := strings.TrimSpace(string(output))
 		if out == "" {
 			out = "(no output from kubectl)"
 		}
-		slog.Error("kubectl command failed", "args", args, "err", err, "output", out)
+		slog.Error("kubectl command failed", "tool", toolName, "args", args, "ms", duration.Milliseconds(), "err", err)
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("kubectl timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
 		}
@@ -140,6 +180,43 @@ func runKubectl(ctx context.Context, kubeContext string, args ...string) (string
 		return "", fmt.Errorf("kubectl failed: %v\nOutput: %s", err, out)
 	}
 	return string(output), nil
+}
+
+// truncateForAudit truncates a string for audit logging.
+func truncateForAudit(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// recordClientGoAudit records audit events for client-go based operations.
+func recordClientGoAudit(ctx context.Context, toolName string, params map[string]any, resultCount int, err error, duration time.Duration) {
+	// Log at INFO level
+	if err == nil {
+		slog.Info("tool ok", "name", toolName, "count", resultCount, "ms", duration.Milliseconds())
+	} else {
+		slog.Error("tool failed", "name", toolName, "ms", duration.Milliseconds(), "err", err)
+	}
+
+	// Record to audit store
+	if toolAuditor == nil {
+		return
+	}
+
+	var errMsg string
+	if err != nil {
+		errMsg = err.Error()
+	}
+
+	toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+		Name:       toolName,
+		Parameters: params,
+		RawCommand: fmt.Sprintf("client-go: %s", toolName),
+	}, audit.ToolResult{
+		Output: fmt.Sprintf("returned %d items", resultCount),
+		Error:  errMsg,
+	}, duration)
 }
 
 // KubectlResult is the standard output type for all kubectl tools.
@@ -157,8 +234,19 @@ type GetPodsArgs struct {
 func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
 	// Resolve database name to namespace/context if applicable
 	namespace := resolveNamespace(args.Namespace)
-	context := resolveContext(args.Context)
-	return fetchPods(ctx, context, namespace, args.Labels)
+	kubeContext := resolveContext(args.Context)
+
+	start := time.Now()
+	result, err := fetchPods(ctx, kubeContext, namespace, args.Labels)
+	duration := time.Since(start)
+
+	recordClientGoAudit(ctx, "get_pods", map[string]any{
+		"context":   kubeContext,
+		"namespace": namespace,
+		"labels":    args.Labels,
+	}, result.Count, err, duration)
+
+	return result, err
 }
 
 // GetServiceArgs defines arguments for the get_service tool.
@@ -171,8 +259,20 @@ type GetServiceArgs struct {
 
 func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
 	namespace := resolveNamespace(args.Namespace)
-	context := resolveContext(args.Context)
-	return fetchServices(ctx, context, namespace, args.ServiceName, args.ServiceType)
+	kubeContext := resolveContext(args.Context)
+
+	start := time.Now()
+	result, err := fetchServices(ctx, kubeContext, namespace, args.ServiceName, args.ServiceType)
+	duration := time.Since(start)
+
+	recordClientGoAudit(ctx, "get_service", map[string]any{
+		"context":      kubeContext,
+		"namespace":    namespace,
+		"service_name": args.ServiceName,
+		"service_type": args.ServiceType,
+	}, result.Count, err, duration)
+
+	return result, err
 }
 
 // DescribeServiceArgs defines arguments for the describe_service tool.
@@ -191,7 +291,7 @@ func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlRes
 		cmdArgs = append(cmdArgs, "-n", namespace)
 	}
 
-	output, err := runKubectl(ctx, kubeContext, cmdArgs...)
+	output, err := runKubectlWithToolName(ctx, kubeContext, "describe_service", cmdArgs...)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("error describing service: %v", err)
 	}
@@ -208,7 +308,18 @@ type GetEndpointsArgs struct {
 func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
 	namespace := resolveNamespace(args.Namespace)
 	kubeContext := resolveContext(args.Context)
-	return fetchEndpoints(ctx, kubeContext, namespace, args.EndpointName)
+
+	start := time.Now()
+	result, err := fetchEndpoints(ctx, kubeContext, namespace, args.EndpointName)
+	duration := time.Since(start)
+
+	recordClientGoAudit(ctx, "get_endpoints", map[string]any{
+		"context":       kubeContext,
+		"namespace":     namespace,
+		"endpoint_name": args.EndpointName,
+	}, result.Count, err, duration)
+
+	return result, err
 }
 
 // GetEventsArgs defines arguments for the get_events tool.
@@ -222,7 +333,19 @@ type GetEventsArgs struct {
 func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
 	namespace := resolveNamespace(args.Namespace)
 	kubeContext := resolveContext(args.Context)
-	return fetchEvents(ctx, kubeContext, namespace, args.ResourceName, args.EventType)
+
+	start := time.Now()
+	result, err := fetchEvents(ctx, kubeContext, namespace, args.ResourceName, args.EventType)
+	duration := time.Since(start)
+
+	recordClientGoAudit(ctx, "get_events", map[string]any{
+		"context":       kubeContext,
+		"namespace":     namespace,
+		"resource_name": args.ResourceName,
+		"event_type":    args.EventType,
+	}, result.Count, err, duration)
+
+	return result, err
 }
 
 // GetPodLogsArgs defines arguments for the get_pod_logs tool.
@@ -258,7 +381,7 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 		cmdArgs = append(cmdArgs, "--previous")
 	}
 
-	output, err := runKubectl(ctx, kubeContext, cmdArgs...)
+	output, err := runKubectlWithToolName(ctx, kubeContext, "get_pod_logs", cmdArgs...)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", err)
 	}
@@ -284,7 +407,7 @@ func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, err
 		cmdArgs = append(cmdArgs, "-n", namespace)
 	}
 
-	output, err := runKubectl(ctx, kubeContext, cmdArgs...)
+	output, err := runKubectlWithToolName(ctx, kubeContext, "describe_pod", cmdArgs...)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("error describing pod: %v", err)
 	}
@@ -299,5 +422,15 @@ type GetNodesArgs struct {
 
 func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
 	kubeContext := resolveContext(args.Context)
-	return fetchNodes(ctx, kubeContext, args.ShowLabels)
+
+	start := time.Now()
+	result, err := fetchNodes(ctx, kubeContext, args.ShowLabels)
+	duration := time.Since(start)
+
+	recordClientGoAudit(ctx, "get_nodes", map[string]any{
+		"context":     kubeContext,
+		"show_labels": args.ShowLabels,
+	}, result.Count, err, duration)
+
+	return result, err
 }
