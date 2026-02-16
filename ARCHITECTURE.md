@@ -345,6 +345,10 @@ helpdesk/
 │   │   ├── hash.go          # SHA-256 hash chain computation/verification
 │   │   ├── tool_audit.go    # ToolAuditor wrapper for agent tool calls
 │   │   └── trace.go         # Trace ID store for request correlation
+│   ├── policy/              # AI Governance policy engine
+│   │   ├── types.go         # Policy, Rule, Condition structs
+│   │   ├── loader.go        # YAML policy file loading
+│   │   └── engine.go        # Policy evaluation logic
 │   ├── discovery/           # Shared agent card discovery
 │   │   └── discovery.go     # Fetch and parse /.well-known/agent-card.json
 │   ├── model/anthropic.go   # Anthropic LLM adapter
@@ -412,7 +416,7 @@ The helpdesk sub-agents can be called directly by upstream programmatic agents
 (e.g., an observability agent, a CI/CD pipeline, or a chatbot). The Orchestrator
 is a UX layer for humans — external agents should bypass it and talk A2A to the
 sub-agents directly. There are two integration paths: native A2A and the REST
-gateway.
+Gateway.
 
 ### Direct A2A Integration
 
@@ -481,7 +485,7 @@ failures are logged but do not affect the tool result.
 
 ### REST Gateway
 
-For consumers that prefer plain REST over JSON-RPC, the optional REST gateway
+For consumers that prefer plain REST API over JSON-RPC, the optional REST Gateway
 (`cmd/gateway/`) provides HTTP endpoints that proxy to the A2A sub-agents:
 
 | Method | Endpoint              | Description                              |
@@ -493,13 +497,13 @@ For consumers that prefer plain REST over JSON-RPC, the optional REST gateway
 | POST   | `/api/v1/db/{tool}`   | Call database agent tool                 |
 | POST   | `/api/v1/k8s/{tool}`  | Call K8s agent tool                      |
 
-Start the gateway:
+Start the Gateway:
 ```bash
 HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104" \
   go run ./cmd/gateway/
 ```
 
-Example REST calls:
+Example REST API calls:
 ```bash
 # List available agents
 curl -s http://localhost:8080/api/v1/agents | jq '.[].name'
@@ -521,407 +525,14 @@ curl -s http://localhost:8080/api/v1/incidents
 ```
 
 **Note**: Each REST call triggers an LLM invocation in the sub-agent, which adds
-latency and cost compared to direct A2A calls. The REST gateway is best suited
+latency and cost compared to direct A2A calls. The REST Gateway is best suited
 for integration testing, simple automation, and consumers that don't implement
 A2A natively.
 
-## Audit System
-
-The helpdesk includes a tamper-evident audit system that records all tool executions
-across agents, providing accountability, compliance support, and security monitoring.
-The audit system uses hash chains to detect tampering with the audit log.
-
-### Architecture
-
-```
-                                    ┌─────────────────────┐
-                                    │   auditor (CLI)     │
-                                    │ Real-time monitor   │
-                                    │ • Security alerts   │
-                                    │ • Chain verification│
-                                    └──────────┬──────────┘
-                                               │ Unix socket
-                                               │ notifications
-    ┌───────────────┐                          ▼
-    │  database     │──────┐         ┌─────────────────────┐
-    │  agent        │      │         │    auditd service   │
-    │  :1100        │      │ HTTP    │    :1199            │
-    └───────────────┘      │         │                     │
-                           ├────────►│ • SQLite storage    │
-    ┌───────────────┐      │         │ • Hash chain        │
-    │  k8s          │──────┤         │ • Socket notify     │
-    │  agent        │      │         │ • Chain verification│
-    │  :1102        │      │         └─────────────────────┘
-    └───────────────┘      │                   │
-                           │                   ▼
-    ┌───────────────┐      │         ┌─────────────────────┐
-    │  incident     │──────┘         │   audit.db (SQLite) │
-    │  agent        │                │   • audit_events    │
-    │  :1104        │                │   • Hash chain      │
-    └───────────────┘                └─────────────────────┘
-```
-
-### Components
-
-| Component | Location | Description |
-|-----------|----------|-------------|
-| `auditd` | `cmd/auditd/` | Central audit service with HTTP API and SQLite storage |
-| `auditor` | `cmd/auditor/` | Real-time monitoring CLI with security alerting |
-| `audit` package | `internal/audit/` | Core audit types, hash chain, and tool auditor |
-
-### Hash Chain Integrity
-
-Each audit event includes cryptographic hashes that form a chain:
-
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Event 1     │     │  Event 2     │     │  Event 3     │
-│              │     │              │     │              │
-│ prev_hash:   │     │ prev_hash:   │     │ prev_hash:   │
-│  genesis     │────►│  hash(E1)    │────►│  hash(E2)    │
-│              │     │              │     │              │
-│ event_hash:  │     │ event_hash:  │     │ event_hash:  │
-│  SHA256(E1)  │     │  SHA256(E2)  │     │  SHA256(E3)  │
-└──────────────┘     └──────────────┘     └──────────────┘
-```
-
-- **prev_hash**: Hash of the previous event (genesis hash for the first event)
-- **event_hash**: SHA-256 hash of the event's canonical JSON representation
-
-If an attacker modifies any event in the database:
-1. The `event_hash` will no longer match the event content
-2. The next event's `prev_hash` will no longer match
-3. Chain verification will detect the break
-
-### Event Schema
-
-Audit events capture tool executions with full context:
-
-| Field | Description |
-|-------|-------------|
-| `event_id` | Unique identifier (e.g., `tool_a1b2c3d4`) |
-| `timestamp` | UTC timestamp in RFC3339Nano format |
-| `event_type` | Type of event (`tool_execution`, `delegation`, etc.) |
-| `trace_id` | End-to-end correlation ID from the orchestrator |
-| `action_class` | Classification: `read`, `write`, or `destructive` |
-| `session_id` | Agent session identifier |
-| `tool.name` | Tool that was executed |
-| `tool.parameters` | Input parameters to the tool |
-| `tool.raw_command` | Actual command executed (SQL query, kubectl command) |
-| `tool.result` | Truncated output (first 500 chars) |
-| `tool.error` | Error message if the tool failed |
-| `tool.duration` | Execution time |
-| `outcome.status` | `success` or `error` |
-| `prev_hash` | Hash of previous event in chain |
-| `event_hash` | SHA-256 hash of this event |
-
-### Action Classification
-
-Tools are classified by their potential impact:
-
-| Action Class | Description | Examples |
-|--------------|-------------|----------|
-| `read` | Read-only operations | `get_pods`, `get_database_info`, `get_active_connections` |
-| `write` | State-modifying operations | `create_incident_bundle` |
-| `destructive` | Potentially destructive operations | (Reserved for future tools) |
-
-### Trace ID Propagation
-
-The `trace_id` flows from the orchestrator through sub-agents for end-to-end
-correlation:
-
-1. User sends a query to the orchestrator
-2. Orchestrator generates a `trace_id` and passes it in the A2A request metadata
-3. Sub-agents extract `trace_id` via `TraceMiddleware` and include it in audit events
-4. All events from a single user query share the same `trace_id`
-
-This enables querying all tool executions triggered by a single user request:
-
-```bash
-# Query all events for a specific trace
-curl "http://localhost:1199/api/events?trace_id=abc123"
-```
-
-### Auditd Service (cmd/auditd/)
-
-The central audit service provides:
-
-- **HTTP API** for recording events and querying the audit log
-- **SQLite storage** with WAL mode for concurrent reads
-- **Unix socket** for real-time event notifications
-- **Hash chain** maintenance and verification
-
-#### API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/events` | Record a new audit event |
-| GET | `/api/events` | Query events with filters |
-| GET | `/api/verify` | Verify hash chain integrity |
-| GET | `/health` | Health check |
-
-#### Query Filters
-
-```bash
-# Recent events
-curl "http://localhost:1199/api/events?limit=10"
-
-# Events by agent
-curl "http://localhost:1199/api/events?agent=k8s_agent"
-
-# Events by trace ID
-curl "http://localhost:1199/api/events?trace_id=abc123"
-
-# Events by action class
-curl "http://localhost:1199/api/events?action_class=destructive"
-
-# Events by tool name
-curl "http://localhost:1199/api/events?tool_name=get_pods"
-
-# Events since a timestamp
-curl "http://localhost:1199/api/events?since=2026-01-01T00:00:00Z"
-```
-
-### Auditor CLI (cmd/auditor/)
-
-The auditor provides real-time monitoring and security alerting:
-
-```bash
-# Start the auditor
-go run ./cmd/auditor/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --audit-url http://localhost:1199 \
-  --verify-interval 30s
-```
-
-#### Security Detection
-
-The auditor monitors for suspicious patterns:
-
-| Detection | Description | Trigger |
-|-----------|-------------|---------|
-| High Volume | Burst of activity | >100 events/minute (configurable) |
-| Off-Hours | Activity outside business hours | Events outside 6 AM - 10 PM local time |
-| Unauthorized Destructive | Destructive ops without approval | `destructive` action without `approved` status |
-| Timestamp Gap | Suspicious time jumps | Events with timestamps far in the past/future |
-| Chain Tampering | Hash chain breaks | Periodic verification detects modified events |
-
-#### Webhook Alerts
-
-Security incidents can be sent to an external webhook:
-
-```bash
-go run ./cmd/auditor/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --incident-webhook https://alerts.example.com/hook
-```
-
-Webhook payload:
-```json
-{
-  "type": "high_volume",
-  "timestamp": "2026-01-15T14:30:00Z",
-  "agent": "k8s_agent",
-  "count": 150,
-  "threshold": 100,
-  "message": "High event volume detected: 150 events in the last minute"
-}
-```
-
-### Environment Variables
-
-#### Auditd Service
-
-```bash
-# Listen address (default: localhost:1199)
-export HELPDESK_AUDITD_ADDR="0.0.0.0:1199"
-
-# SQLite database path (default: audit.db)
-export HELPDESK_AUDIT_DB="/var/lib/helpdesk/audit.db"
-
-# Unix socket for real-time notifications
-export HELPDESK_AUDIT_SOCKET="/tmp/helpdesk-audit.sock"
-```
-
-#### Agent Audit Configuration
-
-```bash
-# Enable auditing for an agent (point to auditd service)
-export HELPDESK_AUDIT_URL="http://localhost:1199"
-
-# Note: Each agent automatically generates a unique session ID
-```
-
-#### Auditor CLI
-
-```bash
-# Unix socket to connect to for real-time events
-# (matches HELPDESK_AUDIT_SOCKET in auditd)
---socket /tmp/helpdesk-audit.sock
-
-# Auditd URL for chain verification
---audit-url http://localhost:1199
-
-# Chain verification interval
---verify-interval 30s
-
-# Webhook URL for security incidents
---incident-webhook https://alerts.example.com/hook
-
-# Activity thresholds
---max-events-per-minute 100
---allowed-hours-start 6
---allowed-hours-end 22
-```
-
-### Running the Audit System
-
-#### Start Auditd
-
-```bash
-# Terminal — audit service
-HELPDESK_AUDIT_DB=/tmp/helpdesk/audit.db \
-HELPDESK_AUDIT_SOCKET=/tmp/helpdesk-audit.sock \
-  go run ./cmd/auditd/
-```
-
-#### Start Agents with Auditing
-
-```bash
-# Start agents with audit enabled
-HELPDESK_AUDIT_URL="http://localhost:1199" go run ./agents/database/
-HELPDESK_AUDIT_URL="http://localhost:1199" go run ./agents/k8s/
-```
-
-#### Start the Auditor
-
-```bash
-# Real-time monitoring with security alerts
-go run ./cmd/auditor/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --audit-url http://localhost:1199 \
-  --verify-interval 30s
-```
-
-### Verifying Audit Integrity
-
-#### Via API
-
-```bash
-curl -s http://localhost:1199/api/verify | jq
-```
-
-Response:
-```json
-{
-  "verified": true,
-  "total_events": 150,
-  "broken_links": [],
-  "first_event": "evt_a1b2c3d4",
-  "last_event": "evt_z9y8x7w6"
-}
-```
-
-#### Via SQL (Manual)
-
-```sql
--- Check for broken hash chain links
-SELECT
-  e1.event_id as event,
-  e1.prev_hash,
-  e2.event_hash as expected_prev,
-  CASE WHEN e1.prev_hash = e2.event_hash THEN 'OK' ELSE 'BROKEN' END as status
-FROM audit_events e1
-LEFT JOIN audit_events e2 ON e1.id = e2.id + 1
-WHERE e1.id > 1
-ORDER BY e1.id;
-```
-
-### Testing
-
-Generate test events to verify the audit system:
-
-```bash
-# Send events directly to auditd
-for i in {1..10}; do
-  curl -X POST http://localhost:1199/api/events \
-    -H "Content-Type: application/json" \
-    -d '{
-      "event_type": "tool_execution",
-      "session": {"id": "test_session"},
-      "tool": {
-        "name": "test_tool",
-        "raw_command": "SELECT 1",
-        "agent": "test_agent"
-      }
-    }'
-  sleep 0.1
-done
-
-# Verify the auditor receives them via the Unix socket
-# (auditor should log each event as it arrives)
-```
-
-### Security Responder Bot (cmd/secbot/)
-
-The `secbot` demonstrates automated security incident response. It monitors the
-audit stream for critical security events and automatically creates incident
-bundles for investigation.
-
-```
-┌─────────────────────┐
-│   Audit Socket      │
-│   (from auditd)     │
-└──────────┬──────────┘
-           │ subscribe
-           ▼
-┌─────────────────────┐         ┌─────────────────────┐
-│   secbot            │  POST   │   REST Gateway      │
-│   • Detect alerts   │────────►│   /api/v1/incidents │
-│   • Enforce cooldown│         └──────────┬──────────┘
-│   • Receive callback│                    │ A2A
-└─────────────────────┘                    ▼
-                               ┌─────────────────────┐
-                               │   incident_agent    │
-                               │   Create bundle     │
-                               └─────────────────────┘
-```
-
-**Key features:**
-- Monitors audit socket for security events
-- Detects: hash mismatches, unauthorized destructive ops, injection attempts
-- Creates incident bundles via REST gateway (maintains architecture)
-- Cooldown period to prevent alert storms
-- Receives async callback when bundle is ready
-
-**Architectural note:** Unlike having the auditor call incident_agent directly,
-secbot is an external automation client (like srebot). Sub-agents remain
-independent and don't know about each other.
-
-#### Running secbot
-
-```bash
-# Prerequisites: auditd, gateway, and incident_agent must be running
-
-# Start secbot
-go run ./cmd/secbot/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --gateway http://localhost:8080 \
-  --listen :9091 \
-  --cooldown 5m
-
-# Dry-run mode (log alerts but don't create incidents)
-go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
-```
-
-#### Detected Security Patterns
-
-| Pattern | Trigger |
-|---------|---------|
-| `hash_mismatch` | Event hash doesn't match content |
-| `unauthorized_destructive` | Destructive action without approval |
-| `potential_sql_injection` | SQL syntax errors in tool output |
-| `potential_command_injection` | Permission denied / command not found errors |
+## AI Governance (including full audit) System
+aiHelpDesk is proud to feature a sophisticated AI Governanance system,
+which relies on comprehensive real-time and after the fact persistant
+auditing. Please see [here](AIGOVERNANCE.md) for details.
 
 ## Troubleshooting
 
@@ -947,62 +558,8 @@ Verify your API key is set correctly:
 echo $HELPDESK_API_KEY
 ```
 
-### Audit System Issues
+### AI Governance (and audit in particular) System Issues
+See the [here](AIGOVERNANCE.md#audit-system-issues) for known/reported issues
+pertaining to AI Governance in general and the built-in
+audit system in particular.
 
-#### Events Not Being Recorded
-
-1. Verify auditd is running:
-   ```bash
-   curl http://localhost:1199/health
-   ```
-
-2. Check agent has `HELPDESK_AUDIT_URL` set:
-   ```bash
-   # When starting the agent
-   HELPDESK_AUDIT_URL="http://localhost:1199" go run ./agents/database/
-   ```
-
-3. Check auditd logs for connection errors
-
-#### Auditor Not Receiving Events
-
-1. Verify socket path matches between auditd and auditor:
-   ```bash
-   # Auditd uses HELPDESK_AUDIT_SOCKET
-   # Auditor uses --socket flag
-   # Both must point to the same path
-   ```
-
-2. Check socket file exists:
-   ```bash
-   ls -la /tmp/helpdesk-audit.sock
-   ```
-
-3. Ensure auditor connects before events are sent (events sent before
-   connection are not replayed)
-
-#### Chain Verification Fails
-
-If chain verification reports broken links:
-
-1. Query the broken events:
-   ```bash
-   curl "http://localhost:1199/api/verify" | jq '.broken_links'
-   ```
-
-2. Investigate potential causes:
-   - Database was modified directly (tampering)
-   - Race condition during high-volume writes (bug - should be fixed)
-   - Database corruption
-
-3. For legitimate issues, the audit log should be considered compromised
-   and investigated
-
-#### Off-Hours Alerts Not Working
-
-The auditor uses local time for off-hours detection. Verify your system
-timezone is set correctly:
-
-```bash
-date  # Check current local time
-```

@@ -1,0 +1,161 @@
+# Example AI Governance Policy Configuration
+# Copy this to /etc/helpdesk/policies.yaml or set HELPDESK_POLICY_FILE
+version: "1"
+
+policies:
+  # Protect production databases
+  - name: production-database-protection
+    description: Restrict operations on production databases
+    priority: 100  # Higher priority = evaluated first
+
+    resources:
+      - type: database
+        match:
+          tags: [production]
+
+    rules:
+      # Read operations are always allowed
+      - action: read
+        effect: allow
+
+      # Write operations require approval and have row limits
+      - action: write
+        effect: allow
+        conditions:
+          require_approval: true
+          max_rows_affected: 1000
+
+      # Destructive operations are blocked
+      - action: destructive
+        effect: deny
+        message: "Destructive operations on production databases are prohibited. Contact DBA team."
+
+  # Change freeze during business hours
+  - name: business-hours-freeze
+    description: No changes during peak business hours
+    priority: 90
+
+    resources:
+      - type: database
+        match:
+          tags: [production]
+      - type: kubernetes
+        match:
+          tags: [production]
+
+    rules:
+      - action: [write, destructive]
+        effect: deny
+        conditions:
+          schedule:
+            days: [mon, tue, wed, thu, fri]
+            hours: [9, 10, 11, 12, 13, 14, 15, 16, 17]  # 9am-5pm
+            timezone: America/New_York
+        message: "Changes not allowed during business hours (9am-5pm ET). Schedule for maintenance window."
+
+  # DBA team privileges
+  - name: dba-privileges
+    description: DBAs can perform write operations on any database
+    priority: 80
+
+    principals:
+      - role: dba
+      - user: alice@example.com  # Lead DBA
+
+    resources:
+      - type: database
+
+    rules:
+      - action: [read, write]
+        effect: allow
+      - action: destructive
+        effect: allow
+        conditions:
+          require_approval: true
+          approval_quorum: 2  # Requires 2 DBAs to approve
+
+  # Protect Kubernetes system namespaces
+  - name: k8s-system-protection
+    description: Protect Kubernetes system namespaces
+    priority: 100
+
+    resources:
+      - type: kubernetes
+        match:
+          namespace: kube-system
+      - type: kubernetes
+        match:
+          namespace: kube-public
+
+    rules:
+      - action: read
+        effect: allow
+      - action: [write, destructive]
+        effect: deny
+        message: "System namespaces are read-only"
+
+  # Allow SRE team full access to staging
+  - name: sre-staging-access
+    description: SRE team has full access to staging environment
+    priority: 70
+
+    principals:
+      - role: sre
+
+    resources:
+      - type: database
+        match:
+          tags: [staging]
+      - type: kubernetes
+        match:
+          tags: [staging]
+
+    rules:
+      - action: [read, write, destructive]
+        effect: allow
+
+  # Default policy for development environments
+  - name: development-permissive
+    description: Development environments are permissive
+    priority: 10
+
+    resources:
+      - type: database
+        match:
+          tags: [development]
+      - type: kubernetes
+        match:
+          tags: [development]
+
+    rules:
+      - action: [read, write]
+        effect: allow
+      - action: destructive
+        effect: allow
+        conditions:
+          require_approval: false  # No approval needed in dev
+
+  # Automated service accounts
+  - name: automated-services
+    description: Restrict automated service accounts
+    priority: 60
+
+    principals:
+      - service: srebot
+      - service: secbot
+
+    resources:
+      - type: database
+      - type: kubernetes
+
+    rules:
+      - action: read
+        effect: allow
+      - action: write
+        effect: allow
+        conditions:
+          require_approval: true
+          max_rows_affected: 100  # Automated changes limited to 100 rows
+      - action: destructive
+        effect: deny
+        message: "Automated services cannot perform destructive operations"

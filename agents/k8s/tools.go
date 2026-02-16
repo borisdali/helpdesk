@@ -11,19 +11,28 @@ import (
 
 	"google.golang.org/adk/tool"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/policy"
 )
 
 // toolAuditor is set during initialization if auditing is enabled.
 var toolAuditor *audit.ToolAuditor
 
-// resolveNamespace checks if the input looks like a database name from the
-// infrastructure config and returns the associated K8s namespace. If not found
-// or not a database name, returns the input unchanged.
-func resolveNamespace(namespaceOrDBName string) string {
+// policyEnforcer is set during initialization for policy enforcement.
+var policyEnforcer *agentutil.PolicyEnforcer
+
+// namespaceInfo holds resolved namespace information for policy checks.
+type namespaceInfo struct {
+	Namespace string
+	Tags      []string
+}
+
+// resolveNamespaceInfo resolves a namespace or database name to full info.
+func resolveNamespaceInfo(namespaceOrDBName string) namespaceInfo {
 	namespaceOrDBName = strings.TrimSpace(namespaceOrDBName)
 	if namespaceOrDBName == "" {
-		return namespaceOrDBName
+		return namespaceInfo{Namespace: namespaceOrDBName}
 	}
 
 	// Try to look up as a database name in the infrastructure config
@@ -31,12 +40,22 @@ func resolveNamespace(namespaceOrDBName string) string {
 		if db, ok := infraConfig.DBServers[namespaceOrDBName]; ok {
 			if db.K8sNamespace != "" {
 				slog.Info("resolved database name to namespace", "name", namespaceOrDBName, "namespace", db.K8sNamespace)
-				return db.K8sNamespace
+				return namespaceInfo{
+					Namespace: db.K8sNamespace,
+					Tags:      db.Tags,
+				}
 			}
 		}
 	}
 
-	return namespaceOrDBName
+	return namespaceInfo{Namespace: namespaceOrDBName}
+}
+
+// resolveNamespace checks if the input looks like a database name from the
+// infrastructure config and returns the associated K8s namespace. If not found
+// or not a database name, returns the input unchanged.
+func resolveNamespace(namespaceOrDBName string) string {
+	return resolveNamespaceInfo(namespaceOrDBName).Namespace
 }
 
 // resolveContext checks if the input looks like a database name from the
@@ -118,6 +137,15 @@ func diagnoseKubectlError(output string) string {
 	default:
 		return ""
 	}
+}
+
+// checkK8sPolicy checks if a kubernetes operation is allowed by policy.
+// Returns nil if allowed, error if denied.
+func checkK8sPolicy(ctx context.Context, namespace string, action policy.ActionClass, tags []string) error {
+	if policyEnforcer == nil {
+		return nil
+	}
+	return policyEnforcer.CheckKubernetes(ctx, namespace, action, tags)
 }
 
 // runKubectl executes a kubectl command and returns the output.
@@ -233,8 +261,19 @@ type GetPodsArgs struct {
 
 func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
 	// Resolve database name to namespace/context if applicable
-	namespace := resolveNamespace(args.Namespace)
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy before executing
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		slog.Warn("policy denied kubernetes access",
+			"tool", "get_pods",
+			"namespace", namespace,
+			"tags", nsInfo.Tags,
+			"err", err)
+		return GetPodsResult{}, fmt.Errorf("policy denied: %w", err)
+	}
 
 	start := time.Now()
 	result, err := fetchPods(ctx, kubeContext, namespace, args.Labels)
@@ -258,8 +297,14 @@ type GetServiceArgs struct {
 }
 
 func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
-	namespace := resolveNamespace(args.Namespace)
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy before executing
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return GetServiceResult{}, fmt.Errorf("policy denied: %w", err)
+	}
 
 	start := time.Now()
 	result, err := fetchServices(ctx, kubeContext, namespace, args.ServiceName, args.ServiceType)
@@ -283,8 +328,15 @@ type DescribeServiceArgs struct {
 }
 
 func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
-	namespace := resolveNamespace(args.Namespace)
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy before executing
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
 	cmdArgs := []string{"describe", "svc", args.ServiceName}
 
 	if namespace != "" {
@@ -306,8 +358,14 @@ type GetEndpointsArgs struct {
 }
 
 func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
-	namespace := resolveNamespace(args.Namespace)
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy before executing
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return GetEndpointsResult{}, fmt.Errorf("policy denied: %w", err)
+	}
 
 	start := time.Now()
 	result, err := fetchEndpoints(ctx, kubeContext, namespace, args.EndpointName)
@@ -331,8 +389,14 @@ type GetEventsArgs struct {
 }
 
 func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
-	namespace := resolveNamespace(args.Namespace)
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy before executing
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return GetEventsResult{}, fmt.Errorf("policy denied: %w", err)
+	}
 
 	start := time.Now()
 	result, err := fetchEvents(ctx, kubeContext, namespace, args.ResourceName, args.EventType)
@@ -359,8 +423,15 @@ type GetPodLogsArgs struct {
 }
 
 func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
-	namespace := resolveNamespace(args.Namespace)
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy before executing
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
 	cmdArgs := []string{"logs", args.PodName}
 
 	if namespace != "" {
@@ -399,8 +470,15 @@ type DescribePodArgs struct {
 }
 
 func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
-	namespace := resolveNamespace(args.Namespace)
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy before executing
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
 	cmdArgs := []string{"describe", "pod", args.PodName}
 
 	if namespace != "" {
@@ -422,6 +500,11 @@ type GetNodesArgs struct {
 
 func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
 	kubeContext := resolveContext(args.Context)
+
+	// Check policy for cluster-level access (no namespace)
+	if err := checkK8sPolicy(ctx, "", policy.ActionRead, nil); err != nil {
+		return GetNodesResult{}, fmt.Errorf("policy denied: %w", err)
+	}
 
 	start := time.Now()
 	result, err := fetchNodes(ctx, kubeContext, args.ShowLabels)

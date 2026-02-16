@@ -11,33 +11,89 @@ import (
 
 	"google.golang.org/adk/tool"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/policy"
 )
 
 // toolAuditor is set during initialization if auditing is enabled.
 var toolAuditor *audit.ToolAuditor
 
-// resolveConnectionString checks if the input looks like a database name (no "=" sign)
-// and attempts to resolve it using the infrastructure config. If resolution fails or
-// the input is already a connection string, it's returned unchanged.
-func resolveConnectionString(connStrOrName string) string {
+// policyEnforcer is set during initialization for policy enforcement.
+var policyEnforcer *agentutil.PolicyEnforcer
+
+// databaseInfo holds resolved database information for policy checks.
+type databaseInfo struct {
+	Name           string
+	ConnectionStr  string
+	Tags           []string
+	IsFromInfraConfig bool
+}
+
+// resolveDatabaseInfo resolves a connection string or database name to full info.
+// Returns the resolved connection string and metadata for policy checks.
+func resolveDatabaseInfo(connStrOrName string) databaseInfo {
 	connStrOrName = strings.TrimSpace(connStrOrName)
 
 	// If it contains "=" it's already a connection string
 	if strings.Contains(connStrOrName, "=") {
-		return connStrOrName
+		// Extract dbname from connection string if present
+		dbName := ""
+		for _, part := range strings.Split(connStrOrName, " ") {
+			if strings.HasPrefix(part, "dbname=") {
+				dbName = strings.TrimPrefix(part, "dbname=")
+				break
+			}
+		}
+
+		// Reverse lookup: find which infraConfig entry has this connection string
+		if infraConfig != nil {
+			for id, db := range infraConfig.DBServers {
+				slog.Debug("reverse lookup comparing", "id", id, "db_conn", db.ConnectionString, "input_conn", connStrOrName, "tags", db.Tags)
+				if db.ConnectionString == connStrOrName {
+					slog.Debug("reverse resolved connection string to database", "id", id, "tags", db.Tags)
+					return databaseInfo{
+						Name:              id,
+						ConnectionStr:     connStrOrName,
+						Tags:              db.Tags,
+						IsFromInfraConfig: true,
+					}
+				}
+			}
+		}
+
+		return databaseInfo{
+			Name:          dbName,
+			ConnectionStr: connStrOrName,
+			Tags:          nil, // No tags - connection string not in infraConfig
+		}
 	}
 
 	// If we have infrastructure config, try to look up the database name
 	if infraConfig != nil {
 		if db, ok := infraConfig.DBServers[connStrOrName]; ok {
 			slog.Info("resolved database name to connection string", "name", connStrOrName)
-			return db.ConnectionString
+			return databaseInfo{
+				Name:              connStrOrName,
+				ConnectionStr:     db.ConnectionString,
+				Tags:              db.Tags,
+				IsFromInfraConfig: true,
+			}
 		}
 	}
 
 	// Return as-is (might be a simple hostname or invalid input)
-	return connStrOrName
+	return databaseInfo{
+		Name:          connStrOrName,
+		ConnectionStr: connStrOrName,
+	}
+}
+
+// resolveConnectionString checks if the input looks like a database name (no "=" sign)
+// and attempts to resolve it using the infrastructure config. If resolution fails or
+// the input is already a connection string, it's returned unchanged.
+func resolveConnectionString(connStrOrName string) string {
+	return resolveDatabaseInfo(connStrOrName).ConnectionStr
 }
 
 // CommandRunner abstracts command execution for testing.
@@ -112,13 +168,29 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 	return runPsqlWithToolName(ctx, connStr, query, "")
 }
 
-// runPsqlWithToolName executes a psql command with auditing support.
+// runPsqlWithToolName executes a psql command with auditing and policy enforcement.
 // toolName is used for audit logging; if empty, a generic name is used.
 func runPsqlWithToolName(ctx context.Context, connStr string, query string, toolName string) (string, error) {
-	start := time.Now()
+	// Resolve database info for policy checks
+	dbInfo := resolveDatabaseInfo(connStr)
 
-	// Resolve database name to connection string if needed
-	connStr = resolveConnectionString(connStr)
+	// Check policy before executing
+	if policyEnforcer != nil {
+		// Determine action class based on query (all current tools are read-only)
+		action := policy.ActionRead
+		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags); err != nil {
+			slog.Warn("policy denied database access",
+				"tool", toolName,
+				"database", dbInfo.Name,
+				"action", action,
+				"tags", dbInfo.Tags,
+				"err", err)
+			return "", fmt.Errorf("policy denied: %w", err)
+		}
+	}
+
+	start := time.Now()
+	connStr = dbInfo.ConnectionStr
 
 	args := []string{"-c", query, "-x"}
 	if connStr != "" {

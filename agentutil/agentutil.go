@@ -28,6 +28,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/logging"
 	"helpdesk/internal/model"
+	"helpdesk/internal/policy"
 )
 
 // Config holds common agent configuration from HELPDESK_* env vars.
@@ -42,6 +43,11 @@ type Config struct {
 	AuditEnabled bool
 	AuditURL     string // URL of central audit service (preferred)
 	AuditDir     string // Local directory for audit.db (fallback if AuditURL not set)
+
+	// Policy configuration
+	PolicyFile    string // Path to policy YAML file
+	PolicyDryRun  bool   // Log policy decisions but don't enforce
+	DefaultPolicy string // "allow" or "deny" when no policy matches (default: "deny")
 }
 
 // MustLoadConfig reads env vars. defaultAddr is used when HELPDESK_AGENT_ADDR is unset.
@@ -51,15 +57,19 @@ func MustLoadConfig(defaultAddr string) Config {
 	logging.InitLogging(os.Args[1:])
 
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED")
+	policyDryRun := os.Getenv("HELPDESK_POLICY_DRY_RUN")
 	cfg := Config{
-		ModelVendor:  os.Getenv("HELPDESK_MODEL_VENDOR"),
-		ModelName:    os.Getenv("HELPDESK_MODEL_NAME"),
-		APIKey:       os.Getenv("HELPDESK_API_KEY"),
-		ListenAddr:   os.Getenv("HELPDESK_AGENT_ADDR"),
-		ExternalURL:  os.Getenv("HELPDESK_AGENT_URL"),
-		AuditEnabled: auditEnabled == "true" || auditEnabled == "1",
-		AuditURL:     os.Getenv("HELPDESK_AUDIT_URL"),
-		AuditDir:     os.Getenv("HELPDESK_AUDIT_DIR"),
+		ModelVendor:   os.Getenv("HELPDESK_MODEL_VENDOR"),
+		ModelName:     os.Getenv("HELPDESK_MODEL_NAME"),
+		APIKey:        os.Getenv("HELPDESK_API_KEY"),
+		ListenAddr:    os.Getenv("HELPDESK_AGENT_ADDR"),
+		ExternalURL:   os.Getenv("HELPDESK_AGENT_URL"),
+		AuditEnabled:  auditEnabled == "true" || auditEnabled == "1",
+		AuditURL:      os.Getenv("HELPDESK_AUDIT_URL"),
+		AuditDir:      os.Getenv("HELPDESK_AUDIT_DIR"),
+		PolicyFile:    os.Getenv("HELPDESK_POLICY_FILE"),
+		PolicyDryRun:  policyDryRun == "true" || policyDryRun == "1",
+		DefaultPolicy: os.Getenv("HELPDESK_DEFAULT_POLICY"),
 	}
 
 	if cfg.ModelVendor == "" || cfg.ModelName == "" || cfg.APIKey == "" {
@@ -69,6 +79,10 @@ func MustLoadConfig(defaultAddr string) Config {
 
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = defaultAddr
+	}
+
+	if cfg.DefaultPolicy == "" {
+		cfg.DefaultPolicy = "deny"
 	}
 
 	return cfg
@@ -96,6 +110,90 @@ func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 	default:
 		return nil, fmt.Errorf("unknown model vendor: %s (supported: google, gemini, anthropic)", cfg.ModelVendor)
 	}
+}
+
+// InitPolicyEngine initializes a policy engine for an agent if configured.
+// Returns nil if no policy file is configured.
+func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
+	if cfg.PolicyFile == "" {
+		slog.Debug("policy enforcement disabled (no HELPDESK_POLICY_FILE)")
+		return nil, nil
+	}
+
+	// Load policies from file
+	policyCfg, err := policy.LoadFile(cfg.PolicyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load policy file: %w", err)
+	}
+
+	// Determine default effect
+	defaultEffect := policy.EffectDeny
+	if strings.ToLower(cfg.DefaultPolicy) == "allow" {
+		defaultEffect = policy.EffectAllow
+	}
+
+	engine := policy.NewEngine(policy.EngineConfig{
+		PolicyConfig:  policyCfg,
+		DefaultEffect: defaultEffect,
+		DryRun:        cfg.PolicyDryRun,
+	})
+
+	slog.Info("policy enforcement enabled",
+		"file", cfg.PolicyFile,
+		"policies", len(policyCfg.Policies),
+		"dry_run", cfg.PolicyDryRun,
+		"default", cfg.DefaultPolicy)
+
+	return engine, nil
+}
+
+// PolicyEnforcer wraps a policy engine with convenience methods for agents.
+type PolicyEnforcer struct {
+	engine     *policy.Engine
+	traceStore *audit.CurrentTraceStore
+}
+
+// NewPolicyEnforcer creates a policy enforcer. If engine is nil, enforcement is disabled.
+func NewPolicyEnforcer(engine *policy.Engine, traceStore *audit.CurrentTraceStore) *PolicyEnforcer {
+	return &PolicyEnforcer{
+		engine:     engine,
+		traceStore: traceStore,
+	}
+}
+
+// CheckTool evaluates whether a tool execution is allowed.
+// Returns nil if allowed, error if denied or requires approval.
+func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string) error {
+	if e.engine == nil {
+		return nil // No enforcement
+	}
+
+	req := policy.Request{
+		Resource: policy.RequestResource{
+			Type: resourceType,
+			Name: resourceName,
+			Tags: tags,
+		},
+		Action: action,
+	}
+
+	// Add trace context if available
+	if e.traceStore != nil {
+		req.Context.TraceID = e.traceStore.Get()
+	}
+
+	decision := e.engine.Evaluate(req)
+	return decision.MustAllow()
+}
+
+// CheckDatabase is a convenience method for database operations.
+func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, action policy.ActionClass, tags []string) error {
+	return e.CheckTool(ctx, "database", dbName, action, tags)
+}
+
+// CheckKubernetes is a convenience method for Kubernetes operations.
+func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string) error {
+	return e.CheckTool(ctx, "kubernetes", namespace, action, tags)
 }
 
 // InitAuditStore initializes an audit store for an agent if auditing is enabled.

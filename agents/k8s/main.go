@@ -57,6 +57,14 @@ func main() {
 		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
 
+	// Initialize policy engine if configured
+	policyEngine, err := agentutil.InitPolicyEngine(cfg)
+	if err != nil {
+		slog.Error("failed to initialize policy engine", "err", err)
+		os.Exit(1)
+	}
+	policyEnforcer = agentutil.NewPolicyEnforcer(policyEngine, traceStore)
+
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {
 		slog.Error("failed to create LLM model", "err", err)

@@ -10,17 +10,19 @@ import (
 
 // DBServer represents a managed database server (AlloyDB Omni, standalone PostgreSQL, etc.).
 type DBServer struct {
-	Name             string `json:"name"`
-	ConnectionString string `json:"connection_string"`
-	K8sCluster       string `json:"k8s_cluster,omitempty"`
-	K8sNamespace     string `json:"k8s_namespace,omitempty"`
-	VMName           string `json:"vm_name,omitempty"`
+	Name             string   `json:"name"`
+	ConnectionString string   `json:"connection_string"`
+	K8sCluster       string   `json:"k8s_cluster,omitempty"`
+	K8sNamespace     string   `json:"k8s_namespace,omitempty"`
+	VMName           string   `json:"vm_name,omitempty"`
+	Tags             []string `json:"tags,omitempty"` // Tags for policy matching (e.g., "production", "staging")
 }
 
 // K8sCluster represents a managed Kubernetes cluster.
 type K8sCluster struct {
-	Name    string `json:"name"`
-	Context string `json:"context"`
+	Name    string   `json:"name"`
+	Context string   `json:"context"`
+	Tags    []string `json:"tags,omitempty"` // Tags for policy matching (e.g., "production", "staging")
 }
 
 // VM represents a virtual machine hosting infrastructure.
