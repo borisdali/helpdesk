@@ -321,6 +321,8 @@ helpdesk/
 │   │   └── main.go          # HTTP API, SQLite storage, socket notifications
 │   ├── auditor/             # Real-time audit monitor
 │   │   └── main.go          # Security alerts, chain verification, webhooks
+│   ├── secbot/              # Security responder bot
+│   │   └── main.go          # Monitors audit stream, creates incident bundles
 │   └── srebot/              # SRE bot demo (o11y watcher simulation)
 │       └── main.go          # Health check, AI diagnosis, incident + callback
 ├── agents/
@@ -859,6 +861,67 @@ done
 # Verify the auditor receives them via the Unix socket
 # (auditor should log each event as it arrives)
 ```
+
+### Security Responder Bot (cmd/secbot/)
+
+The `secbot` demonstrates automated security incident response. It monitors the
+audit stream for critical security events and automatically creates incident
+bundles for investigation.
+
+```
+┌─────────────────────┐
+│   Audit Socket      │
+│   (from auditd)     │
+└──────────┬──────────┘
+           │ subscribe
+           ▼
+┌─────────────────────┐         ┌─────────────────────┐
+│   secbot            │  POST   │   REST Gateway      │
+│   • Detect alerts   │────────►│   /api/v1/incidents │
+│   • Enforce cooldown│         └──────────┬──────────┘
+│   • Receive callback│                    │ A2A
+└─────────────────────┘                    ▼
+                               ┌─────────────────────┐
+                               │   incident_agent    │
+                               │   Create bundle     │
+                               └─────────────────────┘
+```
+
+**Key features:**
+- Monitors audit socket for security events
+- Detects: hash mismatches, unauthorized destructive ops, injection attempts
+- Creates incident bundles via REST gateway (maintains architecture)
+- Cooldown period to prevent alert storms
+- Receives async callback when bundle is ready
+
+**Architectural note:** Unlike having the auditor call incident_agent directly,
+secbot is an external automation client (like srebot). Sub-agents remain
+independent and don't know about each other.
+
+#### Running secbot
+
+```bash
+# Prerequisites: auditd, gateway, and incident_agent must be running
+
+# Start secbot
+go run ./cmd/secbot/ \
+  --socket /tmp/helpdesk-audit.sock \
+  --gateway http://localhost:8080 \
+  --listen :9091 \
+  --cooldown 5m
+
+# Dry-run mode (log alerts but don't create incidents)
+go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
+```
+
+#### Detected Security Patterns
+
+| Pattern | Trigger |
+|---------|---------|
+| `hash_mismatch` | Event hash doesn't match content |
+| `unauthorized_destructive` | Destructive action without approval |
+| `potential_sql_injection` | SQL syntax errors in tool output |
+| `potential_command_injection` | Permission denied / command not found errors |
 
 ## Troubleshooting
 
