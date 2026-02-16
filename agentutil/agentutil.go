@@ -40,7 +40,8 @@ type Config struct {
 
 	// Audit configuration
 	AuditEnabled bool
-	AuditDir     string
+	AuditURL     string // URL of central audit service (preferred)
+	AuditDir     string // Local directory for audit.db (fallback if AuditURL not set)
 }
 
 // MustLoadConfig reads env vars. defaultAddr is used when HELPDESK_AGENT_ADDR is unset.
@@ -57,6 +58,7 @@ func MustLoadConfig(defaultAddr string) Config {
 		ListenAddr:   os.Getenv("HELPDESK_AGENT_ADDR"),
 		ExternalURL:  os.Getenv("HELPDESK_AGENT_URL"),
 		AuditEnabled: auditEnabled == "true" || auditEnabled == "1",
+		AuditURL:     os.Getenv("HELPDESK_AUDIT_URL"),
 		AuditDir:     os.Getenv("HELPDESK_AUDIT_DIR"),
 	}
 
@@ -98,11 +100,20 @@ func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 
 // InitAuditStore initializes an audit store for an agent if auditing is enabled.
 // Returns nil if auditing is disabled. The caller should defer store.Close() if non-nil.
-func InitAuditStore(cfg Config) (*audit.Store, error) {
+// If HELPDESK_AUDIT_URL is set, uses the central audit service (preferred).
+// Otherwise falls back to local SQLite if HELPDESK_AUDIT_DIR is set.
+func InitAuditStore(cfg Config) (audit.Auditor, error) {
 	if !cfg.AuditEnabled {
 		return nil, nil
 	}
 
+	// Prefer central audit service
+	if cfg.AuditURL != "" {
+		slog.Info("agent audit logging enabled (remote)", "url", cfg.AuditURL)
+		return audit.NewRemoteStore(cfg.AuditURL), nil
+	}
+
+	// Fall back to local SQLite
 	auditDir := cfg.AuditDir
 	if auditDir == "" {
 		auditDir = "."
@@ -116,7 +127,7 @@ func InitAuditStore(cfg Config) (*audit.Store, error) {
 		return nil, fmt.Errorf("failed to create audit store: %w", err)
 	}
 
-	slog.Info("agent audit logging enabled", "db", filepath.Join(auditDir, "audit.db"))
+	slog.Info("agent audit logging enabled (local)", "db", filepath.Join(auditDir, "audit.db"))
 	return store, nil
 }
 
@@ -213,6 +224,63 @@ func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) 
 	mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
 
 	slog.Info("starting A2A server",
+		"agent", a.Name(),
+		"url", baseURL.String(),
+		"card", baseURL.String()+"/.well-known/agent-card.json",
+	)
+
+	return http.Serve(listener, mux)
+}
+
+// ServeWithTracing starts an A2A server with trace_id extraction from incoming messages.
+// The traceStore is populated with trace_id from A2A message metadata for each request.
+func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, opts ...CardOptions) error {
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
+	}
+
+	var baseURL *url.URL
+	if cfg.ExternalURL != "" {
+		baseURL, err = url.Parse(cfg.ExternalURL)
+		if err != nil {
+			return fmt.Errorf("invalid HELPDESK_AGENT_URL: %v", err)
+		}
+	} else {
+		baseURL = &url.URL{Scheme: "http", Host: listener.Addr().String()}
+	}
+
+	agentPath := "/invoke"
+	agentCard := &a2a.AgentCard{
+		Name:               a.Name(),
+		Description:        a.Description(),
+		Skills:             adka2a.BuildAgentSkills(a),
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+		URL:                baseURL.JoinPath(agentPath).String(),
+		Capabilities:       a2a.AgentCapabilities{Streaming: true},
+	}
+
+	if len(opts) > 0 {
+		applyCardOptions(agentCard, opts[0])
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName:        a.Name(),
+			Agent:          a,
+			SessionService: session.InMemoryService(),
+		},
+	})
+	requestHandler := a2asrv.NewHandler(executor)
+
+	// Wrap with trace middleware to extract trace_id from incoming messages
+	tracedHandler := audit.TraceMiddleware(traceStore, a2asrv.NewJSONRPCHandler(requestHandler))
+	mux.Handle(agentPath, tracedHandler)
+
+	slog.Info("starting A2A server with tracing",
 		"agent", a.Name(),
 		"url", baseURL.String(),
 		"card", baseURL.String()+"/.well-known/agent-card.json",

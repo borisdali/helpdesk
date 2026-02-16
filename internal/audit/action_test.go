@@ -150,6 +150,24 @@ func TestClassifyDelegation(t *testing.T) {
 			message:  "List all deployments in the cluster",
 			expected: ActionRead,
 		},
+		{
+			name:     "when was vacuum ran - inquiry about write operation",
+			agent:    "postgres_database_agent",
+			message:  "When was vacuum last ran on the users table?",
+			expected: ActionRead,
+		},
+		{
+			name:     "last reindex - inquiry about write operation",
+			agent:    "postgres_database_agent",
+			message:  "When was the last reindex performed?",
+			expected: ActionRead,
+		},
+		{
+			name:     "history of restarts - inquiry about write operation",
+			agent:    "k8s_agent",
+			message:  "What is the restart history for the api-server pod?",
+			expected: ActionRead,
+		},
 
 		// Write operations
 		{

@@ -87,12 +87,12 @@ func (r *AgentRegistry) List() []string {
 }
 
 // DelegateTool creates the delegate_to_agent tool with audit logging.
-func DelegateTool(store *Store, registry *AgentRegistry, sessionID, userID string) (tool.Tool, error) {
-	return DelegateToolWithTrace(store, registry, sessionID, userID, "")
+func DelegateTool(auditor Auditor, registry *AgentRegistry, sessionID, userID string) (tool.Tool, error) {
+	return DelegateToolWithTrace(auditor, registry, sessionID, userID, "")
 }
 
 // DelegateToolWithTrace creates the delegate_to_agent tool with audit logging and trace ID.
-func DelegateToolWithTrace(store *Store, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, error) {
+func DelegateToolWithTrace(auditor Auditor, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, error) {
 	delegationCount := 0
 
 	// Generate trace ID if not provided (top-level orchestrator request)
@@ -117,7 +117,7 @@ func DelegateToolWithTrace(store *Store, registry *AgentRegistry, sessionID, use
 		// Create audit event
 		event := &Event{
 			EventID:     "evt_" + uuid.New().String()[:8],
-			Timestamp:   start,
+			Timestamp:   start.UTC(),
 			EventType:   EventTypeDelegation,
 			TraceID:     traceID,
 			ActionClass: actionClass,
@@ -150,8 +150,8 @@ func DelegateToolWithTrace(store *Store, registry *AgentRegistry, sessionID, use
 		}
 
 		// Record the delegation decision
-		if store != nil {
-			if err := store.Record(context.Background(), event); err != nil {
+		if auditor != nil {
+			if err := auditor.Record(context.Background(), event); err != nil {
 				// Log but don't fail the delegation
 				slog.Warn("failed to record audit event", "error", err)
 			}
@@ -165,8 +165,8 @@ func DelegateToolWithTrace(store *Store, registry *AgentRegistry, sessionID, use
 				ErrorMessage: fmt.Sprintf("agent %q not found in registry", args.Agent),
 				Duration:     time.Since(start),
 			}
-			if store != nil {
-				store.RecordOutcome(context.Background(), event.EventID, outcome)
+			if auditor != nil {
+				auditor.RecordOutcome(context.Background(), event.EventID, outcome)
 			}
 			return DelegateResult{
 				Agent:    args.Agent,
@@ -180,8 +180,9 @@ func DelegateToolWithTrace(store *Store, registry *AgentRegistry, sessionID, use
 		slog.Debug("calling agent via A2A",
 			"agent", args.Agent,
 			"url", agentURL,
-			"message", args.Message)
-		response, err := callAgent(context.Background(), agentURL, args.Message)
+			"message", args.Message,
+			"trace_id", traceID)
+		response, err := callAgentWithTrace(context.Background(), agentURL, args.Message, traceID)
 		duration := time.Since(start)
 		slog.Debug("agent response received",
 			"agent", args.Agent,
@@ -204,8 +205,8 @@ func DelegateToolWithTrace(store *Store, registry *AgentRegistry, sessionID, use
 		} else {
 			outcome.Status = "success"
 		}
-		if store != nil {
-			store.RecordOutcome(context.Background(), event.EventID, outcome)
+		if auditor != nil {
+			auditor.RecordOutcome(context.Background(), event.EventID, outcome)
 		}
 
 		if err != nil {
@@ -234,8 +235,8 @@ incident_agent (incident bundles), research_agent (web search for current info).
 	}, delegateFunc)
 }
 
-// callAgent sends a message to an A2A agent and returns the response text.
-func callAgent(ctx context.Context, agentURL, message string) (string, error) {
+// callAgentWithTrace sends a message to an A2A agent with trace_id in metadata.
+func callAgentWithTrace(ctx context.Context, agentURL, message, traceID string) (string, error) {
 	// Fetch agent card
 	cardURL := strings.TrimSuffix(agentURL, "/") + "/.well-known/agent-card.json"
 	card, err := fetchAgentCard(ctx, cardURL)
@@ -258,8 +259,11 @@ func callAgent(ctx context.Context, agentURL, message string) (string, error) {
 		return "", fmt.Errorf("creating A2A client: %w", err)
 	}
 
-	// Send message
+	// Send message with trace_id in metadata
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: message})
+	if traceID != "" {
+		msg.Metadata = map[string]any{"trace_id": traceID}
+	}
 	result, err := client.SendMessage(ctx, &a2a.MessageSendParams{Message: msg})
 	if err != nil {
 		return "", fmt.Errorf("sending message: %w", err)

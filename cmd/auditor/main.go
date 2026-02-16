@@ -840,7 +840,12 @@ func (a *Auditor) trackEvent(event *audit.Event) {
 }
 
 // checkLowConfidence alerts on delegations with low confidence scores.
+// Tool executions don't have confidence scores - they're not LLM decisions.
 func (a *Auditor) checkLowConfidence(event *audit.Event) {
+	// Tool executions don't have confidence scores
+	if event.EventType == audit.EventTypeToolExecution {
+		return
+	}
 	if event.Decision == nil {
 		return
 	}
@@ -967,10 +972,11 @@ func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
 }
 
 // checkEmptyReasoning alerts when no reasoning chain is provided.
-// Only applies to orchestrator delegations, not gateway requests (which are deterministic).
+// Only applies to orchestrator delegations, not gateway/tool events.
 func (a *Auditor) checkEmptyReasoning(event *audit.Event) {
-	// Gateway requests don't have reasoning chains - they use deterministic routing
-	if event.EventType == audit.EventTypeGatewayRequest {
+	// Gateway requests and tool executions don't have reasoning chains
+	if event.EventType == audit.EventTypeGatewayRequest ||
+		event.EventType == audit.EventTypeToolExecution {
 		return
 	}
 

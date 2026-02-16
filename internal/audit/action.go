@@ -149,7 +149,21 @@ func containsImpl(s, substr string) bool {
 func ClassifyDelegation(agent, message string) ActionClass {
 	msg := strings.ToLower(message)
 
-	// Destructive keywords
+	// Check for inquiry context - asking ABOUT something is a read
+	// e.g., "when was vacuum last ran" is asking about vacuum history, not running vacuum
+	inquiryPrefixes := []string{
+		"when was", "when did", "when is", "last time",
+		"history of", "previous", "how long ago", "how many times",
+		"what is the", "what are the", "what was",
+		"is there a", "are there any", "has been", "have been",
+	}
+	for _, prefix := range inquiryPrefixes {
+		if strings.Contains(msg, prefix) {
+			return ActionRead
+		}
+	}
+
+	// Destructive keywords - check first as they're most critical
 	destructiveKeywords := []string{
 		"kill", "terminate", "delete", "drop", "remove", "destroy",
 		"drain", "evict", "force", "truncate", "purge",
@@ -160,7 +174,7 @@ func ClassifyDelegation(agent, message string) ActionClass {
 		}
 	}
 
-	// Write keywords
+	// Write keywords - actions that modify state
 	writeKeywords := []string{
 		"scale", "restart", "update", "modify", "change", "alter",
 		"create", "insert", "set", "patch", "apply", "rollout",
@@ -172,7 +186,7 @@ func ClassifyDelegation(agent, message string) ActionClass {
 		}
 	}
 
-	// Read keywords (for confirmation, but default is read for most queries)
+	// Read keywords - information retrieval
 	readKeywords := []string{
 		"check", "get", "list", "show", "describe", "explain",
 		"status", "info", "stats", "logs", "events", "search",

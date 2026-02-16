@@ -144,12 +144,17 @@ func runPsqlWithToolName(ctx context.Context, connStr string, query string, tool
 		}, duration)
 	}
 
+	// Log successful tool execution at INFO level
+	if err == nil && toolName != "" {
+		slog.Info("tool ok", "name", toolName, "ms", duration.Milliseconds())
+	}
+
 	if err != nil {
 		out := strings.TrimSpace(output)
 		if out == "" {
 			out = "(no output from psql)"
 		}
-		slog.Error("psql command failed", "connStr", connStr, "err", err, "output", out)
+		slog.Error("psql command failed", "tool", toolName, "ms", duration.Milliseconds(), "err", err)
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("psql timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
 		}

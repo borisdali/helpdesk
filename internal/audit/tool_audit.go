@@ -10,21 +10,43 @@ import (
 
 // ToolAuditor wraps tool executions with audit logging.
 type ToolAuditor struct {
-	store     *Store
-	agentName string
-	sessionID string
-	traceID   string
+	auditor    Auditor
+	agentName  string
+	sessionID  string
+	traceID    string             // Static trace ID (fallback)
+	traceStore *CurrentTraceStore // Dynamic trace ID from incoming requests
 }
 
 // NewToolAuditor creates a new tool auditor for an agent.
-// If store is nil, auditing is disabled (no-op).
-func NewToolAuditor(store *Store, agentName, sessionID, traceID string) *ToolAuditor {
+// If auditor is nil, auditing is disabled (no-op).
+func NewToolAuditor(auditor Auditor, agentName, sessionID, traceID string) *ToolAuditor {
 	return &ToolAuditor{
-		store:     store,
+		auditor:   auditor,
 		agentName: agentName,
 		sessionID: sessionID,
 		traceID:   traceID,
 	}
+}
+
+// NewToolAuditorWithTraceStore creates a tool auditor that gets trace_id dynamically.
+// The traceStore is populated by TraceMiddleware from incoming A2A requests.
+func NewToolAuditorWithTraceStore(auditor Auditor, agentName, sessionID string, traceStore *CurrentTraceStore) *ToolAuditor {
+	return &ToolAuditor{
+		auditor:    auditor,
+		agentName:  agentName,
+		sessionID:  sessionID,
+		traceStore: traceStore,
+	}
+}
+
+// getTraceID returns the current trace ID, preferring the dynamic store.
+func (ta *ToolAuditor) getTraceID() string {
+	if ta.traceStore != nil {
+		if traceID := ta.traceStore.Get(); traceID != "" {
+			return traceID
+		}
+	}
+	return ta.traceID
 }
 
 // ToolCall represents a tool invocation to be audited.
@@ -43,18 +65,19 @@ type ToolResult struct {
 // RecordToolCall records a tool execution event.
 // Call this after the tool has executed with its result.
 func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result ToolResult, duration time.Duration) {
-	if ta.store == nil {
+	if ta.auditor == nil {
 		return
 	}
 
 	// Classify the action based on tool name
 	actionClass := ClassifyTool(call.Name)
+	traceID := ta.getTraceID()
 
 	event := &Event{
 		EventID:     "tool_" + uuid.New().String()[:8],
 		Timestamp:   time.Now().UTC(),
-		EventType:   EventTypeDelegation, // Tool execution is part of delegation
-		TraceID:     ta.traceID,
+		EventType:   EventTypeToolExecution,
+		TraceID:     traceID,
 		ActionClass: actionClass,
 		Session: Session{
 			ID: ta.sessionID,
@@ -69,11 +92,9 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 			Result:     truncateString(result.Output, 500),
 			Error:      result.Error,
 			Duration:   duration,
+			Agent:      ta.agentName, // Track which agent executed this tool
 		},
-		Decision: &Decision{
-			Agent:           ta.agentName,
-			RequestCategory: categorizeToolAgent(ta.agentName),
-		},
+		// No Decision for tool executions - they're not LLM decisions
 		Outcome: &Outcome{
 			Status:   outcomeStatus(result.Error),
 			Duration: duration,
@@ -84,14 +105,8 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 		event.Outcome.ErrorMessage = result.Error
 	}
 
-	if err := ta.store.Record(ctx, event); err != nil {
+	if err := ta.auditor.Record(ctx, event); err != nil {
 		slog.Warn("failed to record tool audit event", "tool", call.Name, "err", err)
-	} else {
-		slog.Debug("tool execution audited",
-			"tool", call.Name,
-			"action_class", actionClass,
-			"duration", duration,
-			"trace_id", ta.traceID)
 	}
 }
 

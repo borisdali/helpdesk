@@ -91,24 +91,32 @@ func main() {
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED") == "true" || os.Getenv("HELPDESK_AUDIT_ENABLED") == "1"
 
 	// Initialize audit store if enabled
-	var auditStore *audit.Store
+	var auditor audit.Auditor
 	if auditEnabled {
-		auditDir := os.Getenv("HELPDESK_AUDIT_DIR")
-		if auditDir == "" {
-			auditDir = "."
+		auditURL := os.Getenv("HELPDESK_AUDIT_URL")
+		if auditURL != "" {
+			// Use central audit service (preferred)
+			auditor = audit.NewRemoteStore(auditURL)
+			slog.Info("audit logging enabled (remote)", "url", auditURL)
+		} else {
+			// Fall back to local store with socket (legacy mode)
+			auditDir := os.Getenv("HELPDESK_AUDIT_DIR")
+			if auditDir == "" {
+				auditDir = "."
+			}
+			auditCfg := audit.StoreConfig{
+				DBPath:     filepath.Join(auditDir, "audit.db"),
+				SocketPath: filepath.Join(auditDir, "audit.sock"),
+			}
+			var err error
+			auditor, err = audit.NewStore(auditCfg)
+			if err != nil {
+				slog.Error("failed to create audit store", "err", err)
+				os.Exit(1)
+			}
+			slog.Info("audit logging enabled (local)", "db", auditCfg.DBPath, "socket", auditCfg.SocketPath)
 		}
-		auditCfg := audit.StoreConfig{
-			DBPath:     filepath.Join(auditDir, "audit.db"),
-			SocketPath: filepath.Join(auditDir, "audit.sock"),
-		}
-		var err error
-		auditStore, err = audit.NewStore(auditCfg)
-		if err != nil {
-			slog.Error("failed to create audit store", "err", err)
-			os.Exit(1)
-		}
-		defer auditStore.Close()
-		slog.Info("audit logging enabled", "db", auditCfg.DBPath, "socket", auditCfg.SocketPath)
+		defer auditor.Close()
 	}
 
 	// Create agent registry for delegate tool
@@ -165,7 +173,7 @@ func main() {
 		// Create delegate tool with audit logging
 		sessionID := "sess_" + uuid.New().String()[:8]
 		userID := os.Getenv("USER")
-		delegateTool, err := audit.DelegateTool(auditStore, agentRegistry, sessionID, userID)
+		delegateTool, err := audit.DelegateTool(auditor, agentRegistry, sessionID, userID)
 		if err != nil {
 			slog.Error("failed to create delegate tool", "err", err)
 			os.Exit(1)

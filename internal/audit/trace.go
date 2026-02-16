@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -67,4 +68,32 @@ func TraceIDFromContext(ctx context.Context) string {
 		return tc.TraceID
 	}
 	return ""
+}
+
+// CurrentTraceStore provides thread-safe storage for the current trace ID.
+// Used when context propagation isn't available (e.g., ADK tools).
+type CurrentTraceStore struct {
+	mu      sync.RWMutex
+	traceID string
+}
+
+// Set stores the current trace ID.
+func (s *CurrentTraceStore) Set(traceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.traceID = traceID
+}
+
+// Get retrieves the current trace ID.
+func (s *CurrentTraceStore) Get() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.traceID
+}
+
+// Clear clears the current trace ID.
+func (s *CurrentTraceStore) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.traceID = ""
 }

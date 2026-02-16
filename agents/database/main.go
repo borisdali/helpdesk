@@ -45,11 +45,15 @@ func main() {
 		slog.Error("failed to initialize audit store", "err", err)
 		os.Exit(1)
 	}
+
+	// Create trace store for propagating trace_id from incoming requests
+	traceStore := &audit.CurrentTraceStore{}
+
 	if auditStore != nil {
 		defer auditStore.Close()
-		// Create tool auditor for this agent instance
+		// Create tool auditor with trace store for dynamic trace_id
 		sessionID := "dbagent_" + uuid.New().String()[:8]
-		toolAuditor = audit.NewToolAuditor(auditStore, "postgres_database_agent", sessionID, "")
+		toolAuditor = audit.NewToolAuditorWithTraceStore(auditStore, "postgres_database_agent", sessionID, traceStore)
 		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
 
@@ -101,7 +105,7 @@ func main() {
 		},
 	}
 
-	if err := agentutil.Serve(ctx, dbAgent, cfg, cardOpts); err != nil {
+	if err := agentutil.ServeWithTracing(ctx, dbAgent, cfg, traceStore, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

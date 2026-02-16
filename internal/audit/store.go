@@ -205,12 +205,12 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 
 	var decisionJSON []byte
 	var decisionAgent, decisionCategory string
-	var decisionConfidence float64
+	var decisionConfidence sql.NullFloat64
 	if event.Decision != nil {
 		decisionJSON, _ = json.Marshal(event.Decision)
 		decisionAgent = event.Decision.Agent
 		decisionCategory = string(event.Decision.RequestCategory)
-		decisionConfidence = event.Decision.Confidence
+		decisionConfidence = sql.NullFloat64{Float64: event.Decision.Confidence, Valid: true}
 	}
 
 	var outcomeStatus, outcomeError string
@@ -221,11 +221,17 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		outcomeDurationMs = event.Outcome.Duration.Milliseconds()
 	}
 
-	var toolName string
+	var toolName, toolAgent string
 	var toolJSON []byte
 	if event.Tool != nil {
 		toolName = event.Tool.Name
+		toolAgent = event.Tool.Agent
 		toolJSON, _ = json.Marshal(event.Tool)
+	}
+
+	// For tool executions, use Tool.Agent as fallback for decision_agent
+	if decisionAgent == "" && toolAgent != "" {
+		decisionAgent = toolAgent
 	}
 
 	var approvalStatus string

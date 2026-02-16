@@ -13,6 +13,7 @@ const (
 	EventTypeDelegation     EventType = "delegation_decision"
 	EventTypeOutcome        EventType = "delegation_outcome"
 	EventTypeGatewayRequest EventType = "gateway_request"
+	EventTypeToolExecution  EventType = "tool_execution"
 )
 
 // RequestCategory classifies the type of user request.
@@ -65,6 +66,9 @@ type Output struct {
 type ToolExecution struct {
 	// Name is the tool that was called (e.g., "check_connection", "get_pods").
 	Name string `json:"name"`
+
+	// Agent is the agent that executed this tool (for tool_execution events).
+	Agent string `json:"agent,omitempty"`
 
 	// Parameters are the arguments passed to the tool.
 	Parameters map[string]any `json:"parameters,omitempty"`

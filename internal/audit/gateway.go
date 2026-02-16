@@ -11,30 +11,30 @@ import (
 
 // GatewayAuditor provides audit logging for gateway requests.
 type GatewayAuditor struct {
-	store           *Store
+	auditor         Auditor
 	approvalManager *ApprovalManager
 }
 
 // NewGatewayAuditor creates a new gateway auditor.
-// If store is nil, auditing is disabled (no-op).
-func NewGatewayAuditor(store *Store) *GatewayAuditor {
+// If auditor is nil, auditing is disabled (no-op).
+func NewGatewayAuditor(auditor Auditor) *GatewayAuditor {
 	return &GatewayAuditor{
-		store:           store,
+		auditor:         auditor,
 		approvalManager: NewApprovalManager(nil), // Use default policy
 	}
 }
 
 // NewGatewayAuditorWithPolicy creates a gateway auditor with a custom approval policy.
-func NewGatewayAuditorWithPolicy(store *Store, policy *ApprovalPolicy) *GatewayAuditor {
+func NewGatewayAuditorWithPolicy(auditor Auditor, policy *ApprovalPolicy) *GatewayAuditor {
 	return &GatewayAuditor{
-		store:           store,
+		auditor:         auditor,
 		approvalManager: NewApprovalManager(policy),
 	}
 }
 
 // RecordRequest records a gateway request to the audit store.
 func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest) error {
-	if a.store == nil {
+	if a.auditor == nil {
 		return nil
 	}
 
@@ -82,7 +82,7 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 
 	event := &Event{
 		EventID:     "gw_" + uuid.New().String()[:8],
-		Timestamp:   req.StartTime,
+		Timestamp:   req.StartTime.UTC(),
 		EventType:   EventTypeGatewayRequest,
 		TraceID:     traceID,
 		ParentID:    req.ParentID,
@@ -112,7 +112,7 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 		},
 	}
 
-	if err := a.store.Record(ctx, event); err != nil {
+	if err := a.auditor.Record(ctx, event); err != nil {
 		slog.Warn("failed to record gateway audit event", "error", err)
 		return err
 	}
@@ -168,7 +168,7 @@ func categorizeAgent(agent string) RequestCategory {
 
 // AuditMiddleware wraps an http.Handler to record audit events.
 func (a *GatewayAuditor) AuditMiddleware(next http.Handler) http.Handler {
-	if a.store == nil {
+	if a.auditor == nil {
 		return next // No-op if auditing disabled
 	}
 
@@ -191,7 +191,7 @@ func (a *GatewayAuditor) AuditMiddleware(next http.Handler) http.Handler {
 
 		event := &Event{
 			EventID:   "gw_" + requestID,
-			Timestamp: start,
+			Timestamp: start.UTC(),
 			EventType: EventTypeGatewayRequest,
 			Session: Session{
 				ID: requestID,
@@ -209,7 +209,7 @@ func (a *GatewayAuditor) AuditMiddleware(next http.Handler) http.Handler {
 			},
 		}
 
-		if err := a.store.Record(r.Context(), event); err != nil {
+		if err := a.auditor.Record(r.Context(), event); err != nil {
 			slog.Debug("failed to record gateway audit", "error", err)
 		}
 	})
