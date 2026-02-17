@@ -348,7 +348,8 @@ func cmdCancel(ctx context.Context, client *audit.ApprovalClient, args []string)
 
 func cmdWatch(ctx context.Context, client *audit.ApprovalClient, auditURL string) error {
 	fmt.Println("Watching for pending approvals... (press Ctrl+C to exit)")
-	fmt.Println("Enter approval ID to approve, or !<ID> to deny")
+	fmt.Println("Enter: <ID> [reason]  to approve, or  !<ID> <reason>  to deny")
+	fmt.Println("Example: apr_abc123 looks good")
 	fmt.Println()
 
 	reader := bufio.NewReader(os.Stdin)
@@ -383,24 +384,30 @@ func cmdWatch(ctx context.Context, client *audit.ApprovalClient, auditURL string
 				continue
 			}
 			if strings.HasPrefix(input, "!") {
-				// Deny
-				id := strings.TrimPrefix(input, "!")
-				fmt.Print("Reason for denial: ")
-				reason, _ := reader.ReadString('\n')
-				reason = strings.TrimSpace(reason)
+				// Deny: !<id> <reason>
+				input = strings.TrimPrefix(input, "!")
+				parts := strings.SplitN(input, " ", 2)
+				id := strings.TrimSpace(parts[0])
+				reason := ""
+				if len(parts) > 1 {
+					reason = strings.TrimSpace(parts[1])
+				}
 				if reason == "" {
-					fmt.Println("Denial requires a reason")
+					fmt.Println("Denial requires a reason. Use: !<ID> <reason>")
 					continue
 				}
 				if err := denyApproval(ctx, id, reason, auditURL); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				}
 			} else {
-				// Approve
-				fmt.Print("Reason for approval (optional): ")
-				reason, _ := reader.ReadString('\n')
-				reason = strings.TrimSpace(reason)
-				if err := approveApproval(ctx, input, reason, auditURL); err != nil {
+				// Approve: <id> [reason]
+				parts := strings.SplitN(input, " ", 2)
+				id := strings.TrimSpace(parts[0])
+				reason := ""
+				if len(parts) > 1 {
+					reason = strings.TrimSpace(parts[1])
+				}
+				if err := approveApproval(ctx, id, reason, auditURL); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				}
 			}
@@ -436,7 +443,7 @@ func showPending(ctx context.Context, client *audit.ApprovalClient, seen map[str
 				fmt.Printf("  Expires:   in %s\n", formatDuration(remaining))
 			}
 		}
-		fmt.Printf("  > Enter '%s' to approve, '!%s' to deny\n", a.ApprovalID, a.ApprovalID)
+		fmt.Printf("  > Type '%s' to approve, or '!%s reason' to deny\n", a.ApprovalID, a.ApprovalID)
 	}
 }
 
