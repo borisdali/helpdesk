@@ -305,3 +305,21 @@ func (e *ApprovalRequiredError) Error() string {
 	}
 	return "approval required by policy " + e.Decision.PolicyName
 }
+
+// IsApprovalRequired returns true if the error indicates approval is required.
+func IsApprovalRequired(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok := err.(*ApprovalRequiredError)
+	return ok
+}
+
+// IsDenied returns true if the error indicates the request was denied.
+func IsDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok := err.(*DeniedError)
+	return ok
+}

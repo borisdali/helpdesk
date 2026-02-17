@@ -5,6 +5,7 @@ A Go-based AI multi-agent intelligent self-service help and support system for t
 * aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
 * aiHelpDesk is designed for human operators as well as for the upstream agents.
 * aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
+* aiHelpDesk is equipped with the comprehensive eight-module AI Governance system.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
 * aiHelpDesk features a built-in fault injection framework. 
 * aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those shipped with aiHelpDesk out of the box.

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
@@ -48,6 +49,10 @@ type Config struct {
 	PolicyFile    string // Path to policy YAML file
 	PolicyDryRun  bool   // Log policy decisions but don't enforce
 	DefaultPolicy string // "allow" or "deny" when no policy matches (default: "deny")
+
+	// Approval configuration
+	ApprovalEnabled bool          // Enable approval workflow
+	ApprovalTimeout time.Duration // How long to wait for approval (default: 30s)
 }
 
 // MustLoadConfig reads env vars. defaultAddr is used when HELPDESK_AGENT_ADDR is unset.
@@ -58,18 +63,30 @@ func MustLoadConfig(defaultAddr string) Config {
 
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED")
 	policyDryRun := os.Getenv("HELPDESK_POLICY_DRY_RUN")
+	approvalEnabled := os.Getenv("HELPDESK_APPROVAL_ENABLED")
+
+	// Parse approval timeout (default 30s)
+	approvalTimeout := 30 * time.Second
+	if v := os.Getenv("HELPDESK_APPROVAL_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			approvalTimeout = d
+		}
+	}
+
 	cfg := Config{
-		ModelVendor:   os.Getenv("HELPDESK_MODEL_VENDOR"),
-		ModelName:     os.Getenv("HELPDESK_MODEL_NAME"),
-		APIKey:        os.Getenv("HELPDESK_API_KEY"),
-		ListenAddr:    os.Getenv("HELPDESK_AGENT_ADDR"),
-		ExternalURL:   os.Getenv("HELPDESK_AGENT_URL"),
-		AuditEnabled:  auditEnabled == "true" || auditEnabled == "1",
-		AuditURL:      os.Getenv("HELPDESK_AUDIT_URL"),
-		AuditDir:      os.Getenv("HELPDESK_AUDIT_DIR"),
-		PolicyFile:    os.Getenv("HELPDESK_POLICY_FILE"),
-		PolicyDryRun:  policyDryRun == "true" || policyDryRun == "1",
-		DefaultPolicy: os.Getenv("HELPDESK_DEFAULT_POLICY"),
+		ModelVendor:     os.Getenv("HELPDESK_MODEL_VENDOR"),
+		ModelName:       os.Getenv("HELPDESK_MODEL_NAME"),
+		APIKey:          os.Getenv("HELPDESK_API_KEY"),
+		ListenAddr:      os.Getenv("HELPDESK_AGENT_ADDR"),
+		ExternalURL:     os.Getenv("HELPDESK_AGENT_URL"),
+		AuditEnabled:    auditEnabled == "true" || auditEnabled == "1",
+		AuditURL:        os.Getenv("HELPDESK_AUDIT_URL"),
+		AuditDir:        os.Getenv("HELPDESK_AUDIT_DIR"),
+		PolicyFile:      os.Getenv("HELPDESK_POLICY_FILE"),
+		PolicyDryRun:    policyDryRun == "true" || policyDryRun == "1",
+		DefaultPolicy:   os.Getenv("HELPDESK_DEFAULT_POLICY"),
+		ApprovalEnabled: approvalEnabled == "true" || approvalEnabled == "1",
+		ApprovalTimeout: approvalTimeout,
 	}
 
 	if cfg.ModelVendor == "" || cfg.ModelName == "" || cfg.APIKey == "" {
@@ -149,20 +166,50 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 
 // PolicyEnforcer wraps a policy engine with convenience methods for agents.
 type PolicyEnforcer struct {
-	engine     *policy.Engine
-	traceStore *audit.CurrentTraceStore
+	engine          *policy.Engine
+	traceStore      *audit.CurrentTraceStore
+	approvalClient  *audit.ApprovalClient
+	approvalTimeout time.Duration
+	agentName       string
+}
+
+// PolicyEnforcerConfig configures the policy enforcer.
+type PolicyEnforcerConfig struct {
+	Engine          *policy.Engine
+	TraceStore      *audit.CurrentTraceStore
+	ApprovalClient  *audit.ApprovalClient
+	ApprovalTimeout time.Duration
+	AgentName       string
 }
 
 // NewPolicyEnforcer creates a policy enforcer. If engine is nil, enforcement is disabled.
 func NewPolicyEnforcer(engine *policy.Engine, traceStore *audit.CurrentTraceStore) *PolicyEnforcer {
 	return &PolicyEnforcer{
-		engine:     engine,
-		traceStore: traceStore,
+		engine:          engine,
+		traceStore:      traceStore,
+		approvalTimeout: 30 * time.Second,
+	}
+}
+
+// NewPolicyEnforcerWithConfig creates a policy enforcer with full configuration.
+func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
+	timeout := cfg.ApprovalTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	return &PolicyEnforcer{
+		engine:          cfg.Engine,
+		traceStore:      cfg.TraceStore,
+		approvalClient:  cfg.ApprovalClient,
+		approvalTimeout: timeout,
+		agentName:       cfg.AgentName,
 	}
 }
 
 // CheckTool evaluates whether a tool execution is allowed.
-// Returns nil if allowed, error if denied or requires approval.
+// Returns nil if allowed, error if denied.
+// If approval is required and an approval client is configured, it will request
+// approval and wait for resolution.
 func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string) error {
 	if e.engine == nil {
 		return nil // No enforcement
@@ -178,12 +225,70 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	}
 
 	// Add trace context if available
+	traceID := ""
 	if e.traceStore != nil {
-		req.Context.TraceID = e.traceStore.Get()
+		traceID = e.traceStore.Get()
+		req.Context.TraceID = traceID
 	}
 
 	decision := e.engine.Evaluate(req)
-	return decision.MustAllow()
+	err := decision.MustAllow()
+
+	// If approval is required, attempt to get approval
+	if policy.IsApprovalRequired(err) && e.approvalClient != nil {
+		return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags)
+	}
+
+	return err
+}
+
+// requestApproval creates an approval request and waits for resolution.
+func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string) error {
+	// First check if there's an existing valid approval for this trace
+	if traceID != "" {
+		existing, err := e.approvalClient.CheckExistingApproval(ctx, traceID, resourceType+":"+resourceName)
+		if err == nil && existing != nil {
+			slog.Info("using existing approval",
+				"approval_id", existing.ApprovalID,
+				"trace_id", traceID,
+				"resource", resourceType+":"+resourceName)
+			return nil // Already approved
+		}
+	}
+
+	// Create approval request
+	approval, err := e.approvalClient.RequestApprovalAndWait(ctx, audit.ApprovalCreateRequest{
+		TraceID:      traceID,
+		ActionClass:  string(action),
+		ToolName:     resourceType + ":" + resourceName,
+		AgentName:    e.agentName,
+		ResourceType: resourceType,
+		ResourceName: resourceName,
+		RequestedBy:  e.agentName,
+		Context: map[string]any{
+			"tags": tags,
+		},
+	}, e.approvalTimeout)
+	if err != nil {
+		return fmt.Errorf("approval request failed: %w", err)
+	}
+
+	switch approval.Status {
+	case "approved":
+		slog.Info("approval granted",
+			"approval_id", approval.ApprovalID,
+			"approved_by", approval.ResolvedBy,
+			"resource", resourceType+":"+resourceName)
+		return nil
+	case "denied":
+		return fmt.Errorf("approval denied by %s: %s", approval.ResolvedBy, approval.ResolutionReason)
+	case "expired":
+		return fmt.Errorf("approval request expired")
+	case "cancelled":
+		return fmt.Errorf("approval request cancelled")
+	default:
+		return fmt.Errorf("approval still pending (status: %s)", approval.Status)
+	}
 }
 
 // CheckDatabase is a convenience method for database operations.
@@ -194,6 +299,27 @@ func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, actio
 // CheckKubernetes is a convenience method for Kubernetes operations.
 func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string) error {
 	return e.CheckTool(ctx, "kubernetes", namespace, action, tags)
+}
+
+// InitApprovalClient creates an approval client if approvals are enabled.
+// Returns nil if approvals are disabled or no audit URL is configured.
+// Approvals require a central auditd service.
+func InitApprovalClient(cfg Config) *audit.ApprovalClient {
+	if !cfg.ApprovalEnabled {
+		slog.Debug("approval workflow disabled (HELPDESK_APPROVAL_ENABLED not set)")
+		return nil
+	}
+
+	if cfg.AuditURL == "" {
+		slog.Warn("approval workflow requires HELPDESK_AUDIT_URL to be set")
+		return nil
+	}
+
+	slog.Info("approval workflow enabled",
+		"audit_url", cfg.AuditURL,
+		"timeout", cfg.ApprovalTimeout)
+
+	return audit.NewApprovalClient(cfg.AuditURL)
 }
 
 // InitAuditStore initializes an audit store for an agent if auditing is enabled.

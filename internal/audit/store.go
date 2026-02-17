@@ -423,6 +423,11 @@ func (s *Store) GetLastHash() string {
 	return s.lastHash
 }
 
+// DB returns the underlying database connection for shared access.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // Close closes the store and releases resources.
 func (s *Store) Close() error {
 	s.mu.Lock()

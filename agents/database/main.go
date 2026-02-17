@@ -63,7 +63,17 @@ func main() {
 		slog.Error("failed to initialize policy engine", "err", err)
 		os.Exit(1)
 	}
-	policyEnforcer = agentutil.NewPolicyEnforcer(policyEngine, traceStore)
+
+	// Initialize approval client for human-in-the-loop workflows
+	approvalClient := agentutil.InitApprovalClient(cfg)
+
+	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
+		Engine:          policyEngine,
+		TraceStore:      traceStore,
+		ApprovalClient:  approvalClient,
+		ApprovalTimeout: cfg.ApprovalTimeout,
+		AgentName:       "postgres_database_agent",
+	})
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {

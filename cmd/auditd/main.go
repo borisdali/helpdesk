@@ -23,6 +23,15 @@ type config struct {
 	listenAddr string
 	dbPath     string
 	socketPath string
+
+	// Approval notification configuration
+	approvalWebhook  string
+	smtpHost         string
+	smtpPort         string
+	smtpUser         string
+	smtpPassword     string
+	emailFrom        string
+	emailTo          string
 }
 
 func main() {
@@ -30,7 +39,22 @@ func main() {
 	flag.StringVar(&cfg.listenAddr, "listen", ":1199", "HTTP listen address")
 	flag.StringVar(&cfg.dbPath, "db", "audit.db", "Path to SQLite database")
 	flag.StringVar(&cfg.socketPath, "socket", "/tmp/helpdesk-audit.sock", "Unix socket for real-time notifications")
+
+	// Approval notification flags
+	flag.StringVar(&cfg.approvalWebhook, "approval-webhook", "", "Webhook URL for approval notifications (Slack, etc.)")
+	approvalBaseURL := flag.String("approval-base-url", "", "Base URL for approve/deny links in emails (e.g., http://localhost:1199)")
+	flag.StringVar(&cfg.smtpHost, "smtp-host", "", "SMTP server host for approval emails")
+	flag.StringVar(&cfg.smtpPort, "smtp-port", "587", "SMTP server port")
+	flag.StringVar(&cfg.smtpUser, "smtp-user", "", "SMTP username")
+	flag.StringVar(&cfg.smtpPassword, "smtp-password", "", "SMTP password (or use SMTP_PASSWORD env)")
+	flag.StringVar(&cfg.emailFrom, "email-from", "", "Email sender address for approvals")
+	flag.StringVar(&cfg.emailTo, "email-to", "", "Email recipients for approvals (comma-separated)")
 	flag.Parse()
+
+	// Allow SMTP password from environment
+	if cfg.smtpPassword == "" {
+		cfg.smtpPassword = os.Getenv("SMTP_PASSWORD")
+	}
 
 	logging.InitLogging(os.Args[1:])
 
@@ -44,12 +68,58 @@ func main() {
 	}
 	defer store.Close()
 
+	// Create approval store (shares the same database connection)
+	approvalStore, err := audit.NewApprovalStore(store.DB())
+	if err != nil {
+		slog.Error("failed to create approval store", "err", err)
+		os.Exit(1)
+	}
+
+	// Create approval notifier if configured
+	// Default baseURL to the listen address if not specified
+	baseURL := *approvalBaseURL
+	if baseURL == "" && cfg.smtpHost != "" {
+		baseURL = "http://localhost" + cfg.listenAddr
+	}
+
+	approvalNotifier := NewApprovalNotifier(ApprovalNotifierConfig{
+		WebhookURL:   cfg.approvalWebhook,
+		BaseURL:      baseURL,
+		SMTPHost:     cfg.smtpHost,
+		SMTPPort:     cfg.smtpPort,
+		SMTPUser:     cfg.smtpUser,
+		SMTPPassword: cfg.smtpPassword,
+		EmailFrom:    cfg.emailFrom,
+		EmailTo:      cfg.emailTo,
+	})
+	if approvalNotifier.IsEnabled() {
+		slog.Info("approval notifications enabled",
+			"webhook", cfg.approvalWebhook != "",
+			"email", cfg.smtpHost != "" && cfg.emailTo != "")
+	}
+
 	srv := &server{store: store}
+	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier}
+
 	mux := http.NewServeMux()
+
+	// Audit event endpoints
 	mux.HandleFunc("POST /v1/events", srv.handleRecordEvent)
 	mux.HandleFunc("POST /v1/events/{eventID}/outcome", srv.handleRecordOutcome)
 	mux.HandleFunc("GET /v1/events", srv.handleQueryEvents)
 	mux.HandleFunc("GET /v1/verify", srv.handleVerifyChain)
+
+	// Approval endpoints
+	mux.HandleFunc("POST /v1/approvals", approvalSrv.handleCreateApproval)
+	mux.HandleFunc("GET /v1/approvals", approvalSrv.handleListApprovals)
+	mux.HandleFunc("GET /v1/approvals/pending", approvalSrv.handlePendingApprovals)
+	mux.HandleFunc("GET /v1/approvals/{approvalID}", approvalSrv.handleGetApproval)
+	mux.HandleFunc("GET /v1/approvals/{approvalID}/wait", approvalSrv.handleWaitForApproval)
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/approve", approvalSrv.handleApprove)
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/deny", approvalSrv.handleDeny)
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/cancel", approvalSrv.handleCancel)
+
+	// Health endpoint
 	mux.HandleFunc("GET /health", srv.handleHealth)
 
 	httpServer := &http.Server{
@@ -62,6 +132,9 @@ func main() {
 	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start background workers
+	go approvalSrv.startExpirationWorker(ctx)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
