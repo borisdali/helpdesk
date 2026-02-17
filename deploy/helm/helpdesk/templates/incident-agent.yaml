@@ -30,6 +30,10 @@ spec:
             - name: HELPDESK_INCIDENT_DIR
               value: /data/incidents
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- if .Values.governance.auditd.enabled }}
+            - name: HELPDESK_AUDIT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+            {{- end }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.incident.port }}

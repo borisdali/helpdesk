@@ -171,9 +171,121 @@ Here's an example of an SRE bot detecting that the `db.example.com` is going off
 See the [sample log](INSTALL_from_source_sample_SRE_bot_log.md)  of running the above commands.
 
 
-## 3. Using the Gateway API
+## 3. AI Governance Components
 
-In addition to the interactive orchestrator REPL, the Gateway provides a REST API for programmatic access:
+aiHelpDesk includes an AI Governance framework with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging. The governance components are:
+
+| Component | Description | Port |
+|-----------|-------------|------|
+| **auditd** | Central audit daemon with SQLite persistence and approval workflow API | 1199 |
+| **auditor** | Real-time audit stream monitor with alerting (Slack, email) | - |
+| **secbot** | Security responder that creates incidents for security anomalies | 9091 |
+| **approvals** | CLI tool for managing approval requests | - |
+
+### 3.1 Enabling Governance (Docker Compose)
+
+The audit daemon (`auditd`) runs by default. To enable the optional monitoring components:
+
+```bash
+# Start all services including governance monitors
+docker compose --profile governance up -d
+
+# Or start just the core services (auditd runs automatically)
+docker compose up -d
+```
+
+### 3.2 Enabling Governance (Binary Deployment)
+
+```bash
+# Start with governance monitoring
+./startall.sh --governance
+
+# Or start without governance monitoring
+./startall.sh
+```
+
+### 3.3 Policy Configuration
+
+Create a policy file to control agent operations:
+
+```yaml
+# policies.yaml
+rules:
+  - name: allow-read-operations
+    match:
+      action_class: read
+    effect: allow
+
+  - name: require-approval-for-writes
+    match:
+      action_class: write
+    effect: require_approval
+
+  - name: deny-destructive-on-production
+    match:
+      action_class: destructive
+      tags: [production]
+    effect: deny
+```
+
+Mount the policy file and set the environment variable:
+
+```yaml
+# docker-compose.yaml addition
+database-agent:
+  environment:
+    HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+  volumes:
+    - ./policies.yaml:/etc/helpdesk/policies.yaml:ro
+```
+
+### 3.4 Managing Approvals
+
+When an operation requires approval, use the CLI:
+
+```bash
+# List pending approvals
+docker compose exec auditd /usr/local/bin/approvals list --status pending
+
+# Approve a request
+docker compose exec auditd /usr/local/bin/approvals approve apr_xxx --reason "Verified safe"
+
+# Watch for new approvals interactively
+docker compose exec auditd /usr/local/bin/approvals watch
+```
+
+Or use the HTTP API directly:
+
+```bash
+# List pending approvals
+curl http://localhost:1199/v1/approvals/pending
+
+# Approve a request
+curl -X POST http://localhost:1199/v1/approvals/apr_xxx/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approved_by": "admin", "reason": "Verified safe"}'
+```
+
+### 3.5 Notification Configuration
+
+Configure approval and alert notifications in `.env`:
+
+```bash
+# Slack webhook for approvals
+HELPDESK_APPROVAL_WEBHOOK=https://hooks.slack.com/services/...
+
+# Email notifications
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=user@example.com
+SMTP_PASSWORD=your-password
+HELPDESK_EMAIL_FROM=helpdesk@example.com
+HELPDESK_EMAIL_TO=ops@example.com
+```
+
+## 4. Using the Gateway API
+
+In addition to the interactive orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access:
 
 ```bash
 # Query the system
@@ -200,7 +312,7 @@ The Gateway API is useful for:
 - Integration with monitoring/alerting systems (see [srebot example](../../cmd/srebot/README.md))
 - Environments where interactive TTY access is limited
 
-## 4. Troubleshooting
+## 5. Troubleshooting
 
 ### Interactive REPL Shows Empty Responses
 

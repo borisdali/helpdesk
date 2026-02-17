@@ -81,3 +81,57 @@ orchestrator:
 #         context: "prod-cluster"
 #     vms: {}
 infrastructure: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Governance Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+governance:
+  # Audit daemon - central audit logging and approval workflow API
+  auditd:
+    enabled: true
+    port: 1199
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""
+
+  # Real-time audit monitoring and alerting
+  auditor:
+    enabled: false
+    # Webhook URL for alerts (Slack, etc.)
+    alertWebhook: ""
+
+  # Security responder bot
+  secbot:
+    enabled: false
+    port: 9091
+    # Cooldown between incident creations
+    cooldown: "5m"
+    # Max events per minute before high-volume alert
+    maxEventsPerMinute: 100
+
+  # Policy configuration
+  policy:
+    # Enable policy-based access control
+    enabled: false
+    # Name of ConfigMap containing policies.yaml
+    configMap: ""
+
+  # Approval workflow settings
+  approvals:
+    # Default timeout for approval requests
+    timeout: "5m"
+    # Webhook URL for approval notifications (Slack, etc.)
+    webhook: ""
+    # Base URL for approve/deny links in emails
+    baseURL: ""
+
+  # Email notifications for approvals and alerts
+  email:
+    enabled: false
+    smtpHost: ""
+    smtpPort: "587"
+    # Name of Secret containing SMTP credentials (keys: username, password)
+    smtpSecret: ""
+    from: ""
+    to: ""  # comma-separated

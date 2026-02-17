@@ -36,6 +36,18 @@ spec:
               value: /home/helpdesk
             {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- if .Values.governance.auditd.enabled }}
+            - name: HELPDESK_AUDIT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+            {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: HELPDESK_POLICY_FILE
+              value: /etc/helpdesk/policies.yaml
+            {{- end }}
+            {{- if .Values.governance.approvals.timeout }}
+            - name: HELPDESK_APPROVAL_TIMEOUT
+              value: "{{ .Values.governance.approvals.timeout }}"
+            {{- end }}
           volumeMounts:
             {{- if .Values.infrastructure }}
             - name: infra-config
@@ -47,6 +59,12 @@ spec:
             - name: pgpass
               mountPath: /home/helpdesk/.pgpass
               subPath: .pgpass
+              readOnly: true
+            {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: policy-config
+              mountPath: /etc/helpdesk/policies.yaml
+              subPath: policies.yaml
               readOnly: true
             {{- end }}
           ports:
@@ -76,6 +94,11 @@ spec:
           secret:
             secretName: {{ .Values.agents.database.pgpassSecret }}
             defaultMode: 0600
+        {{- end }}
+        {{- if .Values.governance.policy.enabled }}
+        - name: policy-config
+          configMap:
+            name: {{ .Values.governance.policy.configMap }}
         {{- end }}
 ---
 apiVersion: v1

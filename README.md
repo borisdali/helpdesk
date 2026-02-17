@@ -110,6 +110,8 @@ aiHelpDesk can certainly be used by humans and that's what the interactive LLM-p
 
 See [a sample](cmd/srebot/README.md) of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a Gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
 
+See [a sample](cmd/secbot/README.md) of a Security Responder bot that automatically sends alerts in real-time for security violations (e.g. for low confidence agent delegations, chain tampering, off-hours activity, high error rates, unauthorized destructive operations, etc.) and optionally creates a security incident (with the full incident bundle snapshot).
+
 ## Sample interactive dialog with a human operator
 aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").
 

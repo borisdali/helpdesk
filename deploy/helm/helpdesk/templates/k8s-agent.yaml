@@ -35,13 +35,31 @@ spec:
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
-          {{- if .Values.infrastructure }}
+            {{- if .Values.governance.auditd.enabled }}
+            - name: HELPDESK_AUDIT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+            {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: HELPDESK_POLICY_FILE
+              value: /etc/helpdesk/policies.yaml
+            {{- end }}
+            {{- if .Values.governance.approvals.timeout }}
+            - name: HELPDESK_APPROVAL_TIMEOUT
+              value: "{{ .Values.governance.approvals.timeout }}"
+            {{- end }}
           volumeMounts:
+            {{- if .Values.infrastructure }}
             - name: infra-config
               mountPath: /etc/helpdesk/infrastructure.json
               subPath: infrastructure.json
               readOnly: true
-          {{- end }}
+            {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: policy-config
+              mountPath: /etc/helpdesk/policies.yaml
+              subPath: policies.yaml
+              readOnly: true
+            {{- end }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.k8s.port }}
@@ -58,12 +76,17 @@ spec:
               port: a2a
             initialDelaySeconds: 3
             periodSeconds: 10
-      {{- if .Values.infrastructure }}
       volumes:
+        {{- if .Values.infrastructure }}
         - name: infra-config
           configMap:
             name: {{ include "helpdesk.fullname" . }}-config
-      {{- end }}
+        {{- end }}
+        {{- if .Values.governance.policy.enabled }}
+        - name: policy-config
+          configMap:
+            name: {{ .Values.governance.policy.configMap }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

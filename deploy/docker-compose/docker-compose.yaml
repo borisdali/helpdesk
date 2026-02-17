@@ -1,4 +1,32 @@
 services:
+  # AI Governance: Audit daemon with approval workflows
+  auditd:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
+    image: helpdesk:latest
+    command: ["/usr/local/bin/auditd"]
+    environment:
+      # Core audit configuration
+      HELPDESK_AUDIT_ADDR: "0.0.0.0:1199"
+      HELPDESK_AUDIT_DB: /data/audit/audit.db
+      HELPDESK_AUDIT_SOCKET: /data/audit/audit.sock
+      # Approval notification (optional)
+      HELPDESK_APPROVAL_WEBHOOK: ${HELPDESK_APPROVAL_WEBHOOK:-}
+      HELPDESK_APPROVAL_BASE_URL: ${HELPDESK_APPROVAL_BASE_URL:-http://localhost:1199}
+      # Email notifications (optional)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      HELPDESK_EMAIL_FROM: ${HELPDESK_EMAIL_FROM:-}
+      HELPDESK_EMAIL_TO: ${HELPDESK_EMAIL_TO:-}
+    volumes:
+      - audit-data:/data/audit
+    ports:
+      - "1199:1199"
+    restart: unless-stopped
+
   database-agent:
     build:
       context: ../../..
@@ -12,11 +40,17 @@ services:
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      # AI Governance
+      HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_POLICY_FILE: ${HELPDESK_POLICY_FILE:-}
+      HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     ports:
       - "1100:1100"
     restart: unless-stopped
+    depends_on:
+      - auditd
 
   k8s-agent:
     build:
@@ -31,6 +65,10 @@ services:
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      # AI Governance
+      HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_POLICY_FILE: ${HELPDESK_POLICY_FILE:-}
+      HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
@@ -38,7 +76,7 @@ services:
       - "1102:1102"
     restart: unless-stopped
     depends_on:
-      - database-agent
+      - auditd
 
   incident-agent:
     build:
@@ -53,6 +91,8 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       HELPDESK_INCIDENT_DIR: /data/incidents
+      # AI Governance
+      HELPDESK_AUDIT_URL: http://auditd:1199
     volumes:
       - incidents:/data/incidents
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
@@ -60,7 +100,7 @@ services:
       - "1104:1104"
     restart: unless-stopped
     depends_on:
-      - database-agent
+      - auditd
 
   # Research agent for Gemini models - provides web search via GoogleSearch.
   # GoogleSearch cannot be combined with function declarations, so this agent
@@ -77,11 +117,13 @@ services:
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      # AI Governance
+      HELPDESK_AUDIT_URL: http://auditd:1199
     ports:
       - "1106:1106"
     restart: unless-stopped
     depends_on:
-      - database-agent
+      - auditd
 
   gateway:
     build:
@@ -131,5 +173,55 @@ services:
       - incident-agent
       - research-agent
 
+  # AI Governance: Real-time audit monitoring and alerting
+  # Enable with: docker compose --profile governance up -d
+  auditor:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
+    image: helpdesk:latest
+    command:
+      - /usr/local/bin/auditor
+      - -socket=/data/audit/audit.sock
+      - -webhook=${HELPDESK_ALERT_WEBHOOK:-}
+    environment:
+      # Email alerting (optional)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      HELPDESK_EMAIL_FROM: ${HELPDESK_EMAIL_FROM:-}
+      HELPDESK_EMAIL_TO: ${HELPDESK_EMAIL_TO:-}
+    volumes:
+      - audit-data:/data/audit:ro
+    profiles:
+      - governance
+    restart: unless-stopped
+    depends_on:
+      - auditd
+
+  # AI Governance: Security responder bot
+  # Enable with: docker compose --profile governance up -d
+  secbot:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
+    image: helpdesk:latest
+    command:
+      - /usr/local/bin/secbot
+      - -socket=/data/audit/audit.sock
+      - -gateway=http://gateway:8080
+    volumes:
+      - audit-data:/data/audit:ro
+    ports:
+      - "9091:9091"
+    profiles:
+      - governance
+    restart: unless-stopped
+    depends_on:
+      - auditd
+      - gateway
+
 volumes:
   incidents:
+  audit-data:

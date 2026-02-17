@@ -75,7 +75,7 @@ start_bg() {
 # --stop: kill any running helpdesk processes
 # ---------------------------------------------------------------------------
 if [[ "${1:-}" == "--stop" ]]; then
-    for name in database-agent k8s-agent incident-agent research-agent gateway; do
+    for name in auditd database-agent k8s-agent incident-agent research-agent gateway auditor secbot; do
         pkill -f "helpdesk.*${name}\|${SCRIPT_DIR}/${name}" 2>/dev/null || true
     done
     echo "Sent stop signal to helpdesk services."
@@ -89,13 +89,26 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 echo "Starting helpdesk services..."
 
-start_bg database-agent "$SCRIPT_DIR/database-agent"
-start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
-start_bg incident-agent "$SCRIPT_DIR/incident-agent"
+# Start audit daemon first (AI Governance foundation)
+if [[ -x "$SCRIPT_DIR/auditd" ]]; then
+    HELPDESK_AUDIT_SOCKET="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}" \
+        start_bg auditd "$SCRIPT_DIR/auditd"
+    sleep 1
+fi
+
+# Configure agents to use audit daemon if running
+AUDIT_URL=""
+if [[ -x "$SCRIPT_DIR/auditd" ]]; then
+    AUDIT_URL="http://localhost:1199"
+fi
+
+HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg database-agent "$SCRIPT_DIR/database-agent"
+HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
+HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
 
 # Start research agent for Gemini models
 if [[ "$VENDOR_LC" == "gemini" || "$VENDOR_LC" == "google" ]]; then
-    start_bg research-agent "$SCRIPT_DIR/research-agent"
+    HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg research-agent "$SCRIPT_DIR/research-agent"
 fi
 
 # Give agents a moment to bind their ports.
@@ -107,6 +120,18 @@ HELPDESK_GATEWAY_ADDR="0.0.0.0:8080" \
 
 sleep 1
 echo "Gateway listening on http://localhost:8080"
+
+# Start optional governance components if --governance flag is set
+if [[ "${1:-}" == "--governance" || "${2:-}" == "--governance" ]]; then
+    echo ""
+    echo "Starting governance components..."
+    if [[ -x "$SCRIPT_DIR/auditor" ]]; then
+        start_bg auditor "$SCRIPT_DIR/auditor" -socket="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}"
+    fi
+    if [[ -x "$SCRIPT_DIR/secbot" ]]; then
+        start_bg secbot "$SCRIPT_DIR/secbot" -socket="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}" -gateway="http://localhost:8080"
+    fi
+fi
 echo ""
 
 # ---------------------------------------------------------------------------

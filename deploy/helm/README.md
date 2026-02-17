@@ -319,9 +319,120 @@ kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
 ./scripts/gateway-repl.sh
 ```
 
-## 9. Troubleshooting
+## 9. AI Governance
 
-### Interactive REPL Shows Empty Responses
+aiHelpDesk includes an AI Governance framework with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging.
+
+### 9.1 Governance Components
+
+| Component | Description | Default |
+|-----------|-------------|---------|
+| **auditd** | Central audit daemon with SQLite persistence and approval workflow API | Enabled |
+| **auditor** | Real-time audit stream monitor with alerting | Disabled |
+| **secbot** | Security responder that creates incidents for anomalies | Disabled |
+
+### 9.2 Enable Governance
+
+Add to your `values.yaml`:
+
+```yaml
+governance:
+  auditd:
+    enabled: true
+    port: 1199
+    persistence:
+      enabled: true
+      size: 5Gi
+
+  # Optional: Real-time monitoring
+  auditor:
+    enabled: true
+    alertWebhook: "https://hooks.slack.com/services/..."
+
+  # Optional: Security responder
+  secbot:
+    enabled: true
+    cooldown: "5m"
+    maxEventsPerMinute: 100
+```
+
+### 9.3 Policy Configuration
+
+Create a ConfigMap with your policies:
+
+```bash
+kubectl -n helpdesk-system create configmap helpdesk-policies \
+  --from-file=policies.yaml=./policies.yaml
+```
+
+Then reference it in values:
+
+```yaml
+governance:
+  policy:
+    enabled: true
+    configMap: helpdesk-policies
+```
+
+Example `policies.yaml`:
+
+```yaml
+rules:
+  - name: allow-read-operations
+    match:
+      action_class: read
+    effect: allow
+
+  - name: require-approval-for-writes
+    match:
+      action_class: write
+    effect: require_approval
+
+  - name: deny-destructive-on-production
+    match:
+      action_class: destructive
+      tags: [production]
+    effect: deny
+```
+
+### 9.4 Approval Workflow
+
+Configure approval notifications:
+
+```yaml
+governance:
+  approvals:
+    timeout: "5m"
+    webhook: "https://hooks.slack.com/services/..."
+    baseURL: "http://helpdesk-auditd:1199"
+
+  email:
+    enabled: true
+    smtpHost: "smtp.example.com"
+    smtpPort: "587"
+    smtpSecret: "smtp-credentials"  # Secret with keys: username, password
+    from: "helpdesk@example.com"
+    to: "ops@example.com"
+```
+
+Manage approvals via the Gateway:
+
+```bash
+# Port-forward auditd
+kubectl -n helpdesk-system port-forward svc/helpdesk-auditd 1199:1199
+
+# List pending approvals
+curl http://localhost:1199/v1/approvals/pending
+
+# Approve a request
+curl -X POST http://localhost:1199/v1/approvals/apr_xxx/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approved_by": "admin", "reason": "Verified safe"}'
+```
+
+## 10. Troubleshooting
+
+### 10.1 Interactive REPL Shows Empty Responses
 
 **Symptom:** When running the interactive orchestrator in a container, agent responses appear empty and require pressing Enter to display.
 
@@ -342,7 +453,7 @@ kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
 
 3. **Direct API calls** - Use curl with the Gateway REST API (see Section 7).
 
-### Agents Not Discovered
+### 10.2 Agents Not Discovered
 
 **Symptom:** Orchestrator logs show "agent not available" or discovery failures.
 
@@ -353,7 +464,7 @@ kubectl -n helpdesk-system get svc
 kubectl -n helpdesk-system logs deploy/helpdesk-orchestrator
 ```
 
-### API Key Issues
+### 10.3 API Key Issues
 
 **Symptom:** Agents fail with authentication errors to the LLM provider.
 
@@ -362,7 +473,7 @@ kubectl -n helpdesk-system logs deploy/helpdesk-orchestrator
 kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 ```
 
-### K8s Context Not Found
+### 10.4 K8s Context Not Found
 
 **Symptom:** K8s agent reports "context does not exist" when querying pods.
 
@@ -372,7 +483,7 @@ kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 - For databases in the **same cluster** as aiHelpDesk: use empty context (`""`) in `infrastructure.json`. The agent will use in-cluster authentication via its service account.
 - For databases in **other clusters**: mount a kubeconfig as a secret (see Section 3.2).
 
-## 10. Uninstall
+## 11. Uninstall
 
 ```bash
 helm uninstall helpdesk --namespace helpdesk-system

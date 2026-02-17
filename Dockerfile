@@ -29,6 +29,12 @@ RUN CGO_ENABLED=0 go build -o /out/gateway         ./cmd/gateway/
 RUN CGO_ENABLED=0 go build -o /out/helpdesk        ./cmd/helpdesk/
 RUN CGO_ENABLED=0 go build -o /out/srebot          ./cmd/srebot/
 
+# AI Governance tools
+RUN CGO_ENABLED=0 go build -o /out/auditd          ./cmd/auditd/
+RUN CGO_ENABLED=0 go build -o /out/auditor         ./cmd/auditor/
+RUN CGO_ENABLED=0 go build -o /out/approvals       ./cmd/approvals/
+RUN CGO_ENABLED=0 go build -o /out/secbot          ./cmd/secbot/
+
 # Stage 2: Runtime image with psql and kubectl.
 FROM debian:bookworm-slim
 
@@ -62,6 +68,12 @@ COPY --from=builder /out/research-agent  /usr/local/bin/research-agent
 COPY --from=builder /out/gateway         /usr/local/bin/gateway
 COPY --from=builder /out/helpdesk        /usr/local/bin/helpdesk
 COPY --from=builder /out/srebot          /usr/local/bin/srebot
+
+# AI Governance tools
+COPY --from=builder /out/auditd          /usr/local/bin/auditd
+COPY --from=builder /out/auditor         /usr/local/bin/auditor
+COPY --from=builder /out/approvals       /usr/local/bin/approvals
+COPY --from=builder /out/secbot          /usr/local/bin/secbot
 
 # Incident bundles default directory.
 RUN mkdir -p /data/incidents

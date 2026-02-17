@@ -1,0 +1,119 @@
+{{- if .Values.governance.auditd.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-auditd
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auditd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: auditd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: auditd
+    spec:
+      containers:
+        - name: auditd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/auditd"]
+          args:
+            - "-listen=:{{ .Values.governance.auditd.port }}"
+            - "-db=/data/audit/audit.db"
+            - "-socket=/data/audit/audit.sock"
+            {{- if .Values.governance.approvals.webhook }}
+            - "-approval-webhook={{ .Values.governance.approvals.webhook }}"
+            {{- end }}
+            {{- if .Values.governance.approvals.baseURL }}
+            - "-approval-base-url={{ .Values.governance.approvals.baseURL }}"
+            {{- end }}
+            {{- if .Values.governance.email.enabled }}
+            - "-smtp-host={{ .Values.governance.email.smtpHost }}"
+            - "-smtp-port={{ .Values.governance.email.smtpPort }}"
+            - "-email-from={{ .Values.governance.email.from }}"
+            - "-email-to={{ .Values.governance.email.to }}"
+            {{- end }}
+          env:
+            {{- if and .Values.governance.email.enabled .Values.governance.email.smtpSecret }}
+            - name: SMTP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.email.smtpSecret }}
+                  key: username
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.email.smtpSecret }}
+                  key: password
+            {{- end }}
+          volumeMounts:
+            - name: audit-data
+              mountPath: /data/audit
+          ports:
+            - name: http
+              containerPort: {{ .Values.governance.auditd.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: audit-data
+          {{- if .Values.governance.auditd.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "helpdesk.fullname" . }}-auditd
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-auditd
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auditd
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.governance.auditd.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: auditd
+{{- if .Values.governance.auditd.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-auditd
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auditd
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.governance.auditd.persistence.size }}
+  {{- if .Values.governance.auditd.persistence.storageClass }}
+  storageClassName: {{ .Values.governance.auditd.persistence.storageClass }}
+  {{- end }}
+{{- end }}
+{{- end }}
