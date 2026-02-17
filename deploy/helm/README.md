@@ -330,6 +330,7 @@ aiHelpDesk includes an AI Governance framework with policy-based access control,
 | **auditd** | Central audit daemon with SQLite persistence and approval workflow API | Enabled |
 | **auditor** | Real-time audit stream monitor with alerting | Disabled |
 | **secbot** | Security responder that creates incidents for anomalies | Disabled |
+| **approvals** | CLI tool for managing approval requests (included in auditd pod) | - |
 
 ### 9.2 Enable Governance
 
@@ -415,7 +416,20 @@ governance:
     to: "ops@example.com"
 ```
 
-Manage approvals via the Gateway:
+Manage approvals via the CLI (exec into the auditd pod):
+
+```bash
+# List pending approvals
+kubectl -n helpdesk-system exec -it deploy/helpdesk-auditd -- approvals list --status pending
+
+# Approve a request
+kubectl -n helpdesk-system exec -it deploy/helpdesk-auditd -- approvals approve apr_xxx --reason "LGTM, verified safe"
+
+# Watch for new approvals interactively
+kubectl -n helpdesk-system exec -it deploy/helpdesk-auditd -- approvals watch
+```
+
+Or use the HTTP API directly:
 
 ```bash
 # Port-forward auditd
@@ -427,7 +441,7 @@ curl http://localhost:1199/v1/approvals/pending
 # Approve a request
 curl -X POST http://localhost:1199/v1/approvals/apr_xxx/approve \
   -H "Content-Type: application/json" \
-  -d '{"approved_by": "admin", "reason": "Verified safe"}'
+  -d '{"approved_by": "admin", "reason": "LGTM, verified safe"}'
 ```
 
 ## 10. Troubleshooting

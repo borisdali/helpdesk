@@ -173,7 +173,7 @@ See the [sample log](INSTALL_from_source_sample_SRE_bot_log.md)  of running the 
 
 ## 3. AI Governance Components
 
-aiHelpDesk includes an AI Governance framework with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging. The governance components are:
+aiHelpDesk includes an [AI Governance framework](../../AIGOVERNANCE.md) with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging. The governance components are:
 
 | Component | Description | Port |
 |-----------|-------------|------|
@@ -248,7 +248,7 @@ When an operation requires approval, use the CLI:
 docker compose exec auditd /usr/local/bin/approvals list --status pending
 
 # Approve a request
-docker compose exec auditd /usr/local/bin/approvals approve apr_xxx --reason "Verified safe"
+docker compose exec auditd /usr/local/bin/approvals approve apr_xxx --reason "LGTM, verified and it is safe"
 
 # Watch for new approvals interactively
 docker compose exec auditd /usr/local/bin/approvals watch
@@ -263,7 +263,7 @@ curl http://localhost:1199/v1/approvals/pending
 # Approve a request
 curl -X POST http://localhost:1199/v1/approvals/apr_xxx/approve \
   -H "Content-Type: application/json" \
-  -d '{"approved_by": "admin", "reason": "Verified safe"}'
+  -d '{"approved_by": "admin", "reason": "LGTM, verified and it is safe"}'
 ```
 
 ### 3.5 Notification Configuration

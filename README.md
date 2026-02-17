@@ -105,7 +105,7 @@ aiHelpDesk includes helper scripts for working around the ADK REPL bug in contai
 
 See [scripts/README.md](scripts/README.md) for detailed usage.
 
-## Demo app calling aiHelpDesk
+## Demo upstream applications calling aiHelpDesk
 aiHelpDesk can certainly be used by humans and that's what the interactive LLM-powered Orchestrator is there for. Additionally however, an upstream agent or a program can call aiHelpDesk agents directly as well.
 
 See [a sample](cmd/srebot/README.md) of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a Gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
