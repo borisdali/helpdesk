@@ -33,6 +33,8 @@ spec:
             {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
             {{- if .Values.governance.auditd.enabled }}
+            - name: HELPDESK_AUDIT_ENABLED
+              value: "true"
             - name: HELPDESK_AUDIT_URL
               value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
             {{- end }}

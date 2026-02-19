@@ -41,6 +41,7 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       # AI Governance
+      HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_FILE: ${HELPDESK_POLICY_FILE:-}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
@@ -66,6 +67,7 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       # AI Governance
+      HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_FILE: ${HELPDESK_POLICY_FILE:-}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
@@ -92,6 +94,7 @@ services:
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       HELPDESK_INCIDENT_DIR: /data/incidents
       # AI Governance
+      HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
     volumes:
       - incidents:/data/incidents
@@ -118,6 +121,7 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       # AI Governance
+      HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
     ports:
       - "1106:1106"
@@ -138,6 +142,7 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       # AI Governance - enables /api/v1/governance endpoints
+      HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
     ports:
       - "8080:8080"
