@@ -31,7 +31,7 @@ BIN_PKGS := \
 	approvals:./cmd/approvals/ \
 	secbot:./cmd/secbot/
 
-.PHONY: test cover integration faulttest e2e image push binaries bundle release github-release clean
+.PHONY: test cover test-governance cover-governance integration integration-governance faulttest e2e image push binaries bundle release github-release clean
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
@@ -45,6 +45,33 @@ cover:
 	go tool cover -func=$(DIST)/coverage.out
 	go tool cover -html=$(DIST)/coverage.out -o $(DIST)/coverage.html
 	@echo "Coverage report: $(DIST)/coverage.html"
+
+# ---------------------------------------------------------------------------
+# AI Governance unit tests (no infrastructure required)
+# ---------------------------------------------------------------------------
+test-governance:
+	go test \
+		./internal/audit/... \
+		./internal/policy/... \
+		./agentutil/... \
+		./cmd/auditd/...
+
+cover-governance:
+	@mkdir -p $(DIST)
+	go test -coverprofile=$(DIST)/coverage-governance.out \
+		./internal/audit/... \
+		./internal/policy/... \
+		./agentutil/... \
+		./cmd/auditd/...
+	go tool cover -func=$(DIST)/coverage-governance.out
+	go tool cover -html=$(DIST)/coverage-governance.out -o $(DIST)/coverage-governance.html
+	@echo "Coverage report: $(DIST)/coverage-governance.html"
+
+# ---------------------------------------------------------------------------
+# AI Governance integration tests (no Docker required; builds auditd internally)
+# ---------------------------------------------------------------------------
+integration-governance:
+	go test -tags integration -timeout 120s ./testing/integration/governance/...
 
 # ---------------------------------------------------------------------------
 # Integration tests (requires Docker)

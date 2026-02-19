@@ -46,7 +46,8 @@ type Config struct {
 	AuditDir     string // Local directory for audit.db (fallback if AuditURL not set)
 
 	// Policy configuration
-	PolicyFile    string // Path to policy YAML file
+	PolicyEnabled bool   // Master switch — must be true to enforce policy
+	PolicyFile    string // Path to policy YAML file (required when PolicyEnabled)
 	PolicyDryRun  bool   // Log policy decisions but don't enforce
 	DefaultPolicy string // "allow" or "deny" when no policy matches (default: "deny")
 
@@ -62,8 +63,18 @@ func MustLoadConfig(defaultAddr string) Config {
 	logging.InitLogging(os.Args[1:])
 
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED")
+	policyEnabled := os.Getenv("HELPDESK_POLICY_ENABLED")
+	policyFile := os.Getenv("HELPDESK_POLICY_FILE")
 	policyDryRun := os.Getenv("HELPDESK_POLICY_DRY_RUN")
 	approvalEnabled := os.Getenv("HELPDESK_APPROVAL_ENABLED")
+
+	// Backward compat: if HELPDESK_POLICY_FILE is set without HELPDESK_POLICY_ENABLED,
+	// infer enabled=true and warn so operators know to update their config.
+	policyEnabledBool := policyEnabled == "true" || policyEnabled == "1"
+	if !policyEnabledBool && policyFile != "" && policyEnabled == "" {
+		slog.Warn("HELPDESK_POLICY_FILE is set without HELPDESK_POLICY_ENABLED; inferring enabled=true — set HELPDESK_POLICY_ENABLED=true explicitly")
+		policyEnabledBool = true
+	}
 
 	// Parse approval timeout (default 30s)
 	approvalTimeout := 30 * time.Second
@@ -82,7 +93,8 @@ func MustLoadConfig(defaultAddr string) Config {
 		AuditEnabled:    auditEnabled == "true" || auditEnabled == "1",
 		AuditURL:        os.Getenv("HELPDESK_AUDIT_URL"),
 		AuditDir:        os.Getenv("HELPDESK_AUDIT_DIR"),
-		PolicyFile:      os.Getenv("HELPDESK_POLICY_FILE"),
+		PolicyEnabled:   policyEnabledBool,
+		PolicyFile:      policyFile,
 		PolicyDryRun:    policyDryRun == "true" || policyDryRun == "1",
 		DefaultPolicy:   os.Getenv("HELPDESK_DEFAULT_POLICY"),
 		ApprovalEnabled: approvalEnabled == "true" || approvalEnabled == "1",
@@ -130,11 +142,15 @@ func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 }
 
 // InitPolicyEngine initializes a policy engine for an agent if configured.
-// Returns nil if no policy file is configured.
+// Returns nil if policy enforcement is disabled.
 func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
-	if cfg.PolicyFile == "" {
-		slog.Debug("policy enforcement disabled (no HELPDESK_POLICY_FILE)")
+	if !cfg.PolicyEnabled {
+		slog.Debug("policy enforcement disabled (HELPDESK_POLICY_ENABLED not set)")
 		return nil, nil
+	}
+
+	if cfg.PolicyFile == "" {
+		return nil, fmt.Errorf("HELPDESK_POLICY_ENABLED is true but HELPDESK_POLICY_FILE is not set")
 	}
 
 	// Load policies from file

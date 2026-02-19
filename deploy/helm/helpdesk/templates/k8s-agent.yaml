@@ -42,6 +42,8 @@ spec:
               value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
             {{- end }}
             {{- if .Values.governance.policy.enabled }}
+            - name: HELPDESK_POLICY_ENABLED
+              value: "true"
             - name: HELPDESK_POLICY_FILE
               value: /etc/helpdesk/policies.yaml
             {{- end }}

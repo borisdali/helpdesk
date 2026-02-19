@@ -89,47 +89,64 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 echo "Starting helpdesk services..."
 
+# Resolve HELPDESK_POLICY_FILE before starting any service so that auditd and
+# agents all see the same resolved path.
+# Relative paths are interpreted relative to SCRIPT_DIR (where .env lives).
+if [[ -n "${HELPDESK_POLICY_FILE:-}" ]]; then
+    if [[ "$HELPDESK_POLICY_FILE" != /* ]]; then
+        HELPDESK_POLICY_FILE="$SCRIPT_DIR/$HELPDESK_POLICY_FILE"
+    fi
+    if [[ ! -f "$HELPDESK_POLICY_FILE" ]]; then
+        fallback="$SCRIPT_DIR/policies.example.yaml"
+        if [[ -f "$fallback" ]]; then
+            echo "WARN: HELPDESK_POLICY_FILE='$HELPDESK_POLICY_FILE' not found; falling back to $fallback" >&2
+            HELPDESK_POLICY_FILE="$fallback"
+        else
+            echo "ERROR: HELPDESK_POLICY_FILE='$HELPDESK_POLICY_FILE' not found and no policies.example.yaml alongside script." >&2
+            exit 1
+        fi
+    fi
+fi
+
+# Infer HELPDESK_POLICY_ENABLED from HELPDESK_POLICY_FILE when not set explicitly
+# (backward compat — operators should set HELPDESK_POLICY_ENABLED=true in .env explicitly).
+if [[ -z "${HELPDESK_POLICY_ENABLED:-}" && -n "${HELPDESK_POLICY_FILE:-}" ]]; then
+    HELPDESK_POLICY_ENABLED="true"
+fi
+POLICY_ENABLED="${HELPDESK_POLICY_ENABLED:-false}"
+
+# Configure agents to use audit daemon if running.
+# HELPDESK_AUDIT_ENABLED defaults to true when auditd is present, but can be
+# overridden to "false" in .env or the shell to disable audit logging entirely.
+AUDIT_ENABLED=""
+AUDIT_URL=""
+if [[ -x "$SCRIPT_DIR/auditd" ]]; then
+    AUDIT_ENABLED="${HELPDESK_AUDIT_ENABLED:-true}"
+    AUDIT_URL="http://localhost:1199"
+fi
+
 # Start audit daemon first (AI Governance foundation)
 if [[ -x "$SCRIPT_DIR/auditd" ]]; then
     HELPDESK_AUDIT_SOCKET="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}" \
+    HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" \
         start_bg auditd "$SCRIPT_DIR/auditd"
     sleep 1
 fi
 
-# Configure agents to use audit daemon if running
-AUDIT_ENABLED=""
-AUDIT_URL=""
-if [[ -x "$SCRIPT_DIR/auditd" ]]; then
-    AUDIT_ENABLED="true"
-    AUDIT_URL="http://localhost:1199"
-fi
-
-# Resolve HELPDESK_POLICY_FILE: if set but the file doesn't exist, try the
-# bundled policies.example.yaml in the same directory as this script.
-if [[ -n "${HELPDESK_POLICY_FILE:-}" && ! -f "$HELPDESK_POLICY_FILE" ]]; then
-    fallback="$SCRIPT_DIR/policies.example.yaml"
-    if [[ -f "$fallback" ]]; then
-        echo "WARN: HELPDESK_POLICY_FILE='$HELPDESK_POLICY_FILE' not found; falling back to $fallback" >&2
-        HELPDESK_POLICY_FILE="$fallback"
-    else
-        echo "ERROR: HELPDESK_POLICY_FILE='$HELPDESK_POLICY_FILE' not found and no policies.example.yaml alongside script." >&2
-        exit 1
-    fi
-fi
-
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg database-agent "$SCRIPT_DIR/database-agent"
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" start_bg database-agent "$SCRIPT_DIR/database-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
 
 # Start research agent for Gemini models
 if [[ "$VENDOR_LC" == "gemini" || "$VENDOR_LC" == "google" ]]; then
-    HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg research-agent "$SCRIPT_DIR/research-agent"
+    HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" start_bg research-agent "$SCRIPT_DIR/research-agent"
 fi
 
 # Give agents a moment to bind their ports.
 sleep 2
 
 HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" \
+HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" \
 HELPDESK_AGENT_URLS="$AGENT_URLS" \
 HELPDESK_GATEWAY_ADDR="0.0.0.0:8080" \
     start_bg gateway "$SCRIPT_DIR/gateway"

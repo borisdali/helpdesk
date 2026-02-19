@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -89,15 +90,21 @@ func newGovernanceServer(
 		notifier:      notifier,
 	}
 
-	// Try to load policy file if configured
+	// Load policy file when explicitly enabled.
+	// Backward compat: also load when HELPDESK_POLICY_FILE is set without the flag.
+	policyEnabled := os.Getenv("HELPDESK_POLICY_ENABLED")
 	policyFile := os.Getenv("HELPDESK_POLICY_FILE")
-	if policyFile != "" {
+	shouldLoad := policyEnabled == "true" || policyEnabled == "1" ||
+		(policyEnabled == "" && policyFile != "")
+	if shouldLoad && policyFile != "" {
 		gs.policyFile = policyFile
 		cfg, err := policy.LoadFile(policyFile)
 		if err == nil {
 			gs.policyEngine = policy.NewEngine(policy.EngineConfig{
 				PolicyConfig: cfg,
 			})
+		} else {
+			slog.Warn("failed to load policy file for governance info", "file", policyFile, "err", err)
 		}
 	}
 
