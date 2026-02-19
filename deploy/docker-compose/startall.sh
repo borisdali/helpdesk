@@ -97,12 +97,11 @@ if [[ -x "$SCRIPT_DIR/auditd" ]]; then
 fi
 
 # Configure agents to use audit daemon if running
-AUDIT_ENV=()
+AUDIT_ENABLED=""
+AUDIT_URL=""
 if [[ -x "$SCRIPT_DIR/auditd" ]]; then
-    AUDIT_ENV=(
-        HELPDESK_AUDIT_ENABLED=true
-        HELPDESK_AUDIT_URL=http://localhost:1199
-    )
+    AUDIT_ENABLED="true"
+    AUDIT_URL="http://localhost:1199"
 fi
 
 # Resolve HELPDESK_POLICY_FILE: if set but the file doesn't exist, try the
@@ -118,19 +117,19 @@ if [[ -n "${HELPDESK_POLICY_FILE:-}" && ! -f "$HELPDESK_POLICY_FILE" ]]; then
     fi
 fi
 
-env "${AUDIT_ENV[@]}" start_bg database-agent "$SCRIPT_DIR/database-agent"
-env "${AUDIT_ENV[@]}" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
-env "${AUDIT_ENV[@]}" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg database-agent "$SCRIPT_DIR/database-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
 
 # Start research agent for Gemini models
 if [[ "$VENDOR_LC" == "gemini" || "$VENDOR_LC" == "google" ]]; then
-    env "${AUDIT_ENV[@]}" start_bg research-agent "$SCRIPT_DIR/research-agent"
+    HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg research-agent "$SCRIPT_DIR/research-agent"
 fi
 
 # Give agents a moment to bind their ports.
 sleep 2
 
-env "${AUDIT_ENV[@]}" \
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" \
 HELPDESK_AGENT_URLS="$AGENT_URLS" \
 HELPDESK_GATEWAY_ADDR="0.0.0.0:8080" \
     start_bg gateway "$SCRIPT_DIR/gateway"
