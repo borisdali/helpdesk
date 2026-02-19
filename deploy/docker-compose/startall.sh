@@ -97,23 +97,40 @@ if [[ -x "$SCRIPT_DIR/auditd" ]]; then
 fi
 
 # Configure agents to use audit daemon if running
-AUDIT_URL=""
+AUDIT_ENV=()
 if [[ -x "$SCRIPT_DIR/auditd" ]]; then
-    AUDIT_URL="http://localhost:1199"
+    AUDIT_ENV=(
+        HELPDESK_AUDIT_ENABLED=true
+        HELPDESK_AUDIT_URL=http://localhost:1199
+    )
 fi
 
-HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg database-agent "$SCRIPT_DIR/database-agent"
-HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
-HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
+# Resolve HELPDESK_POLICY_FILE: if set but the file doesn't exist, try the
+# bundled policies.example.yaml in the same directory as this script.
+if [[ -n "${HELPDESK_POLICY_FILE:-}" && ! -f "$HELPDESK_POLICY_FILE" ]]; then
+    fallback="$SCRIPT_DIR/policies.example.yaml"
+    if [[ -f "$fallback" ]]; then
+        echo "WARN: HELPDESK_POLICY_FILE='$HELPDESK_POLICY_FILE' not found; falling back to $fallback" >&2
+        HELPDESK_POLICY_FILE="$fallback"
+    else
+        echo "ERROR: HELPDESK_POLICY_FILE='$HELPDESK_POLICY_FILE' not found and no policies.example.yaml alongside script." >&2
+        exit 1
+    fi
+fi
+
+env "${AUDIT_ENV[@]}" start_bg database-agent "$SCRIPT_DIR/database-agent"
+env "${AUDIT_ENV[@]}" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
+env "${AUDIT_ENV[@]}" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
 
 # Start research agent for Gemini models
 if [[ "$VENDOR_LC" == "gemini" || "$VENDOR_LC" == "google" ]]; then
-    HELPDESK_AUDIT_URL="$AUDIT_URL" start_bg research-agent "$SCRIPT_DIR/research-agent"
+    env "${AUDIT_ENV[@]}" start_bg research-agent "$SCRIPT_DIR/research-agent"
 fi
 
 # Give agents a moment to bind their ports.
 sleep 2
 
+env "${AUDIT_ENV[@]}" \
 HELPDESK_AGENT_URLS="$AGENT_URLS" \
 HELPDESK_GATEWAY_ADDR="0.0.0.0:8080" \
     start_bg gateway "$SCRIPT_DIR/gateway"
