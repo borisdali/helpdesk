@@ -46,7 +46,7 @@ var anomalyKeywords = []string{
 
 func main() {
 	gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
-	conn := flag.String("conn", "host=localhost port=15432 dbname=testdb user=postgres password=testpass", "PostgreSQL libpq connection string")
+	conn := flag.String("conn", "", "PostgreSQL libpq connection string (required, e.g. host=db port=5432 dbname=mydb user=... password=...)")
 	listen := flag.String("listen", ":9090", "Callback listener address")
 	infraKey := flag.String("infra-key", "srebot-demo", "Infrastructure identifier for incident bundles")
 	cbTimeout := flag.Duration("timeout", 120*time.Second, "How long to wait for the callback")
@@ -54,6 +54,12 @@ func main() {
 	symptom := flag.String("symptom", "Users are reporting database connectivity issues.",
 		"Symptom description sent to the AI agent for diagnosis")
 	flag.Parse()
+
+	if *conn == "" {
+		fmt.Fprintln(os.Stderr, "error: -conn is required (PostgreSQL libpq connection string)")
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
