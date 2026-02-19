@@ -44,10 +44,17 @@ func main() {
 	gw := NewGateway(registry)
 
 	// Initialize audit store if enabled.
+	auditURL := os.Getenv("HELPDESK_AUDIT_URL")
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED") == "true" || os.Getenv("HELPDESK_AUDIT_ENABLED") == "1"
+
+	// Always set audit URL for governance queries (even if audit logging is disabled)
+	if auditURL != "" {
+		gw.SetAuditURL(auditURL)
+		slog.Info("governance queries enabled", "url", auditURL)
+	}
+
 	if auditEnabled {
 		var auditor audit.Auditor
-		auditURL := os.Getenv("HELPDESK_AUDIT_URL")
 		if auditURL != "" {
 			// Use central audit service (preferred)
 			auditor = audit.NewRemoteStore(auditURL)

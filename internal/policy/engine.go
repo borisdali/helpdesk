@@ -43,6 +43,11 @@ func NewEngine(cfg EngineConfig) *Engine {
 	}
 }
 
+// Config returns the policy configuration.
+func (e *Engine) Config() *Config {
+	return e.config
+}
+
 // Evaluate evaluates a request against all policies and returns a decision.
 func (e *Engine) Evaluate(req Request) Decision {
 	// Set default timestamp if not provided

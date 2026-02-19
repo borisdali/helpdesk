@@ -79,4 +79,8 @@ COPY --from=builder /out/secbot          /usr/local/bin/secbot
 RUN mkdir -p /data/incidents
 ENV HELPDESK_INCIDENT_DIR=/data/incidents
 
+# Sample policy file — set HELPDESK_POLICY_FILE=/etc/helpdesk/policies.example.yaml to use it.
+RUN mkdir -p /etc/helpdesk
+COPY helpdesk/policies.example.yaml /etc/helpdesk/policies.example.yaml
+
 # No default CMD — each service specifies its own command.

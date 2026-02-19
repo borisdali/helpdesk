@@ -32,6 +32,10 @@ spec:
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- if .Values.governance.auditd.enabled }}
+            - name: HELPDESK_AUDIT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+            {{- end }}
           {{- if .Values.infrastructure }}
           volumeMounts:
             - name: config

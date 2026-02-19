@@ -116,6 +116,7 @@ binaries:
 		cp deploy/docker-compose/startall.sh $$outdir/; \
 		cp deploy/docker-compose/.env.example $$outdir/; \
 		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
+		cp policies.example.yaml $$outdir/; \
 		tar -czf $(DIST)/helpdesk-$(VERSION)-$$os-$$arch.tar.gz \
 			-C $(DIST) helpdesk-$(VERSION)-$$os-$$arch; \
 		rm -rf $$outdir; \
@@ -133,6 +134,7 @@ bundle:
 	cp deploy/docker-compose/.env.example $$bundledir/docker-compose/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/docker-compose/; \
 	cp deploy/docker-compose/startall.sh $$bundledir/docker-compose/; \
+	cp policies.example.yaml $$bundledir/docker-compose/; \
 	sed -e '/^    build:/,/^      dockerfile:/d' \
 	    -e 's|image: helpdesk:latest|image: $(IMAGE):$(VERSION)|' \
 	    deploy/docker-compose/docker-compose.yaml \
@@ -141,6 +143,7 @@ bundle:
 	echo "==> helm chart"; \
 	cp -r deploy/helm/helpdesk $$bundledir/helm/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/helm/; \
+	cp policies.example.yaml $$bundledir/helm/; \
 	sed -i.bak \
 	    -e 's|^  repository: helpdesk|  repository: $(IMAGE)|' \
 	    -e 's|^  tag: latest|  tag: $(VERSION)|' \

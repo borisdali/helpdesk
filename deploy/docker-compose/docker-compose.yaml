@@ -137,10 +137,13 @@ services:
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      # AI Governance - enables /api/v1/governance endpoints
+      HELPDESK_AUDIT_URL: http://auditd:1199
     ports:
       - "8080:8080"
     restart: unless-stopped
     depends_on:
+      - auditd
       - database-agent
       - k8s-agent
       - incident-agent

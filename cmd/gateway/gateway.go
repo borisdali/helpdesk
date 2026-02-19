@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -32,10 +33,11 @@ const agentNameResearch = "research_agent"
 
 // Gateway translates REST requests into A2A calls to sub-agents.
 type Gateway struct {
-	agents  map[string]*discovery.Agent
-	clients map[string]*a2aclient.Client
-	infra   *infra.Config
-	auditor *audit.GatewayAuditor
+	agents   map[string]*discovery.Agent
+	clients  map[string]*a2aclient.Client
+	infra    *infra.Config
+	auditor  *audit.GatewayAuditor
+	auditURL string // URL to auditd service for governance queries
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -63,6 +65,11 @@ func (g *Gateway) SetAuditor(auditor *audit.GatewayAuditor) {
 	g.auditor = auditor
 }
 
+// SetAuditURL sets the auditd service URL for governance queries.
+func (g *Gateway) SetAuditURL(url string) {
+	g.auditURL = url
+}
+
 // agentAliases maps short names (used in the /query endpoint) to internal
 // agent names used for client lookup.
 var agentAliases = map[string]string{
@@ -83,6 +90,8 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/research", g.handleResearch)
 	mux.HandleFunc("GET /api/v1/infrastructure", g.handleListInfrastructure)
 	mux.HandleFunc("GET /api/v1/databases", g.handleListDatabases)
+	mux.HandleFunc("GET /api/v1/governance", g.handleGovernance)
+	mux.HandleFunc("GET /api/v1/governance/policies", g.handleGovernancePolicies)
 }
 
 // --- Handlers ---
@@ -219,6 +228,38 @@ func (g *Gateway) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 		"databases": g.infra.ListDatabases(),
 		"count":     len(g.infra.DBServers),
 	})
+}
+
+func (g *Gateway) handleGovernance(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/governance/info")
+}
+
+func (g *Gateway) handleGovernancePolicies(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/governance/policies")
+}
+
+// proxyGovernanceRequest forwards a request to the auditd governance endpoint.
+func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request, path string) {
+	if g.auditURL == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled": false,
+			"message": "Governance service not configured. Set HELPDESK_AUDIT_URL to enable.",
+		})
+		return
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(g.auditURL + path)
+	if err != nil {
+		slog.Error("failed to query governance service", "err", err)
+		writeError(w, http.StatusBadGateway, "governance service unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // --- A2A call ---

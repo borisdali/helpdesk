@@ -36,19 +36,19 @@ type config struct {
 
 func main() {
 	var cfg config
-	flag.StringVar(&cfg.listenAddr, "listen", ":1199", "HTTP listen address")
-	flag.StringVar(&cfg.dbPath, "db", "audit.db", "Path to SQLite database")
-	flag.StringVar(&cfg.socketPath, "socket", "/tmp/helpdesk-audit.sock", "Unix socket for real-time notifications")
+	flag.StringVar(&cfg.listenAddr, "listen", envOrDefault("HELPDESK_AUDIT_ADDR", ":1199"), "HTTP listen address")
+	flag.StringVar(&cfg.dbPath, "db", envOrDefault("HELPDESK_AUDIT_DB", "audit.db"), "Path to SQLite database")
+	flag.StringVar(&cfg.socketPath, "socket", envOrDefault("HELPDESK_AUDIT_SOCKET", "/tmp/helpdesk-audit.sock"), "Unix socket for real-time notifications")
 
 	// Approval notification flags
-	flag.StringVar(&cfg.approvalWebhook, "approval-webhook", "", "Webhook URL for approval notifications (Slack, etc.)")
-	approvalBaseURL := flag.String("approval-base-url", "", "Base URL for approve/deny links in emails (e.g., http://localhost:1199)")
-	flag.StringVar(&cfg.smtpHost, "smtp-host", "", "SMTP server host for approval emails")
-	flag.StringVar(&cfg.smtpPort, "smtp-port", "587", "SMTP server port")
-	flag.StringVar(&cfg.smtpUser, "smtp-user", "", "SMTP username")
+	flag.StringVar(&cfg.approvalWebhook, "approval-webhook", envOrDefault("HELPDESK_APPROVAL_WEBHOOK", ""), "Webhook URL for approval notifications (Slack, etc.)")
+	approvalBaseURL := flag.String("approval-base-url", envOrDefault("HELPDESK_APPROVAL_BASE_URL", ""), "Base URL for approve/deny links in emails (e.g., http://localhost:1199)")
+	flag.StringVar(&cfg.smtpHost, "smtp-host", envOrDefault("SMTP_HOST", ""), "SMTP server host for approval emails")
+	flag.StringVar(&cfg.smtpPort, "smtp-port", envOrDefault("SMTP_PORT", "587"), "SMTP server port")
+	flag.StringVar(&cfg.smtpUser, "smtp-user", envOrDefault("SMTP_USER", ""), "SMTP username")
 	flag.StringVar(&cfg.smtpPassword, "smtp-password", "", "SMTP password (or use SMTP_PASSWORD env)")
-	flag.StringVar(&cfg.emailFrom, "email-from", "", "Email sender address for approvals")
-	flag.StringVar(&cfg.emailTo, "email-to", "", "Email recipients for approvals (comma-separated)")
+	flag.StringVar(&cfg.emailFrom, "email-from", envOrDefault("HELPDESK_EMAIL_FROM", ""), "Email sender address for approvals")
+	flag.StringVar(&cfg.emailTo, "email-to", envOrDefault("HELPDESK_EMAIL_TO", ""), "Email recipients for approvals (comma-separated)")
 	flag.Parse()
 
 	// Allow SMTP password from environment
@@ -100,6 +100,7 @@ func main() {
 
 	srv := &server{store: store}
 	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier}
+	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 
 	mux := http.NewServeMux()
 
@@ -118,6 +119,10 @@ func main() {
 	mux.HandleFunc("POST /v1/approvals/{approvalID}/approve", approvalSrv.handleApprove)
 	mux.HandleFunc("POST /v1/approvals/{approvalID}/deny", approvalSrv.handleDeny)
 	mux.HandleFunc("POST /v1/approvals/{approvalID}/cancel", approvalSrv.handleCancel)
+
+	// Governance endpoints (explainability)
+	mux.HandleFunc("GET /v1/governance/info", govSrv.handleGetInfo)
+	mux.HandleFunc("GET /v1/governance/policies", govSrv.handleGetPolicySummary)
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", srv.handleHealth)
@@ -271,4 +276,13 @@ func (s *server) handleVerifyChain(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// envOrDefault returns the value of the environment variable named by key,
+// or def if the variable is not set or empty.
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
