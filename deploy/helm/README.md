@@ -185,7 +185,7 @@ EOF
 
 ```bash
 kubectl -n helpdesk-system create secret generic pgpass \
-    --from-file=.pgpass=./pgpass
+    --from-file=.pgpass=./.pgpass
 ```
 
 The chart mounts this secret at `/home/helpdesk/.pgpass` with `0600` permissions automatically.
@@ -403,14 +403,51 @@ governance:
 
 ### 9.3 Policy Configuration
 
-Create a ConfigMap with your policies:
+**Step 1: Create a `policies.yaml` file**
+
+A fully-commented example is included in the deploy bundle as `policies.example.yaml`. Copy and edit it:
+
+```bash
+cp policies.example.yaml my-policies.yaml
+# Edit my-policies.yaml to match your environment
+```
+
+Minimal example (`my-policies.yaml`):
+
+```yaml
+version: "1"
+policies:
+  - name: allow-reads
+    resources:
+      - type: database
+      - type: kubernetes
+    rules:
+      - action: read
+        effect: allow
+
+  - name: require-approval-for-writes
+    resources:
+      - type: database
+        match:
+          tags: [production]
+    rules:
+      - action: write
+        effect: require_approval
+      - action: destructive
+        effect: deny
+        message: "Destructive operations on production are prohibited."
+```
+
+See `policies.example.yaml` in the bundle for the full schema including time-based schedules, principal-based rules, row limits, and multi-approver quorum.
+
+**Step 2: Create a Kubernetes ConfigMap**
 
 ```bash
 kubectl -n helpdesk-system create configmap helpdesk-policies \
-  --from-file=policies.yaml=./policies.yaml
+  --from-file=policies.yaml=./my-policies.yaml
 ```
 
-Then reference it in values:
+**Step 3: Reference it in `values.yaml`**
 
 ```yaml
 governance:
@@ -419,25 +456,14 @@ governance:
     configMap: helpdesk-policies
 ```
 
-Example `policies.yaml`:
+To update the policy without reinstalling:
 
-```yaml
-rules:
-  - name: allow-read-operations
-    match:
-      action_class: read
-    effect: allow
-
-  - name: require-approval-for-writes
-    match:
-      action_class: write
-    effect: require_approval
-
-  - name: deny-destructive-on-production
-    match:
-      action_class: destructive
-      tags: [production]
-    effect: deny
+```bash
+kubectl -n helpdesk-system create configmap helpdesk-policies \
+  --from-file=policies.yaml=./my-policies.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+# Restart agents to pick up the new policy
+kubectl -n helpdesk-system rollout restart deploy/helpdesk-database-agent deploy/helpdesk-k8s-agent
 ```
 
 ### 9.4 Approval Workflow

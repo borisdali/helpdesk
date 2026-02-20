@@ -102,7 +102,7 @@ spec:
         {{- if .Values.governance.policy.enabled }}
         - name: policy-config
           configMap:
-            name: {{ .Values.governance.policy.configMap }}
+            name: {{ required "governance.policy.configMap must be set when governance.policy.enabled is true" .Values.governance.policy.configMap }}
         {{- end }}
 ---
 apiVersion: v1
