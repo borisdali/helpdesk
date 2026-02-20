@@ -92,7 +92,9 @@ echo "Starting helpdesk services..."
 # Resolve HELPDESK_POLICY_FILE before starting any service so that auditd and
 # agents all see the same resolved path.
 # Relative paths are interpreted relative to SCRIPT_DIR (where .env lives).
-if [[ -n "${HELPDESK_POLICY_FILE:-}" ]]; then
+# Skip resolution and validation entirely when policy enforcement is explicitly
+# disabled — the file path is irrelevant in that case.
+if [[ -n "${HELPDESK_POLICY_FILE:-}" && "${HELPDESK_POLICY_ENABLED:-}" != "false" ]]; then
     if [[ "$HELPDESK_POLICY_FILE" != /* ]]; then
         HELPDESK_POLICY_FILE="$SCRIPT_DIR/$HELPDESK_POLICY_FILE"
     fi
@@ -153,6 +155,11 @@ HELPDESK_GATEWAY_ADDR="0.0.0.0:8080" \
 
 sleep 1
 echo "Gateway listening on http://localhost:8080"
+if [[ "$AUDIT_ENABLED" == "true" ]]; then
+    echo "Auditing: enabled  ($AUDIT_URL)"
+else
+    echo "Auditing: disabled"
+fi
 
 # Start optional governance components if --governance flag is set
 if [[ "${1:-}" == "--governance" || "${2:-}" == "--governance" ]]; then

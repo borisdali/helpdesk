@@ -41,6 +41,7 @@ type Config struct {
 	K8sAgentURL      string
 	ResearchAgentURL string
 	OrchestratorURL  string
+	AuditdURL        string
 	ConnStr          string
 	KubeContext      string
 	Categories       []string
@@ -54,6 +55,7 @@ func LoadConfig() *Config {
 		K8sAgentURL:      getEnvDefault("E2E_K8S_AGENT_URL", "http://localhost:1102"),
 		ResearchAgentURL: getEnvDefault("E2E_RESEARCH_AGENT_URL", "http://localhost:1106"),
 		OrchestratorURL:  os.Getenv("E2E_ORCHESTRATOR_URL"),
+		AuditdURL:        getEnvDefault("E2E_AUDITD_URL", "http://localhost:1199"),
 		ConnStr:          getEnvDefault("E2E_CONN_STR", "host=localhost port=15432 dbname=testdb user=postgres password=testpass"),
 		KubeContext:      os.Getenv("E2E_KUBE_CONTEXT"),
 	}
@@ -141,6 +143,32 @@ func (c *GatewayClient) K8sTool(ctx context.Context, tool string, args map[strin
 // CreateIncident calls POST /api/v1/incidents.
 func (c *GatewayClient) CreateIncident(ctx context.Context, args map[string]any) (*A2AResponse, error) {
 	return c.post(ctx, "/api/v1/incidents", args)
+}
+
+// GovernanceInfo calls GET /api/v1/governance.
+func (c *GatewayClient) GovernanceInfo(ctx context.Context) (map[string]any, error) {
+	body, err := c.get(ctx, "/api/v1/governance")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode governance info: %w", err)
+	}
+	return result, nil
+}
+
+// GovernancePolicies calls GET /api/v1/governance/policies.
+func (c *GatewayClient) GovernancePolicies(ctx context.Context) (map[string]any, error) {
+	body, err := c.get(ctx, "/api/v1/governance/policies")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode governance policies: %w", err)
+	}
+	return result, nil
 }
 
 // Research calls POST /api/v1/research.

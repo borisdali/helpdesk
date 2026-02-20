@@ -31,7 +31,7 @@ BIN_PKGS := \
 	approvals:./cmd/approvals/ \
 	secbot:./cmd/secbot/
 
-.PHONY: test cover test-governance cover-governance integration integration-governance faulttest e2e image push binaries bundle release github-release clean
+.PHONY: test cover test-governance cover-governance integration integration-governance faulttest e2e e2e-governance image push binaries bundle release github-release clean
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
@@ -103,6 +103,22 @@ e2e:
 	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Running E2E tests..."
 	-go test -tags e2e -timeout 300s -v ./testing/e2e/...
+	@echo "Stopping full stack..."
+	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+
+# ---------------------------------------------------------------------------
+# AI Governance E2E tests (requires full stack; API key only for audit-trail tests)
+# ---------------------------------------------------------------------------
+e2e-governance: image
+	@echo "Starting full stack..."
+	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	@echo "Waiting for gateway to be ready..."
+	@for i in $$(seq 1 30); do \
+		curl -sf http://localhost:8080/api/v1/agents >/dev/null 2>&1 && echo "Gateway ready." && break; \
+		echo "  waiting ($$i/30)..."; sleep 3; \
+	done
+	@echo "Running governance E2E tests..."
+	-go test -tags e2e -timeout 300s -v -run TestGovernance ./testing/e2e/...
 	@echo "Stopping full stack..."
 	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 

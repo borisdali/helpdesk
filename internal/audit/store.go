@@ -402,15 +402,32 @@ type QueryOptions struct {
 
 // VerifyIntegrity verifies the hash chain integrity of the audit log.
 func (s *Store) VerifyIntegrity(ctx context.Context) (ChainStatus, error) {
-	// Query all events in chronological order
-	events, err := s.Query(ctx, QueryOptions{})
+	// Query events in insertion order (id ASC).
+	// The hash chain links events in the order they were inserted into the DB,
+	// NOT by their Timestamp field. Events can arrive out of timestamp order
+	// (e.g., a gateway event has Timestamp=request-start but is inserted AFTER
+	// the agent event that was recorded mid-request), so sorting by timestamp
+	// would produce a different order than the chain was built in.
+	rows, err := s.db.QueryContext(ctx, `SELECT raw_json FROM audit_events ORDER BY id ASC`)
 	if err != nil {
-		return ChainStatus{}, fmt.Errorf("query events: %w", err)
+		return ChainStatus{}, fmt.Errorf("query events for verify: %w", err)
 	}
+	defer rows.Close()
 
-	// Events from Query are in DESC order, reverse for chain verification
-	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
-		events[i], events[j] = events[j], events[i]
+	var events []Event
+	for rows.Next() {
+		var rawJSON string
+		if err := rows.Scan(&rawJSON); err != nil {
+			return ChainStatus{}, fmt.Errorf("scan event: %w", err)
+		}
+		var event Event
+		if err := json.Unmarshal([]byte(rawJSON), &event); err != nil {
+			return ChainStatus{}, fmt.Errorf("unmarshal event: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return ChainStatus{}, err
 	}
 
 	return VerifyChainStatus(events), nil
