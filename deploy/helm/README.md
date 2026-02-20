@@ -163,7 +163,51 @@ helm install helpdesk ./helm/helpdesk \
 
 See `infrastructure.json.example` in the bundle for a complete reference.
 
-### 3.4 Custom Namespace
+### 3.4 Database Authentication
+
+The database agent runs `psql` to connect to PostgreSQL. To avoid password prompts, use a `.pgpass` file.
+
+**Step 1: Create the `.pgpass` file**
+
+```bash
+# Format: hostname:port:database:username:password
+# Use '*' as a wildcard for any field
+cat > pgpass << 'EOF'
+db.example.com:5432:mydb:myuser:mypassword
+db2.example.com:5432:*:admin:adminpassword
+EOF
+# Note: do NOT chmod here — Kubernetes handles permissions automatically
+```
+
+> **Important:** The hostname must **exactly match** the hostname in your `infrastructure.json` connection strings (e.g., if the connection string says `host=db.example.com`, then `.pgpass` must also say `db.example.com`).
+
+**Step 2: Create a Kubernetes Secret**
+
+```bash
+kubectl -n helpdesk-system create secret generic pgpass \
+    --from-file=.pgpass=./pgpass
+```
+
+The chart mounts this secret at `/home/helpdesk/.pgpass` with `0600` permissions automatically.
+
+**Step 3: Reference it in `values.yaml`**
+
+```yaml
+agents:
+  database:
+    pgpassSecret: pgpass
+```
+
+Or pass it inline:
+
+```bash
+helm install helpdesk ./helm/helpdesk \
+    --namespace helpdesk-system \
+    --set agents.database.pgpassSecret=pgpass \
+    ...
+```
+
+### 3.5 Custom Namespace
 
 Install to any namespace using `--namespace` and `--create-namespace`:
 
@@ -175,7 +219,7 @@ helm install helpdesk ./helm/helpdesk \
     --set model.name=claude-haiku-4-5-20251001
 ```
 
-### 3.5 Gateway Access
+### 3.6 Gateway Access
 
 By default, the gateway uses `ClusterIP`. For external access:
 
@@ -496,6 +540,24 @@ kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 **Solution:**
 - For databases in the **same cluster** as aiHelpDesk: use empty context (`""`) in `infrastructure.json`. The agent will use in-cluster authentication via its service account.
 - For databases in **other clusters**: mount a kubeconfig as a secret (see Section 3.2).
+
+### 10.5 Database Agent Prompts for Password
+
+**Symptom:** The database agent asks for a password every time it connects to a database, or logs `fe_sendauth: no password supplied`.
+
+**Solution:** Create a `.pgpass` secret and reference it via `agents.database.pgpassSecret` (see Section 3.4).
+
+**Important:** The hostname in `.pgpass` must **exactly match** the hostname in your `infrastructure.json` connection strings. If the connection string says `host=db.example.com`, the `.pgpass` entry must also use `db.example.com` (not a K8s service name alias or IP).
+
+Verify the secret was created correctly:
+```bash
+kubectl -n helpdesk-system get secret pgpass -o jsonpath='{.data.\.pgpass}' | base64 -d
+```
+
+Check the database agent logs for the actual error:
+```bash
+kubectl -n helpdesk-system logs deploy/helpdesk-database-agent | grep -i "psql\|pgpass\|password"
+```
 
 ## 11. Uninstall
 
