@@ -219,8 +219,19 @@ func main() {
 	// Connect to the audit socket
 	conn, err := net.Dial("unix", cfg.SocketPath)
 	if err != nil {
+		if cfg.AuditServiceURL != "" {
+			// Fall back to HTTP polling mode when the socket is not available.
+			// This lets operators run  ./auditor -audit-service=http://localhost:1199
+			// to inspect events without needing the Unix socket.
+			slog.Info("audit socket not available; switching to HTTP polling mode",
+				"socket", cfg.SocketPath, "url", cfg.AuditServiceURL)
+			auditor := NewAuditor(cfg, notifiers, metrics)
+			runHTTPPollingMode(cfg, auditor)
+			return
+		}
 		slog.Error("failed to connect to audit socket", "path", cfg.SocketPath, "err", err)
 		slog.Info("hint: ensure the orchestrator is running with HELPDESK_AUDIT_ENABLED=true")
+		slog.Info("hint: or use -audit-service=<url> to poll events via HTTP when the socket is unavailable")
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -1441,4 +1452,105 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// runHTTPPollingMode polls the audit service HTTP API for new events.
+// It is used when the Unix socket is unavailable but -audit-service is set.
+func runHTTPPollingMode(cfg Config, auditor *Auditor) {
+	baseURL := strings.TrimSuffix(cfg.AuditServiceURL, "/")
+	client := &http.Client{Timeout: 15 * time.Second}
+	pollInterval := 5 * time.Second
+
+	// Fetch an initial batch of recent events.
+	events, err := fetchEventsHTTP(client, baseURL, time.Time{}, 50)
+	if err != nil {
+		slog.Warn("initial HTTP fetch failed", "err", err)
+	} else {
+		// API returns newest-first; reverse for chronological display.
+		for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+			events[i], events[j] = events[j], events[i]
+		}
+		for i := range events {
+			auditor.Analyze(&events[i])
+		}
+	}
+
+	// Track the newest timestamp and IDs seen so far.
+	var latestSeen time.Time
+	seenIDs := make(map[string]bool, 200)
+	for _, e := range events {
+		seenIDs[e.EventID] = true
+		if e.Timestamp.After(latestSeen) {
+			latestSeen = e.Timestamp
+		}
+	}
+
+	slog.Info("polling for new events", "interval", pollInterval, "url", baseURL)
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		since := latestSeen
+		if since.IsZero() {
+			since = time.Now().UTC().Add(-time.Minute)
+		}
+
+		newEvents, err := fetchEventsHTTP(client, baseURL, since, 200)
+		if err != nil {
+			slog.Warn("HTTP poll failed", "err", err)
+			continue
+		}
+
+		// Filter out already-seen events (the API uses >= so the boundary event reappears).
+		var toDisplay []audit.Event
+		for _, e := range newEvents {
+			if !seenIDs[e.EventID] {
+				toDisplay = append(toDisplay, e)
+			}
+			seenIDs[e.EventID] = true
+			if e.Timestamp.After(latestSeen) {
+				latestSeen = e.Timestamp
+			}
+		}
+
+		// Reverse to display oldest-first.
+		for i, j := 0, len(toDisplay)-1; i < j; i, j = i+1, j-1 {
+			toDisplay[i], toDisplay[j] = toDisplay[j], toDisplay[i]
+		}
+		for i := range toDisplay {
+			auditor.Analyze(&toDisplay[i])
+		}
+
+		// Prevent unbounded growth of the dedup set.
+		if len(seenIDs) > 2000 {
+			seenIDs = make(map[string]bool, 200)
+		}
+	}
+}
+
+// fetchEventsHTTP retrieves audit events from the HTTP API.
+// Pass a zero since to fetch the most recent events without a time filter.
+func fetchEventsHTTP(client *http.Client, baseURL string, since time.Time, limit int) ([]audit.Event, error) {
+	u := fmt.Sprintf("%s/v1/events?limit=%d", baseURL, limit)
+	if !since.IsZero() {
+		// Use UTC so the timestamp ends in "Z" — no "+" sign that needs URL-encoding.
+		u += "&since=" + since.UTC().Format(time.RFC3339)
+	}
+
+	resp, err := client.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("audit service returned HTTP %d", resp.StatusCode)
+	}
+
+	var events []audit.Event
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		return nil, fmt.Errorf("decode events: %w", err)
+	}
+	return events, nil
 }

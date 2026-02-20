@@ -171,7 +171,11 @@ if [[ "${1:-}" == "--governance" || "${2:-}" == "--governance" ]]; then
     echo ""
     echo "Starting governance components..."
     if [[ -x "$SCRIPT_DIR/auditor" ]]; then
-        start_bg auditor "$SCRIPT_DIR/auditor" -socket="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}"
+        AUDITOR_ARGS=(-socket="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}")
+        if [[ "${HELPDESK_AUDITOR_LOG_ALL:-true}" == "true" ]]; then
+            AUDITOR_ARGS+=(-log-all)
+        fi
+        start_bg auditor "$SCRIPT_DIR/auditor" "${AUDITOR_ARGS[@]}"
     fi
     if [[ -x "$SCRIPT_DIR/secbot" ]]; then
         start_bg secbot "$SCRIPT_DIR/secbot" -socket="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}" -gateway="http://localhost:8080"
