@@ -6,39 +6,46 @@
       "name": "Orders Production Database",
       "connection_string": "host=orders-db.prod.example.com port=5432 dbname=orders user=app_user",
       "k8s_cluster": "prod-cluster",
-      "k8s_namespace": "orders"
+      "k8s_namespace": "orders",
+      "tags": ["production"]
     },
     "prod-users-db": {
       "name": "Users Production Database",
       "connection_string": "host=users-db.prod.example.com port=5432 dbname=users user=app_user",
       "k8s_cluster": "prod-cluster",
-      "k8s_namespace": "users"
+      "k8s_namespace": "users",
+      "tags": ["production"]
     },
     "staging-db": {
       "name": "Staging Database (shared)",
       "connection_string": "host=staging-db.dev.example.com port=5432 dbname=staging user=dev_user",
       "k8s_cluster": "staging-cluster",
-      "k8s_namespace": "default"
+      "k8s_namespace": "default",
+      "tags": ["staging"]
     },
     "legacy-analytics-db": {
       "name": "Legacy Analytics Database on VM",
       "connection_string": "host=analytics.internal.example.com port=5432 dbname=analytics user=etl_user",
-      "vm_name": "analytics-vm"
+      "vm_name": "analytics-vm",
+      "tags": ["production"]
     },
     "dev-local-db": {
       "name": "Local Development Database",
-      "connection_string": "host=localhost port=5432 dbname=devdb user=postgres"
+      "connection_string": "host=localhost port=5432 dbname=devdb user=postgres",
+      "tags": ["development"]
     }
   },
 
   "k8s_clusters": {
     "prod-cluster": {
       "name": "Production GKE Cluster",
-      "context": "gke_myproject_us-central1_prod"
+      "context": "gke_myproject_us-central1_prod",
+      "tags": ["production"]
     },
     "staging-cluster": {
       "name": "Staging EKS Cluster",
-      "context": "arn:aws:eks:us-west-2:123456789:cluster/staging"
+      "context": "arn:aws:eks:us-west-2:123456789:cluster/staging",
+      "tags": ["staging"]
     }
   },
 

@@ -160,6 +160,11 @@ if [[ "$AUDIT_ENABLED" == "true" ]]; then
 else
     echo "Auditing: disabled"
 fi
+if [[ "$POLICY_ENABLED" == "true" ]]; then
+    echo "Policy:   enabled  ($HELPDESK_POLICY_FILE)"
+else
+    echo "Policy:   disabled"
+fi
 
 # Start optional governance components if --governance flag is set
 if [[ "${1:-}" == "--governance" || "${2:-}" == "--governance" ]]; then
