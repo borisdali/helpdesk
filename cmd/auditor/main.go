@@ -807,6 +807,24 @@ func (a *Auditor) logEvent(event *audit.Event) {
 	if event.Decision != nil && len(event.Decision.ReasoningChain) > 0 {
 		fmt.Printf("  Reasoning:  %s\n", strings.Join(event.Decision.ReasoningChain, " -> "))
 	}
+	if event.PolicyDecision != nil {
+		pd := event.PolicyDecision
+		effectIcon := "[OK] allow"
+		switch pd.Effect {
+		case "deny":
+			effectIcon = "[NO] deny"
+		case "require_approval":
+			effectIcon = "[??] require_approval"
+		}
+		fmt.Printf("  Policy:     %s  %s → %s  (matched: %s)\n",
+			effectIcon, pd.Action, pd.ResourceName, pd.PolicyName)
+		if len(pd.Tags) > 0 {
+			fmt.Printf("  Tags:       %s\n", strings.Join(pd.Tags, ", "))
+		}
+		if pd.Message != "" {
+			fmt.Printf("  Msg:        %s\n", pd.Message)
+		}
+	}
 	// Display hash chain info if present
 	if event.EventHash != "" {
 		fmt.Printf("  Hash:       %s...%s\n", event.EventHash[:12], event.EventHash[len(event.EventHash)-6:])

@@ -29,6 +29,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	slog.Info("governance", "audit", false, "policy", false)
+
 	// Only add GoogleSearch for Gemini models
 	var tools []tool.Tool
 	if cfg.ModelVendor == "google" || cfg.ModelVendor == "gemini" {

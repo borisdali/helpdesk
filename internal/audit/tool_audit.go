@@ -110,6 +110,28 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 	}
 }
 
+// RecordPolicyDecision records a policy evaluation result to the audit trail.
+// Call this from PolicyEnforcer after every Evaluate(), before returning to the caller.
+func (ta *ToolAuditor) RecordPolicyDecision(ctx context.Context, pd PolicyDecision) {
+	if ta.auditor == nil {
+		return
+	}
+
+	event := &Event{
+		EventID:        "pol_" + uuid.New().String()[:8],
+		Timestamp:      time.Now().UTC(),
+		EventType:      EventTypePolicyDecision,
+		TraceID:        ta.getTraceID(),
+		ActionClass:    ActionClass(pd.Action),
+		Session:        Session{ID: ta.sessionID},
+		PolicyDecision: &pd,
+	}
+
+	if err := ta.auditor.Record(ctx, event); err != nil {
+		slog.Warn("failed to record policy decision event", "err", err)
+	}
+}
+
 func outcomeStatus(errMsg string) string {
 	if errMsg != "" {
 		return "error"

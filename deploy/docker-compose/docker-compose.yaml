@@ -11,6 +11,9 @@ services:
       HELPDESK_AUDIT_ADDR: "0.0.0.0:1199"
       HELPDESK_AUDIT_DB: /data/audit/audit.db
       HELPDESK_AUDIT_SOCKET: /data/audit/audit.sock
+      # Policy (for governance info endpoint)
+      HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       # Approval notification (optional)
       HELPDESK_APPROVAL_WEBHOOK: ${HELPDESK_APPROVAL_WEBHOOK:-}
       HELPDESK_APPROVAL_BASE_URL: ${HELPDESK_APPROVAL_BASE_URL:-http://localhost:1199}
@@ -23,6 +26,7 @@ services:
       HELPDESK_EMAIL_TO: ${HELPDESK_EMAIL_TO:-}
     volumes:
       - audit-data:/data/audit
+      - ${HELPDESK_POLICY_FILE:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1199:1199"
     restart: unless-stopped
@@ -44,10 +48,17 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
-      HELPDESK_POLICY_FILE: ${HELPDESK_POLICY_FILE:-}
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+      # Optional: set PGPASSWORD in .env as a single global DB password.
+      # This is not secure and not recommended for anything beyond
+      # throw-away development databases.
+      # For per-host credentials mount a .pgpass file via PGPASSFILE below.
+      PGPASSWORD: ${PGPASSWORD:-}
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
+      - ${HELPDESK_POLICY_FILE:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      - ${PGPASSFILE:-./.pgpass}:/root/.pgpass:ro
     ports:
       - "1100:1100"
     restart: unless-stopped
@@ -71,11 +82,12 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
-      HELPDESK_POLICY_FILE: ${HELPDESK_POLICY_FILE:-}
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
+      - ${HELPDESK_POLICY_FILE:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1102:1102"
     restart: unless-stopped

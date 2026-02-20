@@ -20,6 +20,8 @@ func main() {
 	cfg := agentutil.MustLoadConfig("localhost:1104")
 	ctx := context.Background()
 
+	slog.Info("governance", "audit", false, "policy", false)
+
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {
 		slog.Error("failed to create LLM model", "err", err)

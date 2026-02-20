@@ -73,7 +73,14 @@ func main() {
 		ApprovalClient:  approvalClient,
 		ApprovalTimeout: cfg.ApprovalTimeout,
 		AgentName:       "postgres_database_agent",
+		ToolAuditor:     toolAuditor,
 	})
+
+	slog.Info("governance",
+		"audit", auditStore != nil,
+		"policy", policyEngine != nil,
+		"approval", approvalClient != nil,
+	)
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {

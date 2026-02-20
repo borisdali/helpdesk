@@ -14,6 +14,7 @@ const (
 	EventTypeOutcome        EventType = "delegation_outcome"
 	EventTypeGatewayRequest EventType = "gateway_request"
 	EventTypeToolExecution  EventType = "tool_execution"
+	EventTypePolicyDecision EventType = "policy_decision"
 )
 
 // RequestCategory classifies the type of user request.
@@ -94,6 +95,19 @@ type Outcome struct {
 	Duration     time.Duration `json:"duration_ms"`
 }
 
+// PolicyDecision captures the outcome of a policy evaluation.
+// Emitted by PolicyEnforcer before every tool execution, regardless of outcome.
+type PolicyDecision struct {
+	ResourceType string   `json:"resource_type"`          // "database", "kubernetes"
+	ResourceName string   `json:"resource_name"`          // db name, namespace, etc.
+	Action       string   `json:"action"`                 // "read", "write", "destructive"
+	Tags         []string `json:"tags,omitempty"`         // resource tags used for matching
+	Effect       string   `json:"effect"`                 // "allow", "deny", "require_approval"
+	PolicyName   string   `json:"policy_name"`            // which policy matched
+	Message      string   `json:"message,omitempty"`      // denial or approval message
+	DryRun       bool     `json:"dry_run,omitempty"`      // true when policy is in dry-run mode
+}
+
 // Event is a single audit event for delegation decisions.
 type Event struct {
 	EventID   string    `json:"event_id"`
@@ -114,10 +128,11 @@ type Event struct {
 	Session  Session   `json:"session"`
 	Input    Input     `json:"input"`
 	Output   *Output   `json:"output,omitempty"`
-	Tool     *ToolExecution `json:"tool,omitempty"`
-	Approval *Approval `json:"approval,omitempty"`
-	Decision *Decision `json:"decision,omitempty"`
-	Outcome  *Outcome  `json:"outcome,omitempty"`
+	Tool           *ToolExecution  `json:"tool,omitempty"`
+	Approval       *Approval       `json:"approval,omitempty"`
+	Decision       *Decision       `json:"decision,omitempty"`
+	PolicyDecision *PolicyDecision `json:"policy_decision,omitempty"`
+	Outcome        *Outcome        `json:"outcome,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

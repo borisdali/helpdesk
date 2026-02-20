@@ -63,7 +63,17 @@ func main() {
 		slog.Error("failed to initialize policy engine", "err", err)
 		os.Exit(1)
 	}
-	policyEnforcer = agentutil.NewPolicyEnforcer(policyEngine, traceStore)
+	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
+		Engine:      policyEngine,
+		TraceStore:  traceStore,
+		AgentName:   "k8s_agent",
+		ToolAuditor: toolAuditor,
+	})
+
+	slog.Info("governance",
+		"audit", auditStore != nil,
+		"policy", policyEngine != nil,
+	)
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {

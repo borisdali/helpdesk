@@ -187,6 +187,7 @@ type PolicyEnforcer struct {
 	approvalClient  *audit.ApprovalClient
 	approvalTimeout time.Duration
 	agentName       string
+	toolAuditor     *audit.ToolAuditor // records policy decisions to the audit trail
 }
 
 // PolicyEnforcerConfig configures the policy enforcer.
@@ -196,6 +197,7 @@ type PolicyEnforcerConfig struct {
 	ApprovalClient  *audit.ApprovalClient
 	ApprovalTimeout time.Duration
 	AgentName       string
+	ToolAuditor     *audit.ToolAuditor // optional; enables policy decision audit events
 }
 
 // NewPolicyEnforcer creates a policy enforcer. If engine is nil, enforcement is disabled.
@@ -217,6 +219,7 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 		engine:          cfg.Engine,
 		traceStore:      cfg.TraceStore,
 		approvalClient:  cfg.ApprovalClient,
+		toolAuditor:     cfg.ToolAuditor,
 		approvalTimeout: timeout,
 		agentName:       cfg.AgentName,
 	}
@@ -249,6 +252,19 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 
 	decision := e.engine.Evaluate(req)
 	err := decision.MustAllow()
+
+	// Record the policy decision to the audit trail (allow, deny, or require_approval).
+	if e.toolAuditor != nil {
+		e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+			ResourceType: resourceType,
+			ResourceName: resourceName,
+			Action:       string(action),
+			Tags:         tags,
+			Effect:       string(decision.Effect),
+			PolicyName:   decision.PolicyName,
+			Message:      decision.Message,
+		})
+	}
 
 	// If approval is required, attempt to get approval
 	if policy.IsApprovalRequired(err) && e.approvalClient != nil {
