@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -238,10 +239,7 @@ func (e *Engine) applyConditions(decision Decision, cond *Conditions, req Reques
 }
 
 func formatMessage(format string, args ...any) string {
-	return strings.TrimSpace(strings.ReplaceAll(
-		strings.ReplaceAll(format, "%d", "%v"),
-		"%s", "%v",
-	))
+	return strings.TrimSpace(fmt.Sprintf(format, args...))
 }
 
 func logDecision(req Request, decision Decision, dryRun bool) {

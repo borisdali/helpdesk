@@ -117,3 +117,61 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestParsePodsAffected(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{
+			name:   "single pod deleted",
+			output: `pod "my-pod" deleted` + "\n",
+			want:   1,
+		},
+		{
+			name:   "multiple pods deleted",
+			output: "pod \"pod-a\" deleted\npod \"pod-b\" deleted\npod \"pod-c\" deleted\n",
+			want:   3,
+		},
+		{
+			name:   "deployment configured",
+			output: `deployment.apps "my-deploy" configured` + "\n",
+			want:   1,
+		},
+		{
+			name:   "resource created",
+			output: `configmap "my-cm" created` + "\n",
+			want:   1,
+		},
+		{
+			name:   "mixed actions",
+			output: "pod \"p1\" deleted\ndeployment.apps \"d1\" configured\nservice \"s1\" created\n",
+			want:   3,
+		},
+		{
+			name:   "read-only output (no mutations)",
+			output: "NAME   READY   STATUS\npod-a  1/1     Running\n",
+			want:   0,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   0,
+		},
+		{
+			name:   "error output",
+			output: "Error from server (NotFound): pods \"bad\" not found\n",
+			want:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parsePodsAffected(tt.output)
+			if got != tt.want {
+				t.Errorf("parsePodsAffected(%q) = %d, want %d", tt.output, got, tt.want)
+			}
+		})
+	}
+}

@@ -61,6 +61,34 @@ func newTestContext() tool.Context {
 	return mockToolContext{context.Background()}
 }
 
+func TestParseRowsAffected(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{name: "DELETE", output: "DELETE 150\n", want: 150},
+		{name: "UPDATE", output: "UPDATE 42\n", want: 42},
+		{name: "INSERT", output: "INSERT 0 5\n", want: 5},
+		{name: "INSERT single row", output: "INSERT 0 1\n", want: 1},
+		{name: "DELETE embedded in expanded output", output: "-[ RECORD 1 ]---\ncol | val\nDELETE 7\n", want: 7},
+		{name: "zero rows deleted", output: "DELETE 0\n", want: 0},
+		{name: "SELECT returns nothing", output: "-[ RECORD 1 ]---\ncol | val\n", want: 0},
+		{name: "empty output", output: "", want: 0},
+		{name: "unrelated output", output: "ERROR: relation does not exist\n", want: 0},
+		{name: "verb prefix but no number", output: "DELETE \n", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseRowsAffected(tt.output)
+			if got != tt.want {
+				t.Errorf("parseRowsAffected(%q) = %d, want %d", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDiagnosePsqlError(t *testing.T) {
 	tests := []struct {
 		name    string

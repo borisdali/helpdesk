@@ -50,12 +50,12 @@ aiHelpDesk Governance consists of eight well-defined components:
 |-----------|--------|-------------|
 | [Audit System](#audit-system) | **Implemented** | Tamper-evident logging with hash chains |
 | [Policy Engine](#policy-engine) | **Implemented** | Rule-based access control |
-| [Approval Workflows](#approval-workflows) | Planned | Human-in-the-loop for risky ops |
-| [Guardrails](#guardrails) | Planned | Hard safety constraints |
+| [Approval Workflows](#approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
+| [Compliance Reporting](#compliance-reporting-govbot) | **Implemented** | Scheduled compliance snapshots and alerting |
+| [Guardrails](#guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
 | Identity & Access | Planned | User/role-based permissions |
-| Explainability | Partial | Reasoning chains in audit |
+| Explainability | Partial | Reasoning chains in audit, diagnostic notes |
 | Rollback & Undo | Planned | Recovery from mistakes |
-| Compliance Reporting | Planned | Audit exports, reports |
 
 ---
 
@@ -290,46 +290,86 @@ When an agent receives a request for `prod-db`, it:
 
 ## Approval Workflows
 
-When a policy requires approval, the request enters an approval workflow.
+When a policy rule has `effect: require_approval`, the agent blocks and waits
+for a human to approve or deny the request before execution proceeds.
 
 ### Flow
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Agent     │     │  Approval   │     │  Approvers  │
-│  (request)  │────►│   Service   │────►│  (humans)   │
-└─────────────┘     └─────────────┘     └─────────────┘
-                           │                   │
-                           │◄──────────────────┘
-                           │      approve/deny
-                           ▼
-                    ┌─────────────┐
-                    │   Execute   │
-                    │  or Abort   │
-                    └─────────────┘
+┌─────────────┐   require_approval   ┌─────────────────────┐
+│   Agent     │─────────────────────►│   auditd            │
+│  (blocked)  │                      │   /v1/approvals     │
+└──────┬──────┘                      └──────────┬──────────┘
+       │                                        │ Slack / email
+       │                                        ▼
+       │                             ┌─────────────────────┐
+       │                             │   Approvers         │
+       │                             │   (humans)          │
+       │                             └──────────┬──────────┘
+       │                                        │ POST /v1/approvals/{id}/approve
+       │                                        │      or /deny
+       │◄───────────────────────────────────────┘
+       │     decision (allow / deny)
+       ▼
+┌─────────────┐
+│   Execute   │
+│  or Abort   │
+└─────────────┘
 ```
+
+### Implementation
+
+Approval state is managed by `auditd` and persisted in SQLite.
+The agent's `agentutil.PolicyEnforcer` polls the auditd approval API
+until the request is decided or the timeout elapses.
+
+| Component | Location | Role |
+|-----------|----------|------|
+| Approval API | `cmd/auditd/` | Stores requests, exposes approve/deny endpoints |
+| PolicyEnforcer | `agentutil/agentutil.go` | Blocks tool execution, polls for decision |
+| Approvals CLI | `cmd/approvals/` | Human tool to list and decide pending requests |
+| Notification | `cmd/auditd/` | Sends Slack webhook and/or email on new request |
+
+### Approvals CLI
+
+Humans manage pending approvals with the `approvals` CLI:
+
+```bash
+# List all pending approval requests
+approvals list --url http://localhost:1199
+
+# Approve a specific request
+approvals approve <approval-id> --url http://localhost:1199
+
+# Deny a specific request
+approvals deny <approval-id> --url http://localhost:1199
+```
+
+### Approval API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/v1/approvals` | Create a new approval request (called by agent) |
+| GET | `/v1/approvals` | List all approval requests |
+| GET | `/v1/approvals/pending` | List only pending requests |
+| POST | `/v1/approvals/{id}/approve` | Approve a request |
+| POST | `/v1/approvals/{id}/deny` | Deny a request |
 
 ### Configuration
 
-```yaml
-approval:
-  channels:
-    - type: slack
-      webhook: ${SLACK_WEBHOOK_URL}
-    - type: email
-      smtp_host: smtp.example.com
+```bash
+# Timeout before an unanswered request is considered expired (default: 5m)
+export HELPDESK_APPROVAL_TIMEOUT="15m"
 
-  timeout: 15m
+# Slack webhook for approval notifications (optional)
+export HELPDESK_APPROVAL_WEBHOOK="https://hooks.slack.com/..."
 
-  default_approvers:
-    - group: oncall
-    - user: security@example.com
-
-  emergency_override:
-    enabled: true
-    requires_reason: true
-    notify: [security@example.com]
+# Base URL embedded in approve/deny links sent via email or Slack
+export HELPDESK_APPROVAL_BASE_URL="http://auditd.internal:1199"
 ```
+
+Email notifications use the same SMTP settings as the auditor (see
+[Environment Variables](#environment-variables) below).
 
 ### Approval States
 
@@ -337,10 +377,8 @@ approval:
 |-------|-------------|
 | `pending` | Awaiting approval decision |
 | `approved` | Manually approved by human |
-| `auto_approved` | Automatically approved by policy |
 | `denied` | Rejected by approver |
-| `expired` | Approval request timed out |
-| `emergency` | Emergency override used |
+| `expired` | Approval request timed out — agent receives a denial |
 
 ---
 
@@ -348,41 +386,87 @@ approval:
 
 Guardrails are hard safety constraints that cannot be overridden, even with approval.
 
-### Types
+| Guardrail | Status | Description |
+|-----------|--------|-------------|
+| **Blast Radius** | **Implemented** | Caps rows/pods affected per operation |
+| Rate Limits | Planned | Max write frequency per session |
+| Circuit Breaker | Planned | Auto-stop on consecutive errors |
 
-| Guardrail | Description | Example |
-|-----------|-------------|---------|
-| **Blast Radius** | Limit scope of changes | Max 100 rows per DELETE |
-| **Rate Limit** | Limit frequency of actions | Max 10 writes per minute |
-| **Resource Lock** | Protect specific resources | `users` table is read-only |
-| **Circuit Breaker** | Auto-stop on failures | Stop if 3 consecutive errors |
-| **Dry Run First** | Require preview before execute | Always simulate DELETEs |
+### Blast Radius (Implemented)
 
-### Configuration
+Blast radius limits cap how many rows or pods a single operation may affect.
+They are evaluated **post-execution** — after the tool runs but before the LLM
+receives the result. If the limit is exceeded, the result is withheld and an
+error is returned to the LLM, and a `PostExecution: true` policy denial event
+is recorded in the audit trail.
+
+Configure limits in your policy file under a rule's `conditions`:
 
 ```yaml
-guardrails:
-  blast_radius:
-    max_rows_affected: 1000
-    max_pods_affected: 10
-
-  rate_limits:
-    write_ops_per_minute: 20
-    destructive_ops_per_hour: 5
-
-  protected_resources:
-    - type: database
-      name: "billing-*"
-      allowed_actions: [read]
-    - type: kubernetes
-      namespace: kube-system
-      allowed_actions: [read]
-
-  circuit_breaker:
-    error_threshold: 3
-    window: 5m
-    reset_after: 15m
+rules:
+  - action: write
+    effect: allow
+    conditions:
+      max_rows_affected: 1000   # database: rows modified (DELETE/UPDATE/INSERT)
+      max_pods_affected: 10     # kubernetes: resources created/configured/deleted
 ```
+
+See `policies.example.yaml` for full examples.
+
+#### How it works
+
+```
+Pre-execution:   CheckDatabase / CheckKubernetes  → allow/deny/require_approval
+                         │
+                    tool executes
+                         │
+Post-execution:  CheckDatabaseResult              → blast-radius enforcement
+                 CheckKubernetesResult
+                         │
+                 ┌───────┴────────┐
+                 │ within limit   │ exceeded limit
+                 ▼                ▼
+              return result    return error +
+                               audit PostExecution denial
+```
+
+Row counts are parsed from psql command tag output (`DELETE N`, `UPDATE N`,
+`INSERT 0 N`). Pod counts are parsed from kubectl confirmation lines
+(`pod "x" deleted`, `deployment "y" configured`, etc.).
+
+#### Agent Integration
+
+**Database agent** — `runPsqlWithToolName` calls `CheckDatabaseResult`
+automatically. When adding a new write tool, pass `policy.ActionWrite` (or
+`policy.ActionDestructive`) via the `action` variable — the post-execution
+check is already wired.
+
+**Kubernetes agent** — call `checkK8sPolicyResult` after any write or
+destructive `runKubectlWithToolName` call:
+
+```go
+// Pre-execution check (existing pattern)
+nsInfo := resolveNamespaceInfo(namespace)
+if err := checkK8sPolicy(ctx, nsInfo.Namespace, policy.ActionWrite, nsInfo.Tags); err != nil {
+    return "", err
+}
+
+// Execute
+output, execErr := runKubectlWithToolName(ctx, kubeCtx, "tool_name", args...)
+
+// Post-execution blast-radius check
+if err := checkK8sPolicyResult(ctx, nsInfo.Namespace, policy.ActionWrite, nsInfo.Tags, output, execErr); err != nil {
+    return "", err
+}
+```
+
+### Planned Guardrails
+
+**Rate limits** — cap write frequency per session (e.g. max 20 writes/minute).
+Requires a per-session counter with TTL; not yet implemented.
+
+**Circuit breaker** — auto-pause an agent after N consecutive errors in a
+rolling window to prevent runaway failure loops. Not yet implemented.
 
 ---
 
@@ -784,6 +868,93 @@ go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
 | `potential_sql_injection` | SQL syntax errors in tool output |
 | `potential_command_injection` | Permission denied / command not found errors |
 
+## Compliance Reporting (govbot)
+
+The `govbot` is a one-shot compliance reporter that queries the gateway's
+governance API endpoints and produces a structured compliance snapshot. It
+is designed to run on-demand or on a schedule (daily cron / Kubernetes CronJob)
+and optionally post a summary to a Slack webhook.
+
+```
+Gateway /api/v1/governance/* → govbot → compliance report + optional Slack alert
+```
+
+govbot is stateless and read-only. No audit socket access or cluster privileges
+are required — only network access to the gateway.
+
+### Compliance Phases
+
+```
+Phase 1 — Governance Status:       GET /api/v1/governance
+Phase 2 — Policy Overview:         Detailed policy rule breakdown
+Phase 3 — Audit Activity:          GET /api/v1/governance/events?since=...
+Phase 4 — Policy Decision Analysis: Per-resource allow/deny/no-match breakdown
+Phase 5 — Pending Approvals:       GET /api/v1/governance/approvals/pending
+Phase 6 — Chain Integrity:         GET /api/v1/governance/verify
+Phase 7 — Compliance Summary:      Aggregated alerts and warnings + optional Slack post
+```
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Healthy — no alerts or warnings |
+| `1`  | Fatal — could not reach gateway |
+| `2`  | Alerts present — chain integrity failure or other critical finding |
+
+Exit code `2` is useful for CI pipelines and cron alerting.
+
+### Detection Logic
+
+**Phase 4 — no_match decisions:** When an agent connects to a database host
+that is not listed in `infraConfig`, the policy engine has no tags to evaluate
+and falls back to the default deny. These decisions are counted as `no_match`
+and raise a warning. The fix is to ensure every host the agents contact appears
+in the infrastructure config with appropriate tags.
+
+**Phase 5 — Stale approvals:** Any approval request pending for more than
+30 minutes is flagged as stale, indicating the notification channel may not
+be working correctly.
+
+**Phase 6 — Chain integrity:** A broken hash chain raises an **alert** (exit 2).
+
+### Running govbot
+
+```bash
+# On-demand
+go run ./cmd/govbot/ -gateway http://localhost:8080
+
+# Custom look-back window
+go run ./cmd/govbot/ -gateway http://localhost:8080 -since 6h
+
+# With Slack reporting
+go run ./cmd/govbot/ -gateway http://localhost:8080 \
+  -webhook https://hooks.slack.com/services/...
+
+# Docker Compose (governance profile)
+docker compose --profile governance run govbot
+
+# Kubernetes — trigger a one-off run outside the CronJob schedule
+kubectl create job govbot-manual --from=cronjob/helpdesk-govbot
+```
+
+### Scheduling in Kubernetes
+
+govbot is deployed as a CronJob. Enable it in `values.yaml`:
+
+```yaml
+governance:
+  govbot:
+    enabled: true
+    schedule: "0 8 * * *"   # daily at 08:00 UTC
+    since: "24h"
+    webhook: "https://hooks.slack.com/services/..."
+```
+
+See `cmd/govbot/README.md` for full documentation.
+
+---
+
 ## Troubleshooting
 
 Please refer to [here](ARCHITECTURE.md#troubleshooting) for the general purpose
@@ -859,14 +1030,17 @@ date  # Check current local time
 - [x] Policy engine (internal/policy/)
 - [x] Policy enforcement in agents (database, k8s)
 
-### Phase 2: Enforcement (In Progress)
-- [ ] Approval workflows
-- [ ] Guardrails implementation
+### Phase 2: Enforcement (Complete)
+- [x] Approval workflows (cmd/approvals/, auditd API, Slack/email notifications)
+- [x] Compliance reporting (cmd/govbot/, Kubernetes CronJob)
+- [x] Blast-radius guardrails (`max_rows_affected`, `max_pods_affected`, post-execution hooks)
+- [ ] Rate limits (write frequency per session)
+- [ ] Circuit breaker (auto-pause on consecutive errors)
 
 ### Phase 3: Operations
-- [ ] Identity & access control
+- [ ] Identity & access control (principal/role matching in policy engine)
+- [ ] Time-based policy conditions (schedule: days/hours/timezone)
 - [ ] Rollback capabilities
-- [ ] Compliance reporting
 
 ### Phase 4: Intelligence
 - [ ] Anomaly detection (ML-based)

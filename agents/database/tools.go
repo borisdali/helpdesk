@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,9 +63,13 @@ func resolveDatabaseInfo(connStrOrName string) databaseInfo {
 			}
 		}
 
+		knownDBs := 0
+		if infraConfig != nil {
+			knownDBs = len(infraConfig.DBServers)
+		}
 		slog.Warn("connection string not found in infraConfig; policy will evaluate with no tags",
 			"connection_string", connStrOrName,
-			"known_databases", len(infraConfig.DBServers),
+			"known_databases", knownDBs,
 		)
 		return databaseInfo{
 			Name:          dbName,
@@ -178,10 +183,12 @@ func runPsqlWithToolName(ctx context.Context, connStr string, query string, tool
 	// Resolve database info for policy checks
 	dbInfo := resolveDatabaseInfo(connStr)
 
+	// Determine action class based on query. All current tools are read-only;
+	// future write/destructive tools should pass the appropriate ActionClass.
+	action := policy.ActionRead
+
 	// Check policy before executing
 	if policyEnforcer != nil {
-		// Determine action class based on query (all current tools are read-only)
-		action := policy.ActionRead
 		note := ""
 		if !dbInfo.IsFromInfraConfig {
 			note = "connection string not found in infraConfig; no tags available for policy matching"
@@ -225,6 +232,18 @@ func runPsqlWithToolName(ctx context.Context, connStr string, query string, tool
 		}, duration)
 	}
 
+	// Post-execution policy check: enforce blast-radius conditions using the
+	// actual row count from the command tag (e.g. "DELETE 1500").
+	if policyEnforcer != nil && err == nil {
+		rowsAffected := parseRowsAffected(output)
+		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, action, dbInfo.Tags, agentutil.ToolOutcome{
+			RowsAffected: rowsAffected,
+			Err:          err,
+		}); postErr != nil {
+			return "", fmt.Errorf("policy denied after execution: %w", postErr)
+		}
+	}
+
 	// Log successful tool execution at INFO level
 	if err == nil && toolName != "" {
 		slog.Info("tool ok", "name", toolName, "ms", duration.Milliseconds())
@@ -265,6 +284,31 @@ func truncateForAudit(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// parseRowsAffected extracts the number of rows affected from psql output.
+// PostgreSQL command tags appear as standalone lines in the output:
+//
+//	DELETE 150
+//	UPDATE 42
+//	INSERT 0 5   (OID count followed by row count)
+func parseRowsAffected(output string) int {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		for _, verb := range []string{"DELETE ", "UPDATE ", "INSERT "} {
+			if strings.HasPrefix(line, verb) {
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					// INSERT outputs "INSERT 0 N", others "VERB N"
+					n, err := strconv.Atoi(parts[len(parts)-1])
+					if err == nil {
+						return n
+					}
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // PsqlResult is the standard output type for all psql tools.

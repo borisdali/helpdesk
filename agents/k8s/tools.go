@@ -148,6 +148,38 @@ func checkK8sPolicy(ctx context.Context, namespace string, action policy.ActionC
 	return policyEnforcer.CheckKubernetes(ctx, namespace, action, tags, "")
 }
 
+// parsePodsAffected counts the number of Kubernetes resources modified from
+// kubectl output. Handles the standard kubectl confirmation lines:
+//
+//	pod "foo" deleted
+//	deployment.apps "bar" configured
+//	service "baz" created
+func parsePodsAffected(output string) int {
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, " deleted") ||
+			strings.HasSuffix(line, " configured") ||
+			strings.HasSuffix(line, " created") {
+			count++
+		}
+	}
+	return count
+}
+
+// checkK8sPolicyResult runs a post-execution policy check for a Kubernetes
+// operation, enforcing blast-radius conditions with the actual resource count.
+// Call this after write or destructive kubectl commands.
+func checkK8sPolicyResult(ctx context.Context, namespace string, action policy.ActionClass, tags []string, output string, execErr error) error {
+	if policyEnforcer == nil {
+		return nil
+	}
+	return policyEnforcer.CheckKubernetesResult(ctx, namespace, action, tags, agentutil.ToolOutcome{
+		PodsAffected: parsePodsAffected(output),
+		Err:          execErr,
+	})
+}
+
 // runKubectl executes a kubectl command and returns the output.
 // If context is non-empty, it's passed as --context to kubectl.
 // The provided ctx controls cancellation — if it expires, kubectl is killed.

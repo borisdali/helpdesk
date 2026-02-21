@@ -334,6 +334,102 @@ func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, 
 	return e.CheckTool(ctx, "kubernetes", namespace, action, tags, note)
 }
 
+// ToolOutcome carries the measured result of a tool execution for
+// post-execution policy checks (blast-radius enforcement).
+type ToolOutcome struct {
+	// RowsAffected is the number of database rows modified.
+	// Parse from psql command tag output: "DELETE N", "UPDATE N", "INSERT 0 N".
+	RowsAffected int
+
+	// PodsAffected is the number of Kubernetes resources modified.
+	// Parse from kubectl output lines ending in " deleted", " configured", etc.
+	PodsAffected int
+
+	// Err is the error returned by the tool, if any.
+	// When non-nil, post-execution checks are skipped (nothing was executed).
+	Err error
+}
+
+// CheckResult runs post-execution policy checks with the actual execution context.
+// It re-evaluates the policy engine with RowsAffected/PodsAffected populated
+// from real tool output and returns an error if a blast-radius condition is violated.
+//
+// Should be called after every write or destructive tool execution. For read-only
+// tools or when Err is set it is a no-op.
+func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, outcome ToolOutcome) error {
+	if e.engine == nil {
+		return nil
+	}
+	// Tool itself failed — nothing was executed, blast-radius is irrelevant.
+	if outcome.Err != nil {
+		return nil
+	}
+	// Pure reads with no measured impact are always fine.
+	if action == policy.ActionRead && outcome.RowsAffected == 0 && outcome.PodsAffected == 0 {
+		return nil
+	}
+
+	traceID := ""
+	if e.traceStore != nil {
+		traceID = e.traceStore.Get()
+	}
+
+	req := policy.Request{
+		Resource: policy.RequestResource{
+			Type: resourceType,
+			Name: resourceName,
+			Tags: tags,
+		},
+		Action: action,
+		Context: policy.RequestContext{
+			TraceID:      traceID,
+			RowsAffected: outcome.RowsAffected,
+			PodsAffected: outcome.PodsAffected,
+		},
+	}
+
+	decision := e.engine.Evaluate(req)
+	if decision.Effect != policy.EffectDeny {
+		return nil
+	}
+
+	// Blast-radius violated — audit the post-execution denial and return an error.
+	if e.toolAuditor != nil {
+		e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+			ResourceType:  resourceType,
+			ResourceName:  resourceName,
+			Action:        string(action),
+			Tags:          tags,
+			Effect:        string(decision.Effect),
+			PolicyName:    decision.PolicyName,
+			Message:       decision.Message,
+			PostExecution: true,
+		})
+	}
+
+	slog.Warn("post-execution policy check: blast radius exceeded",
+		"resource_type", resourceType,
+		"resource_name", resourceName,
+		"action", action,
+		"rows_affected", outcome.RowsAffected,
+		"pods_affected", outcome.PodsAffected,
+		"policy", decision.PolicyName,
+		"message", decision.Message,
+	)
+
+	return &policy.DeniedError{Decision: decision}
+}
+
+// CheckDatabaseResult is a convenience method for post-execution database checks.
+func (e *PolicyEnforcer) CheckDatabaseResult(ctx context.Context, dbName string, action policy.ActionClass, tags []string, outcome ToolOutcome) error {
+	return e.CheckResult(ctx, "database", dbName, action, tags, outcome)
+}
+
+// CheckKubernetesResult is a convenience method for post-execution Kubernetes checks.
+func (e *PolicyEnforcer) CheckKubernetesResult(ctx context.Context, namespace string, action policy.ActionClass, tags []string, outcome ToolOutcome) error {
+	return e.CheckResult(ctx, "kubernetes", namespace, action, tags, outcome)
+}
+
 // InitApprovalClient creates an approval client if approvals are enabled.
 // Returns nil if approvals are disabled or no audit URL is configured.
 // Approvals require a central auditd service.

@@ -1,10 +1,14 @@
 package agentutil
 
 import (
+	"context"
+	"errors"
 	"os"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
+
+	"helpdesk/internal/policy"
 )
 
 // minimalPolicyYAML is a valid policy file used across policy tests.
@@ -35,6 +39,134 @@ func writeTempPolicyFile(t *testing.T, content string) string {
 	}
 	f.Close()
 	return f.Name()
+}
+
+// blastRadiusPolicyYAML allows writes with max 100 rows affected.
+const blastRadiusPolicyYAML = `
+version: "1"
+policies:
+  - name: blast-radius-policy
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: allow
+        conditions:
+          max_rows_affected: 100
+`
+
+// newBlastRadiusEnforcer creates a PolicyEnforcer backed by the blast-radius policy.
+func newBlastRadiusEnforcer(t *testing.T) *PolicyEnforcer {
+	t.Helper()
+	path := writeTempPolicyFile(t, blastRadiusPolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+}
+
+// --- CheckResult ---
+
+func TestCheckResult_NilEngine(t *testing.T) {
+	e := &PolicyEnforcer{} // no engine
+	err := e.CheckResult(context.Background(), "database", "mydb", policy.ActionWrite, nil, ToolOutcome{RowsAffected: 9999})
+	if err != nil {
+		t.Errorf("nil engine should be no-op, got: %v", err)
+	}
+}
+
+func TestCheckResult_SkipsWhenToolFailed(t *testing.T) {
+	e := newBlastRadiusEnforcer(t)
+	// Tool errored out — nothing was actually executed, blast-radius is irrelevant.
+	err := e.CheckResult(context.Background(), "database", "mydb", policy.ActionWrite, nil, ToolOutcome{
+		RowsAffected: 9999,
+		Err:          errors.New("psql failed"),
+	})
+	if err != nil {
+		t.Errorf("should be no-op when outcome.Err is set, got: %v", err)
+	}
+}
+
+func TestCheckResult_SkipsReadWithZeroRows(t *testing.T) {
+	e := newBlastRadiusEnforcer(t)
+	// Pure read with nothing measured — fast path exit.
+	err := e.CheckResult(context.Background(), "database", "mydb", policy.ActionRead, nil, ToolOutcome{
+		RowsAffected: 0,
+		PodsAffected: 0,
+	})
+	if err != nil {
+		t.Errorf("read with 0 rows/pods should be no-op, got: %v", err)
+	}
+}
+
+func TestCheckResult_AllowsWriteWithinLimit(t *testing.T) {
+	e := newBlastRadiusEnforcer(t)
+	err := e.CheckResult(context.Background(), "database", "mydb", policy.ActionWrite, nil, ToolOutcome{
+		RowsAffected: 50, // under the 100-row limit
+	})
+	if err != nil {
+		t.Errorf("50 rows should be within blast-radius limit, got: %v", err)
+	}
+}
+
+func TestCheckResult_DeniesWriteExceedingLimit(t *testing.T) {
+	e := newBlastRadiusEnforcer(t)
+	err := e.CheckResult(context.Background(), "database", "mydb", policy.ActionWrite, nil, ToolOutcome{
+		RowsAffected: 150, // over the 100-row limit
+	})
+	if err == nil {
+		t.Fatal("150 rows exceeds blast-radius limit, expected denial error")
+	}
+	if !policy.IsDenied(err) {
+		t.Errorf("expected DeniedError, got: %T %v", err, err)
+	}
+}
+
+func TestCheckResult_DenialMessageContainsRowCount(t *testing.T) {
+	e := newBlastRadiusEnforcer(t)
+	err := e.CheckResult(context.Background(), "database", "mydb", policy.ActionWrite, nil, ToolOutcome{
+		RowsAffected: 1500,
+	})
+	if err == nil {
+		t.Fatal("expected denial error")
+	}
+	msg := err.Error()
+	if msg == "" {
+		t.Error("denial error message is empty")
+	}
+	// The message should mention the actual row count and the limit.
+	for _, want := range []string{"1500", "100"} {
+		if !containsStr(msg, want) {
+			t.Errorf("denial message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestCheckDatabaseResult_ConvenienceWrapper(t *testing.T) {
+	e := newBlastRadiusEnforcer(t)
+	// CheckDatabaseResult is a thin wrapper — just verify it routes correctly.
+	withinErr := e.CheckDatabaseResult(context.Background(), "mydb", policy.ActionWrite, nil, ToolOutcome{RowsAffected: 10})
+	if withinErr != nil {
+		t.Errorf("10 rows within limit: unexpected error: %v", withinErr)
+	}
+	exceededErr := e.CheckDatabaseResult(context.Background(), "mydb", policy.ActionWrite, nil, ToolOutcome{RowsAffected: 9999})
+	if exceededErr == nil {
+		t.Error("9999 rows: expected denial error")
+	}
+}
+
+func containsStr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && stringContainsHelper(s, sub))
+}
+
+func stringContainsHelper(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // --- InitPolicyEngine ---

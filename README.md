@@ -112,6 +112,8 @@ See [a sample](cmd/srebot/README.md) of a O11y watcher program or an SRE bot tha
 
 See [a sample](cmd/secbot/README.md) of a Security Responder bot that automatically sends alerts in real-time for security violations (e.g. for low confidence agent delegations, chain tampering, off-hours activity, high error rates, unauthorized destructive operations, etc.) and optionally creates a security incident (with the full incident bundle snapshot).
 
+See [a sample](cmd/govbot/README.md) of a Compliance Reporter bot that queries the aiHelpDesk Gateway's governance API endpoints and produces a structured compliance snapshot. It is designed to run on-demand or on a schedule (e.g. daily cron / Kubernetes CronJob) and optionally post a summary to a Slack webhook. In contrast to SEC bot (reactive, threat-driven) and Auditor (streaming, rule-based alerts), GOV bot is designed to be periodic and analytical — the compliance officer's tool rather than the on-call engineer's troubleshooter.
+
 ## Sample interactive dialog with a human operator
 aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").
 

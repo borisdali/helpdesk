@@ -105,8 +105,9 @@ type PolicyDecision struct {
 	Effect       string   `json:"effect"`                 // "allow", "deny", "require_approval"
 	PolicyName   string   `json:"policy_name"`            // which policy matched
 	Message      string   `json:"message,omitempty"`      // denial or approval message from the policy rule
-	Note         string   `json:"note,omitempty"`         // diagnostic context (e.g. why tags are missing)
-	DryRun       bool     `json:"dry_run,omitempty"`      // true when policy is in dry-run mode
+	Note          string   `json:"note,omitempty"`          // diagnostic context (e.g. why tags are missing)
+	DryRun        bool     `json:"dry_run,omitempty"`       // true when policy is in dry-run mode
+	PostExecution bool     `json:"post_execution,omitempty"` // true for post-execution blast-radius checks
 }
 
 // Event is a single audit event for delegation decisions.
