@@ -53,6 +53,7 @@ aiHelpDesk Governance consists of eight well-defined components:
 | [Approval Workflows](#approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
 | [Compliance Reporting](#compliance-reporting-govbot) | **Implemented** | Scheduled compliance snapshots and alerting |
 | [Guardrails](#guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
+| [Operating Mode](#operating-mode) | Planned | `readonly`/`fix` switch with governance enforcement |
 | Identity & Access | Planned | User/role-based permissions |
 | Explainability | Partial | Reasoning chains in audit, diagnostic notes |
 | Rollback & Undo | Planned | Recovery from mistakes |
@@ -470,6 +471,118 @@ rolling window to prevent runaway failure loops. Not yet implemented.
 
 ---
 
+## Operating Mode
+
+The operating mode switch controls whether agents are allowed to execute
+write and destructive tools at all, and enforces governance requirements
+when they are.
+
+| Mode | Description |
+|------|-------------|
+| `readonly` | **Default.** Write and destructive tools are disabled. Safe for diagnostics. |
+| `fix` | Write and destructive tools are enabled. Governance (audit + policy) is required. |
+
+```bash
+export HELPDESK_OPERATING_MODE="readonly"  # default — safe
+export HELPDESK_OPERATING_MODE="fix"       # enable mutations; enforces governance
+```
+
+### Why a Default of `readonly`
+
+Most day-to-day use is diagnostic — querying databases, inspecting pods,
+gathering logs. Read-only mode ensures that newly deployed agents can never
+accidentally mutate state until an operator explicitly opts in. When write tools
+are added in the future, they will be silently gated behind this flag until
+the operator is ready.
+
+### Startup Validation (fix mode)
+
+When an agent starts in `fix` mode, it performs a pre-flight governance check
+before registering any A2A skills:
+
+```
+Agent starts in fix mode
+         │
+         ▼
+┌─────────────────────┐
+│ Is policy enabled   │── No ──► stderr: "fix mode requires policy"
+│ and loaded?         │         exit 1
+└─────────┬───────────┘
+          │ Yes
+          ▼
+┌─────────────────────┐
+│ Is auditd reachable │── No ──► stderr: "fix mode requires audit"
+│ (GET /health)?      │         exit 1
+└─────────┬───────────┘
+          │ Yes
+          ▼
+     Agent starts
+```
+
+This prevents a misconfigured deployment from silently operating without
+governance. The failure is intentional: in `fix` mode, governance is
+non-negotiable.
+
+### Runtime Enforcement
+
+The mode check runs inside `PolicyEnforcer.CheckTool`, before the policy
+engine is consulted, so it is invisible to tool authors. No tool code needs
+to be mode-aware.
+
+```
+Tool called with ActionWrite or ActionDestructive
+         │
+         ▼
+┌─────────────────────────┐
+│ HELPDESK_OPERATING_MODE │
+│       == readonly?      │── Yes ──► return error: "agent is in read-only mode"
+└──────────┬──────────────┘
+           │ No (fix mode)
+           ▼
+┌─────────────────────────┐
+│ Audit reachable?        │── No ──► create governance incident (see below)
+│ Policy loaded?          │         return error: "governance unavailable"
+└──────────┬──────────────┘
+           │ Yes
+           ▼
+     Normal policy evaluation
+```
+
+### Governance Misconfiguration Incidents
+
+In `fix` mode, if audit becomes unreachable at runtime (after successful
+startup), the agent cannot use the audit trail to record a denial — because
+the audit system is the problem. To break this chicken-and-egg deadlock, the
+agent uses a two-stage fallback:
+
+1. **POST `gateway /api/v1/incidents`** — create a security incident directly
+   via the gateway, which routes it to the incident agent outside the
+   broken audit path.
+2. **Write to stderr** — ensure the violation is captured in container/system
+   logs even if the gateway is also unreachable.
+
+This guarantees that governance failures are always visible, even when the
+audit system itself has failed.
+
+### Violation Types
+
+| Condition | Severity | Action |
+|-----------|----------|--------|
+| `fix` mode + audit disabled or unreachable | **Critical** | Block tool, create incident, log stderr |
+| `fix` mode + policy disabled or not loaded | **Critical** | Block tool, create incident, log stderr |
+| `fix` mode + approval disabled for `destructive` action | Warning | Allow with log warning (governance gap, not a hard block) |
+
+### Implementation Notes (Planned)
+
+This feature is not yet implemented. When built, the key integration points will be:
+
+- `agentutil.MustLoadConfig` — validate mode + governance config at startup
+- `agentutil.PolicyEnforcer.CheckTool` — mode gate before policy evaluation
+- `agentutil.PolicyEnforcer` — hold a reference to the gateway URL for the incident fallback
+- `agents/*/main.go` — startup pre-flight check before `a2a.Serve`
+
+---
+
 ## Audit System
 
 aiHelpDesk includes a tamper-evident audit system that records all tool executions
@@ -868,7 +981,7 @@ go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
 | `potential_sql_injection` | SQL syntax errors in tool output |
 | `potential_command_injection` | Permission denied / command not found errors |
 
-## Compliance Reporting (govbot)
+## Compliance Reporting (cmd/govbot/)
 
 The `govbot` is a one-shot compliance reporter that queries the gateway's
 governance API endpoints and produces a structured compliance snapshot. It
@@ -1038,6 +1151,7 @@ date  # Check current local time
 - [ ] Circuit breaker (auto-pause on consecutive errors)
 
 ### Phase 3: Operations
+- [ ] Operating mode switch (`readonly` / `fix`) with governance enforcement
 - [ ] Identity & access control (principal/role matching in policy engine)
 - [ ] Time-based policy conditions (schedule: days/hours/timezone)
 - [ ] Rollback capabilities
