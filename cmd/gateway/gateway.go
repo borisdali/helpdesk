@@ -92,6 +92,10 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/databases", g.handleListDatabases)
 	mux.HandleFunc("GET /api/v1/governance", g.handleGovernance)
 	mux.HandleFunc("GET /api/v1/governance/policies", g.handleGovernancePolicies)
+	mux.HandleFunc("GET /api/v1/governance/events", g.handleGovernanceEvents)
+	mux.HandleFunc("GET /api/v1/governance/approvals/pending", g.handleGovernanceApprovalsPending)
+	mux.HandleFunc("GET /api/v1/governance/approvals", g.handleGovernanceApprovals)
+	mux.HandleFunc("GET /api/v1/governance/verify", g.handleGovernanceVerify)
 }
 
 // --- Handlers ---
@@ -238,7 +242,23 @@ func (g *Gateway) handleGovernancePolicies(w http.ResponseWriter, r *http.Reques
 	g.proxyGovernanceRequest(w, r, "/v1/governance/policies")
 }
 
-// proxyGovernanceRequest forwards a request to the auditd governance endpoint.
+func (g *Gateway) handleGovernanceEvents(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/events")
+}
+
+func (g *Gateway) handleGovernanceApprovals(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/approvals")
+}
+
+func (g *Gateway) handleGovernanceApprovalsPending(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/approvals/pending")
+}
+
+func (g *Gateway) handleGovernanceVerify(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/verify")
+}
+
+// proxyGovernanceRequest forwards a request to the auditd service, preserving query parameters.
 func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request, path string) {
 	if g.auditURL == "" {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -248,8 +268,13 @@ func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	targetURL := g.auditURL + path
+	if q := r.URL.RawQuery; q != "" {
+		targetURL += "?" + q
+	}
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(g.auditURL + path)
+	resp, err := client.Get(targetURL)
 	if err != nil {
 		slog.Error("failed to query governance service", "err", err)
 		writeError(w, http.StatusBadGateway, "governance service unavailable")

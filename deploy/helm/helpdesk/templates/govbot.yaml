@@ -1,0 +1,34 @@
+{{- if .Values.governance.govbot.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-govbot
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: govbot
+spec:
+  schedule: {{ .Values.governance.govbot.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: govbot
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: govbot
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["/usr/local/bin/govbot"]
+              args:
+                - "-gateway=http://{{ include "helpdesk.fullname" . }}-gateway:{{ .Values.gateway.port }}"
+                - "-since={{ .Values.governance.govbot.since }}"
+                {{- if .Values.governance.govbot.webhook }}
+                - "-webhook={{ .Values.governance.govbot.webhook }}"
+                {{- end }}
+{{- end }}

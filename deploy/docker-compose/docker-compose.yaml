@@ -222,6 +222,24 @@ services:
     depends_on:
       - auditd
 
+  # AI Governance: Compliance reporter (one-shot, run with: docker compose run govbot)
+  # Enable with: docker compose --profile governance run govbot
+  govbot:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
+    image: helpdesk:latest
+    command:
+      - /usr/local/bin/govbot
+      - -gateway=http://gateway:8080
+      - -since=${GOVBOT_SINCE:-24h}
+      - -webhook=${GOVBOT_WEBHOOK:-}
+    profiles:
+      - governance
+    depends_on:
+      - auditd
+      - gateway
+
   # AI Governance: Security responder bot
   # Enable with: docker compose --profile governance up -d
   secbot:

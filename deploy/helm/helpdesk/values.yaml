@@ -110,6 +110,16 @@ governance:
     # Max events per minute before high-volume alert
     maxEventsPerMinute: 100
 
+  # Governance compliance reporter (runs as a Kubernetes CronJob)
+  govbot:
+    enabled: false
+    # Cron schedule for automated compliance reports (default: daily at 08:00 UTC)
+    schedule: "0 8 * * *"
+    # Look-back window for audit event analysis
+    since: "24h"
+    # Slack webhook URL for posting the compliance summary (optional)
+    webhook: ""
+
   # Policy configuration
   policy:
     # Enable policy-based access control
