@@ -62,6 +62,10 @@ func resolveDatabaseInfo(connStrOrName string) databaseInfo {
 			}
 		}
 
+		slog.Warn("connection string not found in infraConfig; policy will evaluate with no tags",
+			"connection_string", connStrOrName,
+			"known_databases", len(infraConfig.DBServers),
+		)
 		return databaseInfo{
 			Name:          dbName,
 			ConnectionStr: connStrOrName,
@@ -178,12 +182,17 @@ func runPsqlWithToolName(ctx context.Context, connStr string, query string, tool
 	if policyEnforcer != nil {
 		// Determine action class based on query (all current tools are read-only)
 		action := policy.ActionRead
-		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags); err != nil {
+		note := ""
+		if !dbInfo.IsFromInfraConfig {
+			note = "connection string not found in infraConfig; no tags available for policy matching"
+		}
+		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags, note); err != nil {
 			slog.Warn("policy denied database access",
 				"tool", toolName,
 				"database", dbInfo.Name,
 				"action", action,
 				"tags", dbInfo.Tags,
+				"from_infra_config", dbInfo.IsFromInfraConfig,
 				"err", err)
 			return "", fmt.Errorf("policy denied: %w", err)
 		}

@@ -145,7 +145,7 @@ func checkK8sPolicy(ctx context.Context, namespace string, action policy.ActionC
 	if policyEnforcer == nil {
 		return nil
 	}
-	return policyEnforcer.CheckKubernetes(ctx, namespace, action, tags)
+	return policyEnforcer.CheckKubernetes(ctx, namespace, action, tags, "")
 }
 
 // runKubectl executes a kubectl command and returns the output.

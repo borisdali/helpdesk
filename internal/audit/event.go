@@ -104,7 +104,8 @@ type PolicyDecision struct {
 	Tags         []string `json:"tags,omitempty"`         // resource tags used for matching
 	Effect       string   `json:"effect"`                 // "allow", "deny", "require_approval"
 	PolicyName   string   `json:"policy_name"`            // which policy matched
-	Message      string   `json:"message,omitempty"`      // denial or approval message
+	Message      string   `json:"message,omitempty"`      // denial or approval message from the policy rule
+	Note         string   `json:"note,omitempty"`         // diagnostic context (e.g. why tags are missing)
 	DryRun       bool     `json:"dry_run,omitempty"`      // true when policy is in dry-run mode
 }
 

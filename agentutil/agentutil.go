@@ -229,7 +229,7 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 // Returns nil if allowed, error if denied.
 // If approval is required and an approval client is configured, it will request
 // approval and wait for resolution.
-func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string) error {
+func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
 	if e.engine == nil {
 		return nil // No enforcement
 	}
@@ -263,6 +263,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Effect:       string(decision.Effect),
 			PolicyName:   decision.PolicyName,
 			Message:      decision.Message,
+			Note:         note,
 		})
 	}
 
@@ -324,13 +325,13 @@ func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceT
 }
 
 // CheckDatabase is a convenience method for database operations.
-func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, action policy.ActionClass, tags []string) error {
-	return e.CheckTool(ctx, "database", dbName, action, tags)
+func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, action policy.ActionClass, tags []string, note string) error {
+	return e.CheckTool(ctx, "database", dbName, action, tags, note)
 }
 
 // CheckKubernetes is a convenience method for Kubernetes operations.
-func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string) error {
-	return e.CheckTool(ctx, "kubernetes", namespace, action, tags)
+func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string, note string) error {
+	return e.CheckTool(ctx, "kubernetes", namespace, action, tags, note)
 }
 
 // InitApprovalClient creates an approval client if approvals are enabled.
