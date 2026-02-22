@@ -1,6 +1,6 @@
 # AI Governance Architecture
 
-Please refer to [here](ARCHITECTURE.md) for the general overview of
+Please see [here](ARCHITECTURE.md) for the general overview of
 aiHelpDesk Architecture. This page is dedicated to aiHelpDesk's very
 important subsystem that we refer to as AI Governance.
 

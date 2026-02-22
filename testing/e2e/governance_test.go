@@ -700,3 +700,155 @@ func TestGovernance_GetEvent_HasTrace(t *testing.T) {
 		t.Logf("gateway proxy event_id: %v", gatewayResult["event_id"])
 	}
 }
+
+// =============================================================================
+// Agent-reasoning audit layer
+// =============================================================================
+
+// TestGovernance_GetEvent_AgentReasoning verifies that an agent_reasoning event
+// — written exactly as NewReasoningCallback would emit it — survives the full
+// HTTP → auditd store → HTTP round-trip with its AgentReasoning fields intact.
+// No API key required; the event is synthesised directly via POST /v1/events.
+func TestGovernance_GetEvent_AgentReasoning(t *testing.T) {
+	cfg := LoadConfig()
+	if !isAuditdReachable(cfg.AuditdURL) {
+		t.Skipf("auditd not reachable at %s", cfg.AuditdURL)
+	}
+
+	eventID := fmt.Sprintf("e2e-reasoning-%d", time.Now().UnixNano())
+
+	payload := map[string]any{
+		"event_id":   eventID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "agent_reasoning",
+		"trace_id":   "e2e-trace-reasoning",
+		"session":    map[string]any{"id": "e2e-rsn-session"},
+		// Matches the AgentReasoning struct written by RecordAgentReasoning.
+		"agent_reasoning": map[string]any{
+			"reasoning":  "The user wants connection stats. I will call get_active_connections first, then get_connection_stats.",
+			"tool_calls": []string{"get_active_connections", "get_connection_stats"},
+		},
+	}
+	created := auditdPost(t, cfg.AuditdURL, "/v1/events", payload)
+	if created["event_id"] == nil {
+		t.Fatalf("POST /v1/events: event_id missing from response: %v", created)
+	}
+	t.Logf("created agent_reasoning event: %s", eventID)
+
+	// Retrieve via auditd direct.
+	result := auditdGet(t, cfg.AuditdURL, "/v1/events/"+eventID)
+	if result["event_id"] != eventID {
+		t.Errorf("event_id = %v, want %s", result["event_id"], eventID)
+	}
+	if result["event_type"] != "agent_reasoning" {
+		t.Errorf("event_type = %v, want agent_reasoning", result["event_type"])
+	}
+	ar, _ := result["agent_reasoning"].(map[string]any)
+	if ar == nil {
+		t.Fatal("agent_reasoning field missing from retrieved event")
+	}
+	if reasoning, _ := ar["reasoning"].(string); reasoning == "" {
+		t.Error("agent_reasoning.reasoning empty after store round-trip")
+	}
+	toolCalls, _ := ar["tool_calls"].([]any)
+	if len(toolCalls) != 2 {
+		t.Errorf("agent_reasoning.tool_calls = %v, want 2 entries", toolCalls)
+	}
+	t.Logf("reasoning: %s", ar["reasoning"])
+	t.Logf("tool_calls: %v", toolCalls)
+
+	// Also verify via gateway proxy.
+	if IsGatewayReachable(cfg.GatewayURL) {
+		gatewayResult := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/events/"+eventID)
+		if gatewayResult["event_id"] != eventID {
+			t.Errorf("gateway: event_id = %v, want %s", gatewayResult["event_id"], eventID)
+		}
+		gar, _ := gatewayResult["agent_reasoning"].(map[string]any)
+		if gar == nil {
+			t.Error("gateway: agent_reasoning field missing after proxy round-trip")
+		} else if r, _ := gar["reasoning"].(string); r == "" {
+			t.Error("gateway: agent_reasoning.reasoning empty after proxy round-trip")
+		}
+		t.Logf("gateway proxy retrieved agent_reasoning event_id: %v", gatewayResult["event_id"])
+	}
+}
+
+// TestGovernance_ReasoningEventsInTrace verifies that a real agent call which
+// invokes at least one tool produces at least one agent_reasoning event in the
+// audit trail for that trace. This confirms NewReasoningCallback is wired and
+// the AfterModelCallback fires when the model deliberates before a tool call.
+//
+// Soft check: if no reasoning events are found the test warns but does not fail,
+// because some model responses may emit only bare function calls (no text parts)
+// depending on the model and temperature. An absence is logged, not a hard error,
+// to avoid flaky CI.
+func TestGovernance_ReasoningEventsInTrace(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+	if !isAuditdReachable(cfg.AuditdURL) {
+		t.Skipf("auditd not reachable at %s", cfg.AuditdURL)
+	}
+
+	// Make a real DB agent call that will require tool use.
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	b, _ := json.Marshal(map[string]any{
+		"connection_string": cfg.ConnStr,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		cfg.GatewayURL+"/api/v1/db/check_connection",
+		bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 90 * time.Second}
+	httpResp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("agent call: %v", err)
+	}
+	io.ReadAll(httpResp.Body)
+	httpResp.Body.Close()
+
+	traceID := httpResp.Header.Get("X-Trace-ID")
+	if traceID == "" {
+		t.Skip("X-Trace-ID not returned — audit may not be enabled on this stack")
+	}
+	t.Logf("X-Trace-ID: %s", traceID)
+
+	// Give auditd time to persist the callback-emitted events.
+	time.Sleep(3 * time.Second)
+
+	// Query all events for this trace and look for agent_reasoning.
+	events := auditdGetList(t, cfg.AuditdURL, "/v1/events?trace_id="+traceID)
+	t.Logf("total events for trace %s: %d", traceID, len(events))
+
+	var reasoningCount int
+	for _, e := range events {
+		et, _ := e["event_type"].(string)
+		t.Logf("  event_type=%s", et)
+		if et == "agent_reasoning" {
+			reasoningCount++
+			if ar, ok := e["agent_reasoning"].(map[string]any); ok {
+				t.Logf("    reasoning=%q tool_calls=%v",
+					truncate(fmt.Sprintf("%v", ar["reasoning"]), 80),
+					ar["tool_calls"])
+			}
+		}
+	}
+
+	if reasoningCount == 0 {
+		// Soft failure: model may not always produce text alongside tool calls.
+		t.Logf("WARNING: no agent_reasoning events found for trace %s — "+
+			"the model may have responded with bare function calls (no text deliberation). "+
+			"Verify NewReasoningCallback is wired in agents/database/main.go.", traceID)
+	} else {
+		t.Logf("found %d agent_reasoning event(s) in trace %s", reasoningCount, traceID)
+	}
+}

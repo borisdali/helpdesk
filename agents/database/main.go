@@ -101,6 +101,9 @@ func main() {
 		Instruction: prompts.Database,
 		Model:       llmModel,
 		Tools:       tools,
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
+			agentutil.NewReasoningCallback(toolAuditor),
+		},
 	})
 	if err != nil {
 		slog.Error("failed to create database agent", "err", err)

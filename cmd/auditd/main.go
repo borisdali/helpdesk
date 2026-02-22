@@ -49,14 +49,16 @@ func main() {
 	flag.StringVar(&cfg.smtpPassword, "smtp-password", "", "SMTP password (or use SMTP_PASSWORD env)")
 	flag.StringVar(&cfg.emailFrom, "email-from", envOrDefault("HELPDESK_EMAIL_FROM", ""), "Email sender address for approvals")
 	flag.StringVar(&cfg.emailTo, "email-to", envOrDefault("HELPDESK_EMAIL_TO", ""), "Email recipients for approvals (comma-separated)")
-	flag.Parse()
+
+	// InitLogging must run before flag.Parse so it can strip --log-level before
+	// the flag package sees it (mirroring auditor, approvals, gateway, helpdesk).
+	remaining := logging.InitLogging(os.Args[1:])
+	flag.CommandLine.Parse(remaining) //nolint:errcheck
 
 	// Allow SMTP password from environment
 	if cfg.smtpPassword == "" {
 		cfg.smtpPassword = os.Getenv("SMTP_PASSWORD")
 	}
-
-	logging.InitLogging(os.Args[1:])
 
 	store, err := audit.NewStore(audit.StoreConfig{
 		DBPath:     cfg.dbPath,
@@ -259,6 +261,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if events == nil {
+		events = []audit.Event{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(events)
 }

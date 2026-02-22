@@ -15,6 +15,7 @@ const (
 	EventTypeGatewayRequest EventType = "gateway_request"
 	EventTypeToolExecution  EventType = "tool_execution"
 	EventTypePolicyDecision EventType = "policy_decision"
+	EventTypeAgentReasoning EventType = "agent_reasoning"
 )
 
 // RequestCategory classifies the type of user request.
@@ -116,6 +117,17 @@ type PolicyDecision struct {
 	Explanation string          `json:"explanation,omitempty"` // human-readable explanation
 }
 
+// AgentReasoning captures the LLM's text deliberation immediately before
+// it issues one or more tool calls. This fills the gap between policy
+// decision events (which rule matched) and tool execution events (what ran):
+// it records *why* the agent decided to call a specific tool.
+type AgentReasoning struct {
+	// Reasoning is the model's text output that preceded the tool call(s).
+	Reasoning string `json:"reasoning"`
+	// ToolCalls lists the names of the tools the model decided to invoke.
+	ToolCalls []string `json:"tool_calls"`
+}
+
 // Event is a single audit event for delegation decisions.
 type Event struct {
 	EventID   string    `json:"event_id"`
@@ -136,11 +148,12 @@ type Event struct {
 	Session  Session   `json:"session"`
 	Input    Input     `json:"input"`
 	Output   *Output   `json:"output,omitempty"`
-	Tool           *ToolExecution  `json:"tool,omitempty"`
-	Approval       *Approval       `json:"approval,omitempty"`
-	Decision       *Decision       `json:"decision,omitempty"`
-	PolicyDecision *PolicyDecision `json:"policy_decision,omitempty"`
-	Outcome        *Outcome        `json:"outcome,omitempty"`
+	Tool            *ToolExecution  `json:"tool,omitempty"`
+	Approval        *Approval       `json:"approval,omitempty"`
+	Decision        *Decision       `json:"decision,omitempty"`
+	PolicyDecision  *PolicyDecision `json:"policy_decision,omitempty"`
+	AgentReasoning  *AgentReasoning `json:"agent_reasoning,omitempty"`
+	Outcome         *Outcome        `json:"outcome,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

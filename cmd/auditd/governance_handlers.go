@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
 
@@ -19,6 +20,7 @@ type governanceServer struct {
 	notifier      *ApprovalNotifier
 	policyEngine  *policy.Engine
 	policyFile    string
+	infraConfig   *infra.Config // loaded from HELPDESK_INFRA_CONFIG for tag resolution
 }
 
 // GovernanceInfo is the response for GET /v1/governance/info.
@@ -106,6 +108,20 @@ func newGovernanceServer(
 			})
 		} else {
 			slog.Warn("failed to load policy file for governance info", "file", policyFile, "err", err)
+		}
+	}
+
+	// Load infrastructure config so the explain endpoint can resolve tags by resource name.
+	if infraPath := os.Getenv("HELPDESK_INFRA_CONFIG"); infraPath != "" {
+		ic, err := infra.Load(infraPath)
+		if err == nil {
+			gs.infraConfig = ic
+			slog.Info("infra config loaded for tag resolution",
+				"databases", len(ic.DBServers),
+				"k8s_clusters", len(ic.K8sClusters))
+		} else {
+			slog.Warn("failed to load infra config; explain won't auto-resolve tags",
+				"path", infraPath, "err", err)
 		}
 	}
 
@@ -342,6 +358,13 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// When no tags were provided explicitly, try to resolve them from the infra config.
+	// This mirrors how agents derive tags at runtime, so the explain result reflects
+	// the same policy evaluation the agent would perform.
+	if len(tags) == 0 {
+		tags = s.tagsFromInfra(resourceType, resourceName)
+	}
+
 	req := policy.Request{
 		Principal: policy.RequestPrincipal{
 			UserID: q.Get("user_id"),
@@ -364,6 +387,25 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(trace)
+}
+
+// tagsFromInfra resolves the tags for a resource from the infrastructure config.
+// Returns nil when the infra config is not loaded or the resource is not found.
+func (s *governanceServer) tagsFromInfra(resourceType, resourceName string) []string {
+	if s.infraConfig == nil {
+		return nil
+	}
+	switch resourceType {
+	case "database":
+		if db, ok := s.infraConfig.DBServers[resourceName]; ok {
+			return db.Tags
+		}
+	case "kubernetes":
+		if k8s, ok := s.infraConfig.K8sClusters[resourceName]; ok {
+			return k8s.Tags
+		}
+	}
+	return nil
 }
 
 // handleGetEvent handles GET /v1/events/{eventID} — retrieve a single audit event by ID.

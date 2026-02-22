@@ -824,6 +824,16 @@ func (a *Auditor) logEvent(event *audit.Event) {
 		if pd.Message != "" {
 			fmt.Printf("  Msg:        %s\n", pd.Message)
 		}
+		if pd.Explanation != "" {
+			fmt.Printf("  Explain:    %s\n", truncate(pd.Explanation, 120))
+		}
+	}
+	if event.AgentReasoning != nil {
+		ar := event.AgentReasoning
+		fmt.Printf("  Reasoning:  %s\n", truncate(ar.Reasoning, 120))
+		if len(ar.ToolCalls) > 0 {
+			fmt.Printf("  → Tools:    %s\n", strings.Join(ar.ToolCalls, ", "))
+		}
 	}
 	// Display hash chain info if present
 	if event.EventHash != "" {
@@ -1052,9 +1062,12 @@ func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
 // checkEmptyReasoning alerts when no reasoning chain is provided.
 // Only applies to orchestrator delegations, not gateway/tool events.
 func (a *Auditor) checkEmptyReasoning(event *audit.Event) {
-	// Gateway requests and tool executions don't have reasoning chains
+	// Gateway requests, tool executions, policy decisions, and agent reasoning
+	// events don't have orchestrator-level reasoning chains.
 	if event.EventType == audit.EventTypeGatewayRequest ||
-		event.EventType == audit.EventTypeToolExecution {
+		event.EventType == audit.EventTypeToolExecution ||
+		event.EventType == audit.EventTypePolicyDecision ||
+		event.EventType == audit.EventTypeAgentReasoning {
 		return
 	}
 

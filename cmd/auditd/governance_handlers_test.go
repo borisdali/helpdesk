@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
 
@@ -281,8 +282,8 @@ func TestHandleExplain_AllowedDecision(t *testing.T) {
 	if decision == nil {
 		t.Fatal("response missing decision field")
 	}
-	if decision["Effect"] != "allow" {
-		t.Errorf("Effect = %v, want allow", decision["Effect"])
+	if decision["effect"] != "allow" {
+		t.Errorf("Effect = %v, want allow", decision["effect"])
 	}
 	if expl, _ := trace["explanation"].(string); expl == "" {
 		t.Error("explanation should be non-empty for allowed decisions")
@@ -303,8 +304,8 @@ func TestHandleExplain_DeniedDecision(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&trace)
 
 	decision, _ := trace["decision"].(map[string]any)
-	if decision["Effect"] != "deny" {
-		t.Errorf("Effect = %v, want deny", decision["Effect"])
+	if decision["effect"] != "deny" {
+		t.Errorf("Effect = %v, want deny", decision["effect"])
 	}
 	expl, _ := trace["explanation"].(string)
 	if !strings.Contains(expl, "DENIED") {
@@ -341,8 +342,8 @@ policies:
 	json.NewDecoder(w.Body).Decode(&trace)
 
 	decision, _ := trace["decision"].(map[string]any)
-	if decision["Effect"] != "require_approval" {
-		t.Errorf("Effect = %v, want require_approval", decision["Effect"])
+	if decision["effect"] != "require_approval" {
+		t.Errorf("Effect = %v, want require_approval", decision["effect"])
 	}
 	if expl, _ := trace["explanation"].(string); expl == "" {
 		t.Error("explanation should be non-empty for require_approval decisions")
@@ -377,8 +378,8 @@ policies:
 	gs.handleExplain(w, req)
 	var trace map[string]any
 	json.NewDecoder(w.Body).Decode(&trace)
-	if d, _ := trace["decision"].(map[string]any); d["Effect"] != "allow" {
-		t.Errorf("staging tag: Effect = %v, want allow", d["Effect"])
+	if d, _ := trace["decision"].(map[string]any); d["effect"] != "allow" {
+		t.Errorf("staging tag: Effect = %v, want allow", d["effect"])
 	}
 
 	// Production tag — prod-policy matches and denies.
@@ -387,8 +388,113 @@ policies:
 	gs.handleExplain(w2, req2)
 	var trace2 map[string]any
 	json.NewDecoder(w2.Body).Decode(&trace2)
-	if d, _ := trace2["decision"].(map[string]any); d["Effect"] != "deny" {
-		t.Errorf("production tag: Effect = %v, want deny", d["Effect"])
+	if d, _ := trace2["decision"].(map[string]any); d["effect"] != "deny" {
+		t.Errorf("production tag: Effect = %v, want deny", d["effect"])
+	}
+}
+
+// TestHandleExplain_TagsResolvedFromInfraConfig verifies that when no ?tags= parameter
+// is supplied, handleExplain auto-resolves the resource tags from the infra config.
+// This mirrors how agents enrich policy.Request at runtime.
+func TestHandleExplain_TagsResolvedFromInfraConfig(t *testing.T) {
+	const devPolicyYAML = `
+version: "1"
+policies:
+  - name: dev-allow-all
+    resources:
+      - type: database
+        match:
+          tags: [development]
+    rules:
+      - action: [read, write]
+        effect: allow
+`
+	ic := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"alloydb-on-vm": {
+				Name: "AlloyDB on VM",
+				Tags: []string{"development"},
+			},
+		},
+	}
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, devPolicyYAML),
+		infraConfig:  ic,
+	}
+
+	// No ?tags= — tags must be resolved from infraConfig automatically.
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/governance/explain?resource_type=database&resource_name=alloydb-on-vm&action=read", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var trace map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&trace); err != nil {
+		t.Fatalf("decode trace: %v", err)
+	}
+	d, _ := trace["decision"].(map[string]any)
+	if got := d["effect"]; got != "allow" {
+		t.Errorf("Effect = %v, want allow (tags should have been resolved from infra config)", got)
+	}
+	// The explanation should mention the resolved tag.
+	expl, _ := trace["explanation"].(string)
+	if !strings.Contains(expl, "development") {
+		t.Errorf("explanation %q should mention the resolved tag 'development'", expl)
+	}
+}
+
+// TestHandleExplain_ExplicitTagsOverrideInfra verifies that an explicit ?tags= parameter
+// takes precedence over infra-config tags.
+func TestHandleExplain_ExplicitTagsOverrideInfra(t *testing.T) {
+	const prodDenyYAML = `
+version: "1"
+policies:
+  - name: prod-deny-write
+    resources:
+      - type: database
+        match:
+          tags: [production]
+    rules:
+      - action: write
+        effect: deny
+        message: "production writes denied"
+  - name: dev-allow-all
+    resources:
+      - type: database
+        match:
+          tags: [development]
+    rules:
+      - action: write
+        effect: allow
+`
+	// Infra says the resource has "development" tag, but the caller passes "production".
+	ic := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"shared-db": {
+				Name: "Shared DB",
+				Tags: []string{"development"},
+			},
+		},
+	}
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, prodDenyYAML),
+		infraConfig:  ic,
+	}
+
+	// Explicit ?tags=production should override the infra-config "development" tag.
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/governance/explain?resource_type=database&resource_name=shared-db&action=write&tags=production", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+
+	var trace map[string]any
+	json.NewDecoder(w.Body).Decode(&trace)
+	d, _ := trace["decision"].(map[string]any)
+	if got := d["effect"]; got != "deny" {
+		t.Errorf("Effect = %v, want deny (explicit production tag should override infra-config)", got)
 	}
 }
 
@@ -463,6 +569,59 @@ func TestHandleGetEvent_Found(t *testing.T) {
 	}
 	if pd["effect"] != "deny" {
 		t.Errorf("policy_decision.effect = %v, want deny", pd["effect"])
+	}
+}
+
+func TestHandleGetEvent_WithAgentReasoning(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{auditStore: store}
+
+	event := &audit.Event{
+		EventID:   "evt-handler-reasoning",
+		Timestamp: time.Now(),
+		EventType: audit.EventTypeAgentReasoning,
+		TraceID:   "trace-unit-42",
+		Session:   audit.Session{ID: "sess-rsn"},
+		AgentReasoning: &audit.AgentReasoning{
+			Reasoning: "The user wants connection stats. I will call get_active_connections.",
+			ToolCalls: []string{"get_active_connections", "get_connection_stats"},
+		},
+	}
+	if err := store.Record(context.Background(), event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events/evt-handler-reasoning", nil)
+	req.SetPathValue("eventID", "evt-handler-reasoning")
+	w := httptest.NewRecorder()
+	gs.handleGetEvent(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var result map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["event_id"] != "evt-handler-reasoning" {
+		t.Errorf("event_id = %v, want evt-handler-reasoning", result["event_id"])
+	}
+	if result["event_type"] != "agent_reasoning" {
+		t.Errorf("event_type = %v, want agent_reasoning", result["event_type"])
+	}
+	ar, _ := result["agent_reasoning"].(map[string]any)
+	if ar == nil {
+		t.Fatal("agent_reasoning field missing from response")
+	}
+	if reasoning, _ := ar["reasoning"].(string); reasoning == "" {
+		t.Error("agent_reasoning.reasoning is empty after store round-trip")
+	}
+	toolCalls, _ := ar["tool_calls"].([]any)
+	if len(toolCalls) != 2 {
+		t.Errorf("agent_reasoning.tool_calls = %v, want 2 entries", toolCalls)
+	}
+	if toolCalls[0] != "get_active_connections" {
+		t.Errorf("tool_calls[0] = %v, want get_active_connections", toolCalls[0])
 	}
 }
 

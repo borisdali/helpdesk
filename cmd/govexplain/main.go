@@ -1,6 +1,6 @@
 // Package main implements govexplain — a CLI for querying the policy explainability API.
 //
-// It supports two modes:
+// It supports three modes:
 //
 //  1. Hypothetical check — "what would happen if I tried this action?"
 //     govexplain --gateway http://localhost:8080 \
@@ -9,11 +9,15 @@
 //  2. Retrospective — "why was this audit event denied?"
 //     govexplain --gateway http://localhost:8080 --event tool_a1b2c3d4
 //
+//  3. List — show explanations for multiple recent policy decisions
+//     govexplain --auditd http://localhost:1199 --list --since 1h
+//     govexplain --auditd http://localhost:1199 --list --effect deny
+//
 // Exit codes:
 //
-//	0  allowed
-//	1  denied
-//	2  requires approval
+//	0  allowed (or all events allowed in list mode)
+//	1  denied (or at least one deny in list mode)
+//	2  requires approval (or at least one require_approval, no denials)
 //	3  error (network, missing args, etc.)
 package main
 
@@ -30,7 +34,8 @@ import (
 )
 
 func main() {
-	gateway := flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway base URL")
+	gateway := flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway base URL (requires gateway + auditd)")
+	auditd := flag.String("auditd", envOrDefault("HELPDESK_AUDIT_URL", ""), "Auditd base URL — bypasses the gateway (e.g. http://localhost:1199)")
 	event := flag.String("event", "", "Audit event ID to explain (retrospective mode)")
 	resource := flag.String("resource", "", "Resource to check: type:name (e.g. database:prod-db)")
 	action := flag.String("action", "", "Action to check: read, write, destructive")
@@ -38,18 +43,52 @@ func main() {
 	userID := flag.String("user", "", "Evaluate as a specific user ID")
 	role := flag.String("role", "", "Evaluate with a specific role")
 	asJSON := flag.Bool("json", false, "Output raw JSON instead of human-readable text")
+
+	// List mode flags
+	list := flag.Bool("list", false, "List policy decisions (batch retrospective mode)")
+	since := flag.String("since", "", "Show events newer than this: duration (1h, 30m) or RFC3339 timestamp")
+	session := flag.String("session", "", "Filter by session ID")
+	trace := flag.String("trace", "", "Filter by trace ID")
+	effect := flag.String("effect", "", "Filter by effect: allow, deny, require_approval")
+	limit := flag.Int("limit", 20, "Maximum number of events to show in list mode")
+
 	flag.Parse()
 
 	client := &http.Client{Timeout: 10 * time.Second}
+
+	// --auditd bypasses the gateway and talks directly to auditd.
+	// auditd exposes /v1/governance/explain and /v1/events/{id} natively.
+	if *auditd != "" {
+		base := strings.TrimRight(*auditd, "/")
+		if *list {
+			os.Exit(runList(client, base+"/v1/events", *since, *session, *trace, *effect, *limit, *asJSON))
+		}
+		if *event != "" {
+			os.Exit(runRetrospectiveDirect(client, *auditd, *event, *asJSON))
+		}
+		if *resource == "" || *action == "" {
+			printUsage()
+			os.Exit(3)
+		}
+		parts := strings.SplitN(*resource, ":", 2)
+		if len(parts) != 2 {
+			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
+			os.Exit(3)
+		}
+		os.Exit(runHypotheticalDirect(client, *auditd, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+	}
+
+	if *list {
+		base := strings.TrimRight(*gateway, "/")
+		os.Exit(runList(client, base+"/api/v1/governance/events", *since, *session, *trace, *effect, *limit, *asJSON))
+	}
 
 	if *event != "" {
 		os.Exit(runRetrospective(client, *gateway, *event, *asJSON))
 	}
 
 	if *resource == "" || *action == "" {
-		fmt.Fprintln(os.Stderr, "Usage:")
-		fmt.Fprintln(os.Stderr, "  Hypothetical:   govexplain --resource TYPE:NAME --action ACTION [--tags TAG,…]")
-		fmt.Fprintln(os.Stderr, "  Retrospective:  govexplain --event EVENT_ID")
+		printUsage()
 		os.Exit(3)
 	}
 
@@ -60,6 +99,181 @@ func main() {
 	}
 
 	os.Exit(runHypothetical(client, *gateway, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+}
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  Hypothetical (via gateway):  govexplain --resource TYPE:NAME --action ACTION [--tags TAG,…]")
+	fmt.Fprintln(os.Stderr, "  Hypothetical (direct):       govexplain --auditd http://localhost:1199 --resource TYPE:NAME --action ACTION")
+	fmt.Fprintln(os.Stderr, "  Retrospective (via gateway): govexplain --event EVENT_ID")
+	fmt.Fprintln(os.Stderr, "  Retrospective (direct):      govexplain --auditd http://localhost:1199 --event EVENT_ID")
+	fmt.Fprintln(os.Stderr, "  List (direct):               govexplain --auditd http://localhost:1199 --list [--since 1h] [--effect deny]")
+	fmt.Fprintln(os.Stderr, "  List (via gateway):          govexplain --list [--since 1h] [--session ID] [--limit 50]")
+}
+
+// runList fetches multiple policy_decision events and prints their explanations.
+func runList(client *http.Client, baseURL, since, session, trace, effectFilter string, limit int, asJSON bool) int {
+	q := url.Values{}
+	q.Set("event_type", "policy_decision")
+	if session != "" {
+		q.Set("session_id", session)
+	}
+	if trace != "" {
+		q.Set("trace_id", trace)
+	}
+	if since != "" {
+		t, err := parseSince(since)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: --since:", err)
+			return 3
+		}
+		q.Set("since", t.UTC().Format(time.RFC3339))
+	}
+
+	endpoint := baseURL + "?" + q.Encode()
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 3
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error reading response:", err)
+		return 3
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "error: HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		return 3
+	}
+
+	if asJSON {
+		fmt.Println(string(body))
+		return 0
+	}
+
+	var events []json.RawMessage
+	if err := json.Unmarshal(body, &events); err != nil {
+		fmt.Fprintln(os.Stderr, "error parsing response:", err)
+		return 3
+	}
+
+	sep := strings.Repeat("─", 60)
+	shown := 0
+	result := 0 // tracks worst exit code across all events
+
+	for _, raw := range events {
+		if shown >= limit {
+			break
+		}
+
+		var ev map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			continue
+		}
+
+		// Client-side effect filter (the API has no effect= param).
+		effStr := extractEffect(ev)
+		if effectFilter != "" && effStr != effectFilter {
+			continue
+		}
+
+		if shown > 0 {
+			fmt.Println(sep)
+		}
+		shown++
+
+		// Header line: event_id and timestamp.
+		var eventID, ts string
+		if v, ok := ev["event_id"]; ok {
+			json.Unmarshal(v, &eventID)
+		}
+		if v, ok := ev["timestamp"]; ok {
+			json.Unmarshal(v, &ts)
+			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+				ts = t.Local().Format("2006-01-02 15:04:05")
+			}
+		}
+		fmt.Printf("%s  %s\n", eventID, ts)
+
+		// Explanation from policy_decision.
+		if pdRaw, ok := ev["policy_decision"]; ok {
+			var pd map[string]json.RawMessage
+			if json.Unmarshal(pdRaw, &pd) == nil {
+				if expl, ok := pd["explanation"]; ok {
+					var s string
+					if json.Unmarshal(expl, &s) == nil && s != "" {
+						fmt.Println(s)
+					}
+				}
+			}
+		}
+
+		// Accumulate worst exit code: deny(1) beats require_approval(2) beats allow(0).
+		code := effectToCode(effStr)
+		if code == 1 || (result != 1 && code == 2) {
+			result = code
+		}
+	}
+
+	if shown == 0 {
+		fmt.Println("No policy decision events found.")
+		return 0
+	}
+
+	return result
+}
+
+// parseSince parses --since as a Go duration ("1h", "30m") or RFC3339 timestamp.
+func parseSince(s string) (time.Time, error) {
+	if d, err := time.ParseDuration(s); err == nil {
+		return time.Now().Add(-d), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("expected duration (e.g. 1h, 30m) or RFC3339 timestamp, got %q", s)
+}
+
+func effectToCode(effect string) int {
+	switch effect {
+	case "allow":
+		return 0
+	case "deny":
+		return 1
+	case "require_approval":
+		return 2
+	default:
+		return 3
+	}
+}
+
+// runHypotheticalDirect talks to auditd's native /v1/governance/explain endpoint.
+// Only auditd needs to be running — no gateway required.
+func runHypotheticalDirect(client *http.Client, auditdURL, resourceType, resourceName, action, tags, userID, role string, asJSON bool) int {
+	q := url.Values{}
+	q.Set("resource_type", resourceType)
+	q.Set("resource_name", resourceName)
+	q.Set("action", action)
+	if tags != "" {
+		q.Set("tags", tags)
+	}
+	if userID != "" {
+		q.Set("user_id", userID)
+	}
+	if role != "" {
+		q.Set("role", role)
+	}
+	endpoint := strings.TrimRight(auditdURL, "/") + "/v1/governance/explain?" + q.Encode()
+	return doExplainRequest(client, endpoint, asJSON)
+}
+
+// runRetrospectiveDirect talks to auditd's native /v1/events/{id} endpoint.
+// Only auditd needs to be running — no gateway required.
+func runRetrospectiveDirect(client *http.Client, auditdURL, eventID string, asJSON bool) int {
+	endpoint := strings.TrimRight(auditdURL, "/") + "/v1/events/" + url.PathEscape(eventID)
+	return doExplainRequest(client, endpoint, asJSON)
 }
 
 func runHypothetical(client *http.Client, gateway, resourceType, resourceName, action, tags, userID, role string, asJSON bool) int {
@@ -153,17 +367,7 @@ func exitCodeFromJSON(data json.RawMessage) int {
 		return 3
 	}
 
-	effect := extractEffect(wrapper)
-	switch effect {
-	case "allow":
-		return 0
-	case "deny":
-		return 1
-	case "require_approval":
-		return 2
-	default:
-		return 3
-	}
+	return effectToCode(extractEffect(wrapper))
 }
 
 func extractEffect(m map[string]json.RawMessage) string {

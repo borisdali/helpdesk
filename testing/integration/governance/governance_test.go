@@ -609,6 +609,75 @@ func TestGovernance_InfoWithPolicyEnabled(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Agent-reasoning audit layer
+// =============================================================================
+
+// TestIntegration_AgentReasoningRoundTrip verifies that an agent_reasoning event
+// posted to the live auditd HTTP API (as NewReasoningCallback emits it) survives
+// the full HTTP → SQLite → HTTP round-trip with all AgentReasoning fields intact,
+// and that the ?event_type filter correctly surfaces it.
+func TestIntegration_AgentReasoningRoundTrip(t *testing.T) {
+	eventID := fmt.Sprintf("rsn-integ-%d", time.Now().UnixNano())
+
+	payload := map[string]any{
+		"event_id":   eventID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "agent_reasoning",
+		"trace_id":   "integ-trace-rsn",
+		"session":    map[string]any{"id": "integ-rsn-session"},
+		"agent_reasoning": map[string]any{
+			"reasoning":  "The user wants active connections. I will call get_active_connections first.",
+			"tool_calls": []string{"get_active_connections", "get_connection_stats"},
+		},
+	}
+	created := post(t, auditdAddr, "/v1/events", payload)
+	if created["event_id"] == nil {
+		t.Fatalf("POST /v1/events: event_id missing from response: %v", created)
+	}
+
+	// Retrieve by event ID.
+	result := get(t, auditdAddr, "/v1/events/"+eventID)
+	if result["event_id"] != eventID {
+		t.Errorf("event_id = %v, want %s", result["event_id"], eventID)
+	}
+	if result["event_type"] != "agent_reasoning" {
+		t.Errorf("event_type = %v, want agent_reasoning", result["event_type"])
+	}
+	if result["trace_id"] != "integ-trace-rsn" {
+		t.Errorf("trace_id = %v, want integ-trace-rsn", result["trace_id"])
+	}
+	ar, _ := result["agent_reasoning"].(map[string]any)
+	if ar == nil {
+		t.Fatal("agent_reasoning field missing from retrieved event")
+	}
+	if reasoning, _ := ar["reasoning"].(string); reasoning == "" {
+		t.Error("agent_reasoning.reasoning empty after store round-trip")
+	}
+	toolCalls, _ := ar["tool_calls"].([]any)
+	if len(toolCalls) != 2 {
+		t.Errorf("agent_reasoning.tool_calls = %v, want 2 entries", toolCalls)
+	}
+	if toolCalls[0] != "get_active_connections" {
+		t.Errorf("tool_calls[0] = %v, want get_active_connections", toolCalls[0])
+	}
+
+	// Verify the ?event_type=agent_reasoning filter surfaces it.
+	sessionEvents := getList(t, auditdAddr, "/v1/events?event_type=agent_reasoning&session_id=integ-rsn-session")
+	found := false
+	for _, e := range sessionEvents {
+		if e["event_id"] == eventID {
+			found = true
+			if e["event_type"] != "agent_reasoning" {
+				t.Errorf("filtered result has event_type = %v, want agent_reasoning", e["event_type"])
+			}
+		}
+	}
+	if !found {
+		t.Errorf("event %s not found when filtering by event_type=agent_reasoning", eventID)
+	}
+}
+
 func TestGovernance_PoliciesSummaryWithEngine(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policies.yaml")
 	if err := os.WriteFile(policyPath, []byte(minimalPolicyYAML), 0644); err != nil {

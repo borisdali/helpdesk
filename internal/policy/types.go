@@ -240,13 +240,13 @@ type RequestContext struct {
 
 // Decision is the result of policy evaluation.
 type Decision struct {
-	Effect      Effect   // allow, deny, require_approval
-	PolicyName  string   // Which policy made the decision
-	RuleIndex   int      // Which rule within the policy
-	Message     string   // Explanation or denial message
-	Conditions  []string // Conditions that must be met (e.g., "max 100 rows")
-	RequiresApproval bool
-	ApprovalQuorum   int
+	Effect      Effect   `json:"effect"`        // allow, deny, require_approval
+	PolicyName  string   `json:"policy_name"`
+	RuleIndex   int      `json:"rule_index"`
+	Message     string   `json:"message,omitempty"`
+	Conditions  []string `json:"conditions,omitempty"`
+	RequiresApproval bool `json:"requires_approval,omitempty"`
+	ApprovalQuorum   int  `json:"approval_quorum,omitempty"`
 }
 
 // DecisionTrace is the full evaluation record for a single request.

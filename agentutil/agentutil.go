@@ -604,6 +604,37 @@ func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) 
 	return http.Serve(listener, mux)
 }
 
+// NewReasoningCallback returns an ADK AfterModelCallback that captures agent-level
+// LLM reasoning to the audit trail. It emits an agent_reasoning event whenever
+// the model produces both text (deliberation) and function calls (tool decision)
+// in the same response — bridging the gap between policy-decision events and
+// tool-execution events with the model's own rationale.
+//
+// Returning nil, nil from an AfterModelCallback leaves the original response unchanged.
+func NewReasoningCallback(auditor *audit.ToolAuditor) func(agent.CallbackContext, *adkmodel.LLMResponse, error) (*adkmodel.LLMResponse, error) {
+	return func(ctx agent.CallbackContext, llmResponse *adkmodel.LLMResponse, llmResponseError error) (*adkmodel.LLMResponse, error) {
+		if auditor == nil || llmResponse == nil || llmResponse.Content == nil {
+			return nil, nil
+		}
+		var textParts []string
+		var toolCalls []string
+		for _, part := range llmResponse.Content.Parts {
+			if part.Text != "" {
+				textParts = append(textParts, part.Text)
+			}
+			if part.FunctionCall != nil {
+				toolCalls = append(toolCalls, part.FunctionCall.Name)
+			}
+		}
+		// Only audit when the model deliberates (text) AND decides on a tool (function call).
+		// Pure-text responses are final answers; pure function calls have no reasoning to capture.
+		if len(textParts) > 0 && len(toolCalls) > 0 {
+			auditor.RecordAgentReasoning(ctx, strings.Join(textParts, "\n\n"), toolCalls)
+		}
+		return nil, nil
+	}
+}
+
 // ServeWithTracing starts an A2A server with trace_id extraction from incoming messages.
 // The traceStore is populated with trace_id from A2A message metadata for each request.
 func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, opts ...CardOptions) error {
