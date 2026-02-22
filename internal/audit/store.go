@@ -309,6 +309,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 	query := `SELECT raw_json FROM audit_events WHERE 1=1`
 	var args []any
 
+	if opts.EventID != "" {
+		query += " AND event_id = ?"
+		args = append(args, opts.EventID)
+	}
 	if opts.SessionID != "" {
 		query += " AND session_id = ?"
 		args = append(args, opts.SessionID)
@@ -387,6 +391,7 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 
 // QueryOptions specifies filters for querying events.
 type QueryOptions struct {
+	EventID        string         // filter by exact event ID (returns at most one event)
 	SessionID      string
 	EventType      EventType
 	Agent          string

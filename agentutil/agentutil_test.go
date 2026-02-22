@@ -156,6 +156,70 @@ func TestCheckDatabaseResult_ConvenienceWrapper(t *testing.T) {
 	}
 }
 
+// --- CheckTool ---
+
+// newMinimalEnforcer creates a PolicyEnforcer backed by minimalPolicyYAML.
+func newMinimalEnforcer(t *testing.T) *PolicyEnforcer {
+	t.Helper()
+	path := writeTempPolicyFile(t, minimalPolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+}
+
+func TestCheckTool_AllowReturnsNil(t *testing.T) {
+	e := newMinimalEnforcer(t)
+	err := e.CheckTool(context.Background(), "database", "mydb", policy.ActionRead, nil, "unit test")
+	if err != nil {
+		t.Errorf("read action should be allowed, got: %v", err)
+	}
+}
+
+func TestCheckTool_DeniedError_HasExplanation(t *testing.T) {
+	e := newMinimalEnforcer(t)
+	err := e.CheckTool(context.Background(), "database", "mydb", policy.ActionDestructive, nil, "unit test")
+	if err == nil {
+		t.Fatal("destructive action should be denied")
+	}
+
+	var de *policy.DeniedError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected *policy.DeniedError, got %T: %v", err, err)
+	}
+	if de.Explanation == "" {
+		t.Error("DeniedError.Explanation should be non-empty")
+	}
+	if !containsStr(de.Explanation, "DENIED") {
+		t.Errorf("Explanation should contain DENIED, got: %s", de.Explanation)
+	}
+}
+
+func TestCheckResult_DeniedError_HasExplanation(t *testing.T) {
+	e := newBlastRadiusEnforcer(t)
+	err := e.CheckResult(context.Background(), "database", "mydb", policy.ActionWrite, nil, ToolOutcome{
+		RowsAffected: 150, // over the 100-row limit
+	})
+	if err == nil {
+		t.Fatal("150 rows exceeds blast-radius limit, expected denial error")
+	}
+
+	var de *policy.DeniedError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected *policy.DeniedError, got %T: %v", err, err)
+	}
+	if de.Explanation == "" {
+		t.Error("DeniedError.Explanation should be non-empty for blast-radius denial")
+	}
+	// The explanation should contain both the actual count and the limit.
+	for _, want := range []string{"150", "100"} {
+		if !containsStr(de.Explanation, want) {
+			t.Errorf("Explanation missing %q, got: %s", want, de.Explanation)
+		}
+	}
+}
+
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && stringContainsHelper(s, sub))
 }

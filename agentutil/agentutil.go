@@ -5,6 +5,7 @@ package agentutil
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -250,8 +251,12 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		req.Context.TraceID = traceID
 	}
 
-	decision := e.engine.Evaluate(req)
-	err := decision.MustAllow()
+	trace := e.engine.Explain(req)
+	decision := trace.Decision
+
+	// Marshal the trace for the audit record (json.RawMessage avoids an import cycle
+	// between the audit and policy packages).
+	traceJSON, _ := json.Marshal(trace)
 
 	// Record the policy decision to the audit trail (allow, deny, or require_approval).
 	if e.toolAuditor != nil {
@@ -262,17 +267,25 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Tags:         tags,
 			Effect:       string(decision.Effect),
 			PolicyName:   decision.PolicyName,
+			RuleIndex:    decision.RuleIndex,
 			Message:      decision.Message,
 			Note:         note,
+			Trace:        traceJSON,
+			Explanation:  trace.Explanation,
 		})
 	}
 
-	// If approval is required, attempt to get approval
-	if policy.IsApprovalRequired(err) && e.approvalClient != nil {
+	// If approval is required, attempt to get approval.
+	if decision.NeedsApproval() && e.approvalClient != nil {
 		return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags)
 	}
-
-	return err
+	if decision.NeedsApproval() {
+		return &policy.ApprovalRequiredError{Decision: decision}
+	}
+	if decision.IsDenied() {
+		return &policy.DeniedError{Decision: decision, Explanation: trace.Explanation}
+	}
+	return nil
 }
 
 // requestApproval creates an approval request and waits for resolution.
@@ -388,10 +401,13 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 		},
 	}
 
-	decision := e.engine.Evaluate(req)
+	trace := e.engine.Explain(req)
+	decision := trace.Decision
 	if decision.Effect != policy.EffectDeny {
 		return nil
 	}
+
+	traceJSON, _ := json.Marshal(trace)
 
 	// Blast-radius violated — audit the post-execution denial and return an error.
 	if e.toolAuditor != nil {
@@ -402,8 +418,11 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 			Tags:          tags,
 			Effect:        string(decision.Effect),
 			PolicyName:    decision.PolicyName,
+			RuleIndex:     decision.RuleIndex,
 			Message:       decision.Message,
 			PostExecution: true,
+			Trace:         traceJSON,
+			Explanation:   trace.Explanation,
 		})
 	}
 
@@ -417,7 +436,7 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 		"message", decision.Message,
 	)
 
-	return &policy.DeniedError{Decision: decision}
+	return &policy.DeniedError{Decision: decision, Explanation: trace.Explanation}
 }
 
 // CheckDatabaseResult is a convenience method for post-execution database checks.

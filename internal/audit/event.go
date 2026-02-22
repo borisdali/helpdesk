@@ -104,10 +104,16 @@ type PolicyDecision struct {
 	Tags         []string `json:"tags,omitempty"`         // resource tags used for matching
 	Effect       string   `json:"effect"`                 // "allow", "deny", "require_approval"
 	PolicyName   string   `json:"policy_name"`            // which policy matched
+	RuleIndex    int      `json:"rule_index,omitempty"`   // index of the matched rule within the policy
 	Message      string   `json:"message,omitempty"`      // denial or approval message from the policy rule
-	Note          string   `json:"note,omitempty"`          // diagnostic context (e.g. why tags are missing)
-	DryRun        bool     `json:"dry_run,omitempty"`       // true when policy is in dry-run mode
-	PostExecution bool     `json:"post_execution,omitempty"` // true for post-execution blast-radius checks
+	Note         string   `json:"note,omitempty"`         // diagnostic context (e.g. why tags are missing)
+	DryRun       bool     `json:"dry_run,omitempty"`      // true when policy is in dry-run mode
+	PostExecution bool    `json:"post_execution,omitempty"` // true for post-execution blast-radius checks
+
+	// Explainability fields — populated by agentutil.PolicyEnforcer when using engine.Explain().
+	// Trace is the JSON-serialised policy.DecisionTrace (stored as raw JSON to avoid import cycles).
+	Trace       json.RawMessage `json:"trace,omitempty"`       // full evaluation trace
+	Explanation string          `json:"explanation,omitempty"` // human-readable explanation
 }
 
 // Event is a single audit event for delegation decisions.

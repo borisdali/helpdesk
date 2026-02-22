@@ -120,9 +120,11 @@ func main() {
 	mux.HandleFunc("POST /v1/approvals/{approvalID}/deny", approvalSrv.handleDeny)
 	mux.HandleFunc("POST /v1/approvals/{approvalID}/cancel", approvalSrv.handleCancel)
 
-	// Governance endpoints (explainability)
+	// Governance endpoints
 	mux.HandleFunc("GET /v1/governance/info", govSrv.handleGetInfo)
 	mux.HandleFunc("GET /v1/governance/policies", govSrv.handleGetPolicySummary)
+	mux.HandleFunc("GET /v1/governance/explain", govSrv.handleExplain)
+	mux.HandleFunc("GET /v1/events/{eventID}", govSrv.handleGetEvent)
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", srv.handleHealth)

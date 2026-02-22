@@ -558,3 +558,145 @@ func TestGovernance_FullStackSummary(t *testing.T) {
 	// Always pass — this is diagnostic only.
 	_ = fmt.Sprintf("governance summary complete for stack at %s", cfg.GatewayURL)
 }
+
+// =============================================================================
+// Explainability endpoints (no API key required)
+// =============================================================================
+
+// TestGovernance_ExplainEndpoint verifies the hypothetical policy check endpoint
+// responds with a valid DecisionTrace shape — both via auditd directly and via
+// the gateway proxy.
+func TestGovernance_ExplainEndpoint(t *testing.T) {
+	cfg := LoadConfig()
+	auditdOK := isAuditdReachable(cfg.AuditdURL)
+	gatewayOK := IsGatewayReachable(cfg.GatewayURL)
+
+	if !auditdOK && !gatewayOK {
+		t.Skip("neither auditd nor gateway reachable")
+	}
+
+	const params = "?resource_type=database&resource_name=test-db&action=read"
+
+	// --- Direct auditd path ---
+	if auditdOK {
+		result := auditdGet(t, cfg.AuditdURL, "/v1/governance/explain"+params)
+		t.Logf("auditd explain response: %v", result)
+
+		if _, ok := result["enabled"]; ok && result["enabled"] == false {
+			// Policy not configured — endpoint correctly reports disabled.
+			t.Logf("policy not enabled on this stack; skipping decision field checks")
+		} else {
+			// Policy is enabled — verify the DecisionTrace shape.
+			if _, ok := result["decision"]; !ok {
+				t.Error("auditd: explain response missing decision field")
+			}
+			if _, ok := result["explanation"]; !ok {
+				t.Error("auditd: explain response missing explanation field")
+			}
+			if expl, _ := result["explanation"].(string); expl == "" {
+				t.Error("auditd: explanation should be non-empty when policy is enabled")
+			}
+		}
+	}
+
+	// --- Gateway proxy path ---
+	if gatewayOK {
+		result := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/explain"+params)
+		t.Logf("gateway explain response: %v", result)
+
+		if _, ok := result["enabled"]; ok && result["enabled"] == false {
+			t.Logf("gateway: policy not enabled on this stack")
+		} else {
+			if _, ok := result["decision"]; !ok {
+				t.Error("gateway: explain response missing decision field")
+			}
+			if expl, _ := result["explanation"].(string); expl == "" {
+				t.Error("gateway: explanation should be non-empty when policy is enabled")
+			}
+		}
+	}
+}
+
+// TestGovernance_GetEvent_HasTrace verifies that an audit event recorded with
+// PolicyDecision.Trace and PolicyDecision.Explanation survives the store
+// round-trip and can be retrieved via GET /v1/events/{eventID}.
+//
+// This test does NOT require policy enforcement to be active in the stack —
+// it writes the event directly via POST /v1/events and reads it back.
+func TestGovernance_GetEvent_HasTrace(t *testing.T) {
+	cfg := LoadConfig()
+	if !isAuditdReachable(cfg.AuditdURL) {
+		t.Skipf("auditd not reachable at %s", cfg.AuditdURL)
+	}
+
+	// Construct a unique event ID to avoid collisions between test runs.
+	eventID := fmt.Sprintf("e2e-trace-test-%d", time.Now().UnixNano())
+
+	// POST an event that carries the explainability fields as agentutil would.
+	payload := map[string]any{
+		"event_id":   eventID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "policy_decision",
+		"session":    map[string]any{"id": "e2e-test-session"},
+		"policy_decision": map[string]any{
+			"resource_type": "database",
+			"resource_name": "e2e-prod-db",
+			"action":        "write",
+			"effect":        "deny",
+			"policy_name":   "e2e-test-policy",
+			"message":       "writes to production are prohibited",
+			"explanation":   "Access DENIED: writes to production are prohibited by e2e-test-policy",
+			// trace is stored as embedded JSON — the store persists the whole event as a blob.
+			"trace": map[string]any{
+				"decision": map[string]any{
+					"Effect":     "deny",
+					"PolicyName": "e2e-test-policy",
+				},
+				"default_applied": false,
+			},
+		},
+	}
+	created := auditdPost(t, cfg.AuditdURL, "/v1/events", payload)
+	if created["event_id"] == "" || created["event_id"] == nil {
+		t.Fatalf("POST /v1/events: event_id missing from response: %v", created)
+	}
+	t.Logf("created event: %s", eventID)
+
+	// Retrieve via GET /v1/events/{eventID} (auditd direct).
+	result := auditdGet(t, cfg.AuditdURL, "/v1/events/"+eventID)
+	t.Logf("retrieved event: %v", result)
+
+	if result["event_id"] != eventID {
+		t.Errorf("event_id = %v, want %s", result["event_id"], eventID)
+	}
+	pd, _ := result["policy_decision"].(map[string]any)
+	if pd == nil {
+		t.Fatal("policy_decision field missing from retrieved event")
+	}
+	if pd["effect"] != "deny" {
+		t.Errorf("policy_decision.effect = %v, want deny", pd["effect"])
+	}
+	// Explanation must survive the store round-trip.
+	if expl, _ := pd["explanation"].(string); expl == "" {
+		t.Error("policy_decision.explanation missing after store round-trip")
+	}
+	// Trace must survive too.
+	if _, ok := pd["trace"]; !ok {
+		t.Error("policy_decision.trace missing after store round-trip")
+	}
+	t.Logf("explanation: %s", pd["explanation"])
+
+	// Also verify via the gateway proxy path (GET /api/v1/governance/events/{eventID}).
+	if IsGatewayReachable(cfg.GatewayURL) {
+		gatewayResult := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/events/"+eventID)
+		if gatewayResult["event_id"] != eventID {
+			t.Errorf("gateway: event_id = %v, want %s", gatewayResult["event_id"], eventID)
+		}
+		if gpd, _ := gatewayResult["policy_decision"].(map[string]any); gpd == nil {
+			t.Error("gateway: policy_decision field missing from retrieved event")
+		} else if _, ok := gpd["explanation"]; !ok {
+			t.Error("gateway: policy_decision.explanation missing after proxy round-trip")
+		}
+		t.Logf("gateway proxy event_id: %v", gatewayResult["event_id"])
+	}
+}

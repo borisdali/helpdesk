@@ -92,7 +92,9 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/databases", g.handleListDatabases)
 	mux.HandleFunc("GET /api/v1/governance", g.handleGovernance)
 	mux.HandleFunc("GET /api/v1/governance/policies", g.handleGovernancePolicies)
+	mux.HandleFunc("GET /api/v1/governance/explain", g.handleGovernanceExplain)
 	mux.HandleFunc("GET /api/v1/governance/events", g.handleGovernanceEvents)
+	mux.HandleFunc("GET /api/v1/governance/events/{eventID}", g.handleGovernanceEvent)
 	mux.HandleFunc("GET /api/v1/governance/approvals/pending", g.handleGovernanceApprovalsPending)
 	mux.HandleFunc("GET /api/v1/governance/approvals", g.handleGovernanceApprovals)
 	mux.HandleFunc("GET /api/v1/governance/verify", g.handleGovernanceVerify)
@@ -256,6 +258,15 @@ func (g *Gateway) handleGovernanceApprovalsPending(w http.ResponseWriter, r *htt
 
 func (g *Gateway) handleGovernanceVerify(w http.ResponseWriter, r *http.Request) {
 	g.proxyGovernanceRequest(w, r, "/v1/verify")
+}
+
+func (g *Gateway) handleGovernanceExplain(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/governance/explain")
+}
+
+func (g *Gateway) handleGovernanceEvent(w http.ResponseWriter, r *http.Request) {
+	eventID := r.PathValue("eventID")
+	g.proxyGovernanceRequest(w, r, "/v1/events/"+eventID)
 }
 
 // proxyGovernanceRequest forwards a request to the auditd service, preserving query parameters.

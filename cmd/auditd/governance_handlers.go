@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"helpdesk/internal/audit"
@@ -298,4 +299,97 @@ func (s *governanceServer) handleGetPolicySummary(w http.ResponseWriter, r *http
 		"policy_file": s.policyFile,
 		"policies":    policySummaries,
 	})
+}
+
+// handleExplain handles GET /v1/governance/explain — hypothetical policy check.
+// It evaluates the policy engine against the supplied parameters without
+// recording an audit event or executing any tool.
+//
+// Query parameters:
+//
+//	resource_type  required  "database" | "kubernetes"
+//	resource_name  required  resource name (db name, namespace, …)
+//	action         required  "read" | "write" | "destructive"
+//	tags           optional  comma-separated tags, e.g. "production,critical"
+//	user_id        optional  evaluate as a specific user
+//	role           optional  evaluate with a specific role
+func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request) {
+	if s.policyEngine == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"enabled": false,
+			"message": "No policy file configured. Set HELPDESK_POLICY_FILE to enable policy enforcement.",
+		})
+		return
+	}
+
+	q := r.URL.Query()
+	resourceType := q.Get("resource_type")
+	resourceName := q.Get("resource_name")
+	actionStr := q.Get("action")
+
+	if resourceType == "" || resourceName == "" || actionStr == "" {
+		http.Error(w, "resource_type, resource_name and action are required", http.StatusBadRequest)
+		return
+	}
+
+	var tags []string
+	if raw := q.Get("tags"); raw != "" {
+		for _, t := range strings.Split(raw, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+
+	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID: q.Get("user_id"),
+			Roles:  func() []string {
+				if r := q.Get("role"); r != "" {
+					return []string{r}
+				}
+				return nil
+			}(),
+		},
+		Resource: policy.RequestResource{
+			Type: resourceType,
+			Name: resourceName,
+			Tags: tags,
+		},
+		Action: policy.ActionClass(actionStr),
+	}
+
+	trace := s.policyEngine.Explain(req)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(trace)
+}
+
+// handleGetEvent handles GET /v1/events/{eventID} — retrieve a single audit event by ID.
+// The event JSON includes the policy_decision.trace and policy_decision.explanation fields
+// when the event was recorded by an agent using engine.Explain().
+func (s *governanceServer) handleGetEvent(w http.ResponseWriter, r *http.Request) {
+	eventID := r.PathValue("eventID")
+	if eventID == "" {
+		http.Error(w, "missing event ID", http.StatusBadRequest)
+		return
+	}
+
+	events, err := s.auditStore.Query(r.Context(), audit.QueryOptions{
+		EventID: eventID,
+		Limit:   1,
+	})
+	if err != nil {
+		slog.Error("failed to query event", "event_id", eventID, "err", err)
+		http.Error(w, "failed to query event", http.StatusInternalServerError)
+		return
+	}
+	if len(events) == 0 {
+		http.Error(w, "event not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(events[0])
 }

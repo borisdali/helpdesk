@@ -50,79 +50,114 @@ func (e *Engine) Config() *Config {
 }
 
 // Evaluate evaluates a request against all policies and returns a decision.
+// It is a thin wrapper around Explain that discards the trace.
 func (e *Engine) Evaluate(req Request) Decision {
-	// Set default timestamp if not provided
+	return e.Explain(req).Decision
+}
+
+// Explain evaluates a request and returns both the decision and a full
+// evaluation trace suitable for human-readable explanations and audit storage.
+func (e *Engine) Explain(req Request) DecisionTrace {
 	if req.Context.Timestamp.IsZero() {
 		req.Context.Timestamp = time.Now()
 	}
 
-	decision := e.evaluate(req)
+	trace := e.explainEvaluate(req)
+	trace.Explanation = buildExplanation(req, trace)
 
-	// Log the decision
-	logDecision(req, decision, e.dryRun)
+	logDecision(req, trace.Decision, e.dryRun)
 
-	// In dry-run mode, always allow but preserve the decision info
-	if e.dryRun && decision.Effect != EffectAllow {
-		decision.Message = "[DRY RUN] " + decision.Message
-		decision.Effect = EffectAllow
+	if e.dryRun && trace.Decision.Effect != EffectAllow {
+		trace.Decision.Message = "[DRY RUN] " + trace.Decision.Message
+		trace.Decision.Effect = EffectAllow
 	}
 
-	return decision
+	return trace
 }
 
-func (e *Engine) evaluate(req Request) Decision {
-	// Find matching policies
-	for _, policy := range e.config.Policies {
-		if !policy.IsEnabled() {
+// explainEvaluate performs the full policy evaluation while building a trace.
+func (e *Engine) explainEvaluate(req Request) DecisionTrace {
+	var trace DecisionTrace
+
+	for _, pol := range e.config.Policies {
+		pt := PolicyTrace{PolicyName: pol.Name}
+
+		if !pol.IsEnabled() {
+			pt.SkipReason = "disabled"
+			trace.PoliciesEvaluated = append(trace.PoliciesEvaluated, pt)
+			continue
+		}
+		if !e.matchesPrincipal(pol, req.Principal) {
+			pt.SkipReason = "principal_mismatch"
+			trace.PoliciesEvaluated = append(trace.PoliciesEvaluated, pt)
+			continue
+		}
+		if !e.matchesResource(pol, req.Resource) {
+			pt.SkipReason = "resource_mismatch"
+			trace.PoliciesEvaluated = append(trace.PoliciesEvaluated, pt)
 			continue
 		}
 
-		// Check if policy applies to this principal
-		if !e.matchesPrincipal(policy, req.Principal) {
-			continue
-		}
+		pt.Matched = true
 
-		// Check if policy applies to this resource
-		if !e.matchesResource(policy, req.Resource) {
-			continue
-		}
-
-		// Evaluate rules in order
-		for i, rule := range policy.Rules {
-			if !rule.Action.Matches(req.Action) {
-				continue
+		for i, rule := range pol.Rules {
+			rt := RuleTrace{
+				Index:   i,
+				Actions: actionsToStrings(rule.Action),
+				Effect:  string(rule.Effect),
 			}
 
-			// Check schedule condition
+			if !rule.Action.Matches(req.Action) {
+				rt.SkipReason = "action_mismatch"
+				pt.Rules = append(pt.Rules, rt)
+				continue
+			}
 			if rule.Conditions != nil && rule.Conditions.Schedule != nil {
 				if !rule.Conditions.Schedule.IsActive(req.Context.Timestamp) {
-					continue // Schedule doesn't match, try next rule
+					rt.SkipReason = "schedule_inactive"
+					pt.Rules = append(pt.Rules, rt)
+					continue
 				}
 			}
 
-			// Found a matching rule
+			// This rule matched.
+			rt.Matched = true
 			decision := Decision{
 				Effect:     rule.Effect,
-				PolicyName: policy.Name,
+				PolicyName: pol.Name,
 				RuleIndex:  i,
 				Message:    rule.Message,
 			}
-
-			// Apply conditions
 			if rule.Conditions != nil {
-				decision = e.applyConditions(decision, rule.Conditions, req)
+				decision, rt.Conditions = e.applyConditionsWithTrace(decision, rule.Conditions, req)
 			}
+			rt.Effect = string(decision.Effect) // may have changed (e.g. blast radius → deny)
 
-			return decision
+			pt.Rules = append(pt.Rules, rt)
+			trace.PoliciesEvaluated = append(trace.PoliciesEvaluated, pt)
+			trace.Decision = decision
+			return trace
 		}
+
+		trace.PoliciesEvaluated = append(trace.PoliciesEvaluated, pt)
 	}
 
-	// No matching policy/rule - use default
-	return Decision{
+	// No matching policy/rule — apply default.
+	trace.DefaultApplied = true
+	trace.Decision = Decision{
 		Effect:     e.defaultEffect,
 		PolicyName: "default",
 		Message:    "No matching policy found",
 	}
+	return trace
+}
+
+func actionsToStrings(am ActionMatcher) []string {
+	s := make([]string, len(am))
+	for i, a := range am {
+		s[i] = string(a)
+	}
+	return s
 }
 
 // matchesPrincipal checks if a policy applies to the given principal.
@@ -204,9 +239,11 @@ func hasAllTags(resourceTags, requiredTags []string) bool {
 	return true
 }
 
-// applyConditions applies rule conditions to the decision.
-func (e *Engine) applyConditions(decision Decision, cond *Conditions, req Request) Decision {
-	// Check approval requirement
+// applyConditionsWithTrace applies rule conditions to a decision and returns
+// a ConditionTrace for each condition checked.
+func (e *Engine) applyConditionsWithTrace(decision Decision, cond *Conditions, req Request) (Decision, []ConditionTrace) {
+	var traces []ConditionTrace
+
 	if cond.RequireApproval {
 		decision.RequiresApproval = true
 		decision.ApprovalQuorum = cond.ApprovalQuorum
@@ -216,26 +253,48 @@ func (e *Engine) applyConditions(decision Decision, cond *Conditions, req Reques
 		if decision.Effect == EffectAllow {
 			decision.Effect = EffectRequireApproval
 		}
+		traces = append(traces, ConditionTrace{
+			Name:   "require_approval",
+			Passed: true,
+			Detail: fmt.Sprintf("quorum: %d", decision.ApprovalQuorum),
+		})
 	}
 
-	// Check blast radius limits
-	if cond.MaxRowsAffected > 0 && req.Context.RowsAffected > cond.MaxRowsAffected {
-		decision.Effect = EffectDeny
-		decision.Message = formatMessage("Operation affects %d rows, limit is %d",
-			req.Context.RowsAffected, cond.MaxRowsAffected)
-		decision.Conditions = append(decision.Conditions,
-			formatMessage("max %d rows", cond.MaxRowsAffected))
+	if cond.MaxRowsAffected > 0 {
+		exceeded := req.Context.RowsAffected > cond.MaxRowsAffected
+		ct := ConditionTrace{
+			Name:   "max_rows_affected",
+			Passed: !exceeded,
+			Detail: fmt.Sprintf("%d rows affected, limit is %d", req.Context.RowsAffected, cond.MaxRowsAffected),
+		}
+		if exceeded {
+			decision.Effect = EffectDeny
+			decision.Message = formatMessage("Operation affects %d rows, limit is %d",
+				req.Context.RowsAffected, cond.MaxRowsAffected)
+			decision.Conditions = append(decision.Conditions,
+				formatMessage("max %d rows", cond.MaxRowsAffected))
+		}
+		traces = append(traces, ct)
 	}
 
-	if cond.MaxPodsAffected > 0 && req.Context.PodsAffected > cond.MaxPodsAffected {
-		decision.Effect = EffectDeny
-		decision.Message = formatMessage("Operation affects %d pods, limit is %d",
-			req.Context.PodsAffected, cond.MaxPodsAffected)
-		decision.Conditions = append(decision.Conditions,
-			formatMessage("max %d pods", cond.MaxPodsAffected))
+	if cond.MaxPodsAffected > 0 {
+		exceeded := req.Context.PodsAffected > cond.MaxPodsAffected
+		ct := ConditionTrace{
+			Name:   "max_pods_affected",
+			Passed: !exceeded,
+			Detail: fmt.Sprintf("%d pods affected, limit is %d", req.Context.PodsAffected, cond.MaxPodsAffected),
+		}
+		if exceeded {
+			decision.Effect = EffectDeny
+			decision.Message = formatMessage("Operation affects %d pods, limit is %d",
+				req.Context.PodsAffected, cond.MaxPodsAffected)
+			decision.Conditions = append(decision.Conditions,
+				formatMessage("max %d pods", cond.MaxPodsAffected))
+		}
+		traces = append(traces, ct)
 	}
 
-	return decision
+	return decision, traces
 }
 
 func formatMessage(format string, args ...any) string {
@@ -287,10 +346,14 @@ func (d *Decision) MustAllow() error {
 
 // DeniedError is returned when a request is denied by policy.
 type DeniedError struct {
-	Decision Decision
+	Decision    Decision
+	Explanation string // human-readable explanation from DecisionTrace; overrides the terse default
 }
 
 func (e *DeniedError) Error() string {
+	if e.Explanation != "" {
+		return e.Explanation
+	}
 	if e.Decision.Message != "" {
 		return "policy denied: " + e.Decision.Message
 	}

@@ -55,7 +55,7 @@ aiHelpDesk Governance consists of eight well-defined components:
 | [Guardrails](#guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
 | [Operating Mode](#operating-mode) | Planned | `readonly`/`fix` switch with governance enforcement |
 | Identity & Access | Planned | User/role-based permissions |
-| Explainability | Partial | Reasoning chains in audit, diagnostic notes |
+| [Explainability](#explainability) | Designed | Decision trace, human-readable explanations, query interface — implementation planned |
 | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
@@ -400,6 +400,11 @@ They are evaluated **post-execution** — after the tool runs but before the LLM
 receives the result. If the limit is exceeded, the result is withheld and an
 error is returned to the LLM, and a `PostExecution: true` policy denial event
 is recorded in the audit trail.
+
+> **Design note:** post-execution evaluation has important limitations for large
+> DML, DDL statements, and distributed topologies. See [GOVPOSTEVAL.md](GOVPOSTEVAL.md)
+> for a full analysis of trade-offs, the rollback problem, and the planned
+> pre-execution COUNT estimation approach.
 
 Configure limits in your policy file under a rule's `conditions`:
 
@@ -1068,6 +1073,300 @@ See `cmd/govbot/README.md` for full documentation.
 
 ---
 
+## Explainability
+
+Explainability gives users and operators a clear, structured answer to three
+questions about any policy decision:
+
+1. **Why was my access denied (or allowed)?** — inline explanation at the point of the decision
+2. **Why was event X denied?** — retrospective lookup against the audit trail
+3. **What would happen if I tried action Y?** — hypothetical dry-run without execution
+
+Today the audit trail records the *outcome* of a policy decision (`effect`,
+`policy_name`, `message`). What is missing is the *evaluation trace* — the
+step-by-step record of which policies and rules were considered, why each was
+skipped or matched, and which conditions passed or failed. Without the trace
+the `message` field is the only signal, and it only describes the matched rule,
+not the full reasoning path.
+
+### Decision Trace
+
+The policy `engine.evaluate()` loops through policies and rules silently today.
+The design adds an `Explain(req Request) DecisionTrace` method alongside
+`Evaluate`, recording each step:
+
+```go
+// DecisionTrace is the full evaluation record for a single request.
+type DecisionTrace struct {
+    Decision          Decision        // final outcome
+    PoliciesEvaluated []PolicyTrace   // one entry per policy in the config
+    DefaultApplied    bool            // true when no policy matched at all
+    Explanation       string          // human-readable summary (see below)
+}
+
+// PolicyTrace records what happened for a single policy.
+type PolicyTrace struct {
+    PolicyName string      // policy name
+    Matched    bool        // true if resource + principal matched this policy
+    SkipReason string      // if !Matched: "disabled", "principal_mismatch", "resource_mismatch"
+    Rules      []RuleTrace // only populated when Matched == true
+}
+
+// RuleTrace records what happened for a single rule within a matched policy.
+type RuleTrace struct {
+    Index      int              // position in the rules list (0-based)
+    Actions    []string         // actions this rule applies to
+    Effect     string           // allow / deny / require_approval
+    Matched    bool             // true if this rule produced the final decision
+    SkipReason string           // if !Matched: "action_mismatch", "schedule_inactive"
+    Conditions []ConditionTrace // populated for the matching rule
+}
+
+// ConditionTrace records whether a single condition passed or failed.
+type ConditionTrace struct {
+    Name   string // "max_rows_affected", "require_approval", "schedule", ...
+    Passed bool
+    Detail string // e.g. "rows_affected=1500 > limit=1000"
+}
+```
+
+Only the **matching** rule records conditions. Skipped rules record only the
+reason they were skipped, keeping the trace concise.
+
+### Human-Readable Explanation
+
+`DecisionTrace.Explanation` is generated from the trace by a pure function,
+`buildExplanation(req, trace)`. Example outputs:
+
+**Denied by blast radius:**
+```
+Access to prod-db (tags: production, critical) for write: DENIED
+
+Policy "production-database-protection" matched (type=database, tag=production):
+  Rule 0  read → allow         skipped — action is write
+  Rule 1  write → allow        matched
+    ✗ max_rows_affected: 1500 rows affected, limit is 1000
+  → DENY
+
+To proceed, reduce the scope of the operation so fewer than 1000 rows are affected.
+```
+
+**Denied by explicit rule:**
+```
+Access to prod-db (tags: production) for destructive: DENIED
+
+Policy "production-database-protection" matched (type=database, tag=production):
+  Rule 0  read → allow         skipped — action is destructive
+  Rule 1  write → allow        skipped — action is destructive
+  Rule 2  destructive → deny   matched
+    Message: "Destructive operations on production databases are prohibited"
+  → DENY
+
+This rule cannot be overridden by approval.
+```
+
+**Allowed with approval required:**
+```
+Access to prod-db (tags: production) for write: REQUIRES APPROVAL
+
+Policy "production-database-protection" matched (type=database, tag=production):
+  Rule 0  read → allow         skipped — action is write
+  Rule 1  write → allow        matched
+    ✓ max_rows_affected: 50 rows affected, limit is 1000
+    ✓ require_approval (quorum: 1)
+  → REQUIRE_APPROVAL
+
+An approval request has been created. Use `approvals list` to see pending requests.
+```
+
+**No policy matched (default deny):**
+```
+Access to unknown-db (tags: none) for write: DENIED
+
+No policy matched this resource — default effect is deny.
+
+This usually means the database is not listed in the infrastructure config
+and therefore has no tags. Add it to HELPDESK_INFRA_CONFIG with appropriate
+tags so a policy can be applied.
+```
+
+### Surfacing the Explanation
+
+The explanation is surfaced in three ways:
+
+#### 1. Inline at the point of denial
+
+`PolicyEnforcer.CheckTool` (and `CheckDatabase`, `CheckKubernetes`) today returns
+a terse error string. With explainability, the denial error wraps the full
+`DecisionTrace`. The LLM receives the human-readable explanation directly and
+can relay it to the user without any secondary lookup.
+
+```go
+// DeniedError gains the trace
+type DeniedError struct {
+    Decision Decision
+    Trace    DecisionTrace // new
+}
+
+func (e *DeniedError) Error() string {
+    return e.Trace.Explanation // replaces the terse one-liner
+}
+```
+
+#### 2. Retrospective — explain a past audit event
+
+```bash
+# CLI
+govexplain --gateway http://localhost:8080 --event tool_a1b2c3d4
+
+# API
+GET /api/v1/governance/events/tool_a1b2c3d4/explain
+```
+
+The gateway retrieves the stored `DecisionTrace` from the audit event and
+returns it. No re-evaluation is needed — the trace was recorded at the time.
+
+#### 3. Hypothetical — what would happen if?
+
+```bash
+# CLI
+govexplain --gateway http://localhost:8080 \
+  --resource database:prod-db \
+  --action write \
+  --tags production,critical
+
+# API
+GET /api/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write&tags=production,critical
+```
+
+The gateway calls `engine.Explain()` in dry-run mode with the provided
+parameters. No audit event is written, no tool is executed.
+
+### Audit Enrichment
+
+The `PolicyDecision` audit struct gains two fields:
+
+```go
+type PolicyDecision struct {
+    // existing fields unchanged ...
+    ResourceType  string         `json:"resource_type"`
+    ResourceName  string         `json:"resource_name"`
+    Action        string         `json:"action"`
+    Tags          []string       `json:"tags,omitempty"`
+    Effect        string         `json:"effect"`
+    PolicyName    string         `json:"policy_name"`
+    RuleIndex     int            `json:"rule_index,omitempty"`
+    Message       string         `json:"message,omitempty"`
+    Note          string         `json:"note,omitempty"`
+    DryRun        bool           `json:"dry_run,omitempty"`
+    PostExecution bool           `json:"post_execution,omitempty"`
+
+    // new fields:
+    Trace       *policy.DecisionTrace `json:"trace,omitempty"`       // full evaluation trace
+    Explanation string                `json:"explanation,omitempty"` // human-readable summary
+}
+```
+
+The trace is always stored, regardless of the decision outcome — allowed
+decisions are as important to explain as denied ones.
+
+### Gateway API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/governance/explain` | Hypothetical check — what would happen? |
+| GET | `/api/v1/governance/events/{id}/explain` | Explain a specific past audit event |
+
+#### Hypothetical check request parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `resource_type` | yes | `database`, `kubernetes` |
+| `resource_name` | yes | Resource name (db name, namespace) |
+| `action` | yes | `read`, `write`, `destructive` |
+| `tags` | no | Comma-separated tags, e.g. `production,critical` |
+| `user_id` | no | Evaluate as a specific user |
+| `role` | no | Evaluate with a specific role |
+
+#### Response format (both endpoints)
+
+```json
+{
+  "decision": {
+    "effect": "deny",
+    "policy_name": "production-database-protection",
+    "rule_index": 2,
+    "message": "Destructive operations on production databases are prohibited"
+  },
+  "policies_evaluated": [
+    {
+      "policy_name": "production-database-protection",
+      "matched": true,
+      "rules": [
+        { "index": 0, "actions": ["read"],        "effect": "allow", "matched": false, "skip_reason": "action_mismatch" },
+        { "index": 1, "actions": ["write"],       "effect": "allow", "matched": false, "skip_reason": "action_mismatch" },
+        { "index": 2, "actions": ["destructive"], "effect": "deny",  "matched": true,
+          "conditions": [] }
+      ]
+    },
+    {
+      "policy_name": "change-freeze",
+      "matched": false,
+      "skip_reason": "resource_mismatch"
+    }
+  ],
+  "default_applied": false,
+  "explanation": "Access to prod-db (tags: production) for destructive: DENIED\n\nPolicy \"production-database-protection\" matched ..."
+}
+```
+
+### govexplain CLI
+
+A lightweight CLI binary for humans and scripts:
+
+```bash
+# Hypothetical — test a permission before attempting an action
+govexplain \
+  --gateway http://localhost:8080 \
+  --resource database:prod-db \
+  --action write \
+  --tags production,critical
+
+# Retrospective — understand why a past event was denied
+govexplain \
+  --gateway http://localhost:8080 \
+  --event tool_a1b2c3d4
+
+# JSON output for scripting
+govexplain --gateway http://localhost:8080 \
+  --resource database:prod-db --action write \
+  --json
+```
+
+Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
+
+### Implementation Plan
+
+Changes are additive — no existing behaviour changes:
+
+| Component | Change | Location |
+|-----------|--------|----------|
+| Policy engine | Add `Explain(req) DecisionTrace`; instrument `evaluate()` to record trace | `internal/policy/engine.go` |
+| Policy types | Add `DecisionTrace`, `PolicyTrace`, `RuleTrace`, `ConditionTrace` | `internal/policy/types.go` |
+| Policy engine | Add `buildExplanation(req, trace) string` | `internal/policy/explain.go` (new file) |
+| Audit types | Add `Trace` and `Explanation` to `PolicyDecision` | `internal/audit/event.go` |
+| agentutil | Call `Explain` instead of `Evaluate`; populate audit fields; enrich `DeniedError` | `agentutil/agentutil.go` |
+| Gateway | Add two explain endpoints; call auditd for event lookup | `cmd/gateway/` |
+| govexplain CLI | New binary — thin HTTP client for the two gateway endpoints | `cmd/govexplain/` |
+
+The largest single change is instrumenting `evaluate()` to record the trace
+without altering its return value. The trace is built as a side-effect,
+collected into a `DecisionTrace` that is returned alongside the `Decision`
+from `Explain()`. `Evaluate()` calls `Explain()` and discards the trace,
+preserving full backwards compatibility.
+
+---
+
 ## Troubleshooting
 
 Please refer to [here](ARCHITECTURE.md#troubleshooting) for the general purpose
@@ -1151,6 +1450,7 @@ date  # Check current local time
 - [ ] Circuit breaker (auto-pause on consecutive errors)
 
 ### Phase 3: Operations
+- [ ] Explainability — decision trace, `govexplain` CLI, explain API endpoints
 - [ ] Operating mode switch (`readonly` / `fix`) with governance enforcement
 - [ ] Identity & access control (principal/role matching in policy engine)
 - [ ] Time-based policy conditions (schedule: days/hours/timezone)

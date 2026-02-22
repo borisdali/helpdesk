@@ -249,6 +249,45 @@ type Decision struct {
 	ApprovalQuorum   int
 }
 
+// DecisionTrace is the full evaluation record for a single request.
+// It captures which policies were tested, which rules matched or were skipped,
+// and which conditions passed or failed — enabling human-readable explanations.
+type DecisionTrace struct {
+	Decision          Decision      `json:"decision"`
+	PoliciesEvaluated []PolicyTrace `json:"policies_evaluated"`
+	DefaultApplied    bool          `json:"default_applied,omitempty"`
+	Explanation       string        `json:"explanation,omitempty"`
+}
+
+// PolicyTrace records what happened for a single policy during evaluation.
+type PolicyTrace struct {
+	PolicyName string      `json:"policy_name"`
+	Matched    bool        `json:"matched"`
+	// SkipReason is set when Matched == false: "disabled", "principal_mismatch", "resource_mismatch".
+	SkipReason string      `json:"skip_reason,omitempty"`
+	// Rules is populated only when Matched == true.
+	Rules      []RuleTrace `json:"rules,omitempty"`
+}
+
+// RuleTrace records what happened for a single rule within a matched policy.
+type RuleTrace struct {
+	Index   int    `json:"index"`
+	Actions []string `json:"actions"`
+	Effect  string `json:"effect"`
+	Matched bool   `json:"matched"`
+	// SkipReason is set when Matched == false: "action_mismatch", "schedule_inactive".
+	SkipReason string           `json:"skip_reason,omitempty"`
+	// Conditions is populated only for the matching rule.
+	Conditions []ConditionTrace `json:"conditions,omitempty"`
+}
+
+// ConditionTrace records whether a single condition on a matched rule passed or failed.
+type ConditionTrace struct {
+	Name   string `json:"name"`
+	Passed bool   `json:"passed"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // IsAllowed returns true if the decision allows the action.
 func (d *Decision) IsAllowed() bool {
 	return d.Effect == EffectAllow

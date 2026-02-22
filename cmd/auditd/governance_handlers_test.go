@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/policy"
 )
 
@@ -223,5 +228,290 @@ func TestNewGovernanceServer_NoPolicyConfig(t *testing.T) {
 	gs := newGovernanceServer(nil, nil, nil)
 	if gs.policyEngine != nil {
 		t.Error("expected nil engine when no policy env vars are set")
+	}
+}
+
+// --- handleExplain ---
+
+func TestHandleExplain_NoPolicyEngine(t *testing.T) {
+	gs := &governanceServer{} // nil engine
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if enabled, _ := resp["enabled"].(bool); enabled {
+		t.Error("expected enabled=false when no engine is loaded")
+	}
+}
+
+func TestHandleExplain_MissingParams(t *testing.T) {
+	gs := &governanceServer{policyEngine: makeEngine(t, minimalPolicyYAML)}
+
+	// Missing action parameter.
+	req := httptest.NewRequest(http.MethodGet, "/v1/governance/explain?resource_type=database&resource_name=prod-db", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("missing action: status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleExplain_AllowedDecision(t *testing.T) {
+	gs := &governanceServer{policyEngine: makeEngine(t, minimalPolicyYAML)}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/governance/explain?resource_type=database&resource_name=test-db&action=read", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var trace map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&trace); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	decision, _ := trace["decision"].(map[string]any)
+	if decision == nil {
+		t.Fatal("response missing decision field")
+	}
+	if decision["Effect"] != "allow" {
+		t.Errorf("Effect = %v, want allow", decision["Effect"])
+	}
+	if expl, _ := trace["explanation"].(string); expl == "" {
+		t.Error("explanation should be non-empty for allowed decisions")
+	}
+}
+
+func TestHandleExplain_DeniedDecision(t *testing.T) {
+	gs := &governanceServer{policyEngine: makeEngine(t, minimalPolicyYAML)}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var trace map[string]any
+	json.NewDecoder(w.Body).Decode(&trace)
+
+	decision, _ := trace["decision"].(map[string]any)
+	if decision["Effect"] != "deny" {
+		t.Errorf("Effect = %v, want deny", decision["Effect"])
+	}
+	expl, _ := trace["explanation"].(string)
+	if !strings.Contains(expl, "DENIED") {
+		t.Errorf("explanation should contain DENIED, got: %s", expl)
+	}
+	if !strings.Contains(expl, "writes not allowed") {
+		t.Errorf("explanation should contain the denial message, got: %s", expl)
+	}
+}
+
+func TestHandleExplain_RequireApproval(t *testing.T) {
+	const approvalPolicyYAML = `
+version: "1"
+policies:
+  - name: approval-policy
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: allow
+        conditions:
+          require_approval: true
+`
+	gs := &governanceServer{policyEngine: makeEngine(t, approvalPolicyYAML)}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var trace map[string]any
+	json.NewDecoder(w.Body).Decode(&trace)
+
+	decision, _ := trace["decision"].(map[string]any)
+	if decision["Effect"] != "require_approval" {
+		t.Errorf("Effect = %v, want require_approval", decision["Effect"])
+	}
+	if expl, _ := trace["explanation"].(string); expl == "" {
+		t.Error("explanation should be non-empty for require_approval decisions")
+	}
+}
+
+func TestHandleExplain_TagsPassedThrough(t *testing.T) {
+	const tagPolicyYAML = `
+version: "1"
+policies:
+  - name: prod-policy
+    resources:
+      - type: database
+        match:
+          tags: [production]
+    rules:
+      - action: write
+        effect: deny
+        message: "production writes denied"
+  - name: default-allow
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: allow
+`
+	gs := &governanceServer{policyEngine: makeEngine(t, tagPolicyYAML)}
+
+	// Staging tag — prod-policy doesn't match, default-allow does.
+	req := httptest.NewRequest(http.MethodGet, "/v1/governance/explain?resource_type=database&resource_name=dev-db&action=write&tags=staging", nil)
+	w := httptest.NewRecorder()
+	gs.handleExplain(w, req)
+	var trace map[string]any
+	json.NewDecoder(w.Body).Decode(&trace)
+	if d, _ := trace["decision"].(map[string]any); d["Effect"] != "allow" {
+		t.Errorf("staging tag: Effect = %v, want allow", d["Effect"])
+	}
+
+	// Production tag — prod-policy matches and denies.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write&tags=production", nil)
+	w2 := httptest.NewRecorder()
+	gs.handleExplain(w2, req2)
+	var trace2 map[string]any
+	json.NewDecoder(w2.Body).Decode(&trace2)
+	if d, _ := trace2["decision"].(map[string]any); d["Effect"] != "deny" {
+		t.Errorf("production tag: Effect = %v, want deny", d["Effect"])
+	}
+}
+
+// --- handleGetEvent ---
+
+// newTestAuditStore creates a temporary SQLite-backed audit store for testing.
+func newTestAuditStore(t *testing.T) *audit.Store {
+	t.Helper()
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
+
+func TestHandleGetEvent_NotFound(t *testing.T) {
+	gs := &governanceServer{auditStore: newTestAuditStore(t)}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events/nonexistent-id", nil)
+	req.SetPathValue("eventID", "nonexistent-id")
+	w := httptest.NewRecorder()
+	gs.handleGetEvent(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleGetEvent_Found(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{auditStore: store}
+
+	event := &audit.Event{
+		EventID:   "evt-handler-found",
+		Timestamp: time.Now(),
+		EventType: audit.EventTypePolicyDecision,
+		Session:   audit.Session{ID: "sess-test"},
+		PolicyDecision: &audit.PolicyDecision{
+			ResourceType: "database",
+			ResourceName: "prod-db",
+			Action:       "write",
+			Effect:       "deny",
+			PolicyName:   "test-policy",
+			Message:      "writes not allowed",
+		},
+	}
+	if err := store.Record(context.Background(), event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events/evt-handler-found", nil)
+	req.SetPathValue("eventID", "evt-handler-found")
+	w := httptest.NewRecorder()
+	gs.handleGetEvent(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var result map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["event_id"] != "evt-handler-found" {
+		t.Errorf("event_id = %v, want evt-handler-found", result["event_id"])
+	}
+	pd, _ := result["policy_decision"].(map[string]any)
+	if pd == nil {
+		t.Fatal("policy_decision field missing from response")
+	}
+	if pd["effect"] != "deny" {
+		t.Errorf("policy_decision.effect = %v, want deny", pd["effect"])
+	}
+}
+
+func TestHandleGetEvent_WithTraceAndExplanation(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{auditStore: store}
+
+	// Simulate what agentutil.CheckTool stores — trace as raw JSON plus a human explanation.
+	traceJSON := json.RawMessage(`{"decision":{"effect":"deny","policy_name":"prod-policy"},"default_applied":false}`)
+	event := &audit.Event{
+		EventID:   "evt-handler-trace",
+		Timestamp: time.Now(),
+		EventType: audit.EventTypePolicyDecision,
+		Session:   audit.Session{ID: "sess-test"},
+		PolicyDecision: &audit.PolicyDecision{
+			ResourceType: "database",
+			ResourceName: "prod-db",
+			Action:       "write",
+			Effect:       "deny",
+			PolicyName:   "prod-policy",
+			Trace:        traceJSON,
+			Explanation:  "Access DENIED: writes to production are prohibited by prod-policy",
+		},
+	}
+	if err := store.Record(context.Background(), event); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/events/evt-handler-trace", nil)
+	req.SetPathValue("eventID", "evt-handler-trace")
+	w := httptest.NewRecorder()
+	gs.handleGetEvent(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var result map[string]any
+	json.NewDecoder(w.Body).Decode(&result)
+
+	pd, _ := result["policy_decision"].(map[string]any)
+	if pd == nil {
+		t.Fatal("policy_decision missing from response")
+	}
+	// Trace must survive the store round-trip (stored as part of JSON blob).
+	if _, ok := pd["trace"]; !ok {
+		t.Error("policy_decision.trace field missing — trace not persisted through store round-trip")
+	}
+	// Explanation must survive too.
+	if expl, _ := pd["explanation"].(string); !strings.Contains(expl, "DENIED") {
+		t.Errorf("policy_decision.explanation missing or truncated, got: %q", expl)
 	}
 }
