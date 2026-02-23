@@ -1,5 +1,5 @@
-# Example AI Governance Policy Configuration
-# Copy this to /etc/helpdesk/policies.yaml or set HELPDESK_POLICY_FILE
+# Example of aiHelpDesk AI Governance Policy Configuration.
+# Copy this to /etc/helpdesk/policies.yaml or set HELPDESK_POLICY_FILE.
 version: "1"
 
 policies:

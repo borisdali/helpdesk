@@ -180,7 +180,10 @@ aiHelpDesk includes an [AI Governance framework](../../AIGOVERNANCE.md) with pol
 | **auditd** | Central audit daemon with SQLite persistence and approval workflow API | 1199 |
 | **auditor** | Real-time audit stream monitor with alerting (Slack, email) | - |
 | **secbot** | Security responder that creates incidents for security anomalies | 9091 |
-| **approvals** | CLI tool for managing approval requests | - |
+| **govbot** | Compliance reporter — runs on demand or on a schedule, posts summary to Slack | - |
+| **approvals** | Operator CLI for listing, approving, and denying approval requests | - |
+| **govexplain** | Operator CLI for explaining past and hypothetical policy decisions | - |
+| **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
 
 ### 3.1 Enabling Governance (Docker Compose)
 
@@ -266,7 +269,58 @@ curl -X POST http://localhost:1199/v1/approvals/apr_xxx/approve \
   -d '{"approved_by": "admin", "reason": "LGTM, verified and it is safe"}'
 ```
 
-### 3.5 Notification Configuration
+### 3.5 Explaining Policy Decisions (govexplain)
+
+`govexplain` is baked into the Docker image. Exec into the `gateway` container (which has the auditd URL wired in via `HELPDESK_AUDIT_URL`) to run it:
+
+```bash
+# List recent policy decisions (last hour)
+docker compose exec gateway govexplain --list --since 1h
+
+# Show only denials
+docker compose exec gateway govexplain --list --since 24h --effect deny
+
+# Explain a specific past decision by event ID
+docker compose exec gateway govexplain --event tool_a1b2c3d4
+
+# Hypothetical check: what would happen if an agent tried this?
+docker compose exec gateway govexplain \
+  --resource database:prod-db --action write --tags production
+
+# Talk directly to auditd (no gateway needed)
+docker compose exec auditd govexplain \
+  --auditd http://localhost:1199 --list --since 1h
+```
+
+### 3.6 Running the SRE Bot (srebot)
+
+`srebot` is a one-shot automation tool — run it with `docker run --rm` so it exits cleanly when done:
+
+```bash
+docker run --rm --network helpdesk_default helpdesk:latest srebot \
+  -gateway http://gateway:8080 \
+  -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
+```
+
+> **Note:** The Docker Compose network name defaults to `<directory>_default`. If you unpacked the deploy bundle into a directory named `helpdesk`, the network is `helpdesk_default`. Adjust accordingly, or check with `docker network ls`.
+
+### 3.7 Running the Compliance Reporter (govbot)
+
+`govbot` is included as a `--profile governance` service so you can run it on demand:
+
+```bash
+# One-shot compliance report (last 24h, printed to stdout)
+docker compose --profile governance run --rm govbot
+
+# Post to Slack
+GOVBOT_WEBHOOK=https://hooks.slack.com/services/... \
+  docker compose --profile governance run --rm govbot
+
+# Custom look-back window
+GOVBOT_SINCE=7d docker compose --profile governance run --rm govbot
+```
+
+### 3.8 Notification Configuration
 
 Configure approval and alert notifications in `.env`:
 

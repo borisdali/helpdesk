@@ -1,8 +1,8 @@
 # AI Governance Architecture
 
 Please see [here](ARCHITECTURE.md) for the general overview of
-aiHelpDesk Architecture. This page is dedicated to aiHelpDesk's very
-important subsystem that we refer to as AI Governance.
+aiHelpDesk Architecture. This page presents a part of this architecture
+dedicated to aiHelpDesk's critical subsystem that we refer to as AI Governance.
 
 ## Overview
 
@@ -51,11 +51,11 @@ aiHelpDesk Governance consists of eight well-defined components:
 | [Audit System](#audit-system) | **Implemented** | Tamper-evident logging with hash chains |
 | [Policy Engine](#policy-engine) | **Implemented** | Rule-based access control |
 | [Approval Workflows](#approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
-| [Compliance Reporting](#compliance-reporting-govbot) | **Implemented** | Scheduled compliance snapshots and alerting |
+| [Compliance Reporting](#compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
 | [Guardrails](#guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
 | [Operating Mode](#operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
-| Identity & Access | Planned | User/role-based permissions |
 | [Explainability](#explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
+| Identity & Access | Planned | User/role-based permissions |
 | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
@@ -1461,12 +1461,12 @@ date  # Check current local time
 - [x] Approval workflows (cmd/approvals/, auditd API, Slack/email notifications)
 - [x] Compliance reporting (cmd/govbot/, Kubernetes CronJob)
 - [x] Blast-radius guardrails (`max_rows_affected`, `max_pods_affected`, post-execution hooks)
-- [ ] Rate limits (write frequency per session)
-- [ ] Circuit breaker (auto-pause on consecutive errors)
+- [x] Explainability — decision trace, `govexplain` CLI, explain API endpoints
+- [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
 
 ### Phase 3: Operations
-- [ ] Explainability — decision trace, `govexplain` CLI, explain API endpoints
-- [ ] Operating mode switch (`readonly` / `fix`) with governance enforcement
+- [ ] Rate limits (write frequency per session)
+- [ ] Circuit breaker (auto-pause on consecutive errors)
 - [ ] Identity & access control (principal/role matching in policy engine)
 - [ ] Time-based policy conditions (schedule: days/hours/timezone)
 - [ ] Rollback capabilities

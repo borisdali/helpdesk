@@ -45,6 +45,7 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       # AI Governance
+      HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
@@ -79,6 +80,7 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       # AI Governance
+      HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
@@ -108,6 +110,7 @@ services:
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       HELPDESK_INCIDENT_DIR: /data/incidents
       # AI Governance
+      HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
     volumes:
@@ -135,6 +138,7 @@ services:
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY}
       # AI Governance
+      HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
     ports:
@@ -183,6 +187,10 @@ services:
       # Streaming mode: "sse" (streaming) or "none" (disabled, default)
       # Set to "none" to work around ADK REPL bug in containers
       HELPDESK_STREAMING_MODE: ${HELPDESK_STREAMING_MODE:-none}
+      # AI Governance
+      HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
+      HELPDESK_AUDIT_ENABLED: "true"
+      HELPDESK_AUDIT_URL: http://auditd:1199
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     stdin_open: true

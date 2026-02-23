@@ -374,7 +374,10 @@ aiHelpDesk includes an AI Governance framework with policy-based access control,
 | **auditd** | Central audit daemon with SQLite persistence and approval workflow API | Enabled |
 | **auditor** | Real-time audit stream monitor with alerting | Disabled |
 | **secbot** | Security responder that creates incidents for anomalies | Disabled |
-| **approvals** | CLI tool for managing approval requests (included in auditd pod) | - |
+| **govbot** | Compliance reporter CronJob — posts summary to Slack on a schedule | Disabled |
+| **approvals** | Operator CLI for listing, approving, and denying approval requests (exec into auditd pod) | - |
+| **govexplain** | Operator CLI for explaining past and hypothetical policy decisions (exec into any pod) | - |
+| **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
 
 ### 9.2 Enable Governance
 
@@ -512,6 +515,68 @@ curl http://localhost:1199/v1/approvals/pending
 curl -X POST http://localhost:1199/v1/approvals/apr_xxx/approve \
   -H "Content-Type: application/json" \
   -d '{"approved_by": "admin", "reason": "LGTM, verified safe"}'
+```
+
+### 9.5 Explaining Policy Decisions (govexplain)
+
+`govexplain` is baked into every pod image. Exec into any running pod to use it — the `gateway` pod is the most convenient since its `HELPDESK_AUDIT_URL` is already set:
+
+```bash
+# List recent policy decisions (last hour)
+kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
+  govexplain --list --since 1h
+
+# Show only denials
+kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
+  govexplain --list --since 24h --effect deny
+
+# Explain a specific past decision by event ID
+kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
+  govexplain --event tool_a1b2c3d4
+
+# Hypothetical check: what would happen if an agent tried this?
+kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
+  govexplain --resource database:prod-db --action write --tags production
+
+# Talk directly to auditd (bypass gateway, exec into auditd pod)
+kubectl -n helpdesk-system exec -it deploy/helpdesk-auditd -- \
+  govexplain --auditd http://localhost:1199 --list --since 1h
+```
+
+### 9.6 Running the SRE Bot (srebot)
+
+`srebot` is a one-shot tool — use `kubectl run` with `--rm` so the pod is cleaned up on exit:
+
+```bash
+kubectl -n helpdesk-system run srebot --rm -it --restart=Never \
+  --image=$(kubectl -n helpdesk-system get deploy/helpdesk-gateway \
+    -o jsonpath='{.spec.template.spec.containers[0].image}') \
+  -- srebot \
+    -gateway http://helpdesk-gateway:8080 \
+    -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
+```
+
+Or pin the image tag directly:
+
+```bash
+kubectl -n helpdesk-system run srebot --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:v1.0.0 \
+  -- srebot \
+    -gateway http://helpdesk-gateway:8080 \
+    -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
+```
+
+### 9.7 Running the Compliance Reporter (govbot)
+
+`govbot` is deployed as a Kubernetes CronJob (runs automatically on the configured schedule). To trigger it immediately:
+
+```bash
+# Run now, without waiting for the next scheduled time
+kubectl -n helpdesk-system create job govbot-now \
+  --from=cronjob/helpdesk-govbot
+
+# Follow the output
+kubectl -n helpdesk-system logs -f job/govbot-now
 ```
 
 ## 10. Troubleshooting

@@ -158,7 +158,7 @@ binaries:
 			GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
 				go build -ldflags="$(LDFLAGS)" -o $$outdir/$$bin $$pkg || exit 1; \
 		done; \
-		cp deploy/docker-compose/startall.sh $$outdir/; \
+		cp deploy/host/startall.sh $$outdir/; \
 		cp deploy/docker-compose/.env.example $$outdir/; \
 		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
 		cp policies.example.yaml $$outdir/; \
@@ -178,7 +178,6 @@ bundle:
 	echo "==> docker-compose files"; \
 	cp deploy/docker-compose/.env.example $$bundledir/docker-compose/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/docker-compose/; \
-	cp deploy/docker-compose/startall.sh $$bundledir/docker-compose/; \
 	cp policies.example.yaml $$bundledir/docker-compose/; \
 	sed -e '/^    build:/,/^      dockerfile:/d' \
 	    -e 's|image: helpdesk:latest|image: $(IMAGE):$(VERSION)|' \
