@@ -52,7 +52,7 @@ Note in particular the phase 3, which sends a natural language problem descripti
  description sent to the AI agent
  (the default is "Users are reporting database connectivity issues").
 
-For details on how to run `srebot` in your specific deployment environment see [here](../../deploy/docker-compose/README.md#36-running-the-sre-bot-srebot) for running via Docker containers and [here](../../deploy/helm/README.md#96-running-the-sre-bot-   srebot) for running on K8s.
+For details on how to run `srebot` in your specific deployment environment see [here](../../deploy/docker-compose/README.md#36-running-the-sre-bot-srebot) for running via Docker containers, [here](../../deploy/host#75-running-the-sre-bot-srebot) for running directly on a host and [here](../../deploy/helm/README.md#96-running-the-sre-bot-srebot) for running on K8s.
 
 ## Sample Run #1: ask aiHelpDesk for a Database status report
 

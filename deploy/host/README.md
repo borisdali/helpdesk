@@ -138,6 +138,8 @@ curl -s -X POST http://localhost:8080/api/v1/query \
 
 ## 7. AI Governance
 
+See [here](../../AIGOVERNANCE.md) for details on aiHelpDesk AI Governance module and its sub-modules.
+
 ### 7.1 Enabling Governance
 
 `auditd` starts automatically whenever the binary is present in the tarball directory. To also start the real-time monitor and security responder:
