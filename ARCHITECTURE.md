@@ -32,7 +32,7 @@ Sub-agents are standalone A2A servers. That means that if a provider with the de
   └───────────┘   └───────────┘   └───────────────┘
 ```
 
-## Infrastructure Inventory
+## 1. Infrastructure Inventory
 
 The Orchestrator loads an infrastructure inventory (`infrastructure.json`) that maps
 managed database servers, Kubernetes clusters, and VMs. When the user asks about a
@@ -73,7 +73,7 @@ Each database server runs on either a Kubernetes cluster (with `k8s_cluster` and
 `k8s_namespace`) or a VM (with `vm_name`) — never both. The `k8s_namespace` defaults to
 `"default"` when not specified.
 
-## Agent Discovery
+## 2. Agent Discovery
 
 The Orchestrator finds sub-agents in two ways:
 
@@ -84,16 +84,16 @@ The Orchestrator finds sub-agents in two ways:
 
 At startup, the Orchestrator health-checks all agents and gracefully handles any that are unavailable.
 
-## Prerequisites
+## 3. Prerequisites
 
 - Go 1.24.4+
 - PostgreSQL client (`psql`) for database agent
 - `kubectl` configured for K8s agent
 - API key for Google AI Studio (Gemini) or Anthropic (Claude)
 
-## Environment Variables
+## 4. Environment Variables
 
-### Required (all agents and Orchestrator)
+### 4.1 Required (all agents and Orchestrator)
 
 ```bash
 # Google Gemini
@@ -107,7 +107,7 @@ export HELPDESK_MODEL_NAME="claude-sonnet-4-20250514"
 export HELPDESK_API_KEY="your-anthropic-api-key"
 ```
 
-### Orchestrator
+### 4.2 Orchestrator
 
 ```bash
 # Infrastructure inventory (database servers, K8s clusters, VMs)
@@ -120,7 +120,7 @@ export HELPDESK_AGENTS_CONFIG="agents.json"
 export HELPDESK_AGENT_URLS="http://host1:1100,http://host2:1102,http://host3:1104"
 ```
 
-### REST Gateway
+### 4.3 REST Gateway
 
 ```bash
 # Listen address (default: localhost:8080)
@@ -130,7 +130,7 @@ export HELPDESK_GATEWAY_ADDR="0.0.0.0:8080"
 export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
 ```
 
-### Agent-specific
+### 4.4 Agent-specific
 
 ```bash
 # Override default listen address for any agent
@@ -144,13 +144,13 @@ The database agent also respects standard PostgreSQL environment variables (`PGH
 `PGPORT`, `PGUSER`, `PGDATABASE`) as fallback defaults when no connection string is
 provided.
 
-## Running the System
+## 5. Running the System
 
 Each agent is an independent process. Start them in any order — the Orchestrator
 health-checks agents at startup and works with whatever is available. Agents can run
 on the same machine or on different hosts.
 
-### Start the sub-agents
+### 5.1 Start the sub-agents
 
 ```bash
 # Terminal 1 — database agent (default :1100)
@@ -168,7 +168,7 @@ To run an agent on a different address:
 HELPDESK_AGENT_ADDR="0.0.0.0:2100" go run ./agents/database/
 ```
 
-### Start the Orchestrator
+### 5.2 Start the Orchestrator
 
 ```bash
 # Terminal 4
@@ -188,9 +188,9 @@ Orchestrator initialized with 3 available agent(s)
 Unavailable agents are noted but don't prevent the Orchestrator from starting — it
 works with the agents that are reachable.
 
-## Available Tools
+## 6. Available Tools
 
-### PostgreSQL Database Agent (default :1100)
+### 6.1 PostgreSQL Database Agent (default :1100)
 
 | Tool | Description |
 |------|-------------|
@@ -204,7 +204,7 @@ works with the agents that are reachable.
 | `get_lock_info` | Find blocking locks and waiting queries |
 | `get_table_stats` | Table sizes, dead tuples, vacuum times, scan types |
 
-### Kubernetes Agent (default :1102)
+### 6.2 Kubernetes Agent (default :1102)
 
 | Tool | Description |
 |------|-------------|
@@ -217,7 +217,7 @@ works with the agents that are reachable.
 | `describe_pod` | Detailed pod info (conditions, events) |
 | `get_nodes` | List cluster nodes with status |
 
-### Incident Agent (default :1104)
+### 6.3 Incident Agent (default :1104)
 
 | Tool | Description |
 |------|-------------|
@@ -232,7 +232,7 @@ The incident agent collects data across four layers:
 
 Bundles are always created even if some commands fail (e.g., database unreachable). Failed commands are recorded as errors inside the bundle. Output directory is controlled by `HELPDESK_INCIDENT_DIR` (defaults to current directory). An `incidents.json` index file tracks all created bundles.
 
-## Verifying Agent Cards
+## 7. Verifying Agent Cards
 
 You can verify that agents are running by fetching their agent cards:
 
@@ -250,9 +250,9 @@ curl -s http://localhost:1104/.well-known/agent-card.json | jq .name
 # Output: "incident_agent"
 ```
 
-## Example Interactions
+## 8. Example Interactions
 
-### Database Troubleshooting
+### 8.1 Database Troubleshooting
 
 ```
 User -> My database queries are running slow
@@ -265,7 +265,7 @@ connections and running queries...
 Based on the results, I can see there are 3 long-running queries...
 ```
 
-### Kubernetes Troubleshooting
+### 8.2 Kubernetes Troubleshooting
 
 ```
 User -> I can't connect to my database running on Kubernetes
@@ -277,7 +277,7 @@ Agent -> Let me check the Kubernetes service configuration...
 The LoadBalancer service shows EXTERNAL-IP as <pending>, which means...
 ```
 
-### Combined Troubleshooting
+### 8.3 Combined Troubleshooting
 
 ```
 User -> My AlloyDB Omni connection times out from outside the cluster
@@ -289,7 +289,7 @@ service exposure first, then verify the database is accepting connections...
 [Calls postgres_database_agent to verify database health]
 ```
 
-### Incident Bundle Creation
+### 8.4 Incident Bundle Creation
 
 ```
 User -> Create an incident for the global-prod database
@@ -305,7 +305,7 @@ Incident bundle created:
 - Some commands could not collect data: database/version.txt (connection refused)
 ```
 
-## File Structure
+## 9. File Structure
 
 ```
 helpdesk/
@@ -373,9 +373,9 @@ helpdesk/
 └── README.md
 ```
 
-## Extending the System
+## 10. Extending the System
 
-### Adding a New Agent
+### 10.1 Adding a New Agent
 
 1. Create a new directory under `agents/` (e.g., `agents/myagent/`)
 2. Write `main.go` using the `agentutil` SDK:
@@ -403,14 +403,14 @@ helpdesk/
    ```
 4. Add the agent's URL to `agents.json` or `HELPDESK_AGENT_URLS`
 
-### Adding Tools to Existing Agents
+### 10.2 Adding Tools to Existing Agents
 
 1. Define the args struct with JSON schema tags
 2. Implement the tool function returning `(ResultStruct, error)`
 3. Create the tool with `functiontool.New()`
 4. Add to the agent's `Tools` slice in `createTools()`
 
-## Agent-to-Agent Integration
+## 11. Agent-to-Agent Integration
 
 The helpdesk sub-agents can be called directly by upstream programmatic agents
 (e.g., an observability agent, a CI/CD pipeline, or a chatbot). The Orchestrator
@@ -418,7 +418,7 @@ is a UX layer for humans — external agents should bypass it and talk A2A to th
 sub-agents directly. There are two integration paths: native A2A and the REST
 Gateway.
 
-### Direct A2A Integration
+### 11.1 Direct A2A Integration
 
 Each sub-agent serves an agent card at `/.well-known/agent-card.json` that
 describes its capabilities, tools, tags, and example prompts. An upstream agent
@@ -429,7 +429,7 @@ can discover sub-agents dynamically:
    `"incident"`) and `examples` to help the caller decide which agent to use
 3. **Call**: Send a JSON-RPC `message/send` request to the agent's `url` field
 
-#### Agent Card Schema (key fields)
+#### 11.1.1 Agent Card Schema (key fields)
 
 | Field                | Description                                       |
 |----------------------|---------------------------------------------------|
@@ -442,7 +442,7 @@ can discover sub-agents dynamically:
 | `skills[].tags`      | Keywords (e.g., `"postgresql"`, `"locks"`)         |
 | `skills[].examples`  | Example prompts                                    |
 
-#### Example: A2A JSON-RPC call
+#### 11.1.2 Example: A2A JSON-RPC call
 
 ```bash
 curl -X POST http://localhost:1100/invoke \
@@ -461,7 +461,7 @@ curl -X POST http://localhost:1100/invoke \
   }'
 ```
 
-#### Example: O11y Agent Workflow
+#### 11.1.3 Example: O11y Agent Workflow
 
 An observability agent detects a database anomaly and investigates automatically:
 
@@ -476,14 +476,14 @@ An observability agent detects a database anomaly and investigates automatically
 6. **Notify**: The incident agent POSTs the bundle result to the callback URL
    when complete
 
-#### Callback URL (fire-and-forget)
+#### 11.1.4 Callback URL (fire-and-forget)
 
 The incident agent's `create_incident_bundle` tool supports an optional
 `callback_url` parameter. When set, the agent POSTs the `IncidentBundleResult`
 JSON to that URL after the bundle is created. This is best-effort: callback
 failures are logged but do not affect the tool result.
 
-### REST Gateway
+### 11.2 REST Gateway
 
 For consumers that prefer plain REST API over JSON-RPC, the optional REST Gateway
 (`cmd/gateway/`) provides HTTP endpoints that proxy to the A2A sub-agents:
@@ -529,21 +529,21 @@ latency and cost compared to direct A2A calls. The REST Gateway is best suited
 for integration testing, simple automation, and consumers that don't implement
 A2A natively.
 
-## AI Governance (including full audit) System
+## 12. AI Governance (including full audit) System
 aiHelpDesk is proud to feature a sophisticated AI Governanance system,
 which relies on comprehensive real-time and after the fact persistant
 auditing. Please see [here](AIGOVERNANCE.md) for details.
 
-## Troubleshooting
+## 13 Troubleshooting
 
-### Agent Unavailable
+### 13.1 Agent Unavailable
 
 If the Orchestrator reports an agent as unavailable:
 1. Check if the agent process is running
 2. Verify the port is not in use by another process
 3. Check firewall rules if running on different machines
 
-### psql/kubectl Not Found
+### 13.2 psql/kubectl Not Found
 
 Ensure the respective CLI tools are installed and in your PATH:
 ```bash
@@ -551,14 +551,14 @@ which psql    # Should return path to psql
 which kubectl # Should return path to kubectl
 ```
 
-### API Key Issues
+### 13.3 API Key Issues
 
 Verify your API key is set correctly:
 ```bash
 echo $HELPDESK_API_KEY
 ```
 
-### AI Governance (and audit in particular) System Issues
+### 13.4 AI Governance (and audit in particular) System Issues
 See the [here](AIGOVERNANCE.md#audit-system-issues) for known/reported issues
 pertaining to AI Governance in general and the built-in
 audit system in particular.

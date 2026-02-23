@@ -579,6 +579,41 @@ kubectl -n helpdesk-system create job govbot-now \
 kubectl -n helpdesk-system logs -f job/govbot-now
 ```
 
+### 9.8 Security Responder (secbot)
+
+Unlike the CLI tools above, `secbot` is a **long-running daemon** — enable it once and it watches the audit stream continuously. It automatically creates incident bundles when it detects:
+
+- `unauthorized_destructive` — a destructive tool call without a valid approval
+- `hash_mismatch` — audit chain integrity failure (tampered event)
+- `high_volume` — event rate exceeds threshold (potential abuse or runaway agent)
+- `potential_sql_injection` / `potential_command_injection` — error patterns in tool output
+
+Enable it in `values.yaml`:
+
+```yaml
+governance:
+  secbot:
+    enabled: true
+    cooldown: "5m"           # minimum time between incident creations
+    maxEventsPerMinute: 100  # high-volume alert threshold
+```
+
+Check that it is running and connected:
+
+```bash
+# Check pod status
+kubectl -n helpdesk-system get pods -l app.kubernetes.io/component=secbot
+
+# Follow logs (you'll see startup phases and any alerts)
+kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
+
+# Dry-run mode: log alerts but don't create incidents
+# Add to your values.yaml under secbot: dryRun: true
+# (requires adding the flag to the secbot Helm template args)
+```
+
+> **Socket scheduling note:** `secbot` reads from the same Unix socket as `auditd` via a shared PersistentVolumeClaim. If your storage class only supports `ReadWriteOnce`, both pods must land on the same node. Either use a `ReadWriteMany` storage class, or add a `nodeAffinity` / `podAffinity` rule to co-locate them. The default Helm chart uses `emptyDir` when persistence is disabled, which automatically co-locates via the volume.
+
 ## 10. Troubleshooting
 
 ### 10.1 Interactive REPL Shows Empty Responses

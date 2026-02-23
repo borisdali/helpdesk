@@ -159,6 +159,7 @@ binaries:
 				go build -ldflags="$(LDFLAGS)" -o $$outdir/$$bin $$pkg || exit 1; \
 		done; \
 		cp deploy/host/startall.sh $$outdir/; \
+		cp deploy/host/README.md $$outdir/; \
 		cp deploy/docker-compose/.env.example $$outdir/; \
 		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
 		cp policies.example.yaml $$outdir/; \

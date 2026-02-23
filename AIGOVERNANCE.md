@@ -4,7 +4,7 @@ Please see [here](ARCHITECTURE.md) for the general overview of
 aiHelpDesk Architecture. This page presents a part of this architecture
 dedicated to aiHelpDesk's critical subsystem that we refer to as AI Governance.
 
-## Overview
+## 1. Overview
 
 As aiHelpDesk evolves from read-only diagnostics to actively *fixing* infrastructure
 issues, governance becomes critical for trust. The AI Governance system ensures that
@@ -42,7 +42,7 @@ safely, accountably, and with appropriate human oversight.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Components
+## 2. Components
 
 aiHelpDesk Governance consists of eight well-defined components:
 
@@ -60,12 +60,12 @@ aiHelpDesk Governance consists of eight well-defined components:
 
 ---
 
-## Policy Engine
+## 3. Policy Engine
 
 The Policy Engine defines what actions are allowed, by whom, on which resources,
 and under what conditions. It is the foundation for all other governance controls.
 
-### Policy Structure
+### 3.1 Policy Structure
 
 ```yaml
 # /etc/helpdesk/policies.yaml
@@ -130,7 +130,7 @@ policies:
           approval_quorum: 2
 ```
 
-### Policy Evaluation Flow
+### 3.2 Policy Evaluation Flow
 
 ```
 Request arrives
@@ -164,7 +164,7 @@ Request arrives
       └── REQUIRE_APPROVAL ───► Enter approval workflow
 ```
 
-### Environment Variables
+### 3.3 Environment Variables
 
 ```bash
 export HELPDESK_POLICY_FILE="/etc/helpdesk/policies.yaml"
@@ -172,7 +172,7 @@ export HELPDESK_DEFAULT_POLICY="deny"      # When no policy matches
 export HELPDESK_POLICY_DRY_RUN="true"      # Log decisions but don't enforce
 ```
 
-### Implementation
+### 3.4 Implementation
 
 The policy engine is implemented in `internal/policy/`:
 
@@ -222,12 +222,12 @@ if err := decision.MustAllow(); err != nil {
 
 See [`policies.example.yaml`](policies.example.yaml) for a complete policy configuration example.
 
-### Agent Integration
+### 3.5 Agent Integration
 
 Policy enforcement is integrated directly into the agents via `agentutil.PolicyEnforcer`.
 Each agent initializes the policy engine at startup and checks policies before executing tools.
 
-#### Initialization (main.go)
+#### 3.5.1 Initialization (main.go)
 
 ```go
 // Initialize policy engine if configured
@@ -239,7 +239,7 @@ if err != nil {
 policyEnforcer = agentutil.NewPolicyEnforcer(policyEngine, traceStore)
 ```
 
-#### Tool Enforcement (tools.go)
+#### 3.5.2 Tool Enforcement (tools.go)
 
 ```go
 // Database agent example - before executing psql
@@ -259,7 +259,7 @@ if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err !=
 }
 ```
 
-#### Resource Tags
+#### 3.5.3 Resource Tags
 
 Tags are resolved from the infrastructure configuration (`HELPDESK_INFRA_CONFIG`):
 
@@ -289,12 +289,12 @@ When an agent receives a request for `prod-db`, it:
 
 ---
 
-## Approval Workflows
+## 4. Approval Workflows
 
 When a policy rule has `effect: require_approval`, the agent blocks and waits
 for a human to approve or deny the request before execution proceeds.
 
-### Flow
+### 4.1 Flow
 
 ```
 ┌─────────────┐   require_approval   ┌─────────────────────┐
@@ -318,7 +318,7 @@ for a human to approve or deny the request before execution proceeds.
 └─────────────┘
 ```
 
-### Implementation
+### 4.2 Implementation
 
 Approval state is managed by `auditd` and persisted in SQLite.
 The agent's `agentutil.PolicyEnforcer` polls the auditd approval API
@@ -331,7 +331,7 @@ until the request is decided or the timeout elapses.
 | Approvals CLI | `cmd/approvals/` | Human tool to list and decide pending requests |
 | Notification | `cmd/auditd/` | Sends Slack webhook and/or email on new request |
 
-### Approvals CLI
+### 4.3 Approvals CLI
 
 Humans manage pending approvals with the `approvals` CLI:
 
@@ -345,8 +345,9 @@ approvals approve <approval-id> --url http://localhost:1199
 # Deny a specific request
 approvals deny <approval-id> --url http://localhost:1199
 ```
+For details on how to run `approvals` in your specific deployment environment see [here](deploy/docker-compose/README.md#34-managing-approvals) for running via Docker containers and [here](deploy/helm/README.md#94-approval-workflow) for running on K8s.
 
-### Approval API Endpoints
+### 4.4 Approval API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -356,7 +357,7 @@ approvals deny <approval-id> --url http://localhost:1199
 | POST | `/v1/approvals/{id}/approve` | Approve a request |
 | POST | `/v1/approvals/{id}/deny` | Deny a request |
 
-### Configuration
+### 4.5 Configuration
 
 ```bash
 # Timeout before an unanswered request is considered expired (default: 5m)
@@ -372,7 +373,7 @@ export HELPDESK_APPROVAL_BASE_URL="http://auditd.internal:1199"
 Email notifications use the same SMTP settings as the auditor (see
 [Environment Variables](#environment-variables) below).
 
-### Approval States
+### 4.6 Approval States
 
 | State | Description |
 |-------|-------------|
@@ -383,7 +384,7 @@ Email notifications use the same SMTP settings as the auditor (see
 
 ---
 
-## Guardrails
+## 5. Guardrails
 
 Guardrails are hard safety constraints that cannot be overridden, even with approval.
 
@@ -393,7 +394,7 @@ Guardrails are hard safety constraints that cannot be overridden, even with appr
 | Rate Limits | Planned | Max write frequency per session |
 | Circuit Breaker | Planned | Auto-stop on consecutive errors |
 
-### Blast Radius (Implemented)
+### 5.1 Blast Radius (Implemented)
 
 Blast radius limits cap how many rows or pods a single operation may affect.
 They are evaluated **post-execution** — after the tool runs but before the LLM
@@ -419,7 +420,7 @@ rules:
 
 See [`policies.example.yaml`](policies.example.yaml) for a complete policy configuration example.
 
-#### How it works
+#### 5.1.1 How it works
 
 ```
 Pre-execution:   CheckDatabase / CheckKubernetes  → allow/deny/require_approval
@@ -440,7 +441,7 @@ Row counts are parsed from psql command tag output (`DELETE N`, `UPDATE N`,
 `INSERT 0 N`). Pod counts are parsed from kubectl confirmation lines
 (`pod "x" deleted`, `deployment "y" configured`, etc.).
 
-#### Agent Integration
+#### 5.1.2 Agent Integration
 
 **Database agent** — `runPsqlWithToolName` calls `CheckDatabaseResult`
 automatically. When adding a new write tool, pass `policy.ActionWrite` (or
@@ -466,7 +467,7 @@ if err := checkK8sPolicyResult(ctx, nsInfo.Namespace, policy.ActionWrite, nsInfo
 }
 ```
 
-### Planned Guardrails
+### 5.2 Planned Guardrails
 
 **Rate limits** — cap write frequency per session (e.g. max 20 writes/minute).
 Requires a per-session counter with TTL; not yet implemented.
@@ -476,7 +477,7 @@ rolling window to prevent runaway failure loops. Not yet implemented.
 
 ---
 
-## Operating Mode
+## 6. Operating Mode
 
 The operating mode switch controls whether agents are allowed to execute
 write and destructive tools at all, and enforces governance requirements
@@ -492,7 +493,7 @@ export HELPDESK_OPERATING_MODE="readonly"  # default — safe
 export HELPDESK_OPERATING_MODE="fix"       # enable mutations; enforces governance
 ```
 
-### Why a Default of `readonly`
+### 6.1 Why a Default of `readonly`
 
 Most day-to-day use is diagnostic — querying databases, inspecting pods,
 gathering logs. Read-only mode ensures that newly deployed agents can never
@@ -500,7 +501,7 @@ accidentally mutate state until an operator explicitly opts in. When write tools
 are added in the future, they will be silently gated behind this flag until
 the operator is ready.
 
-### Startup Validation (fix mode)
+### 6.2 Startup Validation (fix mode)
 
 When an agent starts in `fix` mode, it performs a pre-flight governance check
 before registering any A2A skills:
@@ -543,7 +544,7 @@ For every violation the agent:
 2. Best-effort POSTs a `governance_violation` audit event to auditd (if `HELPDESK_AUDIT_URL` is set)
 3. Best-effort POSTs an incident to the gateway (if `HELPDESK_GATEWAY_URL` is set)
 
-### Runtime Enforcement
+### 6.3 Runtime Enforcement
 
 The mode check runs inside `PolicyEnforcer.CheckTool`, before the policy
 engine is consulted, so it is invisible to tool authors. No tool code needs
@@ -568,7 +569,7 @@ Tool called with ActionWrite or ActionDestructive
      Normal policy evaluation
 ```
 
-### Governance Misconfiguration Incidents
+### 6.4 Governance Misconfiguration Incidents
 
 In `fix` mode, if audit becomes unreachable at runtime (after successful
 startup), the agent cannot use the audit trail to record a denial — because
@@ -584,7 +585,7 @@ agent uses a two-stage fallback:
 This guarantees that governance failures are always visible, even when the
 audit system itself has failed.
 
-### Violation Types
+### 6.5 Violation Types
 
 | Condition | Severity | Action |
 |-----------|----------|--------|
@@ -592,7 +593,7 @@ audit system itself has failed.
 | `fix` mode + policy disabled or not loaded | **Critical** | Block tool, create incident, log stderr |
 | `fix` mode + approval disabled for `destructive` action | Warning | Allow with log warning (governance gap, not a hard block) |
 
-### Implementation
+### 6.6 Implementation
 
 Key integration points:
 
@@ -603,13 +604,13 @@ Key integration points:
 
 ---
 
-## Audit System
+## 7. Audit System
 
 aiHelpDesk includes a tamper-evident audit system that records all tool executions
 across agents, providing accountability, compliance support, and security monitoring.
 The audit system uses hash chains to detect tampering with the audit log.
 
-### Architecture
+### 7.1 Architecture
 
 ```
                                     ┌─────────────────────┐
@@ -639,7 +640,7 @@ The audit system uses hash chains to detect tampering with the audit log.
     └───────────────┘                └─────────────────────┘
 ```
 
-### Components
+### 7.2 Components
 
 | Component | Location | Description |
 |-----------|----------|-------------|
@@ -647,7 +648,7 @@ The audit system uses hash chains to detect tampering with the audit log.
 | `auditor` | `cmd/auditor/` | Real-time monitoring CLI with security alerting |
 | `audit` package | `internal/audit/` | Core audit types, hash chain, and tool auditor |
 
-### Hash Chain Integrity
+### 7.3 Hash Chain Integrity
 
 Each audit event includes cryptographic hashes that form a chain:
 
@@ -693,7 +694,7 @@ Audit events capture tool executions with full context:
 | `prev_hash` | Hash of previous event in chain |
 | `event_hash` | SHA-256 hash of this event |
 
-### Action Classification
+### 7.4 Action Classification
 
 Tools are classified by their potential impact:
 
@@ -703,7 +704,7 @@ Tools are classified by their potential impact:
 | `write` | State-modifying operations | `create_incident_bundle` |
 | `destructive` | Potentially destructive operations | (Reserved for future tools) |
 
-### Trace ID Propagation
+### 7.5 Trace ID Propagation
 
 The `trace_id` flows from the orchestrator through sub-agents for end-to-end
 correlation:
@@ -720,7 +721,7 @@ This enables querying all tool executions triggered by a single user request:
 curl "http://localhost:1199/api/events?trace_id=abc123"
 ```
 
-### Auditd Service (cmd/auditd/)
+### 7.6 Auditd Service (cmd/auditd/)
 
 The central audit service provides:
 
@@ -729,7 +730,7 @@ The central audit service provides:
 - **Unix socket** for real-time event notifications
 - **Hash chain** maintenance and verification
 
-#### API Endpoints
+#### 7.6.1 API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -738,7 +739,7 @@ The central audit service provides:
 | GET | `/api/verify` | Verify hash chain integrity |
 | GET | `/health` | Health check |
 
-#### Query Filters
+#### 7.6.2 Query Filters
 
 ```bash
 # Recent events
@@ -760,7 +761,7 @@ curl "http://localhost:1199/api/events?tool_name=get_pods"
 curl "http://localhost:1199/api/events?since=2026-01-01T00:00:00Z"
 ```
 
-### Auditor CLI (cmd/auditor/)
+### 7.7 Auditor CLI (cmd/auditor/)
 
 The auditor provides real-time monitoring and security alerting:
 
@@ -772,7 +773,7 @@ go run ./cmd/auditor/ \
   --verify-interval 30s
 ```
 
-#### Security Detection
+#### 7.7.1 Security Detection
 
 The auditor monitors for suspicious patterns:
 
@@ -784,7 +785,7 @@ The auditor monitors for suspicious patterns:
 | Timestamp Gap | Suspicious time jumps | Events with timestamps far in the past/future |
 | Chain Tampering | Hash chain breaks | Periodic verification detects modified events |
 
-#### Webhook Alerts
+#### 7.7.2 Webhook Alerts
 
 Security incidents can be sent to an external webhook:
 
@@ -806,9 +807,9 @@ Webhook payload:
 }
 ```
 
-### Environment Variables
+### 7.8 Environment Variables
 
-#### Auditd Service
+#### 7.8.1 Auditd Service
 
 ```bash
 # Listen address (default: localhost:1199)
@@ -821,7 +822,7 @@ export HELPDESK_AUDIT_DB="/var/lib/helpdesk/audit.db"
 export HELPDESK_AUDIT_SOCKET="/tmp/helpdesk-audit.sock"
 ```
 
-#### Agent Audit Configuration
+#### 7.8.2 Agent Audit Configuration
 
 ```bash
 # Enable auditing for an agent (point to auditd service)
@@ -830,7 +831,7 @@ export HELPDESK_AUDIT_URL="http://localhost:1199"
 # Note: Each agent automatically generates a unique session ID
 ```
 
-#### Auditor CLI
+#### 7.8.3 Auditor CLI
 
 ```bash
 # Unix socket to connect to for real-time events
@@ -852,9 +853,9 @@ export HELPDESK_AUDIT_URL="http://localhost:1199"
 --allowed-hours-end 22
 ```
 
-### Running the Audit System
+### 7.9 Running the Audit System
 
-#### Start Auditd
+#### 7.9.1 Start Auditd
 
 ```bash
 # Terminal — audit service
@@ -863,7 +864,7 @@ HELPDESK_AUDIT_SOCKET=/tmp/helpdesk-audit.sock \
   go run ./cmd/auditd/
 ```
 
-#### Start Agents with Auditing
+#### 7.9.2 Start Agents with Auditing
 
 ```bash
 # Start agents with audit enabled
@@ -871,7 +872,7 @@ HELPDESK_AUDIT_URL="http://localhost:1199" go run ./agents/database/
 HELPDESK_AUDIT_URL="http://localhost:1199" go run ./agents/k8s/
 ```
 
-#### Start the Auditor
+#### 7.9.3 Start the Auditor
 
 ```bash
 # Real-time monitoring with security alerts
@@ -881,9 +882,9 @@ go run ./cmd/auditor/ \
   --verify-interval 30s
 ```
 
-### Verifying Audit Integrity
+### 7.10 Verifying Audit Integrity
 
-#### Via API
+#### 7.10.1 Via API
 
 ```bash
 curl -s http://localhost:1199/api/verify | jq
@@ -900,7 +901,7 @@ Response:
 }
 ```
 
-#### Via SQL (Manual)
+#### 7.10.2 Via SQL (Manual)
 
 ```sql
 -- Check for broken hash chain links
@@ -915,7 +916,7 @@ WHERE e1.id > 1
 ORDER BY e1.id;
 ```
 
-### Testing
+### 7.11 Testing
 
 Generate test events to verify the audit system:
 
@@ -940,7 +941,7 @@ done
 # (auditor should log each event as it arrives)
 ```
 
-### Security Responder Bot (cmd/secbot/)
+### 7.12 Security Responder Bot (cmd/secbot/)
 
 The `secbot` demonstrates automated security incident response. It monitors the
 audit stream for critical security events and automatically creates incident
@@ -976,7 +977,7 @@ bundles for investigation.
 secbot is an external automation client (like srebot). Sub-agents remain
 independent and don't know about each other.
 
-#### Running secbot
+#### 7.12.1 Running secbot
 
 ```bash
 # Prerequisites: auditd, gateway, and incident_agent must be running
@@ -992,7 +993,7 @@ go run ./cmd/secbot/ \
 go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
 ```
 
-#### Detected Security Patterns
+#### 7.12.2 Detected Security Patterns
 
 | Pattern | Trigger |
 |---------|---------|
@@ -1001,7 +1002,7 @@ go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
 | `potential_sql_injection` | SQL syntax errors in tool output |
 | `potential_command_injection` | Permission denied / command not found errors |
 
-## Compliance Reporting (cmd/govbot/)
+## 8. Compliance Reporting (cmd/govbot/)
 
 The `govbot` is a one-shot compliance reporter that queries the gateway's
 governance API endpoints and produces a structured compliance snapshot. It
@@ -1015,7 +1016,7 @@ Gateway /api/v1/governance/* → govbot → compliance report + optional Slack a
 govbot is stateless and read-only. No audit socket access or cluster privileges
 are required — only network access to the gateway.
 
-### Compliance Phases
+### 8.1 Compliance Phases
 
 ```
 Phase 1 — Governance Status:       GET /api/v1/governance
@@ -1027,7 +1028,7 @@ Phase 6 — Chain Integrity:         GET /api/v1/governance/verify
 Phase 7 — Compliance Summary:      Aggregated alerts and warnings + optional Slack post
 ```
 
-### Exit Codes
+### 8.2 Exit Codes
 
 | Code | Meaning |
 |------|---------|
@@ -1037,7 +1038,7 @@ Phase 7 — Compliance Summary:      Aggregated alerts and warnings + optional S
 
 Exit code `2` is useful for CI pipelines and cron alerting.
 
-### Detection Logic
+### 8.3 Detection Logic
 
 **Phase 4 — no_match decisions:** When an agent connects to a database host
 that is not listed in `infraConfig`, the policy engine has no tags to evaluate
@@ -1051,7 +1052,9 @@ be working correctly.
 
 **Phase 6 — Chain integrity:** A broken hash chain raises an **alert** (exit 2).
 
-### Running govbot
+See more on `secbot` [here](cmd/secbot/README.md).
+
+### 8.4 Running govbot
 
 ```bash
 # On-demand
@@ -1071,7 +1074,9 @@ docker compose --profile governance run govbot
 kubectl create job govbot-manual --from=cronjob/helpdesk-govbot
 ```
 
-### Scheduling in Kubernetes
+For details on how to run `govbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers and [here](deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
+
+### 8.5 Scheduling in Kubernetes
 
 govbot is deployed as a CronJob. Enable it in `values.yaml`:
 
@@ -1088,7 +1093,7 @@ See `cmd/govbot/README.md` for full documentation.
 
 ---
 
-## Explainability
+## 9. Explainability
 
 Explainability gives users and operators a clear, structured answer to three
 questions about any policy decision:
@@ -1104,7 +1109,7 @@ skipped or matched, and which conditions passed or failed. Without the trace
 the `message` field is the only signal, and it only describes the matched rule,
 not the full reasoning path.
 
-### Decision Trace
+### 9.1 Decision Trace
 
 The policy `engine.evaluate()` loops through policies and rules silently today.
 The design adds an `Explain(req Request) DecisionTrace` method alongside
@@ -1148,7 +1153,7 @@ type ConditionTrace struct {
 Only the **matching** rule records conditions. Skipped rules record only the
 reason they were skipped, keeping the trace concise.
 
-### Human-Readable Explanation
+### 9.2 Human-Readable Explanation
 
 `DecisionTrace.Explanation` is generated from the trace by a pure function,
 `buildExplanation(req, trace)`. Example outputs:
@@ -1205,11 +1210,11 @@ and therefore has no tags. Add it to HELPDESK_INFRA_CONFIG with appropriate
 tags so a policy can be applied.
 ```
 
-### Surfacing the Explanation
+### 9.3 Surfacing the Explanation
 
 The explanation is surfaced in three ways:
 
-#### 1. Inline at the point of denial
+#### 9.3.1 Inline at the point of denial
 
 `PolicyEnforcer.CheckTool` (and `CheckDatabase`, `CheckKubernetes`) today returns
 a terse error string. With explainability, the denial error wraps the full
@@ -1228,7 +1233,7 @@ func (e *DeniedError) Error() string {
 }
 ```
 
-#### 2. Retrospective — explain a past audit event
+#### 9.3.2 Retrospective — explain a past audit event
 
 ```bash
 # CLI
@@ -1241,7 +1246,7 @@ GET /api/v1/governance/events/tool_a1b2c3d4/explain
 The gateway retrieves the stored `DecisionTrace` from the audit event and
 returns it. No re-evaluation is needed — the trace was recorded at the time.
 
-#### 3. Hypothetical — what would happen if?
+#### 9.3.3 Hypothetical — what would happen if?
 
 ```bash
 # CLI
@@ -1257,7 +1262,7 @@ GET /api/v1/governance/explain?resource_type=database&resource_name=prod-db&acti
 The gateway calls `engine.Explain()` in dry-run mode with the provided
 parameters. No audit event is written, no tool is executed.
 
-### Audit Enrichment
+### 9.4 Audit Enrichment
 
 The `PolicyDecision` audit struct gains two fields:
 
@@ -1285,14 +1290,14 @@ type PolicyDecision struct {
 The trace is always stored, regardless of the decision outcome — allowed
 decisions are as important to explain as denied ones.
 
-### Gateway API Endpoints
+### 9.5 Gateway API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/v1/governance/explain` | Hypothetical check — what would happen? |
 | GET | `/api/v1/governance/events/{id}/explain` | Explain a specific past audit event |
 
-#### Hypothetical check request parameters
+#### 9.5.1 Hypothetical check request parameters
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
@@ -1303,7 +1308,7 @@ decisions are as important to explain as denied ones.
 | `user_id` | no | Evaluate as a specific user |
 | `role` | no | Evaluate with a specific role |
 
-#### Response format (both endpoints)
+#### 9.5.2 Response format (both endpoints)
 
 ```json
 {
@@ -1335,7 +1340,7 @@ decisions are as important to explain as denied ones.
 }
 ```
 
-### govexplain CLI
+### 9.6 govexplain CLI
 
 A lightweight CLI binary for humans and scripts (see [here](GOVEXPLAIN.md) for the full reference):
 
@@ -1360,7 +1365,9 @@ govexplain --gateway http://localhost:8080 \
 
 Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
 
-### Implementation Plan
+For details on how to run `govexplain` in your specific deployment environment see [here](deploy/docker-compose/README.md#35-explaining-policy-decisions-govexplain) for running via Docker containers and [here](deploy/helm/README.md#95-explaining-policy-decisions-govexplain) for running on K8s.
+
+### 9.7 Implementation Plan
 
 Changes are additive — no existing behaviour changes:
 
@@ -1382,13 +1389,13 @@ preserving full backwards compatibility.
 
 ---
 
-## Troubleshooting
+## 10. Troubleshooting
 
 Please refer to [here](ARCHITECTURE.md#troubleshooting) for the general purpose
 troubleshooting tips and known issues beyond AI Governance and Audit.
 This troubleshooting section is specific to just these two topics.
 
-#### Events Not Being Recorded
+#### 10.1 Events Not Being Recorded
 
 1. Verify auditd is running:
    ```bash
@@ -1403,7 +1410,7 @@ This troubleshooting section is specific to just these two topics.
 
 3. Check auditd logs for connection errors
 
-#### Auditor Not Receiving Events
+#### 10.2 Auditor Not Receiving Events
 
 1. Verify socket path matches between auditd and auditor:
    ```bash
@@ -1420,7 +1427,7 @@ This troubleshooting section is specific to just these two topics.
 3. Ensure auditor connects before events are sent (events sent before
    connection are not replayed)
 
-#### Chain Verification Fails
+#### 10.3 Chain Verification Fails
 
 If chain verification reports broken links:
 
@@ -1437,7 +1444,7 @@ If chain verification reports broken links:
 3. For legitimate issues, the audit log should be considered compromised
    and investigated
 
-#### Off-Hours Alerts Not Working
+#### 10.4 Off-Hours Alerts Not Working
 
 The auditor uses local time for off-hours detection. Verify your system
 timezone is set correctly:
@@ -1448,30 +1455,30 @@ date  # Check current local time
 
 ---
 
-## Roadmap
+## 11. Roadmap
 
-### Phase 1: Foundation (Complete)
+### 11.1 Phase 1: Foundation (Complete)
 - [x] Audit system with hash chains
 - [x] Real-time monitoring (auditor)
 - [x] Security alerting (secbot)
 - [x] Policy engine (internal/policy/)
 - [x] Policy enforcement in agents (database, k8s)
 
-### Phase 2: Enforcement (Complete)
+### 11.2 Phase 2: Enforcement (Complete)
 - [x] Approval workflows (cmd/approvals/, auditd API, Slack/email notifications)
 - [x] Compliance reporting (cmd/govbot/, Kubernetes CronJob)
 - [x] Blast-radius guardrails (`max_rows_affected`, `max_pods_affected`, post-execution hooks)
 - [x] Explainability — decision trace, `govexplain` CLI, explain API endpoints
 - [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
 
-### Phase 3: Operations
+### 11.3 Phase 3: Operations
 - [ ] Rate limits (write frequency per session)
 - [ ] Circuit breaker (auto-pause on consecutive errors)
 - [ ] Identity & access control (principal/role matching in policy engine)
 - [ ] Time-based policy conditions (schedule: days/hours/timezone)
 - [ ] Rollback capabilities
 
-### Phase 4: Intelligence
+### 11.4 Phase 4: Intelligence
 - [ ] Anomaly detection (ML-based)
 - [ ] Risk scoring
 - [ ] Automated remediation suggestions

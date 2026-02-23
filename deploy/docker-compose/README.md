@@ -320,7 +320,49 @@ GOVBOT_WEBHOOK=https://hooks.slack.com/services/... \
 GOVBOT_SINCE=7d docker compose --profile governance run --rm govbot
 ```
 
-### 3.8 Notification Configuration
+### 3.8 Security Responder (secbot)
+
+Unlike the CLI tools above, `secbot` is a **long-running daemon** — start it once and leave it running alongside the stack. It reads from the audit socket in real time and automatically creates incident bundles when it detects:
+
+- `unauthorized_destructive` — a destructive tool call without a valid approval
+- `hash_mismatch` — audit chain integrity failure (tampered event)
+- `high_volume` — event rate exceeds threshold (potential abuse or runaway agent)
+- `potential_sql_injection` / `potential_command_injection` — error patterns in tool output
+
+It is included in the `--profile governance` set, so it starts automatically with:
+
+```bash
+docker compose --profile governance up -d
+```
+
+To tune its behaviour without editing `docker-compose.yaml`, set variables in `.env`:
+
+```bash
+# docker-compose.yaml passes these through to secbot already:
+# (edit docker-compose.yaml secbot.command if you need other flags)
+
+# Check secbot logs
+docker compose logs -f secbot
+
+# Dry-run mode: log alerts but don't create incidents (useful for tuning)
+# Edit docker-compose.yaml secbot command and add: --dry-run
+
+# Verify it is connected and watching
+docker compose exec secbot cat /proc/1/cmdline | tr '\0' ' '
+```
+
+Key flags (set via `command:` in `docker-compose.yaml`):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-cooldown` | `5m` | Minimum time between incident creations |
+| `-max-events-per-minute` | `100` | Alert threshold for high-volume detection |
+| `-dry-run` | `false` | Log alerts without creating incidents |
+| `-verbose` | `false` | Log every received audit event |
+
+> **Note:** `secbot` must be able to reach the audit socket at `/data/audit/audit.sock` (the shared `audit-data` volume) and the gateway at `http://gateway:8080`. Both are wired correctly in the provided `docker-compose.yaml`.
+
+### 3.9 Notification Configuration
 
 Configure approval and alert notifications in `.env`:
 
