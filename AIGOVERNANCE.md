@@ -53,9 +53,9 @@ aiHelpDesk Governance consists of eight well-defined components:
 | [Approval Workflows](#approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
 | [Compliance Reporting](#compliance-reporting-govbot) | **Implemented** | Scheduled compliance snapshots and alerting |
 | [Guardrails](#guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
-| [Operating Mode](#operating-mode) | Planned | `readonly`/`fix` switch with governance enforcement |
+| [Operating Mode](#operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
 | Identity & Access | Planned | User/role-based permissions |
-| [Explainability](#explainability) | Designed | Decision trace, human-readable explanations, query interface — implementation planned |
+| [Explainability](#explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
@@ -220,7 +220,7 @@ if err := decision.MustAllow(); err != nil {
 }
 ```
 
-See `policies.example.yaml` for a complete policy configuration example.
+See [`policies.example.yaml`](policies.example.yaml) for a complete policy configuration example.
 
 ### Agent Integration
 
@@ -417,7 +417,7 @@ rules:
       max_pods_affected: 10     # kubernetes: resources created/configured/deleted
 ```
 
-See `policies.example.yaml` for full examples.
+See [`policies.example.yaml`](policies.example.yaml) for a complete policy configuration example.
 
 #### How it works
 
@@ -528,6 +528,21 @@ This prevents a misconfigured deployment from silently operating without
 governance. The failure is intentional: in `fix` mode, governance is
 non-negotiable.
 
+Five governance modules are validated at startup via `agentutil.EnforceFixMode`:
+
+| Module | Severity | What is checked |
+|--------|----------|-----------------|
+| `audit` | **fatal** | `HELPDESK_AUDIT_ENABLED=true` and `HELPDESK_AUDIT_URL` set |
+| `policy_engine` | **fatal** | `HELPDESK_POLICY_ENABLED=true` and `HELPDESK_POLICY_FILE` set |
+| `guardrails` | **fatal** | `HELPDESK_POLICY_DRY_RUN` must not be `true` |
+| `approval_workflows` | warning | `HELPDESK_APPROVAL_ENABLED=true` recommended |
+| `explainability` | warning | `HELPDESK_INFRA_CONFIG` set (tag resolution for policy decisions) |
+
+For every violation the agent:
+1. Logs at `ERROR` (fatal) or `WARN` (warning) level
+2. Best-effort POSTs a `governance_violation` audit event to auditd (if `HELPDESK_AUDIT_URL` is set)
+3. Best-effort POSTs an incident to the gateway (if `HELPDESK_GATEWAY_URL` is set)
+
 ### Runtime Enforcement
 
 The mode check runs inside `PolicyEnforcer.CheckTool`, before the policy
@@ -577,14 +592,14 @@ audit system itself has failed.
 | `fix` mode + policy disabled or not loaded | **Critical** | Block tool, create incident, log stderr |
 | `fix` mode + approval disabled for `destructive` action | Warning | Allow with log warning (governance gap, not a hard block) |
 
-### Implementation Notes (Planned)
+### Implementation
 
-This feature is not yet implemented. When built, the key integration points will be:
+Key integration points:
 
-- `agentutil.MustLoadConfig` — validate mode + governance config at startup
-- `agentutil.PolicyEnforcer.CheckTool` — mode gate before policy evaluation
-- `agentutil.PolicyEnforcer` — hold a reference to the gateway URL for the incident fallback
-- `agents/*/main.go` — startup pre-flight check before `a2a.Serve`
+- `agentutil.CheckFixModeViolations(cfg)` — validates all five modules from `agentutil.Config`
+- `agentutil.CheckFixModeAuditViolations(auditEnabled, auditURL)` — audit-only check for the orchestrator (which delegates policy enforcement to sub-agents)
+- `agentutil.EnforceFixMode(ctx, violations, componentName, auditURL)` — logs, records `governance_violation` audit events, creates gateway incidents, and exits on fatal violations
+- `agents/*/main.go` and `cmd/helpdesk/main.go` — call `EnforceFixMode` immediately after config loading, before any agent initialization
 
 ---
 
@@ -1322,7 +1337,7 @@ decisions are as important to explain as denied ones.
 
 ### govexplain CLI
 
-A lightweight CLI binary for humans and scripts:
+A lightweight CLI binary for humans and scripts (see [here](GOVEXPLAIN.md) for the full reference):
 
 ```bash
 # Hypothetical — test a permission before attempting an action

@@ -28,6 +28,9 @@ func main() {
 	cfg := agentutil.MustLoadConfig("localhost:1100")
 	ctx := context.Background()
 
+	// Enforce governance compliance in fix mode before any other initialization.
+	agentutil.EnforceFixMode(ctx, agentutil.CheckFixModeViolations(cfg), "postgres_database_agent", cfg.AuditURL)
+
 	// Load infrastructure config if available (enables database name resolution)
 	if infraPath := os.Getenv("HELPDESK_INFRA_CONFIG"); infraPath != "" {
 		var err error

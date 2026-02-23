@@ -1,0 +1,82 @@
+{{- if .Values.governance.secbot.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-secbot
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: secbot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: secbot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: secbot
+    spec:
+      containers:
+        - name: secbot
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/secbot"]
+          args:
+            - "-socket=/data/audit/audit.sock"
+            - "-gateway=http://{{ include "helpdesk.fullname" . }}-gateway:{{ .Values.gateway.port }}"
+            {{- if .Values.governance.secbot.cooldown }}
+            - "-cooldown={{ .Values.governance.secbot.cooldown }}"
+            {{- end }}
+            {{- if .Values.governance.secbot.maxEventsPerMinute }}
+            - "-max-events-per-minute={{ .Values.governance.secbot.maxEventsPerMinute }}"
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.governance.secbot.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: audit-data
+              mountPath: /data/audit
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: audit-data
+          {{- if .Values.governance.auditd.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "helpdesk.fullname" . }}-auditd
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-secbot
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: secbot
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.governance.secbot.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: secbot
+{{- end }}

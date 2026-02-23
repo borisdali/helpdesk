@@ -29,7 +29,9 @@ BIN_PKGS := \
 	auditd:./cmd/auditd/ \
 	auditor:./cmd/auditor/ \
 	approvals:./cmd/approvals/ \
-	secbot:./cmd/secbot/
+	secbot:./cmd/secbot/ \
+	govbot:./cmd/govbot/ \
+	govexplain:./cmd/govexplain/
 
 .PHONY: test cover test-governance cover-governance integration integration-governance faulttest e2e e2e-governance image push binaries bundle release github-release clean
 

@@ -20,6 +20,9 @@ func main() {
 	cfg := agentutil.MustLoadConfig("localhost:1104")
 	ctx := context.Background()
 
+	// Enforce governance compliance in fix mode before any other initialization.
+	agentutil.EnforceFixMode(ctx, agentutil.CheckFixModeViolations(cfg), "incident_agent", cfg.AuditURL)
+
 	slog.Info("governance", "audit", false, "policy", false)
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)

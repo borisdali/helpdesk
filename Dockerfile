@@ -35,6 +35,7 @@ RUN CGO_ENABLED=0 go build -o /out/auditor         ./cmd/auditor/
 RUN CGO_ENABLED=0 go build -o /out/approvals       ./cmd/approvals/
 RUN CGO_ENABLED=0 go build -o /out/secbot          ./cmd/secbot/
 RUN CGO_ENABLED=0 go build -o /out/govbot          ./cmd/govbot/
+RUN CGO_ENABLED=0 go build -o /out/govexplain     ./cmd/govexplain/
 
 # Stage 2: Runtime image with psql and kubectl.
 FROM debian:bookworm-slim
@@ -76,6 +77,7 @@ COPY --from=builder /out/auditor         /usr/local/bin/auditor
 COPY --from=builder /out/approvals       /usr/local/bin/approvals
 COPY --from=builder /out/secbot          /usr/local/bin/secbot
 COPY --from=builder /out/govbot          /usr/local/bin/govbot
+COPY --from=builder /out/govexplain     /usr/local/bin/govexplain
 
 # Incident bundles default directory.
 RUN mkdir -p /data/incidents

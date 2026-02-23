@@ -23,6 +23,9 @@ func main() {
 	cfg := agentutil.MustLoadConfig("localhost:1106")
 	ctx := context.Background()
 
+	// Enforce governance compliance in fix mode before any other initialization.
+	agentutil.EnforceFixMode(ctx, agentutil.CheckFixModeViolations(cfg), "research_agent", cfg.AuditURL)
+
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {
 		slog.Error("failed to create LLM model", "err", err)

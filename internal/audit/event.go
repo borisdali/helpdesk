@@ -10,12 +10,13 @@ import (
 type EventType string
 
 const (
-	EventTypeDelegation     EventType = "delegation_decision"
-	EventTypeOutcome        EventType = "delegation_outcome"
-	EventTypeGatewayRequest EventType = "gateway_request"
-	EventTypeToolExecution  EventType = "tool_execution"
-	EventTypePolicyDecision EventType = "policy_decision"
-	EventTypeAgentReasoning EventType = "agent_reasoning"
+	EventTypeDelegation          EventType = "delegation_decision"
+	EventTypeOutcome             EventType = "delegation_outcome"
+	EventTypeGatewayRequest      EventType = "gateway_request"
+	EventTypeToolExecution       EventType = "tool_execution"
+	EventTypePolicyDecision      EventType = "policy_decision"
+	EventTypeAgentReasoning      EventType = "agent_reasoning"
+	EventTypeGovernanceViolation EventType = "governance_violation"
 )
 
 // RequestCategory classifies the type of user request.
@@ -128,6 +129,16 @@ type AgentReasoning struct {
 	ToolCalls []string `json:"tool_calls"`
 }
 
+// GovernanceViolation records a compliance violation when a required governance
+// module is disabled or misconfigured in fix mode (HELPDESK_OPERATING_MODE=fix).
+type GovernanceViolation struct {
+	OperatingMode string `json:"operating_mode"` // "fix"
+	Module        string `json:"module"`          // "audit", "policy_engine", "guardrails", etc.
+	Severity      string `json:"severity"`        // "fatal" or "warning"
+	Description   string `json:"description"`
+	Remediation   string `json:"remediation,omitempty"`
+}
+
 // Event is a single audit event for delegation decisions.
 type Event struct {
 	EventID   string    `json:"event_id"`
@@ -148,12 +159,13 @@ type Event struct {
 	Session  Session   `json:"session"`
 	Input    Input     `json:"input"`
 	Output   *Output   `json:"output,omitempty"`
-	Tool            *ToolExecution  `json:"tool,omitempty"`
-	Approval        *Approval       `json:"approval,omitempty"`
-	Decision        *Decision       `json:"decision,omitempty"`
-	PolicyDecision  *PolicyDecision `json:"policy_decision,omitempty"`
-	AgentReasoning  *AgentReasoning `json:"agent_reasoning,omitempty"`
-	Outcome         *Outcome        `json:"outcome,omitempty"`
+	Tool                *ToolExecution       `json:"tool,omitempty"`
+	Approval            *Approval            `json:"approval,omitempty"`
+	Decision            *Decision            `json:"decision,omitempty"`
+	PolicyDecision      *PolicyDecision      `json:"policy_decision,omitempty"`
+	AgentReasoning      *AgentReasoning      `json:"agent_reasoning,omitempty"`
+	GovernanceViolation *GovernanceViolation `json:"governance_violation,omitempty"`
+	Outcome             *Outcome             `json:"outcome,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

@@ -90,6 +90,15 @@ func main() {
 	// Check if audit mode is enabled
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED") == "true" || os.Getenv("HELPDESK_AUDIT_ENABLED") == "1"
 
+	// Enforce governance compliance in fix mode. The orchestrator delegates policy
+	// enforcement to sub-agents, so only the audit module is checked here.
+	agentutil.EnforceFixMode(
+		ctx,
+		agentutil.CheckFixModeAuditViolations(auditEnabled, os.Getenv("HELPDESK_AUDIT_URL")),
+		"helpdesk_orchestrator",
+		os.Getenv("HELPDESK_AUDIT_URL"),
+	)
+
 	// Initialize audit store if enabled
 	var auditor audit.Auditor
 	if auditEnabled {
@@ -169,6 +178,7 @@ func main() {
 
 	// Create tools list
 	var tools []tool.Tool
+	var orchestratorAuditor *audit.ToolAuditor
 	if auditEnabled {
 		// Create delegate tool with audit logging
 		sessionID := "sess_" + uuid.New().String()[:8]
@@ -180,15 +190,23 @@ func main() {
 		}
 		tools = append(tools, delegateTool)
 		slog.Info("delegate_to_agent tool created", "session_id", sessionID)
+
+		// ToolAuditor for capturing the orchestrator's LLM reasoning (why it
+		// chose to delegate to a particular agent). Shares the same session ID
+		// as the delegate tool so all events are correlated.
+		orchestratorAuditor = audit.NewToolAuditor(auditor, "helpdesk_orchestrator", sessionID, "")
 	}
 
 	// Create the root agent
 	agentConfig := llmagent.Config{
-		Name:                "helpdesk_orchestrator",
-		Model:               llmModel,
-		Description:         "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
-		Instruction:         instruction,
-		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportFunc},
+		Name:        "helpdesk_orchestrator",
+		Model:       llmModel,
+		Description: "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
+		Instruction: instruction,
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
+			saveReportFunc,
+			agentutil.NewReasoningCallback(orchestratorAuditor),
+		},
 	}
 
 	if auditEnabled {
