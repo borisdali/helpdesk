@@ -325,7 +325,7 @@ kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
 # In another terminal, query the system
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "What databases are you aware of?"}'
+  -d '{"agent": "database", "message": "What databases are you aware of?"}'
 
 # List available agents
 curl http://localhost:8080/api/v1/agents

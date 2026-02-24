@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,13 +83,19 @@ type integrityStatus struct {
 
 func main() {
 	gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
-	since := flag.Duration("since", 24*time.Hour, "Look-back window for audit events")
+	sinceStr := flag.String("since", "24h", "Look-back window for audit events (e.g. 24h, 7d, 2w)")
 	webhook := flag.String("webhook", "", "Slack webhook URL for posting report summary")
 	dryRun := flag.Bool("dry-run", false, "Collect and print report but do not post to webhook")
 	flag.Parse()
 
+	since, err := parseLookback(*sinceStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid -since value %q: %v\n", *sinceStr, err)
+		os.Exit(1)
+	}
+
 	logf("Gateway:   %s", *gateway)
-	logf("Since:     last %s", *since)
+	logf("Since:     last %s", *sinceStr)
 	logf("Webhook:   %v", *webhook != "")
 	logf("Dry run:   %v", *dryRun)
 	fmt.Println()
@@ -150,9 +157,9 @@ func main() {
 	fmt.Println()
 
 	// ── Phase 3: Audit Activity ───────────────────────────────────────────────
-	logPhase(3, fmt.Sprintf("Audit Activity (last %s)", *since))
+	logPhase(3, fmt.Sprintf("Audit Activity (last %s)", *sinceStr))
 
-	sinceTime := time.Now().Add(-*since)
+	sinceTime := time.Now().Add(-since)
 	events, err := getEvents(*gateway, sinceTime, 1000)
 	if err != nil {
 		logf("WARNING: Could not fetch events: %v", err)
@@ -357,7 +364,7 @@ func main() {
 	if *webhook != "" && !*dryRun {
 		fmt.Println()
 		logf("Posting summary to webhook...")
-		if err := postWebhook(*webhook, overall, alerts, warnings, info, *since); err != nil {
+		if err := postWebhook(*webhook, overall, alerts, warnings, info, *sinceStr); err != nil {
 			logf("WARNING: Failed to post webhook: %v", err)
 		} else {
 			logf("Webhook posted")
@@ -442,7 +449,7 @@ func gatewayGET(baseURL, path string) ([]byte, error) {
 
 // ── Webhook ───────────────────────────────────────────────────────────────────
 
-func postWebhook(webhookURL, overall string, alerts, warnings []string, info *governanceInfo, window time.Duration) error {
+func postWebhook(webhookURL, overall string, alerts, warnings []string, info *governanceInfo, window string) error {
 	icon := ":white_check_mark:"
 	if len(alerts) > 0 {
 		icon = ":rotating_light:"
@@ -509,4 +516,26 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// parseLookback extends time.ParseDuration to support d (days) and w (weeks),
+// which are natural units for compliance look-back windows but not part of
+// Go's built-in duration syntax.
+func parseLookback(s string) (time.Duration, error) {
+	switch {
+	case strings.HasSuffix(s, "w"):
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "w"))
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("invalid duration %q: weeks must be a positive integer", s)
+		}
+		return time.Duration(n) * 7 * 24 * time.Hour, nil
+	case strings.HasSuffix(s, "d"):
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("invalid duration %q: days must be a positive integer", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	default:
+		return time.ParseDuration(s)
+	}
 }

@@ -92,7 +92,7 @@ curl -X POST http://localhost:8080/api/v1/db/get_server_info \
   -d '{"connection_string": "host=db.example.com port=5432 dbname=mydb user=admin"}'
 ```
 
-The [Gateway API](API.md#aihelpdesk-gateway-api-reference) documents the full REST API reference: all 17 endpoints with request/response shapes, query parameters, and `curl` examples. It is recommended for CI/CD pipelines, automation, and containerized environments. See deployment READMEs for details: for [Docker](deploy/docker-compose/README.md), for running [directly on a host](deploy/host/README.md) or for running [on K8s](deploy/helm/README.md).
+The [Gateway API](API.md#gateway-rest-api-port-8080) documents the full REST API reference: all 17 endpoints with request/response shapes, query parameters, and `curl` examples. It is recommended for CI/CD pipelines, automation, and containerized environments. See deployment READMEs for details: for [Docker](deploy/docker-compose/README.md), for running [directly on a host](deploy/host/README.md) or for running [on K8s](deploy/helm/README.md).
 
 ## Helper Scripts
 

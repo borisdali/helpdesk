@@ -57,7 +57,7 @@ Send a natural-language question to an agent.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `agent` | string | yes | `database`, `db`, `k8s`, or `incident` |
-| `message` | string | yes | The question or instruction |
+| `message` | string | yes | The question or instruction (`query` is accepted as an alias) |
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/query \

@@ -106,13 +106,17 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Agent   string `json:"agent"`
 		Message string `json:"message"`
+		Query   string `json:"query"` // alias for message; both are accepted
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
 	if req.Message == "" {
-		writeError(w, http.StatusBadRequest, "message is required")
+		req.Message = req.Query
+	}
+	if req.Message == "" {
+		writeError(w, http.StatusBadRequest, `"message" (or "query") is required`)
 		return
 	}
 

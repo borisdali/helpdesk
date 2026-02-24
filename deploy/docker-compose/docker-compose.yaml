@@ -1,3 +1,5 @@
+name: helpdesk
+
 services:
   # AI Governance: Audit daemon with approval workflows
   auditd:

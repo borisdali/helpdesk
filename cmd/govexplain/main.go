@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -225,15 +226,29 @@ func runList(client *http.Client, baseURL, since, session, trace, effectFilter s
 	return result
 }
 
-// parseSince parses --since as a Go duration ("1h", "30m") or RFC3339 timestamp.
+// parseSince parses --since as a duration or RFC3339 timestamp.
+// Supported duration formats: Go standard (1h, 30m, 45s), plus d (days) and w (weeks).
 func parseSince(s string) (time.Time, error) {
+	// d / w shorthand not in Go's time.ParseDuration.
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err == nil && n > 0 {
+			return time.Now().Add(-time.Duration(n) * 24 * time.Hour), nil
+		}
+	}
+	if strings.HasSuffix(s, "w") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "w"))
+		if err == nil && n > 0 {
+			return time.Now().Add(-time.Duration(n) * 7 * 24 * time.Hour), nil
+		}
+	}
 	if d, err := time.ParseDuration(s); err == nil {
 		return time.Now().Add(-d), nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
-	return time.Time{}, fmt.Errorf("expected duration (e.g. 1h, 30m) or RFC3339 timestamp, got %q", s)
+	return time.Time{}, fmt.Errorf("expected duration (e.g. 1h, 30m, 7d, 2w) or RFC3339 timestamp, got %q", s)
 }
 
 func effectToCode(effect string) int {

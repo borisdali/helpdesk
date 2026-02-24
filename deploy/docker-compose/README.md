@@ -167,7 +167,7 @@ See the [sample log](INSTALL_from_source_sample_interactive_log.md)  of running 
 Here's an example of an SRE bot detecting that the `db.example.com` is going offline, which results in a failure to establish a connection. As a result, aiHelpDesk automatically records an incident and creates a troubelshooting bundle to investigate further either interally or by sending to a vendor:
 
 ```
-  docker run --rm --network docker-compose_default helpdesk:latest /usr/local/bin/srebot -gateway http://gateway:8080 -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
+  docker run --rm --network helpdesk_default helpdesk:latest srebot -gateway http://gateway:8080 -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
 ```
 
 See the [sample log](INSTALL_from_source_sample_SRE_bot_log.md)  of running the above commands.
@@ -304,7 +304,7 @@ docker run --rm --network helpdesk_default helpdesk:latest srebot \
   -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
 ```
 
-> **Note:** The Docker Compose network name defaults to `<directory>_default`. If you unpacked the deploy bundle into a directory named `helpdesk`, the network is `helpdesk_default`. Adjust accordingly, or check with `docker network ls`.
+> **Note:** The network is always `helpdesk_default` because `docker-compose.yaml` pins the project name to `helpdesk` via the top-level `name:` field. If you started the stack without this file (e.g. a very old release), check the actual name with `docker network ls`.
 
 ### 3.7 Running the Compliance Reporter (govbot)
 
@@ -389,7 +389,7 @@ In addition to the interactive orchestrator REPL and the governance APIs, the Ga
 # Query the system
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "What databases are you aware of?"}'
+  -d '{"agent": "database", "message": "What databases are you aware of?"}'
 
 # List available agents
 curl http://localhost:8080/api/v1/agents
