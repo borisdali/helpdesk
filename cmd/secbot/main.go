@@ -88,120 +88,147 @@ func main() {
 	srv := startCallbackServer(*listen, callbackCh)
 	defer srv.Shutdown(context.Background())
 
-	// Connect to audit socket
 	logPhase(2, "Connect to Audit Stream")
-	conn, err := net.Dial("unix", *socketPath)
-	if err != nil {
-		logf("FATAL: Failed to connect to audit socket: %v", err)
-		logf("Hint: Ensure auditd is running with HELPDESK_AUDIT_SOCKET=%s", *socketPath)
-		os.Exit(1)
-	}
-	defer conn.Close()
-	logf("Connected to audit stream")
 	fmt.Println()
 
 	logPhase(3, "Monitoring for Security Events")
 	logf("Watching for: %s", strings.Join(alertTypeList(), ", "))
 	fmt.Println()
 
-	// Track last incident time to enforce cooldown
-	var lastIncidentTime time.Time
-
-	// Process events
-	scanner := bufio.NewScanner(conn)
-	eventCount := 0
+	// Event processing runs in a goroutine that reconnects automatically if
+	// auditd restarts or drops the connection. Reading and processing are
+	// decoupled: a fast reader goroutine keeps the socket buffer drained while
+	// the processor handles slow operations (e.g. gatewayPOST for incidents).
 	go func() {
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(line) == 0 {
-				continue
+		var lastIncidentTime time.Time
+		eventCount := 0
+
+		for {
+			if ctx.Err() != nil {
+				return
 			}
 
-			var event audit.Event
-			if err := json.Unmarshal(line, &event); err != nil {
-				logf("WARN: Failed to parse event: %v", err)
-				continue
-			}
-
-			eventCount++
-			if *verbose {
-				logf("EVENT #%d: %s (type=%s)", eventCount, event.EventID, event.EventType)
-			}
-
-			// Check for high volume first
-			alertType := volTracker.recordAndCheck()
-
-			// If not high volume, check other security patterns
-			if alertType == "" {
-				alertType = detectSecurityAlert(&event)
-			}
-			if alertType == "" {
-				continue
-			}
-
-			logf("SECURITY ALERT: %s", alertType)
-			logf("  Event ID:  %s", event.EventID)
-			logf("  Trace ID:  %s", event.TraceID)
-			logf("  Time:      %s", event.Timestamp.Format(time.RFC3339))
-			if event.Tool != nil {
-				logf("  Tool:      %s", event.Tool.Name)
-				logf("  Agent:     %s", event.Tool.Agent)
-			}
-
-			// Check cooldown
-			if time.Since(lastIncidentTime) < *cooldown {
-				remaining := *cooldown - time.Since(lastIncidentTime)
-				logf("  Skipping incident creation (cooldown: %s remaining)", remaining.Round(time.Second))
-				fmt.Println()
-				continue
-			}
-
-			if *dryRun {
-				logf("  [DRY RUN] Would create incident bundle")
-				fmt.Println()
-				continue
-			}
-
-			// Create incident bundle
-			fmt.Println()
-			logPhase(4, "Creating Security Incident Bundle")
-
-			callbackHost, callbackPort := callbackAddr(*listen)
-			callbackURL := fmt.Sprintf("http://%s:%s/callback", callbackHost, callbackPort)
-
-			description := fmt.Sprintf("Security alert: %s (event: %s, trace: %s)",
-				alertType, event.EventID, event.TraceID)
-
-			logf("POST /api/v1/incidents")
-			logf("  infra_key:    %s", *infraKey)
-			logf("  description:  %s", truncate(description, 60))
-			logf("  callback_url: %s", callbackURL)
-
-			incResp, err := gatewayPOST(*gateway, "/api/v1/incidents", map[string]any{
-				"infra_key":    *infraKey,
-				"description":  description,
-				"callback_url": callbackURL,
-				"layers":       []string{"os", "storage"}, // Skip db/k8s for security incidents
-			})
+			conn, err := net.Dial("unix", *socketPath)
 			if err != nil {
-				logf("ERROR: Failed to create incident: %v", err)
-				fmt.Println()
+				logf("WARN: Cannot connect to audit socket: %v — retrying in 5s", err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
 				continue
 			}
+			logf("Connected to audit stream")
 
-			lastIncidentTime = time.Now()
-			logf("Incident creation initiated (%d chars response)", len(incResp.Text))
-			fmt.Println()
+			// eventCh buffers parsed events so the reader goroutine is never
+			// blocked by slow downstream work.
+			eventCh := make(chan audit.Event, 64)
 
-			// Return to monitoring
-			logPhase(3, "Monitoring for Security Events")
-			fmt.Println()
-		}
+			// Fast reader — sole owner of conn; closes eventCh when done.
+			go func(c net.Conn) {
+				defer close(eventCh)
+				defer c.Close()
+				scanner := bufio.NewScanner(c)
+				for scanner.Scan() {
+					line := scanner.Bytes()
+					if len(line) == 0 {
+						continue
+					}
+					var event audit.Event
+					if err := json.Unmarshal(line, &event); err != nil {
+						logf("WARN: Failed to parse event: %v", err)
+						continue
+					}
+					select {
+					case eventCh <- event:
+					case <-ctx.Done():
+						return
+					}
+				}
+				if err := scanner.Err(); err != nil && ctx.Err() == nil {
+					logf("WARN: Socket read error: %v — will reconnect", err)
+				}
+			}(conn)
 
-		if err := scanner.Err(); err != nil {
-			logf("ERROR: Socket read error: %v", err)
-		} else {
-			logf("Socket closed, stopping event loop")
+			// Processor — runs until eventCh is closed (connection lost).
+			for event := range eventCh {
+				eventCount++
+				if *verbose {
+					logf("EVENT #%d: %s (type=%s)", eventCount, event.EventID, event.EventType)
+				}
+
+				alertType := volTracker.recordAndCheck()
+				if alertType == "" {
+					alertType = detectSecurityAlert(&event)
+				}
+				if alertType == "" {
+					continue
+				}
+
+				logf("SECURITY ALERT: %s", alertType)
+				logf("  Event ID:  %s", event.EventID)
+				logf("  Trace ID:  %s", event.TraceID)
+				logf("  Time:      %s", event.Timestamp.Format(time.RFC3339))
+				if event.Tool != nil {
+					logf("  Tool:      %s", event.Tool.Name)
+					logf("  Agent:     %s", event.Tool.Agent)
+				}
+
+				if time.Since(lastIncidentTime) < *cooldown {
+					remaining := *cooldown - time.Since(lastIncidentTime)
+					logf("  Skipping incident creation (cooldown: %s remaining)", remaining.Round(time.Second))
+					fmt.Println()
+					continue
+				}
+
+				if *dryRun {
+					logf("  [DRY RUN] Would create incident bundle")
+					fmt.Println()
+					continue
+				}
+
+				fmt.Println()
+				logPhase(4, "Creating Security Incident Bundle")
+
+				callbackHost, callbackPort := callbackAddr(*listen)
+				callbackURL := fmt.Sprintf("http://%s:%s/callback", callbackHost, callbackPort)
+				description := fmt.Sprintf("Security alert: %s (event: %s, trace: %s)",
+					alertType, event.EventID, event.TraceID)
+
+				logf("POST /api/v1/incidents")
+				logf("  infra_key:    %s", *infraKey)
+				logf("  description:  %s", truncate(description, 60))
+				logf("  callback_url: %s", callbackURL)
+
+				incResp, err := gatewayPOST(*gateway, "/api/v1/incidents", map[string]any{
+					"infra_key":    *infraKey,
+					"description":  description,
+					"callback_url": callbackURL,
+					"layers":       []string{"os", "storage"},
+				})
+				if err != nil {
+					logf("ERROR: Failed to create incident: %v", err)
+					fmt.Println()
+					continue
+				}
+
+				lastIncidentTime = time.Now()
+				logf("Incident creation initiated (%d chars response)", len(incResp.Text))
+				fmt.Println()
+
+				logPhase(3, "Monitoring for Security Events")
+				fmt.Println()
+			}
+
+			if ctx.Err() != nil {
+				return
+			}
+			logf("Audit stream disconnected — reconnecting in 5s")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
 		}
 	}()
 

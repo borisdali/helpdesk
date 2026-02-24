@@ -32,11 +32,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"helpdesk/internal/policy"
 )
 
 func main() {
 	gateway := flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway base URL (requires gateway + auditd)")
 	auditd := flag.String("auditd", envOrDefault("HELPDESK_AUDIT_URL", ""), "Auditd base URL — bypasses the gateway (e.g. http://localhost:1199)")
+	policyFile := flag.String("policy-file", envOrDefault("HELPDESK_POLICY_FILE", ""), "Policy file for local evaluation — no server required (e.g. policies.yaml)")
 	event := flag.String("event", "", "Audit event ID to explain (retrospective mode)")
 	resource := flag.String("resource", "", "Resource to check: type:name (e.g. database:prod-db)")
 	action := flag.String("action", "", "Action to check: read, write, destructive")
@@ -54,6 +57,19 @@ func main() {
 	limit := flag.Int("limit", 20, "Maximum number of events to show in list mode")
 
 	flag.Parse()
+
+	// Local mode: when --policy-file (or HELPDESK_POLICY_FILE) is set and the
+	// request is a hypothetical check (--resource + --action), evaluate the
+	// policy directly without talking to any server. This lets operators test
+	// policy files from the binary tarball before deploying them.
+	if *policyFile != "" && *resource != "" && *action != "" && *event == "" && !*list {
+		parts := strings.SplitN(*resource, ":", 2)
+		if len(parts) != 2 {
+			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
+			os.Exit(3)
+		}
+		os.Exit(runLocalExplain(*policyFile, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
@@ -409,6 +425,57 @@ func extractEffect(m map[string]json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+// runLocalExplain evaluates a hypothetical policy check entirely in-process —
+// no gateway or auditd required. Used when --policy-file (or HELPDESK_POLICY_FILE)
+// is set.
+func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, userID, role string, asJSON bool) int {
+	cfg, err := policy.LoadFile(policyFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error loading policy file:", err)
+		return 3
+	}
+
+	engine := policy.NewEngine(policy.EngineConfig{PolicyConfig: cfg})
+
+	var tags []string
+	for _, t := range strings.Split(tagsStr, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			tags = append(tags, t)
+		}
+	}
+
+	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID: userID,
+		},
+		Resource: policy.RequestResource{
+			Type: resourceType,
+			Name: resourceName,
+			Tags: tags,
+		},
+		Action: policy.ActionClass(action),
+	}
+	if role != "" {
+		req.Principal.Roles = []string{role}
+	}
+
+	trace := engine.Explain(req)
+
+	if asJSON {
+		out, _ := json.MarshalIndent(trace, "", "  ")
+		fmt.Println(string(out))
+		return effectToCode(string(trace.Decision.Effect))
+	}
+
+	if trace.Explanation != "" {
+		fmt.Println(trace.Explanation)
+	} else {
+		out, _ := json.MarshalIndent(trace, "", "  ")
+		fmt.Println(string(out))
+	}
+	return effectToCode(string(trace.Decision.Effect))
 }
 
 func envOrDefault(key, def string) string {

@@ -117,6 +117,19 @@ if [[ -z "${HELPDESK_POLICY_ENABLED:-}" && -n "${HELPDESK_POLICY_FILE:-}" ]]; th
 fi
 POLICY_ENABLED="${HELPDESK_POLICY_ENABLED:-false}"
 
+# If policy enforcement is enabled but no file was resolved, fall back to the
+# bundled example or fail early rather than crashing later with an obscure error.
+if [[ "$POLICY_ENABLED" == "true" && -z "${HELPDESK_POLICY_FILE:-}" ]]; then
+    fallback="$SCRIPT_DIR/policies.example.yaml"
+    if [[ -f "$fallback" ]]; then
+        echo "WARN: HELPDESK_POLICY_ENABLED=true but HELPDESK_POLICY_FILE not set; using $fallback" >&2
+        HELPDESK_POLICY_FILE="$fallback"
+    else
+        echo "ERROR: HELPDESK_POLICY_ENABLED=true but HELPDESK_POLICY_FILE is not set and no policies.example.yaml found alongside startall.sh." >&2
+        exit 1
+    fi
+fi
+
 # Configure agents to use audit daemon if running.
 # HELPDESK_AUDIT_ENABLED defaults to true when auditd is present, but can be
 # overridden to "false" in .env or the shell to disable audit logging entirely.
@@ -161,7 +174,7 @@ else
     echo "Auditing: disabled"
 fi
 if [[ "$POLICY_ENABLED" == "true" ]]; then
-    echo "Policy:   enabled  ($HELPDESK_POLICY_FILE)"
+    echo "Policy:   enabled  (${HELPDESK_POLICY_FILE:-})"
 else
     echo "Policy:   disabled"
 fi
@@ -193,6 +206,9 @@ else
     echo "Launching interactive orchestrator (type 'exit' to quit)..."
     echo ""
     HELPDESK_AGENT_URLS="$AGENT_URLS" \
+    HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" \
+    HELPDESK_AUDIT_URL="$AUDIT_URL" \
+    HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" \
     HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" \
         "$SCRIPT_DIR/helpdesk"
 fi

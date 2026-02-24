@@ -90,10 +90,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	instruction := prompts.K8s
+	if infraConfig != nil {
+		instruction += "\n\n## Known Infrastructure\n\n" + infraConfig.Summary()
+	}
+
 	k8sAgent, err := llmagent.New(llmagent.Config{
 		Name:        "k8s_agent",
 		Description: "Kubernetes troubleshooting agent that can inspect pods, services, endpoints, events, and logs to diagnose infrastructure issues.",
-		Instruction: prompts.K8s,
+		Instruction: instruction,
 		Model:       llmModel,
 		Tools:       tools,
 		AfterModelCallbacks: []llmagent.AfterModelCallback{

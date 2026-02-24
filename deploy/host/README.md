@@ -81,6 +81,18 @@ HELPDESK_API_KEY=<your-api-key>
 
 `startall.sh` sources `.env` automatically on startup. All variables exported from `.env` are inherited by every agent process.
 
+**Database hostname when the DB runs in Docker:** Docker Desktop (Mac/Windows) maps container ports to `localhost` on the host. Use `localhost` (not the container name) in your connection strings and `infrastructure.json` when the agents run as native binaries on the host:
+
+```bash
+# Correct — agents on the host reach Docker containers via localhost
+host=localhost port=5432 dbname=myapp user=admin
+
+# Wrong — container names only resolve inside the Docker network
+host=my-postgres-container port=5432 dbname=myapp user=admin
+```
+
+On Linux with Docker Engine (no Desktop), use `172.17.0.1` (the Docker bridge gateway IP) or the host's LAN IP if `localhost` doesn't work.
+
 **Database credentials:** Create a `.pgpass` file alongside `.env` for passwordless authentication:
 
 ```bash
@@ -253,7 +265,37 @@ curl -X POST http://localhost:1199/v1/approvals/apr_abc123/approve \
 
 Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
 
-### 7.5 Running the SRE Bot (srebot)
+### 7.5 Real-time Audit Monitor (auditor)
+
+`auditor` watches the audit stream and fires alerts (log, Slack webhook, email) when it detects low-confidence reasoning, unauthorized destructive actions, or chain integrity failures.
+
+`startall.sh --governance` starts it automatically. To run it manually while the rest of the stack is already up:
+
+```bash
+# Default socket path used by startall.sh
+./auditor -socket /tmp/helpdesk-audit.sock
+
+# Log every event (not just alerts)
+./auditor -socket /tmp/helpdesk-audit.sock -log-all
+
+# Post security alerts to Slack
+./auditor -socket /tmp/helpdesk-audit.sock \
+  -webhook https://hooks.slack.com/services/...
+
+# HTTP polling fallback — use when the socket is unavailable
+# (e.g. the auditd process is on a different host or restarted)
+./auditor -audit-service http://localhost:1199
+```
+
+> **Socket path:** `startall.sh` creates the socket at `HELPDESK_AUDIT_SOCKET` (default `/tmp/helpdesk-audit.sock`). The `auditor` binary defaults to `audit.sock` in the current directory — always pass `-socket` explicitly when running it outside `startall.sh`.
+
+Check the live alert log:
+
+```bash
+tail -f /tmp/helpdesk-auditor.log
+```
+
+### 7.6 Running the SRE Bot (srebot)
 
 `srebot` is a one-shot automation tool. Run it while the stack is up — it contacts the gateway, runs AI diagnosis on a database, and creates an incident bundle:
 
@@ -274,7 +316,7 @@ Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
   -symptom "Replication lag exceeded 30 seconds on the primary."
 ```
 
-### 7.6 Running the Compliance Reporter (govbot)
+### 7.7 Running the Compliance Reporter (govbot)
 
 `govbot` generates a compliance summary from the audit trail and optionally posts it to Slack:
 
@@ -290,7 +332,7 @@ Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
   -webhook https://hooks.slack.com/services/...
 ```
 
-### 7.7 Security Responder (secbot)
+### 7.8 Security Responder (secbot)
 
 `secbot` is a **long-running daemon**, not a one-shot CLI. `startall.sh --governance` starts it automatically in the background alongside `auditor`. It reads from the audit socket in real time and automatically creates incident bundles when it detects:
 

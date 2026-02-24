@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -240,20 +241,39 @@ func collectOSLayer(ctx context.Context) (map[string]string, []string) {
 	files := make(map[string]string)
 	var errs []string
 
-	commands := []struct {
+	type osCmd struct {
 		filename string
 		name     string
 		args     []string
-	}{
-		{"uname.txt", "uname", []string{"-a"}},
-		{"uptime.txt", "uptime", nil},
-		{"hostname.txt", "hostname", nil},
-		{"top.txt", "top", []string{"-b", "-n", "1"}},
-		{"ps.txt", "ps", []string{"aux", "--sort=-pcpu"}},
-		{"free.txt", "free", []string{"-h"}},
-		{"vmstat.txt", "vmstat", []string{"1", "3"}},
-		{"dmesg.txt", "dmesg", []string{"--time-format=iso", "-T"}},
-		{"sysctl.txt", "sysctl", []string{"-a"}},
+	}
+
+	var commands []osCmd
+	if runtime.GOOS == "darwin" {
+		commands = []osCmd{
+			{"uname.txt", "uname", []string{"-a"}},
+			{"uptime.txt", "uptime", nil},
+			{"hostname.txt", "hostname", nil},
+			// macOS top: -l <samples> for logging mode, -n <procs>, no -b flag.
+			{"top.txt", "top", []string{"-l", "1", "-n", "20", "-s", "0"}},
+			// macOS ps: --sort is a GNU extension; plain aux is sufficient.
+			{"ps.txt", "ps", []string{"aux"}},
+			// macOS has no `free`; vm_stat covers both free and vmstat.
+			{"vm_stat.txt", "vm_stat", nil},
+			{"sysctl.txt", "sysctl", []string{"-a"}},
+			// dmesg requires sudo on macOS — skipped.
+		}
+	} else {
+		commands = []osCmd{
+			{"uname.txt", "uname", []string{"-a"}},
+			{"uptime.txt", "uptime", nil},
+			{"hostname.txt", "hostname", nil},
+			{"top.txt", "top", []string{"-b", "-n", "1"}},
+			{"ps.txt", "ps", []string{"aux", "--sort=-pcpu"}},
+			{"free.txt", "free", []string{"-h"}},
+			{"vmstat.txt", "vmstat", []string{"1", "3"}},
+			{"dmesg.txt", "dmesg", []string{"--time-format=iso", "-T"}},
+			{"sysctl.txt", "sysctl", []string{"-a"}},
+		}
 	}
 
 	for _, c := range commands {
@@ -273,16 +293,31 @@ func collectStorageLayer(ctx context.Context) (map[string]string, []string) {
 	files := make(map[string]string)
 	var errs []string
 
-	commands := []struct {
+	type storageCmd struct {
 		filename string
 		name     string
 		args     []string
-	}{
-		{"df.txt", "df", []string{"-h"}},
-		{"df_inodes.txt", "df", []string{"-i"}},
-		{"mount.txt", "mount", nil},
-		{"lsblk.txt", "lsblk", []string{"-f"}},
-		{"iostat.txt", "iostat", []string{"-x", "1", "3"}},
+	}
+
+	var commands []storageCmd
+	if runtime.GOOS == "darwin" {
+		commands = []storageCmd{
+			{"df.txt", "df", []string{"-h"}},
+			{"df_inodes.txt", "df", []string{"-i"}},
+			{"mount.txt", "mount", nil},
+			// macOS has no lsblk; diskutil list gives equivalent disk inventory.
+			{"diskutil.txt", "diskutil", []string{"list"}},
+			// macOS iostat: -x is Linux-only; -c <count> -w <wait> is the macOS syntax.
+			{"iostat.txt", "iostat", []string{"-c", "3", "-w", "1"}},
+		}
+	} else {
+		commands = []storageCmd{
+			{"df.txt", "df", []string{"-h"}},
+			{"df_inodes.txt", "df", []string{"-i"}},
+			{"mount.txt", "mount", nil},
+			{"lsblk.txt", "lsblk", []string{"-f"}},
+			{"iostat.txt", "iostat", []string{"-x", "1", "3"}},
+		}
 	}
 
 	for _, c := range commands {

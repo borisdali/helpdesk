@@ -98,10 +98,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	instruction := prompts.Database
+	if infraConfig != nil {
+		instruction += "\n\n## Known Infrastructure\n\n" + infraConfig.Summary()
+	}
+
 	dbAgent, err := llmagent.New(llmagent.Config{
 		Name:        "postgres_database_agent",
 		Description: "PostgreSQL database troubleshooting agent that can check connections, query statistics, configuration, replication status, and diagnose performance issues.",
-		Instruction: prompts.Database,
+		Instruction: instruction,
 		Model:       llmModel,
 		Tools:       tools,
 		AfterModelCallbacks: []llmagent.AfterModelCallback{

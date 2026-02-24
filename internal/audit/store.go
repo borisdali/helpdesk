@@ -493,24 +493,52 @@ func (s *Store) startSocketListener() error {
 }
 
 // notifyListeners sends an event to all connected listeners.
+// Writes are dispatched in a goroutine so Record() returns immediately and
+// slow consumers don't block audit ingestion. Dead connections are pruned
+// after each notification pass.
 func (s *Store) notifyListeners(eventJSON []byte) {
+	// Snapshot the listener list under a read lock — no I/O while holding the lock,
+	// and no lock-upgrade race from the old RLock→Lock pattern.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Append newline for line-based reading.
-	data := append(eventJSON, '\n')
-
-	for i := len(s.listeners) - 1; i >= 0; i-- {
-		conn := s.listeners[i]
-		conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-		if _, err := conn.Write(data); err != nil {
-			// Remove dead connection.
-			conn.Close()
-			s.mu.RUnlock()
-			s.mu.Lock()
-			s.listeners = append(s.listeners[:i], s.listeners[i+1:]...)
-			s.mu.Unlock()
-			s.mu.RLock()
-		}
+	if len(s.listeners) == 0 {
+		s.mu.RUnlock()
+		return
 	}
+	conns := make([]net.Conn, len(s.listeners))
+	copy(conns, s.listeners)
+	s.mu.RUnlock()
+
+	// Copy the payload; eventJSON is owned by the caller and must not be mutated.
+	data := make([]byte, len(eventJSON)+1)
+	copy(data, eventJSON)
+	data[len(eventJSON)] = '\n'
+
+	go func() {
+		var dead []net.Conn
+		for _, conn := range conns {
+			// Allow clients up to 5 s to drain their receive buffer before
+			// we consider them dead (e.g. secbot may be mid-incident-creation).
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if _, err := conn.Write(data); err != nil {
+				conn.Close()
+				dead = append(dead, conn)
+			}
+		}
+		if len(dead) == 0 {
+			return
+		}
+		deadSet := make(map[net.Conn]bool, len(dead))
+		for _, c := range dead {
+			deadSet[c] = true
+		}
+		s.mu.Lock()
+		live := make([]net.Conn, 0, len(s.listeners))
+		for _, c := range s.listeners {
+			if !deadSet[c] {
+				live = append(live, c)
+			}
+		}
+		s.listeners = live
+		s.mu.Unlock()
+	}()
 }
