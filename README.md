@@ -61,7 +61,10 @@ See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instruct
 See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on how to deploy aiHelpDesk on K8s.
 
 ## Architecture
-See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configuration, API reference, and extension guide.
+See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configuration, and extension guide.
+
+## Gateway API Reference
+See [API.md](API.md) for the full REST API reference: all 17 endpoints with request/response shapes, query parameters, and `curl` examples.
 
 ## AI Governance 
 aiHelpDesk is proud to feature a sophisticated AI Governanance system,
@@ -106,13 +109,15 @@ aiHelpDesk includes helper scripts for working around the ADK REPL bug in contai
 See [scripts/README.md](scripts/README.md) for detailed usage.
 
 ## Demo upstream agents calling aiHelpDesk
-aiHelpDesk can certainly be used by humans and that's what the interactive LLM-powered Orchestrator is there for. Additionally however, an upstream agent or a program can call aiHelpDesk agents directly as well.
+aiHelpDesk can certainly be used by humans and that's what the interactive LLM-powered Orchestrator is there for. Additionally however, an upstream agent or a program can call aiHelpDesk agents directly as well. Here are some examples:
 
 See [a sample](cmd/srebot/README.md) of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a Gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
 
 See [a sample](cmd/secbot/README.md) of a Security Responder bot that automatically sends alerts in real-time for security violations (e.g. for low confidence agent delegations, chain tampering, off-hours activity, high error rates, unauthorized destructive operations, etc.) and optionally creates a security incident (with the full incident bundle snapshot).
 
 See [a sample](cmd/govbot/README.md) of a Compliance Reporter bot that queries the aiHelpDesk Gateway's governance API endpoints and produces a structured compliance snapshot. It is designed to run on-demand or on a schedule (e.g. daily cron / Kubernetes CronJob) and optionally post a summary to a Slack webhook. In contrast to SEC bot (reactive, threat-driven) and Auditor (streaming, rule-based alerts), GOV bot is designed to be periodic and analytical — the compliance officer's tool rather than the on-call engineer's troubleshooter.
+
+See [a Real-Time Auditor](AIGOVERNANCE.md#77-auditor-cli-cmdauditor) that can be used as an inspiration for an upstream long-running agent. In constrast to the SRE bot and the GOV bot that can be considered as one-shot automation agents, the SEC bot and the Auditor can be viewed as the core daemons (both are long-running and both connect to the audit Unix socket and process events in real time. The distinction is purely in what they do: the Auditor fires webhook/email/syslog alerts, while SEC bot creates an incident bundle (via aiHelpDesk Gateway).
 
 ## Sample interactive dialog with a human operator
 aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").

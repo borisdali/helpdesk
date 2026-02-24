@@ -70,6 +70,8 @@ database-agent:
 
   ### 1.2 The non-Docker route to run the pre-built binaries on a host
 
+> **Note:** This section 1.2 is left here mostly for historical reasons. Please see now a dedicated page for running aiHelpDesk directly on a host [here](../host/README.md).
+
 To run aiHelpDesk directly on a host (without Docker), download the right platform-specific tarballs and run the following commands:
 
 ```
@@ -381,7 +383,7 @@ HELPDESK_EMAIL_TO=ops@example.com
 
 ## 4. Using the Gateway API
 
-In addition to the interactive orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access:
+In addition to the interactive orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
 
 ```bash
 # Query the system

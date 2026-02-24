@@ -345,7 +345,7 @@ approvals approve <approval-id> --url http://localhost:1199
 # Deny a specific request
 approvals deny <approval-id> --url http://localhost:1199
 ```
-For details on how to run `approvals` in your specific deployment environment see [here](deploy/docker-compose/README.md#34-managing-approvals) for running via Docker containers, [here](../../deploy/host#73-managing-approvals) for running directly on a host and [here](deploy/helm/README.md#94-approval-workflow) for running on K8s.
+For details on how to run `approvals` in your specific deployment environment see [here](deploy/docker-compose/README.md#34-managing-approvals) for running via Docker containers, [here](deploy/host/README.md#73-managing-approvals) for running directly on a host and [here](deploy/helm/README.md#94-approval-workflow) for running on K8s.
 
 ### 4.4 Approval API Endpoints
 
@@ -979,7 +979,7 @@ independent and don't know about each other.
 
 #### 7.12.1 Running secbot
 
-For details on how to run `secbot` in your specific deployment environment see [here](../../deploy/docker-compose/README.md#38-security-responder-secbot) for running via Docker containers, [here](../../deploy/host#77-security-responder-secbot) for running directly on a host and [here](../../deploy/helm/README.md#98-security-responder-secbot) for running on K8s.
+For details on how to run `secbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#38-security-responder-secbot) for running via Docker containers, [here](deploy/host#77-security-responder-secbot) for running directly on a host and [here](deploy/helm/README.md#98-security-responder-secbot) for running on K8s.
 
 ```bash
 # Prerequisites: auditd, gateway, and incident_agent must be running
@@ -1076,7 +1076,7 @@ docker compose --profile governance run govbot
 kubectl create job govbot-manual --from=cronjob/helpdesk-govbot
 ```
 
-For details on how to run `govbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers, [here](../../deploy/host#76-running-the-compliance-reporter-govbot) for running directly on a host and [here](deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
+For details on how to run `govbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers, [here](deploy/host#76-running-the-compliance-reporter-govbot) for running directly on a host and [here](deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
 
 ### 8.5 Scheduling in Kubernetes
 
@@ -1367,7 +1367,7 @@ govexplain --gateway http://localhost:8080 \
 
 Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
 
-For details on how to run `govexplain` in your specific deployment environment see [here](deploy/docker-compose/README.md#35-explaining-policy-decisions-govexplain) for running via Docker containers, [here](../../deploy/host#74-explaining-policy-decisions-govexplain) for running directly on a host and [here](deploy/helm/README.md#95-explaining-policy-decisions-govexplain) for running on K8s.
+For details on how to run `govexplain` in your specific deployment environment see [here](deploy/docker-compose/README.md#35-explaining-policy-decisions-govexplain) for running via Docker containers, [here](deploy/host#74-explaining-policy-decisions-govexplain) for running directly on a host and [here](deploy/helm/README.md#95-explaining-policy-decisions-govexplain) for running on K8s.
 
 ### 9.7 Implementation Plan
 

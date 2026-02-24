@@ -123,7 +123,7 @@ tail -f /tmp/helpdesk-gateway.log
 
 ## 6. Headless / API Mode
 
-To use the REST gateway API without the interactive REPL:
+To use the REST gateway API without the interactive REPL. See [API.md](../../API.md) for the full endpoint reference.
 
 ```bash
 ./startall.sh --no-repl &

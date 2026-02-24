@@ -316,7 +316,7 @@ To include infrastructure config, create a `my-values.yaml` as shown above and a
 
 ## 7. Using the Gateway API
 
-While the interactive orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation:
+While the interactive orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
 
 ```bash
 # Port-forward the gateway

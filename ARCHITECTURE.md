@@ -488,14 +488,27 @@ failures are logged but do not affect the tool result.
 For consumers that prefer plain REST API over JSON-RPC, the optional REST Gateway
 (`cmd/gateway/`) provides HTTP endpoints that proxy to the A2A sub-agents:
 
-| Method | Endpoint              | Description                              |
-|--------|-----------------------|------------------------------------------|
-| GET    | `/api/v1/agents`      | List discovered agents + cards           |
-| POST   | `/api/v1/query`       | Send natural language message to an agent |
-| POST   | `/api/v1/incidents`   | Create incident bundle                   |
-| GET    | `/api/v1/incidents`   | List incident bundles                    |
-| POST   | `/api/v1/db/{tool}`   | Call database agent tool                 |
-| POST   | `/api/v1/k8s/{tool}`  | Call K8s agent tool                      |
+| Method | Endpoint                                  | Description                              |
+|--------|-------------------------------------------|------------------------------------------|
+| GET    | `/api/v1/agents`                          | List discovered agents + cards           |
+| POST   | `/api/v1/query`                           | Send natural language message to an agent |
+| POST   | `/api/v1/incidents`                       | Create incident bundle                   |
+| GET    | `/api/v1/incidents`                       | List incident bundles                    |
+| POST   | `/api/v1/db/{tool}`                       | Call database agent tool                 |
+| POST   | `/api/v1/k8s/{tool}`                      | Call K8s agent tool                      |
+| POST   | `/api/v1/research`                        | Web research query                       |
+| GET    | `/api/v1/infrastructure`                  | Infrastructure inventory summary         |
+| GET    | `/api/v1/databases`                       | List configured databases                |
+| GET    | `/api/v1/governance`                      | Governance status (audit + policy)       |
+| GET    | `/api/v1/governance/policies`             | Active policy rules                      |
+| GET    | `/api/v1/governance/explain`              | Hypothetical policy check                |
+| GET    | `/api/v1/governance/events`               | Audit event trail (filterable)           |
+| GET    | `/api/v1/governance/events/{eventID}`     | Single audit event by ID                 |
+| GET    | `/api/v1/governance/approvals/pending`    | Pending approvals queue                  |
+| GET    | `/api/v1/governance/approvals`            | All approvals (filterable)               |
+| GET    | `/api/v1/governance/verify`               | Audit chain integrity check              |
+
+See [API.md](API.md) for the complete reference including request/response shapes, query parameters, and examples.
 
 Start the Gateway:
 ```bash

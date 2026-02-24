@@ -42,7 +42,7 @@ Exit code `2` is useful for CI pipelines and cron alerting.
 
 ## Command Line Flags
 
-For details on how to run `govbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers, [here](../../deploy/host#76-running-the-compliance-reporter-govbot) for running directly on a host and [here](deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
+For details on how to run `govbot` in your specific deployment environment see [here](../../deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers, [here](../../deploy/host#76-running-the-compliance-reporter-govbot) for running directly on a host and [here](../../deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
 
 ```
 -gateway string
