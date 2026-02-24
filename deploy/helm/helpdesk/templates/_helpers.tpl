@@ -24,6 +24,17 @@ http://{{ include "helpdesk.fullname" . }}-database-agent:{{ .Values.agents.data
 {{- end -}}
 
 {{/*
+Operating mode env var — emitted only when governance.operatingMode is set.
+Include this in every process that calls EnforceFixMode or CheckFixModeAuditViolations.
+*/}}
+{{- define "helpdesk.operatingModeEnv" -}}
+{{- if .Values.governance.operatingMode }}
+- name: HELPDESK_OPERATING_MODE
+  value: {{ .Values.governance.operatingMode | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Common model environment variables injected into every agent/orchestrator pod.
 */}}
 {{- define "helpdesk.modelEnv" -}}

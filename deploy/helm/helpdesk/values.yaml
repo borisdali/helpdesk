@@ -127,6 +127,12 @@ governance:
     # Name of ConfigMap containing policies.yaml
     configMap: ""
 
+  # Operating mode: set to "fix" to require all governance modules (audit, policy,
+  # approvals) to be active before agents will start. Agents refuse to start if any
+  # required module is missing or misconfigured.
+  # Leave empty (default) for normal operation.
+  operatingMode: ""
+
   # Approval workflow settings
   approvals:
     # Default timeout for approval requests

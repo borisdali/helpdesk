@@ -404,7 +404,55 @@ governance:
     maxEventsPerMinute: 100
 ```
 
-### 9.3 Policy Configuration
+### 9.3 Fix Operating Mode
+
+Fix mode requires all governance modules (audit, policy, approvals) to be active before any agent will start. An agent that detects a missing or misconfigured module logs the violation and exits — it cannot be used until the gap is resolved.
+
+To enable fix mode, set `governance.operatingMode` in `values.yaml` alongside the required governance config:
+
+```yaml
+governance:
+  operatingMode: fix
+
+  auditd:
+    enabled: true
+    port: 1199
+    persistence:
+      enabled: true
+      size: 5Gi
+
+  policy:
+    enabled: true
+    configMap: helpdesk-policies   # must exist — see §9.4
+
+  approvals:
+    timeout: "5m"
+```
+
+Then apply:
+
+```bash
+helm upgrade helpdesk . -f values.yaml
+```
+
+Because `operatingMode` is rendered directly into every agent's Deployment spec, `helm upgrade` alone triggers a full rollout — no manual `kubectl rollout restart` needed.
+
+If an agent exits immediately after enabling fix mode, check its logs for the specific violation:
+
+```bash
+kubectl -n helpdesk-system logs deploy/helpdesk-database-agent | grep "governance violation"
+```
+
+Common causes and remediations:
+
+| Violation | Cause | Fix |
+|-----------|-------|-----|
+| `audit: fatal` | `governance.auditd.enabled` is false | Set `governance.auditd.enabled: true` |
+| `policy_engine: fatal` | `governance.policy.enabled` is false or `configMap` not set | Set `governance.policy.enabled: true` and create the ConfigMap |
+| `guardrails: fatal` | `HELPDESK_POLICY_DRY_RUN=true` is set | Remove or unset `HELPDESK_POLICY_DRY_RUN` |
+| `approval_workflows: warning` | Approval timeout not configured | Set `governance.approvals.timeout` |
+
+### 9.4 Policy Configuration
 
 **Step 1: Create a `policies.yaml` file**
 

@@ -29,6 +29,13 @@ spec:
             - name: HELPDESK_STREAMING_MODE
               value: {{ .Values.orchestrator.streamingMode | default "none" | quote }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- if .Values.governance.auditd.enabled }}
+            - name: HELPDESK_AUDIT_ENABLED
+              value: "true"
+            - name: HELPDESK_AUDIT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+            {{- end }}
+            {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- if .Values.infrastructure }}
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json

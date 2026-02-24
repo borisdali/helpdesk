@@ -36,6 +36,13 @@ spec:
             - name: HELPDESK_AUDIT_URL
               value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
             {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: HELPDESK_POLICY_ENABLED
+              value: "true"
+            - name: HELPDESK_POLICY_FILE
+              value: /etc/helpdesk/policies.yaml
+            {{- end }}
+            {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.incident.port }}
