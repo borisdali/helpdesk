@@ -28,7 +28,8 @@ import (
 
 const (
 	auditdAddr  = "http://localhost:19901"
-	auditdAddr2 = "http://localhost:19902" // for policy-enabled instance
+	auditdAddr2 = "http://localhost:19902" // for policy-enabled instance (HELPDESK_POLICY_ENABLED=true)
+	auditdAddr3 = "http://localhost:19903" // for default-config instance (HELPDESK_POLICY_FILE set, HELPDESK_POLICY_ENABLED absent)
 )
 
 // auditdBin is the path to the compiled auditd binary, set in TestMain.
@@ -702,5 +703,108 @@ func TestGovernance_PoliciesSummaryWithEngine(t *testing.T) {
 	rules, _ := pol["rules"].([]any)
 	if len(rules) != 2 {
 		t.Errorf("rules count = %d, want 2", len(rules))
+	}
+}
+
+// =============================================================================
+// Default-config govexplain regression
+// =============================================================================
+
+// stripEnv returns os.Environ() with all entries for the given keys removed.
+// Used to prevent test-runner env vars from leaking into subprocess invocations.
+func stripEnv(keys ...string) []string {
+	skip := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		skip[k] = true
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		if !skip[key] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// startAuditdFileOnly starts auditd on auditdAddr3 with HELPDESK_POLICY_FILE set
+// but HELPDESK_POLICY_ENABLED absent — replicating the docker-compose default
+// after the fix (empty default for HELPDESK_POLICY_ENABLED in the auditd service).
+// It strips HELPDESK_POLICY_ENABLED from the test runner's environment so the
+// "absent" condition is not accidentally overridden.
+func startAuditdFileOnly(t *testing.T, policyPath string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "audit.db")
+	socketPath := fmt.Sprintf("/tmp/atest3-%d.sock", time.Now().UnixNano()%1e9)
+
+	cmd := exec.Command(auditdBin,
+		"-listen", ":19903",
+		"-db", dbPath,
+		"-socket", socketPath,
+	)
+	cmd.Env = append(stripEnv("HELPDESK_POLICY_ENABLED"),
+		"HELPDESK_POLICY_FILE="+policyPath,
+	)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start file-only auditd: %v", err)
+	}
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	})
+
+	if !waitForReady(auditdAddr3+"/health", 10*time.Second) {
+		t.Fatal("file-only auditd did not become ready within 10s")
+	}
+}
+
+// TestGovernance_Explain_DefaultConfig is a regression test for the deployment
+// bug where HELPDESK_POLICY_ENABLED defaulted to "false" in docker-compose,
+// preventing auditd from loading the policy engine even when a policy file was
+// mounted. With the fix (empty default), setting only HELPDESK_POLICY_FILE
+// should be sufficient for auditd to load the policy and serve real decisions
+// from /v1/governance/explain — not the stub {"enabled":false} response.
+func TestGovernance_Explain_DefaultConfig(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "policies.yaml")
+	if err := os.WriteFile(policyPath, []byte(minimalPolicyYAML), 0644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	startAuditdFileOnly(t, policyPath)
+
+	// Governance info must show the policy engine is loaded.
+	info := get(t, auditdAddr3, "/v1/governance/info")
+	policyInfo, _ := info["policy"].(map[string]any)
+	if policyInfo == nil {
+		t.Fatal("expected policy field in governance info")
+	}
+	if enabled, _ := policyInfo["enabled"].(bool); !enabled {
+		t.Error("policy.enabled should be true when HELPDESK_POLICY_FILE is set and HELPDESK_POLICY_ENABLED is absent")
+	}
+
+	// Explain: read on a database resource should be allowed.
+	readResp := get(t, auditdAddr3,
+		"/v1/governance/explain?resource_type=database&resource_name=prod-db&action=read")
+	readDecision, _ := readResp["decision"].(map[string]any)
+	if readDecision == nil {
+		// Engine was not loaded — we got the stub {"enabled":false} response instead.
+		t.Fatalf("explain response missing 'decision' field (got %v); policy engine may not have loaded", readResp)
+	}
+	if effect, _ := readDecision["effect"].(string); effect != "allow" {
+		t.Errorf("explain effect for read = %q, want allow", effect)
+	}
+
+	// Explain: write on a database resource should be denied.
+	writeResp := get(t, auditdAddr3,
+		"/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write")
+	writeDecision, _ := writeResp["decision"].(map[string]any)
+	if writeDecision == nil {
+		t.Fatalf("explain response missing 'decision' field (got %v); policy engine may not have loaded", writeResp)
+	}
+	if effect, _ := writeDecision["effect"].(string); effect != "deny" {
+		t.Errorf("explain effect for write = %q, want deny", effect)
 	}
 }

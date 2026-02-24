@@ -11,8 +11,14 @@ services:
       HELPDESK_AUDIT_ADDR: "0.0.0.0:1199"
       HELPDESK_AUDIT_DB: /data/audit/audit.db
       HELPDESK_AUDIT_SOCKET: /data/audit/audit.sock
-      # Policy (for governance info endpoint)
-      HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
+      # Set so that approvals/govexplain binaries exec'd inside this container
+      # can find auditd without requiring -e or an explicit --url flag.
+      HELPDESK_AUDIT_URL: http://localhost:1199
+      # Policy (for governance info / govexplain endpoint).
+      # Empty default: auditd loads the mounted policy file unconditionally so
+      # that govexplain hypothetical checks work out of the box.
+      # Set HELPDESK_POLICY_ENABLED=false in .env to suppress loading entirely.
+      HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       # Approval notification (optional)
       HELPDESK_APPROVAL_WEBHOOK: ${HELPDESK_APPROVAL_WEBHOOK:-}
@@ -26,7 +32,7 @@ services:
       HELPDESK_EMAIL_TO: ${HELPDESK_EMAIL_TO:-}
     volumes:
       - audit-data:/data/audit
-      - ${HELPDESK_POLICY_FILE:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1199:1199"
     restart: unless-stopped
@@ -58,7 +64,7 @@ services:
       PGPASSWORD: ${PGPASSWORD:-}
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
-      - ${HELPDESK_POLICY_FILE:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
       - ${PGPASSFILE:-./.pgpass}:/root/.pgpass:ro
     ports:
       - "1100:1100"
@@ -89,7 +95,7 @@ services:
     volumes:
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
-      - ${HELPDESK_POLICY_FILE:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1102:1102"
     restart: unless-stopped
