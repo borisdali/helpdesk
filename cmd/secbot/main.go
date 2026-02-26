@@ -56,6 +56,7 @@ type a2aResponse struct {
 
 func main() {
 	socketPath := flag.String("socket", "/tmp/helpdesk-audit.sock", "Path to audit Unix socket")
+	auditServiceURL := flag.String("audit-service", "", "URL of audit HTTP service for polling mode (alternative to Unix socket)")
 	gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
 	listen := flag.String("listen", ":9091", "Callback listener address")
 	infraKey := flag.String("infra-key", "security-incident", "Infrastructure identifier for incident bundles")
@@ -75,7 +76,11 @@ func main() {
 	defer cancel()
 
 	logPhase(1, "Startup")
-	logf("Audit socket:  %s", *socketPath)
+	if *auditServiceURL != "" {
+		logf("Audit service: %s (HTTP polling)", *auditServiceURL)
+	} else {
+		logf("Audit socket:  %s", *socketPath)
+	}
 	logf("Gateway:       %s", *gateway)
 	logf("Callback:      %s", *listen)
 	logf("Cooldown:      %s", *cooldown)
@@ -95,11 +100,20 @@ func main() {
 	logf("Watching for: %s", strings.Join(alertTypeList(), ", "))
 	fmt.Println()
 
-	// Event processing runs in a goroutine that reconnects automatically if
-	// auditd restarts or drops the connection. Reading and processing are
-	// decoupled: a fast reader goroutine keeps the socket buffer drained while
-	// the processor handles slow operations (e.g. gatewayPOST for incidents).
+	// Event processing runs in a goroutine. When -audit-service is set, HTTP
+	// polling is used instead of the Unix socket (required on K8s when
+	// governance.auditd.persistence.enabled=false, as emptyDir volumes are
+	// per-pod and cannot share the Unix socket across pods).
+	// When using the socket, the goroutine reconnects automatically if auditd
+	// restarts or drops the connection, with reading and processing decoupled
+	// via a buffered channel so slow downstream work never blocks the reader.
 	go func() {
+		if *auditServiceURL != "" {
+			runHTTPPollingMode(ctx, *auditServiceURL, *gateway, *infraKey, *listen,
+				*cooldown, *dryRun, *verbose, volTracker)
+			return
+		}
+
 		var lastIncidentTime time.Time
 		eventCount := 0
 
@@ -165,59 +179,8 @@ func main() {
 					continue
 				}
 
-				logf("SECURITY ALERT: %s", alertType)
-				logf("  Event ID:  %s", event.EventID)
-				logf("  Trace ID:  %s", event.TraceID)
-				logf("  Time:      %s", event.Timestamp.Format(time.RFC3339))
-				if event.Tool != nil {
-					logf("  Tool:      %s", event.Tool.Name)
-					logf("  Agent:     %s", event.Tool.Agent)
-				}
-
-				if time.Since(lastIncidentTime) < *cooldown {
-					remaining := *cooldown - time.Since(lastIncidentTime)
-					logf("  Skipping incident creation (cooldown: %s remaining)", remaining.Round(time.Second))
-					fmt.Println()
-					continue
-				}
-
-				if *dryRun {
-					logf("  [DRY RUN] Would create incident bundle")
-					fmt.Println()
-					continue
-				}
-
-				fmt.Println()
-				logPhase(4, "Creating Security Incident Bundle")
-
-				callbackHost, callbackPort := callbackAddr(*listen)
-				callbackURL := fmt.Sprintf("http://%s:%s/callback", callbackHost, callbackPort)
-				description := fmt.Sprintf("Security alert: %s (event: %s, trace: %s)",
-					alertType, event.EventID, event.TraceID)
-
-				logf("POST /api/v1/incidents")
-				logf("  infra_key:    %s", *infraKey)
-				logf("  description:  %s", truncate(description, 60))
-				logf("  callback_url: %s", callbackURL)
-
-				incResp, err := gatewayPOST(*gateway, "/api/v1/incidents", map[string]any{
-					"infra_key":    *infraKey,
-					"description":  description,
-					"callback_url": callbackURL,
-					"layers":       []string{"os", "storage"},
-				})
-				if err != nil {
-					logf("ERROR: Failed to create incident: %v", err)
-					fmt.Println()
-					continue
-				}
-
-				lastIncidentTime = time.Now()
-				logf("Incident creation initiated (%d chars response)", len(incResp.Text))
-				fmt.Println()
-
-				logPhase(3, "Monitoring for Security Events")
-				fmt.Println()
+				lastIncidentTime = processAlert(alertType, &event, lastIncidentTime,
+					*cooldown, *gateway, *infraKey, *listen, *dryRun)
 			}
 
 			if ctx.Err() != nil {
@@ -426,4 +389,197 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// --- Alert handling ---
+
+// processAlert logs a security alert and creates an incident bundle when appropriate.
+// Returns the updated lastIncidentTime.
+func processAlert(
+	alertType string,
+	event *audit.Event,
+	lastIncidentTime time.Time,
+	cooldown time.Duration,
+	gateway, infraKey, listenAddr string,
+	dryRun bool,
+) time.Time {
+	logf("SECURITY ALERT: %s", alertType)
+	logf("  Event ID:  %s", event.EventID)
+	logf("  Trace ID:  %s", event.TraceID)
+	logf("  Time:      %s", event.Timestamp.Format(time.RFC3339))
+	if event.Tool != nil {
+		logf("  Tool:      %s", event.Tool.Name)
+		logf("  Agent:     %s", event.Tool.Agent)
+	}
+
+	if time.Since(lastIncidentTime) < cooldown {
+		remaining := cooldown - time.Since(lastIncidentTime)
+		logf("  Skipping incident creation (cooldown: %s remaining)", remaining.Round(time.Second))
+		fmt.Println()
+		return lastIncidentTime
+	}
+
+	if dryRun {
+		logf("  [DRY RUN] Would create incident bundle")
+		fmt.Println()
+		return lastIncidentTime
+	}
+
+	fmt.Println()
+	logPhase(4, "Creating Security Incident Bundle")
+
+	callbackHost, callbackPort := callbackAddr(listenAddr)
+	callbackURL := fmt.Sprintf("http://%s:%s/callback", callbackHost, callbackPort)
+	description := fmt.Sprintf("Security alert: %s (event: %s, trace: %s)",
+		alertType, event.EventID, event.TraceID)
+
+	logf("POST /api/v1/incidents")
+	logf("  infra_key:    %s", infraKey)
+	logf("  description:  %s", truncate(description, 60))
+	logf("  callback_url: %s", callbackURL)
+
+	incResp, err := gatewayPOST(gateway, "/api/v1/incidents", map[string]any{
+		"infra_key":    infraKey,
+		"description":  description,
+		"callback_url": callbackURL,
+		"layers":       []string{"os", "storage"},
+	})
+	if err != nil {
+		logf("ERROR: Failed to create incident: %v", err)
+		fmt.Println()
+		return lastIncidentTime
+	}
+
+	logf("Incident creation initiated (%d chars response)", len(incResp.Text))
+	fmt.Println()
+
+	logPhase(3, "Monitoring for Security Events")
+	fmt.Println()
+
+	return time.Now()
+}
+
+// --- HTTP polling mode ---
+
+// runHTTPPollingMode polls the audit HTTP service for new events and processes
+// them for security alerts. This is used when the Unix socket is not available,
+// e.g. when governance.auditd.persistence.enabled=false on Kubernetes (emptyDir
+// volumes are per-pod and cannot be shared across pods).
+func runHTTPPollingMode(
+	ctx context.Context,
+	auditURL, gateway, infraKey, listenAddr string,
+	cooldown time.Duration,
+	dryRun, verbose bool,
+	volTracker *volumeTracker,
+) {
+	baseURL := strings.TrimSuffix(auditURL, "/")
+	client := &http.Client{Timeout: 15 * time.Second}
+	const pollInterval = 5 * time.Second
+
+	var lastIncidentTime time.Time
+	eventCount := 0
+	seenIDs := make(map[string]bool, 200)
+	var latestSeen time.Time
+
+	// Fetch an initial batch to establish a baseline without alerting on
+	// historical events that predate this secbot instance.
+	initial, err := fetchEventsHTTP(client, baseURL, time.Time{}, 50)
+	if err != nil {
+		logf("WARN: initial HTTP fetch failed: %v", err)
+	} else {
+		for _, e := range initial {
+			seenIDs[e.EventID] = true
+			if e.Timestamp.After(latestSeen) {
+				latestSeen = e.Timestamp
+			}
+		}
+		logf("Baseline: %d existing events (not re-analyzed)", len(initial))
+	}
+	logf("Polling audit service for new events every %s", pollInterval)
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		since := latestSeen
+		if since.IsZero() {
+			since = time.Now().UTC().Add(-time.Minute)
+		}
+
+		newEvents, err := fetchEventsHTTP(client, baseURL, since, 200)
+		if err != nil {
+			logf("WARN: HTTP poll failed: %v", err)
+			continue
+		}
+
+		// Collect unseen events and update tracking state.
+		var toProcess []audit.Event
+		for _, e := range newEvents {
+			if !seenIDs[e.EventID] {
+				toProcess = append(toProcess, e)
+			}
+			seenIDs[e.EventID] = true
+			if e.Timestamp.After(latestSeen) {
+				latestSeen = e.Timestamp
+			}
+		}
+		// API returns newest-first; reverse for chronological processing.
+		for i, j := 0, len(toProcess)-1; i < j; i, j = i+1, j-1 {
+			toProcess[i], toProcess[j] = toProcess[j], toProcess[i]
+		}
+
+		for i := range toProcess {
+			event := &toProcess[i]
+			eventCount++
+			if verbose {
+				logf("EVENT #%d: %s (type=%s)", eventCount, event.EventID, event.EventType)
+			}
+
+			alertType := volTracker.recordAndCheck()
+			if alertType == "" {
+				alertType = detectSecurityAlert(event)
+			}
+			if alertType == "" {
+				continue
+			}
+
+			lastIncidentTime = processAlert(alertType, event, lastIncidentTime,
+				cooldown, gateway, infraKey, listenAddr, dryRun)
+		}
+
+		// Prevent unbounded growth of the dedup set.
+		if len(seenIDs) > 2000 {
+			seenIDs = make(map[string]bool, 200)
+		}
+	}
+}
+
+// fetchEventsHTTP retrieves audit events from the auditd HTTP API.
+// Pass a zero since to fetch the most recent events without a time filter.
+func fetchEventsHTTP(client *http.Client, baseURL string, since time.Time, limit int) ([]audit.Event, error) {
+	u := fmt.Sprintf("%s/v1/events?limit=%d", baseURL, limit)
+	if !since.IsZero() {
+		// Use UTC so the timestamp ends in "Z" — no "+" sign that needs URL-encoding.
+		u += "&since=" + since.UTC().Format(time.RFC3339)
+	}
+	resp, err := client.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var events []audit.Event
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return events, nil
 }

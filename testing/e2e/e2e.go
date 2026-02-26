@@ -74,11 +74,18 @@ func getEnvDefault(key, def string) string {
 	return def
 }
 
-// RequireAPIKey skips the test if no LLM API key is available.
+// RequireAPIKey skips the test if HELPDESK_API_KEY is not set.
+//
+// HELPDESK_API_KEY is the key injected into every agent container via
+// docker-compose. It must be a real API key (e.g. sk-ant-...) that works for
+// direct calls to api.anthropic.com — not a Claude Code OAuth token.
+// Set it explicitly before running E2E tests:
+//
+//	HELPDESK_API_KEY=sk-ant-... make e2e
 func RequireAPIKey(t *testing.T) {
 	t.Helper()
-	if os.Getenv("HELPDESK_API_KEY") == "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
-		t.Skip("HELPDESK_API_KEY or ANTHROPIC_API_KEY not set")
+	if os.Getenv("HELPDESK_API_KEY") == "" {
+		t.Skip("HELPDESK_API_KEY not set — skipping LLM-dependent test")
 	}
 }
 

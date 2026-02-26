@@ -33,13 +33,19 @@ BIN_PKGS := \
 	govbot:./cmd/govbot/ \
 	govexplain:./cmd/govexplain/
 
-.PHONY: test cover test-governance cover-governance integration integration-governance faulttest e2e e2e-governance image push binaries bundle release github-release clean
+.PHONY: test cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance image push binaries bundle release github-release clean
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
 # ---------------------------------------------------------------------------
 test:
 	go test ./...
+
+# ---------------------------------------------------------------------------
+# Helm chart template tests (requires helm in PATH; no Kubernetes cluster needed)
+# ---------------------------------------------------------------------------
+test-helm:
+	go test -v ./testing/helm/...
 
 cover:
 	@mkdir -p $(DIST)

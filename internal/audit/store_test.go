@@ -1,7 +1,10 @@
 package audit
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -187,6 +190,169 @@ func TestStore_InitLastHash(t *testing.T) {
 
 	if store2.GetLastHash() != lastHash {
 		t.Errorf("store2.GetLastHash() = %q, want %q", store2.GetLastHash(), lastHash)
+	}
+}
+
+// waitForSocket dials the Unix socket until it responds or the deadline passes.
+func waitForSocket(t *testing.T, path string, deadline time.Duration) bool {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if c, err := net.Dial("unix", path); err == nil {
+			c.Close()
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// newStoreWithSocket creates a Store backed by a temp dir and a Unix socket.
+func newStoreWithSocket(t *testing.T) (*Store, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	socketPath := fmt.Sprintf("/tmp/audit_test_%d.sock", time.Now().UnixNano()%1e9)
+	store, err := NewStore(StoreConfig{
+		DBPath:     filepath.Join(tmpDir, "test.db"),
+		SocketPath: socketPath,
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() {
+		store.Close()
+		os.Remove(socketPath)
+	})
+	if !waitForSocket(t, socketPath, 2*time.Second) {
+		t.Fatal("audit socket did not become ready within 2s")
+	}
+	return store, socketPath
+}
+
+// TestStore_NotifyListeners_SlowConsumerDoesNotBlock is a regression test for
+// the 100ms write-deadline + lock-upgrade race in notifyListeners:
+//
+//   - Old behaviour: a slow listener caused Record() to block (lock upgrade from
+//     RLock→Lock mid-loop), or the connection was silently dropped after 100 ms
+//     even when the consumer was legitimately busy (e.g. secbot creating an incident).
+//
+//   - New behaviour: writes are dispatched in a background goroutine with a 5 s
+//     deadline; Record() returns immediately regardless of listener speed.
+func TestStore_NotifyListeners_SlowConsumerDoesNotBlock(t *testing.T) {
+	store, socketPath := newStoreWithSocket(t)
+
+	// Fast listener: actively reads each event.
+	fastConn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("connect fast listener: %v", err)
+	}
+	defer fastConn.Close()
+
+	// Slow listener: never reads; its kernel receive buffer will eventually fill.
+	slowConn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("connect slow listener: %v", err)
+	}
+	defer slowConn.Close()
+
+	time.Sleep(20 * time.Millisecond) // let store register both connections
+
+	const numEvents = 10
+	ctx := context.Background()
+
+	// Record events in a goroutine; the main goroutine drains the fast listener.
+	// Record() must return promptly — slow listener must not delay it.
+	done := make(chan error, 1)
+	go func() {
+		for i := range numEvents {
+			err := store.Record(ctx, &Event{
+				EventID:   fmt.Sprintf("evt_%03d", i),
+				EventType: EventTypeDelegation,
+				Timestamp: time.Now(),
+				Session:   Session{ID: "sess_slow", UserID: "testuser"},
+				Input:     Input{UserQuery: fmt.Sprintf("query %d", i)},
+			})
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Record failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Record() blocked for >10 s — slow listener is preventing audit ingestion")
+	}
+
+	// Fast listener should receive all events without being starved by the slow one.
+	fastConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	scanner := bufio.NewScanner(fastConn)
+	received := 0
+	for scanner.Scan() {
+		if len(scanner.Bytes()) > 0 {
+			received++
+		}
+		if received >= numEvents {
+			break
+		}
+	}
+	if received < numEvents {
+		t.Errorf("fast listener received %d/%d events", received, numEvents)
+	}
+}
+
+// TestStore_NotifyListeners_DeadListenerIsPruned verifies that a connection
+// closed by the remote end is removed from the listener list after the next
+// notification pass so it does not accumulate indefinitely.
+func TestStore_NotifyListeners_DeadListenerIsPruned(t *testing.T) {
+	store, socketPath := newStoreWithSocket(t)
+
+	// Connect a listener and immediately close it (simulates a crashed consumer).
+	dead, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("connect dead listener: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond) // let store register it
+	dead.Close()
+
+	// Connect a healthy listener so we can confirm delivery still works.
+	good, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("connect good listener: %v", err)
+	}
+	defer good.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	ctx := context.Background()
+	if err := store.Record(ctx, &Event{
+		EventID:   "evt_prune",
+		EventType: EventTypeDelegation,
+		Timestamp: time.Now(),
+		Session:   Session{ID: "sess_prune", UserID: "user"},
+		Input:     Input{UserQuery: "prune test"},
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Good listener receives the event.
+	good.SetReadDeadline(time.Now().Add(5 * time.Second))
+	sc := bufio.NewScanner(good)
+	if !sc.Scan() {
+		t.Error("good listener did not receive event")
+	}
+
+	// Wait for the async pruning goroutine to finish, then check listener count.
+	time.Sleep(200 * time.Millisecond)
+	store.mu.RLock()
+	n := len(store.listeners)
+	store.mu.RUnlock()
+	if n != 1 {
+		t.Errorf("after pruning dead connection: want 1 live listener, got %d", n)
 	}
 }
 

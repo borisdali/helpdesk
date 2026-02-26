@@ -660,7 +660,7 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 # (requires adding the flag to the secbot Helm template args)
 ```
 
-> **Socket scheduling note:** `secbot` reads from the same Unix socket as `auditd` via a shared PersistentVolumeClaim. If your storage class only supports `ReadWriteOnce`, both pods must land on the same node. Either use a `ReadWriteMany` storage class, or add a `nodeAffinity` / `podAffinity` rule to co-locate them. The default Helm chart uses `emptyDir` when persistence is disabled, which automatically co-locates via the volume.
+> **Socket vs. HTTP polling:** When `governance.auditd.persistence.enabled=true`, `auditor` and `secbot` connect to `auditd` via a shared Unix socket on a PersistentVolumeClaim. If your storage class only supports `ReadWriteOnce`, all three pods must land on the same node — use a `ReadWriteMany` class or add a `podAffinity` rule to co-locate them. When persistence is **disabled** (the default), there is no shared volume; instead, the chart automatically switches `auditor` and `secbot` to **HTTP polling mode**, where they poll `auditd`'s `/v1/events` endpoint every 5 seconds. No manual configuration is needed — the correct mode is selected based on the `persistence.enabled` flag.
 
 ## 10. Troubleshooting
 

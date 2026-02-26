@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -139,10 +140,14 @@ func TestCollectOSLayer_Success(t *testing.T) {
 	if len(errs) != 0 {
 		t.Errorf("unexpected errors: %v", errs)
 	}
-	// Expect 9 files: uname.txt, uptime.txt, hostname.txt, top.txt,
-	// ps.txt, free.txt, vmstat.txt, dmesg.txt, sysctl.txt
-	if len(files) != 9 {
-		t.Errorf("expected 9 files, got %d: %v", len(files), mapKeys(files))
+	// macOS omits free, vmstat, dmesg (not available / require sudo).
+	// Linux includes all 9: uname, uptime, hostname, top, ps, free, vmstat, dmesg, sysctl.
+	wantFiles := 9
+	if runtime.GOOS == "darwin" {
+		wantFiles = 7 // uname, uptime, hostname, top, ps, vm_stat, sysctl
+	}
+	if len(files) != wantFiles {
+		t.Errorf("expected %d files, got %d: %v", wantFiles, len(files), mapKeys(files))
 	}
 }
 
@@ -159,12 +164,17 @@ func TestCollectStorageLayer_Success(t *testing.T) {
 	if len(errs) != 0 {
 		t.Errorf("unexpected errors: %v", errs)
 	}
-	// Expect 5 files: df.txt, df_inodes.txt, mount.txt, lsblk.txt, iostat.txt
+	// Both platforms produce 5 files; the disk-inventory file differs:
+	//   Linux: lsblk.txt   macOS: diskutil.txt
 	if len(files) != 5 {
 		t.Errorf("expected 5 files, got %d: %v", len(files), mapKeys(files))
 	}
 
-	expectedFiles := []string{"df.txt", "df_inodes.txt", "mount.txt", "lsblk.txt", "iostat.txt"}
+	diskFile := "lsblk.txt"
+	if runtime.GOOS == "darwin" {
+		diskFile = "diskutil.txt"
+	}
+	expectedFiles := []string{"df.txt", "df_inodes.txt", "mount.txt", diskFile, "iostat.txt"}
 	for _, f := range expectedFiles {
 		if _, ok := files[f]; !ok {
 			t.Errorf("missing expected file: %s", f)
@@ -176,8 +186,11 @@ func TestCollectOSLayer_CommandNotFound(t *testing.T) {
 	orig := runCommand
 	defer func() { runCommand = orig }()
 
+	// sysctl is present in both the Linux and macOS command lists; use it as
+	// the command that fails so the test is platform-independent.
+	// (dmesg is Linux-only and absent from the macOS branch.)
 	runCommand = func(ctx context.Context, name string, args ...string) (string, error) {
-		if name == "dmesg" {
+		if name == "sysctl" {
 			return "", fmt.Errorf("permission denied")
 		}
 		return "output", nil
@@ -188,11 +201,11 @@ func TestCollectOSLayer_CommandNotFound(t *testing.T) {
 	if len(errs) != 1 {
 		t.Errorf("expected 1 error, got %d: %v", len(errs), errs)
 	}
-	// dmesg.txt should have ERROR prefix.
-	if content, ok := files["dmesg.txt"]; !ok {
-		t.Error("dmesg.txt should exist")
+	// sysctl.txt should exist with an ERROR prefix.
+	if content, ok := files["sysctl.txt"]; !ok {
+		t.Error("sysctl.txt should exist")
 	} else if !strings.HasPrefix(content, "ERROR:") {
-		t.Errorf("dmesg.txt should have ERROR: prefix, got: %s", content)
+		t.Errorf("sysctl.txt should have ERROR: prefix, got: %s", content)
 	}
 }
 

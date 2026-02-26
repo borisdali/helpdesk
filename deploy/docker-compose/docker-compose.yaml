@@ -51,7 +51,7 @@ services:
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
-      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
       # AI Governance
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
@@ -86,7 +86,7 @@ services:
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
-      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
       # AI Governance
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
@@ -115,7 +115,7 @@ services:
       HELPDESK_AGENT_URL: "http://incident-agent:1104"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
-      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
       HELPDESK_INCIDENT_DIR: /data/incidents
       # AI Governance
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
@@ -144,7 +144,7 @@ services:
       HELPDESK_AGENT_URL: "http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
-      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
       # AI Governance
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
@@ -166,7 +166,7 @@ services:
       HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
-      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
       # AI Governance - enables /api/v1/governance endpoints
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
@@ -190,7 +190,7 @@ services:
       HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
-      HELPDESK_API_KEY: ${HELPDESK_API_KEY}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       # Streaming mode: "sse" (streaming) or "none" (disabled, default)
       # Set to "none" to work around ADK REPL bug in containers

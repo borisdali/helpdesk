@@ -33,7 +33,11 @@ const (
 )
 
 // auditdBin is the path to the compiled auditd binary, set in TestMain.
-var auditdBin string
+var (
+	auditdBin  string
+	auditorBin string
+	secbotBin  string
+)
 
 func TestMain(m *testing.M) {
 	tmpDir, err := os.MkdirTemp("", "auditd-integration-*")
@@ -43,13 +47,21 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Build auditd once; all tests share this binary.
-	auditdBin = filepath.Join(tmpDir, "auditd")
-	buildCmd := exec.Command("go", "build", "-o", auditdBin, "helpdesk/cmd/auditd")
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "SKIP: failed to build auditd: %v\n%s\n", err, out)
-		os.Exit(0)
+	// Build all governance binaries once; all tests share them.
+	bins := map[string]*string{
+		"helpdesk/cmd/auditd":  &auditdBin,
+		"helpdesk/cmd/auditor": &auditorBin,
+		"helpdesk/cmd/secbot":  &secbotBin,
 	}
+	for pkg, dest := range bins {
+		bin := filepath.Join(tmpDir, filepath.Base(pkg))
+		if out, err := exec.Command("go", "build", "-o", bin, pkg).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "SKIP: failed to build %s: %v\n%s\n", pkg, err, out)
+			os.Exit(0)
+		}
+		*dest = bin
+	}
+	auditdBin = filepath.Join(tmpDir, "auditd")
 
 	// Start the primary auditd instance (no policy loaded).
 	dbPath := filepath.Join(tmpDir, "audit.db")

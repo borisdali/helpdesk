@@ -24,7 +24,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/secbot"]
           args:
+            {{- if .Values.governance.auditd.persistence.enabled }}
             - "-socket=/data/audit/audit.sock"
+            {{- else }}
+            - "-audit-service=http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+            {{- end }}
             - "-gateway=http://{{ include "helpdesk.fullname" . }}-gateway:{{ .Values.gateway.port }}"
             {{- if .Values.governance.secbot.cooldown }}
             - "-cooldown={{ .Values.governance.secbot.cooldown }}"
@@ -36,10 +40,12 @@ spec:
             - name: metrics
               containerPort: {{ .Values.governance.secbot.port }}
               protocol: TCP
+          {{- if .Values.governance.auditd.persistence.enabled }}
           volumeMounts:
             - name: audit-data
               mountPath: /data/audit
               readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -52,14 +58,12 @@ spec:
               port: metrics
             initialDelaySeconds: 3
             periodSeconds: 10
+      {{- if .Values.governance.auditd.persistence.enabled }}
       volumes:
         - name: audit-data
-          {{- if .Values.governance.auditd.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "helpdesk.fullname" . }}-auditd
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
+      {{- end }}
       restartPolicy: Always
 ---
 apiVersion: v1
