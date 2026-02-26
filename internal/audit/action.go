@@ -43,6 +43,9 @@ var ToolClassification = map[string]ActionClass{
 	"alter_config":           ActionDestructive,
 	"vacuum_table":           ActionWrite,
 	"reindex_table":          ActionWrite,
+	"cancel_query":           ActionWrite,
+	"terminate_connection":   ActionDestructive,
+	"kill_idle_connections":  ActionDestructive,
 
 	// Kubernetes agent tools
 	"get_pods":              ActionRead,
@@ -56,9 +59,9 @@ var ToolClassification = map[string]ActionClass{
 	"describe_pod":          ActionRead,
 	"describe_node":         ActionRead,
 	"get_resource_usage":    ActionRead,
-	"scale_deployment":      ActionWrite,
-	"scale_statefulset":     ActionWrite,
-	"restart_deployment":    ActionWrite,
+	"scale_deployment":      ActionDestructive,
+	"scale_statefulset":     ActionDestructive,
+	"restart_deployment":    ActionDestructive,
 	"delete_pod":            ActionDestructive,
 	"drain_node":            ActionDestructive,
 	"cordon_node":           ActionWrite,
@@ -178,7 +181,7 @@ func ClassifyDelegation(agent, message string) ActionClass {
 	writeKeywords := []string{
 		"scale", "restart", "update", "modify", "change", "alter",
 		"create", "insert", "set", "patch", "apply", "rollout",
-		"cordon", "uncordon", "vacuum", "reindex",
+		"cordon", "uncordon", "vacuum", "reindex", "cancel",
 	}
 	for _, kw := range writeKeywords {
 		if strings.Contains(msg, kw) {

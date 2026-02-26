@@ -179,13 +179,15 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 
 // runPsqlWithToolName executes a psql command with auditing and policy enforcement.
 // toolName is used for audit logging; if empty, a generic name is used.
+// All callers that don't specify an action are read-only.
 func runPsqlWithToolName(ctx context.Context, connStr string, query string, toolName string) (string, error) {
+	return runPsqlAs(ctx, connStr, query, toolName, policy.ActionRead)
+}
+
+// runPsqlAs executes a psql command with explicit action class for policy enforcement.
+func runPsqlAs(ctx context.Context, connStr string, query string, toolName string, action policy.ActionClass) (string, error) {
 	// Resolve database info for policy checks
 	dbInfo := resolveDatabaseInfo(connStr)
-
-	// Determine action class based on query. All current tools are read-only;
-	// future write/destructive tools should pass the appropriate ActionClass.
-	action := policy.ActionRead
 
 	// Check policy before executing
 	if policyEnforcer != nil {
@@ -284,6 +286,23 @@ func truncateForAudit(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// parseTerminatedCount reads the integer value from a "terminated | N" line in
+// psql expanded (-x) output. Used by kill_idle_connections to extract the count
+// of connections actually terminated so blast-radius policy can be enforced.
+func parseTerminatedCount(output string) int {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "terminated") && strings.Contains(line, "|") {
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) == 2 {
+				if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // parseRowsAffected extracts the number of rows affected from psql output.
@@ -640,5 +659,117 @@ func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, er
 	if err != nil {
 		return errorResult("get_table_stats", args.ConnectionString, err), nil
 	}
+	return PsqlResult{Output: output}, nil
+}
+
+// CancelQueryArgs defines arguments for the cancel_query tool.
+type CancelQueryArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	PID              int    `json:"pid" jsonschema:"required,The process ID (pid) of the backend to cancel. Use get_active_connections to find pids."`
+}
+
+func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error) {
+	query := fmt.Sprintf(`SELECT pg_cancel_backend(%d) AS cancelled, pid, usename, datname, state, LEFT(query, 100) AS query_preview
+FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
+	output, err := runPsqlAs(ctx, args.ConnectionString, query, "cancel_query", policy.ActionWrite)
+	if err != nil {
+		return errorResult("cancel_query", args.ConnectionString, err), nil
+	}
+	if strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: fmt.Sprintf("No backend found with pid %d.", args.PID)}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+// TerminateConnectionArgs defines arguments for the terminate_connection tool.
+type TerminateConnectionArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	PID              int    `json:"pid" jsonschema:"required,The process ID (pid) of the backend to terminate. Use get_active_connections to find pids."`
+}
+
+func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (PsqlResult, error) {
+	query := fmt.Sprintf(`SELECT pg_terminate_backend(%d) AS terminated, pid, usename, datname, state, LEFT(query, 100) AS query_preview
+FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
+	output, err := runPsqlAs(ctx, args.ConnectionString, query, "terminate_connection", policy.ActionDestructive)
+	if err != nil {
+		return errorResult("terminate_connection", args.ConnectionString, err), nil
+	}
+	if strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: fmt.Sprintf("No backend found with pid %d.", args.PID)}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+// KillIdleConnectionsArgs defines arguments for the kill_idle_connections tool.
+type KillIdleConnectionsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	IdleMinutes      int    `json:"idle_minutes" jsonschema:"required,Terminate connections idle longer than this many minutes. Minimum 5."`
+	Database         string `json:"database,omitempty" jsonschema:"Limit termination to connections in this specific database. If empty, targets all databases."`
+	DryRun           bool   `json:"dry_run,omitempty" jsonschema:"If true, only list connections that would be terminated without actually terminating them. Defaults to false."`
+}
+
+func killIdleConnectionsTool(ctx tool.Context, args KillIdleConnectionsArgs) (PsqlResult, error) {
+	if args.IdleMinutes < 5 {
+		return PsqlResult{Output: "ERROR: idle_minutes must be at least 5 to avoid terminating legitimately short-lived connections."}, nil
+	}
+
+	dbFilter := ""
+	if args.Database != "" {
+		dbFilter = fmt.Sprintf("AND datname = '%s'", strings.ReplaceAll(args.Database, "'", "''"))
+	}
+
+	action := policy.ActionDestructive
+	if args.DryRun {
+		action = policy.ActionRead
+	}
+
+	if args.DryRun {
+		query := fmt.Sprintf(`SELECT pid, usename, datname, client_addr, state,
+	EXTRACT(EPOCH FROM (now() - state_change))::int / 60 AS idle_minutes,
+	LEFT(query, 100) AS last_query
+FROM pg_stat_activity
+WHERE state = 'idle'
+  AND state_change < now() - INTERVAL '%d minutes'
+  AND pid != pg_backend_pid()
+  %s
+ORDER BY state_change ASC;`, args.IdleMinutes, dbFilter)
+		output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action)
+		if err != nil {
+			return errorResult("kill_idle_connections", args.ConnectionString, err), nil
+		}
+		if strings.Contains(output, "(0 rows)") {
+			return PsqlResult{Output: fmt.Sprintf("[DRY RUN] No idle connections older than %d minutes found.", args.IdleMinutes)}, nil
+		}
+		return PsqlResult{Output: "[DRY RUN] Would terminate:\n" + output}, nil
+	}
+
+	query := fmt.Sprintf(`SELECT count(*) AS terminated
+FROM (
+  SELECT pg_terminate_backend(pid) AS terminated
+  FROM pg_stat_activity
+  WHERE state = 'idle'
+    AND state_change < now() - INTERVAL '%d minutes'
+    AND pid != pg_backend_pid()
+    %s
+) t
+WHERE terminated IS TRUE;`, args.IdleMinutes, dbFilter)
+	output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action)
+	if err != nil {
+		return errorResult("kill_idle_connections", args.ConnectionString, err), nil
+	}
+
+	// runPsqlAs uses parseRowsAffected which only reads DELETE/UPDATE/INSERT tags.
+	// kill_idle_connections uses SELECT count(*), so we must parse the terminated
+	// count explicitly and run a second post-execution blast-radius check.
+	if policyEnforcer != nil {
+		dbInfo := resolveDatabaseInfo(args.ConnectionString)
+		terminated := parseTerminatedCount(output)
+		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, action, dbInfo.Tags, agentutil.ToolOutcome{
+			RowsAffected: terminated,
+		}); postErr != nil {
+			return errorResult("kill_idle_connections", args.ConnectionString, postErr), nil
+		}
+	}
+
 	return PsqlResult{Output: output}, nil
 }

@@ -122,16 +122,19 @@ func main() {
 		Version:  "1.0.0",
 		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
 		SkillTags: map[string][]string{
-			"postgres_database_agent":                          {"postgresql", "database", "diagnostics"},
-			"postgres_database_agent-check_connection":         {"postgresql", "connectivity"},
-			"postgres_database_agent-get_database_info":        {"postgresql", "metadata"},
-			"postgres_database_agent-get_active_connections":   {"postgresql", "performance", "connections"},
-			"postgres_database_agent-get_connection_stats":     {"postgresql", "performance", "connections"},
-			"postgres_database_agent-get_database_stats":       {"postgresql", "performance", "statistics"},
-			"postgres_database_agent-get_config_parameter":     {"postgresql", "configuration"},
-			"postgres_database_agent-get_replication_status":   {"postgresql", "replication", "ha"},
-			"postgres_database_agent-get_lock_info":            {"postgresql", "locks", "contention"},
-			"postgres_database_agent-get_table_stats":          {"postgresql", "tables", "performance"},
+			"postgres_database_agent":                            {"postgresql", "database", "diagnostics"},
+			"postgres_database_agent-check_connection":           {"postgresql", "connectivity"},
+			"postgres_database_agent-get_database_info":          {"postgresql", "metadata"},
+			"postgres_database_agent-get_active_connections":     {"postgresql", "performance", "connections"},
+			"postgres_database_agent-get_connection_stats":       {"postgresql", "performance", "connections"},
+			"postgres_database_agent-get_database_stats":         {"postgresql", "performance", "statistics"},
+			"postgres_database_agent-get_config_parameter":       {"postgresql", "configuration"},
+			"postgres_database_agent-get_replication_status":     {"postgresql", "replication", "ha"},
+			"postgres_database_agent-get_lock_info":              {"postgresql", "locks", "contention"},
+			"postgres_database_agent-get_table_stats":            {"postgresql", "tables", "performance"},
+			"postgres_database_agent-cancel_query":               {"postgresql", "connections", "remediation"},
+			"postgres_database_agent-terminate_connection":        {"postgresql", "connections", "remediation"},
+			"postgres_database_agent-kill_idle_connections":       {"postgresql", "connections", "remediation"},
 		},
 		SkillExamples: map[string][]string{
 			"postgres_database_agent-check_connection":       {"Check if the production database is reachable"},
@@ -228,6 +231,30 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	cancelQueryToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "cancel_query",
+		Description: "Cancel a running query by sending SIGINT to the backend process (pg_cancel_backend). The connection stays open. Use get_active_connections to find pids.",
+	}, cancelQueryTool)
+	if err != nil {
+		return nil, err
+	}
+
+	terminateConnectionToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "terminate_connection",
+		Description: "Forcefully terminate a database connection by pid (pg_terminate_backend). Use when cancel_query is insufficient or the backend is stuck. The client will receive a connection error.",
+	}, terminateConnectionTool)
+	if err != nil {
+		return nil, err
+	}
+
+	killIdleConnectionsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "kill_idle_connections",
+		Description: "Terminate all idle connections older than idle_minutes minutes. Use dry_run=true first to preview which connections would be affected. Minimum idle_minutes is 5.",
+	}, killIdleConnectionsTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -239,5 +266,8 @@ func createTools() ([]tool.Tool, error) {
 		getReplicationStatusToolDef,
 		getLockInfoToolDef,
 		getTableStatsToolDef,
+		cancelQueryToolDef,
+		terminateConnectionToolDef,
+		killIdleConnectionsToolDef,
 	}, nil
 }

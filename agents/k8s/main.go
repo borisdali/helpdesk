@@ -114,15 +114,18 @@ func main() {
 		Version:  "1.0.0",
 		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
 		SkillTags: map[string][]string{
-			"k8s_agent":                  {"kubernetes", "infrastructure", "diagnostics"},
-			"k8s_agent-get_pods":         {"kubernetes", "pods", "workloads"},
-			"k8s_agent-get_service":      {"kubernetes", "services", "networking"},
-			"k8s_agent-describe_service": {"kubernetes", "services", "networking"},
-			"k8s_agent-get_endpoints":    {"kubernetes", "endpoints", "networking"},
-			"k8s_agent-get_events":       {"kubernetes", "events", "cluster"},
-			"k8s_agent-get_pod_logs":     {"kubernetes", "logs", "debugging"},
-			"k8s_agent-describe_pod":     {"kubernetes", "pods", "debugging"},
-			"k8s_agent-get_nodes":        {"kubernetes", "nodes", "cluster"},
+			"k8s_agent":                       {"kubernetes", "infrastructure", "diagnostics"},
+			"k8s_agent-get_pods":              {"kubernetes", "pods", "workloads"},
+			"k8s_agent-get_service":           {"kubernetes", "services", "networking"},
+			"k8s_agent-describe_service":      {"kubernetes", "services", "networking"},
+			"k8s_agent-get_endpoints":         {"kubernetes", "endpoints", "networking"},
+			"k8s_agent-get_events":            {"kubernetes", "events", "cluster"},
+			"k8s_agent-get_pod_logs":          {"kubernetes", "logs", "debugging"},
+			"k8s_agent-describe_pod":          {"kubernetes", "pods", "debugging"},
+			"k8s_agent-get_nodes":             {"kubernetes", "nodes", "cluster"},
+			"k8s_agent-delete_pod":            {"kubernetes", "pods", "remediation"},
+			"k8s_agent-restart_deployment":    {"kubernetes", "deployments", "remediation"},
+			"k8s_agent-scale_deployment":      {"kubernetes", "deployments", "remediation"},
 		},
 		SkillExamples: map[string][]string{
 			"k8s_agent-get_pods":      {"List all pods in the database namespace"},
@@ -203,6 +206,30 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	deletePodToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "delete_pod",
+		Description: "Delete a Kubernetes pod by name. The deployment controller will reschedule it. Use to restart a stuck or crash-looping pod without affecting other replicas.",
+	}, deletePodTool)
+	if err != nil {
+		return nil, err
+	}
+
+	restartDeploymentToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "restart_deployment",
+		Description: "Perform a rolling restart of all pods in a deployment (kubectl rollout restart). Replaces pods one at a time to avoid downtime. Use when all replicas are unhealthy or after a config change.",
+	}, restartDeploymentTool)
+	if err != nil {
+		return nil, err
+	}
+
+	scaleDeploymentToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "scale_deployment",
+		Description: "Scale a deployment to the specified number of replicas. Can scale up to add capacity or scale down (including to 0) to stop workloads. Use with caution — scaling to 0 causes downtime.",
+	}, scaleDeploymentTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		getPodsToolDef,
 		getServiceToolDef,
@@ -212,5 +239,8 @@ func createTools() ([]tool.Tool, error) {
 		getPodLogsToolDef,
 		describePodToolDef,
 		getNodesToolDef,
+		deletePodToolDef,
+		restartDeploymentToolDef,
+		scaleDeploymentToolDef,
 	}, nil
 }

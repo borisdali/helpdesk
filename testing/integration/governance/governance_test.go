@@ -820,3 +820,155 @@ func TestGovernance_Explain_DefaultConfig(t *testing.T) {
 		t.Errorf("explain effect for write = %q, want deny", effect)
 	}
 }
+
+// =============================================================================
+// Write/Destructive tool audit event tests
+// =============================================================================
+
+// newToolEvent returns an audit event body that simulates a tool_execution event
+// with the given tool name and action class (write or destructive).
+func newToolEvent(sessionID, toolName, actionClass string) map[string]any {
+	return map[string]any{
+		"event_id":   fmt.Sprintf("evt-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "tool_execution",
+		"session":    map[string]any{"id": sessionID},
+		"input":      map[string]any{"user_query": "integration test"},
+		"tool_execution": map[string]any{
+			"tool_name":    toolName,
+			"action_class": actionClass,
+		},
+	}
+}
+
+func TestAudit_WriteToolEvent_RecordedAndQueryable(t *testing.T) {
+	sessionID := fmt.Sprintf("write-tool-session-%d", time.Now().UnixNano())
+
+	// Record a cancel_query event (ActionWrite)
+	result := post(t, auditdAddr, "/v1/events", newToolEvent(sessionID, "cancel_query", "write"))
+	eventID, _ := result["event_id"].(string)
+	if eventID == "" {
+		t.Fatal("expected event_id in response")
+	}
+	if result["event_hash"] == "" {
+		t.Error("expected event_hash in response for write tool event")
+	}
+
+	// Should be queryable by session
+	events := getList(t, auditdAddr, "/v1/events?session_id="+sessionID)
+	if len(events) == 0 {
+		t.Fatal("expected at least one event for session")
+	}
+	found := false
+	for _, e := range events {
+		if e["event_id"] == eventID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("write tool event %s not found in session query results", eventID)
+	}
+}
+
+func TestAudit_DestructiveToolEvent_RecordedAndQueryable(t *testing.T) {
+	sessionID := fmt.Sprintf("destructive-tool-session-%d", time.Now().UnixNano())
+
+	// Record terminate_connection (ActionDestructive)
+	result := post(t, auditdAddr, "/v1/events", newToolEvent(sessionID, "terminate_connection", "destructive"))
+	eventID, _ := result["event_id"].(string)
+	if eventID == "" {
+		t.Fatal("expected event_id in response for destructive tool event")
+	}
+
+	// Retrieve by event ID
+	event := get(t, auditdAddr, "/v1/events/"+eventID)
+	if event["event_id"] != eventID {
+		t.Errorf("event_id = %v, want %s", event["event_id"], eventID)
+	}
+	if event["event_type"] != "tool_execution" {
+		t.Errorf("event_type = %v, want tool_execution", event["event_type"])
+	}
+}
+
+func TestAudit_MultipleToolEvents_HashChainValid(t *testing.T) {
+	traceID := fmt.Sprintf("tool-trace-%d", time.Now().UnixNano())
+	sessionID := "tool-chain-" + traceID
+
+	// Simulate a typical session: read → write → destructive
+	toolSequence := []struct {
+		tool        string
+		actionClass string
+	}{
+		{"get_active_connections", "read"},
+		{"cancel_query", "write"},
+		{"terminate_connection", "destructive"},
+		{"kill_idle_connections", "destructive"},
+	}
+
+	for _, step := range toolSequence {
+		ev := newToolEvent(sessionID, step.tool, step.actionClass)
+		ev["trace_id"] = traceID
+		result := post(t, auditdAddr, "/v1/events", ev)
+		if hash, _ := result["event_hash"].(string); hash == "" {
+			t.Fatalf("tool event for %s (%s): missing event_hash", step.tool, step.actionClass)
+		}
+	}
+
+	// Hash chain must remain valid after mixed-class tool events.
+	result := get(t, auditdAddr, "/v1/verify")
+	if valid, _ := result["valid"].(bool); !valid {
+		t.Errorf("hash chain integrity check failed after write/destructive events: %v", result)
+	}
+}
+
+func TestAudit_WriteApprovalWorkflow_ForNewTools(t *testing.T) {
+	// Cancel query requires approval → create, approve, verify removed from pending.
+	result := post(t, auditdAddr, "/v1/approvals",
+		newApproval("write", "cancel_query", "postgres-agent", "operator"))
+	approvalID, _ := result["approval_id"].(string)
+	if approvalID == "" {
+		t.Fatal("expected approval_id for cancel_query approval request")
+	}
+	if result["status"] != "pending" {
+		t.Errorf("initial status = %q, want pending", result["status"])
+	}
+
+	// Approve it.
+	updated := post(t, auditdAddr, "/v1/approvals/"+approvalID+"/approve",
+		map[string]any{"approved_by": "senior-dba", "reason": "low-impact cancellation"})
+	if updated["status"] != "approved" {
+		t.Errorf("status after approve = %q, want approved", updated["status"])
+	}
+
+	// Should no longer appear in pending list.
+	pending := getList(t, auditdAddr, "/v1/approvals/pending")
+	for _, a := range pending {
+		if a["approval_id"] == approvalID {
+			t.Error("approved cancel_query request should not be in pending list")
+		}
+	}
+}
+
+func TestAudit_DestructiveApprovalWorkflow_ForNewTools(t *testing.T) {
+	// terminate_connection and kill_idle_connections require human approval.
+	for _, toolName := range []string{"terminate_connection", "kill_idle_connections", "delete_pod", "restart_deployment", "scale_deployment"} {
+		t.Run(toolName, func(t *testing.T) {
+			result := post(t, auditdAddr, "/v1/approvals",
+				newApproval("destructive", toolName, "test-agent", "sre-oncall"))
+			approvalID, _ := result["approval_id"].(string)
+			if approvalID == "" {
+				t.Fatalf("%s: expected approval_id", toolName)
+			}
+			if result["status"] != "pending" {
+				t.Errorf("%s: initial status = %q, want pending", toolName, result["status"])
+			}
+
+			// Deny the destructive operation.
+			updated := post(t, auditdAddr, "/v1/approvals/"+approvalID+"/deny",
+				map[string]any{"denied_by": "change-manager", "reason": "not in maintenance window"})
+			if updated["status"] != "denied" {
+				t.Errorf("%s: status after deny = %q, want denied", toolName, updated["status"])
+			}
+		})
+	}
+}

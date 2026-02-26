@@ -180,31 +180,47 @@ func checkK8sPolicyResult(ctx context.Context, namespace string, action policy.A
 	})
 }
 
-// runKubectl executes a kubectl command and returns the output.
-// If context is non-empty, it's passed as --context to kubectl.
-// The provided ctx controls cancellation — if it expires, kubectl is killed.
-func runKubectl(ctx context.Context, kubeContext string, args ...string) (string, error) {
-	return runKubectlWithToolName(ctx, kubeContext, "", args...)
-}
+// runKubectl is the kubectl execution function. Tests replace this variable to
+// inject mock output without spawning a real kubectl process.
+var runKubectl = runKubectlExec
 
-// runKubectlWithToolName executes a kubectl command with auditing support.
-// toolName is used for audit logging; if empty, no audit is recorded.
-func runKubectlWithToolName(ctx context.Context, kubeContext, toolName string, args ...string) (string, error) {
-	start := time.Now()
-
+// runKubectlExec is the production kubectl runner: it prepends the timeout and
+// optional context flags, invokes kubectl, and returns structured errors.
+func runKubectlExec(ctx context.Context, kubeContext string, args ...string) (string, error) {
 	prefix := []string{"--request-timeout=10s"}
 	if kubeContext != "" {
 		prefix = append(prefix, "--context", kubeContext)
 	}
 	fullArgs := append(prefix, args...)
-	cmd := exec.CommandContext(ctx, "kubectl", fullArgs...)
-	output, err := cmd.CombinedOutput()
+	output, err := exec.CommandContext(ctx, "kubectl", fullArgs...).CombinedOutput()
+	if err != nil {
+		out := strings.TrimSpace(string(output))
+		if out == "" {
+			out = "(no output from kubectl)"
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("kubectl timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
+		}
+		if diagnosis := diagnoseKubectlError(out); diagnosis != "" {
+			return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		}
+		return "", fmt.Errorf("kubectl failed: %v\nOutput: %s", err, out)
+	}
+	return string(output), nil
+}
+
+// runKubectlWithToolName wraps runKubectl with timing, audit logging, and slog.
+// toolName is used for audit logging; if empty, no audit is recorded.
+func runKubectlWithToolName(ctx context.Context, kubeContext, toolName string, args ...string) (string, error) {
+	start := time.Now()
+	output, err := runKubectl(ctx, kubeContext, args...)
 	duration := time.Since(start)
 
-	// Build raw command for audit logging
-	rawCommand := "kubectl " + strings.Join(fullArgs, " ")
+	rawCommand := "kubectl " + strings.Join(args, " ")
+	if kubeContext != "" {
+		rawCommand = "kubectl --context " + kubeContext + " " + strings.Join(args, " ")
+	}
 
-	// Audit the tool execution
 	if toolAuditor != nil && toolName != "" {
 		var errMsg string
 		if err != nil {
@@ -215,31 +231,18 @@ func runKubectlWithToolName(ctx context.Context, kubeContext, toolName string, a
 			Parameters: map[string]any{"context": kubeContext, "args": args},
 			RawCommand: rawCommand,
 		}, audit.ToolResult{
-			Output: truncateForAudit(string(output), 500),
+			Output: truncateForAudit(output, 500),
 			Error:  errMsg,
 		}, duration)
 	}
 
-	// Log successful tool execution at INFO level
 	if err == nil && toolName != "" {
 		slog.Info("tool ok", "name", toolName, "ms", duration.Milliseconds())
 	}
-
 	if err != nil {
-		out := strings.TrimSpace(string(output))
-		if out == "" {
-			out = "(no output from kubectl)"
-		}
 		slog.Error("kubectl command failed", "tool", toolName, "args", args, "ms", duration.Milliseconds(), "err", err)
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("kubectl timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
-		}
-		if diagnosis := diagnoseKubectlError(out); diagnosis != "" {
-			return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
-		}
-		return "", fmt.Errorf("kubectl failed: %v\nOutput: %s", err, out)
 	}
-	return string(output), nil
+	return output, err
 }
 
 // truncateForAudit truncates a string for audit logging.
@@ -548,4 +551,101 @@ func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
 	}, result.Count, err, duration)
 
 	return result, err
+}
+
+// DeletePodArgs defines arguments for the delete_pod tool.
+type DeletePodArgs struct {
+	Context          string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace        string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the pod."`
+	PodName          string `json:"pod_name" jsonschema:"required,The exact pod name to delete. Use get_pods to find the name."`
+	GracePeriodSeconds int  `json:"grace_period_seconds,omitempty" jsonschema:"Seconds for graceful termination (default: pod's terminationGracePeriodSeconds). Use 0 for immediate deletion."`
+}
+
+func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) {
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
+	kubeContext := resolveContext(args.Context)
+
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	cmdArgs := []string{"delete", "pod", args.PodName, "-n", namespace}
+	if args.GracePeriodSeconds > 0 {
+		cmdArgs = append(cmdArgs, "--grace-period", strconv.Itoa(args.GracePeriodSeconds))
+	}
+
+	output, err := runKubectlWithToolName(ctx, kubeContext, "delete_pod", cmdArgs...)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
+	}
+
+	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
+	}
+
+	return KubectlResult{Output: output}, nil
+}
+
+// RestartDeploymentArgs defines arguments for the restart_deployment tool.
+type RestartDeploymentArgs struct {
+	Context        string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace      string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the deployment."`
+	DeploymentName string `json:"deployment_name" jsonschema:"required,The name of the deployment to restart. Use get_pods or kubectl get deployments to find the name."`
+}
+
+func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (KubectlResult, error) {
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
+	kubeContext := resolveContext(args.Context)
+
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	cmdArgs := []string{"rollout", "restart", "deployment", args.DeploymentName, "-n", namespace}
+	output, err := runKubectlWithToolName(ctx, kubeContext, "restart_deployment", cmdArgs...)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
+	}
+
+	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
+	}
+
+	return KubectlResult{Output: output}, nil
+}
+
+// ScaleDeploymentArgs defines arguments for the scale_deployment tool.
+type ScaleDeploymentArgs struct {
+	Context        string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace      string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the deployment."`
+	DeploymentName string `json:"deployment_name" jsonschema:"required,The name of the deployment to scale."`
+	Replicas       int    `json:"replicas" jsonschema:"required,Target replica count. Use 0 to scale down completely."`
+}
+
+func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlResult, error) {
+	nsInfo := resolveNamespaceInfo(args.Namespace)
+	namespace := nsInfo.Namespace
+	kubeContext := resolveContext(args.Context)
+
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	cmdArgs := []string{
+		"scale", "deployment", args.DeploymentName,
+		"--replicas", strconv.Itoa(args.Replicas),
+		"-n", namespace,
+	}
+	output, err := runKubectlWithToolName(ctx, kubeContext, "scale_deployment", cmdArgs...)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
+	}
+
+	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
+	}
+
+	return KubectlResult{Output: output}, nil
 }

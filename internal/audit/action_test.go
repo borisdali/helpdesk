@@ -18,21 +18,22 @@ func TestClassifyTool(t *testing.T) {
 		{"run_query", ActionWrite},
 		{"vacuum_table", ActionWrite},
 		{"reindex_table", ActionWrite},
+		{"cancel_query", ActionWrite},
 
 		// Database destructive operations
 		{"kill_query", ActionDestructive},
 		{"alter_config", ActionDestructive},
+		{"terminate_connection", ActionDestructive},
+		{"kill_idle_connections", ActionDestructive},
 
 		// Kubernetes read operations
 		{"get_pods", ActionRead},
 		{"get_pod_logs", ActionRead},
 		{"describe_pod", ActionRead},
 
-		// Kubernetes write operations
-		{"scale_deployment", ActionWrite},
-		{"restart_deployment", ActionWrite},
-
 		// Kubernetes destructive operations
+		{"scale_deployment", ActionDestructive},
+		{"restart_deployment", ActionDestructive},
 		{"delete_pod", ActionDestructive},
 		{"drain_node", ActionDestructive},
 
@@ -188,6 +189,18 @@ func TestClassifyDelegation(t *testing.T) {
 			message:  "Update the max_connections parameter",
 			expected: ActionWrite,
 		},
+		{
+			name:     "cancel query by pid",
+			agent:    "postgres_database_agent",
+			message:  "Cancel the slow query with pid 12345",
+			expected: ActionWrite,
+		},
+		{
+			name:     "cancel idle backend",
+			agent:    "postgres_database_agent",
+			message:  "Cancel the idle backend that is blocking the table",
+			expected: ActionWrite,
+		},
 
 		// Destructive operations
 		{
@@ -212,6 +225,18 @@ func TestClassifyDelegation(t *testing.T) {
 			name:     "terminate process",
 			agent:    "postgres_database_agent",
 			message:  "Terminate the backend process blocking the table",
+			expected: ActionDestructive,
+		},
+		{
+			name:     "terminate idle connections",
+			agent:    "postgres_database_agent",
+			message:  "Terminate all idle connections older than 10 minutes",
+			expected: ActionDestructive,
+		},
+		{
+			name:     "delete stuck pod",
+			agent:    "k8s_agent",
+			message:  "Delete the stuck pod api-server-abc123 in the default namespace",
 			expected: ActionDestructive,
 		},
 
