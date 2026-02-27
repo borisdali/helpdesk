@@ -410,6 +410,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		query += " AND trace_id = ?"
 		args = append(args, opts.TraceID)
 	}
+	if opts.TraceIDPrefix != "" {
+		query += " AND trace_id LIKE ?"
+		args = append(args, opts.TraceIDPrefix+"%")
+	}
 	if opts.ActionClass != "" {
 		query += " AND action_class = ?"
 		args = append(args, string(opts.ActionClass))
@@ -423,8 +427,8 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		args = append(args, string(opts.ApprovalStatus))
 	}
 
-	// Chronological order for trace queries, reverse chronological otherwise
-	if opts.TraceID != "" {
+	// Chronological order for trace/prefix queries, reverse chronological otherwise
+	if opts.TraceID != "" || opts.TraceIDPrefix != "" {
 		query += " ORDER BY timestamp ASC"
 	} else {
 		query += " ORDER BY timestamp DESC"
@@ -468,7 +472,8 @@ type QueryOptions struct {
 	MinConfidence  float64
 	MaxConfidence  float64
 	Limit          int
-	TraceID        string         // filter by trace ID for end-to-end correlation
+	TraceID        string         // filter by exact trace ID for end-to-end correlation
+	TraceIDPrefix  string         // filter by trace ID prefix (e.g. "chk_", "sess_")
 	ActionClass    ActionClass    // filter by action class (read, write, destructive)
 	ToolName       string         // filter by tool name
 	ApprovalStatus ApprovalStatus // filter by approval status

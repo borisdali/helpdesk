@@ -155,9 +155,14 @@ func main() {
 		httpServer.Shutdown(context.Background())
 	}()
 
+	backend := "sqlite"
+	if store.IsPostgres() {
+		backend = "postgres"
+	}
 	slog.Info("audit service starting",
 		"listen", cfg.listenAddr,
 		"db", cfg.dbPath,
+		"backend", backend,
 		"socket", cfg.socketPath)
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
@@ -264,6 +269,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := r.URL.Query().Get("trace_id"); v != "" {
 		opts.TraceID = v
+	}
+	if v := r.URL.Query().Get("trace_id_prefix"); v != "" {
+		opts.TraceIDPrefix = v
 	}
 	if v := r.URL.Query().Get("event_type"); v != "" {
 		opts.EventType = audit.EventType(v)

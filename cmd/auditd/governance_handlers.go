@@ -78,6 +78,7 @@ type ApprovalConfig struct {
 // AuditStatus describes the audit system status.
 type AuditStatus struct {
 	Enabled     bool   `json:"enabled"`
+	Backend     string `json:"backend"`      // "sqlite" or "postgres"
 	EventsTotal int    `json:"events_total"`
 	ChainValid  bool   `json:"chain_valid"`
 	LastEventAt string `json:"last_event_at,omitempty"`
@@ -232,8 +233,13 @@ func (s *governanceServer) handleGetInfo(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Audit status
+	backend := "sqlite"
+	if s.auditStore != nil && s.auditStore.IsPostgres() {
+		backend = "postgres"
+	}
 	info.Audit = AuditStatus{
 		Enabled: true,
+		Backend: backend,
 	}
 
 	if s.auditStore != nil {
