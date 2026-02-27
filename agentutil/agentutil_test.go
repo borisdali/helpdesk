@@ -2,8 +2,12 @@ package agentutil
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -220,6 +224,155 @@ func TestCheckResult_DeniedError_HasExplanation(t *testing.T) {
 	}
 }
 
+// --- Remote policy check (CheckTool + CheckResult via mock auditd) ---
+
+// newRemoteEnforcer creates a PolicyEnforcer that calls the provided URL for policy checks.
+func newRemoteEnforcer(url string) *PolicyEnforcer {
+	return NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{
+		PolicyCheckURL: url,
+	})
+}
+
+// mockPolicyCheckServer starts an httptest server that returns the given effect.
+// It returns the server; callers should defer server.Close().
+func mockPolicyCheckServer(t *testing.T, effect string, httpStatus int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/governance/check" || r.Method != http.MethodPost {
+			http.Error(w, "unexpected path", http.StatusNotFound)
+			return
+		}
+		resp := policyCheckResp{
+			Effect:      effect,
+			PolicyName:  "mock-policy",
+			Message:     "mock message",
+			Explanation: "mock explanation: " + strings.ToUpper(effect),
+			EventID:     "pol_mock0001",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(httpStatus)
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestCheckTool_RemoteCheck_Allow(t *testing.T) {
+	srv := mockPolicyCheckServer(t, "allow", http.StatusOK)
+	defer srv.Close()
+
+	e := newRemoteEnforcer(srv.URL)
+	err := e.CheckTool(context.Background(), "database", "dev-db", policy.ActionRead, nil, "unit test")
+	if err != nil {
+		t.Errorf("allow: expected nil error, got: %v", err)
+	}
+}
+
+func TestCheckTool_RemoteCheck_Deny(t *testing.T) {
+	srv := mockPolicyCheckServer(t, "deny", http.StatusForbidden)
+	defer srv.Close()
+
+	e := newRemoteEnforcer(srv.URL)
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "unit test")
+	if err == nil {
+		t.Fatal("deny: expected error, got nil")
+	}
+	var de *policy.DeniedError
+	if !errors.As(err, &de) {
+		t.Fatalf("deny: expected *policy.DeniedError, got %T: %v", err, err)
+	}
+	if de.Decision.PolicyName != "mock-policy" {
+		t.Errorf("policy_name = %q, want mock-policy", de.Decision.PolicyName)
+	}
+	if !containsStr(de.Explanation, "DENY") {
+		t.Errorf("Explanation = %q, want to contain DENY", de.Explanation)
+	}
+}
+
+func TestCheckTool_RemoteCheck_Unreachable(t *testing.T) {
+	// Point to a port with no listener — should fail closed.
+	e := newRemoteEnforcer("http://127.0.0.1:19999")
+	err := e.CheckTool(context.Background(), "database", "dev-db", policy.ActionRead, nil, "unit test")
+	if err == nil {
+		t.Fatal("unreachable service: expected error, got nil")
+	}
+	if !containsStr(err.Error(), "policy service unreachable") {
+		t.Errorf("error = %q, want to contain 'policy service unreachable'", err.Error())
+	}
+}
+
+func TestCheckTool_RemoteCheck_RequireApproval_NoClient(t *testing.T) {
+	srv := mockPolicyCheckServer(t, "require_approval", http.StatusOK)
+	defer srv.Close()
+
+	e := newRemoteEnforcer(srv.URL) // no approvalClient
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "unit test")
+	if err == nil {
+		t.Fatal("require_approval: expected error, got nil")
+	}
+	var are *policy.ApprovalRequiredError
+	if !errors.As(err, &are) {
+		t.Fatalf("require_approval: expected *policy.ApprovalRequiredError, got %T: %v", err, err)
+	}
+	if are.Decision.PolicyName != "mock-policy" {
+		t.Errorf("policy_name = %q, want mock-policy", are.Decision.PolicyName)
+	}
+}
+
+func TestCheckResult_RemoteCheck_Allow(t *testing.T) {
+	srv := mockPolicyCheckServer(t, "allow", http.StatusOK)
+	defer srv.Close()
+
+	e := newRemoteEnforcer(srv.URL)
+	err := e.CheckResult(context.Background(), "database", "prod-db", policy.ActionWrite,
+		nil, ToolOutcome{RowsAffected: 50})
+	if err != nil {
+		t.Errorf("allow: expected nil error, got: %v", err)
+	}
+}
+
+func TestCheckResult_RemoteCheck_Deny(t *testing.T) {
+	srv := mockPolicyCheckServer(t, "deny", http.StatusForbidden)
+	defer srv.Close()
+
+	e := newRemoteEnforcer(srv.URL)
+	err := e.CheckResult(context.Background(), "database", "prod-db", policy.ActionWrite,
+		nil, ToolOutcome{RowsAffected: 9999})
+	if err == nil {
+		t.Fatal("deny: expected error, got nil")
+	}
+	var de *policy.DeniedError
+	if !errors.As(err, &de) {
+		t.Fatalf("deny: expected *policy.DeniedError, got %T: %v", err, err)
+	}
+}
+
+func TestCheckResult_RemoteCheck_SkipsWhenToolFailed(t *testing.T) {
+	// Even with remote enforcer, a tool error should bypass the check.
+	e := newRemoteEnforcer("http://127.0.0.1:19999") // unreachable — but should never be called
+	err := e.CheckResult(context.Background(), "database", "prod-db", policy.ActionWrite,
+		nil, ToolOutcome{Err: errors.New("psql failed"), RowsAffected: 9999})
+	if err != nil {
+		t.Errorf("tool failure should skip check, got: %v", err)
+	}
+}
+
+func TestCheckResult_RemoteCheck_SkipsPureReadWithZeroRows(t *testing.T) {
+	e := newRemoteEnforcer("http://127.0.0.1:19999") // unreachable — should never be called
+	err := e.CheckResult(context.Background(), "database", "dev-db", policy.ActionRead,
+		nil, ToolOutcome{RowsAffected: 0, PodsAffected: 0})
+	if err != nil {
+		t.Errorf("pure read with zero rows should skip check, got: %v", err)
+	}
+}
+
+func TestCheckTool_NilEnforcer_NoRemoteURL(t *testing.T) {
+	// Neither engine nor remote URL — no-op.
+	e := &PolicyEnforcer{}
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, "test")
+	if err != nil {
+		t.Errorf("nil enforcer: expected nil error, got: %v", err)
+	}
+}
+
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && stringContainsHelper(s, sub))
 }
@@ -273,6 +426,21 @@ func TestInitPolicyEngine_EnabledWithNonexistentFile(t *testing.T) {
 	}
 	if engine != nil {
 		t.Error("expected nil engine on error")
+	}
+}
+
+func TestInitPolicyEngine_RemoteMode_SkipsLocalEngine(t *testing.T) {
+	// PolicyCheckURL set → remote mode; nil engine expected, no error.
+	engine, err := InitPolicyEngine(Config{
+		PolicyEnabled:  true,
+		PolicyCheckURL: "http://auditd:1199",
+		// Deliberately no PolicyFile — not needed in remote mode.
+	})
+	if err != nil {
+		t.Fatalf("unexpected error in remote mode: %v", err)
+	}
+	if engine != nil {
+		t.Error("expected nil engine in remote check mode")
 	}
 }
 
@@ -353,6 +521,29 @@ func TestMustLoadConfig_PolicyNotSetAtAll(t *testing.T) {
 	}
 	if cfg.PolicyFile != "" {
 		t.Errorf("expected empty PolicyFile, got %q", cfg.PolicyFile)
+	}
+}
+
+func TestMustLoadConfig_PolicyCheckURL_SetFromAuditURL(t *testing.T) {
+	setRequiredModelEnv(t)
+	t.Setenv("HELPDESK_POLICY_ENABLED", "true")
+	t.Setenv("HELPDESK_POLICY_FILE", "/tmp/policies.yaml")
+	t.Setenv("HELPDESK_AUDIT_URL", "http://auditd:1199")
+
+	cfg := MustLoadConfig(":9999")
+	if cfg.PolicyCheckURL != "http://auditd:1199" {
+		t.Errorf("PolicyCheckURL = %q, want http://auditd:1199 (set from AuditURL)", cfg.PolicyCheckURL)
+	}
+}
+
+func TestMustLoadConfig_PolicyCheckURL_NotSetWhenPolicyDisabled(t *testing.T) {
+	setRequiredModelEnv(t)
+	t.Setenv("HELPDESK_POLICY_ENABLED", "false")
+	t.Setenv("HELPDESK_AUDIT_URL", "http://auditd:1199")
+
+	cfg := MustLoadConfig(":9999")
+	if cfg.PolicyCheckURL != "" {
+		t.Errorf("PolicyCheckURL = %q, want empty (policy disabled)", cfg.PolicyCheckURL)
 	}
 }
 

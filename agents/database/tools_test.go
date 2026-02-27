@@ -16,6 +16,7 @@ import (
 	"google.golang.org/genai"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/infra"
 )
 
 // mockRunner implements CommandRunner for testing.
@@ -1187,5 +1188,110 @@ func TestKillIdleConnectionsTool_BlastRadiusDenied(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "kill_idle_connections") {
 		t.Errorf("output = %q, want tool name in blast-radius error", result.Output)
+	}
+}
+
+// =============================================================================
+// Infra.json enforcement tests
+// =============================================================================
+
+// withInfraConfig temporarily sets the package-level infraConfig for a test.
+func withInfraConfig(cfg *infra.Config) func() {
+	old := infraConfig
+	infraConfig = cfg
+	return func() { infraConfig = old }
+}
+
+// makeTestInfraConfig builds a minimal infra.Config with one registered database.
+func makeTestInfraConfig() *infra.Config {
+	return &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				Name:             "prod-db",
+				ConnectionString: "host=prod.example.com dbname=mydb user=postgres",
+				Tags:             []string{"production"},
+			},
+		},
+	}
+}
+
+func TestResolveDatabaseInfo_InfraEnforced_UnknownConnString(t *testing.T) {
+	// infraConfig is set but the connection string is not registered → hard reject.
+	defer withInfraConfig(makeTestInfraConfig())()
+
+	_, err := resolveDatabaseInfo("host=unknown.example.com dbname=other user=postgres")
+	if err == nil {
+		t.Fatal("resolveDatabaseInfo() error = nil, want error for unregistered conn string with infra config set")
+	}
+	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
+		t.Errorf("resolveDatabaseInfo() error = %q, want 'not registered in infrastructure config'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "prod-db") {
+		t.Errorf("resolveDatabaseInfo() error = %q, want known database 'prod-db' listed", err.Error())
+	}
+}
+
+func TestResolveDatabaseInfo_InfraEnforced_UnknownName(t *testing.T) {
+	// infraConfig is set but the database name is not registered → hard reject.
+	defer withInfraConfig(makeTestInfraConfig())()
+
+	_, err := resolveDatabaseInfo("unknown-db")
+	if err == nil {
+		t.Fatal("resolveDatabaseInfo() error = nil, want error for unregistered name with infra config set")
+	}
+	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
+		t.Errorf("resolveDatabaseInfo() error = %q, want 'not registered in infrastructure config'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "prod-db") {
+		t.Errorf("resolveDatabaseInfo() error = %q, want known database 'prod-db' listed", err.Error())
+	}
+}
+
+func TestResolveDatabaseInfo_InfraEnforced_RegisteredConnString(t *testing.T) {
+	// infraConfig is set and the connection string is registered → succeed with tags.
+	defer withInfraConfig(makeTestInfraConfig())()
+
+	info, err := resolveDatabaseInfo("host=prod.example.com dbname=mydb user=postgres")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil for registered conn string", err)
+	}
+	if info.Name != "prod-db" {
+		t.Errorf("resolveDatabaseInfo() Name = %q, want 'prod-db'", info.Name)
+	}
+	if len(info.Tags) == 0 || info.Tags[0] != "production" {
+		t.Errorf("resolveDatabaseInfo() Tags = %v, want ['production']", info.Tags)
+	}
+}
+
+func TestResolveDatabaseInfo_InfraPermissive_UnknownConnString(t *testing.T) {
+	// infraConfig is nil (dev mode) → unregistered conn string is allowed with no tags.
+	defer withInfraConfig(nil)()
+
+	info, err := resolveDatabaseInfo("host=localhost dbname=devdb user=dev")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil in dev mode (no infra config)", err)
+	}
+	if info.Tags != nil {
+		t.Errorf("resolveDatabaseInfo() Tags = %v, want nil in dev mode", info.Tags)
+	}
+}
+
+func TestCheckConnectionTool_InfraEnforced_Rejected(t *testing.T) {
+	// infraConfig is set but connection string is not registered → tool returns ERROR.
+	defer withInfraConfig(makeTestInfraConfig())()
+	defer withMockRunner("", nil)() // should not be reached
+
+	ctx := newTestContext()
+	result, err := checkConnectionTool(ctx, CheckConnectionArgs{
+		ConnectionString: "host=unknown.example.com dbname=other user=postgres",
+	})
+	if err != nil {
+		t.Fatalf("checkConnectionTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("checkConnectionTool() output = %q, want ERROR for unregistered database", result.Output)
+	}
+	if !strings.Contains(result.Output, "not registered in infrastructure config") {
+		t.Errorf("checkConnectionTool() output = %q, want infra rejection message", result.Output)
 	}
 }

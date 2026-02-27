@@ -15,6 +15,7 @@ import (
 	"google.golang.org/genai"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/infra"
 )
 
 // mockK8sToolContext implements tool.Context for k8s agent tests.
@@ -545,5 +546,116 @@ func TestDeletePodTool_BlastRadiusDenied(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "policy denied after execution") {
 		t.Errorf("deletePodTool() error = %v, want 'policy denied after execution'", err)
+	}
+}
+
+// =============================================================================
+// Infra.json enforcement tests
+// =============================================================================
+
+// withK8sInfraConfig temporarily sets the package-level infraConfig for k8s tests.
+func withK8sInfraConfig(cfg *infra.Config) func() {
+	old := infraConfig
+	infraConfig = cfg
+	return func() { infraConfig = old }
+}
+
+// makeK8sTestInfraConfig builds a minimal infra.Config with one registered database
+// that has a K8s namespace and cluster.
+func makeK8sTestInfraConfig() *infra.Config {
+	return &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				Name:         "prod-db",
+				K8sNamespace: "prod-namespace",
+				K8sCluster:   "prod-cluster",
+				Tags:         []string{"production"},
+			},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"prod-cluster": {
+				Name:    "prod-cluster",
+				Context: "gke_prod",
+				Tags:    []string{"production"},
+			},
+		},
+	}
+}
+
+func TestResolveNamespaceInfo_InfraEnforced_UnknownNamespace(t *testing.T) {
+	// infraConfig is set but namespace is not registered → hard reject.
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+
+	_, err := resolveNamespaceInfo("unknown-namespace")
+	if err == nil {
+		t.Fatal("resolveNamespaceInfo() error = nil, want error for unregistered namespace with infra config set")
+	}
+	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
+		t.Errorf("resolveNamespaceInfo() error = %q, want 'not registered in infrastructure config'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "prod-db") {
+		t.Errorf("resolveNamespaceInfo() error = %q, want known database 'prod-db' listed", err.Error())
+	}
+}
+
+func TestResolveNamespaceInfo_InfraEnforced_RegisteredByDBName(t *testing.T) {
+	// infraConfig is set and input is a registered database name → succeed with namespace + tags.
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+
+	info, err := resolveNamespaceInfo("prod-db")
+	if err != nil {
+		t.Fatalf("resolveNamespaceInfo() error = %v, want nil for registered DB name", err)
+	}
+	if info.Namespace != "prod-namespace" {
+		t.Errorf("resolveNamespaceInfo() Namespace = %q, want 'prod-namespace'", info.Namespace)
+	}
+	if len(info.Tags) == 0 || info.Tags[0] != "production" {
+		t.Errorf("resolveNamespaceInfo() Tags = %v, want ['production']", info.Tags)
+	}
+}
+
+func TestResolveNamespaceInfo_InfraEnforced_RegisteredByNamespace(t *testing.T) {
+	// infraConfig is set and input is the actual K8s namespace of a registered DB → allowed.
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+
+	info, err := resolveNamespaceInfo("prod-namespace")
+	if err != nil {
+		t.Fatalf("resolveNamespaceInfo() error = %v, want nil for registered K8s namespace", err)
+	}
+	if info.Namespace != "prod-namespace" {
+		t.Errorf("resolveNamespaceInfo() Namespace = %q, want 'prod-namespace'", info.Namespace)
+	}
+}
+
+func TestResolveNamespaceInfo_InfraPermissive_UnknownNamespace(t *testing.T) {
+	// infraConfig is nil (dev mode) → any namespace is allowed.
+	defer withK8sInfraConfig(nil)()
+
+	info, err := resolveNamespaceInfo("any-namespace")
+	if err != nil {
+		t.Fatalf("resolveNamespaceInfo() error = %v, want nil in dev mode (no infra config)", err)
+	}
+	if info.Namespace != "any-namespace" {
+		t.Errorf("resolveNamespaceInfo() Namespace = %q, want 'any-namespace'", info.Namespace)
+	}
+}
+
+func TestGetPodsTool_InfraEnforced_Rejected(t *testing.T) {
+	// infraConfig is set but namespace is not registered → tool returns error.
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+	defer withMockKubectl("", nil)() // should not be reached
+
+	ctx := newK8sTestContext()
+	_, err := getPodsTool(ctx, GetPodsArgs{
+		Namespace: "unknown-namespace",
+	})
+	if err == nil {
+		t.Fatal("getPodsTool() expected error for unregistered namespace with infra config set")
+	}
+	if !strings.Contains(err.Error(), "access denied") {
+		t.Errorf("getPodsTool() error = %v, want 'access denied'", err)
+	}
+	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
+		t.Errorf("getPodsTool() error = %v, want infra rejection message", err)
 	}
 }

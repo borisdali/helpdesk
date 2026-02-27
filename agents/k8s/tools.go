@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,33 +30,60 @@ type namespaceInfo struct {
 }
 
 // resolveNamespaceInfo resolves a namespace or database name to full info.
-func resolveNamespaceInfo(namespaceOrDBName string) namespaceInfo {
+// When infraConfig is set and the namespace is not registered (neither as a
+// database name nor as a K8s namespace of a registered database), returns an
+// error (hard reject) so callers can fail before any tool execution.
+func resolveNamespaceInfo(namespaceOrDBName string) (namespaceInfo, error) {
 	namespaceOrDBName = strings.TrimSpace(namespaceOrDBName)
 	if namespaceOrDBName == "" {
-		return namespaceInfo{Namespace: namespaceOrDBName}
+		return namespaceInfo{Namespace: namespaceOrDBName}, nil
 	}
 
-	// Try to look up as a database name in the infrastructure config
 	if infraConfig != nil {
+		// Check if input is a registered database name with a K8s namespace.
 		if db, ok := infraConfig.DBServers[namespaceOrDBName]; ok {
 			if db.K8sNamespace != "" {
 				slog.Info("resolved database name to namespace", "name", namespaceOrDBName, "namespace", db.K8sNamespace)
 				return namespaceInfo{
 					Namespace: db.K8sNamespace,
 					Tags:      db.Tags,
-				}
+				}, nil
 			}
 		}
+		// Check if input is the actual K8s namespace of a registered database.
+		for _, db := range infraConfig.DBServers {
+			if db.K8sNamespace == namespaceOrDBName {
+				return namespaceInfo{
+					Namespace: namespaceOrDBName,
+					Tags:      db.Tags,
+				}, nil
+			}
+		}
+		// infraConfig is set but namespace not registered — hard reject.
+		known := make([]string, 0, len(infraConfig.DBServers))
+		for id := range infraConfig.DBServers {
+			known = append(known, id)
+		}
+		sort.Strings(known)
+		return namespaceInfo{}, fmt.Errorf(
+			"namespace or database %q not registered in infrastructure config; "+
+				"contact your IT administrator to add it. Known databases: %s",
+			namespaceOrDBName, strings.Join(known, ", "))
 	}
 
-	return namespaceInfo{Namespace: namespaceOrDBName}
+	// Dev mode: no infra config — return as-is.
+	return namespaceInfo{Namespace: namespaceOrDBName}, nil
 }
 
 // resolveNamespace checks if the input looks like a database name from the
 // infrastructure config and returns the associated K8s namespace. If not found
 // or not a database name, returns the input unchanged.
-func resolveNamespace(namespaceOrDBName string) string {
-	return resolveNamespaceInfo(namespaceOrDBName).Namespace
+func resolveNamespace(namespaceOrDBName string) (string, error) {
+	info, err := resolveNamespaceInfo(namespaceOrDBName)
+	if err != nil {
+		return "", err
+	}
+	return info.Namespace, nil
 }
 
 // resolveContext checks if the input looks like a database name from the
@@ -296,7 +324,10 @@ type GetPodsArgs struct {
 
 func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
 	// Resolve database name to namespace/context if applicable
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return GetPodsResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -332,7 +363,10 @@ type GetServiceArgs struct {
 }
 
 func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return GetServiceResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -363,7 +397,10 @@ type DescribeServiceArgs struct {
 }
 
 func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -393,7 +430,10 @@ type GetEndpointsArgs struct {
 }
 
 func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return GetEndpointsResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -424,7 +464,10 @@ type GetEventsArgs struct {
 }
 
 func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return GetEventsResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -458,7 +501,10 @@ type GetPodLogsArgs struct {
 }
 
 func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -505,7 +551,10 @@ type DescribePodArgs struct {
 }
 
 func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -562,7 +611,10 @@ type DeletePodArgs struct {
 }
 
 func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -595,7 +647,10 @@ type RestartDeploymentArgs struct {
 }
 
 func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (KubectlResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
@@ -625,7 +680,10 @@ type ScaleDeploymentArgs struct {
 }
 
 func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlResult, error) {
-	nsInfo := resolveNamespaceInfo(args.Namespace)
+	nsInfo, err := resolveNamespaceInfo(args.Namespace)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 

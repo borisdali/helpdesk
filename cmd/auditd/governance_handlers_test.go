@@ -674,3 +674,355 @@ func TestHandleGetEvent_WithTraceAndExplanation(t *testing.T) {
 		t.Errorf("policy_decision.explanation missing or truncated, got: %q", expl)
 	}
 }
+
+// --- handlePolicyCheck ---
+
+const approvalPolicyYAML = `
+version: "1"
+policies:
+  - name: approval-policy
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: allow
+        conditions:
+          require_approval: true
+`
+
+func TestHandlePolicyCheck_NoPolicyEngine(t *testing.T) {
+	gs := &governanceServer{} // nil engine, nil store — returns before touching either
+
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"prod-db","action":"write"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestHandlePolicyCheck_MissingParams(t *testing.T) {
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   newTestAuditStore(t),
+	}
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing resource_type", `{"resource_name":"prod-db","action":"write"}`},
+		{"missing resource_name", `{"resource_type":"database","action":"write"}`},
+		{"missing action", `{"resource_type":"database","resource_name":"prod-db"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.NewReader(tc.body)
+			req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+			w := httptest.NewRecorder()
+			gs.handlePolicyCheck(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("%s: status = %d, want 400", tc.name, w.Code)
+			}
+		})
+	}
+}
+
+func TestHandlePolicyCheck_Allow(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   store,
+	}
+
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"dev-db","action":"read","session_id":"sess-allow","trace_id":"trace-allow"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Effect != "allow" {
+		t.Errorf("Effect = %q, want allow", resp.Effect)
+	}
+	if resp.EventID == "" {
+		t.Error("event_id should be set in response")
+	}
+	if !strings.HasPrefix(resp.EventID, "pol_") {
+		t.Errorf("event_id = %q, want pol_* prefix", resp.EventID)
+	}
+	if resp.Explanation == "" {
+		t.Error("explanation should be non-empty")
+	}
+
+	// Verify the pol_* event was persisted in the store.
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("pol_* audit event not persisted in store")
+	}
+	pd := events[0].PolicyDecision
+	if pd == nil {
+		t.Fatal("persisted event missing policy_decision")
+	}
+	if pd.Effect != "allow" {
+		t.Errorf("persisted effect = %q, want allow", pd.Effect)
+	}
+	if pd.ResourceType != "database" {
+		t.Errorf("persisted resource_type = %q, want database", pd.ResourceType)
+	}
+	if pd.ResourceName != "dev-db" {
+		t.Errorf("persisted resource_name = %q, want dev-db", pd.ResourceName)
+	}
+}
+
+func TestHandlePolicyCheck_Deny(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   store,
+	}
+
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"prod-db","action":"write"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Effect != "deny" {
+		t.Errorf("Effect = %q, want deny", resp.Effect)
+	}
+	if !strings.Contains(resp.Message, "writes not allowed") {
+		t.Errorf("Message = %q, want to contain 'writes not allowed'", resp.Message)
+	}
+	if !strings.Contains(resp.Explanation, "DENIED") {
+		t.Errorf("Explanation = %q, want to contain DENIED", resp.Explanation)
+	}
+
+	// Verify the deny event was persisted.
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("deny pol_* audit event not persisted in store")
+	}
+	if events[0].PolicyDecision.Effect != "deny" {
+		t.Errorf("persisted effect = %q, want deny", events[0].PolicyDecision.Effect)
+	}
+}
+
+func TestHandlePolicyCheck_RequireApproval(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, approvalPolicyYAML),
+		auditStore:   store,
+	}
+
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"prod-db","action":"write"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	// require_approval is not a deny — should return 200.
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Effect != "require_approval" {
+		t.Errorf("Effect = %q, want require_approval", resp.Effect)
+	}
+	if !resp.RequiresApproval {
+		t.Error("requires_approval should be true")
+	}
+	if resp.EventID == "" {
+		t.Error("event_id should be set in response")
+	}
+}
+
+func TestHandlePolicyCheck_TagsAutoResolved(t *testing.T) {
+	const prodDenyYAML = `
+version: "1"
+policies:
+  - name: prod-deny-write
+    resources:
+      - type: database
+        match:
+          tags: [production]
+    rules:
+      - action: write
+        effect: deny
+        message: "production writes denied"
+  - name: default-allow
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: allow
+`
+	ic := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				Name: "Production DB",
+				Tags: []string{"production"},
+			},
+		},
+	}
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, prodDenyYAML),
+		auditStore:   store,
+		infraConfig:  ic,
+	}
+
+	// Request carries no tags — the handler must resolve "production" from infraConfig.
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"prod-db","action":"write"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (tags should have been auto-resolved to production); body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Effect != "deny" {
+		t.Errorf("Effect = %q, want deny", resp.Effect)
+	}
+
+	// The persisted event should carry the resolved tag.
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("pol_* event not persisted")
+	}
+	found := false
+	for _, tag := range events[0].PolicyDecision.Tags {
+		if tag == "production" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("persisted tags = %v, want to include 'production'", events[0].PolicyDecision.Tags)
+	}
+}
+
+func TestHandlePolicyCheck_SessionIDFallback(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   store,
+	}
+
+	// No session_id — trace_id should be used as session fallback.
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"dev-db","action":"read","trace_id":"trace-xyz"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp PolicyCheckResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("event not persisted")
+	}
+	if events[0].Session.ID != "trace-xyz" {
+		t.Errorf("session_id = %q, want trace-xyz (fallback to trace_id)", events[0].Session.ID)
+	}
+	if events[0].TraceID != "trace-xyz" {
+		t.Errorf("trace_id = %q, want trace-xyz", events[0].TraceID)
+	}
+}
+
+func TestHandlePolicyCheck_AgentWithoutTraceID_Returns400(t *testing.T) {
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   newTestAuditStore(t),
+	}
+
+	// agent_name present, trace_id absent — must be rejected.
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"dev-db","action":"read","agent_name":"db_agent"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	var errResp map[string]string
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp["error"], "trace_id") {
+		t.Errorf("error message should mention trace_id, got: %q", errResp["error"])
+	}
+}
+
+func TestHandlePolicyCheck_DirectCallAutoGeneratesChkTraceID(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   store,
+	}
+
+	// No agent_name, no trace_id — should succeed with a synthetic chk_* trace_id.
+	body := strings.NewReader(`{"resource_type":"database","resource_name":"dev-db","action":"read"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp PolicyCheckResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if !strings.HasPrefix(resp.TraceID, "chk_") {
+		t.Errorf("trace_id = %q, want chk_* prefix for direct call", resp.TraceID)
+	}
+
+	// Event should be recorded with the synthetic trace_id.
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("event not persisted")
+	}
+	if events[0].TraceID != resp.TraceID {
+		t.Errorf("stored trace_id = %q, want %q", events[0].TraceID, resp.TraceID)
+	}
+}

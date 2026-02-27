@@ -11,12 +11,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// ApprovalStore persists approval requests to SQLite.
+// ApprovalStore persists approval requests to the database (SQLite or PostgreSQL).
 type ApprovalStore struct {
-	db       *sql.DB
-	mu       sync.RWMutex
-	waiters  map[string][]chan *StoredApproval // keyed by approval_id
-	waiterMu sync.Mutex
+	db         *sql.DB
+	isPostgres bool
+	mu         sync.RWMutex
+	waiters    map[string][]chan *StoredApproval // keyed by approval_id
+	waiterMu   sync.Mutex
 }
 
 // StoredApproval represents a pending or resolved approval request.
@@ -67,21 +68,28 @@ type StoredApproval struct {
 
 // NewApprovalStore creates a new approval store using the given database connection.
 // The database should already be opened (typically shared with the audit Store).
-func NewApprovalStore(db *sql.DB) (*ApprovalStore, error) {
-	if err := createApprovalTables(db); err != nil {
+// isPostgres should match the backend used by the Store that owns the connection.
+func NewApprovalStore(db *sql.DB, isPostgres bool) (*ApprovalStore, error) {
+	if err := createApprovalTables(db, isPostgres); err != nil {
 		return nil, fmt.Errorf("create approval tables: %w", err)
 	}
 
 	return &ApprovalStore{
-		db:      db,
-		waiters: make(map[string][]chan *StoredApproval),
+		db:         db,
+		isPostgres: isPostgres,
+		waiters:    make(map[string][]chan *StoredApproval),
 	}, nil
 }
 
-func createApprovalTables(db *sql.DB) error {
-	schema := `
+func createApprovalTables(db *sql.DB, isPostgres bool) error {
+	pkDef := "INTEGER PRIMARY KEY AUTOINCREMENT"
+	if isPostgres {
+		pkDef = "BIGSERIAL PRIMARY KEY"
+	}
+
+	schema := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS approval_requests (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id %s,
 		approval_id TEXT UNIQUE NOT NULL,
 		event_id TEXT,
 		trace_id TEXT,
@@ -103,10 +111,11 @@ func createApprovalTables(db *sql.DB) error {
 		approver_role TEXT,
 		callback_url TEXT,
 		callback_sent_at TEXT,
-		created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-		updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		created_at TEXT DEFAULT '',
+		updated_at TEXT DEFAULT ''
 	);
-	`
+	`, pkDef)
+
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
@@ -144,7 +153,7 @@ func (s *ApprovalStore) CreateRequest(ctx context.Context, req *StoredApproval) 
 		contextJSON = []byte("{}")
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		INSERT INTO approval_requests (
 			approval_id, event_id, trace_id, status,
 			action_class, tool_name, agent_name, resource_type, resource_name,
@@ -152,7 +161,7 @@ func (s *ApprovalStore) CreateRequest(ctx context.Context, req *StoredApproval) 
 			expires_at, policy_name, approver_role, callback_url,
 			created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
+	`),
 		req.ApprovalID,
 		req.EventID,
 		req.TraceID,
@@ -177,7 +186,7 @@ func (s *ApprovalStore) CreateRequest(ctx context.Context, req *StoredApproval) 
 
 // GetRequest retrieves an approval request by ID.
 func (s *ApprovalStore) GetRequest(ctx context.Context, approvalID string) (*StoredApproval, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 		SELECT approval_id, event_id, trace_id, status,
 			action_class, tool_name, agent_name, resource_type, resource_name,
 			requested_by, requested_at, request_context,
@@ -185,14 +194,14 @@ func (s *ApprovalStore) GetRequest(ctx context.Context, approvalID string) (*Sto
 			expires_at, approval_valid_until, policy_name, approver_role,
 			callback_url, callback_sent_at, created_at, updated_at
 		FROM approval_requests WHERE approval_id = ?
-	`, approvalID)
+	`), approvalID)
 
 	return scanStoredApproval(row)
 }
 
 // GetRequestByTraceAndTool finds an approval for a specific trace and tool.
 func (s *ApprovalStore) GetRequestByTraceAndTool(ctx context.Context, traceID, toolName string) (*StoredApproval, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 		SELECT approval_id, event_id, trace_id, status,
 			action_class, tool_name, agent_name, resource_type, resource_name,
 			requested_by, requested_at, request_context,
@@ -202,7 +211,7 @@ func (s *ApprovalStore) GetRequestByTraceAndTool(ctx context.Context, traceID, t
 		FROM approval_requests
 		WHERE trace_id = ? AND tool_name = ?
 		ORDER BY created_at DESC LIMIT 1
-	`, traceID, toolName)
+	`), traceID, toolName)
 
 	return scanStoredApproval(row)
 }
@@ -258,7 +267,7 @@ func (s *ApprovalStore) ListRequests(ctx context.Context, opts ApprovalQueryOpti
 		args = append(args, opts.Limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +294,7 @@ func (s *ApprovalStore) Approve(ctx context.Context, approvalID, approvedBy, rea
 		validUntil = &t
 	}
 
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		UPDATE approval_requests
 		SET status = 'approved',
 			resolved_by = ?,
@@ -294,7 +303,7 @@ func (s *ApprovalStore) Approve(ctx context.Context, approvalID, approvedBy, rea
 			approval_valid_until = ?,
 			updated_at = ?
 		WHERE approval_id = ? AND status = 'pending'
-	`,
+	`),
 		approvedBy,
 		now.Format(time.RFC3339Nano),
 		reason,
@@ -321,7 +330,7 @@ func (s *ApprovalStore) Approve(ctx context.Context, approvalID, approvedBy, rea
 func (s *ApprovalStore) Deny(ctx context.Context, approvalID, deniedBy, reason string) error {
 	now := time.Now().UTC()
 
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		UPDATE approval_requests
 		SET status = 'denied',
 			resolved_by = ?,
@@ -329,7 +338,7 @@ func (s *ApprovalStore) Deny(ctx context.Context, approvalID, deniedBy, reason s
 			resolution_reason = ?,
 			updated_at = ?
 		WHERE approval_id = ? AND status = 'pending'
-	`,
+	`),
 		deniedBy,
 		now.Format(time.RFC3339Nano),
 		reason,
@@ -355,7 +364,7 @@ func (s *ApprovalStore) Deny(ctx context.Context, approvalID, deniedBy, reason s
 func (s *ApprovalStore) Cancel(ctx context.Context, approvalID, cancelledBy, reason string) error {
 	now := time.Now().UTC()
 
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		UPDATE approval_requests
 		SET status = 'cancelled',
 			resolved_by = ?,
@@ -363,7 +372,7 @@ func (s *ApprovalStore) Cancel(ctx context.Context, approvalID, cancelledBy, rea
 			resolution_reason = ?,
 			updated_at = ?
 		WHERE approval_id = ? AND status = 'pending'
-	`,
+	`),
 		cancelledBy,
 		now.Format(time.RFC3339Nano),
 		reason,
@@ -391,10 +400,10 @@ func (s *ApprovalStore) ExpireRequests(ctx context.Context) (int, error) {
 	now := time.Now().UTC()
 
 	// Get IDs of requests to expire (for notifying waiters)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
 		SELECT approval_id FROM approval_requests
 		WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?
-	`, now.Format(time.RFC3339Nano))
+	`), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
@@ -414,14 +423,14 @@ func (s *ApprovalStore) ExpireRequests(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		UPDATE approval_requests
 		SET status = 'expired',
 			resolved_at = ?,
 			resolution_reason = 'Approval request expired',
 			updated_at = ?
 		WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?
-	`,
+	`),
 		now.Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano),
@@ -508,11 +517,11 @@ func (s *ApprovalStore) notifyWaiters(approvalID string) {
 // MarkCallbackSent marks the callback as sent for an approval.
 func (s *ApprovalStore) MarkCallbackSent(ctx context.Context, approvalID string) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		UPDATE approval_requests
 		SET callback_sent_at = ?, updated_at = ?
 		WHERE approval_id = ?
-	`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), approvalID)
+	`), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), approvalID)
 	return err
 }
 

@@ -4,6 +4,7 @@
 package agentutil
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,10 @@ type Config struct {
 	// Approval configuration
 	ApprovalEnabled bool          // Enable approval workflow
 	ApprovalTimeout time.Duration // How long to wait for approval (default: 30s)
+
+	// Remote policy check (set automatically from AuditURL when PolicyEnabled)
+	PolicyCheckURL     string        // auditd base URL for /v1/governance/check; enables remote mode
+	PolicyCheckTimeout time.Duration // HTTP timeout for remote checks (default 5s)
 }
 
 // MustLoadConfig reads env vars. defaultAddr is used when HELPDESK_AGENT_ADDR is unset.
@@ -100,6 +105,12 @@ func MustLoadConfig(defaultAddr string) Config {
 		DefaultPolicy:   os.Getenv("HELPDESK_DEFAULT_POLICY"),
 		ApprovalEnabled: approvalEnabled == "true" || approvalEnabled == "1",
 		ApprovalTimeout: approvalTimeout,
+	}
+
+	// Enable remote policy check mode: when HELPDESK_AUDIT_URL is set and policy is
+	// enabled, delegate policy evaluation to auditd. Agents need no local engine copy.
+	if cfg.PolicyEnabled && cfg.AuditURL != "" {
+		cfg.PolicyCheckURL = cfg.AuditURL
 	}
 
 	if cfg.ModelVendor == "" || cfg.ModelName == "" || cfg.APIKey == "" {
@@ -150,6 +161,13 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 		return nil, nil
 	}
 
+	// Remote check mode: policy evaluation is delegated to auditd.
+	// The PolicyEnforcer will call POST /v1/governance/check instead of a local engine.
+	if cfg.PolicyCheckURL != "" {
+		slog.Info("policy enforcement enabled (remote check mode)", "url", cfg.PolicyCheckURL)
+		return nil, nil
+	}
+
 	if cfg.PolicyFile == "" {
 		return nil, fmt.Errorf("HELPDESK_POLICY_ENABLED is true but HELPDESK_POLICY_FILE is not set")
 	}
@@ -183,22 +201,26 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 
 // PolicyEnforcer wraps a policy engine with convenience methods for agents.
 type PolicyEnforcer struct {
-	engine          *policy.Engine
-	traceStore      *audit.CurrentTraceStore
-	approvalClient  *audit.ApprovalClient
-	approvalTimeout time.Duration
-	agentName       string
-	toolAuditor     *audit.ToolAuditor // records policy decisions to the audit trail
+	engine             *policy.Engine
+	policyCheckURL     string        // non-empty → remote check mode via auditd
+	policyCheckTimeout time.Duration // HTTP timeout for remote checks (default 5s)
+	traceStore         *audit.CurrentTraceStore
+	approvalClient     *audit.ApprovalClient
+	approvalTimeout    time.Duration
+	agentName          string
+	toolAuditor        *audit.ToolAuditor // records policy decisions to the audit trail
 }
 
 // PolicyEnforcerConfig configures the policy enforcer.
 type PolicyEnforcerConfig struct {
-	Engine          *policy.Engine
-	TraceStore      *audit.CurrentTraceStore
-	ApprovalClient  *audit.ApprovalClient
-	ApprovalTimeout time.Duration
-	AgentName       string
-	ToolAuditor     *audit.ToolAuditor // optional; enables policy decision audit events
+	Engine             *policy.Engine
+	PolicyCheckURL     string        // auditd base URL for remote checks (set from cfg.PolicyCheckURL)
+	PolicyCheckTimeout time.Duration // HTTP timeout for remote checks (default 5s)
+	TraceStore         *audit.CurrentTraceStore
+	ApprovalClient     *audit.ApprovalClient
+	ApprovalTimeout    time.Duration
+	AgentName          string
+	ToolAuditor        *audit.ToolAuditor // optional; enables policy decision audit events
 }
 
 // NewPolicyEnforcer creates a policy enforcer. If engine is nil, enforcement is disabled.
@@ -216,13 +238,19 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
+	checkTimeout := cfg.PolicyCheckTimeout
+	if checkTimeout == 0 {
+		checkTimeout = 5 * time.Second
+	}
 	return &PolicyEnforcer{
-		engine:          cfg.Engine,
-		traceStore:      cfg.TraceStore,
-		approvalClient:  cfg.ApprovalClient,
-		toolAuditor:     cfg.ToolAuditor,
-		approvalTimeout: timeout,
-		agentName:       cfg.AgentName,
+		engine:             cfg.Engine,
+		policyCheckURL:     cfg.PolicyCheckURL,
+		policyCheckTimeout: checkTimeout,
+		traceStore:         cfg.TraceStore,
+		approvalClient:     cfg.ApprovalClient,
+		toolAuditor:        cfg.ToolAuditor,
+		approvalTimeout:    timeout,
+		agentName:          cfg.AgentName,
 	}
 }
 
@@ -231,10 +259,32 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 // If approval is required and an approval client is configured, it will request
 // approval and wait for resolution.
 func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
-	if e.engine == nil {
+	if e.engine == nil && e.policyCheckURL == "" {
 		return nil // No enforcement
 	}
 
+	// Remote check mode: delegate evaluation + audit recording to auditd atomically.
+	if e.policyCheckURL != "" {
+		traceID := ""
+		if e.traceStore != nil {
+			traceID = e.traceStore.Get()
+		}
+		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
+			ResourceType: resourceType,
+			ResourceName: resourceName,
+			Action:       string(action),
+			Tags:         tags,
+			TraceID:      traceID,
+			AgentName:    e.agentName,
+			Note:         note,
+		})
+		if err != nil {
+			return err
+		}
+		return e.handleRemoteResponse(ctx, resp, traceID, resourceType, resourceName, action, tags)
+	}
+
+	// Local engine path.
 	req := policy.Request{
 		Resource: policy.RequestResource{
 			Type: resourceType,
@@ -370,7 +420,7 @@ type ToolOutcome struct {
 // Should be called after every write or destructive tool execution. For read-only
 // tools or when Err is set it is a no-op.
 func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, outcome ToolOutcome) error {
-	if e.engine == nil {
+	if e.engine == nil && e.policyCheckURL == "" {
 		return nil
 	}
 	// Tool itself failed — nothing was executed, blast-radius is irrelevant.
@@ -380,6 +430,48 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 	// Pure reads with no measured impact are always fine.
 	if action == policy.ActionRead && outcome.RowsAffected == 0 && outcome.PodsAffected == 0 {
 		return nil
+	}
+
+	// Remote check mode: delegate blast-radius evaluation to auditd.
+	if e.policyCheckURL != "" {
+		traceID := ""
+		if e.traceStore != nil {
+			traceID = e.traceStore.Get()
+		}
+		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
+			ResourceType:  resourceType,
+			ResourceName:  resourceName,
+			Action:        string(action),
+			Tags:          tags,
+			TraceID:       traceID,
+			AgentName:     e.agentName,
+			RowsAffected:  outcome.RowsAffected,
+			PodsAffected:  outcome.PodsAffected,
+			PostExecution: true,
+		})
+		if err != nil {
+			return err
+		}
+		if resp.Effect != "deny" {
+			return nil
+		}
+		slog.Warn("remote post-execution policy check: blast radius exceeded",
+			"resource_type", resourceType,
+			"resource_name", resourceName,
+			"action", action,
+			"rows_affected", outcome.RowsAffected,
+			"pods_affected", outcome.PodsAffected,
+			"policy", resp.PolicyName,
+			"message", resp.Message,
+		)
+		return &policy.DeniedError{
+			Decision: policy.Decision{
+				Effect:     policy.EffectDeny,
+				PolicyName: resp.PolicyName,
+				Message:    resp.Message,
+			},
+			Explanation: resp.Explanation,
+		}
 	}
 
 	traceID := ""
@@ -447,6 +539,99 @@ func (e *PolicyEnforcer) CheckDatabaseResult(ctx context.Context, dbName string,
 // CheckKubernetesResult is a convenience method for post-execution Kubernetes checks.
 func (e *PolicyEnforcer) CheckKubernetesResult(ctx context.Context, namespace string, action policy.ActionClass, tags []string, outcome ToolOutcome) error {
 	return e.CheckResult(ctx, "kubernetes", namespace, action, tags, outcome)
+}
+
+// policyCheckReq is the body sent to POST /v1/governance/check.
+// Field names match PolicyCheckRequest in cmd/auditd/governance_handlers.go.
+type policyCheckReq struct {
+	ResourceType  string   `json:"resource_type"`
+	ResourceName  string   `json:"resource_name"`
+	Action        string   `json:"action"`
+	Tags          []string `json:"tags,omitempty"`
+	TraceID       string   `json:"trace_id,omitempty"`
+	AgentName     string   `json:"agent_name,omitempty"`
+	Note          string   `json:"note,omitempty"`
+	RowsAffected  int      `json:"rows_affected,omitempty"`
+	PodsAffected  int      `json:"pods_affected,omitempty"`
+	PostExecution bool     `json:"post_execution,omitempty"`
+}
+
+// policyCheckResp is the response from POST /v1/governance/check.
+// Field names match PolicyCheckResponse in cmd/auditd/governance_handlers.go.
+type policyCheckResp struct {
+	Effect      string `json:"effect"`
+	PolicyName  string `json:"policy_name"`
+	Message     string `json:"message"`
+	Explanation string `json:"explanation"`
+	EventID     string `json:"event_id"`
+}
+
+// callRemotePolicyCheck sends a policy check request to the auditd service.
+// On any network or server error it returns a non-nil error (fail closed).
+func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCheckReq) (policyCheckResp, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return policyCheckResp{}, fmt.Errorf("policy check failed: marshal: %w", err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, e.policyCheckTimeout)
+	defer cancel()
+
+	checkURL := strings.TrimRight(e.policyCheckURL, "/") + "/v1/governance/check"
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, checkURL, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("remote policy check: failed to build request; failing closed", "url", checkURL, "err", err)
+		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service unreachable")
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		slog.Warn("remote policy check: service unreachable; failing closed", "url", checkURL, "err", err)
+		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service unreachable")
+	}
+	defer httpResp.Body.Close()
+
+	var resp policyCheckResp
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		slog.Warn("remote policy check: invalid response; failing closed",
+			"url", checkURL, "status", httpResp.StatusCode, "err", err)
+		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service unreachable")
+	}
+	return resp, nil
+}
+
+// handleRemoteResponse converts a policyCheckResp into a Go error.
+// For require_approval it invokes the approval workflow when a client is configured.
+func (e *PolicyEnforcer) handleRemoteResponse(ctx context.Context, resp policyCheckResp, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string) error {
+	switch resp.Effect {
+	case "allow":
+		return nil
+	case "deny":
+		return &policy.DeniedError{
+			Decision: policy.Decision{
+				Effect:     policy.EffectDeny,
+				PolicyName: resp.PolicyName,
+				Message:    resp.Message,
+			},
+			Explanation: resp.Explanation,
+		}
+	case "require_approval":
+		if e.approvalClient != nil {
+			return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags)
+		}
+		return &policy.ApprovalRequiredError{
+			Decision: policy.Decision{
+				Effect:     policy.EffectRequireApproval,
+				PolicyName: resp.PolicyName,
+				Message:    resp.Message,
+			},
+		}
+	default:
+		slog.Warn("remote policy check returned unrecognised effect; treating as allow",
+			"effect", resp.Effect, "policy", resp.PolicyName)
+		return nil
+	}
 }
 
 // InitApprovalClient creates an approval client if approvals are enabled.

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,8 +33,10 @@ type databaseInfo struct {
 }
 
 // resolveDatabaseInfo resolves a connection string or database name to full info.
-// Returns the resolved connection string and metadata for policy checks.
-func resolveDatabaseInfo(connStrOrName string) databaseInfo {
+// Returns the resolved info and metadata for policy checks.
+// When infraConfig is set and the database is not registered, returns an error
+// (hard reject) so callers can fail before any tool execution.
+func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 	connStrOrName = strings.TrimSpace(connStrOrName)
 
 	// If it contains "=" it's already a connection string
@@ -58,24 +61,30 @@ func resolveDatabaseInfo(connStrOrName string) databaseInfo {
 						ConnectionStr:     connStrOrName,
 						Tags:              db.Tags,
 						IsFromInfraConfig: true,
-					}
+					}, nil
 				}
 			}
+			// infraConfig is set but connection string not registered — hard reject.
+			known := make([]string, 0, len(infraConfig.DBServers))
+			for id := range infraConfig.DBServers {
+				known = append(known, id)
+			}
+			sort.Strings(known)
+			return databaseInfo{}, fmt.Errorf(
+				"database not registered in infrastructure config; "+
+					"contact your IT administrator to add it. Known databases: %s",
+				strings.Join(known, ", "))
 		}
 
-		knownDBs := 0
-		if infraConfig != nil {
-			knownDBs = len(infraConfig.DBServers)
-		}
 		slog.Warn("connection string not found in infraConfig; policy will evaluate with no tags",
 			"connection_string", connStrOrName,
-			"known_databases", knownDBs,
+			"known_databases", 0,
 		)
 		return databaseInfo{
 			Name:          dbName,
 			ConnectionStr: connStrOrName,
 			Tags:          nil, // No tags - connection string not in infraConfig
-		}
+		}, nil
 	}
 
 	// If we have infrastructure config, try to look up the database name
@@ -87,22 +96,36 @@ func resolveDatabaseInfo(connStrOrName string) databaseInfo {
 				ConnectionStr:     db.ConnectionString,
 				Tags:              db.Tags,
 				IsFromInfraConfig: true,
-			}
+			}, nil
 		}
+		// infraConfig is set but database name not registered — hard reject.
+		known := make([]string, 0, len(infraConfig.DBServers))
+		for id := range infraConfig.DBServers {
+			known = append(known, id)
+		}
+		sort.Strings(known)
+		return databaseInfo{}, fmt.Errorf(
+			"database %q not registered in infrastructure config; "+
+				"contact your IT administrator to add it. Known databases: %s",
+			connStrOrName, strings.Join(known, ", "))
 	}
 
-	// Return as-is (might be a simple hostname or invalid input)
+	// Dev mode: no infra config — return as-is
 	return databaseInfo{
 		Name:          connStrOrName,
 		ConnectionStr: connStrOrName,
-	}
+	}, nil
 }
 
 // resolveConnectionString checks if the input looks like a database name (no "=" sign)
-// and attempts to resolve it using the infrastructure config. If resolution fails or
-// the input is already a connection string, it's returned unchanged.
-func resolveConnectionString(connStrOrName string) string {
-	return resolveDatabaseInfo(connStrOrName).ConnectionStr
+// and attempts to resolve it using the infrastructure config. Returns an error if the
+// database is not registered when infraConfig is set.
+func resolveConnectionString(connStrOrName string) (string, error) {
+	info, err := resolveDatabaseInfo(connStrOrName)
+	if err != nil {
+		return "", err
+	}
+	return info.ConnectionStr, nil
 }
 
 // CommandRunner abstracts command execution for testing.
@@ -187,7 +210,10 @@ func runPsqlWithToolName(ctx context.Context, connStr string, query string, tool
 // runPsqlAs executes a psql command with explicit action class for policy enforcement.
 func runPsqlAs(ctx context.Context, connStr string, query string, toolName string, action policy.ActionClass) (string, error) {
 	// Resolve database info for policy checks
-	dbInfo := resolveDatabaseInfo(connStr)
+	dbInfo, err := resolveDatabaseInfo(connStr)
+	if err != nil {
+		return "", err
+	}
 
 	// Check policy before executing
 	if policyEnforcer != nil {
@@ -764,7 +790,10 @@ WHERE terminated IS TRUE;`, args.IdleMinutes, dbFilter)
 	// kill_idle_connections uses SELECT count(*), so we must parse the terminated
 	// count explicitly and run a second post-execution blast-radius check.
 	if policyEnforcer != nil {
-		dbInfo := resolveDatabaseInfo(args.ConnectionString)
+		dbInfo, err := resolveDatabaseInfo(args.ConnectionString)
+		if err != nil {
+			return errorResult("kill_idle_connections", args.ConnectionString, err), nil
+		}
 		terminated := parseTerminatedCount(output)
 		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, action, dbInfo.Tags, agentutil.ToolOutcome{
 			RowsAffected: terminated,

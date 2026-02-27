@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -432,4 +433,112 @@ func TestStore_Query(t *testing.T) {
 	if len(results) != 1 {
 		t.Errorf("query by event type: got %d results, want 1", len(results))
 	}
+}
+
+// TestRebind verifies that rebind rewrites ? placeholders to $N for PostgreSQL
+// and leaves queries unchanged for SQLite.
+func TestRebind(t *testing.T) {
+	tests := []struct {
+		name       string
+		isPostgres bool
+		input      string
+		want       string
+	}{
+		{
+			name:       "SQLite: query unchanged",
+			isPostgres: false,
+			input:      "SELECT * FROM t WHERE a = ? AND b = ?",
+			want:       "SELECT * FROM t WHERE a = ? AND b = ?",
+		},
+		{
+			name:       "PostgreSQL: single placeholder",
+			isPostgres: true,
+			input:      "SELECT * FROM t WHERE id = ?",
+			want:       "SELECT * FROM t WHERE id = $1",
+		},
+		{
+			name:       "PostgreSQL: multiple placeholders",
+			isPostgres: true,
+			input:      "INSERT INTO t (a, b, c) VALUES (?, ?, ?)",
+			want:       "INSERT INTO t (a, b, c) VALUES ($1, $2, $3)",
+		},
+		{
+			name:       "PostgreSQL: no placeholders",
+			isPostgres: true,
+			input:      "SELECT * FROM t",
+			want:       "SELECT * FROM t",
+		},
+		{
+			name:       "PostgreSQL: placeholder in string literal",
+			isPostgres: true,
+			input:      "UPDATE t SET status = 'pending' WHERE id = ?",
+			want:       "UPDATE t SET status = 'pending' WHERE id = $1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rebind(tc.isPostgres, tc.input)
+			if got != tc.want {
+				t.Errorf("rebind(%v, %q)\n got  %q\n want %q", tc.isPostgres, tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStoreConfig_DSNRouting verifies that DSN prefixes select the correct backend.
+func TestStoreConfig_DSNRouting(t *testing.T) {
+	t.Run("file path uses SQLite backend", func(t *testing.T) {
+		store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		defer store.Close()
+
+		if store.IsPostgres() {
+			t.Error("expected IsPostgres()=false for file-path DSN")
+		}
+	})
+
+	t.Run("DSN field takes precedence over DBPath", func(t *testing.T) {
+		// When DSN is a file path it should still open successfully.
+		dbPath := filepath.Join(t.TempDir(), "dsn_test.db")
+		store, err := NewStore(StoreConfig{
+			DBPath: filepath.Join(t.TempDir(), "ignored.db"),
+			DSN:    dbPath,
+		})
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		defer store.Close()
+
+		if store.IsPostgres() {
+			t.Error("expected IsPostgres()=false for SQLite DSN")
+		}
+	})
+
+	t.Run("postgres:// DSN selects pgx driver", func(t *testing.T) {
+		// No real Postgres server is required — the open succeeds because sql.Open
+		// is lazy. createTables will fail when it tries to execute a query, but the
+		// error must NOT be "unknown driver 'pgx'", which would mean the pgx driver
+		// import is missing.
+		_, err := NewStore(StoreConfig{DSN: "postgres://localhost:5432/nonexistent_db_for_test"})
+		if err == nil {
+			// Surprisingly connected — skip (CI may have a PG server).
+			t.Skip("unexpectedly connected to postgres; skipping driver-detection assertion")
+		}
+		if strings.Contains(err.Error(), "unknown driver") {
+			t.Errorf("pgx driver not registered: %v", err)
+		}
+	})
+
+	t.Run("postgresql:// prefix also selects pgx driver", func(t *testing.T) {
+		_, err := NewStore(StoreConfig{DSN: "postgresql://localhost:5432/nonexistent_db_for_test"})
+		if err == nil {
+			t.Skip("unexpectedly connected to postgres; skipping driver-detection assertion")
+		}
+		if strings.Contains(err.Error(), "unknown driver") {
+			t.Errorf("pgx driver not registered: %v", err)
+		}
+	})
 }

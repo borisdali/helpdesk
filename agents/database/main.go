@@ -72,6 +72,7 @@ func main() {
 
 	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
 		Engine:          policyEngine,
+		PolicyCheckURL:  cfg.PolicyCheckURL,
 		TraceStore:      traceStore,
 		ApprovalClient:  approvalClient,
 		ApprovalTimeout: cfg.ApprovalTimeout,

@@ -71,7 +71,7 @@ func main() {
 	defer store.Close()
 
 	// Create approval store (shares the same database connection)
-	approvalStore, err := audit.NewApprovalStore(store.DB())
+	approvalStore, err := audit.NewApprovalStore(store.DB(), store.IsPostgres())
 	if err != nil {
 		slog.Error("failed to create approval store", "err", err)
 		os.Exit(1)
@@ -126,6 +126,7 @@ func main() {
 	mux.HandleFunc("GET /v1/governance/info", govSrv.handleGetInfo)
 	mux.HandleFunc("GET /v1/governance/policies", govSrv.handleGetPolicySummary)
 	mux.HandleFunc("GET /v1/governance/explain", govSrv.handleExplain)
+	mux.HandleFunc("POST /v1/governance/check", govSrv.handlePolicyCheck)
 	mux.HandleFunc("GET /v1/events/{eventID}", govSrv.handleGetEvent)
 
 	// Health endpoint

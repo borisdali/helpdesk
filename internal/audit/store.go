@@ -8,67 +8,117 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
-// Store persists audit events to SQLite and notifies listeners.
+// Store persists audit events to SQLite or PostgreSQL and notifies listeners.
 type Store struct {
 	db         *sql.DB
+	isPostgres bool   // true when connected to PostgreSQL
 	socketPath string
 	listeners  []net.Conn
 	mu         sync.RWMutex
-	lastHash   string // hash of the last recorded event (for chain)
+	lastHash   string     // hash of the last recorded event (for chain)
 	hashMu     sync.Mutex // protects lastHash
 }
 
 // StoreConfig configures the audit store.
 type StoreConfig struct {
 	// DBPath is the path to the SQLite database file.
-	// If empty, defaults to "audit.db" in the current directory.
+	// Kept for backward compatibility; takes effect when DSN is empty.
 	DBPath string
+
+	// DSN is the data-source name. When it starts with "postgres://" or
+	// "postgresql://", the PostgreSQL backend (pgx) is used; otherwise the
+	// value is treated as a SQLite file path.  If both DSN and DBPath are
+	// provided, DSN takes precedence.
+	DSN string
 
 	// SocketPath is the path to the Unix socket for real-time notifications.
 	// If empty, notifications are disabled.
 	SocketPath string
 }
 
+// IsPostgres reports whether the store is backed by PostgreSQL.
+func (s *Store) IsPostgres() bool { return s.isPostgres }
+
+// rebind rewrites a query that uses ? placeholders into one using $N
+// placeholders when the store is backed by PostgreSQL.
+func rebind(isPostgres bool, query string) string {
+	if !isPostgres {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for _, c := range query {
+		if c == '?' {
+			n++
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(n))
+		} else {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
 // NewStore creates a new audit store with the given configuration.
 func NewStore(cfg StoreConfig) (*Store, error) {
-	if cfg.DBPath == "" {
-		cfg.DBPath = "audit.db"
+	// Resolve the effective DSN: prefer cfg.DSN, fall back to cfg.DBPath.
+	dsn := cfg.DSN
+	if dsn == "" {
+		dsn = cfg.DBPath
+	}
+	if dsn == "" {
+		dsn = "audit.db"
 	}
 
-	// Ensure directory exists.
-	dir := filepath.Dir(cfg.DBPath)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("create audit directory: %w", err)
+	// Detect backend from DSN prefix.
+	isPostgres := strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
+
+	var db *sql.DB
+	var err error
+
+	if isPostgres {
+		db, err = sql.Open("pgx", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("open postgres database: %w", err)
+		}
+	} else {
+		// SQLite: ensure directory exists.
+		dir := filepath.Dir(dsn)
+		if dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, fmt.Errorf("create audit directory: %w", err)
+			}
+		}
+		db, err = sql.Open("sqlite", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("open audit database: %w", err)
+		}
+		// Enable WAL mode for better concurrent read performance (SQLite only).
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("enable WAL mode: %w", err)
 		}
 	}
 
-	db, err := sql.Open("sqlite", cfg.DBPath)
-	if err != nil {
-		return nil, fmt.Errorf("open audit database: %w", err)
-	}
-
-	// Enable WAL mode for better concurrent read performance.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enable WAL mode: %w", err)
-	}
-
 	// Create tables.
-	if err := createTables(db); err != nil {
+	if err := createTables(db, isPostgres); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create tables: %w", err)
 	}
 
 	s := &Store{
 		db:         db,
+		isPostgres: isPostgres,
 		socketPath: cfg.SocketPath,
 		lastHash:   GenesisHash,
 	}
@@ -114,10 +164,18 @@ func (s *Store) initLastHash() error {
 	return nil
 }
 
-func createTables(db *sql.DB) error {
-	schema := `
+func createTables(db *sql.DB, isPostgres bool) error {
+	// Primary-key definition differs between SQLite and PostgreSQL.
+	pkDef := "INTEGER PRIMARY KEY AUTOINCREMENT"
+	createdAt := "TEXT DEFAULT CURRENT_TIMESTAMP"
+	if isPostgres {
+		pkDef = "BIGSERIAL PRIMARY KEY"
+		createdAt = "TIMESTAMPTZ DEFAULT NOW()"
+	}
+
+	schema := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS audit_events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id %s,
 		event_id TEXT UNIQUE NOT NULL,
 		timestamp TEXT NOT NULL,
 		event_type TEXT NOT NULL,
@@ -141,31 +199,37 @@ func createTables(db *sql.DB) error {
 		outcome_error TEXT,
 		outcome_duration_ms INTEGER,
 		raw_json TEXT NOT NULL,
-		created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		created_at %s
 	);
-	`
+	`, pkDef, createdAt)
+
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
 
-	// Migrate existing tables: add columns that may not exist
+	// Migrate existing tables: add columns that may not exist.
+	// PostgreSQL supports IF NOT EXISTS for ALTER TABLE ADD COLUMN; SQLite does not,
+	// so we simply ignore errors (duplicate-column) on both backends.
+	ifNotExists := ""
+	if isPostgres {
+		ifNotExists = "IF NOT EXISTS "
+	}
 	migrations := []string{
-		"ALTER TABLE audit_events ADD COLUMN trace_id TEXT",
-		"ALTER TABLE audit_events ADD COLUMN parent_id TEXT",
-		"ALTER TABLE audit_events ADD COLUMN action_class TEXT",
-		"ALTER TABLE audit_events ADD COLUMN prev_hash TEXT",
-		"ALTER TABLE audit_events ADD COLUMN event_hash TEXT",
-		"ALTER TABLE audit_events ADD COLUMN tool_name TEXT",
-		"ALTER TABLE audit_events ADD COLUMN tool_json TEXT",
-		"ALTER TABLE audit_events ADD COLUMN approval_status TEXT",
-		"ALTER TABLE audit_events ADD COLUMN approval_json TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "trace_id TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "parent_id TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "action_class TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "prev_hash TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "event_hash TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "tool_name TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "tool_json TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_status TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_json TEXT",
 	}
 	for _, m := range migrations {
-		// Ignore "duplicate column" errors - column already exists
-		db.Exec(m)
+		db.Exec(m) //nolint:errcheck
 	}
 
-	// Create indexes (safe to run multiple times with IF NOT EXISTS)
+	// Create indexes (safe to run multiple times with IF NOT EXISTS).
 	indexes := `
 	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON audit_events(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_events_session ON audit_events(session_id);
@@ -246,7 +310,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		approvalJSON, _ = json.Marshal(event.Approval)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		INSERT INTO audit_events (
 			event_id, timestamp, event_type, trace_id, parent_id, action_class,
 			prev_hash, event_hash,
@@ -256,7 +320,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
+	`),
 		event.EventID,
 		event.Timestamp.Format(time.RFC3339Nano),
 		string(event.EventType),
@@ -296,11 +360,11 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 
 // RecordOutcome updates an existing delegation event with its outcome.
 func (s *Store) RecordOutcome(ctx context.Context, eventID string, outcome *Outcome) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		UPDATE audit_events
 		SET outcome_status = ?, outcome_error = ?, outcome_duration_ms = ?
 		WHERE event_id = ?
-	`,
+	`),
 		outcome.Status,
 		outcome.ErrorMessage,
 		outcome.Duration.Milliseconds(),
@@ -371,7 +435,7 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		args = append(args, opts.Limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, query), args...)
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)
 	}

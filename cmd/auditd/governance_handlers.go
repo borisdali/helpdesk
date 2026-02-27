@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
@@ -106,9 +108,16 @@ func newGovernanceServer(
 			gs.policyEngine = policy.NewEngine(policy.EngineConfig{
 				PolicyConfig: cfg,
 			})
+			slog.Info("policy engine loaded",
+				"file", policyFile,
+				"policies", len(cfg.Policies))
 		} else {
 			slog.Warn("failed to load policy file for governance info", "file", policyFile, "err", err)
 		}
+	} else {
+		slog.Info("policy engine disabled (governance/check returns 503)",
+			"HELPDESK_POLICY_ENABLED", policyEnabled,
+			"HELPDESK_POLICY_FILE", policyFile)
 	}
 
 	// Load infrastructure config so the explain endpoint can resolve tags by resource name.
@@ -391,6 +400,14 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 
 // tagsFromInfra resolves the tags for a resource from the infrastructure config.
 // Returns nil when the infra config is not loaded or the resource is not found.
+// writeJSONError writes a JSON {"error":"..."} body with the given status code.
+// Use this instead of http.Error so that all error responses are valid JSON.
+func writeJSONError(w http.ResponseWriter, msg string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck
+}
+
 func (s *governanceServer) tagsFromInfra(resourceType, resourceName string) []string {
 	if s.infraConfig == nil {
 		return nil
@@ -406,6 +423,178 @@ func (s *governanceServer) tagsFromInfra(resourceType, resourceName string) []st
 		}
 	}
 	return nil
+}
+
+// PolicyCheckRequest is the body for POST /v1/governance/check.
+// Agents send this instead of evaluating locally and POSTing a separate pol_* event.
+type PolicyCheckRequest struct {
+	ResourceType string   `json:"resource_type"` // "database" | "kubernetes"
+	ResourceName string   `json:"resource_name"` // database name, namespace, etc.
+	Action       string   `json:"action"`        // "read" | "write" | "destructive"
+	Tags         []string `json:"tags,omitempty"`
+	TraceID      string   `json:"trace_id,omitempty"`
+	SessionID    string   `json:"session_id,omitempty"`
+	AgentName    string   `json:"agent_name,omitempty"`
+	Note         string   `json:"note,omitempty"`
+	// blast-radius context (post-execution checks)
+	RowsAffected  int  `json:"rows_affected,omitempty"`
+	PodsAffected  int  `json:"pods_affected,omitempty"`
+	PostExecution bool `json:"post_execution,omitempty"`
+}
+
+// PolicyCheckResponse is returned by POST /v1/governance/check.
+type PolicyCheckResponse struct {
+	Effect           string               `json:"effect"`                     // allow / deny / require_approval
+	PolicyName       string               `json:"policy_name"`
+	Message          string               `json:"message,omitempty"`
+	Explanation      string               `json:"explanation"`
+	RequiresApproval bool                 `json:"requires_approval,omitempty"`
+	Trace            policy.DecisionTrace `json:"trace"`
+	EventID          string               `json:"event_id"`  // pol_* event recorded atomically
+	TraceID          string               `json:"trace_id"`  // echoed back; chk_* prefix means auto-generated (direct call)
+}
+
+// handlePolicyCheck handles POST /v1/governance/check.
+// It evaluates the policy engine and records the decision as a pol_* audit event
+// atomically. Agents call this instead of running a local engine and then separately
+// POSTing to /v1/events.
+//
+// Returns 403 Forbidden when the decision is deny; 503 when no policy engine is configured.
+func (s *governanceServer) handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
+	if s.policyEngine == nil {
+		writeJSONError(w, "policy engine not configured; set HELPDESK_POLICY_FILE and HELPDESK_POLICY_ENABLED", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req PolicyCheckRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.ResourceType == "" || req.ResourceName == "" || req.Action == "" {
+		writeJSONError(w, "resource_type, resource_name and action are required", http.StatusBadRequest)
+		return
+	}
+
+	// Agent calls must always carry a trace_id so their policy decisions are
+	// traceable to the originating user request. A missing trace_id from an
+	// agent indicates either an out-of-band bypass or a propagation bug —
+	// reject loudly rather than silently recording an orphaned event.
+	if req.AgentName != "" && req.TraceID == "" {
+		writeJSONError(w, "agent requests must include trace_id", http.StatusBadRequest)
+		return
+	}
+	// Direct calls (ops/curl) without a trace_id get a synthetic chk_* ID so
+	// the event is still recorded and queryable. The chk_* prefix is exclusive
+	// to calls with no agent_name — a reliable signal in the audit log.
+	if req.TraceID == "" {
+		req.TraceID = "chk_" + uuid.New().String()[:8]
+	}
+
+	tags := req.Tags
+	// Auto-resolve tags from infra config when not supplied by the agent.
+	if len(tags) == 0 {
+		tags = s.tagsFromInfra(req.ResourceType, req.ResourceName)
+	}
+
+	polReq := policy.Request{
+		Resource: policy.RequestResource{
+			Type: req.ResourceType,
+			Name: req.ResourceName,
+			Tags: tags,
+		},
+		Action: policy.ActionClass(req.Action),
+		Context: policy.RequestContext{
+			TraceID:      req.TraceID,
+			RowsAffected: req.RowsAffected,
+			PodsAffected: req.PodsAffected,
+		},
+	}
+
+	trace := s.policyEngine.Explain(polReq)
+	decision := trace.Decision
+
+	// Serialize trace for the audit record.
+	traceJSON, _ := json.Marshal(trace)
+
+	// Build and record the pol_* audit event atomically so there is exactly one
+	// authoritative record — agents no longer need to POST a separate /v1/events.
+	eventID := "pol_" + uuid.New().String()[:8]
+	sessionID := req.SessionID
+	if sessionID == "" {
+		sessionID = req.TraceID // always non-empty at this point
+	}
+
+	event := &audit.Event{
+		EventID:     eventID,
+		Timestamp:   time.Now().UTC(),
+		EventType:   audit.EventTypePolicyDecision,
+		TraceID:     req.TraceID,
+		ActionClass: audit.ActionClass(req.Action),
+		Session:     audit.Session{ID: sessionID},
+		PolicyDecision: &audit.PolicyDecision{
+			ResourceType:  req.ResourceType,
+			ResourceName:  req.ResourceName,
+			Action:        req.Action,
+			Tags:          tags,
+			Effect:        string(decision.Effect),
+			PolicyName:    decision.PolicyName,
+			RuleIndex:     decision.RuleIndex,
+			Message:       decision.Message,
+			Note:          req.Note,
+			PostExecution: req.PostExecution,
+			Trace:         traceJSON,
+			Explanation:   trace.Explanation,
+		},
+	}
+
+	if err := s.auditStore.Record(r.Context(), event); err != nil {
+		// Don't fail the response — policy evaluation succeeded; only persistence failed.
+		slog.Error("failed to record policy check event", "event_id", eventID, "err", err)
+	}
+
+	// Log at appropriate level (mirrors handleRecordEvent).
+	switch decision.Effect {
+	case policy.EffectDeny:
+		slog.Warn("policy check: DENY",
+			"event_id", eventID,
+			"resource", req.ResourceType+":"+req.ResourceName,
+			"action", req.Action,
+			"policy", decision.PolicyName,
+			"agent", req.AgentName)
+	case policy.EffectRequireApproval:
+		slog.Info("policy check: REQUIRE_APPROVAL",
+			"event_id", eventID,
+			"resource", req.ResourceType+":"+req.ResourceName,
+			"action", req.Action,
+			"policy", decision.PolicyName)
+	default:
+		slog.Debug("policy check: ALLOW",
+			"event_id", eventID,
+			"resource", req.ResourceType+":"+req.ResourceName,
+			"action", req.Action)
+	}
+
+	resp := PolicyCheckResponse{
+		Effect:           string(decision.Effect),
+		PolicyName:       decision.PolicyName,
+		Message:          decision.Message,
+		Explanation:      trace.Explanation,
+		RequiresApproval: decision.NeedsApproval(),
+		Trace:            trace,
+		EventID:          eventID,
+		TraceID:          req.TraceID,
+	}
+
+	httpStatus := http.StatusOK
+	if decision.IsDenied() {
+		httpStatus = http.StatusForbidden
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpStatus)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleGetEvent handles GET /v1/events/{eventID} — retrieve a single audit event by ID.

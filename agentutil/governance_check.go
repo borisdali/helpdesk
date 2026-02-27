@@ -67,12 +67,14 @@ func CheckFixModeViolations(cfg Config) []FixModeViolation {
 			Description: "Policy enforcement is disabled. HELPDESK_POLICY_ENABLED must be 'true' in fix mode.",
 			Remediation: "Set HELPDESK_POLICY_ENABLED=true and HELPDESK_POLICY_FILE to a valid policy YAML.",
 		})
-	} else if cfg.PolicyFile == "" {
+	} else if cfg.PolicyFile == "" && cfg.PolicyCheckURL == "" {
+		// Remote check mode (PolicyCheckURL set from AuditURL) satisfies this requirement
+		// without a local policy file — no violation in that case.
 		v = append(v, FixModeViolation{
 			Module:      "policy_engine",
 			Severity:    "fatal",
-			Description: "Policy engine is enabled but HELPDESK_POLICY_FILE is not set.",
-			Remediation: "Set HELPDESK_POLICY_FILE to a valid policy YAML file.",
+			Description: "Policy engine is enabled but neither HELPDESK_POLICY_FILE nor a remote check URL is configured.",
+			Remediation: "Set HELPDESK_POLICY_FILE to a valid policy YAML, or set HELPDESK_AUDIT_URL to enable remote policy checks.",
 		})
 	}
 

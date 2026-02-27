@@ -67,10 +67,11 @@ func main() {
 		os.Exit(1)
 	}
 	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
-		Engine:      policyEngine,
-		TraceStore:  traceStore,
-		AgentName:   "k8s_agent",
-		ToolAuditor: toolAuditor,
+		Engine:         policyEngine,
+		PolicyCheckURL: cfg.PolicyCheckURL,
+		TraceStore:     traceStore,
+		AgentName:      "k8s_agent",
+		ToolAuditor:    toolAuditor,
 	})
 
 	slog.Info("governance",
