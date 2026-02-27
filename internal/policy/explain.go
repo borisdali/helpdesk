@@ -22,9 +22,28 @@ func buildExplanation(req Request, trace DecisionTrace) string {
 	if trace.DefaultApplied {
 		fmt.Fprintf(&b, "\nNo policy matched this resource — default effect is %s.\n", trace.Decision.Effect)
 		if len(req.Resource.Tags) == 0 {
-			b.WriteString("\nThis usually means the resource is not listed in the infrastructure ")
-			b.WriteString("config and therefore has no tags. Add it to HELPDESK_INFRA_CONFIG ")
-			b.WriteString("with appropriate tags so a policy can be applied.")
+			b.WriteString("\nThis resource has no tags, so no tag-based policy can match it.\n")
+			b.WriteString("Add it to HELPDESK_INFRA_CONFIG with one of the following tag sets:\n\n")
+
+			// Collect unique tag sets from resource_mismatch skips and list them with
+			// the policy name so the operator knows what each tag set unlocks.
+			seen := make(map[string]bool)
+			for _, pt := range trace.PoliciesEvaluated {
+				if pt.SkipReason != "resource_mismatch" {
+					continue
+				}
+				for _, tags := range pt.RequiredTags {
+					key := strings.Join(tags, ",")
+					if !seen[key] {
+						seen[key] = true
+						fmt.Fprintf(&b, "  • tags: [%s]  → enables policy %q\n",
+							strings.Join(tags, ", "), pt.PolicyName)
+					}
+				}
+			}
+			if len(seen) == 0 {
+				b.WriteString("  (no tag-based policies are configured for this resource type)\n")
+			}
 		}
 		return b.String()
 	}

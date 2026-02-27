@@ -191,6 +191,31 @@ func (s *server) handleRecordEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log policy decisions at an appropriate level so denials are visible in the
+	// auditd log alongside the explain-endpoint decisions.
+	if event.PolicyDecision != nil {
+		pd := event.PolicyDecision
+		attrs := []any{
+			"event_id", event.EventID,
+			"action", pd.Action,
+			"resource_type", pd.ResourceType,
+			"resource_name", pd.ResourceName,
+			"effect", pd.Effect,
+			"policy", pd.PolicyName,
+		}
+		if pd.Message != "" {
+			attrs = append(attrs, "message", pd.Message)
+		}
+		switch pd.Effect {
+		case "deny":
+			slog.Warn("policy decision recorded: DENY", attrs...)
+		case "require_approval":
+			slog.Info("policy decision recorded: REQUIRE_APPROVAL", attrs...)
+		default:
+			slog.Debug("policy decision recorded: ALLOW", attrs...)
+		}
+	}
+
 	// Return the event with computed hashes
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{

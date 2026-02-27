@@ -94,6 +94,7 @@ func (e *Engine) explainEvaluate(req Request) DecisionTrace {
 		}
 		if !e.matchesResource(pol, req.Resource) {
 			pt.SkipReason = "resource_mismatch"
+			pt.RequiredTags = resourceTagSets(pol, req.Resource.Type)
 			trace.PoliciesEvaluated = append(trace.PoliciesEvaluated, pt)
 			continue
 		}
@@ -223,6 +224,21 @@ func (e *Engine) matchesResource(policy Policy, resource RequestResource) bool {
 	}
 
 	return false
+}
+
+// resourceTagSets returns the tag sets from a policy's resource specs that
+// match the given resource type and have tag requirements. Used to populate
+// PolicyTrace.RequiredTags so callers can explain which tags would unlock a policy.
+func resourceTagSets(pol Policy, resourceType string) [][]string {
+	var sets [][]string
+	for _, r := range pol.Resources {
+		if r.Type == resourceType && len(r.Match.Tags) > 0 {
+			cp := make([]string, len(r.Match.Tags))
+			copy(cp, r.Match.Tags)
+			sets = append(sets, cp)
+		}
+	}
+	return sets
 }
 
 // hasAllTags returns true if resourceTags contains all requiredTags.

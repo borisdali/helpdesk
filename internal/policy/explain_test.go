@@ -50,6 +50,88 @@ func TestBuildExplanation_DefaultDeny_NoTags(t *testing.T) {
 	assertContains(t, got, "no tags")
 }
 
+func TestBuildExplanation_DefaultDeny_ListsRequiredTags(t *testing.T) {
+	// When a resource has no tags and policies were skipped for resource_mismatch,
+	// the explanation should list the specific tags that would unlock each policy.
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "mystery-db"},
+		Action:   ActionRead,
+	}
+	trace := DecisionTrace{
+		Decision:       Decision{Effect: EffectDeny, PolicyName: "default"},
+		DefaultApplied: true,
+		PoliciesEvaluated: []PolicyTrace{
+			{PolicyName: "production-protection", Matched: false, SkipReason: "resource_mismatch",
+				RequiredTags: [][]string{{"production"}}},
+			{PolicyName: "dev-permissive", Matched: false, SkipReason: "resource_mismatch",
+				RequiredTags: [][]string{{"development"}}},
+			{PolicyName: "k8s-only", Matched: false, SkipReason: "resource_mismatch",
+				RequiredTags: nil}, // different type — no tag requirements for "database"
+		},
+	}
+	got := buildExplanation(req, trace)
+
+	assertContains(t, got, "no tags")
+	assertContains(t, got, `tags: [production]`)
+	assertContains(t, got, `"production-protection"`)
+	assertContains(t, got, `tags: [development]`)
+	assertContains(t, got, `"dev-permissive"`)
+	// k8s-only has no RequiredTags for this type, so it should NOT appear.
+	assertNotContains(t, got, "k8s-only")
+}
+
+func TestExplain_DefaultDeny_RequiredTagsPopulated(t *testing.T) {
+	// Verify the engine populates RequiredTags on PolicyTrace when a policy is
+	// skipped because the resource lacks required tags.
+	engine := newEngineFromYAML(t, `
+version: "1"
+policies:
+  - name: prod-only
+    resources:
+      - type: database
+        match:
+          tags: [production]
+    rules:
+      - action: read
+        effect: allow
+  - name: staging-only
+    resources:
+      - type: database
+        match:
+          tags: [staging]
+    rules:
+      - action: read
+        effect: allow
+`)
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "unknown-db"},
+		Action:   ActionRead,
+	}
+	trace := engine.Explain(req)
+
+	if !trace.DefaultApplied {
+		t.Fatal("expected default deny when resource has no tags")
+	}
+	if len(trace.PoliciesEvaluated) != 2 {
+		t.Fatalf("PoliciesEvaluated len = %d, want 2", len(trace.PoliciesEvaluated))
+	}
+
+	for _, pt := range trace.PoliciesEvaluated {
+		if pt.SkipReason != "resource_mismatch" {
+			t.Errorf("policy %q: SkipReason = %q, want resource_mismatch", pt.PolicyName, pt.SkipReason)
+		}
+		if len(pt.RequiredTags) == 0 {
+			t.Errorf("policy %q: RequiredTags should be populated", pt.PolicyName)
+		}
+	}
+
+	// The explanation should list both tag sets.
+	assertContains(t, trace.Explanation, "tags: [production]")
+	assertContains(t, trace.Explanation, "tags: [staging]")
+	assertContains(t, trace.Explanation, "prod-only")
+	assertContains(t, trace.Explanation, "staging-only")
+}
+
 func TestBuildExplanation_DefaultDeny_WithTags(t *testing.T) {
 	req := Request{
 		Resource: RequestResource{Type: "database", Name: "mystery-db", Tags: []string{"staging"}},

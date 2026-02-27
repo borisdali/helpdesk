@@ -411,13 +411,15 @@ func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult
 // GetActiveConnectionsArgs defines arguments for the get_active_connections tool.
 type GetActiveConnectionsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
-	IncludeIdle      bool   `json:"include_idle,omitempty" jsonschema:"If true, include idle connections. Default shows only active queries."`
+	ActiveOnly       bool   `json:"active_only,omitempty" jsonschema:"If true, show only connections currently executing a query (state=active). Default shows all connected sessions including idle ones."`
 }
 
 func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
-	stateFilter := "AND state != 'idle'"
-	if args.IncludeIdle {
-		stateFilter = ""
+	// Default: show all user connections including idle sessions (connected but not running a query).
+	// Autovacuum workers and background processes have state IS NULL and are excluded automatically.
+	stateFilter := "AND state IS NOT NULL"
+	if args.ActiveOnly {
+		stateFilter = "AND state = 'active'"
 	}
 
 	query := fmt.Sprintf(`SELECT

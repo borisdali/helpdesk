@@ -219,6 +219,11 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		outcomeStatus = event.Outcome.Status
 		outcomeError = event.Outcome.ErrorMessage
 		outcomeDurationMs = event.Outcome.Duration.Milliseconds()
+	} else if event.PolicyDecision != nil {
+		// For policy decision events, surface the effect in outcome_status so it is
+		// queryable without json_extract. Denied access is then visible as "deny" in
+		// the same column that shows "success"/"error" for tool executions.
+		outcomeStatus = event.PolicyDecision.Effect
 	}
 
 	var toolName, toolAgent string

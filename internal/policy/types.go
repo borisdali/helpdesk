@@ -265,8 +265,13 @@ type PolicyTrace struct {
 	Matched    bool        `json:"matched"`
 	// SkipReason is set when Matched == false: "disabled", "principal_mismatch", "resource_mismatch".
 	SkipReason string      `json:"skip_reason,omitempty"`
+	// RequiredTags is populated for resource_mismatch skips.
+	// Each element is a set of tags required by one of the policy's resource specs
+	// that matches the requested resource type. Only non-empty tag sets are included.
+	// Use this to explain to operators which tags would unlock the policy.
+	RequiredTags [][]string `json:"required_tags,omitempty"`
 	// Rules is populated only when Matched == true.
-	Rules      []RuleTrace `json:"rules,omitempty"`
+	Rules        []RuleTrace `json:"rules,omitempty"`
 }
 
 // RuleTrace records what happened for a single rule within a matched policy.

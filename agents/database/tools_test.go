@@ -380,20 +380,36 @@ func TestGetActiveConnectionsTool_EmptyOutput(t *testing.T) {
 	}
 }
 
-func TestGetActiveConnectionsTool_IncludeIdle(t *testing.T) {
+func TestGetActiveConnectionsTool_IdleIncludedByDefault(t *testing.T) {
+	// Idle sessions (psql at prompt) must appear in the default output.
 	mockOutput := "-[ RECORD 1 ]---+---\npid | 123\nstate | idle\n"
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+	if result.Output == "" {
+		t.Error("getActiveConnectionsTool() output is empty — idle session should be included by default")
+	}
+}
+
+func TestGetActiveConnectionsTool_ActiveOnly(t *testing.T) {
+	// With ActiveOnly=true only state='active' connections are queried; idle sessions are excluded.
+	mockOutput := "-[ RECORD 1 ]---+---\npid | 456\nstate | active\n"
 	defer withMockRunner(mockOutput, nil)()
 
 	ctx := newTestContext()
 	result, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{
 		ConnectionString: "host=localhost",
-		IncludeIdle:      true,
+		ActiveOnly:       true,
 	})
 	if err != nil {
 		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
 	}
-	if result.Output == "" {
-		t.Error("getActiveConnectionsTool() output is empty")
+	if !strings.Contains(result.Output, "456") {
+		t.Errorf("getActiveConnectionsTool() output = %q, want to contain pid 456", result.Output)
 	}
 }
 
