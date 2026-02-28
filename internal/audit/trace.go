@@ -25,9 +25,20 @@ type TraceContext struct {
 	Principal string `json:"principal,omitempty"`
 }
 
-// NewTraceID generates a new trace ID.
+// NewTraceID generates a new trace ID with the default "tr_" prefix.
+// Use NewTraceIDWithPrefix to produce a prefix that identifies the call origin.
 func NewTraceID() string {
-	return "tr_" + uuid.New().String()[:12]
+	return NewTraceIDWithPrefix("tr_")
+}
+
+// NewTraceIDWithPrefix generates a trace ID with a custom prefix.
+// Conventional prefixes used by the gateway:
+//
+//	"tr_"  — natural-language query  (POST /api/v1/query)
+//	"dt_"  — direct tool invocation  (POST /api/v1/db/{tool}, /api/v1/k8s/{tool})
+//	"chk_" — direct governance check (POST /v1/governance/check, no agent)
+func NewTraceIDWithPrefix(prefix string) string {
+	return prefix + uuid.New().String()[:12]
 }
 
 // NewTraceContext creates a new trace context for a top-level request.

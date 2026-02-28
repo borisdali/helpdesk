@@ -67,6 +67,7 @@ type approvalConfig struct {
 
 type auditStatus struct {
 	Enabled     bool   `json:"enabled"`
+	Backend     string `json:"backend"` // "sqlite" or "postgres"
 	EventsTotal int    `json:"events_total"`
 	ChainValid  bool   `json:"chain_valid"`
 	LastEventAt string `json:"last_event_at"`
@@ -112,26 +113,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	logf("Audit enabled:    %v  (%d total events)", info.Audit.Enabled, info.Audit.EventsTotal)
-	logf("Chain valid:      %v", info.Audit.ChainValid)
-	if info.Audit.LastEventAt != "" {
-		logf("Last event:       %s", info.Audit.LastEventAt)
+	auditConfigured := info.Audit.Enabled // false only when HELPDESK_AUDIT_URL is unset on the gateway
+
+	if auditConfigured {
+		logf("Audit enabled:    true  (%d total events)", info.Audit.EventsTotal)
+		logf("Audit backend:    %s", info.Audit.Backend)
+		logf("Chain valid:      %v", info.Audit.ChainValid)
+		if info.Audit.LastEventAt != "" {
+			logf("Last event:       %s", info.Audit.LastEventAt)
+		}
+		if info.Audit.ChainValid == false {
+			alerts = append(alerts, "Audit hash chain integrity failure — log tampering may have occurred")
+		}
+	} else {
+		logf("Audit enabled:    unknown  (gateway cannot proxy governance queries — HELPDESK_AUDIT_URL not set)")
+		warnings = append(warnings, "Gateway has no HELPDESK_AUDIT_URL — governance reporting is unavailable; "+
+			"audit logging and policy enforcement may still be active on individual agents")
 	}
 	if info.Policy != nil {
 		logf("Policy enabled:   %v  (%d policies, %d rules)", info.Policy.Enabled, info.Policy.PoliciesCount, info.Policy.RulesCount)
 	}
 	logf("Pending approvals: %d", info.Approvals.PendingCount)
 	logf("Approval notify:  webhook=%v  email=%v", info.Approvals.WebhookConfigured, info.Approvals.EmailConfigured)
-
-	if !info.Audit.ChainValid {
-		alerts = append(alerts, "Audit hash chain integrity failure — log tampering may have occurred")
-	}
 	fmt.Println()
 
 	// ── Phase 2: Policy Overview ──────────────────────────────────────────────
 	logPhase(2, "Policy Overview")
 
-	if info.Policy == nil || !info.Policy.Enabled {
+	if !auditConfigured {
+		logf("Policy status unknown — requires governance data from auditd")
+	} else if info.Policy == nil || !info.Policy.Enabled {
 		logf("Policy enforcement is disabled")
 		warnings = append(warnings, "Policy enforcement is disabled — all agent actions are uncontrolled")
 	} else {
@@ -162,8 +173,12 @@ func main() {
 	sinceTime := time.Now().Add(-since)
 	events, err := getEvents(*gateway, sinceTime, 1000)
 	if err != nil {
-		logf("WARNING: Could not fetch events: %v", err)
-		warnings = append(warnings, fmt.Sprintf("Failed to fetch audit events: %v", err))
+		if !auditConfigured {
+			logf("Skipped — audit service not configured")
+		} else {
+			logf("WARNING: Could not fetch events: %v", err)
+			warnings = append(warnings, fmt.Sprintf("Failed to fetch audit events: %v", err))
+		}
 	} else {
 		logf("Events fetched:   %d", len(events))
 
@@ -269,13 +284,104 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 5: Pending Approvals ────────────────────────────────────────────
-	logPhase(5, "Pending Approvals")
+	// ── Phase 5: Agent Enforcement Coverage ──────────────────────────────────
+	logPhase(5, "Agent Enforcement Coverage")
+
+	// Cross-reference tool_execution and policy_decision events by trace_id.
+	// A trace that has tool executions but zero policy decisions means the agent
+	// ran tools without going through policy enforcement — alert-level finding.
+	//
+	// Also track the ratio of policy_decision events with a "chk_*" trace_id
+	// (direct/ops curl calls) vs agent-originated ones. A high chk_* ratio
+	// means agents are not using centralized enforcement.
+	if len(events) == 0 {
+		logf("No events available for enforcement analysis")
+	} else {
+		traceHasToolExec := make(map[string]bool)
+		traceHasPolicyDecision := make(map[string]bool)
+		totalPolicyDecisions := 0
+		chkPolicyDecisions := 0
+
+		for i := range events {
+			e := &events[i]
+			if e.TraceID == "" {
+				continue
+			}
+			switch e.EventType {
+			case audit.EventTypeToolExecution:
+				traceHasToolExec[e.TraceID] = true
+			case audit.EventTypePolicyDecision:
+				traceHasPolicyDecision[e.TraceID] = true
+				totalPolicyDecisions++
+				if strings.HasPrefix(e.TraceID, "chk_") {
+					chkPolicyDecisions++
+				}
+			}
+		}
+
+		// Sub-check A: uncontrolled tool executions
+		policyEnabled := info.Policy != nil && info.Policy.Enabled
+		var uncontrolledTraces []string
+		for traceID := range traceHasToolExec {
+			if !traceHasPolicyDecision[traceID] {
+				uncontrolledTraces = append(uncontrolledTraces, traceID)
+			}
+		}
+		sort.Strings(uncontrolledTraces)
+
+		controlled := len(traceHasToolExec) - len(uncontrolledTraces)
+		logf("Traces with tool executions: %d", len(traceHasToolExec))
+		logf("  Controlled (policy checked): %d", controlled)
+		logf("  Uncontrolled (no policy):    %d", len(uncontrolledTraces))
+
+		if len(uncontrolledTraces) > 0 && policyEnabled {
+			logf("  Uncontrolled traces:")
+			for _, id := range uncontrolledTraces {
+				logf("    %-20s  ← %s", id, traceOrigin(id))
+			}
+			alerts = append(alerts, fmt.Sprintf(
+				"%d trace(s) contain tool executions with no policy decision — agent(s) may be bypassing enforcement: %s",
+				len(uncontrolledTraces), strings.Join(uncontrolledTraces, ", "),
+			))
+		} else if len(uncontrolledTraces) > 0 {
+			// Policy disabled — uncontrolled executions are expected, just note them
+			logf("  (policy enforcement disabled — uncontrolled executions are expected)")
+		}
+
+		// Sub-check B: chk_* ratio
+		fmt.Println()
+		logf("Policy decisions in window:  %d", totalPolicyDecisions)
+		if totalPolicyDecisions > 0 {
+			agentDecisions := totalPolicyDecisions - chkPolicyDecisions
+			chkPct := 100 * chkPolicyDecisions / totalPolicyDecisions
+			logf("  via agents:                  %d  (%d%%)", agentDecisions, 100-chkPct)
+			logf("  via direct (chk_*):          %d  (%d%%)", chkPolicyDecisions, chkPct)
+			if chkPct > 50 {
+				warnings = append(warnings, fmt.Sprintf(
+					"%d%% of policy decisions originate from direct (chk_*) calls, not agents — "+
+						"agents may not be using centralized enforcement (HELPDESK_AUDIT_URL)",
+					chkPct,
+				))
+			}
+		} else if policyEnabled {
+			logf("  No policy decisions recorded — agents may not be calling /v1/governance/check")
+			warnings = append(warnings, "Policy enforcement is enabled but no policy decisions were recorded — "+
+				"check that agents have HELPDESK_AUDIT_URL configured")
+		}
+	}
+	fmt.Println()
+
+	// ── Phase 6: Pending Approvals ────────────────────────────────────────────
+	logPhase(6, "Pending Approvals")
 
 	pending, err := getPendingApprovals(*gateway)
 	if err != nil {
-		logf("WARNING: Could not fetch pending approvals: %v", err)
-		warnings = append(warnings, fmt.Sprintf("Failed to fetch pending approvals: %v", err))
+		if !auditConfigured {
+			logf("Skipped — audit service not configured")
+		} else {
+			logf("WARNING: Could not fetch pending approvals: %v", err)
+			warnings = append(warnings, fmt.Sprintf("Failed to fetch pending approvals: %v", err))
+		}
 	} else if len(pending) == 0 {
 		logf("No pending approvals")
 	} else {
@@ -304,37 +410,41 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 6: Chain Integrity ──────────────────────────────────────────────
-	logPhase(6, "Chain Integrity")
+	// ── Phase 7: Chain Integrity ──────────────────────────────────────────────
+	logPhase(7, "Chain Integrity")
 
-	integrity, err := getChainIntegrity(*gateway)
-	if err != nil {
-		logf("WARNING: Could not verify chain: %v", err)
-		warnings = append(warnings, fmt.Sprintf("Failed to verify audit chain: %v", err))
+	if !auditConfigured {
+		logf("Skipped — audit service not configured")
 	} else {
-		status := "✓ VALID"
-		if !integrity.Valid {
-			status = "✗ INVALID"
-		}
-		logf("Chain status:  %s", status)
-		logf("Total events:  %d", integrity.TotalEvents)
-		if integrity.InvalidEventID != "" {
-			logf("First invalid: %s", integrity.InvalidEventID)
-		}
-		if integrity.Message != "" {
-			logf("Message:       %s", integrity.Message)
-		}
-		if !integrity.Valid {
-			alerts = append(alerts, fmt.Sprintf(
-				"Audit chain integrity FAILED (first invalid event: %s) — possible log tampering",
-				integrity.InvalidEventID,
-			))
+		integrity, err := getChainIntegrity(*gateway)
+		if err != nil {
+			logf("WARNING: Could not verify chain: %v", err)
+			warnings = append(warnings, fmt.Sprintf("Failed to verify audit chain: %v", err))
+		} else {
+			status := "✓ VALID"
+			if !integrity.Valid {
+				status = "✗ INVALID"
+			}
+			logf("Chain status:  %s", status)
+			logf("Total events:  %d", integrity.TotalEvents)
+			if integrity.InvalidEventID != "" {
+				logf("First invalid: %s", integrity.InvalidEventID)
+			}
+			if integrity.Message != "" {
+				logf("Message:       %s", integrity.Message)
+			}
+			if !integrity.Valid {
+				alerts = append(alerts, fmt.Sprintf(
+					"Audit chain integrity FAILED (first invalid event: %s) — possible log tampering",
+					integrity.InvalidEventID,
+				))
+			}
 		}
 	}
 	fmt.Println()
 
-	// ── Phase 7: Summary ──────────────────────────────────────────────────────
-	logPhase(7, "Compliance Summary")
+	// ── Phase 8: Summary ──────────────────────────────────────────────────────
+	logPhase(8, "Compliance Summary")
 
 	overall := "✓ HEALTHY"
 	if len(alerts) > 0 {
@@ -509,6 +619,21 @@ func logPhase(num int, name string) {
 	}
 	fmt.Println()
 	logf("%s %s %s", strings.Repeat("─", 2), line, strings.Repeat("─", pad))
+}
+
+// traceOrigin returns a short human-readable label for a trace ID based on its prefix.
+// Prefixes are minted by the gateway (tr_, dt_) or auditd (chk_) at request entry.
+func traceOrigin(traceID string) string {
+	switch {
+	case strings.HasPrefix(traceID, "tr_"):
+		return "natural-language query (POST /api/v1/query)"
+	case strings.HasPrefix(traceID, "dt_"):
+		return "direct tool call (POST /api/v1/db|k8s/{tool})"
+	case strings.HasPrefix(traceID, "chk_"):
+		return "direct governance check (POST /v1/governance/check)"
+	default:
+		return "unknown origin (external or pre-dating prefix scheme)"
+	}
 }
 
 func truncate(s string, n int) string {

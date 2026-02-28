@@ -69,13 +69,23 @@ func main() {
 				DBPath:     filepath.Join(auditDir, "audit.db"),
 				SocketPath: filepath.Join(auditDir, "audit.sock"),
 			}
-			var err error
-			auditor, err = audit.NewStore(auditCfg)
+			localStore, err := audit.NewStore(auditCfg)
 			if err != nil {
 				slog.Error("failed to initialize audit store", "err", err)
 				os.Exit(1)
 			}
 			slog.Info("audit logging enabled (local)", "db", auditCfg.DBPath, "socket", auditCfg.SocketPath)
+			auditor = localStore
+
+			// Start an embedded governance server so that /api/v1/governance/*
+			// proxy endpoints work in local mode, identical to remote auditd mode.
+			govURL, err := startLocalGovernanceServer(localStore)
+			if err != nil {
+				slog.Warn("failed to start local governance server; governance queries unavailable", "err", err)
+			} else {
+				gw.SetAuditURL(govURL)
+				slog.Info("local governance server started", "url", govURL)
+			}
 		}
 		defer auditor.Close()
 

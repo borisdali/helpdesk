@@ -314,10 +314,17 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	start := time.Now()
 	requestID := uuid.New().String()[:8]
 
-	// Generate or extract trace ID for end-to-end correlation
+	// Generate or extract trace ID for end-to-end correlation.
+	// Use a prefix that encodes the call origin so audit queries can distinguish:
+	//   tr_ — natural-language query (POST /api/v1/query)
+	//   dt_ — direct tool invocation (POST /api/v1/db/{tool}, /api/v1/k8s/{tool})
 	traceID := r.Header.Get("X-Trace-ID")
 	if traceID == "" {
-		traceID = audit.NewTraceID()
+		if toolName != "" {
+			traceID = audit.NewTraceIDWithPrefix("dt_")
+		} else {
+			traceID = audit.NewTraceID() // "tr_"
+		}
 	}
 
 	client, ok := g.clients[agentName]

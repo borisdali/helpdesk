@@ -22,6 +22,22 @@ func TestNewTraceID(t *testing.T) {
 	}
 }
 
+func TestNewTraceIDWithPrefix(t *testing.T) {
+	for _, prefix := range []string{"tr_", "dt_", "chk_", "nl_"} {
+		id := NewTraceIDWithPrefix(prefix)
+		if !strings.HasPrefix(id, prefix) {
+			t.Errorf("prefix %q: got %q", prefix, id)
+		}
+		if len(id) != len(prefix)+12 {
+			t.Errorf("prefix %q: want length %d, got %d: %q", prefix, len(prefix)+12, len(id), id)
+		}
+		// Uniqueness
+		if id2 := NewTraceIDWithPrefix(prefix); id == id2 {
+			t.Errorf("prefix %q: IDs should be unique", prefix)
+		}
+	}
+}
+
 func TestNewTraceContext(t *testing.T) {
 	tc := NewTraceContext("gateway", "user123")
 
