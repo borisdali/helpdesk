@@ -314,6 +314,28 @@ func truncateForAudit(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// parsePgFunctionResult parses the boolean result returned by pg_cancel_backend
+// or pg_terminate_backend. These functions return a single-row SELECT with a
+// boolean column aliased as "cancelled" or "terminated". psql always runs with
+// -x (expanded mode), so each field appears as "column_name | value" on its
+// own line. Returns 1 if the function succeeded (value is "t"), 0 otherwise.
+func parsePgFunctionResult(output string) int {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		// In expanded psql output, the boolean column appears as:
+		//   cancelled       | t
+		//   terminated      | t
+		if (strings.HasPrefix(line, "cancelled") || strings.HasPrefix(line, "terminated")) &&
+			strings.Contains(line, "|") {
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) == 2 && strings.TrimSpace(parts[1]) == "t" {
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
 // parseTerminatedCount reads the integer value from a "terminated | N" line in
 // psql expanded (-x) output. Used by kill_idle_connections to extract the count
 // of connections actually terminated so blast-radius policy can be enforced.
@@ -706,6 +728,21 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	if strings.Contains(output, "(0 rows)") {
 		return PsqlResult{Output: fmt.Sprintf("No backend found with pid %d.", args.PID)}, nil
 	}
+	// runPsqlAs uses parseRowsAffected which only reads DELETE/UPDATE/INSERT tags.
+	// cancel_query uses SELECT pg_cancel_backend(), so we must parse the boolean
+	// result explicitly and run a second post-execution blast-radius check.
+	if policyEnforcer != nil {
+		dbInfo, err := resolveDatabaseInfo(args.ConnectionString)
+		if err != nil {
+			return errorResult("cancel_query", args.ConnectionString, err), nil
+		}
+		cancelled := parsePgFunctionResult(output)
+		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, policy.ActionWrite, dbInfo.Tags, agentutil.ToolOutcome{
+			RowsAffected: cancelled,
+		}); postErr != nil {
+			return errorResult("cancel_query", args.ConnectionString, postErr), nil
+		}
+	}
 	return PsqlResult{Output: output}, nil
 }
 
@@ -724,6 +761,21 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}
 	if strings.Contains(output, "(0 rows)") {
 		return PsqlResult{Output: fmt.Sprintf("No backend found with pid %d.", args.PID)}, nil
+	}
+	// runPsqlAs uses parseRowsAffected which only reads DELETE/UPDATE/INSERT tags.
+	// terminate_connection uses SELECT pg_terminate_backend(), so we must parse
+	// the boolean result explicitly and run a second post-execution blast-radius check.
+	if policyEnforcer != nil {
+		dbInfo, err := resolveDatabaseInfo(args.ConnectionString)
+		if err != nil {
+			return errorResult("terminate_connection", args.ConnectionString, err), nil
+		}
+		terminated := parsePgFunctionResult(output)
+		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, policy.ActionDestructive, dbInfo.Tags, agentutil.ToolOutcome{
+			RowsAffected: terminated,
+		}); postErr != nil {
+			return errorResult("terminate_connection", args.ConnectionString, postErr), nil
+		}
 	}
 	return PsqlResult{Output: output}, nil
 }

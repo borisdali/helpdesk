@@ -759,6 +759,91 @@ func TestParseTerminatedCount(t *testing.T) {
 }
 
 // =============================================================================
+// parsePgFunctionResult
+// =============================================================================
+
+func TestParsePgFunctionResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{
+			// Typical psql -x output when pg_cancel_backend succeeds.
+			name: "cancelled true",
+			output: `-[ RECORD 1 ]---+------------------------------
+cancelled       | t
+pid             | 12345
+usename         | app_user
+datname         | testdb
+state           | active
+query_preview   | SELECT 1
+`,
+			want: 1,
+		},
+		{
+			// pg_cancel_backend returned false (backend existed but cancel failed).
+			name: "cancelled false",
+			output: `-[ RECORD 1 ]---+------------------------------
+cancelled       | f
+pid             | 12345
+usename         | app_user
+datname         | testdb
+state           | active
+query_preview   | SELECT 1
+`,
+			want: 0,
+		},
+		{
+			// Typical psql -x output when pg_terminate_backend succeeds.
+			name: "terminated true",
+			output: `-[ RECORD 1 ]---+------------------------------
+terminated      | t
+pid             | 5678
+usename         | other_user
+datname         | proddb
+state           | idle
+query_preview   | COMMIT
+`,
+			want: 1,
+		},
+		{
+			// pg_terminate_backend returned false.
+			name: "terminated false",
+			output: `-[ RECORD 1 ]---+------------------------------
+terminated      | f
+pid             | 5678
+usename         | other_user
+datname         | proddb
+state           | idle
+query_preview   | COMMIT
+`,
+			want: 0,
+		},
+		{
+			// No matching column — should return 0.
+			name:   "no relevant column",
+			output: "-[ RECORD 1 ]---+---\npid | 12345\nstate | idle\n",
+			want:   0,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parsePgFunctionResult(tt.output)
+			if got != tt.want {
+				t.Errorf("parsePgFunctionResult(%q) = %d, want %d", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+// =============================================================================
 // cancelQueryTool
 // =============================================================================
 
@@ -1163,6 +1248,68 @@ func TestTerminateConnectionTool_PolicyDenied(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "policy denied") {
 		t.Errorf("terminateConnectionTool() output = %q, want 'policy denied' in error", result.Output)
+	}
+}
+
+func TestCancelQueryTool_PostExecPolicyChecked(t *testing.T) {
+	// Verifies that when policyEnforcer is set and pg_cancel_backend returns "t",
+	// the explicit post-exec CheckDatabaseResult block is exercised.
+	// cancel_query targets a single backend — blast-radius ceiling is always 1,
+	// so this test focuses on exercising the code path (not triggering denial).
+	defer withPolicyEnforcer(newDenyDestructiveEnforcer(t))() // allows write, denies destructive
+	mockOutput := `-[ RECORD 1 ]---+------------------------------
+cancelled       | t
+pid             | 12345
+usename         | app_user
+datname         | testdb
+state           | active
+query_preview   | SELECT 1
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              12345,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	// Write action is allowed by newDenyDestructiveEnforcer (DefaultPolicy: allow).
+	// Post-exec block runs with RowsAffected=1; policy allows write → no error.
+	if strings.Contains(result.Output, "ERROR") {
+		t.Errorf("cancelQueryTool() output = %q, want no error when write is allowed", result.Output)
+	}
+}
+
+func TestTerminateConnectionTool_PostExecPolicyChecked(t *testing.T) {
+	// Verifies that when policyEnforcer is set and pg_terminate_backend returns "t",
+	// the explicit post-exec CheckDatabaseResult block is exercised.
+	// terminate_connection targets a single backend — blast-radius ceiling is always 1,
+	// so this test focuses on exercising the code path (not triggering denial).
+	defer withPolicyEnforcer(newDenyWriteEnforcer(t))() // allows destructive, denies write
+	mockOutput := `-[ RECORD 1 ]---+------------------------------
+terminated      | t
+pid             | 5678
+usename         | app_user
+datname         | testdb
+state           | idle
+query_preview   | COMMIT
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	// Destructive action is allowed by newDenyWriteEnforcer (DefaultPolicy: allow).
+	// Post-exec block runs with RowsAffected=1; policy allows destructive → no error.
+	if strings.Contains(result.Output, "ERROR") {
+		t.Errorf("terminateConnectionTool() output = %q, want no error when destructive is allowed", result.Output)
 	}
 }
 
