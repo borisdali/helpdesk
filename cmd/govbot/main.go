@@ -203,13 +203,26 @@ func main() {
 
 	if len(events) > 0 {
 		type resourceStats struct {
-			allow          int
-			deny           int
+			allow           int
+			deny            int
 			requireApproval int
-			noMatch        int // policy_name is "" or "default" — misconfiguration
+			noMatch         int // policy_name is "" or "default" — misconfiguration
+		}
+		type blockedEvent struct {
+			resource  string
+			action    string
+			effect    string // "deny" or "require_approval"
+			traceID   string
+			origin    string
+			policy    string
+			message   string
+			sessionID string
+			timestamp string
 		}
 		byResource := make(map[string]*resourceStats)
 		totalAllow, totalDeny, totalReqApproval, totalNoMatch := 0, 0, 0, 0
+		unattributableDecisions := 0
+		var blockedEvents []blockedEvent
 
 		for i := range events {
 			e := &events[i]
@@ -218,6 +231,11 @@ func main() {
 			}
 			pd := e.PolicyDecision
 			key := pd.ResourceType + "/" + pd.ResourceName
+
+			if e.TraceID == "" {
+				unattributableDecisions++
+			}
+
 			if byResource[key] == nil {
 				byResource[key] = &resourceStats{}
 			}
@@ -239,9 +257,31 @@ func main() {
 					rs.noMatch++
 					totalNoMatch++
 				}
+				blockedEvents = append(blockedEvents, blockedEvent{
+					resource:  key,
+					action:    pd.Action,
+					effect:    "deny",
+					traceID:   e.TraceID,
+					origin:    traceOrigin(e.TraceID),
+					policy:    pd.PolicyName,
+					message:   pd.Message,
+					sessionID: e.Session.ID,
+					timestamp: e.Timestamp.Format("01-02 15:04:05"),
+				})
 			case "require_approval":
 				rs.requireApproval++
 				totalReqApproval++
+				blockedEvents = append(blockedEvents, blockedEvent{
+					resource:  key,
+					action:    pd.Action,
+					effect:    "require_approval",
+					traceID:   e.TraceID,
+					origin:    traceOrigin(e.TraceID),
+					policy:    pd.PolicyName,
+					message:   pd.Message,
+					sessionID: e.Session.ID,
+					timestamp: e.Timestamp.Format("01-02 15:04:05"),
+				})
 			}
 		}
 
@@ -251,7 +291,6 @@ func main() {
 			logf("%-40s  %6s  %6s  %6s  %6s", "Resource", "allow", "deny", "req_apr", "no_match")
 			logf("%s", strings.Repeat("─", 72))
 
-			// Sort resources for stable output
 			resources := make([]string, 0, len(byResource))
 			for r := range byResource {
 				resources = append(resources, r)
@@ -273,10 +312,52 @@ func main() {
 			logf("%-40s  %6d  %6d  %6d  %6d", "TOTAL", totalAllow, totalDeny, totalReqApproval, totalNoMatch)
 		}
 
+		// Denial / require-approval detail — security officer view
+		if len(blockedEvents) > 0 {
+			fmt.Println()
+			logf("Blocked request details (%d):", len(blockedEvents))
+			for _, b := range blockedEvents {
+				logf("  [%s]  %s  action=%-12s  %s", strings.ToUpper(b.effect), b.timestamp, b.action, b.resource)
+				if b.traceID != "" {
+					logf("    trace:   %s  ← %s", b.traceID, b.origin)
+				} else {
+					logf("    trace:   (none — unattributable)")
+				}
+				if b.sessionID != "" {
+					logf("    session: %s", b.sessionID)
+				}
+				if b.policy != "" {
+					logf("    policy:  %s", b.policy)
+				}
+				if b.message != "" {
+					logf("    message: %s", b.message)
+				}
+			}
+		}
+
+		// Unattributable decisions — no trace_id, cannot link to any session or origin
+		if unattributableDecisions > 0 {
+			fmt.Println()
+			logf("Unattributable decisions: %d  ⚠", unattributableDecisions)
+			logf("  These policy decisions have no trace_id — they cannot be linked to")
+			logf("  any session, user, or call origin. Likely from agents using a local")
+			logf("  policy engine without trace propagation wired up.")
+			warnings = append(warnings, fmt.Sprintf(
+				"%d policy decision(s) have no trace_id — cannot be attributed to any session or call origin",
+				unattributableDecisions,
+			))
+		}
+
 		if totalNoMatch > 0 {
 			warnings = append(warnings, fmt.Sprintf(
 				"%d policy decisions matched no rule (policy_name=default) — likely missing tags in infrastructure config",
 				totalNoMatch,
+			))
+		}
+		if totalDeny > 0 {
+			alerts = append(alerts, fmt.Sprintf(
+				"%d request(s) were denied by policy — review blocked request details above",
+				totalDeny,
 			))
 		}
 	} else {
@@ -301,16 +382,20 @@ func main() {
 		traceHasPolicyDecision := make(map[string]bool)
 		totalPolicyDecisions := 0
 		chkPolicyDecisions := 0
+		unattributablePolicyDecisions := 0
 
 		for i := range events {
 			e := &events[i]
-			if e.TraceID == "" {
-				continue
-			}
 			switch e.EventType {
 			case audit.EventTypeToolExecution:
-				traceHasToolExec[e.TraceID] = true
+				if e.TraceID != "" {
+					traceHasToolExec[e.TraceID] = true
+				}
 			case audit.EventTypePolicyDecision:
+				if e.TraceID == "" {
+					unattributablePolicyDecisions++
+					continue
+				}
 				traceHasPolicyDecision[e.TraceID] = true
 				totalPolicyDecisions++
 				if strings.HasPrefix(e.TraceID, "chk_") {
@@ -334,6 +419,23 @@ func main() {
 		logf("  Controlled (policy checked): %d", controlled)
 		logf("  Uncontrolled (no policy):    %d", len(uncontrolledTraces))
 
+		// Prefix breakdown of all traced tool executions
+		if len(traceHasToolExec) > 0 {
+			prefixCounts := make(map[string]int)
+			for traceID := range traceHasToolExec {
+				prefixCounts[traceIDPrefix(traceID)]++
+			}
+			prefixes := make([]string, 0, len(prefixCounts))
+			for p := range prefixCounts {
+				prefixes = append(prefixes, p)
+			}
+			sort.Strings(prefixes)
+			logf("  Origin breakdown:")
+			for _, p := range prefixes {
+				logf("    %-6s  %d trace(s)  ← %s", p+"*", prefixCounts[p], traceOriginFromPrefix(p))
+			}
+		}
+
 		if len(uncontrolledTraces) > 0 && policyEnabled {
 			logf("  Uncontrolled traces:")
 			for _, id := range uncontrolledTraces {
@@ -350,7 +452,7 @@ func main() {
 
 		// Sub-check B: chk_* ratio
 		fmt.Println()
-		logf("Policy decisions in window:  %d", totalPolicyDecisions)
+		logf("Policy decisions in window:  %d  (+ %d unattributable)", totalPolicyDecisions, unattributablePolicyDecisions)
 		if totalPolicyDecisions > 0 {
 			agentDecisions := totalPolicyDecisions - chkPolicyDecisions
 			chkPct := 100 * chkPolicyDecisions / totalPolicyDecisions
@@ -367,6 +469,12 @@ func main() {
 			logf("  No policy decisions recorded — agents may not be calling /v1/governance/check")
 			warnings = append(warnings, "Policy enforcement is enabled but no policy decisions were recorded — "+
 				"check that agents have HELPDESK_AUDIT_URL configured")
+		}
+		if unattributablePolicyDecisions > 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%d policy decision(s) in Phase 5 have no trace_id — cannot be correlated to any session or call origin",
+				unattributablePolicyDecisions,
+			))
 		}
 	}
 	fmt.Println()
@@ -621,19 +729,34 @@ func logPhase(num int, name string) {
 	logf("%s %s %s", strings.Repeat("─", 2), line, strings.Repeat("─", pad))
 }
 
-// traceOrigin returns a short human-readable label for a trace ID based on its prefix.
-// Prefixes are minted by the gateway (tr_, dt_) or auditd (chk_) at request entry.
-func traceOrigin(traceID string) string {
-	switch {
-	case strings.HasPrefix(traceID, "tr_"):
+// traceIDPrefix extracts the prefix portion of a trace ID (up to and including "_").
+func traceIDPrefix(traceID string) string {
+	if i := strings.Index(traceID, "_"); i >= 0 {
+		return traceID[:i+1]
+	}
+	return "?"
+}
+
+// traceOriginFromPrefix returns a human-readable label for a trace ID prefix.
+func traceOriginFromPrefix(prefix string) string {
+	switch prefix {
+	case "tr_":
 		return "natural-language query (POST /api/v1/query)"
-	case strings.HasPrefix(traceID, "dt_"):
+	case "dt_":
 		return "direct tool call (POST /api/v1/db|k8s/{tool})"
-	case strings.HasPrefix(traceID, "chk_"):
+	case "chk_":
 		return "direct governance check (POST /v1/governance/check)"
 	default:
 		return "unknown origin (external or pre-dating prefix scheme)"
 	}
+}
+
+// traceOrigin returns a human-readable label for a full trace ID.
+func traceOrigin(traceID string) string {
+	if traceID == "" {
+		return "unattributable (no trace_id)"
+	}
+	return traceOriginFromPrefix(traceIDPrefix(traceID))
 }
 
 func truncate(s string, n int) string {
