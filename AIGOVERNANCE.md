@@ -720,6 +720,8 @@ kubectl create job govbot-manual --from=cronjob/helpdesk-govbot
 
 For details on how to run `govbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers, [here](deploy/host#76-running-the-compliance-reporter-govbot) for running directly on a host and [here](deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
 
+See this [sample](GOVBOT_SAMPLE.md) of running `govbot` on demand.
+
 ### 8.5 Scheduling in Kubernetes
 
 govbot is deployed as a CronJob. Enable it in `values.yaml`:

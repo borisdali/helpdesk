@@ -551,8 +551,196 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 8: Summary ──────────────────────────────────────────────────────
-	logPhase(8, "Compliance Summary")
+	// ── Phase 8: Mutation Activity ────────────────────────────────────────────
+	logPhase(8, fmt.Sprintf("Mutation Activity (last %s)", *sinceStr))
+
+	if len(events) == 0 {
+		logf("No events available for mutation analysis")
+	} else {
+		// Build trace→user map from delegation events in this window.
+		traceUser := make(map[string]string)
+		for i := range events {
+			e := &events[i]
+			if e.EventType == audit.EventTypeDelegation && e.TraceID != "" && e.Session.UserID != "" {
+				traceUser[e.TraceID] = e.Session.UserID
+			}
+		}
+
+		// Collect mutations (write + destructive tool executions) from current window.
+		type mutationRec struct {
+			tool  string
+			class audit.ActionClass
+			user  string
+			hour  int
+		}
+		var mutations []mutationRec
+		toolCounts := make(map[string]int)
+		userCounts := make(map[string]int)
+		hourlyCounts := make([]int, 24)
+		writeCount, destructiveCount := 0, 0
+
+		for i := range events {
+			e := &events[i]
+			if e.EventType != audit.EventTypeToolExecution {
+				continue
+			}
+			if e.ActionClass != audit.ActionWrite && e.ActionClass != audit.ActionDestructive {
+				continue
+			}
+			toolName := ""
+			if e.Tool != nil {
+				toolName = e.Tool.Name
+			}
+			userID := traceUser[e.TraceID]
+			if userID == "" {
+				userID = "(unattributed)"
+			}
+			hour := e.Timestamp.UTC().Hour()
+			mutations = append(mutations, mutationRec{tool: toolName, class: e.ActionClass, user: userID, hour: hour})
+			toolCounts[toolName]++
+			userCounts[userID]++
+			hourlyCounts[hour]++
+			if e.ActionClass == audit.ActionDestructive {
+				destructiveCount++
+			} else {
+				writeCount++
+			}
+		}
+
+		// Fetch previous period for day-over-day comparison.
+		prevStart := sinceTime.Add(-since)
+		prevEvents, prevErr := getEvents(*gateway, prevStart, 2000)
+		prevCount := 0
+		if prevErr == nil {
+			for i := range prevEvents {
+				e := &prevEvents[i]
+				if e.Timestamp.Before(sinceTime) &&
+					e.EventType == audit.EventTypeToolExecution &&
+					(e.ActionClass == audit.ActionWrite || e.ActionClass == audit.ActionDestructive) {
+					prevCount++
+				}
+			}
+		}
+
+		totalMutations := len(mutations)
+
+		// Total + comparison
+		if prevErr == nil && prevCount > 0 {
+			pct := (totalMutations - prevCount) * 100 / prevCount
+			sign := "+"
+			if pct < 0 {
+				sign = ""
+			}
+			logf("Total mutations:  %d  (previous %s: %d,  %s%d%%)", totalMutations, *sinceStr, prevCount, sign, pct)
+			if totalMutations*2 > prevCount*3 { // more than 50% increase
+				alerts = append(alerts, fmt.Sprintf(
+					"Mutation count (%d) is %s%d%% vs previous period (%d) — investigate cause",
+					totalMutations, sign, pct, prevCount,
+				))
+			}
+		} else if prevErr == nil {
+			logf("Total mutations:  %d  (previous %s: 0)", totalMutations, *sinceStr)
+			if totalMutations > 5 {
+				warnings = append(warnings, fmt.Sprintf(
+					"%d mutations recorded; previous equivalent period had none", totalMutations,
+				))
+			}
+		} else {
+			logf("Total mutations:  %d  (previous period unavailable: %v)", totalMutations, prevErr)
+		}
+
+		if totalMutations == 0 {
+			logf("No write or destructive tool executions in this window")
+		} else {
+			// By class
+			fmt.Println()
+			logf("By class:")
+			logf("  write:          %d", writeCount)
+			logf("  destructive:    %d", destructiveCount)
+
+			// By tool (top 10)
+			type kv struct {
+				name  string
+				count int
+			}
+			var toolList []kv
+			for name, count := range toolCounts {
+				toolList = append(toolList, kv{name, count})
+			}
+			sort.Slice(toolList, func(i, j int) bool {
+				if toolList[i].count != toolList[j].count {
+					return toolList[i].count > toolList[j].count
+				}
+				return toolList[i].name < toolList[j].name
+			})
+			fmt.Println()
+			logf("By tool:")
+			for i, t := range toolList {
+				if i >= 10 {
+					logf("  ... and %d more", len(toolList)-10)
+					break
+				}
+				logf("  %-30s %d", t.name, t.count)
+			}
+
+			// Hourly breakdown — fixed-width two-row grid
+			fmt.Println()
+			logf("Hourly breakdown (UTC, 00–23):")
+			var hdrBuf, valBuf strings.Builder
+			hdrBuf.WriteString("  ")
+			valBuf.WriteString("  ")
+			for h := 0; h < 24; h++ {
+				hdrBuf.WriteString(fmt.Sprintf("%3d", h))
+				valBuf.WriteString(fmt.Sprintf("%3d", hourlyCounts[h]))
+			}
+			logf("%s", hdrBuf.String())
+			logf("%s", valBuf.String())
+
+			// Spike detection: flag if peak hour is ≥3× the hourly mean,
+			// but only when there are enough data points to be meaningful.
+			if totalMutations >= 5 {
+				peakHour, peakCount := 0, 0
+				for h := 0; h < 24; h++ {
+					if hourlyCounts[h] > peakCount {
+						peakCount = hourlyCounts[h]
+						peakHour = h
+					}
+				}
+				mean := float64(totalMutations) / 24.0
+				ratio := float64(peakCount) / mean
+				spike := ""
+				if ratio >= 3.0 {
+					spike = "  ⚠ SPIKE"
+					alerts = append(alerts, fmt.Sprintf(
+						"Mutation spike at %02d:00 UTC: %d mutations (%.1fx the %.1f/hr mean)",
+						peakHour, peakCount, ratio, mean,
+					))
+				}
+				logf("Peak hour:  %02d:00 UTC  (%d mutations,  %.1fx mean)%s", peakHour, peakCount, ratio, spike)
+			}
+
+			// By user
+			fmt.Println()
+			logf("By user:")
+			var userList []kv
+			for user, count := range userCounts {
+				userList = append(userList, kv{user, count})
+			}
+			sort.Slice(userList, func(i, j int) bool {
+				if userList[i].count != userList[j].count {
+					return userList[i].count > userList[j].count
+				}
+				return userList[i].name < userList[j].name
+			})
+			for _, u := range userList {
+				logf("  %-30s %d", u.name, u.count)
+			}
+		}
+	}
+	fmt.Println()
+
+	// ── Phase 9: Summary ──────────────────────────────────────────────────────
+	logPhase(9, "Compliance Summary")
 
 	overall := "✓ HEALTHY"
 	if len(alerts) > 0 {

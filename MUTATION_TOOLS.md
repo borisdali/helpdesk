@@ -29,6 +29,7 @@ For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
 3. [Enforcement layers](#3-enforcement-layers)
 4. [Test coverage](#4-test-coverage)
 5. [Fault scenario: db-terminate-direct-command](#5-fault-scenario-db-terminate-direct-command)
+6. [Compliance and Alerting](#6-compliance-and-alerting)
 
 ---
 
@@ -518,3 +519,36 @@ make test-governance
 # Live fault scenarios (requires Docker + agents + LLM API key)
 make faulttest
 ```
+
+## 6. Compliance and Alerting
+
+aiHelpDesk' AI Governance module and in particular the Compliance Reporter
+(`govbot`) have been enhanced to track and if necessary alert on unusual
+mutations activities and spikes. The compliance report shows the following:
+
+- The total mutations with day-over-day comparison
+  to the equivalent previous period, shown as +42% / -12%.
+  It fires an alert if the count is more than 50% above the previous period.
+
+- By class — split between write and destructive so you can see what proportion
+  are high-risk.
+
+- By tool (top 10 by count) — reveals which specific operations are driving
+  the load (terminate_connection, delete_pod, etc.).
+
+- Hourly breakdown — two-row fixed-width grid (00–23) with counts per hour, e.g.:
+```
+  [09:14:05]     0   1   2  ...  09  10  ...  23
+  [09:14:05]     0   0   0  ...   4   2  ...   0
+```
+
+- Spike detection: if there are ≥5 mutations in the window and the peak hour is
+  ≥3× the hourly mean, an alert is raised naming the hour and the ratio.
+
+- By user — sorted by mutation count descending; unattributable mutations
+  (no trace_id → no delegation event → no user_id) are grouped under (unattributed).
+
+The previous-period fetch makes one extra API call (getEvents with since
+= 2×window ago) and filters client-side to timestamp < sinceTime.
+A limit of 2000 is used for the comparison fetch.
+
