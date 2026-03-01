@@ -19,9 +19,9 @@ func TestLoadCatalog_Valid(t *testing.T) {
 		t.Errorf("Version = %q, want %q", catalog.Version, "1")
 	}
 
-	// The real catalog has 17 failures: 9 database, 6 kubernetes, 2 compound.
-	if len(catalog.Failures) != 17 {
-		t.Errorf("Failures count = %d, want 17", len(catalog.Failures))
+	// The real catalog has 18 failures: 10 database, 6 kubernetes, 2 compound.
+	if len(catalog.Failures) != 18 {
+		t.Errorf("Failures count = %d, want 18", len(catalog.Failures))
 	}
 
 	// Spot-check a known failure.
@@ -157,10 +157,10 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 		t.Fatalf("LoadCatalog error: %v", err)
 	}
 
-	// Filter by database category should return 9 failures.
+	// Filter by database category should return 10 failures.
 	dbFailures := FilterFailures(catalog, []string{"database"}, nil)
-	if len(dbFailures) != 9 {
-		t.Errorf("database category count = %d, want 9", len(dbFailures))
+	if len(dbFailures) != 10 {
+		t.Errorf("database category count = %d, want 10", len(dbFailures))
 	}
 
 	// Filter by kubernetes category should return 6 failures.

@@ -133,12 +133,14 @@ func main() {
 			"postgres_database_agent-get_replication_status":     {"postgresql", "replication", "ha"},
 			"postgres_database_agent-get_lock_info":              {"postgresql", "locks", "contention"},
 			"postgres_database_agent-get_table_stats":            {"postgresql", "tables", "performance"},
+			"postgres_database_agent-get_session_info":            {"postgresql", "connections", "inspection"},
 			"postgres_database_agent-cancel_query":               {"postgresql", "connections", "remediation"},
 			"postgres_database_agent-terminate_connection":        {"postgresql", "connections", "remediation"},
 			"postgres_database_agent-kill_idle_connections":       {"postgresql", "connections", "remediation"},
 		},
 		SkillExamples: map[string][]string{
 			"postgres_database_agent-check_connection":       {"Check if the production database is reachable"},
+			"postgres_database_agent-get_session_info":       {"How much uncommitted work does the session with pid 38553 have?", "Is it safe to terminate PID 12345?"},
 			"postgres_database_agent-get_active_connections": {"Show me all long-running queries"},
 			"postgres_database_agent-get_lock_info":          {"Are there any blocking locks on the database?"},
 			"postgres_database_agent-get_replication_status": {"What is the replication lag?"},
@@ -232,6 +234,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getSessionInfoToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_session_info",
+		Description: "Inspect a specific backend session by PID: current state, open transaction age, whether writes have occurred (uncommitted work), locked tables, row locks held, and a rollback time estimate. Read-only — safe to call before any destructive action. Use before terminate_connection or cancel_query to understand impact.",
+	}, getSessionInfoTool)
+	if err != nil {
+		return nil, err
+	}
+
 	cancelQueryToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "cancel_query",
 		Description: "Cancel a running query by sending SIGINT to the backend process (pg_cancel_backend). The connection stays open. Use get_active_connections to find pids.",
@@ -267,6 +277,7 @@ func createTools() ([]tool.Tool, error) {
 		getReplicationStatusToolDef,
 		getLockInfoToolDef,
 		getTableStatsToolDef,
+		getSessionInfoToolDef,
 		cancelQueryToolDef,
 		terminateConnectionToolDef,
 		killIdleConnectionsToolDef,

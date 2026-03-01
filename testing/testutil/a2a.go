@@ -87,14 +87,24 @@ func fetchCard(ctx context.Context, cardURL string) (*a2a.AgentCard, error) {
 }
 
 // extractText pulls the response text from a SendMessageResult.
+// ADK-based agents store their response in Artifacts; other agents may use
+// History or Status.Message. We check all three locations.
 func extractText(result a2a.SendMessageResult) string {
 	switch v := result.(type) {
 	case *a2a.Task:
+		// ADK agents emit artifact update events; text lives in Artifacts.
+		for _, artifact := range v.Artifacts {
+			if t := partsText(artifact.Parts); t != "" {
+				return t
+			}
+		}
+		// Non-ADK agents or error responses may use Status.Message.
 		if v.Status.Message != nil {
 			if t := partsText(v.Status.Message.Parts); t != "" {
 				return t
 			}
 		}
+		// Some implementations populate History.
 		for i := len(v.History) - 1; i >= 0; i-- {
 			if v.History[i].Role == a2a.MessageRoleAgent {
 				if t := partsText(v.History[i].Parts); t != "" {

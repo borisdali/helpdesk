@@ -302,6 +302,49 @@ failures:
         category: "replication_lag"
     timeout: 60s
 
+  - id: db-idle-in-transaction
+    name: "Session stuck with uncommitted writes"
+    category: database
+    severity: high
+    description: >
+      A backend is stuck in a long-running transaction that has performed
+      writes (backend_xid IS NOT NULL). Other sessions waiting for locks
+      on the affected table are queued. If the stuck session is terminated,
+      PostgreSQL must roll back the uncommitted work.
+    inject:
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/inject_idle_in_transaction.sh
+      detach: true
+    teardown:
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/teardown_idle_in_transaction.sh
+    prompt: >
+      A backend session appears to be stuck in a long-running transaction
+      and users are experiencing write timeouts on a key table.
+      The connection_string is `{{connection_string}}` — use it verbatim
+      for all tool calls. Investigate the stuck session, assess how much
+      uncommitted work it holds, and determine whether it is safe to
+      terminate it.
+    evaluation:
+      expected_tools:
+        - get_active_connections
+        - get_session_info
+        - terminate_connection
+      expected_keywords:
+        any_of:
+          - "uncommitted"
+          - "has writes"
+          - "has_writes"
+          - "idle in transaction"
+          - "rollback"
+          - "terminate"
+          - "locked"
+      expected_diagnosis:
+        category: "uncommitted_transaction"
+    timeout: 90s
+
   # ── Kubernetes failures (6) ────────────────────────────────────────────
 
   - id: k8s-crashloop

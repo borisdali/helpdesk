@@ -844,6 +844,347 @@ query_preview   | COMMIT
 }
 
 // =============================================================================
+// parseExpandedRow / parseConnectionPlan / formatDuration / formatConnectionPlan
+// =============================================================================
+
+func TestParseExpandedRow(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   map[string]string
+	}{
+		{
+			name: "simple record",
+			input: `-[ RECORD 1 ]---+----
+pid             | 12345
+usename         | alice
+datname         | mydb
+state           | active
+`,
+			want: map[string]string{
+				"pid":     "12345",
+				"usename": "alice",
+				"datname": "mydb",
+				"state":   "active",
+			},
+		},
+		{
+			name: "boolean fields",
+			input: `-[ RECORD 1 ]---+----
+has_open_tx     | t
+has_writes      | f
+`,
+			want: map[string]string{
+				"has_open_tx": "t",
+				"has_writes":  "f",
+			},
+		},
+		{
+			name: "empty value",
+			input: `-[ RECORD 1 ]---+----
+locked_tables   |
+current_query   | SELECT 1
+`,
+			want: map[string]string{
+				"locked_tables": "",
+				"current_query": "SELECT 1",
+			},
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseExpandedRow(tt.input)
+			for k, want := range tt.want {
+				if got[k] != want {
+					t.Errorf("parseExpandedRow()[%q] = %q, want %q", k, got[k], want)
+				}
+			}
+			if len(got) != len(tt.want) {
+				t.Errorf("parseExpandedRow() returned %d keys, want %d; got %v", len(got), len(tt.want), got)
+			}
+		})
+	}
+}
+
+func TestParseConnectionPlan(t *testing.T) {
+	t.Run("idle session no tx", func(t *testing.T) {
+		output := `-[ RECORD 1 ]---+----
+pid                  | 111
+usename              | alice
+datname              | mydb
+client_addr          | 10.0.0.1
+state                | idle
+state_duration_secs  | 30
+has_open_tx          | f
+open_tx_secs         | 0
+has_writes           | f
+total_locks          | 2
+row_locks            | 0
+locked_tables        | pg_class
+current_query        | SELECT 1
+`
+		plan := parseConnectionPlan(111, output)
+		if plan.PID != 111 {
+			t.Errorf("PID = %d, want 111", plan.PID)
+		}
+		if plan.User != "alice" {
+			t.Errorf("User = %q, want alice", plan.User)
+		}
+		if plan.State != "idle" {
+			t.Errorf("State = %q, want idle", plan.State)
+		}
+		if plan.StateDurationSecs != 30 {
+			t.Errorf("StateDurationSecs = %d, want 30", plan.StateDurationSecs)
+		}
+		if plan.HasOpenTransaction {
+			t.Error("HasOpenTransaction = true, want false")
+		}
+		if plan.HasWrites {
+			t.Error("HasWrites = true, want false")
+		}
+		if plan.RollbackMinSecs != 0 || plan.RollbackMaxSecs != 0 {
+			t.Errorf("rollback estimate = [%d, %d], want [0, 0] for read-only", plan.RollbackMinSecs, plan.RollbackMaxSecs)
+		}
+	})
+
+	t.Run("write tx with locks", func(t *testing.T) {
+		output := `-[ RECORD 1 ]---+----
+pid                  | 222
+usename              | writer
+datname              | proddb
+client_addr          | 192.168.1.5
+state                | idle in transaction
+state_duration_secs  | 120
+has_open_tx          | t
+open_tx_secs         | 600
+has_writes           | t
+total_locks          | 5
+row_locks            | 2
+locked_tables        | orders, customers
+current_query        | UPDATE orders SET status = 'shipped' WHERE id = 42
+`
+		plan := parseConnectionPlan(222, output)
+		if !plan.HasOpenTransaction {
+			t.Error("HasOpenTransaction = false, want true")
+		}
+		if plan.OpenTxAgeSecs != 600 {
+			t.Errorf("OpenTxAgeSecs = %d, want 600", plan.OpenTxAgeSecs)
+		}
+		if !plan.HasWrites {
+			t.Error("HasWrites = false, want true")
+		}
+		if len(plan.LockedTables) != 2 {
+			t.Errorf("LockedTables = %v, want [orders customers]", plan.LockedTables)
+		}
+		if plan.TotalLocks != 5 {
+			t.Errorf("TotalLocks = %d, want 5", plan.TotalLocks)
+		}
+		if plan.RowLocks != 2 {
+			t.Errorf("RowLocks = %d, want 2", plan.RowLocks)
+		}
+		// 600 seconds: min = max(1, 300) = 300, max = 1200
+		if plan.RollbackMinSecs != 300 {
+			t.Errorf("RollbackMinSecs = %d, want 300", plan.RollbackMinSecs)
+		}
+		if plan.RollbackMaxSecs != 1200 {
+			t.Errorf("RollbackMaxSecs = %d, want 1200", plan.RollbackMaxSecs)
+		}
+	})
+
+	t.Run("short write tx rollback minimum", func(t *testing.T) {
+		// open_tx_secs=1 → min = max(1, 0) = 1, max = 2
+		output := `-[ RECORD 1 ]---+----
+pid                  | 333
+usename              | u
+datname              | db
+client_addr          | local
+state                | idle in transaction
+state_duration_secs  | 0
+has_open_tx          | t
+open_tx_secs         | 1
+has_writes           | t
+total_locks          | 1
+row_locks            | 0
+locked_tables        |
+current_query        | INSERT INTO t VALUES (1)
+`
+		plan := parseConnectionPlan(333, output)
+		if plan.RollbackMinSecs != 1 {
+			t.Errorf("RollbackMinSecs = %d, want 1 (clamped minimum)", plan.RollbackMinSecs)
+		}
+		if plan.RollbackMaxSecs != 2 {
+			t.Errorf("RollbackMaxSecs = %d, want 2", plan.RollbackMaxSecs)
+		}
+	})
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		secs int
+		want string
+	}{
+		{0, "0s"},
+		{-5, "0s"},
+		{1, "1s"},
+		{59, "59s"},
+		{60, "1m 0s"},
+		{90, "1m 30s"},
+		{3599, "59m 59s"},
+		{3600, "1h 0m"},
+		{3661, "1h 1m"},
+		{7322, "2h 2m"},
+	}
+	for _, tt := range tests {
+		got := formatDuration(tt.secs)
+		if got != tt.want {
+			t.Errorf("formatDuration(%d) = %q, want %q", tt.secs, got, tt.want)
+		}
+	}
+}
+
+func TestFormatConnectionPlan(t *testing.T) {
+	t.Run("no open transaction", func(t *testing.T) {
+		plan := ConnectionPlan{
+			PID:        42,
+			User:       "alice",
+			Database:   "mydb",
+			ClientAddr: "10.0.0.1",
+			State:      "idle",
+			StateDurationSecs: 15,
+		}
+		out := formatConnectionPlan(plan)
+		if !strings.Contains(out, "Session PID 42") {
+			t.Errorf("missing PID header: %q", out)
+		}
+		if !strings.Contains(out, "No open transaction") {
+			t.Errorf("missing no-tx message: %q", out)
+		}
+		if strings.Contains(out, "Transaction:") {
+			t.Errorf("should not contain Transaction section: %q", out)
+		}
+	})
+
+	t.Run("read-only transaction", func(t *testing.T) {
+		plan := ConnectionPlan{
+			PID:                42,
+			User:               "bob",
+			Database:           "proddb",
+			State:              "idle in transaction",
+			HasOpenTransaction: true,
+			OpenTxAgeSecs:      300,
+			HasWrites:          false,
+		}
+		out := formatConnectionPlan(plan)
+		if !strings.Contains(out, "Transaction:") {
+			t.Errorf("missing Transaction section: %q", out)
+		}
+		if !strings.Contains(out, "read-only") {
+			t.Errorf("missing read-only label: %q", out)
+		}
+		if strings.Contains(out, "Rollback estimate") {
+			t.Errorf("should not have rollback estimate for read-only: %q", out)
+		}
+	})
+
+	t.Run("write transaction with estimate", func(t *testing.T) {
+		plan := ConnectionPlan{
+			PID:                99,
+			User:               "writer",
+			Database:           "orders",
+			State:              "idle in transaction",
+			HasOpenTransaction: true,
+			OpenTxAgeSecs:      600,
+			HasWrites:          true,
+			TotalLocks:         3,
+			RowLocks:           1,
+			LockedTables:       []string{"orders"},
+			RollbackMinSecs:    300,
+			RollbackMaxSecs:    1200,
+			CurrentQuery:       "UPDATE orders SET x=1",
+		}
+		out := formatConnectionPlan(plan)
+		if !strings.Contains(out, "Has writes:    yes") {
+			t.Errorf("missing has-writes: %q", out)
+		}
+		if !strings.Contains(out, "Locked tables: orders") {
+			t.Errorf("missing locked tables: %q", out)
+		}
+		if !strings.Contains(out, "Rollback estimate") {
+			t.Errorf("missing rollback estimate: %q", out)
+		}
+		if !strings.Contains(out, "UPDATE orders") {
+			t.Errorf("missing last query: %q", out)
+		}
+	})
+}
+
+// =============================================================================
+// getSessionInfoTool
+// =============================================================================
+
+func TestGetSessionInfoTool_Success(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+----
+pid                  | 38553
+usename              | app_user
+datname              | production
+client_addr          | 10.1.2.3
+state                | idle in transaction
+state_duration_secs  | 45
+has_open_tx          | t
+open_tx_secs         | 45
+has_writes           | t
+total_locks          | 3
+row_locks            | 1
+locked_tables        | orders
+current_query        | UPDATE orders SET shipped = true WHERE id = 7
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getSessionInfoTool(ctx, GetSessionInfoArgs{
+		ConnectionString: "host=localhost",
+		PID:              38553,
+	})
+	if err != nil {
+		t.Fatalf("getSessionInfoTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "Session PID 38553") {
+		t.Errorf("output missing PID header: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "app_user") {
+		t.Errorf("output missing user: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "Has writes:    yes") {
+		t.Errorf("output missing has-writes: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "Rollback estimate") {
+		t.Errorf("output missing rollback estimate: %q", result.Output)
+	}
+}
+
+func TestGetSessionInfoTool_NoPidFound(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getSessionInfoTool(ctx, GetSessionInfoArgs{
+		ConnectionString: "host=localhost",
+		PID:              9999,
+	})
+	if err != nil {
+		t.Fatalf("getSessionInfoTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "no session found with pid 9999") {
+		t.Errorf("output = %q, want 'no session found' message", result.Output)
+	}
+}
+
+// =============================================================================
 // cancelQueryTool
 // =============================================================================
 
@@ -885,8 +1226,10 @@ func TestCancelQueryTool_NoPidFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
 	}
-	if !strings.Contains(result.Output, "No backend found with pid 99999") {
-		t.Errorf("cancelQueryTool() output = %q, want 'No backend found' message", result.Output)
+	// inspectConnection is now called first; "(0 rows)" from the mock causes it to
+	// report "no session found" before the actual cancel runs.
+	if !strings.Contains(result.Output, "no session found with pid 99999") {
+		t.Errorf("cancelQueryTool() output = %q, want 'no session found' message", result.Output)
 	}
 }
 
@@ -951,8 +1294,10 @@ func TestTerminateConnectionTool_NoPidFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
 	}
-	if !strings.Contains(result.Output, "No backend found with pid 11111") {
-		t.Errorf("terminateConnectionTool() output = %q, want 'No backend found' message", result.Output)
+	// inspectConnection is now called first; "(0 rows)" from the mock causes it to
+	// report "no session found" before the actual terminate runs.
+	if !strings.Contains(result.Output, "no session found with pid 11111") {
+		t.Errorf("terminateConnectionTool() output = %q, want 'no session found' message", result.Output)
 	}
 }
 

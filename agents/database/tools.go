@@ -378,6 +378,225 @@ func parseRowsAffected(output string) int {
 	return 0
 }
 
+// ConnectionPlan holds the result of inspecting a database session before a
+// destructive operation. It is returned by get_session_info and used as the
+// pre-execution plan step inside terminate_connection and cancel_query.
+type ConnectionPlan struct {
+	PID               int
+	User              string
+	Database          string
+	ClientAddr        string
+	State             string // "idle", "active", "idle in transaction", ...
+	StateDurationSecs int
+
+	// Transaction state
+	HasOpenTransaction bool
+	OpenTxAgeSecs      int
+
+	// Uncommitted-work signals — what would be rolled back on termination.
+	// backend_xid IS NOT NULL is the definitive indicator that at least one
+	// write has occurred; read-only transactions have a NULL xid and roll back
+	// instantly. WAL bytes per backend are not exposed by PostgreSQL, so
+	// transaction age is the primary proxy for rollback cost.
+	HasWrites    bool     // false → read-only tx, rollback is instant
+	TotalLocks   int      // all granted locks held by this backend
+	RowLocks     int      // tuple-level (row-level) locks only
+	LockedTables []string // table names with any lock held
+
+	// Rollback time estimate (rule of thumb: 0.5× to 2× TX write duration).
+	// Both fields are 0 when HasWrites is false.
+	RollbackMinSecs int
+	RollbackMaxSecs int
+
+	// Context
+	CurrentQuery string
+}
+
+// parseExpandedRow parses a single record from psql -x (expanded) output into
+// a map of column → value. Handles multi-line values produced by long strings.
+func parseExpandedRow(output string) map[string]string {
+	result := make(map[string]string)
+	var lastKey string
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Skip record separator lines: "-[ RECORD 1 ]---+---"
+		if trimmed == "" || strings.HasPrefix(trimmed, "-[") {
+			continue
+		}
+		idx := strings.Index(line, "|")
+		if idx < 0 {
+			continue
+		}
+		keyPart := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		if keyPart != "" {
+			result[keyPart] = val
+			lastKey = keyPart
+		} else if lastKey != "" {
+			// Continuation line for a multi-line value (psql wraps long strings).
+			result[lastKey] += "\n" + val
+		}
+	}
+	return result
+}
+
+// parseConnectionPlan builds a ConnectionPlan from the expanded psql output
+// of inspectionQuery.
+func parseConnectionPlan(pid int, output string) ConnectionPlan {
+	row := parseExpandedRow(output)
+	plan := ConnectionPlan{
+		PID:        pid,
+		User:       row["usename"],
+		Database:   row["datname"],
+		ClientAddr: row["client_addr"],
+		State:      row["state"],
+	}
+	if v, err := strconv.Atoi(row["state_duration_secs"]); err == nil {
+		plan.StateDurationSecs = v
+	}
+	plan.HasOpenTransaction = row["has_open_tx"] == "t"
+	if v, err := strconv.Atoi(row["open_tx_secs"]); err == nil {
+		plan.OpenTxAgeSecs = v
+	}
+	plan.HasWrites = row["has_writes"] == "t"
+	if v, err := strconv.Atoi(row["total_locks"]); err == nil {
+		plan.TotalLocks = v
+	}
+	if v, err := strconv.Atoi(row["row_locks"]); err == nil {
+		plan.RowLocks = v
+	}
+	if tables := strings.TrimSpace(row["locked_tables"]); tables != "" {
+		for _, t := range strings.Split(tables, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				plan.LockedTables = append(plan.LockedTables, t)
+			}
+		}
+	}
+	plan.CurrentQuery = strings.TrimSpace(row["current_query"])
+
+	// Rollback estimate: 0.5× to 2× transaction age.
+	// Only set when writes have been confirmed (backend_xid IS NOT NULL).
+	if plan.HasWrites && plan.OpenTxAgeSecs > 0 {
+		plan.RollbackMinSecs = max(1, plan.OpenTxAgeSecs/2)
+		plan.RollbackMaxSecs = plan.OpenTxAgeSecs * 2
+	}
+	return plan
+}
+
+// inspectionQuery retrieves session state and uncommitted-work signals for a
+// specific backend PID in a single round-trip. Lock subqueries give scope
+// (which tables, how many rows) without requiring superuser privileges.
+//
+// Key signals:
+//   - has_open_tx:  xact_start IS NOT NULL — a transaction is open
+//   - has_writes:   backend_xid IS NOT NULL — at least one write occurred
+//   - open_tx_secs: how long the transaction has been open (rollback proxy)
+//   - locked_tables: table names helping estimate blast radius
+const inspectionQuery = `SELECT
+	a.pid,
+	a.usename,
+	COALESCE(a.datname, '')           AS datname,
+	COALESCE(a.client_addr::text, 'local') AS client_addr,
+	COALESCE(a.state, '')             AS state,
+	COALESCE(EXTRACT(EPOCH FROM (now() - a.state_change))::int, 0) AS state_duration_secs,
+	(a.xact_start IS NOT NULL)        AS has_open_tx,
+	COALESCE(EXTRACT(EPOCH FROM (now() - a.xact_start))::int, 0)   AS open_tx_secs,
+	(a.backend_xid IS NOT NULL)       AS has_writes,
+	COALESCE((
+		SELECT count(*)
+		FROM pg_locks l
+		WHERE l.pid = a.pid AND l.granted
+	), 0) AS total_locks,
+	COALESCE((
+		SELECT count(*)
+		FROM pg_locks l
+		WHERE l.pid = a.pid AND l.granted AND l.locktype = 'tuple'
+	), 0) AS row_locks,
+	COALESCE((
+		SELECT string_agg(DISTINCT c.relname, ', ' ORDER BY c.relname)
+		FROM pg_locks l
+		JOIN pg_class c ON l.relation = c.oid
+		WHERE l.pid = a.pid AND l.granted AND l.relation IS NOT NULL
+	), '') AS locked_tables,
+	COALESCE(LEFT(a.query, 200), '')  AS current_query
+FROM pg_stat_activity a
+WHERE a.pid = %d;`
+
+// inspectConnection runs a read-only inspection against a specific backend PID
+// and returns a structured ConnectionPlan. It is called by getSessionInfoTool
+// and as the mandatory plan step inside terminateConnectionTool and
+// cancelQueryTool so every destructive action is preceded by an audit record
+// of what was found.
+func inspectConnection(ctx context.Context, connStr string, pid int) (ConnectionPlan, error) {
+	query := fmt.Sprintf(inspectionQuery, pid)
+	output, err := runPsqlWithToolName(ctx, connStr, query, "get_session_info")
+	if err != nil {
+		return ConnectionPlan{}, err
+	}
+	if strings.Contains(output, "(0 rows)") {
+		return ConnectionPlan{}, fmt.Errorf("no session found with pid %d", pid)
+	}
+	return parseConnectionPlan(pid, output), nil
+}
+
+// formatDuration converts seconds to a human-readable duration string.
+func formatDuration(secs int) string {
+	if secs <= 0 {
+		return "0s"
+	}
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	if secs < 3600 {
+		return fmt.Sprintf("%dm %ds", secs/60, secs%60)
+	}
+	return fmt.Sprintf("%dh %dm", secs/3600, (secs%3600)/60)
+}
+
+// formatConnectionPlan renders a ConnectionPlan as a human-readable summary
+// for presenting to a user or including in an approval request body.
+func formatConnectionPlan(plan ConnectionPlan) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Session PID %d\n", plan.PID)
+	fmt.Fprintf(&b, "  User:     %s\n", plan.User)
+	fmt.Fprintf(&b, "  Database: %s\n", plan.Database)
+	fmt.Fprintf(&b, "  Client:   %s\n", plan.ClientAddr)
+	fmt.Fprintf(&b, "  State:    %s (%s in current state)\n",
+		plan.State, formatDuration(plan.StateDurationSecs))
+
+	if !plan.HasOpenTransaction {
+		fmt.Fprintf(&b, "\n  No open transaction.")
+		if plan.CurrentQuery != "" {
+			fmt.Fprintf(&b, "\n  Last query: %s", truncateForAudit(plan.CurrentQuery, 120))
+		}
+		return b.String()
+	}
+
+	fmt.Fprintf(&b, "\n  Transaction:\n")
+	fmt.Fprintf(&b, "    Open TX age:   %s\n", formatDuration(plan.OpenTxAgeSecs))
+	if !plan.HasWrites {
+		fmt.Fprintf(&b, "    Has writes:    no  (read-only — rollback is instant)\n")
+	} else {
+		fmt.Fprintf(&b, "    Has writes:    yes\n")
+		if len(plan.LockedTables) > 0 {
+			fmt.Fprintf(&b, "    Locked tables: %s\n", strings.Join(plan.LockedTables, ", "))
+		}
+		if plan.RowLocks > 0 {
+			fmt.Fprintf(&b, "    Row locks:     %d\n", plan.RowLocks)
+		}
+		if plan.TotalLocks > plan.RowLocks {
+			fmt.Fprintf(&b, "    Total locks:   %d\n", plan.TotalLocks)
+		}
+		fmt.Fprintf(&b, "\n    Rollback estimate: ~%s to ~%s\n",
+			formatDuration(plan.RollbackMinSecs),
+			formatDuration(plan.RollbackMaxSecs))
+	}
+	if plan.CurrentQuery != "" {
+		fmt.Fprintf(&b, "\n  Last query: %s\n", truncateForAudit(plan.CurrentQuery, 120))
+	}
+	return b.String()
+}
+
 // PsqlResult is the standard output type for all psql tools.
 type PsqlResult struct {
 	Output string `json:"output"`
@@ -712,6 +931,23 @@ func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, er
 	return PsqlResult{Output: output}, nil
 }
 
+// GetSessionInfoArgs defines arguments for the get_session_info tool.
+type GetSessionInfoArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	PID              int    `json:"pid" jsonschema:"required,The process ID of the session to inspect."`
+}
+
+// getSessionInfoTool inspects a specific backend PID and returns its current
+// state, transaction status, uncommitted-work signals, and a rollback time
+// estimate. Safe to call at any time — read-only, no side effects.
+func getSessionInfoTool(ctx tool.Context, args GetSessionInfoArgs) (PsqlResult, error) {
+	plan, err := inspectConnection(ctx, args.ConnectionString, args.PID)
+	if err != nil {
+		return errorResult("get_session_info", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: formatConnectionPlan(plan)}, nil
+}
+
 // CancelQueryArgs defines arguments for the cancel_query tool.
 type CancelQueryArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
@@ -719,6 +955,14 @@ type CancelQueryArgs struct {
 }
 
 func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error) {
+	// Step 1: inspect the session — establishes plan context in the audit trail
+	// before any destructive action is taken.
+	plan, err := inspectConnection(ctx, args.ConnectionString, args.PID)
+	if err != nil {
+		return errorResult("cancel_query", args.ConnectionString, err), nil
+	}
+
+	// Step 2: cancel the query (policy pre-check happens inside runPsqlAs).
 	query := fmt.Sprintf(`SELECT pg_cancel_backend(%d) AS cancelled, pid, usename, datname, state, LEFT(query, 100) AS query_preview
 FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	output, err := runPsqlAs(ctx, args.ConnectionString, query, "cancel_query", policy.ActionWrite)
@@ -743,7 +987,8 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 			return errorResult("cancel_query", args.ConnectionString, postErr), nil
 		}
 	}
-	return PsqlResult{Output: output}, nil
+	// Step 3: return plan context + execution result so the agent can relay both.
+	return PsqlResult{Output: formatConnectionPlan(plan) + "\n--- Result ---\n" + output}, nil
 }
 
 // TerminateConnectionArgs defines arguments for the terminate_connection tool.
@@ -753,6 +998,14 @@ type TerminateConnectionArgs struct {
 }
 
 func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (PsqlResult, error) {
+	// Step 1: inspect the session — establishes plan context in the audit trail
+	// before any destructive action is taken.
+	plan, err := inspectConnection(ctx, args.ConnectionString, args.PID)
+	if err != nil {
+		return errorResult("terminate_connection", args.ConnectionString, err), nil
+	}
+
+	// Step 2: terminate the connection (policy pre-check happens inside runPsqlAs).
 	query := fmt.Sprintf(`SELECT pg_terminate_backend(%d) AS terminated, pid, usename, datname, state, LEFT(query, 100) AS query_preview
 FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	output, err := runPsqlAs(ctx, args.ConnectionString, query, "terminate_connection", policy.ActionDestructive)
@@ -777,7 +1030,8 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 			return errorResult("terminate_connection", args.ConnectionString, postErr), nil
 		}
 	}
-	return PsqlResult{Output: output}, nil
+	// Step 3: return plan context + execution result so the agent can relay both.
+	return PsqlResult{Output: formatConnectionPlan(plan) + "\n--- Result ---\n" + output}, nil
 }
 
 // KillIdleConnectionsArgs defines arguments for the kill_idle_connections tool.
