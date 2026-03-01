@@ -37,6 +37,7 @@ func startLocalGovernanceServer(store *audit.Store) (string, error) {
 	// Policy and explain endpoints require a policy engine — not available in local mode.
 	mux.HandleFunc("GET /v1/governance/policies", localHandleUnavailable("policy engine not available in gateway local mode"))
 	mux.HandleFunc("GET /v1/governance/explain", localHandleUnavailable("explain not available in gateway local mode"))
+	mux.HandleFunc("GET /v1/journeys", localHandleJourneys(store))
 
 	go http.Serve(ln, mux) //nolint:errcheck
 	return "http://" + ln.Addr().String(), nil
@@ -140,6 +141,39 @@ func localHandleVerify(store *audit.Store) http.HandlerFunc {
 			return
 		}
 		writeLocalJSON(w, status)
+	}
+}
+
+func localHandleJourneys(store *audit.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		opts := audit.JourneyOptions{Limit: 50}
+
+		if v := q.Get("user"); v != "" {
+			opts.UserID = v
+		}
+		if v := q.Get("from"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				opts.From = t
+			}
+		}
+		if v := q.Get("until"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				opts.Until = t
+			}
+		}
+		if v := q.Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				opts.Limit = n
+			}
+		}
+
+		journeys, err := store.QueryJourneys(r.Context(), opts)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeLocalJSON(w, journeys)
 	}
 }
 

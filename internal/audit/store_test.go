@@ -435,6 +435,159 @@ func TestStore_Query(t *testing.T) {
 	}
 }
 
+// TestQueryJourneys verifies that QueryJourneys groups events by trace_id and
+// surfaces the right user_query, agent, tools_used, and outcome.
+func TestQueryJourneys(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_journeys_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Journey 1 (alice, trace tr_aaa): delegation + 2 tool calls
+	j1events := []*Event{
+		{
+			EventID:   "evt_j1_del",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_aaa",
+			Session:   Session{ID: "sess_1", UserID: "alice"},
+			Input:     Input{UserQuery: "show active connections"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_j1_t1",
+			Timestamp: base.Add(500 * time.Millisecond),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_aaa",
+			Session:   Session{ID: "dbagent_1"},
+			Tool:      &ToolExecution{Name: "get_active_connections"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "tool_j1_t2",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_aaa",
+			Session:   Session{ID: "dbagent_1"},
+			Tool:      &ToolExecution{Name: "get_connection_stats"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	}
+
+	// Journey 2 (bob, trace tr_bbb): delegation + 1 tool call that errored
+	j2events := []*Event{
+		{
+			EventID:   "evt_j2_del",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_bbb",
+			Session:   Session{ID: "sess_2", UserID: "bob"},
+			Input:     Input{UserQuery: "restart the web pod"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_j2_t1",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_bbb",
+			Session:   Session{ID: "k8sagent_1"},
+			Tool:      &ToolExecution{Name: "get_pods"},
+			Outcome:   &Outcome{Status: "error", ErrorMessage: "timeout"},
+		},
+	}
+
+	for _, e := range append(j1events, j2events...) {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("record event %s: %v", e.EventID, err)
+		}
+	}
+
+	// No filters — both journeys returned, newest first.
+	all, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("QueryJourneys() = %d journeys, want 2", len(all))
+	}
+	// Ordered newest-first by started_at of delegation_decision.
+	if all[0].TraceID != "tr_bbb" {
+		t.Errorf("all[0].TraceID = %q, want tr_bbb", all[0].TraceID)
+	}
+	if all[1].TraceID != "tr_aaa" {
+		t.Errorf("all[1].TraceID = %q, want tr_aaa", all[1].TraceID)
+	}
+
+	j1 := all[1]
+	if j1.UserID != "alice" {
+		t.Errorf("j1.UserID = %q, want alice", j1.UserID)
+	}
+	if j1.UserQuery != "show active connections" {
+		t.Errorf("j1.UserQuery = %q", j1.UserQuery)
+	}
+	if j1.Agent != "postgres_database_agent" {
+		t.Errorf("j1.Agent = %q", j1.Agent)
+	}
+	if len(j1.ToolsUsed) != 2 {
+		t.Errorf("j1.ToolsUsed = %v, want 2 tools", j1.ToolsUsed)
+	}
+	if j1.Outcome != "success" {
+		t.Errorf("j1.Outcome = %q, want success", j1.Outcome)
+	}
+	if j1.EventCount != 3 {
+		t.Errorf("j1.EventCount = %d, want 3", j1.EventCount)
+	}
+	if j1.DurationMs <= 0 {
+		t.Errorf("j1.DurationMs = %d, want > 0", j1.DurationMs)
+	}
+
+	j2 := all[0]
+	if j2.Outcome != "error" {
+		t.Errorf("j2.Outcome = %q, want error", j2.Outcome)
+	}
+
+	// Filter by user — only alice's journey.
+	alice, err := store.QueryJourneys(ctx, JourneyOptions{UserID: "alice"})
+	if err != nil {
+		t.Fatalf("QueryJourneys(alice): %v", err)
+	}
+	if len(alice) != 1 || alice[0].TraceID != "tr_aaa" {
+		t.Errorf("QueryJourneys(alice) = %v, want [tr_aaa]", alice)
+	}
+
+	// Filter by time — only events after j2's delegation_decision.
+	fromJ2 := base.Add(2 * time.Second)
+	windowed, err := store.QueryJourneys(ctx, JourneyOptions{From: fromJ2})
+	if err != nil {
+		t.Fatalf("QueryJourneys(from): %v", err)
+	}
+	if len(windowed) != 1 || windowed[0].TraceID != "tr_bbb" {
+		t.Errorf("QueryJourneys(from=j2) = %v, want [tr_bbb]", windowed)
+	}
+
+	// Empty result when no journeys in range.
+	empty, err := store.QueryJourneys(ctx, JourneyOptions{
+		From:  base.Add(10 * time.Hour),
+		Until: base.Add(11 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("QueryJourneys(empty window): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("QueryJourneys(empty window) = %d, want 0", len(empty))
+	}
+}
+
 // TestRebind verifies that rebind rewrites ? placeholders to $N for PostgreSQL
 // and leaves queries unchanged for SQLite.
 func TestRebind(t *testing.T) {

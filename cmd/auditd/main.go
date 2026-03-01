@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -128,6 +129,9 @@ func main() {
 	mux.HandleFunc("GET /v1/governance/explain", govSrv.handleExplain)
 	mux.HandleFunc("POST /v1/governance/check", govSrv.handlePolicyCheck)
 	mux.HandleFunc("GET /v1/events/{eventID}", govSrv.handleGetEvent)
+
+	// Journey endpoint
+	mux.HandleFunc("GET /v1/journeys", srv.handleQueryJourneys)
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", srv.handleHealth)
@@ -300,6 +304,40 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(events)
+}
+
+func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
+	opts := audit.JourneyOptions{Limit: 50}
+
+	q := r.URL.Query()
+	if v := q.Get("user"); v != "" {
+		opts.UserID = v
+	}
+	if v := q.Get("from"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			opts.From = t
+		}
+	}
+	if v := q.Get("until"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			opts.Until = t
+		}
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			opts.Limit = n
+		}
+	}
+
+	journeys, err := s.store.QueryJourneys(r.Context(), opts)
+	if err != nil {
+		slog.Error("failed to query journeys", "err", err)
+		http.Error(w, "failed to query journeys", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(journeys)
 }
 
 func (s *server) handleVerifyChain(w http.ResponseWriter, r *http.Request) {

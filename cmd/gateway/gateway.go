@@ -98,6 +98,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/governance/approvals/pending", g.handleGovernanceApprovalsPending)
 	mux.HandleFunc("GET /api/v1/governance/approvals", g.handleGovernanceApprovals)
 	mux.HandleFunc("GET /api/v1/governance/verify", g.handleGovernanceVerify)
+	mux.HandleFunc("GET /api/v1/governance/journeys", g.handleGovernanceJourneys)
 }
 
 // --- Handlers ---
@@ -273,6 +274,10 @@ func (g *Gateway) handleGovernanceEvent(w http.ResponseWriter, r *http.Request) 
 	g.proxyGovernanceRequest(w, r, "/v1/events/"+eventID)
 }
 
+func (g *Gateway) handleGovernanceJourneys(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/journeys")
+}
+
 // proxyGovernanceRequest forwards a request to the auditd service, preserving query parameters.
 func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request, path string) {
 	if g.auditURL == "" {
@@ -351,6 +356,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	slog.Info("gateway: proxying request", "agent", agentName, "prompt_len", len(prompt))
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
+	msg.Metadata = map[string]any{"trace_id": traceID}
 	result, err := client.SendMessage(r.Context(), &a2a.MessageSendParams{Message: msg})
 	if err != nil {
 		slog.Error("gateway: A2A call failed", "agent", agentName, "err", err)

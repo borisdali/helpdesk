@@ -1,12 +1,23 @@
-# aiHelpDesk Database Mutation Tools
+# aiHelpDesk Mutation Tools
 
-This page documents the database agent tools that modify or terminate backend
-sessions, explains the **two-step inspect-then-act** safeguard built into each
-of them, and describes how every layer of that safeguard is tested.
+This page documents the database and Kubernetes agent tools that perform
+mutations, explains the **two-step inspect-then-act** safeguard and how it
+differs between agents, and describes how every layer is tested.
+
+> **Important:** The four database-agent tools and three Kubernetes-agent tools
+> documented here are presented solely for testing aiHelpDesk AI Governance
+> features.
+>
+> Specifically and crucially, **these seven tools are not ready for PROD use yet!!!**
+>
+> Please wait until we are fully comfortable with AI Governance
+> to release these — and many more — mutation tools to you.
 
 ## Table of Contents
 
 1. [Tools](#1-tools)
+   - [Database agent (1.1–1.4)](#database-agent)
+   - [Kubernetes agent (1.5–1.8)](#kubernetes-agent)
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm)
 3. [Enforcement layers](#3-enforcement-layers)
 4. [Test coverage](#4-test-coverage)
@@ -15,6 +26,8 @@ of them, and describes how every layer of that safeguard is tested.
 ---
 
 ## 1. Tools
+
+### Database agent
 
 ### 1.1 `get_session_info` — read-only inspector
 
@@ -120,7 +133,103 @@ termination of legitimately short-lived idle connections.
 
 ---
 
+### Kubernetes agent
+
+All three Kubernetes mutation tools share the same action class (`destructive`)
+and follow the same pre-check / execute / post-check pattern. Unlike the
+database tools, there is **no structural guard** inside the mutation tool that
+forces an inspection call — the enforce-first discipline relies on the system
+prompt (Layer A) and the approval context (Layer C) only.
+
+### 1.5 `describe_pod` — read-only inspector
+
+**Action class**: read (no policy check needed)
+
+```
+context     string   optional — Kubernetes context; defaults to current context
+namespace   string   required — namespace of the pod
+pod_name    string   required — exact pod name (from get_pods output)
+```
+
+Runs `kubectl describe pod <name> -n <namespace>` and returns the full pod
+description: status, conditions, container states, resource requests/limits,
+events, and recent restart history. Call this before `delete_pod` to confirm
+the pod identity and understand the current state before acting.
+
+---
+
+### 1.6 `delete_pod` — single pod deletion
+
+**Action class**: `destructive` (policy pre-check + post-execution blast-radius
+check)
+
+```
+context              string   optional
+namespace            string   required
+pod_name             string   required — exact pod name; use get_pods to find it
+grace_period_seconds int      optional — graceful termination window in seconds;
+                               0 = immediate deletion
+```
+
+Runs `kubectl delete pod <name> -n <namespace>`. If the pod is managed by a
+`Deployment`, `StatefulSet`, or `DaemonSet`, the controller will reschedule it
+automatically. Use to restart a single stuck or crash-looping pod without
+rolling the entire deployment.
+
+**Execution sequence**:
+
+1. Policy pre-check (`ActionDestructive`) — may trigger approval workflow
+2. Execute `kubectl delete pod ...`
+3. Post-execution blast-radius check (`checkK8sPolicyResult`)
+4. Return kubectl output to the orchestrator
+
+---
+
+### 1.7 `restart_deployment` — rolling restart
+
+**Action class**: `destructive` (policy pre-check + post-execution blast-radius
+check)
+
+```
+context          string   optional
+namespace        string   required
+deployment_name  string   required — use get_pods or kubectl get deployments
+```
+
+Runs `kubectl rollout restart deployment <name> -n <namespace>`. Replaces all
+pods in the deployment one at a time (rolling strategy), preserving availability
+throughout. Use when all replicas are unhealthy or after a configuration change
+that requires a full pod cycle.
+
+**Execution sequence**: identical to `delete_pod` (pre-check → execute →
+post-check).
+
+---
+
+### 1.8 `scale_deployment` — replica count change
+
+**Action class**: `destructive` (policy pre-check + post-execution blast-radius
+check)
+
+```
+context          string   optional
+namespace        string   required
+deployment_name  string   required
+replicas         int      required — target replica count; 0 scales down completely
+```
+
+Runs `kubectl scale deployment <name> --replicas=<n> -n <namespace>`. Scaling to
+`0` terminates all pods immediately (downtime). Scaling up adds capacity without
+touching running pods.
+
+**Execution sequence**: identical to `delete_pod` (pre-check → execute →
+post-check).
+
+---
+
 ## 2. Two-step review-and-confirm
+
+### Database agent
 
 Every single-PID mutation tool (`cancel_query`, `terminate_connection`) is
 required to execute a two-step sequence:
@@ -138,9 +247,35 @@ Step 2: cancel_query(pid)  or  terminate_connection(pid)
 This is enforced at three independent layers. No single layer can be bypassed
 without triggering a failure in at least one of the other two.
 
+### Kubernetes agent
+
+The same intent applies but the implementation is shallower:
+
+```
+Step 1: describe_pod(pod_name)  or  get_pods(namespace)
+        → returns current pod state, restart count, events
+
+Step 2: delete_pod(pod_name)  or  restart_deployment(name)  or  scale_deployment(name)
+        → policy check; approval context includes namespace tags
+        → approver sees namespace and cluster context before deciding
+```
+
+Unlike the database agent, **the k8s mutation tools do not call `describe_pod`
+internally** (no Layer B structural guard). Compliance with the inspect-first
+discipline depends on the system prompt (Layer A) and the approval workflow
+(Layer C).
+
 ---
 
 ## 3. Enforcement layers
+
+The three layers apply differently across agents:
+
+| Layer | Database agent | Kubernetes agent |
+|-------|---------------|-----------------|
+| A — LLM prompt | Explicit CRITICAL section: inspect before cancel/terminate | Generic "fail fast on errors"; no explicit inspect-before-mutate rule |
+| B — Structural guard in tool | `inspectConnection` called unconditionally inside `cancelQueryTool` / `terminateConnectionTool` | **Absent** — `describe_pod` is not called inside `deletePodTool` |
+| C — Approval context | Full session plan attached to `request_context.session_info` | Namespace tags attached; no pod-level detail |
 
 ### Layer A — LLM prompt instruction (`prompts/database.txt`)
 
@@ -216,7 +351,9 @@ transaction".
 
 ## 4. Test coverage
 
-The three layers map to three test tiers.
+The three layers map to three test tiers. Kubernetes tool tests cover Layers A
+and C only (no Layer B structural tests, because there is no structural guard
+to test).
 
 ### Tier 1 — Unit: approval context (`agentutil/agentutil_test.go`)
 
@@ -229,6 +366,28 @@ The three layers map to three test tiers.
 These tests use a local `httptest` mock server implementing `POST /v1/approvals`
 and `GET /v1/approvals/{id}/wait`. They capture the raw request body via a
 buffered channel and assert on the JSON structure.
+
+### Tier 1b — Unit: Kubernetes tool behaviour (`agents/k8s/tools_test.go`)
+
+| Test | What it verifies |
+|---|---|
+| `TestDeletePodTool_Success` | `kubectl delete pod` output returned correctly |
+| `TestDeletePodTool_WithGracePeriod` | `--grace-period` flag appended when `grace_period_seconds > 0` |
+| `TestDeletePodTool_Failure` | kubectl not-found error propagated without panic |
+| `TestDeletePodTool_PolicyDenied` | Pre-check denial blocks kubectl execution entirely |
+| `TestDeletePodTool_BlastRadiusAllowed` | Post-check passes when pod count ≤ policy limit |
+| `TestDeletePodTool_BlastRadiusDenied` | Post-check denies when simulated bulk deletion exceeds limit |
+| `TestRestartDeploymentTool_Success` | `kubectl rollout restart` output returned correctly |
+| `TestRestartDeploymentTool_Failure` | kubectl not-found error propagated |
+| `TestRestartDeploymentTool_PolicyDenied` | Pre-check denial blocks kubectl execution |
+| `TestScaleDeploymentTool_Success` | `kubectl scale --replicas` output returned correctly |
+| `TestScaleDeploymentTool_ScaleToZero` | `--replicas=0` accepted and passed through |
+| `TestScaleDeploymentTool_Failure` | kubectl not-found error propagated |
+| `TestScaleDeploymentTool_PolicyDenied` | Pre-check denial blocks kubectl execution |
+
+Tests use `withMockKubectl` (replaces the kubectl binary path at test time) and
+`withK8sPolicyEnforcer` / `newDenyK8sDestructiveEnforcer` for policy fixture
+setup.
 
 ### Tier 2 — Unit: session plan wiring (`agents/database/tools_test.go`)
 
@@ -311,11 +470,19 @@ make faulttest
 
 ---
 
-## 5. Fault scenario: `db-terminate-direct-command`
+## 5. Fault scenarios
+
+### `db-terminate-direct-command`
 
 This scenario specifically tests **Layer A** (LLM behaviour) in a live
-environment. It is the only test that can catch a regression where the model is
-prompted to act without inspecting first.
+environment for the database agent. It is the only test that can catch a
+regression where the model is prompted to act without inspecting first.
+
+No equivalent k8s fault scenario exists yet. The absence of a Layer B
+structural guard for the k8s mutation tools makes this a gap: a misbehaving
+model could call `delete_pod` without first calling `describe_pod` and there is
+currently no automated test that would catch it.
+
 
 **Failure mode being tested**: an agent that calls `terminate_connection`
 directly after `get_active_connections`, skipping the `get_session_info` step.
@@ -338,9 +505,9 @@ position(A) < position(B).
 ## Run all mutation-tool tests locally
 
 ```bash
-# Tier 1 + 2 + 3a (no infrastructure needed)
+# Database + k8s unit tests + fault-lib ordering tests (no infrastructure needed)
 make test-governance
 
-# Tier 3b (requires Docker + database agent + LLM API key)
+# Live fault scenarios (requires Docker + agents + LLM API key)
 make faulttest
 ```

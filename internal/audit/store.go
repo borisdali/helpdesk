@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -477,6 +478,199 @@ type QueryOptions struct {
 	ActionClass    ActionClass    // filter by action class (read, write, destructive)
 	ToolName       string         // filter by tool name
 	ApprovalStatus ApprovalStatus // filter by approval status
+}
+
+// JourneyOptions specifies filters for QueryJourneys.
+type JourneyOptions struct {
+	UserID string    // optional; empty = all users
+	From   time.Time // inclusive lower bound on timestamp
+	Until  time.Time // exclusive upper bound on timestamp
+	Limit  int       // max journeys returned; default 50
+}
+
+// JourneySummary summarises a single end-to-end user request (one trace_id).
+type JourneySummary struct {
+	TraceID    string   `json:"trace_id"`
+	StartedAt  string   `json:"started_at"`
+	EndedAt    string   `json:"ended_at"`
+	DurationMs int64    `json:"duration_ms"`
+	UserID     string   `json:"user_id,omitempty"`
+	UserQuery  string   `json:"user_query,omitempty"`
+	Agent      string   `json:"agent,omitempty"`
+	ToolsUsed  []string `json:"tools_used"`
+	Outcome    string   `json:"outcome,omitempty"`
+	EventCount int      `json:"event_count"`
+}
+
+// QueryJourneys returns journey summaries for traces that have at least one
+// delegation_decision event matching the given filters.
+//
+// Two queries are issued: one to find matching trace IDs (from
+// delegation_decision events, which are the only rows that carry user_id and
+// user_query), and one to fetch all events for those traces so that tool
+// names, outcome, and wall-clock duration can be computed in Go.
+func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]JourneySummary, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 50
+	}
+
+	// Step 1: find trace IDs from delegation_decision events matching filters.
+	q1 := `SELECT trace_id, MIN(timestamp) AS first_event
+		FROM audit_events
+		WHERE event_type = 'delegation_decision'
+		  AND trace_id != ''`
+	var args1 []any
+	if opts.UserID != "" {
+		q1 += " AND user_id = ?"
+		args1 = append(args1, opts.UserID)
+	}
+	if !opts.From.IsZero() {
+		q1 += " AND timestamp >= ?"
+		args1 = append(args1, opts.From.Format(time.RFC3339Nano))
+	}
+	if !opts.Until.IsZero() {
+		q1 += " AND timestamp < ?"
+		args1 = append(args1, opts.Until.Format(time.RFC3339Nano))
+	}
+	q1 += " GROUP BY trace_id ORDER BY first_event DESC LIMIT ?"
+	args1 = append(args1, opts.Limit)
+
+	rows1, err := s.db.QueryContext(ctx, rebind(s.isPostgres, q1), args1...)
+	if err != nil {
+		return nil, fmt.Errorf("query journey trace ids: %w", err)
+	}
+	defer rows1.Close()
+
+	var traceIDs []string
+	for rows1.Next() {
+		var traceID, firstEvent string
+		if err := rows1.Scan(&traceID, &firstEvent); err != nil {
+			return nil, fmt.Errorf("scan trace id: %w", err)
+		}
+		traceIDs = append(traceIDs, traceID)
+	}
+	if err := rows1.Err(); err != nil {
+		return nil, err
+	}
+	if len(traceIDs) == 0 {
+		return []JourneySummary{}, nil
+	}
+
+	// Step 2: fetch all events for those trace IDs in one query.
+	placeholders := strings.Repeat("?,", len(traceIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	q2 := fmt.Sprintf(
+		`SELECT trace_id, event_type, user_id, user_query, decision_agent,
+		        tool_name, outcome_status, timestamp
+		 FROM audit_events
+		 WHERE trace_id IN (%s)
+		 ORDER BY trace_id, timestamp ASC`, placeholders)
+	args2 := make([]any, len(traceIDs))
+	for i, id := range traceIDs {
+		args2[i] = id
+	}
+
+	rows2, err := s.db.QueryContext(ctx, rebind(s.isPostgres, q2), args2...)
+	if err != nil {
+		return nil, fmt.Errorf("query journey events: %w", err)
+	}
+	defer rows2.Close()
+
+	type traceData struct {
+		startedAt string
+		endedAt   string
+		userID    string
+		userQuery string
+		agent     string
+		toolsSeen map[string]bool
+		tools     []string
+		outcome   string
+		count     int
+	}
+
+	// Preserve the order returned by step 1.
+	byTrace := make(map[string]*traceData, len(traceIDs))
+	for _, id := range traceIDs {
+		byTrace[id] = &traceData{toolsSeen: make(map[string]bool)}
+	}
+
+	for rows2.Next() {
+		var (
+			traceID, eventType            string
+			userID, userQuery, agent      sql.NullString
+			toolName, outcomeStatus       sql.NullString
+			ts                            string
+		)
+		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &agent,
+			&toolName, &outcomeStatus, &ts); err != nil {
+			return nil, fmt.Errorf("scan journey event: %w", err)
+		}
+		d := byTrace[traceID]
+		if d == nil {
+			continue
+		}
+		d.count++
+		if d.startedAt == "" || ts < d.startedAt {
+			d.startedAt = ts
+		}
+		if ts > d.endedAt {
+			d.endedAt = ts
+		}
+		if eventType == string(EventTypeDelegation) {
+			if userID.Valid && userID.String != "" && d.userID == "" {
+				d.userID = userID.String
+			}
+			if userQuery.Valid && userQuery.String != "" && d.userQuery == "" {
+				d.userQuery = userQuery.String
+			}
+			if agent.Valid && agent.String != "" && d.agent == "" {
+				d.agent = agent.String
+			}
+		}
+		if toolName.Valid && toolName.String != "" && !d.toolsSeen[toolName.String] {
+			d.toolsSeen[toolName.String] = true
+			d.tools = append(d.tools, toolName.String)
+		}
+		if outcomeStatus.Valid && outcomeStatus.String != "" {
+			if d.outcome == "" || outcomeStatus.String == "error" {
+				d.outcome = outcomeStatus.String
+			}
+		}
+	}
+	if err := rows2.Err(); err != nil {
+		return nil, err
+	}
+
+	summaries := make([]JourneySummary, 0, len(traceIDs))
+	for _, id := range traceIDs {
+		d := byTrace[id]
+		var durationMs int64
+		if d.startedAt != "" && d.endedAt != "" {
+			t1, e1 := time.Parse(time.RFC3339Nano, d.startedAt)
+			t2, e2 := time.Parse(time.RFC3339Nano, d.endedAt)
+			if e1 == nil && e2 == nil {
+				durationMs = t2.Sub(t1).Milliseconds()
+			}
+		}
+		tools := d.tools
+		if tools == nil {
+			tools = []string{}
+		}
+		sort.Strings(tools)
+		summaries = append(summaries, JourneySummary{
+			TraceID:    id,
+			StartedAt:  d.startedAt,
+			EndedAt:    d.endedAt,
+			DurationMs: durationMs,
+			UserID:     d.userID,
+			UserQuery:  d.userQuery,
+			Agent:      d.agent,
+			ToolsUsed:  tools,
+			Outcome:    d.outcome,
+			EventCount: d.count,
+		})
+	}
+	return summaries, nil
 }
 
 // VerifyIntegrity verifies the hash chain integrity of the audit log.

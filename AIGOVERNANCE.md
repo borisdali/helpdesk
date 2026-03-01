@@ -48,7 +48,7 @@ aiHelpDesk Governance consists of eight well-defined components:
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| [Audit System](#audit-system) | **Implemented** | Tamper-evident logging with hash chains |
+| [Audit System](#7-audit-system) | **Implemented** | Tamper-evident logging with hash chains |
 | [Policy Engine](#policy-engine) | **Implemented** | Rule-based access control |
 | [Approval Workflows](#approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
 | [Compliance Reporting](#compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
@@ -606,396 +606,23 @@ Key integration points:
 
 ## 7. Audit System
 
-aiHelpDesk includes a tamper-evident audit system that records all tool executions
-across agents, providing accountability, compliance support, and security monitoring.
-The audit system uses hash chains to detect tampering with the audit log.
-
-### 7.1 Architecture
-
-```
-                                    ┌─────────────────────┐
-                                    │   auditor (CLI)     │
-                                    │ Real-time monitor   │
-                                    │ • Security alerts   │
-                                    │ • Chain verification│
-                                    └──────────┬──────────┘
-                                               │ Unix socket
-                                               │ notifications
-    ┌───────────────┐                          ▼
-    │  database     │──────┐         ┌─────────────────────┐
-    │  agent        │      │         │    auditd service   │
-    │  :1100        │      │ HTTP    │    :1199            │
-    └───────────────┘      │         │                     │
-                           ├────────►│ • SQLite storage    │
-    ┌───────────────┐      │         │ • Hash chain        │
-    │  k8s          │──────┤         │ • Socket notify     │
-    │  agent        │      │         │ • Chain verification│
-    │  :1102        │      │         └─────────────────────┘
-    └───────────────┘      │                   │
-                           │                   ▼
-    ┌───────────────┐      │         ┌─────────────────────┐
-    │  incident     │──────┘         │   audit.db (SQLite) │
-    │  agent        │                │   • audit_events    │
-    │  :1104        │                │   • Hash chain      │
-    └───────────────┘                └─────────────────────┘
-```
-
-### 7.2 Components
+The audit system records every tool execution, policy decision, delegation, and
+gateway request into a tamper-evident, hash-chained log managed by `auditd`.
 
 | Component | Location | Description |
 |-----------|----------|-------------|
-| `auditd` | `cmd/auditd/` | Central audit service with HTTP API and SQLite storage |
-| `auditor` | `cmd/auditor/` | Real-time monitoring CLI with security alerting |
-| `audit` package | `internal/audit/` | Core audit types, hash chain, and tool auditor |
+| `auditd` | `cmd/auditd/` | Central HTTP service; stores events, manages hash chain, serves approval and governance APIs |
+| `auditor` | `cmd/auditor/` | Real-time monitoring CLI; reads the Unix socket, fires security alerts, verifies chain integrity |
+| `secbot` | `cmd/secbot/` | Automated incident responder; listens to the audit socket and creates incident bundles via the gateway |
+| `audit` package | `internal/audit/` | Core event types, hash chain implementation, store, trace middleware |
 
-### 7.3 Hash Chain Integrity
+For the full API reference, event schema, auditor flags, environment variables,
+and troubleshooting guide see **[AUDIT.md](AUDIT.md)**.
 
-Each audit event includes cryptographic hashes that form a chain:
+### 7.1 secbot — Security Responder
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Event 1     │     │  Event 2     │     │  Event 3     │
-│              │     │              │     │              │
-│ prev_hash:   │     │ prev_hash:   │     │ prev_hash:   │
-│  genesis     │────►│  hash(E1)    │────►│  hash(E2)    │
-│              │     │              │     │              │
-│ event_hash:  │     │ event_hash:  │     │ event_hash:  │
-│  SHA256(E1)  │     │  SHA256(E2)  │     │  SHA256(E3)  │
-└──────────────┘     └──────────────┘     └──────────────┘
-```
-
-- **prev_hash**: Hash of the previous event (genesis hash for the first event)
-- **event_hash**: SHA-256 hash of the event's canonical JSON representation
-
-If an attacker modifies any event in the database:
-1. The `event_hash` will no longer match the event content
-2. The next event's `prev_hash` will no longer match
-3. Chain verification will detect the break
-
-### Event Schema
-
-Audit events capture tool executions with full context:
-
-| Field | Description |
-|-------|-------------|
-| `event_id` | Unique identifier (e.g., `tool_a1b2c3d4`) |
-| `timestamp` | UTC timestamp in RFC3339Nano format |
-| `event_type` | Type of event (`tool_execution`, `delegation`, etc.) |
-| `trace_id` | End-to-end correlation ID from the orchestrator |
-| `action_class` | Classification: `read`, `write`, or `destructive` |
-| `session_id` | Agent session identifier |
-| `tool.name` | Tool that was executed |
-| `tool.parameters` | Input parameters to the tool |
-| `tool.raw_command` | Actual command executed (SQL query, kubectl command) |
-| `tool.result` | Truncated output (first 500 chars) |
-| `tool.error` | Error message if the tool failed |
-| `tool.duration` | Execution time |
-| `outcome.status` | `success` or `error` |
-| `prev_hash` | Hash of previous event in chain |
-| `event_hash` | SHA-256 hash of this event |
-
-### 7.4 Action Classification
-
-Tools are classified by their potential impact:
-
-| Action Class | Description | Examples |
-|--------------|-------------|----------|
-| `read` | Read-only operations | `get_pods`, `get_database_info`, `get_active_connections` |
-| `write` | State-modifying operations | `create_incident_bundle` |
-| `destructive` | Potentially destructive operations | (Reserved for future tools) |
-
-### 7.5 Trace ID Propagation
-
-The `trace_id` flows from the orchestrator through sub-agents for end-to-end
-correlation:
-
-1. User sends a query to the orchestrator
-2. Orchestrator generates a `trace_id` and passes it in the A2A request metadata
-3. Sub-agents extract `trace_id` via `TraceMiddleware` and include it in audit events
-4. All events from a single user query share the same `trace_id`
-
-This enables querying all tool executions triggered by a single user request:
-
-```bash
-# Query all events for a specific trace
-curl "http://localhost:1199/api/events?trace_id=abc123"
-```
-
-### 7.6 Auditd Service (cmd/auditd/)
-
-The central audit service provides:
-
-- **HTTP API** for recording events and querying the audit log
-- **SQLite storage** with WAL mode for concurrent reads
-- **Unix socket** for real-time event notifications
-- **Hash chain** maintenance and verification
-
-#### 7.6.1 API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/events` | Record a new audit event |
-| GET | `/api/events` | Query events with filters |
-| GET | `/api/verify` | Verify hash chain integrity |
-| GET | `/health` | Health check |
-
-#### 7.6.2 Query Filters
-
-```bash
-# Recent events
-curl "http://localhost:1199/api/events?limit=10"
-
-# Events by agent
-curl "http://localhost:1199/api/events?agent=k8s_agent"
-
-# Events by trace ID
-curl "http://localhost:1199/api/events?trace_id=abc123"
-
-# Events by action class
-curl "http://localhost:1199/api/events?action_class=destructive"
-
-# Events by tool name
-curl "http://localhost:1199/api/events?tool_name=get_pods"
-
-# Events since a timestamp
-curl "http://localhost:1199/api/events?since=2026-01-01T00:00:00Z"
-```
-
-### 7.7 Auditor CLI (cmd/auditor/)
-
-The auditor provides real-time monitoring and security alerting:
-
-```bash
-# Start the auditor
-go run ./cmd/auditor/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --audit-url http://localhost:1199 \
-  --verify-interval 30s
-```
-
-#### 7.7.1 Security Detection
-
-The auditor monitors for suspicious patterns:
-
-| Detection | Description | Trigger |
-|-----------|-------------|---------|
-| High Volume | Burst of activity | >100 events/minute (configurable) |
-| Off-Hours | Activity outside business hours | Events outside 6 AM - 10 PM local time |
-| Unauthorized Destructive | Destructive ops without approval | `destructive` action without `approved` status |
-| Timestamp Gap | Suspicious time jumps | Events with timestamps far in the past/future |
-| Chain Tampering | Hash chain breaks | Periodic verification detects modified events |
-
-#### 7.7.2 Webhook Alerts
-
-Security incidents can be sent to an external webhook:
-
-```bash
-go run ./cmd/auditor/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --incident-webhook https://alerts.example.com/hook
-```
-
-Webhook payload:
-```json
-{
-  "type": "high_volume",
-  "timestamp": "2026-01-15T14:30:00Z",
-  "agent": "k8s_agent",
-  "count": 150,
-  "threshold": 100,
-  "message": "High event volume detected: 150 events in the last minute"
-}
-```
-
-### 7.8 Environment Variables
-
-#### 7.8.1 Auditd Service
-
-```bash
-# Listen address (default: localhost:1199)
-export HELPDESK_AUDITD_ADDR="0.0.0.0:1199"
-
-# SQLite database path (default: audit.db)
-export HELPDESK_AUDIT_DB="/var/lib/helpdesk/audit.db"
-
-# Unix socket for real-time notifications
-export HELPDESK_AUDIT_SOCKET="/tmp/helpdesk-audit.sock"
-```
-
-#### 7.8.2 Agent Audit Configuration
-
-```bash
-# Enable auditing for an agent (point to auditd service)
-export HELPDESK_AUDIT_URL="http://localhost:1199"
-
-# Note: Each agent automatically generates a unique session ID
-```
-
-#### 7.8.3 Auditor CLI
-
-```bash
-# Unix socket to connect to for real-time events
-# (matches HELPDESK_AUDIT_SOCKET in auditd)
---socket /tmp/helpdesk-audit.sock
-
-# Auditd URL for chain verification
---audit-url http://localhost:1199
-
-# Chain verification interval
---verify-interval 30s
-
-# Webhook URL for security incidents
---incident-webhook https://alerts.example.com/hook
-
-# Activity thresholds
---max-events-per-minute 100
---allowed-hours-start 6
---allowed-hours-end 22
-```
-
-### 7.9 Running the Audit System
-
-#### 7.9.1 Start Auditd
-
-```bash
-# Terminal — audit service
-HELPDESK_AUDIT_DB=/tmp/helpdesk/audit.db \
-HELPDESK_AUDIT_SOCKET=/tmp/helpdesk-audit.sock \
-  go run ./cmd/auditd/
-```
-
-#### 7.9.2 Start Agents with Auditing
-
-```bash
-# Start agents with audit enabled
-HELPDESK_AUDIT_URL="http://localhost:1199" go run ./agents/database/
-HELPDESK_AUDIT_URL="http://localhost:1199" go run ./agents/k8s/
-```
-
-#### 7.9.3 Start the Auditor
-
-```bash
-# Real-time monitoring with security alerts
-go run ./cmd/auditor/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --audit-url http://localhost:1199 \
-  --verify-interval 30s
-```
-
-### 7.10 Verifying Audit Integrity
-
-#### 7.10.1 Via API
-
-```bash
-curl -s http://localhost:1199/api/verify | jq
-```
-
-Response:
-```json
-{
-  "verified": true,
-  "total_events": 150,
-  "broken_links": [],
-  "first_event": "evt_a1b2c3d4",
-  "last_event": "evt_z9y8x7w6"
-}
-```
-
-#### 7.10.2 Via SQL (Manual)
-
-```sql
--- Check for broken hash chain links
-SELECT
-  e1.event_id as event,
-  e1.prev_hash,
-  e2.event_hash as expected_prev,
-  CASE WHEN e1.prev_hash = e2.event_hash THEN 'OK' ELSE 'BROKEN' END as status
-FROM audit_events e1
-LEFT JOIN audit_events e2 ON e1.id = e2.id + 1
-WHERE e1.id > 1
-ORDER BY e1.id;
-```
-
-### 7.11 Testing
-
-Generate test events to verify the audit system:
-
-```bash
-# Send events directly to auditd
-for i in {1..10}; do
-  curl -X POST http://localhost:1199/api/events \
-    -H "Content-Type: application/json" \
-    -d '{
-      "event_type": "tool_execution",
-      "session": {"id": "test_session"},
-      "tool": {
-        "name": "test_tool",
-        "raw_command": "SELECT 1",
-        "agent": "test_agent"
-      }
-    }'
-  sleep 0.1
-done
-
-# Verify the auditor receives them via the Unix socket
-# (auditor should log each event as it arrives)
-```
-
-### 7.12 Security Responder Bot (cmd/secbot/)
-
-The `secbot` demonstrates automated security incident response. It monitors the
-audit stream for critical security events and automatically creates incident
-bundles for investigation.
-
-```
-┌─────────────────────┐
-│   Audit Socket      │
-│   (from auditd)     │
-└──────────┬──────────┘
-           │ subscribe
-           ▼
-┌─────────────────────┐         ┌─────────────────────┐
-│   secbot            │  POST   │   REST Gateway      │
-│   • Detect alerts   │────────►│   /api/v1/incidents │
-│   • Enforce cooldown│         └──────────┬──────────┘
-│   • Receive callback│                    │ A2A
-└─────────────────────┘                    ▼
-                               ┌─────────────────────┐
-                               │   incident_agent    │
-                               │   Create bundle     │
-                               └─────────────────────┘
-```
-
-**Key features:**
-- Monitors audit socket for security events
-- Detects: hash mismatches, unauthorized destructive ops, injection attempts
-- Creates incident bundles via REST gateway (maintains architecture)
-- Cooldown period to prevent alert storms
-- Receives async callback when bundle is ready
-
-**Architectural note:** Unlike having the auditor call incident_agent directly,
-secbot is an external automation client (like srebot). Sub-agents remain
-independent and don't know about each other.
-
-#### 7.12.1 Running secbot
-
-For details on how to run `secbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#38-security-responder-secbot) for running via Docker containers, [here](deploy/host#77-security-responder-secbot) for running directly on a host and [here](deploy/helm/README.md#98-security-responder-secbot) for running on K8s.
-
-```bash
-# Prerequisites: auditd, gateway, and incident_agent must be running
-
-# Start secbot
-go run ./cmd/secbot/ \
-  --socket /tmp/helpdesk-audit.sock \
-  --gateway http://localhost:8080 \
-  --listen :9091 \
-  --cooldown 5m
-
-# Dry-run mode (log alerts but don't create incidents)
-go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
-```
-
-#### 7.12.2 Detected Security Patterns
+`secbot` subscribes to the auditd Unix socket and automatically creates incident
+bundles when it detects critical security patterns:
 
 | Pattern | Trigger |
 |---------|---------|
@@ -1003,6 +630,21 @@ go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
 | `unauthorized_destructive` | Destructive action without approval |
 | `potential_sql_injection` | SQL syntax errors in tool output |
 | `potential_command_injection` | Permission denied / command not found errors |
+
+```bash
+go run ./cmd/secbot/ \
+  --socket /tmp/helpdesk-audit.sock \
+  --gateway http://localhost:8080 \
+  --cooldown 5m
+
+# Dry-run (log alerts, don't create incidents)
+go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
+```
+
+For deployment-specific instructions see:
+[Docker Compose](deploy/docker-compose/README.md#38-security-responder-secbot) ·
+[Host](deploy/host/README.md#77-security-responder-secbot) ·
+[Helm](deploy/helm/README.md#98-security-responder-secbot)
 
 ## 8. Compliance Reporting (cmd/govbot/)
 
