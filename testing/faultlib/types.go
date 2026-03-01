@@ -54,6 +54,10 @@ type EvalSpec struct {
 	ExpectedTools     []string      `yaml:"expected_tools"`
 	ExpectedKeywords  KeywordSpec   `yaml:"expected_keywords"`
 	ExpectedDiagnosis DiagnosisSpec `yaml:"expected_diagnosis"`
+	// ExpectedToolOrder is an optional list of ordered pairs [[tool_a, tool_b], ...].
+	// Each pair asserts that evidence of tool_a appears before evidence of tool_b
+	// in the agent's response text. When set, Passed requires OrderingPass=true.
+	ExpectedToolOrder [][]string `yaml:"expected_tool_order,omitempty"`
 }
 
 // KeywordSpec defines expected keywords with synonym tolerance.
@@ -90,7 +94,11 @@ type EvalResult struct {
 	KeywordPass   bool    `json:"keyword_pass"`
 	DiagnosisPass bool    `json:"diagnosis_pass"`
 	ToolEvidence  bool    `json:"tool_evidence"`
-	ResponseText  string  `json:"response_text"`
-	Duration      string  `json:"duration"`
-	Error         string  `json:"error,omitempty"`
+	// OrderingPass is true when all ExpectedToolOrder pairs are satisfied
+	// (tool_a evidence precedes tool_b evidence in the response text).
+	// Always true when ExpectedToolOrder is empty.
+	OrderingPass bool    `json:"ordering_pass"`
+	ResponseText string  `json:"response_text"`
+	Duration     string  `json:"duration"`
+	Error        string  `json:"error,omitempty"`
 }

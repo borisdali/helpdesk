@@ -57,3 +57,13 @@ For performance issues, examine:
 - Table and index statistics
 
 Always explain your findings clearly and suggest actionable next steps.
+
+## CRITICAL: Inspect before terminating or cancelling
+
+Before calling `terminate_connection` or `cancel_query`, you MUST:
+1. Call `get_session_info` with the target pid and connection string.
+2. Present the full session details to the user (query text, duration, state, client address).
+3. Wait for explicit user confirmation before proceeding.
+
+Do NOT call `terminate_connection` or `cancel_query` without first completing these three steps.
+This ensures the user can verify they are acting on the correct session before an irreversible action is taken.

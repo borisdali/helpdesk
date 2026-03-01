@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/policy"
 )
 
@@ -370,6 +372,160 @@ func TestCheckTool_NilEnforcer_NoRemoteURL(t *testing.T) {
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, "test")
 	if err != nil {
 		t.Errorf("nil enforcer: expected nil error, got: %v", err)
+	}
+}
+
+// --- Approval context (session_info threading) ---
+
+// requireApprovalPolicyYAML is a policy that requires approval for write and
+// destructive actions while allowing reads.
+const requireApprovalPolicyYAML = `
+version: "1"
+policies:
+  - name: require-approval-policy
+    resources:
+      - type: database
+    rules:
+      - action: read
+        effect: allow
+      - action: write
+        effect: require_approval
+      - action: destructive
+        effect: require_approval
+`
+
+// mockApprovalServer starts an httptest server implementing the auditd approval
+// API (POST /v1/approvals and GET /v1/approvals/{id}/wait). The POST handler
+// captures each request body and sends it to the returned channel; all requests
+// are immediately approved.
+func mockApprovalServer(t *testing.T) (*httptest.Server, <-chan audit.ApprovalCreateRequest) {
+	t.Helper()
+	ch := make(chan audit.ApprovalCreateRequest, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/approvals":
+			var req audit.ApprovalCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "bad request body", http.StatusBadRequest)
+				return
+			}
+			ch <- req
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.ApprovalCreateResponse{
+				ApprovalID: "test-approval-1",
+				Status:     "pending",
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/wait"):
+			// WaitForApproval — immediately return approved.
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(audit.StoredApproval{
+				ApprovalID: "test-approval-1",
+				Status:     "approved",
+				ResolvedBy: "test-approver",
+			})
+		default:
+			http.Error(w, "unexpected: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, ch
+}
+
+// newRequireApprovalEnforcer creates a PolicyEnforcer backed by
+// requireApprovalPolicyYAML, wired to an approval client at approvalURL.
+func newRequireApprovalEnforcer(t *testing.T, approvalURL string) *PolicyEnforcer {
+	t.Helper()
+	path := writeTempPolicyFile(t, requireApprovalPolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{
+		Engine:         engine,
+		ApprovalClient: audit.NewApprovalClient(approvalURL),
+	})
+}
+
+func TestRequestApproval_SessionInfoInContext(t *testing.T) {
+	appSrv, captured := mockApprovalServer(t)
+	e := newRequireApprovalEnforcer(t, appSrv.URL)
+
+	note := "Session PID 1234\n  User:     app\n  Database: prod\n  State:    active"
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, note)
+	if err != nil {
+		t.Fatalf("CheckTool (require_approval → approved): %v", err)
+	}
+
+	select {
+	case req := <-captured:
+		if req.Context == nil {
+			t.Fatal("approval request_context is nil; expected session_info to be populated")
+		}
+		got, ok := req.Context["session_info"]
+		if !ok {
+			t.Fatalf("approval request_context missing 'session_info' key; got: %v", req.Context)
+		}
+		if !containsStr(fmt.Sprintf("%v", got), "PID 1234") {
+			t.Errorf("session_info = %v, want to contain 'PID 1234'", got)
+		}
+	default:
+		t.Fatal("no approval request was captured by mock server")
+	}
+}
+
+func TestRequestApproval_NoSessionInfoWhenNoteEmpty(t *testing.T) {
+	appSrv, captured := mockApprovalServer(t)
+	e := newRequireApprovalEnforcer(t, appSrv.URL)
+
+	// Empty note → session_info must NOT appear in the approval context.
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "")
+	if err != nil {
+		t.Fatalf("CheckTool: %v", err)
+	}
+
+	select {
+	case req := <-captured:
+		if _, ok := req.Context["session_info"]; ok {
+			t.Errorf("empty note must not add session_info to context; got: %v", req.Context)
+		}
+	default:
+		t.Fatal("no approval request was captured")
+	}
+}
+
+func TestCheckTool_RequireApproval_RemoteCheck_NoteForwarded(t *testing.T) {
+	// Remote governance check (handleRemoteResponse) returns require_approval;
+	// the local approval client must receive the note in request_context.session_info.
+	govSrv := mockPolicyCheckServer(t, "require_approval", http.StatusOK)
+	defer govSrv.Close()
+
+	appSrv, captured := mockApprovalServer(t)
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{
+		PolicyCheckURL: govSrv.URL,
+		ApprovalClient: audit.NewApprovalClient(appSrv.URL),
+	})
+
+	note := "Session PID 9999\n  User:     slow_client\n  State:    active (5m 10s)"
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, note)
+	if err != nil {
+		t.Fatalf("CheckTool (remote require_approval → approved): %v", err)
+	}
+
+	select {
+	case req := <-captured:
+		if req.Context == nil {
+			t.Fatal("approval request_context is nil")
+		}
+		got, ok := req.Context["session_info"]
+		if !ok {
+			t.Fatalf("session_info missing from approval request_context via remote check path; got: %v", req.Context)
+		}
+		if !containsStr(fmt.Sprintf("%v", got), "PID 9999") {
+			t.Errorf("session_info = %v, want to contain 'PID 9999'", got)
+		}
+	default:
+		t.Fatal("no approval request captured via remote check path")
 	}
 }
 

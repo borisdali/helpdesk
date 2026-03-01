@@ -23,8 +23,8 @@ func TestLoadCatalog_Valid(t *testing.T) {
 		t.Errorf("Version = %q, want %q", catalog.Version, "1")
 	}
 
-	if len(catalog.Failures) != 18 {
-		t.Errorf("Failures count = %d, want 18", len(catalog.Failures))
+	if len(catalog.Failures) != 19 {
+		t.Errorf("Failures count = %d, want 19", len(catalog.Failures))
 	}
 }
 
@@ -200,6 +200,92 @@ func TestSplitCategory(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEvaluate_ToolOrdering_Pass(t *testing.T) {
+	// get_session_info evidence ("session", "pid") precedes terminate_connection
+	// evidence ("terminated") in the response text.
+	f := Failure{
+		ID: "ordering-pass",
+		Evaluation: EvalSpec{
+			ExpectedToolOrder: [][]string{
+				{"get_session_info", "terminate_connection"},
+			},
+		},
+	}
+	response := "Inspecting session: pid 1234 is active and holds no open transaction. Terminated the backend."
+	result := Evaluate(f, response)
+	if !result.OrderingPass {
+		t.Errorf("OrderingPass = false; expected session_info evidence to precede terminate evidence in %q", response)
+	}
+}
+
+func TestEvaluate_ToolOrdering_Fail(t *testing.T) {
+	// terminate_connection evidence appears before get_session_info evidence.
+	f := Failure{
+		ID: "ordering-fail",
+		Evaluation: EvalSpec{
+			ExpectedToolOrder: [][]string{
+				{"get_session_info", "terminate_connection"},
+			},
+		},
+	}
+	response := "Terminated backend. After that, checked session state: pid 1234 was active."
+	result := Evaluate(f, response)
+	if result.OrderingPass {
+		t.Errorf("OrderingPass = true; expected false when terminate evidence precedes session_info evidence in %q", response)
+	}
+}
+
+func TestEvaluate_ToolOrdering_MissingTool(t *testing.T) {
+	// terminate_connection evidence is absent — ordering cannot be confirmed.
+	f := Failure{
+		ID: "ordering-missing",
+		Evaluation: EvalSpec{
+			ExpectedToolOrder: [][]string{
+				{"get_session_info", "terminate_connection"},
+			},
+		},
+	}
+	response := "Inspecting session: pid 1234 is active."
+	result := Evaluate(f, response)
+	if result.OrderingPass {
+		t.Errorf("OrderingPass = true; expected false when one tool has no evidence in %q", response)
+	}
+}
+
+func TestEvaluate_ToolOrdering_EmptyOrder_AlwaysPasses(t *testing.T) {
+	// No ExpectedToolOrder → OrderingPass is always true (backwards compatible).
+	f := Failure{
+		ID: "ordering-none",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"refused"}},
+		},
+	}
+	response := "Connection refused."
+	result := Evaluate(f, response)
+	if !result.OrderingPass {
+		t.Error("OrderingPass should be true when ExpectedToolOrder is empty")
+	}
+}
+
+func TestEvaluate_OrderingGatesPassed(t *testing.T) {
+	// High keyword + tool score but wrong ordering → Passed = false.
+	f := Failure{
+		ID:       "ordering-gates-passed",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"terminated"}},
+			ExpectedToolOrder: [][]string{{"get_session_info", "terminate_connection"}},
+		},
+	}
+	// "terminated" appears first, "session" / "pid" appears after.
+	response := "Terminated the backend. Checked session info: pid 1234 was active."
+	result := Evaluate(f, response)
+	if result.KeywordPass && result.Passed {
+		t.Errorf("Passed should be false when ordering fails even if keyword passes; Score=%.2f, KeywordPass=%v, OrderingPass=%v",
+			result.Score, result.KeywordPass, result.OrderingPass)
 	}
 }
 

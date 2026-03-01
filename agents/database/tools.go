@@ -204,11 +204,13 @@ func runPsql(ctx context.Context, connStr string, query string) (string, error) 
 // toolName is used for audit logging; if empty, a generic name is used.
 // All callers that don't specify an action are read-only.
 func runPsqlWithToolName(ctx context.Context, connStr string, query string, toolName string) (string, error) {
-	return runPsqlAs(ctx, connStr, query, toolName, policy.ActionRead)
+	return runPsqlAs(ctx, connStr, query, toolName, policy.ActionRead, "")
 }
 
 // runPsqlAs executes a psql command with explicit action class for policy enforcement.
-func runPsqlAs(ctx context.Context, connStr string, query string, toolName string, action policy.ActionClass) (string, error) {
+// sessionPlan is optional free-text forwarded to the approver when approval is required
+// (e.g. the output of formatConnectionPlan for terminate/cancel operations).
+func runPsqlAs(ctx context.Context, connStr string, query string, toolName string, action policy.ActionClass, sessionPlan string) (string, error) {
 	// Resolve database info for policy checks
 	dbInfo, err := resolveDatabaseInfo(connStr)
 	if err != nil {
@@ -217,9 +219,12 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 
 	// Check policy before executing
 	if policyEnforcer != nil {
-		note := ""
+		note := sessionPlan
 		if !dbInfo.IsFromInfraConfig {
-			note = "connection string not found in infraConfig; no tags available for policy matching"
+			if note != "" {
+				note += "\n\n"
+			}
+			note += "connection string not found in infraConfig; no tags available for policy matching"
 		}
 		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags, note); err != nil {
 			slog.Warn("policy denied database access",
@@ -965,7 +970,7 @@ func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error)
 	// Step 2: cancel the query (policy pre-check happens inside runPsqlAs).
 	query := fmt.Sprintf(`SELECT pg_cancel_backend(%d) AS cancelled, pid, usename, datname, state, LEFT(query, 100) AS query_preview
 FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
-	output, err := runPsqlAs(ctx, args.ConnectionString, query, "cancel_query", policy.ActionWrite)
+	output, err := runPsqlAs(ctx, args.ConnectionString, query, "cancel_query", policy.ActionWrite, formatConnectionPlan(plan))
 	if err != nil {
 		return errorResult("cancel_query", args.ConnectionString, err), nil
 	}
@@ -1008,7 +1013,7 @@ func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (Ps
 	// Step 2: terminate the connection (policy pre-check happens inside runPsqlAs).
 	query := fmt.Sprintf(`SELECT pg_terminate_backend(%d) AS terminated, pid, usename, datname, state, LEFT(query, 100) AS query_preview
 FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
-	output, err := runPsqlAs(ctx, args.ConnectionString, query, "terminate_connection", policy.ActionDestructive)
+	output, err := runPsqlAs(ctx, args.ConnectionString, query, "terminate_connection", policy.ActionDestructive, formatConnectionPlan(plan))
 	if err != nil {
 		return errorResult("terminate_connection", args.ConnectionString, err), nil
 	}
@@ -1067,7 +1072,7 @@ WHERE state = 'idle'
   AND pid != pg_backend_pid()
   %s
 ORDER BY state_change ASC;`, args.IdleMinutes, dbFilter)
-		output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action)
+		output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action, "")
 		if err != nil {
 			return errorResult("kill_idle_connections", args.ConnectionString, err), nil
 		}
@@ -1087,7 +1092,7 @@ FROM (
     %s
 ) t
 WHERE terminated IS TRUE;`, args.IdleMinutes, dbFilter)
-	output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action)
+	output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action, "")
 	if err != nil {
 		return errorResult("kill_idle_connections", args.ConnectionString, err), nil
 	}

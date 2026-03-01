@@ -62,6 +62,8 @@ test-governance:
 		./internal/audit/... \
 		./internal/policy/... \
 		./agentutil/... \
+		./agents/database/... \
+		./agents/k8s/... \
 		./cmd/auditd/...
 
 cover-governance:
@@ -70,6 +72,8 @@ cover-governance:
 		./internal/audit/... \
 		./internal/policy/... \
 		./agentutil/... \
+		./agents/database/... \
+		./agents/k8s/... \
 		./cmd/auditd/...
 	go tool cover -func=$(DIST)/coverage-governance.out
 	go tool cover -html=$(DIST)/coverage-governance.out -o $(DIST)/coverage-governance.html

@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -16,6 +19,7 @@ import (
 	"google.golang.org/genai"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 )
 
@@ -1785,5 +1789,220 @@ func TestCheckConnectionTool_InfraEnforced_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "not registered in infrastructure config") {
 		t.Errorf("checkConnectionTool() output = %q, want infra rejection message", result.Output)
+	}
+}
+
+// =============================================================================
+// Session plan forwarding to approval context
+// =============================================================================
+
+// multiMockRunner returns successive outputs for each call to Run.
+// Useful when a tool makes multiple psql calls (e.g. inspectConnection
+// followed by the action query).
+type multiMockRunner struct {
+	outputs []string
+	call    int
+}
+
+func (m *multiMockRunner) Run(_ context.Context, _ string, _ []string, _ []string) (string, error) {
+	i := m.call
+	if i >= len(m.outputs) {
+		i = len(m.outputs) - 1
+	}
+	m.call++
+	return m.outputs[i], nil
+}
+
+// withMultiRunner temporarily replaces cmdRunner with a multiMockRunner that
+// cycles through the given outputs. Returns a cleanup func.
+func withMultiRunner(outputs ...string) func() {
+	r := &multiMockRunner{outputs: outputs}
+	old := cmdRunner
+	cmdRunner = r
+	return func() { cmdRunner = old }
+}
+
+// mockApprovalServerForTools starts a minimal approval API mock.
+// It captures POST /v1/approvals bodies and immediately approves all requests.
+func mockApprovalServerForTools(t *testing.T) (string, <-chan audit.ApprovalCreateRequest) {
+	t.Helper()
+	ch := make(chan audit.ApprovalCreateRequest, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/approvals":
+			var req audit.ApprovalCreateRequest
+			json.NewDecoder(r.Body).Decode(&req)
+			ch <- req
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.ApprovalCreateResponse{
+				ApprovalID: "tool-approval-1",
+				Status:     "pending",
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/wait"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(audit.StoredApproval{
+				ApprovalID: "tool-approval-1",
+				Status:     "approved",
+				ResolvedBy: "auto-approver",
+			})
+		default:
+			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, ch
+}
+
+const requireApprovalPolicy = `
+version: "1"
+policies:
+  - name: require-approval-policy
+    resources:
+      - type: database
+    rules:
+      - action: read
+        effect: allow
+      - action: write
+        effect: require_approval
+      - action: destructive
+        effect: require_approval
+`
+
+// newToolTestEnforcer creates a PolicyEnforcer that requires approval for
+// write and destructive database actions, pointing at the given approval server.
+func newToolTestEnforcer(t *testing.T, approvalURL string) *agentutil.PolicyEnforcer {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "policy-*.yaml")
+	if err != nil {
+		t.Fatalf("create temp policy file: %v", err)
+	}
+	if _, err := f.WriteString(requireApprovalPolicy); err != nil {
+		t.Fatalf("write temp policy file: %v", err)
+	}
+	f.Close()
+
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    f.Name(),
+		DefaultPolicy: "deny",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
+		Engine:         engine,
+		ApprovalClient: audit.NewApprovalClient(approvalURL),
+	})
+}
+
+// sessionInfoMockOutput is a realistic psql expanded-format response that
+// inspectConnection can parse via parseConnectionPlan.
+const sessionInfoMockOutput = `-[ RECORD 1 ]---+------------------------------
+usename         | app_user
+datname         | appdb
+client_addr     | 10.0.0.5
+state           | active
+state_duration_secs | 300
+has_open_tx     | f
+open_tx_secs    | 0
+has_writes      | f
+total_locks     | 0
+row_locks       | 0
+locked_tables   |
+current_query   | SELECT * FROM orders LIMIT 10`
+
+func TestCancelQueryTool_SessionPlanSentToPolicy(t *testing.T) {
+	appURL, captured := mockApprovalServerForTools(t)
+	defer withPolicyEnforcer(newToolTestEnforcer(t, appURL))()
+
+	cancelOutput := `-[ RECORD 1 ]---+------------------------------
+cancelled       | t
+pid             | 5678
+usename         | app_user
+datname         | appdb
+state           | active
+query_preview   | SELECT * FROM orders LIMIT 10
+`
+	defer withMultiRunner(sessionInfoMockOutput, cancelOutput)()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	if strings.Contains(result.Output, "ERROR") {
+		t.Fatalf("cancelQueryTool() returned error output: %s", result.Output)
+	}
+
+	// The pre-execution approval request must carry the session plan.
+	select {
+	case req := <-captured:
+		if req.Context == nil {
+			t.Fatal("approval request_context is nil; cancelQueryTool must pass session plan to policy check")
+		}
+		si, ok := req.Context["session_info"]
+		if !ok {
+			t.Fatalf("approval request_context missing 'session_info'; got: %v", req.Context)
+		}
+		sessionPlan := fmt.Sprintf("%v", si)
+		for _, want := range []string{"5678", "app_user", "active"} {
+			if !strings.Contains(sessionPlan, want) {
+				t.Errorf("session_info missing %q; got: %s", want, sessionPlan)
+			}
+		}
+	default:
+		t.Fatal("no approval request captured; policy enforcer was not called or did not require approval")
+	}
+}
+
+func TestTerminateConnectionTool_SessionPlanSentToPolicy(t *testing.T) {
+	appURL, captured := mockApprovalServerForTools(t)
+	defer withPolicyEnforcer(newToolTestEnforcer(t, appURL))()
+
+	terminateOutput := `-[ RECORD 1 ]---+------------------------------
+terminated      | t
+pid             | 7890
+usename         | app_user
+datname         | appdb
+state           | active
+query_preview   | UPDATE accounts SET balance = 0
+`
+	defer withMultiRunner(sessionInfoMockOutput, terminateOutput)()
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              7890,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	if strings.Contains(result.Output, "ERROR") {
+		t.Fatalf("terminateConnectionTool() returned error output: %s", result.Output)
+	}
+
+	// The pre-execution approval request must carry the session plan.
+	select {
+	case req := <-captured:
+		if req.Context == nil {
+			t.Fatal("approval request_context is nil; terminateConnectionTool must pass session plan to policy check")
+		}
+		si, ok := req.Context["session_info"]
+		if !ok {
+			t.Fatalf("approval request_context missing 'session_info'; got: %v", req.Context)
+		}
+		sessionPlan := fmt.Sprintf("%v", si)
+		// PID comes from the args (7890), user/state come from inspectConnection mock output.
+		for _, want := range []string{"7890", "app_user", "active"} {
+			if !strings.Contains(sessionPlan, want) {
+				t.Errorf("session_info missing %q; got: %s", want, sessionPlan)
+			}
+		}
+	default:
+		t.Fatal("no approval request captured; policy enforcer was not called or did not require approval")
 	}
 }

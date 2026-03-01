@@ -281,7 +281,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		if err != nil {
 			return err
 		}
-		return e.handleRemoteResponse(ctx, resp, traceID, resourceType, resourceName, action, tags)
+		return e.handleRemoteResponse(ctx, resp, traceID, resourceType, resourceName, action, tags, note)
 	}
 
 	// Local engine path.
@@ -327,7 +327,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 
 	// If approval is required, attempt to get approval.
 	if decision.NeedsApproval() && e.approvalClient != nil {
-		return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags)
+		return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags, note)
 	}
 	if decision.NeedsApproval() {
 		return &policy.ApprovalRequiredError{Decision: decision}
@@ -339,7 +339,8 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 }
 
 // requestApproval creates an approval request and waits for resolution.
-func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string) error {
+// note carries optional free-text context for the approver (e.g. session plan from get_session_info).
+func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
 	// First check if there's an existing valid approval for this trace
 	if traceID != "" {
 		existing, err := e.approvalClient.CheckExistingApproval(ctx, traceID, resourceType+":"+resourceName)
@@ -353,6 +354,10 @@ func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceT
 	}
 
 	// Create approval request
+	reqCtx := map[string]any{"tags": tags}
+	if note != "" {
+		reqCtx["session_info"] = note
+	}
 	approval, err := e.approvalClient.RequestApprovalAndWait(ctx, audit.ApprovalCreateRequest{
 		TraceID:      traceID,
 		ActionClass:  string(action),
@@ -361,9 +366,7 @@ func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceT
 		ResourceType: resourceType,
 		ResourceName: resourceName,
 		RequestedBy:  e.agentName,
-		Context: map[string]any{
-			"tags": tags,
-		},
+		Context:      reqCtx,
 	}, e.approvalTimeout)
 	if err != nil {
 		return fmt.Errorf("approval request failed: %w", err)
@@ -603,7 +606,7 @@ func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCh
 
 // handleRemoteResponse converts a policyCheckResp into a Go error.
 // For require_approval it invokes the approval workflow when a client is configured.
-func (e *PolicyEnforcer) handleRemoteResponse(ctx context.Context, resp policyCheckResp, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string) error {
+func (e *PolicyEnforcer) handleRemoteResponse(ctx context.Context, resp policyCheckResp, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
 	switch resp.Effect {
 	case "allow":
 		return nil
@@ -618,7 +621,7 @@ func (e *PolicyEnforcer) handleRemoteResponse(ctx context.Context, resp policyCh
 		}
 	case "require_approval":
 		if e.approvalClient != nil {
-			return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags)
+			return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags, note)
 		}
 		return &policy.ApprovalRequiredError{
 			Decision: policy.Decision{
