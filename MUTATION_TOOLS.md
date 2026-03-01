@@ -95,7 +95,7 @@ any open transaction is rolled back by PostgreSQL.
 
 ---
 
-### 1.4 `kill_idle_connections` — bulk terminator
+### 1.4 `terminate_idle_connections` — bulk terminator
 
 **Action class**: `read` when `dry_run=true`, `destructive` when executing
 

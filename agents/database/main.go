@@ -136,7 +136,7 @@ func main() {
 			"postgres_database_agent-get_session_info":            {"postgresql", "connections", "inspection"},
 			"postgres_database_agent-cancel_query":               {"postgresql", "connections", "remediation"},
 			"postgres_database_agent-terminate_connection":        {"postgresql", "connections", "remediation"},
-			"postgres_database_agent-kill_idle_connections":       {"postgresql", "connections", "remediation"},
+			"postgres_database_agent-terminate_idle_connections":  {"postgresql", "connections", "remediation"},
 		},
 		SkillExamples: map[string][]string{
 			"postgres_database_agent-check_connection":       {"Check if the production database is reachable"},
@@ -258,10 +258,10 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
-	killIdleConnectionsToolDef, err := functiontool.New(functiontool.Config{
-		Name:        "kill_idle_connections",
+	terminateIdleConnectionsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "terminate_idle_connections",
 		Description: "Terminate all idle connections older than idle_minutes minutes. Use dry_run=true first to preview which connections would be affected. Minimum idle_minutes is 5.",
-	}, killIdleConnectionsTool)
+	}, terminateIdleConnectionsTool)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +280,6 @@ func createTools() ([]tool.Tool, error) {
 		getSessionInfoToolDef,
 		cancelQueryToolDef,
 		terminateConnectionToolDef,
-		killIdleConnectionsToolDef,
+		terminateIdleConnectionsToolDef,
 	}, nil
 }

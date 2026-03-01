@@ -45,7 +45,7 @@ var ToolClassification = map[string]ActionClass{
 	"reindex_table":          ActionWrite,
 	"cancel_query":           ActionWrite,
 	"terminate_connection":   ActionDestructive,
-	"kill_idle_connections":  ActionDestructive,
+	"terminate_idle_connections": ActionDestructive,
 
 	// Kubernetes agent tools
 	"get_pods":              ActionRead,

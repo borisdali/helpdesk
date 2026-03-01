@@ -1325,27 +1325,27 @@ func TestTerminateConnectionTool_Failure(t *testing.T) {
 }
 
 // =============================================================================
-// killIdleConnectionsTool
+// terminateIdleConnectionsTool
 // =============================================================================
 
-func TestKillIdleConnectionsTool_TooShortIdle(t *testing.T) {
+func TestTerminateIdleConnectionsTool_TooShortIdle(t *testing.T) {
 	ctx := newTestContext()
-	result, err := killIdleConnectionsTool(ctx, KillIdleConnectionsArgs{
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
 		IdleMinutes:      2, // Below minimum of 5
 	})
 	if err != nil {
-		t.Fatalf("killIdleConnectionsTool() unexpected Go error: %v", err)
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if !strings.Contains(result.Output, "ERROR") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want ERROR for idle_minutes < 5", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want ERROR for idle_minutes < 5", result.Output)
 	}
 	if !strings.Contains(result.Output, "idle_minutes") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want idle_minutes in error", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want idle_minutes in error", result.Output)
 	}
 }
 
-func TestKillIdleConnectionsTool_DryRun_Found(t *testing.T) {
+func TestTerminateIdleConnectionsTool_DryRun_Found(t *testing.T) {
 	mockOutput := `-[ RECORD 1 ]---+----------
 pid             | 100
 usename         | app
@@ -1358,93 +1358,93 @@ last_query      | SELECT 1
 	defer withMockRunner(mockOutput, nil)()
 
 	ctx := newTestContext()
-	result, err := killIdleConnectionsTool(ctx, KillIdleConnectionsArgs{
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
 		IdleMinutes:      10,
 		DryRun:           true,
 	})
 	if err != nil {
-		t.Fatalf("killIdleConnectionsTool() unexpected Go error: %v", err)
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if !strings.Contains(result.Output, "[DRY RUN]") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want [DRY RUN] prefix", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want [DRY RUN] prefix", result.Output)
 	}
 	if !strings.Contains(result.Output, "Would terminate") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want 'Would terminate' in dry-run output", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want 'Would terminate' in dry-run output", result.Output)
 	}
 }
 
-func TestKillIdleConnectionsTool_DryRun_NoneFound(t *testing.T) {
+func TestTerminateIdleConnectionsTool_DryRun_NoneFound(t *testing.T) {
 	defer withMockRunner("(0 rows)", nil)()
 
 	ctx := newTestContext()
-	result, err := killIdleConnectionsTool(ctx, KillIdleConnectionsArgs{
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
 		IdleMinutes:      30,
 		DryRun:           true,
 	})
 	if err != nil {
-		t.Fatalf("killIdleConnectionsTool() unexpected Go error: %v", err)
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if !strings.Contains(result.Output, "[DRY RUN]") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want [DRY RUN] prefix", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want [DRY RUN] prefix", result.Output)
 	}
 	if !strings.Contains(result.Output, "No idle connections") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want 'No idle connections'", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want 'No idle connections'", result.Output)
 	}
 }
 
-func TestKillIdleConnectionsTool_Success(t *testing.T) {
+func TestTerminateIdleConnectionsTool_Success(t *testing.T) {
 	mockOutput := "-[ RECORD 1 ]---+---\nterminated | 3\n"
 	defer withMockRunner(mockOutput, nil)()
 
 	ctx := newTestContext()
-	result, err := killIdleConnectionsTool(ctx, KillIdleConnectionsArgs{
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
 		IdleMinutes:      10,
 	})
 	if err != nil {
-		t.Fatalf("killIdleConnectionsTool() unexpected Go error: %v", err)
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if !strings.Contains(result.Output, "terminated") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want terminated count", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want terminated count", result.Output)
 	}
 }
 
-func TestKillIdleConnectionsTool_WithDatabaseFilter(t *testing.T) {
+func TestTerminateIdleConnectionsTool_WithDatabaseFilter(t *testing.T) {
 	mockOutput := "-[ RECORD 1 ]---+---\nterminated | 1\n"
 	defer withMockRunner(mockOutput, nil)()
 
 	ctx := newTestContext()
-	result, err := killIdleConnectionsTool(ctx, KillIdleConnectionsArgs{
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
 		IdleMinutes:      10,
 		Database:         "mydb",
 	})
 	if err != nil {
-		t.Fatalf("killIdleConnectionsTool() unexpected Go error: %v", err)
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if result.Output == "" {
-		t.Error("killIdleConnectionsTool() output is empty")
+		t.Error("terminateIdleConnectionsTool() output is empty")
 	}
 }
 
-func TestKillIdleConnectionsTool_Failure(t *testing.T) {
+func TestTerminateIdleConnectionsTool_Failure(t *testing.T) {
 	defer withMockRunner("connection refused", errors.New("exit status 1"))()
 
 	ctx := newTestContext()
-	result, err := killIdleConnectionsTool(ctx, KillIdleConnectionsArgs{
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
 		IdleMinutes:      10,
 	})
 	if err != nil {
-		t.Fatalf("killIdleConnectionsTool() unexpected Go error: %v", err)
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if !strings.Contains(result.Output, "ERROR") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want ERROR on failure", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want ERROR on failure", result.Output)
 	}
-	if !strings.Contains(result.Output, "kill_idle_connections") {
-		t.Errorf("killIdleConnectionsTool() output = %q, want tool name in error", result.Output)
+	if !strings.Contains(result.Output, "terminate_idle_connections") {
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want tool name in error", result.Output)
 	}
 }
 
@@ -1527,7 +1527,7 @@ policies:
 }
 
 // newBlastRadiusDBEnforcer returns a PolicyEnforcer that allows destructive ops
-// but enforces a max_rows_affected limit (used to test kill_idle_connections blast-radius).
+// but enforces a max_rows_affected limit (used to test terminate_idle_connections blast-radius).
 func newBlastRadiusDBEnforcer(t *testing.T, maxRows int) *agentutil.PolicyEnforcer {
 	t.Helper()
 	yamlContent := fmt.Sprintf(`
@@ -1662,27 +1662,27 @@ query_preview   | COMMIT
 	}
 }
 
-func TestKillIdleConnectionsTool_BlastRadiusDenied(t *testing.T) {
+func TestTerminateIdleConnectionsTool_BlastRadiusDenied(t *testing.T) {
 	// Policy allows destructive with max 5 rows affected.
 	// Mock returns 20 terminated — exceeds the limit.
-	// kill_idle_connections has an explicit secondary blast-radius check
+	// terminate_idle_connections has an explicit secondary blast-radius check
 	// using parseTerminatedCount since its output is a SELECT, not a DML tag.
 	defer withPolicyEnforcer(newBlastRadiusDBEnforcer(t, 5))()
 	mockOutput := "-[ RECORD 1 ]---+---\nterminated | 20\n"
 	defer withMockRunner(mockOutput, nil)()
 
 	ctx := newTestContext()
-	result, err := killIdleConnectionsTool(ctx, KillIdleConnectionsArgs{
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
 		IdleMinutes:      10,
 	})
 	if err != nil {
-		t.Fatalf("killIdleConnectionsTool() unexpected Go error: %v", err)
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if !strings.Contains(result.Output, "ERROR") {
 		t.Errorf("output = %q, want ERROR when blast-radius limit (5) is exceeded (20 terminated)", result.Output)
 	}
-	if !strings.Contains(result.Output, "kill_idle_connections") {
+	if !strings.Contains(result.Output, "terminate_idle_connections") {
 		t.Errorf("output = %q, want tool name in blast-radius error", result.Output)
 	}
 }

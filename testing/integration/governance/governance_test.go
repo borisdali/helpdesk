@@ -902,7 +902,7 @@ func TestAudit_MultipleToolEvents_HashChainValid(t *testing.T) {
 		{"get_active_connections", "read"},
 		{"cancel_query", "write"},
 		{"terminate_connection", "destructive"},
-		{"kill_idle_connections", "destructive"},
+		{"terminate_idle_connections", "destructive"},
 	}
 
 	for _, step := range toolSequence {
@@ -950,8 +950,8 @@ func TestAudit_WriteApprovalWorkflow_ForNewTools(t *testing.T) {
 }
 
 func TestAudit_DestructiveApprovalWorkflow_ForNewTools(t *testing.T) {
-	// terminate_connection and kill_idle_connections require human approval.
-	for _, toolName := range []string{"terminate_connection", "kill_idle_connections", "delete_pod", "restart_deployment", "scale_deployment"} {
+	// terminate_connection and terminate_idle_connections require human approval.
+	for _, toolName := range []string{"terminate_connection", "terminate_idle_connections", "delete_pod", "restart_deployment", "scale_deployment"} {
 		t.Run(toolName, func(t *testing.T) {
 			result := post(t, auditdAddr, "/v1/approvals",
 				newApproval("destructive", toolName, "test-agent", "sre-oncall"))

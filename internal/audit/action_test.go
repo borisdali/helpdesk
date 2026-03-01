@@ -24,7 +24,7 @@ func TestClassifyTool(t *testing.T) {
 		{"kill_query", ActionDestructive},
 		{"alter_config", ActionDestructive},
 		{"terminate_connection", ActionDestructive},
-		{"kill_idle_connections", ActionDestructive},
+		{"terminate_idle_connections", ActionDestructive},
 
 		// Kubernetes read operations
 		{"get_pods", ActionRead},

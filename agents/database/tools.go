@@ -342,7 +342,7 @@ func parsePgFunctionResult(output string) int {
 }
 
 // parseTerminatedCount reads the integer value from a "terminated | N" line in
-// psql expanded (-x) output. Used by kill_idle_connections to extract the count
+// psql expanded (-x) output. Used by terminate_idle_connections to extract the count
 // of connections actually terminated so blast-radius policy can be enforced.
 func parseTerminatedCount(output string) int {
 	for _, line := range strings.Split(output, "\n") {
@@ -1039,15 +1039,15 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	return PsqlResult{Output: formatConnectionPlan(plan) + "\n--- Result ---\n" + output}, nil
 }
 
-// KillIdleConnectionsArgs defines arguments for the kill_idle_connections tool.
-type KillIdleConnectionsArgs struct {
+// TerminateIdleConnectionsArgs defines arguments for the terminate_idle_connections tool.
+type TerminateIdleConnectionsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 	IdleMinutes      int    `json:"idle_minutes" jsonschema:"required,Terminate connections idle longer than this many minutes. Minimum 5."`
 	Database         string `json:"database,omitempty" jsonschema:"Limit termination to connections in this specific database. If empty, targets all databases."`
 	DryRun           bool   `json:"dry_run,omitempty" jsonschema:"If true, only list connections that would be terminated without actually terminating them. Defaults to false."`
 }
 
-func killIdleConnectionsTool(ctx tool.Context, args KillIdleConnectionsArgs) (PsqlResult, error) {
+func terminateIdleConnectionsTool(ctx tool.Context, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
 	if args.IdleMinutes < 5 {
 		return PsqlResult{Output: "ERROR: idle_minutes must be at least 5 to avoid terminating legitimately short-lived connections."}, nil
 	}
@@ -1072,9 +1072,9 @@ WHERE state = 'idle'
   AND pid != pg_backend_pid()
   %s
 ORDER BY state_change ASC;`, args.IdleMinutes, dbFilter)
-		output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action, "")
+		output, err := runPsqlAs(ctx, args.ConnectionString, query, "terminate_idle_connections", action, "")
 		if err != nil {
-			return errorResult("kill_idle_connections", args.ConnectionString, err), nil
+			return errorResult("terminate_idle_connections", args.ConnectionString, err), nil
 		}
 		if strings.Contains(output, "(0 rows)") {
 			return PsqlResult{Output: fmt.Sprintf("[DRY RUN] No idle connections older than %d minutes found.", args.IdleMinutes)}, nil
@@ -1092,24 +1092,24 @@ FROM (
     %s
 ) t
 WHERE terminated IS TRUE;`, args.IdleMinutes, dbFilter)
-	output, err := runPsqlAs(ctx, args.ConnectionString, query, "kill_idle_connections", action, "")
+	output, err := runPsqlAs(ctx, args.ConnectionString, query, "terminate_idle_connections", action, "")
 	if err != nil {
-		return errorResult("kill_idle_connections", args.ConnectionString, err), nil
+		return errorResult("terminate_idle_connections", args.ConnectionString, err), nil
 	}
 
 	// runPsqlAs uses parseRowsAffected which only reads DELETE/UPDATE/INSERT tags.
-	// kill_idle_connections uses SELECT count(*), so we must parse the terminated
+	// terminate_idle_connections uses SELECT count(*), so we must parse the terminated
 	// count explicitly and run a second post-execution blast-radius check.
 	if policyEnforcer != nil {
 		dbInfo, err := resolveDatabaseInfo(args.ConnectionString)
 		if err != nil {
-			return errorResult("kill_idle_connections", args.ConnectionString, err), nil
+			return errorResult("terminate_idle_connections", args.ConnectionString, err), nil
 		}
 		terminated := parseTerminatedCount(output)
 		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, action, dbInfo.Tags, agentutil.ToolOutcome{
 			RowsAffected: terminated,
 		}); postErr != nil {
-			return errorResult("kill_idle_connections", args.ConnectionString, postErr), nil
+			return errorResult("terminate_idle_connections", args.ConnectionString, postErr), nil
 		}
 	}
 
