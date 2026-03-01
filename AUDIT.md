@@ -57,7 +57,7 @@ essential for querying and correlating events.
 | `evt_` | `delegation_decision` | Orchestrator — routes a request to an agent |
 | `tool_` | `tool_call` | Agent — records tool name, params, result, duration |
 | `pol_` | `policy_decision` | Agent / auditd — records policy evaluation outcome |
-| `rsn_` | `reasoning` | Agent — LLM chain-of-thought (when enabled) |
+| `rsn_` | `agent_reasoning` | Agent — LLM deliberation text captured automatically when audit is enabled and the model emits text alongside a tool call |
 
 Gateway `gateway_request` events use `evt_` prefix as well.
 
@@ -100,7 +100,7 @@ Core fields present on every event:
 |-------|-------------|
 | `event_id` | Unique identifier (e.g. `tool_a1b2c3d4`) |
 | `timestamp` | UTC timestamp (RFC3339Nano) |
-| `event_type` | `delegation_decision`, `tool_call`, `policy_decision`, `reasoning` |
+| `event_type` | `delegation_decision`, `tool_call`, `policy_decision`, `agent_reasoning`, `governance_violation` |
 | `session_id` | Session identifier of the recording component |
 | `trace_id` | End-to-end correlation ID; empty when no orchestrator context |
 | `agent` | Name of the agent that recorded the event |
@@ -211,7 +211,7 @@ Base URL: `http://localhost:1199` (default). All paths are under `/v1/`.
 | `session_id` | string | Filter by agent session ID |
 | `trace_id` | string | Filter by exact trace ID |
 | `trace_id_prefix` | string | Filter by trace ID prefix (e.g. `tr_`) |
-| `event_type` | string | `delegation_decision`, `tool_call`, `policy_decision`, `reasoning` |
+| `event_type` | string | `delegation_decision`, `tool_call`, `policy_decision`, `agent_reasoning`, `governance_violation` |
 | `agent` | string | Filter by agent name |
 | `action_class` | string | `read`, `write`, or `destructive` |
 | `since` | RFC3339 | Only events at or after this timestamp |

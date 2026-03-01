@@ -4,13 +4,20 @@ This page documents the database and Kubernetes agent tools that perform
 mutations, explains the **two-step inspect-then-act** safeguard and how it
 differs between agents, and describes how every layer is tested.
 
-> **Important:** The four database-agent tools and three Kubernetes-agent tools
+The AI Governance module is critical for risk management associated with
+making changes to your databases and infrastructure (K8s/VM) and it has
+to be explicitly enabled prior to changing aiHelpDesk operating mode
+from `readonly` to `fix` to allow mutations. For the broader governance
+architecture see [AIGOVERNANCE.md](AIGOVERNANCE.md).
+For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
+
+> **Important:** The three database-agent mutation tools and three K8s-agent mutation tools
 > documented here are presented solely for testing aiHelpDesk AI Governance
 > features.
 >
-> Specifically and crucially, **these seven tools are not ready for PROD use yet!!!**
+> Specifically and crucially, **these six tools are not ready for PROD use yet!!!**
 >
-> Please wait until we are fully comfortable with AI Governance
+> Please wait until we are fully comfortable with the AI Governance module
 > to release these — and many more — mutation tools to you.
 
 ## Table of Contents
@@ -38,7 +45,7 @@ connection_string   string   optional — PostgreSQL DSN; defaults to env
 pid                 int      required — backend PID to inspect
 ```
 
-Runs a single read-only query against `pg_stat_activity` and `pg_locks` and
+For now this tool runs a single read-only query against `pg_stat_activity` and `pg_locks` (to be expanded) and
 returns a structured connection plan:
 
 ```
@@ -135,7 +142,7 @@ termination of legitimately short-lived idle connections.
 
 ### Kubernetes agent
 
-All three Kubernetes mutation tools share the same action class (`destructive`)
+All three K8s mutation tools share the same action class (`destructive`)
 and follow the same pre-check / execute / post-check pattern. Unlike the
 database tools, there is **no structural guard** inside the mutation tool that
 forces an inspection call — the enforce-first discipline relies on the system
@@ -146,7 +153,7 @@ prompt (Layer A) and the approval context (Layer C) only.
 **Action class**: read (no policy check needed)
 
 ```
-context     string   optional — Kubernetes context; defaults to current context
+context     string   optional — K8s context; defaults to current context
 namespace   string   required — namespace of the pod
 pod_name    string   required — exact pod name (from get_pods output)
 ```
@@ -351,7 +358,7 @@ transaction".
 
 ## 4. Test coverage
 
-The three layers map to three test tiers. Kubernetes tool tests cover Layers A
+The three layers map to three test tiers. K8s tool tests cover Layers A
 and C only (no Layer B structural tests, because there is no structural guard
 to test).
 
@@ -367,7 +374,7 @@ These tests use a local `httptest` mock server implementing `POST /v1/approvals`
 and `GET /v1/approvals/{id}/wait`. They capture the raw request body via a
 buffered channel and assert on the JSON structure.
 
-### Tier 1b — Unit: Kubernetes tool behaviour (`agents/k8s/tools_test.go`)
+### Tier 1b — Unit: K8s tool behaviour (`agents/k8s/tools_test.go`)
 
 | Test | What it verifies |
 |---|---|

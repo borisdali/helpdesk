@@ -7,26 +7,45 @@ see [AIGOVERNANCE.md](AIGOVERNANCE.md). For policy decision history see
 
 ---
 
-## What Is a Journey
+## 1. What Is a Journey
 
 A **journey** is everything that happened as a result of one user request —
 all the audit events that share the same `trace_id`.
 
-A single natural-language query like _"show me slow queries on alloydb-on-vm"_
+A single natural-language query like _"show me slow queries on my-db postgres database"_
 typically produces:
 
 - one `delegation_decision` event (orchestrator routes the request to an agent)
 - one or more `tool_call` events (the agent executes tools)
 - zero or more `policy_decision` events (policy checks on each tool)
-- zero or more `reasoning` events (LLM chain-of-thought, if enabled)
+- zero or more `agent_reasoning` events (LLM deliberation text captured automatically
+  when audit is enabled — see below)
 
 `GET /v1/journeys` groups these into one summary per trace, ordered
 newest-first, so you can see all recent activity at a glance and then drill
 into any trace for the full event-by-event breakdown.
 
+### 1.1 Agent reasoning events
+
+`agent_reasoning` events (`rsn_` prefix) capture the LLM's deliberation text —
+the model's "thinking out loud" before it calls a tool. They are recorded
+automatically by every agent whenever **both** of these are true:
+
+1. Auditing is enabled (`HELPDESK_AUDIT_ENABLED=true` + `HELPDESK_AUDIT_URL` set)
+2. The model emits text **and** a function call in the same response turn
+
+There is no separate flag. If auditing is on, reasoning is captured. If the
+model returns a pure function call with no preceding text, nothing is recorded
+for that turn (there is no deliberation to capture).
+
+```bash
+# Retrieve all reasoning events for a specific journey
+curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=agent_reasoning"
+```
+
 ---
 
-## The Three Audit IDs
+## 2. The Three Audit IDs
 
 | ID | Scope | Prefix | Example |
 |----|-------|--------|---------|
@@ -38,7 +57,7 @@ into any trace for the full event-by-event breakdown.
 - `trace_id → event_id` is 1:M — one user request produces many audit records.
 - `trace_id` is what uniquely identifies a journey.
 
-### Trace ID prefixes
+### 2.1 Trace ID prefixes
 
 | Prefix | Origin |
 |--------|--------|
@@ -50,7 +69,7 @@ or were made by scripts that bypassed the gateway entirely.
 
 ---
 
-## Architecture
+## 3. Architecture
 
 ```
 User → Gateway :8080                  auditd :1199
@@ -63,7 +82,7 @@ User → Gateway :8080                  auditd :1199
          │
          ├── POST /api/v1/db/{tool} ─────────────────── agent (trace propagated)
          │   (direct tool call)      dt_ trace_id        ├── tool_call events
-         │                                │               └── pol_* events
+         │                                │              └── pol_* events
          │                                │
          └── GET /api/v1/governance/journeys ──────────► GET /v1/journeys
              (read journeys)                             returns []JourneySummary
@@ -74,14 +93,14 @@ The raw endpoint at `/v1/journeys` is served directly by auditd.
 
 ---
 
-## Endpoint
+## 4. Endpoint
 
-### `GET /v1/journeys` (auditd)
-### `GET /api/v1/governance/journeys` (gateway proxy)
+### 4.1 `GET /v1/journeys` (auditd)
+### 4.2 `GET /api/v1/governance/journeys` (gateway proxy)
 
 Returns an array of journey summaries, newest first.
 
-### Query parameters
+### 4.3 Query parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -93,7 +112,7 @@ Returns an array of journey summaries, newest first.
 All parameters are optional. With no parameters, the 50 most recent journeys
 are returned.
 
-### Response
+### 4.4 Response
 
 ```json
 [
@@ -103,7 +122,7 @@ are returned.
     "ended_at":    "2026-03-01T09:14:28Z",
     "duration_ms": 6142,
     "user_id":     "alice",
-    "user_query":  "show me slow queries on alloydb-on-vm",
+    "user_query":  "show me slow queries on my-db",
     "agent":       "postgres_database_agent",
     "tools_used":  ["get_session_info", "run_sql"],
     "outcome":     "success",
@@ -124,7 +143,7 @@ are returned.
 ]
 ```
 
-### Field reference
+### 4.5 Field reference
 
 | Field | Description |
 |-------|-------------|
@@ -141,28 +160,28 @@ are returned.
 
 ---
 
-## Examples
+## 5. Examples
 
-### My recent journeys
+### 5.1 My recent journeys
 
 ```bash
 curl "http://localhost:1199/v1/journeys?user=alice&limit=10"
 ```
 
-### Journeys in a time window
+### 5.2 Journeys in a time window
 
 ```bash
 # Yesterday 4pm–midnight UTC
 curl "http://localhost:1199/v1/journeys?from=2026-02-28T16:00:00Z&until=2026-03-01T00:00:00Z"
 ```
 
-### Via gateway
+### 5.3 Via gateway
 
 ```bash
 curl "http://localhost:8080/api/v1/governance/journeys?user=alice&limit=10"
 ```
 
-### Journeys that ended in error
+### 5.4 Journeys that ended in error
 
 The summary endpoint does not support an `outcome` filter directly. Use `jq`
 to filter client-side:
@@ -172,7 +191,7 @@ curl -s "http://localhost:1199/v1/journeys" \
   | jq '[.[] | select(.outcome == "error")]'
 ```
 
-### Journey count by user
+### 5.5 Journey count by user
 
 ```bash
 curl -s "http://localhost:1199/v1/journeys?limit=200" \
@@ -181,7 +200,7 @@ curl -s "http://localhost:1199/v1/journeys?limit=200" \
 
 ---
 
-## Drilling Into a Journey
+## 5.6 Drilling Into a Journey
 
 Once you have a `trace_id`, fetch every event in that journey from the events
 endpoint:
@@ -205,7 +224,7 @@ See [GOVEXPLAIN.md](GOVEXPLAIN.md) for full govexplain reference.
 
 ---
 
-## Journey Coverage
+## 6. Journey Coverage
 
 A journey only appears in `GET /v1/journeys` if it has at least one
 `delegation_decision` event with a non-empty `trace_id`. This means:
@@ -223,7 +242,7 @@ To see all events regardless of journey status, use `GET /v1/events` directly.
 
 ---
 
-## Environment Variables
+## 7. Environment Variables
 
 | Variable | Description |
 |----------|-------------|
@@ -232,9 +251,9 @@ To see all events regardless of journey status, use `GET /v1/events` directly.
 
 ---
 
-## Troubleshooting
+## 8. Troubleshooting
 
-### Empty result despite active agents
+### 8.1 Empty result despite active agents
 
 Journeys are anchored to `delegation_decision` events. Confirm they exist:
 
@@ -246,13 +265,13 @@ If this returns `0`, either the orchestrator is not running with
 `HELPDESK_AUDIT_URL` set, or you are querying a fresh database. Run a
 natural-language query via `POST /api/v1/query` to produce the first journey.
 
-### Events visible in `/v1/events` but not in `/v1/journeys`
+### 8.2 Events visible in `/v1/events` but not in `/v1/journeys`
 
 These are direct tool calls or raw A2A invocations — they produce `tool_call`
 events but no `delegation_decision` anchor. See [Journey Coverage](#journey-coverage)
 above.
 
-### `started_at` / `ended_at` in unexpected order
+### 8.3 `started_at` / `ended_at` in unexpected order
 
 `started_at` is the timestamp of the `delegation_decision` event;
 `ended_at` is the timestamp of the last event under that trace. If clocks are
