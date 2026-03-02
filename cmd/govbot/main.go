@@ -99,7 +99,7 @@ func main() {
 		var sh historyClient
 		switch {
 		case *auditURL != "":
-			sh = openRemoteHistory(*auditURL, *gateway)
+			sh = openRemoteHistory(*auditURL, "") // no gateway filter: show all runs
 		case *historyDB != "":
 			lh, err := openHistory(*historyDB)
 			if err != nil {
@@ -151,6 +151,14 @@ func main() {
 	logf("Since:     last %s", *sinceStr)
 	logf("Webhook:   %v", *webhook != "")
 	logf("Dry run:   %v", *dryRun)
+	switch {
+	case *auditURL != "":
+		logf("History:   auditd (%s)", *auditURL)
+	case *historyDB != "":
+		logf("History:   local db (%s)", *historyDB)
+	default:
+		logf("History:   disabled")
+	}
 	fmt.Println()
 
 	var alerts []string

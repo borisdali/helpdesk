@@ -259,7 +259,7 @@ When infrastructure tags are missing or approvals go stale:
 
 To fix the `no_match` warning, ensure the database host in the agent's
 connection string matches a `db_servers` entry in the infrastructure config
-(see [Policy Configuration](../../deploy/helm/README.md#93-policy-configuration)).
+(see [Policy Configuration](../../deploy/helm/README.md#94-policy-configuration)).
 
 Also see [this](GOVBOT_SAMPLE.md) as a complete sample run of the `govbot` Compliance Reporter.
 

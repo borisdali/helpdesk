@@ -121,9 +121,13 @@ services:
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
       - incidents:/data/incidents
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
+      - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1104:1104"
     restart: unless-stopped
@@ -149,6 +153,11 @@ services:
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+    volumes:
+      - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1106:1106"
     restart: unless-stopped
