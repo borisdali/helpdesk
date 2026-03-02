@@ -31,4 +31,16 @@ spec:
                 {{- if .Values.governance.govbot.webhook }}
                 - "-webhook={{ .Values.governance.govbot.webhook }}"
                 {{- end }}
+                {{- if .Values.governance.govbot.historyDB }}
+                - "-history-db={{ .Values.governance.govbot.historyDB }}"
+                {{- end }}
+                {{- if .Values.governance.govbot.historyRetain }}
+                - "-history-retain={{ .Values.governance.govbot.historyRetain }}"
+                {{- end }}
+              env:
+                {{- if not .Values.governance.govbot.historyDB }}
+                # Compliance history: govbot POSTs run snapshots to auditd (no PVC needed).
+                - name: HELPDESK_AUDIT_URL
+                  value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+                {{- end }}
 {{- end }}

@@ -1,13 +1,13 @@
 # aiHelpDesk User Journeys: Audit Trail Across a Request
 
 This document covers the `GET /v1/journeys` endpoint and the concept of a
-journey in the aiHelpDesk audit model. For the broader governance architecture
-see [AIGOVERNANCE.md](AIGOVERNANCE.md). For policy decision history see
-[GOVEXPLAIN.md](GOVEXPLAIN.md).
+journey in the aiHelpDesk [audit model](AUDIT.md). For the broader
+governance architecture see [AIGOVERNANCE.md](AIGOVERNANCE.md).
+For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
 
 ---
 
-## 1. What Is a Journey
+## 1. What is an aiHelpDesk Journey?
 
 A **journey** is everything that happened as a result of one user request —
 all the audit events that share the same `trace_id`.

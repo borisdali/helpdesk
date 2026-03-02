@@ -49,12 +49,12 @@ aiHelpDesk Governance consists of eight well-defined components:
 | Component | Status | Description |
 |-----------|--------|-------------|
 | [Audit System](#7-audit-system) | **Implemented** | Tamper-evident logging with hash chains |
-| [Policy Engine](#policy-engine) | **Implemented** | Rule-based access control |
-| [Approval Workflows](#approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
-| [Compliance Reporting](#compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
-| [Guardrails](#guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
-| [Operating Mode](#operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
-| [Explainability](#explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
+| [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
+| [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
+| [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
+| [Guardrails](#5-guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
+| [Operating Mode](#6-operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
+| [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | Identity & Access | Planned | User/role-based permissions |
 | Rollback & Undo | Planned | Recovery from mistakes |
 
@@ -735,7 +735,7 @@ governance:
     webhook: "https://hooks.slack.com/services/..."
 ```
 
-See `cmd/govbot/README.md` for full documentation.
+See [cmd/govbot/README.md](cmd/govbot/README.md) for the full documentation.
 
 ---
 

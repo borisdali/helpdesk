@@ -78,6 +78,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create govbot store (shares the same database connection)
+	govbotStore, err := audit.NewGovbotStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create govbot store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create approval notifier if configured
 	// Default baseURL to the listen address if not specified
 	baseURL := *approvalBaseURL
@@ -104,6 +111,7 @@ func main() {
 	srv := &server{store: store}
 	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier}
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
+	govbotSrv := &govbotServer{store: govbotStore}
 
 	mux := http.NewServeMux()
 
@@ -132,6 +140,10 @@ func main() {
 
 	// Journey endpoint
 	mux.HandleFunc("GET /v1/journeys", srv.handleQueryJourneys)
+
+	// Govbot compliance history endpoints
+	mux.HandleFunc("POST /v1/govbot/runs", govbotSrv.handleSaveRun)
+	mux.HandleFunc("GET /v1/govbot/runs", govbotSrv.handleGetRuns)
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", srv.handleHealth)

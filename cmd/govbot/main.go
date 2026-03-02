@@ -83,11 +83,63 @@ type integrityStatus struct {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
-	sinceStr := flag.String("since", "24h", "Look-back window for audit events (e.g. 24h, 7d, 2w)")
-	webhook := flag.String("webhook", "", "Slack webhook URL for posting report summary")
-	dryRun := flag.Bool("dry-run", false, "Collect and print report but do not post to webhook")
+	gateway       := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
+	sinceStr      := flag.String("since", "24h", "Look-back window for audit events (e.g. 24h, 7d, 2w)")
+	webhook       := flag.String("webhook", "", "Slack webhook URL for posting report summary")
+	dryRun        := flag.Bool("dry-run", false, "Collect and print report but do not post to webhook")
+	auditURL      := flag.String("audit-url", os.Getenv("HELPDESK_AUDIT_URL"), "Auditd service URL for persisting compliance history (e.g. http://auditd:1199). Takes precedence over -history-db.")
+	historyDB     := flag.String("history-db", "", "Path to govbot history database (SQLite path or postgres:// DSN). Used when -audit-url is not set.")
+	showHistory   := flag.Int("show-history", 0, "Print last N compliance runs and exit (requires -audit-url or -history-db)")
+	historyRetain := flag.Int("history-retain", 365, "Maximum number of runs to keep in local history database (ignored when -audit-url is set)")
 	flag.Parse()
+
+	// ── History: --show-history short-circuit ────────────────────────────────
+	// Reads and prints stored runs without contacting the gateway.
+	if *showHistory > 0 {
+		var sh historyClient
+		switch {
+		case *auditURL != "":
+			sh = openRemoteHistory(*auditURL, *gateway)
+		case *historyDB != "":
+			lh, err := openHistory(*historyDB)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "open history: %v\n", err)
+				os.Exit(1)
+			}
+			defer lh.close()
+			sh = lh
+		default:
+			fmt.Fprintln(os.Stderr, "-show-history requires -audit-url or -history-db")
+			os.Exit(1)
+		}
+		if err := sh.printTable("", *showHistory); err != nil {
+			fmt.Fprintf(os.Stderr, "print history: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// ── History: open store for this run ──────────────────────────────────────
+	var hist historyClient
+	switch {
+	case *auditURL != "":
+		hist = openRemoteHistory(*auditURL, *gateway)
+	case *historyDB != "":
+		lh, herr := openHistory(*historyDB)
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: could not open history database: %v\n", herr)
+			// Non-fatal — compliance report continues without persistence.
+		} else {
+			defer lh.close()
+			hist = lh
+		}
+	}
+	// snap is populated incrementally as phases run; saved at the end.
+	snap := runSnapshot{
+		RunAt:   time.Now().UTC(),
+		Window:  *sinceStr,
+		Gateway: *gateway,
+	}
 
 	since, err := parseLookback(*sinceStr)
 	if err != nil {
@@ -135,6 +187,9 @@ func main() {
 	}
 	logf("Pending approvals: %d", info.Approvals.PendingCount)
 	logf("Approval notify:  webhook=%v  email=%v", info.Approvals.WebhookConfigured, info.Approvals.EmailConfigured)
+
+	snap.ChainValid = info.Audit.ChainValid
+	snap.PendingApprovals = info.Approvals.PendingCount
 	fmt.Println()
 
 	// ── Phase 2: Policy Overview ──────────────────────────────────────────────
@@ -360,6 +415,10 @@ func main() {
 				totalDeny,
 			))
 		}
+
+		snap.PolicyDenies = totalDeny
+		snap.PolicyNoMatch = totalNoMatch
+		snap.DecisionsByResource = marshalJSON(byResource)
 	} else {
 		logf("No events available for analysis")
 	}
@@ -515,6 +574,7 @@ func main() {
 				staleCount, staleThreshold,
 			))
 		}
+		snap.StaleApprovals = staleCount
 	}
 	fmt.Println()
 
@@ -649,6 +709,9 @@ func main() {
 			logf("Total mutations:  %d  (previous period unavailable: %v)", totalMutations, prevErr)
 		}
 
+		snap.MutationsTotal = totalMutations
+		snap.MutationsDestructive = destructiveCount
+
 		if totalMutations == 0 {
 			logf("No write or destructive tool executions in this window")
 		} else {
@@ -764,6 +827,71 @@ func main() {
 	}
 	if len(alerts) == 0 && len(warnings) == 0 {
 		logf("No issues detected")
+	}
+
+	// ── History: save snapshot and print trend ────────────────────────────────
+	if hist != nil {
+		// overall is e.g. "✓ HEALTHY" — take the last word and lowercase it.
+		if parts := strings.Fields(overall); len(parts) > 0 {
+			snap.Status = strings.ToLower(parts[len(parts)-1])
+		}
+		snap.AlertCount = len(alerts)
+		snap.WarningCount = len(warnings)
+		snap.AlertsJSON = marshalJSON(alerts)
+		snap.WarningsJSON = marshalJSON(warnings)
+
+		if err := hist.save(snap, *historyRetain); err != nil {
+			logf("WARNING: could not save history: %v", err)
+		} else {
+			// Show a compact trend block when we have at least 2 prior runs in
+			// the same window (the run we just saved counts, so ≥3 total means
+			// ≥2 prior; we fetch 31 to give the block 30 comparison points).
+			prior, err := hist.recent(*sinceStr, 31)
+			if err == nil && len(prior) >= 2 {
+				// prior[0] is the run we just saved — skip it for "previous" avg.
+				prev := prior[1:]
+				healthy, warnings_, alerts_ := 0, 0, 0
+				totalDenies, totalMuts, chainOK := 0, 0, 0
+				totalStale := 0
+				for _, p := range prev {
+					switch p.Status {
+					case "healthy":
+						healthy++
+					case "warnings":
+						warnings_++
+					case "alerts":
+						alerts_++
+					}
+					totalDenies += p.PolicyDenies
+					totalMuts += p.MutationsTotal
+					totalStale += p.StaleApprovals
+					if p.ChainValid {
+						chainOK++
+					}
+				}
+				n := len(prev)
+				avgDenies := float64(totalDenies) / float64(n)
+				avgMuts := float64(totalMuts) / float64(n)
+				avgStale := float64(totalStale) / float64(n)
+
+				deniesArrow := ""
+				if float64(snap.PolicyDenies) > avgDenies*1.5 && avgDenies > 0 {
+					deniesArrow = "  ↑ above avg"
+				}
+				mutsArrow := ""
+				if float64(snap.MutationsTotal) > avgMuts*1.5 && avgMuts > 0 {
+					mutsArrow = "  ↑ above avg"
+				}
+
+				fmt.Println()
+				logf("Historical Trend (last %d %s runs):", n, *sinceStr)
+				logf("  Status:     healthy %d  warnings %d  alerts %d", healthy, warnings_, alerts_)
+				logf("  Denials:    avg %.1f/run   today %d%s", avgDenies, snap.PolicyDenies, deniesArrow)
+				logf("  Mutations:  avg %.1f/run   today %d%s", avgMuts, snap.MutationsTotal, mutsArrow)
+				logf("  Chain:      valid %d/%d", chainOK, n)
+				logf("  Stale apr:  avg %.1f/run   today %d", avgStale, snap.StaleApprovals)
+			}
+		}
 	}
 
 	// Post to webhook if configured

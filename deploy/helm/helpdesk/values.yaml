@@ -119,6 +119,15 @@ governance:
     since: "24h"
     # Slack webhook URL for posting the compliance summary (optional)
     webhook: ""
+    # Compliance history: by default govbot POSTs run snapshots to auditd via
+    # HELPDESK_AUDIT_URL (set automatically in the Helm template). No PVC is
+    # needed. To use a local SQLite or shared PostgreSQL database instead, set
+    # historyDB to a file path or postgres:// DSN. When historyDB is set,
+    # HELPDESK_AUDIT_URL is not injected and historyRetain applies.
+    historyDB: ""
+    # Maximum number of runs to keep when using a local -history-db.
+    # Ignored when posting to auditd (the default).
+    historyRetain: 365
 
   # Policy configuration
   policy:

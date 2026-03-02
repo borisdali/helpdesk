@@ -10,6 +10,7 @@ to be explicitly enabled prior to changing aiHelpDesk operating mode
 from `readonly` to `fix` to allow mutations. For the broader governance
 architecture see [AIGOVERNANCE.md](AIGOVERNANCE.md).
 For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
+For the AI Governance Compliance report see [GOVBOT_SAMPLE.md](GOVBOT_SAMPLE.md).
 
 > **Important:** The three database-agent mutation tools and three K8s-agent mutation tools
 > documented here are presented solely for testing aiHelpDesk AI Governance
@@ -522,11 +523,11 @@ make faulttest
 
 ## 6. Compliance and Alerting
 
-aiHelpDesk' AI Governance module and in particular the Compliance Reporter
+AI Governance module and in particular the Compliance Reporter
 (`govbot`) have been enhanced to track and if necessary alert on unusual
 mutations activities and spikes. The compliance report shows the following:
 
-- The total mutations with day-over-day comparison
+- Total mutations with day-over-day comparison
   to the equivalent previous period, shown as +42% / -12%.
   It fires an alert if the count is more than 50% above the previous period.
 
@@ -552,3 +553,4 @@ The previous-period fetch makes one extra API call (getEvents with since
 = 2×window ago) and filters client-side to timestamp < sinceTime.
 A limit of 2000 is used for the comparison fetch.
 
+See [here](GOVBOT_SAMPLE.md) for a sample of the on-deman ran Governance bot report.

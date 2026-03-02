@@ -250,6 +250,9 @@ services:
       - -gateway=http://gateway:8080
       - -since=${GOVBOT_SINCE:-24h}
       - -webhook=${GOVBOT_WEBHOOK:-}
+    environment:
+      # Compliance history: govbot POSTs run snapshots to auditd so no PVC is needed.
+      HELPDESK_AUDIT_URL: http://auditd:1199
     profiles:
       - governance
     depends_on:

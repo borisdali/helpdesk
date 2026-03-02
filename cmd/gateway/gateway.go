@@ -99,6 +99,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/governance/approvals", g.handleGovernanceApprovals)
 	mux.HandleFunc("GET /api/v1/governance/verify", g.handleGovernanceVerify)
 	mux.HandleFunc("GET /api/v1/governance/journeys", g.handleGovernanceJourneys)
+	mux.HandleFunc("GET /api/v1/governance/govbot/runs", g.handleGovernanceGovbotRuns)
 }
 
 // --- Handlers ---
@@ -276,6 +277,10 @@ func (g *Gateway) handleGovernanceEvent(w http.ResponseWriter, r *http.Request) 
 
 func (g *Gateway) handleGovernanceJourneys(w http.ResponseWriter, r *http.Request) {
 	g.proxyGovernanceRequest(w, r, "/v1/journeys")
+}
+
+func (g *Gateway) handleGovernanceGovbotRuns(w http.ResponseWriter, r *http.Request) {
+	g.proxyGovernanceRequest(w, r, "/v1/govbot/runs")
 }
 
 // proxyGovernanceRequest forwards a request to the auditd service, preserving query parameters.
