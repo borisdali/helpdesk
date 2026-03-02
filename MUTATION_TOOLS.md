@@ -1,20 +1,21 @@
 # aiHelpDesk Mutation Tools
 
 This page documents the database and Kubernetes agent tools that perform
-mutations, explains the **two-step inspect-then-act** safeguard and how it
-differs between agents, and describes how every layer is tested.
+mutations, explains the **two-step review-and-confirm** safeguard, followed
+by the description of aiHelpDesk layers of testing and how every layer
+is tested.
 
 The AI Governance module is critical for risk management associated with
 making changes to your databases and infrastructure (K8s/VM) and it has
 to be explicitly enabled prior to changing aiHelpDesk operating mode
-from `readonly` to `fix` to allow mutations. For the broader governance
-architecture see [AIGOVERNANCE.md](AIGOVERNANCE.md).
-For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
-For the AI Governance Compliance report see [GOVBOT_SAMPLE.md](GOVBOT_SAMPLE.md).
+from `readonly` to `fix` to allow mutations. For the broader AI Governance
+architecture see [here](AIGOVERNANCE.md).For AI Governance Policy Engine's
+decision history see [here](GOVEXPLAIN.md).
+For AI Governance Compliance sub-module see [here](GOVBOT_SAMPLE.md).
 
 > **Important:** The three database-agent mutation tools and three K8s-agent mutation tools
-> documented here are presented solely for testing aiHelpDesk AI Governance
-> features.
+> documented here are presented solely for the purpose of testing aiHelpDesk
+> AI Governance features.
 >
 > Specifically and crucially, **these six tools are not ready for PROD use yet!!!**
 >
@@ -40,7 +41,7 @@ For the AI Governance Compliance report see [GOVBOT_SAMPLE.md](GOVBOT_SAMPLE.md)
 
 ### 1.1 `get_session_info` — read-only inspector
 
-**Action class**: read (no policy check needed)
+**Action class**: `read` (no policy check needed)
 
 ```
 connection_string   string   optional — PostgreSQL DSN; defaults to env
@@ -152,7 +153,7 @@ prompt (Layer A) and the approval context (Layer C) only.
 
 ### 1.5 `describe_pod` — read-only inspector
 
-**Action class**: read (no policy check needed)
+**Action class**: `read` (no policy check needed)
 
 ```
 context     string   optional — K8s context; defaults to current context
@@ -236,7 +237,14 @@ post-check).
 
 ---
 
-## 2. Two-step review-and-confirm
+## 2. Two-step `review-and-confirm` process
+
+This is all about informed consent. Upstream agents and SRE framework
+calling aiHelpDesk for database troubleshooting as well as aiHelpDesk's
+own upcoming autonomous mode are a special category with no
+human-in-the-loop to confirm, but the interactive aiHelpDesk sessions
+present an opportunity for a human operator to fully review the
+consequences of a `write` (W) or `destructive` (D) request.
 
 ### Database agent
 
@@ -428,7 +436,7 @@ position for each tool name in the lowercased response text. If tool A's
 earliest evidence position is greater than or equal to tool B's earliest
 evidence position, the pair fails.
 
-### Tier 3b — Live fault scenario (`testing/catalog/failures.yaml`)
+### Tier 3b — Live fault injection scenario (`testing/catalog/failures.yaml`)
 
 The `db-terminate-direct-command` scenario tests the full agent behaviour end
 to end:
@@ -511,7 +519,7 @@ position(A) < position(B).
 
 ---
 
-## Run all mutation-tool tests locally
+## 6. Run all mutation-tool tests locally
 
 ```bash
 # Database + k8s unit tests + fault-lib ordering tests (no infrastructure needed)
@@ -521,7 +529,7 @@ make test-governance
 make faulttest
 ```
 
-## 6. Compliance and Alerting
+## 7. Compliance and Alerting
 
 AI Governance module and in particular the Compliance Reporter
 (`govbot`) have been enhanced to track and if necessary alert on unusual
