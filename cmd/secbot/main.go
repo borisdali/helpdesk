@@ -323,6 +323,10 @@ func gatewayPOST(baseURL, path string, payload map[string]any) (*a2aResponse, er
 
 func startCallbackServer(addr string, ch chan<- callbackPayload) *http.Server {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`)) //nolint:errcheck
+	})
 	mux.HandleFunc("POST /callback", func(w http.ResponseWriter, r *http.Request) {
 		var p callbackPayload
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {

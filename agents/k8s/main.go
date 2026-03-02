@@ -66,17 +66,24 @@ func main() {
 		slog.Error("failed to initialize policy engine", "err", err)
 		os.Exit(1)
 	}
+
+	// Initialize approval client for human-in-the-loop workflows
+	approvalClient := agentutil.InitApprovalClient(cfg)
+
 	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
-		Engine:         policyEngine,
-		PolicyCheckURL: cfg.PolicyCheckURL,
-		TraceStore:     traceStore,
-		AgentName:      "k8s_agent",
-		ToolAuditor:    toolAuditor,
+		Engine:          policyEngine,
+		PolicyCheckURL:  cfg.PolicyCheckURL,
+		TraceStore:      traceStore,
+		ApprovalClient:  approvalClient,
+		ApprovalTimeout: cfg.ApprovalTimeout,
+		AgentName:       "k8s_agent",
+		ToolAuditor:     toolAuditor,
 	})
 
 	slog.Info("governance",
 		"audit", auditStore != nil,
-		"policy", policyEngine != nil,
+		"policy", cfg.PolicyEnabled,
+		"approval", approvalClient != nil,
 	)
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)

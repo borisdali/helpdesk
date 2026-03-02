@@ -144,6 +144,9 @@ governance:
 
   # Approval workflow settings
   approvals:
+    # Set to true to enable the human-in-the-loop approval workflow.
+    # Requires governance.auditd.enabled: true.
+    enabled: false
     # Default timeout for approval requests
     timeout: "5m"
     # Webhook URL for approval notifications (Slack, etc.)

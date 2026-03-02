@@ -82,7 +82,7 @@ func main() {
 
 	slog.Info("governance",
 		"audit", auditStore != nil,
-		"policy", policyEngine != nil,
+		"policy", cfg.PolicyEnabled,
 		"approval", approvalClient != nil,
 	)
 

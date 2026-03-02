@@ -18,10 +18,36 @@ Compliance in aiHelpDesk operates at two distinct levels:
 | **Real-time enforcement** | Policy engine allows/denies/approves each tool call as it happens | Every tool invocation |
 | **Compliance reporting** | `govbot` takes a periodic snapshot of the entire governance posture | Scheduled (e.g. daily) or on-demand |
 
-This document covers the second level. `govbot` is the only component in the
-Compliance Reporting sub-module. It queries the gateway and auditd over HTTP,
-runs ten sequential analysis phases, and emits a structured report to stdout.
-Every run can be persisted to build a historical trend across days or weeks.
+This document covers the second level.
+In general at aiHelpDesk we view a compliance sub-module as more than just a periodic reporter.
+After all reporting is the output, not the function.
+
+To that end aiHelpDesk compliance centers around continuous posture tracking,
+i.e. not just "what's the state right now?" but "how has posture changed over time?".
+
+The other critical pillar is the evidence collection. We look at the compliance
+data as a must-have exportable, auditor-ready records proving that controls
+were active during a given period (for SOC 2, ISO 27001, internal audits).
+This is out of scope for the aiHelpDesk beta release, but depending on a
+customer demand, this is in our backlog to add to the Compliance sub-module.
+
+We view it as an important feature of Compliance to provide a comprehensive
+policy gap analysis where aiHelpDesk automatically identifies resources that
+have no policy at all, not just resources where a policy fired. The opposite
+is also important, i.e. detecting unused or dead rules in a policy. See details
+on all of this below.
+
+We believe that the Compliance sub-module is to include the emediation tracking.
+That is, when our compliance reporter (`govbot`) fires an alert
+(denied requests, stale approvals), there should be a record of what happens next.
+This feedback loop is out of scope for aiHelpDesk beta release, but we may
+elevate its priority and expedite its delivery depending on a customer feedback.
+
+The primary interface to interface with aiHelpDesk Compliance sub-module
+is via `govbot`, which is the Compliance Reporter .
+It queries the gateway and auditd over HTTP, runs ten sequential analysis
+phases, and emits a structured report to stdout. Every run can be persisted
+to build a historical trend across days or weeks.
 
 ---
 
@@ -29,7 +55,7 @@ Every run can be persisted to build a historical trend across days or weeks.
 
 ```
                         ┌─────────────────────────────────────────────────────┐
-                        │                  aiHelpDesk cluster                 │
+                        │                     aiHelpDesk                      │
                         │                                                     │
   database agent :1100  │──► tool_invoked ──────────────────────────────────┐ │
   k8s agent      :1102  │──► tool_invoked ──────────────────────────────────┤ │
@@ -91,7 +117,7 @@ Agent calls CheckTool(ctx, resourceType, resourceName, action, tags)
 ```
 
 The `tool_invoked` event type is `"tool_invoked"`, distinct from
-`"policy_decision"`. Phase 9 of the govbot report correlates the two event
+`"policy_decision"`. Phase 9 of the `govbot` report correlates the two event
 types to identify coverage gaps.
 
 ### 3.2 Agent scope
@@ -134,7 +160,7 @@ The `effect` field is empty on `tool_invoked` events. A non-empty `effect`
 
 ## 4. Compliance Phases
 
-govbot runs ten sequential phases and exits:
+`govbot` runs ten sequential phases and exits:
 
 | Phase | Name | Data source |
 |-------|------|-------------|
@@ -154,7 +180,7 @@ govbot runs ten sequential phases and exits:
 | Code | Meaning |
 |------|---------|
 | `0` | Healthy — no alerts or warnings |
-| `1` | Fatal — could not reach gateway |
+| `1` | Fatal — could not reach Gateway |
 | `2` | Alerts present — chain failure, policy bypass, or other critical finding |
 
 Exit code `2` is useful in CI pipelines and cron-based alerting.
@@ -258,7 +284,7 @@ to JSON and stored in the compliance run snapshot under
 
 ## 6. Compliance History
 
-Every govbot run can be persisted so that Phase 9 coverage maps accumulate
+Every `govbot` run can be persisted so that Phase 9 coverage maps accumulate
 over time and the trend block has comparison data.
 
 ### 6.1 Storage backends
@@ -270,7 +296,7 @@ over time and the trend block has comparison data.
 | **PostgreSQL** | `-history-db postgres://user:pass@host/db` | Shared history across multiple govbot instances |
 
 The auditd backend stores runs in the shared `govbot_runs` table inside the
-same audit database. Multiple govbot instances (one per team or gateway) can
+same audit database. Multiple govbot instances (one per team or Gateway) can
 write to the same central auditd; the `gateway` column distinguishes their
 origin.
 
@@ -299,7 +325,7 @@ govbot  ──POST /v1/govbot/runs?retain=365──►  auditd
 ```
 
 When govbot posts a new run to auditd it passes the retain limit as a query
-parameter. auditd prunes the oldest rows for that gateway, keeping at most
+parameter. auditd prunes the oldest rows for that Gateway, keeping at most
 `retain` rows. The default retain limit is **365** (one year of daily runs).
 Override with `-history-retain N`.
 
@@ -345,7 +371,7 @@ run for at least one cycle).
 ### 8.1 History table
 
 ```bash
-# From auditd (no gateway contact needed)
+# From auditd (no Gateway contact needed)
 govbot -audit-url http://localhost:1199 -show-history 10
 
 # From a local database
@@ -365,7 +391,7 @@ Run at (UTC)          Window  Status    Denies   Muts  Chain   Alerts  Warnings
 ```
 
 In `-show-history` mode govbot exits immediately after printing the table —
-it does not contact the gateway or run any of the ten compliance phases.
+it does not contact the Gateway or run any of the ten compliance phases.
 
 ### 8.2 REST API (auditd backend)
 
@@ -376,7 +402,7 @@ curl "http://localhost:1199/v1/govbot/runs"
 # Filter by look-back window
 curl "http://localhost:1199/v1/govbot/runs?window=24h&limit=10"
 
-# Filter by gateway (useful in central / multi-team deployments)
+# Filter by Gateway (useful in central / multi-team deployments)
 curl "http://localhost:1199/v1/govbot/runs?gateway=http%3A%2F%2Fgateway%3A8080&limit=30"
 ```
 
@@ -411,12 +437,12 @@ coverage JSON for further processing.
       Used when -audit-url is not set.
 
 -history-retain int
-      Maximum number of runs to keep per gateway (default 365).
+      Maximum number of runs to keep per Gateway (default 365).
       Passed to auditd as ?retain=N; applied locally for -history-db.
 
 -show-history int
       Print last N compliance runs as a table and exit.
-      Requires -audit-url or -history-db. Does not contact the gateway.
+      Requires -audit-url or -history-db. Does not contact the Gateway.
 ```
 
 ---
@@ -425,7 +451,7 @@ coverage JSON for further processing.
 
 ### 10.1 Docker Compose
 
-govbot runs under the `governance` profile and reads `HELPDESK_AUDIT_URL`
+`govbot` runs under the `governance` profile and reads `HELPDESK_AUDIT_URL`
 from the compose environment automatically. No extra volume is needed.
 
 ```bash
@@ -439,14 +465,14 @@ GOVBOT_SINCE=6h docker compose --profile governance run govbot
 GOVBOT_WEBHOOK=https://hooks.slack.com/... \
   docker compose --profile governance run govbot
 
-# Browse history (no gateway contact)
+# Browse history (no Gateway contact)
 docker compose --profile governance run --no-deps govbot \
   /usr/local/bin/govbot -show-history 10
 ```
 
 ### 10.2 Kubernetes
 
-govbot is deployed as a **CronJob**. Enable it in `values.yaml`:
+`govbot` is deployed as a **CronJob**. Enable it in `values.yaml`:
 
 ```yaml
 governance:
@@ -526,7 +552,7 @@ this run compared to the historical average. Possible causes:
 ### 11.4 No trend block appearing
 
 The trend block requires at least two prior runs in the same window (i.e.,
-both using the same `-since` value). Run govbot at least twice with history
+both using the same `-since` value). Run `govbot` at least twice with history
 configured.
 
 ---
@@ -539,5 +565,5 @@ configured.
 | [AUDIT.md](AUDIT.md) | Audit hash chain, event schema, `auditd` and `auditor` API reference |
 | [GOVEXPLAIN.md](GOVEXPLAIN.md) | `govexplain` CLI — explain why a specific past event was allowed or denied |
 | [MUTATION_TOOLS.md](MUTATION_TOOLS.md) | Write and destructive tool inventory; blast-radius enforcement |
-| [cmd/govbot/README.md](cmd/govbot/README.md) | govbot quick-start and sample runs |
-| [GOVBOT_SAMPLE.md](GOVBOT_SAMPLE.md) | Full annotated sample govbot output |
+| [cmd/govbot/README.md](cmd/govbot/README.md) | `govbot` quick-start and sample runs |
+| [GOVBOT_SAMPLE.md](GOVBOT_SAMPLE.md) | Full annotated sample `govbot` output |

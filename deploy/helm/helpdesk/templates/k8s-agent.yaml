@@ -47,6 +47,10 @@ spec:
             - name: HELPDESK_POLICY_FILE
               value: /etc/helpdesk/policies.yaml
             {{- end }}
+            {{- if .Values.governance.approvals.enabled }}
+            - name: HELPDESK_APPROVAL_ENABLED
+              value: "true"
+            {{- end }}
             {{- if .Values.governance.approvals.timeout }}
             - name: HELPDESK_APPROVAL_TIMEOUT
               value: "{{ .Values.governance.approvals.timeout }}"

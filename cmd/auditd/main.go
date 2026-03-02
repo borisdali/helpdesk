@@ -280,6 +280,12 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 		Limit: 100,
 	}
 
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			opts.Limit = n
+		}
+	}
+
 	if v := r.URL.Query().Get("session_id"); v != "" {
 		opts.SessionID = v
 	}
