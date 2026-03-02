@@ -93,14 +93,66 @@ The raw endpoint at `/v1/journeys` is served directly by auditd.
 
 ---
 
-## 4. Endpoint
+## 4. Accessing the API by Deployment Type
 
-### 4.1 `GET /v1/journeys` (auditd)
-### 4.2 `GET /api/v1/governance/journeys` (gateway proxy)
+The journey and events endpoints are served by **auditd** (port 1199) and
+proxied by the **gateway** (port 8080). Which address you use depends on your
+deployment.
+
+### 4.1 Docker Compose / local binary
+
+Both ports are available on localhost. Use either directly:
+
+```bash
+# Via auditd (direct)
+curl "http://localhost:1199/v1/journeys"
+
+# Via gateway (proxy)
+curl "http://localhost:8080/api/v1/governance/journeys"
+```
+
+### 4.2 Kubernetes
+
+Neither port is reachable from outside the cluster. Use **`kubectl port-forward`**
+to open a local tunnel, then run the same `curl` commands against localhost.
+
+**Recommended: port-forward the gateway (single tunnel, all endpoints)**
+
+```bash
+kubectl port-forward -n helpdesk-system \
+  svc/helpdesk-gateway 8080:8080
+
+# Now in another terminal:
+curl "http://localhost:8080/api/v1/governance/journeys?user=alice&limit=10"
+curl "http://localhost:8080/api/v1/governance/journeys?limit=200" \
+  | jq 'group_by(.user_id) | map({user: .[0].user_id, journeys: length}) | sort_by(-.journeys)'
+```
+
+**Alternative: port-forward auditd directly (raw endpoints)**
+
+```bash
+kubectl port-forward -n helpdesk-system \
+  svc/helpdesk-auditd 1199:1199
+
+# Now in another terminal:
+curl "http://localhost:1199/v1/journeys?user=alice&limit=10"
+curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e"
+```
+
+The gateway path (`/api/v1/governance/journeys`) and the auditd path
+(`/v1/journeys`) return identical data — the gateway simply proxies the
+request.
+
+---
+
+## 5. Endpoint
+
+### 5.1 `GET /v1/journeys` (auditd)
+### 5.2 `GET /api/v1/governance/journeys` (gateway proxy)
 
 Returns an array of journey summaries, newest first.
 
-### 4.3 Query parameters
+### 5.3 Query parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -112,7 +164,7 @@ Returns an array of journey summaries, newest first.
 All parameters are optional. With no parameters, the 50 most recent journeys
 are returned.
 
-### 4.4 Response
+### 5.4 Response
 
 ```json
 [
@@ -143,7 +195,7 @@ are returned.
 ]
 ```
 
-### 4.5 Field reference
+### 5.5 Field reference
 
 | Field | Description |
 |-------|-------------|
@@ -160,28 +212,34 @@ are returned.
 
 ---
 
-## 5. Examples
+## 6. Examples
 
-### 5.1 My recent journeys
+> **On Kubernetes:** replace `http://localhost:1199` with
+> `http://localhost:8080/api/v1/governance` (gateway) after running
+> `kubectl port-forward -n helpdesk-system svc/helpdesk-gateway 8080:8080`.
+> See [section 4.2](#42-kubernetes) for details.
+
+### 6.1 My recent journeys
 
 ```bash
+# Local / Docker Compose
 curl "http://localhost:1199/v1/journeys?user=alice&limit=10"
+
+# Kubernetes (gateway port-forward)
+curl "http://localhost:8080/api/v1/governance/journeys?user=alice&limit=10"
 ```
 
-### 5.2 Journeys in a time window
+### 6.2 Journeys in a time window
 
 ```bash
 # Yesterday 4pm–midnight UTC
 curl "http://localhost:1199/v1/journeys?from=2026-02-28T16:00:00Z&until=2026-03-01T00:00:00Z"
+
+# Kubernetes
+curl "http://localhost:8080/api/v1/governance/journeys?from=2026-02-28T16:00:00Z&until=2026-03-01T00:00:00Z"
 ```
 
-### 5.3 Via gateway
-
-```bash
-curl "http://localhost:8080/api/v1/governance/journeys?user=alice&limit=10"
-```
-
-### 5.4 Journeys that ended in error
+### 6.3 Journeys that ended in error
 
 The summary endpoint does not support an `outcome` filter directly. Use `jq`
 to filter client-side:
@@ -191,7 +249,7 @@ curl -s "http://localhost:1199/v1/journeys" \
   | jq '[.[] | select(.outcome == "error")]'
 ```
 
-### 5.5 Journey count by user
+### 6.4 Journey count by user
 
 ```bash
 curl -s "http://localhost:1199/v1/journeys?limit=200" \
@@ -200,17 +258,19 @@ curl -s "http://localhost:1199/v1/journeys?limit=200" \
 
 ---
 
-## 5.6 Drilling Into a Journey
+### 6.5 Drilling Into a Journey
 
 Once you have a `trace_id`, fetch every event in that journey from the events
 endpoint:
 
 ```bash
-# All events for a specific journey
+# Local / Docker Compose
 curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e"
-
-# Just policy decisions for that journey
 curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=policy_decision"
+
+# Kubernetes (gateway port-forward)
+curl "http://localhost:8080/api/v1/governance/events?trace_id=tr_7c2a1b9e"
+curl "http://localhost:8080/api/v1/governance/events?trace_id=tr_7c2a1b9e&event_type=policy_decision"
 ```
 
 For a human-readable policy explanation of any `pol_` event in the trace, use
@@ -224,7 +284,7 @@ See [GOVEXPLAIN.md](GOVEXPLAIN.md) for full govexplain reference.
 
 ---
 
-## 6. Journey Coverage
+## 7. Journey Coverage
 
 A journey only appears in `GET /v1/journeys` if it has at least one
 `delegation_decision` event with a non-empty `trace_id`. This means:
@@ -242,7 +302,7 @@ To see all events regardless of journey status, use `GET /v1/events` directly.
 
 ---
 
-## 7. Environment Variables
+## 8. Environment Variables
 
 | Variable | Description |
 |----------|-------------|
@@ -251,27 +311,41 @@ To see all events regardless of journey status, use `GET /v1/events` directly.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
-### 8.1 Empty result despite active agents
+### 9.1 `curl: (7) Failed to connect to localhost port 1199` on Kubernetes
+
+auditd is an in-cluster service and is not exposed outside the cluster. Use
+the gateway port-forward instead (see [section 4.2](#42-kubernetes)):
+
+```bash
+kubectl port-forward -n helpdesk-system svc/helpdesk-gateway 8080:8080
+# then use http://localhost:8080/api/v1/governance/journeys
+```
+
+### 9.2 Empty result despite active agents
 
 Journeys are anchored to `delegation_decision` events. Confirm they exist:
 
 ```bash
+# Local / Docker Compose
 curl -s "http://localhost:1199/v1/events?event_type=delegation_decision" | jq length
+
+# Kubernetes
+curl -s "http://localhost:8080/api/v1/governance/events?event_type=delegation_decision" | jq length
 ```
 
 If this returns `0`, either the orchestrator is not running with
 `HELPDESK_AUDIT_URL` set, or you are querying a fresh database. Run a
 natural-language query via `POST /api/v1/query` to produce the first journey.
 
-### 8.2 Events visible in `/v1/events` but not in `/v1/journeys`
+### 9.3 Events visible in `/v1/events` but not in `/v1/journeys`
 
 These are direct tool calls or raw A2A invocations — they produce `tool_call`
-events but no `delegation_decision` anchor. See [Journey Coverage](#journey-coverage)
+events but no `delegation_decision` anchor. See [Journey Coverage](#7-journey-coverage)
 above.
 
-### 8.3 `started_at` / `ended_at` in unexpected order
+### 9.4 `started_at` / `ended_at` in unexpected order
 
 `started_at` is the timestamp of the `delegation_decision` event;
 `ended_at` is the timestamp of the last event under that trace. If clocks are

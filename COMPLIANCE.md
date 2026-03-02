@@ -19,11 +19,11 @@ Compliance in aiHelpDesk operates at two distinct levels:
 | **Compliance reporting** | `govbot` takes a periodic snapshot of the entire governance posture | Scheduled (e.g. daily) or on-demand |
 
 This document covers the second level.
-In general at aiHelpDesk we view a compliance sub-module as more than just a periodic reporter.
+In general, at aiHelpDesk we view the compliance sub-module as more than just a periodic reporter.
 After all reporting is the output, not the function.
 
 To that end aiHelpDesk compliance centers around continuous posture tracking,
-i.e. not just "what's the state right now?" but "how has posture changed over time?".
+i.e. not just "what's the state right now?" but "how has the security posture changed over time?".
 
 The other critical pillar is the evidence collection. We look at the compliance
 data as a must-have exportable, auditor-ready records proving that controls
@@ -37,13 +37,13 @@ have no policy at all, not just resources where a policy fired. The opposite
 is also important, i.e. detecting unused or dead rules in a policy. See details
 on all of this below.
 
-We believe that the Compliance sub-module is to include the emediation tracking.
+We believe that the Compliance sub-module is to include the remediation tracking.
 That is, when our compliance reporter (`govbot`) fires an alert
 (denied requests, stale approvals), there should be a record of what happens next.
 This feedback loop is out of scope for aiHelpDesk beta release, but we may
 elevate its priority and expedite its delivery depending on a customer feedback.
 
-The primary interface to interface with aiHelpDesk Compliance sub-module
+The primary way to interface with aiHelpDesk Compliance sub-module
 is via `govbot`, which is the Compliance Reporter .
 It queries the gateway and auditd over HTTP, runs ten sequential analysis
 phases, and emits a structured report to stdout. Every run can be persisted
@@ -370,6 +370,8 @@ run for at least one cycle).
 
 ### 8.1 History table
 
+**Docker Compose / local binary**
+
 ```bash
 # From auditd (no Gateway contact needed)
 govbot -audit-url http://localhost:1199 -show-history 10
@@ -377,6 +379,40 @@ govbot -audit-url http://localhost:1199 -show-history 10
 # From a local database
 govbot -history-db /var/lib/govbot/history.db -show-history 10
 ```
+
+**Kubernetes**
+
+`govbot` is not typically installed on the workstation — it runs inside the
+cluster as a CronJob. Two options:
+
+*Option A — one-shot pod (recommended, no port-forward needed):*
+
+```bash
+RELEASE=helpdesk
+NS=helpdesk-system
+
+IMAGE=$(kubectl get cronjob -n $NS ${RELEASE}-govbot \
+  -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}')
+
+kubectl run -n $NS govbot-history --image=$IMAGE --restart=Never \
+  --env="HELPDESK_AUDIT_URL=http://${RELEASE}-auditd:1199" \
+  -- /usr/local/bin/govbot -show-history 10
+
+kubectl logs -n $NS -f pod/govbot-history
+kubectl delete pod -n $NS govbot-history
+```
+
+*Option B — port-forward auditd, then query the REST API:*
+
+```bash
+kubectl port-forward -n $NS svc/${RELEASE}-auditd 1199:1199
+# in another terminal:
+curl -s "http://localhost:1199/v1/govbot/runs?limit=10" | python3 -m json.tool
+```
+
+The REST response mirrors the history table fields. See [§8.2](#82-rest-api-auditd-backend)
+for the full API reference and [§10.2](#102-kubernetes) for the complete
+Kubernetes deployment notes.
 
 Output:
 
