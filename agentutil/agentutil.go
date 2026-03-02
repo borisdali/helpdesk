@@ -259,6 +259,13 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 // If approval is required and an approval client is configured, it will request
 // approval and wait for resolution.
 func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
+	// Emit unconditional tool_invoked event before any policy evaluation.
+	// Fires even when enforcement is disabled, so govbot can detect tool calls
+	// that were never policy-checked (tool_invoked with no matching policy_decision).
+	if e.toolAuditor != nil {
+		e.toolAuditor.RecordToolInvoked(ctx, resourceType, resourceName, string(action), tags)
+	}
+
 	if e.engine == nil && e.policyCheckURL == "" {
 		return nil // No enforcement
 	}

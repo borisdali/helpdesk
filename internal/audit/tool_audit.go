@@ -132,6 +132,35 @@ func (ta *ToolAuditor) RecordPolicyDecision(ctx context.Context, pd PolicyDecisi
 	}
 }
 
+// RecordToolInvoked emits an unconditional tool_invoked event at the very start
+// of every tool dispatch, before any policy evaluation. This enables gap analysis:
+// comparing tool_invoked events against policy_decision events reveals tool calls
+// that bypassed policy entirely (no corresponding policy_decision event).
+func (ta *ToolAuditor) RecordToolInvoked(ctx context.Context, resourceType, resourceName, action string, tags []string) {
+	if ta.auditor == nil {
+		return
+	}
+
+	event := &Event{
+		EventID:     "inv_" + uuid.New().String()[:8],
+		Timestamp:   time.Now().UTC(),
+		EventType:   EventTypeToolInvoked,
+		TraceID:     ta.getTraceID(),
+		ActionClass: ActionClass(action),
+		Session:     Session{ID: ta.sessionID},
+		PolicyDecision: &PolicyDecision{
+			ResourceType: resourceType,
+			ResourceName: resourceName,
+			Action:       action,
+			Tags:         tags,
+		},
+	}
+
+	if err := ta.auditor.Record(ctx, event); err != nil {
+		slog.Warn("failed to record tool invoked event", "resource", resourceName, "err", err)
+	}
+}
+
 // RecordAgentReasoning records the LLM's deliberation text that preceded a tool decision.
 // Call from an AfterModelCallback whenever the model emits both text and function calls.
 // No-op when auditor is nil or reasoning is empty.

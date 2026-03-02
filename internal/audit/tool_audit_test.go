@@ -20,6 +20,71 @@ func newToolAuditTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestRecordToolInvoked_NilAuditor(t *testing.T) {
+	ta := NewToolAuditor(nil, "test-agent", "sess-1", "trace-1")
+	// Should be a no-op and not panic.
+	ta.RecordToolInvoked(context.Background(), "database", "prod-db", "write", nil)
+}
+
+func TestRecordToolInvoked_RecordsEvent(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "db-agent", "sess-inv", "trace-inv-42")
+
+	ta.RecordToolInvoked(context.Background(), "database", "prod-db", "write", []string{"env:prod"})
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 tool_invoked event, got %d", len(events))
+	}
+
+	evt := events[0]
+	if evt.EventType != EventTypeToolInvoked {
+		t.Errorf("EventType = %q, want %q", evt.EventType, EventTypeToolInvoked)
+	}
+	if evt.TraceID != "trace-inv-42" {
+		t.Errorf("TraceID = %q, want trace-inv-42", evt.TraceID)
+	}
+	if evt.ActionClass != ActionWrite {
+		t.Errorf("ActionClass = %q, want %q", evt.ActionClass, ActionWrite)
+	}
+	if evt.PolicyDecision == nil {
+		t.Fatal("PolicyDecision field is nil")
+	}
+	if evt.PolicyDecision.ResourceType != "database" {
+		t.Errorf("ResourceType = %q, want database", evt.PolicyDecision.ResourceType)
+	}
+	if evt.PolicyDecision.ResourceName != "prod-db" {
+		t.Errorf("ResourceName = %q, want prod-db", evt.PolicyDecision.ResourceName)
+	}
+	if evt.PolicyDecision.Action != "write" {
+		t.Errorf("Action = %q, want write", evt.PolicyDecision.Action)
+	}
+	if evt.PolicyDecision.Effect != "" {
+		t.Errorf("Effect = %q, want empty (not yet evaluated)", evt.PolicyDecision.Effect)
+	}
+}
+
+func TestRecordToolInvoked_EventIDHasInvPrefix(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s-agent", "sess-k8s", "")
+
+	ta.RecordToolInvoked(context.Background(), "kubernetes", "prod-ns", "read", nil)
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no events recorded")
+	}
+	if len(events[0].EventID) < 4 || events[0].EventID[:4] != "inv_" {
+		t.Errorf("EventID = %q, want inv_ prefix", events[0].EventID)
+	}
+}
+
 func TestRecordAgentReasoning_NilAuditor(t *testing.T) {
 	ta := NewToolAuditor(nil, "test-agent", "sess-1", "trace-1")
 	// Should be a no-op and not panic.

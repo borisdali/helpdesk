@@ -810,8 +810,127 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 9: Summary ──────────────────────────────────────────────────────
-	logPhase(9, "Compliance Summary")
+	// ── Phase 9: Policy Coverage Analysis ────────────────────────────────────
+	logPhase(9, "Policy Coverage Analysis")
+	logf("Note: reflects database + k8s agents only (incident + research not instrumented)")
+	fmt.Println()
+
+	if len(events) == 0 {
+		logf("No events available for coverage analysis")
+	} else {
+		type covKey struct {
+			resource string // "resource_type/resource_name"
+			action   string
+		}
+		type covStats struct {
+			invoked int
+			checked int
+		}
+		byCov := make(map[covKey]*covStats)
+
+		for i := range events {
+			e := &events[i]
+			if e.EventType == audit.EventTypeToolInvoked && e.PolicyDecision != nil {
+				pd := e.PolicyDecision
+				key := covKey{pd.ResourceType + "/" + pd.ResourceName, pd.Action}
+				if byCov[key] == nil {
+					byCov[key] = &covStats{}
+				}
+				byCov[key].invoked++
+			}
+		}
+		for i := range events {
+			e := &events[i]
+			if e.EventType == audit.EventTypePolicyDecision && e.PolicyDecision != nil &&
+				!e.PolicyDecision.PostExecution {
+				pd := e.PolicyDecision
+				key := covKey{pd.ResourceType + "/" + pd.ResourceName, pd.Action}
+				if byCov[key] == nil {
+					byCov[key] = &covStats{}
+				}
+				byCov[key].checked++
+			}
+		}
+
+		if len(byCov) == 0 {
+			logf("No tool_invoked events in this window — no coverage data yet")
+			logf("(coverage data accumulates as agents execute tools with updated instrumentation)")
+		} else {
+			keys := make([]covKey, 0, len(byCov))
+			for k := range byCov {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				if keys[i].resource != keys[j].resource {
+					return keys[i].resource < keys[j].resource
+				}
+				return keys[i].action < keys[j].action
+			})
+
+			var gapKeys []covKey
+			fullyChecked := 0
+			for _, k := range keys {
+				cs := byCov[k]
+				if cs.invoked > cs.checked {
+					gapKeys = append(gapKeys, k)
+				} else {
+					fullyChecked++
+				}
+			}
+
+			if len(gapKeys) == 0 {
+				logf("All %d resource-action pair(s) fully covered ✓", len(keys))
+			} else {
+				logf("Uncovered invocations (tool_invoked with no matching policy_decision):")
+				fmt.Println()
+				for _, k := range gapKeys {
+					cs := byCov[k]
+					gap := cs.invoked - cs.checked
+					pct := 0
+					if cs.invoked > 0 {
+						pct = cs.checked * 100 / cs.invoked
+					}
+					severity := "⚠ WARN "
+					if k.action == string(audit.ActionWrite) || k.action == string(audit.ActionDestructive) {
+						severity = "✗ ALERT"
+					}
+					logf("  [%s]  %-38s  action=%-12s  invoked=%d  checked=%d  gap=%d  (%d%% coverage)",
+						severity, k.resource, k.action, cs.invoked, cs.checked, gap, pct)
+				}
+				if fullyChecked > 0 {
+					fmt.Println()
+					logf("  %d other resource-action pair(s): fully covered", fullyChecked)
+				}
+				for _, k := range gapKeys {
+					cs := byCov[k]
+					gap := cs.invoked - cs.checked
+					pct := float64(cs.checked) * 100 / float64(cs.invoked)
+					msg := fmt.Sprintf("%s %s: %d of %d invocations had no policy check (%.0f%% coverage)",
+						k.resource, k.action, gap, cs.invoked, pct)
+					if k.action == string(audit.ActionWrite) || k.action == string(audit.ActionDestructive) {
+						alerts = append(alerts, msg)
+					} else {
+						warnings = append(warnings, msg)
+					}
+				}
+			}
+
+			// Build invocations_by_resource for history snapshot.
+			type invEntry struct {
+				Invoked int `json:"invoked"`
+				Checked int `json:"checked"`
+			}
+			invByResource := make(map[string]invEntry, len(byCov))
+			for k, cs := range byCov {
+				invByResource[k.resource+":"+k.action] = invEntry{cs.invoked, cs.checked}
+			}
+			snap.InvocationsByResource = marshalJSON(invByResource)
+		}
+	}
+	fmt.Println()
+
+	// ── Phase 10: Summary ─────────────────────────────────────────────────────
+	logPhase(10, "Compliance Summary")
 
 	overall := "✓ HEALTHY"
 	if len(alerts) > 0 {

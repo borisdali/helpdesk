@@ -192,6 +192,35 @@ func TestHistory_TrendCalc(t *testing.T) {
 	}
 }
 
+// TestHistory_InvocationsByResource verifies that the InvocationsByResource
+// field round-trips correctly through save and recent.
+func TestHistory_InvocationsByResource(t *testing.T) {
+	h, err := openHistory(tempDB(t))
+	if err != nil {
+		t.Fatalf("openHistory: %v", err)
+	}
+	defer h.close()
+
+	s := makeSnap("healthy", "24h", 0, 0, true)
+	s.InvocationsByResource = `{"database/prod-db:write":{"invoked":5,"checked":3}}`
+
+	if err := h.save(s, 0); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	snaps, err := h.recent("24h", 1)
+	if err != nil {
+		t.Fatalf("recent: %v", err)
+	}
+	if len(snaps) != 1 {
+		t.Fatalf("expected 1 snap, got %d", len(snaps))
+	}
+	if snaps[0].InvocationsByResource != s.InvocationsByResource {
+		t.Errorf("InvocationsByResource = %q, want %q",
+			snaps[0].InvocationsByResource, s.InvocationsByResource)
+	}
+}
+
 // TestHistory_PrintTable verifies that printTable runs without error on a
 // populated database (basic smoke test for the table rendering path).
 func TestHistory_PrintTable(t *testing.T) {

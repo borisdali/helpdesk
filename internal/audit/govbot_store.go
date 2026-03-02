@@ -26,8 +26,9 @@ type GovbotRun struct {
 	MutationsTotal       int       `json:"mutations_total"`
 	MutationsDestructive int       `json:"mutations_destructive"`
 	PendingApprovals     int       `json:"pending_approvals"`
-	StaleApprovals       int       `json:"stale_approvals"`
-	DecisionsByResource  string    `json:"decisions_by_resource,omitempty"`
+	StaleApprovals         int    `json:"stale_approvals"`
+	DecisionsByResource    string `json:"decisions_by_resource,omitempty"`
+	InvocationsByResource  string `json:"invocations_by_resource,omitempty"`
 }
 
 // GovbotStore persists GovbotRun snapshots. It shares the same *sql.DB
@@ -70,7 +71,8 @@ func (s *GovbotStore) createSchema() error {
     mutations_destructive INTEGER NOT NULL DEFAULT 0,
     pending_approvals     INTEGER NOT NULL DEFAULT 0,
     stale_approvals       INTEGER NOT NULL DEFAULT 0,
-    decisions_by_resource TEXT
+    decisions_by_resource   TEXT,
+    invocations_by_resource TEXT
 )`, pk),
 		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_run_at ON govbot_runs(run_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_window  ON govbot_runs(window)`,
@@ -80,6 +82,13 @@ func (s *GovbotStore) createSchema() error {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return err
 		}
+	}
+	// Migration: add invocations_by_resource to databases created before this
+	// column existed. SQLite returns an error on duplicate column; ignore it.
+	if s.isPostgres {
+		s.db.Exec(`ALTER TABLE govbot_runs ADD COLUMN IF NOT EXISTS invocations_by_resource TEXT`) //nolint:errcheck
+	} else {
+		s.db.Exec(`ALTER TABLE govbot_runs ADD COLUMN invocations_by_resource TEXT`) //nolint:errcheck
 	}
 	return nil
 }
@@ -97,8 +106,9 @@ func (s *GovbotStore) SaveRun(run GovbotRun) error {
 		 alert_count, warning_count, alerts_json, warnings_json,
 		 chain_valid, policy_denies, policy_no_match,
 		 mutations_total, mutations_destructive,
-		 pending_approvals, stale_approvals, decisions_by_resource)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		 pending_approvals, stale_approvals,
+		 decisions_by_resource, invocations_by_resource)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	_, err := s.db.Exec(q,
 		run.RunAt.UTC().Format(time.RFC3339),
 		run.Window, run.Gateway, run.Status,
@@ -108,7 +118,7 @@ func (s *GovbotStore) SaveRun(run GovbotRun) error {
 		run.PolicyDenies, run.PolicyNoMatch,
 		run.MutationsTotal, run.MutationsDestructive,
 		run.PendingApprovals, run.StaleApprovals,
-		run.DecisionsByResource,
+		run.DecisionsByResource, run.InvocationsByResource,
 	)
 	return err
 }
@@ -120,7 +130,8 @@ func (s *GovbotStore) RecentRuns(window, gateway string, limit int) ([]GovbotRun
 		alert_count, warning_count, alerts_json, warnings_json,
 		chain_valid, policy_denies, policy_no_match,
 		mutations_total, mutations_destructive,
-		pending_approvals, stale_approvals, decisions_by_resource`
+		pending_approvals, stale_approvals,
+		decisions_by_resource, invocations_by_resource`
 
 	base := "SELECT " + cols + " FROM govbot_runs"
 	var where []string
@@ -159,7 +170,8 @@ func (s *GovbotStore) RecentRuns(window, gateway string, limit int) ([]GovbotRun
 			&r.AlertCount, &r.WarningCount, &alertsJSON, &warningsJSON,
 			&chainInt, &r.PolicyDenies, &r.PolicyNoMatch,
 			&r.MutationsTotal, &r.MutationsDestructive,
-			&r.PendingApprovals, &r.StaleApprovals, &r.DecisionsByResource,
+			&r.PendingApprovals, &r.StaleApprovals,
+			&r.DecisionsByResource, &r.InvocationsByResource,
 		); err != nil {
 			return nil, err
 		}

@@ -17,6 +17,10 @@ const (
 	EventTypePolicyDecision      EventType = "policy_decision"
 	EventTypeAgentReasoning      EventType = "agent_reasoning"
 	EventTypeGovernanceViolation EventType = "governance_violation"
+	// EventTypeToolInvoked is emitted unconditionally at the start of every
+	// tool dispatch, before any policy check. Comparing tool_invoked events
+	// against policy_decision events reveals tool calls that bypassed policy.
+	EventTypeToolInvoked EventType = "tool_invoked"
 )
 
 // RequestCategory classifies the type of user request.

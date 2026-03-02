@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -372,6 +373,57 @@ func TestCheckTool_NilEnforcer_NoRemoteURL(t *testing.T) {
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, "test")
 	if err != nil {
 		t.Errorf("nil enforcer: expected nil error, got: %v", err)
+	}
+}
+
+// TestCheckTool_EmitsToolInvokedWhenPolicyDisabled verifies that a tool_invoked
+// event is recorded unconditionally even when policy enforcement is disabled
+// (engine=nil, policyCheckURL=""). This is the core guarantee of the coverage
+// gap instrumentation: we know the tool was called regardless of enforcement.
+func TestCheckTool_EmitsToolInvokedWhenPolicyDisabled(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-1", "trace-cov")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{
+		ToolAuditor: ta,
+		// No Engine, no PolicyCheckURL — enforcement disabled.
+	})
+
+	if err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, []string{"env:prod"}, ""); err != nil {
+		t.Errorf("expected nil (no enforcement), got: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 tool_invoked event, got %d", len(events))
+	}
+	evt := events[0]
+	if evt.PolicyDecision == nil {
+		t.Fatal("PolicyDecision field is nil on tool_invoked event")
+	}
+	if evt.PolicyDecision.ResourceName != "prod-db" {
+		t.Errorf("ResourceName = %q, want prod-db", evt.PolicyDecision.ResourceName)
+	}
+	if evt.PolicyDecision.Action != string(policy.ActionWrite) {
+		t.Errorf("Action = %q, want %q", evt.PolicyDecision.Action, policy.ActionWrite)
+	}
+	if evt.PolicyDecision.Effect != "" {
+		t.Errorf("Effect = %q, want empty (not yet evaluated)", evt.PolicyDecision.Effect)
+	}
+
+	// Verify no policy_decision event was emitted (enforcement was disabled).
+	polEvents, _ := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypePolicyDecision})
+	if len(polEvents) != 0 {
+		t.Errorf("expected 0 policy_decision events when enforcement disabled, got %d", len(polEvents))
 	}
 }
 

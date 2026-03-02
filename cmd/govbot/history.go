@@ -37,7 +37,8 @@ type runSnapshot struct {
 	MutationsDestructive int
 	PendingApprovals     int
 	StaleApprovals       int
-	DecisionsByResource  string // JSON object: resource → {allow,deny,...}
+	DecisionsByResource    string // JSON object: resource → {allow,deny,...}
+	InvocationsByResource  string // JSON object: "resource:action" → {invoked,checked}
 }
 
 // historyClient abstracts compliance-run persistence.
@@ -145,7 +146,8 @@ func (h *localHistoryStore) createSchema() error {
     mutations_destructive INTEGER NOT NULL DEFAULT 0,
     pending_approvals     INTEGER NOT NULL DEFAULT 0,
     stale_approvals       INTEGER NOT NULL DEFAULT 0,
-    decisions_by_resource TEXT
+    decisions_by_resource   TEXT,
+    invocations_by_resource TEXT
 )`, pk),
 		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_run_at ON govbot_runs(run_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_window  ON govbot_runs(window)`,
@@ -154,6 +156,13 @@ func (h *localHistoryStore) createSchema() error {
 		if _, err := h.db.Exec(stmt); err != nil {
 			return err
 		}
+	}
+	// Migration: add invocations_by_resource to databases created before this
+	// column existed. SQLite returns an error on duplicate column; ignore it.
+	if h.isPostgres {
+		h.db.Exec(`ALTER TABLE govbot_runs ADD COLUMN IF NOT EXISTS invocations_by_resource TEXT`) //nolint:errcheck
+	} else {
+		h.db.Exec(`ALTER TABLE govbot_runs ADD COLUMN invocations_by_resource TEXT`) //nolint:errcheck
 	}
 	return nil
 }
@@ -166,8 +175,9 @@ func (h *localHistoryStore) save(snap runSnapshot, retain int) error {
 		 alert_count, warning_count, alerts_json, warnings_json,
 		 chain_valid, policy_denies, policy_no_match,
 		 mutations_total, mutations_destructive,
-		 pending_approvals, stale_approvals, decisions_by_resource)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		 pending_approvals, stale_approvals,
+		 decisions_by_resource, invocations_by_resource)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 
 	chainInt := 0
 	if snap.ChainValid {
@@ -190,6 +200,7 @@ func (h *localHistoryStore) save(snap runSnapshot, retain int) error {
 		snap.PendingApprovals,
 		snap.StaleApprovals,
 		snap.DecisionsByResource,
+		snap.InvocationsByResource,
 	); err != nil {
 		return fmt.Errorf("insert govbot run: %w", err)
 	}
@@ -216,7 +227,8 @@ func (h *localHistoryStore) recent(window string, n int) ([]runSnapshot, error) 
 		alert_count, warning_count, alerts_json, warnings_json,
 		chain_valid, policy_denies, policy_no_match,
 		mutations_total, mutations_destructive,
-		pending_approvals, stale_approvals, decisions_by_resource`
+		pending_approvals, stale_approvals,
+		decisions_by_resource, invocations_by_resource`
 
 	if window != "" {
 		q = h.rebind(`SELECT ` + cols + `
@@ -246,7 +258,8 @@ func (h *localHistoryStore) recent(window string, n int) ([]runSnapshot, error) 
 			&s.AlertCount, &s.WarningCount, &s.AlertsJSON, &s.WarningsJSON,
 			&chainInt, &s.PolicyDenies, &s.PolicyNoMatch,
 			&s.MutationsTotal, &s.MutationsDestructive,
-			&s.PendingApprovals, &s.StaleApprovals, &s.DecisionsByResource,
+			&s.PendingApprovals, &s.StaleApprovals,
+			&s.DecisionsByResource, &s.InvocationsByResource,
 		); err != nil {
 			return nil, fmt.Errorf("scan govbot run: %w", err)
 		}
@@ -412,7 +425,8 @@ func snapToRun(s runSnapshot) audit.GovbotRun {
 		MutationsDestructive: s.MutationsDestructive,
 		PendingApprovals:     s.PendingApprovals,
 		StaleApprovals:       s.StaleApprovals,
-		DecisionsByResource:  s.DecisionsByResource,
+		DecisionsByResource:   s.DecisionsByResource,
+		InvocationsByResource: s.InvocationsByResource,
 	}
 }
 
@@ -434,7 +448,8 @@ func runToSnap(r audit.GovbotRun) runSnapshot {
 		MutationsDestructive: r.MutationsDestructive,
 		PendingApprovals:     r.PendingApprovals,
 		StaleApprovals:       r.StaleApprovals,
-		DecisionsByResource:  r.DecisionsByResource,
+		DecisionsByResource:   r.DecisionsByResource,
+		InvocationsByResource: r.InvocationsByResource,
 	}
 }
 
