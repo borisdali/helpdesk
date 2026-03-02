@@ -9,7 +9,7 @@ The AI Governance module is critical for risk management associated with
 making changes to your databases and infrastructure (K8s/VM) and it has
 to be explicitly enabled prior to changing aiHelpDesk operating mode
 from `readonly` to `fix` to allow mutations. For the broader AI Governance
-architecture see [here](AIGOVERNANCE.md).For AI Governance Policy Engine's
+architecture see [here](AIGOVERNANCE.md). For AI Governance Policy Engine's
 decision history see [here](GOVEXPLAIN.md).
 For AI Governance Compliance sub-module see [here](GOVBOT_SAMPLE.md).
 
@@ -239,12 +239,12 @@ post-check).
 
 ## 2. Two-step `review-and-confirm` process
 
-This is all about informed consent. Upstream agents and SRE framework
+This is all about informed consent. Upstream agents and SRE frameworks
 calling aiHelpDesk for database troubleshooting as well as aiHelpDesk's
-own upcoming autonomous mode are a special category with no
+own autonomous mode are a special category with no
 human-in-the-loop to confirm, but the interactive aiHelpDesk sessions
 present an opportunity for a human operator to fully review the
-consequences of a `write` (W) or `destructive` (D) request.
+consequences of any `write` (W) or `destructive` (D) request.
 
 ### Database agent
 

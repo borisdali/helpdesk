@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -23,6 +24,14 @@ func (s *govbotServer) handleSaveRun(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SaveRun(run); err != nil {
 		http.Error(w, "failed to save run: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Prune old rows for this gateway if the caller supplied ?retain=N.
+	if retainStr := r.URL.Query().Get("retain"); retainStr != "" {
+		if retain, err := strconv.Atoi(retainStr); err == nil && retain > 0 {
+			if err := s.store.Prune(run.Gateway, retain); err != nil {
+				slog.Warn("failed to prune govbot runs", "gateway", run.Gateway, "err", err)
+			}
+		}
 	}
 	w.WriteHeader(http.StatusCreated)
 }

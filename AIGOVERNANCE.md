@@ -660,16 +660,23 @@ Gateway /api/v1/governance/* → govbot → compliance report + optional Slack a
 govbot is stateless and read-only. No audit socket access or cluster privileges
 are required — only network access to the gateway.
 
+For the full compliance architecture — tool invocation instrumentation, policy
+coverage gap analysis, dead rule detection, compliance history, and the
+historical trend block — see **[COMPLIANCE.md](COMPLIANCE.md)**.
+
 ### 8.1 Compliance Phases
 
 ```
-Phase 1 — Governance Status:       GET /api/v1/governance
-Phase 2 — Policy Overview:         Detailed policy rule breakdown
-Phase 3 — Audit Activity:          GET /api/v1/governance/events?since=...
-Phase 4 — Policy Decision Analysis: Per-resource allow/deny/no-match breakdown
-Phase 5 — Pending Approvals:       GET /api/v1/governance/approvals/pending
-Phase 6 — Chain Integrity:         GET /api/v1/governance/verify
-Phase 7 — Compliance Summary:      Aggregated alerts and warnings + optional Slack post
+Phase  1 — Governance Status
+Phase  2 — Policy Overview
+Phase  3 — Audit Activity
+Phase  4 — Policy Decision Analysis
+Phase  5 — Agent Enforcement Coverage
+Phase  6 — Pending Approvals
+Phase  7 — Chain Integrity
+Phase  8 — Mutation Activity
+Phase  9 — Policy Coverage Analysis   (tool_invoked vs policy_decision gaps)
+Phase 10 — Compliance Summary
 ```
 
 ### 8.2 Exit Codes

@@ -306,15 +306,19 @@ func openRemoteHistory(auditURL, gatewayURL string) *remoteHistoryClient {
 	}
 }
 
-// save POSTs one run snapshot to auditd. The retain parameter is ignored — the
-// auditd service manages its own data lifecycle.
-func (r *remoteHistoryClient) save(snap runSnapshot, _ int) error {
+// save POSTs one run snapshot to auditd. When retain > 0 it is forwarded as a
+// ?retain=N query parameter so auditd can prune stale rows for this gateway.
+func (r *remoteHistoryClient) save(snap runSnapshot, retain int) error {
 	run := snapToRun(snap)
 	body, err := json.Marshal(run)
 	if err != nil {
 		return fmt.Errorf("marshal govbot run: %w", err)
 	}
-	resp, err := r.client.Post(r.auditURL+"/v1/govbot/runs", "application/json", bytes.NewReader(body))
+	saveURL := r.auditURL + "/v1/govbot/runs"
+	if retain > 0 {
+		saveURL += fmt.Sprintf("?retain=%d", retain)
+	}
+	resp, err := r.client.Post(saveURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("POST /v1/govbot/runs: %w", err)
 	}
@@ -451,6 +455,33 @@ func runToSnap(r audit.GovbotRun) runSnapshot {
 		DecisionsByResource:   r.DecisionsByResource,
 		InvocationsByResource: r.InvocationsByResource,
 	}
+}
+
+// ── Coverage helpers ──────────────────────────────────────────────────────────
+
+// coveragePct parses an InvocationsByResource JSON blob and returns the overall
+// coverage percentage (checked/invoked × 100) and whether the data was
+// available. Returns (0, false) when the blob is empty or malformed.
+func coveragePct(invByResourceJSON string) (float64, bool) {
+	if invByResourceJSON == "" || invByResourceJSON == "{}" || invByResourceJSON == "null" {
+		return 0, false
+	}
+	var entries map[string]struct {
+		Invoked int `json:"invoked"`
+		Checked int `json:"checked"`
+	}
+	if err := json.Unmarshal([]byte(invByResourceJSON), &entries); err != nil || len(entries) == 0 {
+		return 0, false
+	}
+	totalInvoked, totalChecked := 0, 0
+	for _, e := range entries {
+		totalInvoked += e.Invoked
+		totalChecked += e.Checked
+	}
+	if totalInvoked == 0 {
+		return 0, false
+	}
+	return float64(totalChecked) * 100 / float64(totalInvoked), true
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────

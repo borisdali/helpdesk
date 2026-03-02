@@ -18,17 +18,23 @@ privileges are required — only network access to the gateway.
 
 ## 2. Compliance Phases
 
-govbot runs seven sequential phases and exits:
+govbot runs ten sequential phases and exits:
 
 ```
-Phase 1 — Governance Status:     GET /api/v1/governance
-Phase 2 — Policy Overview:       Detailed policy rule breakdown from Phase 1 data
-Phase 3 — Audit Activity:        GET /api/v1/governance/events?since=...&limit=1000
-Phase 4 — Policy Decision Analysis: Per-resource allow/deny/no-match breakdown
-Phase 5 — Pending Approvals:     GET /api/v1/governance/approvals/pending
-Phase 6 — Chain Integrity:       GET /api/v1/governance/verify
-Phase 7 — Compliance Summary:    Aggregated alerts and warnings + optional Slack post
+Phase  1 — Governance Status:         GET /api/v1/governance
+Phase  2 — Policy Overview:           Detailed policy rule breakdown from Phase 1 data
+Phase  3 — Audit Activity:            GET /api/v1/governance/events?since=...&limit=1000
+Phase  4 — Policy Decision Analysis:  Per-resource allow/deny/no-match breakdown
+Phase  5 — Agent Enforcement Coverage:Coverage by agent type
+Phase  6 — Pending Approvals:         GET /api/v1/governance/approvals/pending
+Phase  7 — Chain Integrity:           GET /api/v1/governance/verify
+Phase  8 — Mutation Activity:         Write and destructive tool breakdown
+Phase  9 — Policy Coverage Analysis:  tool_invoked vs policy_decision gap analysis
+Phase 10 — Compliance Summary:        Aggregated alerts and warnings + optional Slack post
 ```
+
+See [COMPLIANCE.md](../../COMPLIANCE.md) for a full description of each phase,
+coverage gap detection, dead rule detection, and the historical trend block.
 
 ## 3. Exit Codes
 

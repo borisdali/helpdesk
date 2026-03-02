@@ -925,6 +925,39 @@ func main() {
 				invByResource[k.resource+":"+k.action] = invEntry{cs.invoked, cs.checked}
 			}
 			snap.InvocationsByResource = marshalJSON(invByResource)
+
+			// Dead rule detection: cross-reference policy resource types against
+			// the resource types we actually observed tool_invoked events for.
+			// A policy covering a resource type with zero invocations in the
+			// window may indicate stale rules or an agent that never ran.
+			if info.Policy != nil && info.Policy.Enabled {
+				seenTypes := make(map[string]bool)
+				for k := range byCov {
+					if slash := strings.Index(k.resource, "/"); slash > 0 {
+						seenTypes[k.resource[:slash]] = true
+					}
+				}
+				var deadRules []string
+				for _, pol := range info.Policy.Policies {
+					if !pol.Enabled {
+						continue
+					}
+					for _, resType := range pol.Resources {
+						if !seenTypes[resType] {
+							deadRules = append(deadRules,
+								fmt.Sprintf("policy %q covers resource type %q — no tool_invoked events in window", pol.Name, resType))
+						}
+					}
+				}
+				if len(deadRules) > 0 {
+					fmt.Println()
+					logf("Dead policy rules (policy exists but no invocations observed):")
+					for _, dr := range deadRules {
+						logf("  ⚠ WARN  %s", dr)
+						warnings = append(warnings, dr)
+					}
+				}
+			}
 		}
 	}
 	fmt.Println()
@@ -980,6 +1013,8 @@ func main() {
 				healthy, warnings_, alerts_ := 0, 0, 0
 				totalDenies, totalMuts, chainOK := 0, 0, 0
 				totalStale := 0
+				totalCov := 0.0
+				covRuns := 0
 				for _, p := range prev {
 					switch p.Status {
 					case "healthy":
@@ -994,6 +1029,10 @@ func main() {
 					totalStale += p.StaleApprovals
 					if p.ChainValid {
 						chainOK++
+					}
+					if pct, ok := coveragePct(p.InvocationsByResource); ok {
+						totalCov += pct
+						covRuns++
 					}
 				}
 				n := len(prev)
@@ -1017,6 +1056,19 @@ func main() {
 				logf("  Mutations:  avg %.1f/run   today %d%s", avgMuts, snap.MutationsTotal, mutsArrow)
 				logf("  Chain:      valid %d/%d", chainOK, n)
 				logf("  Stale apr:  avg %.1f/run   today %d", avgStale, snap.StaleApprovals)
+				if covRuns > 0 {
+					avgCov := totalCov / float64(covRuns)
+					todayCovPct, hasCov := coveragePct(snap.InvocationsByResource)
+					covArrow := ""
+					if hasCov && todayCovPct < avgCov-5 {
+						covArrow = "  ↓ below avg"
+					}
+					todayCovStr := "N/A"
+					if hasCov {
+						todayCovStr = fmt.Sprintf("%.0f%%", todayCovPct)
+					}
+					logf("  Coverage:   avg %.0f%%/run   today %s%s", avgCov, todayCovStr, covArrow)
+				}
 			}
 		}
 	}

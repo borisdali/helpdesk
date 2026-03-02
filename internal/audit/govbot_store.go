@@ -123,6 +123,23 @@ func (s *GovbotStore) SaveRun(run GovbotRun) error {
 	return err
 }
 
+// Prune deletes the oldest govbot_runs for the given gateway, keeping at most
+// retain rows. It is a no-op when retain ≤ 0 or gateway is empty.
+func (s *GovbotStore) Prune(gateway string, retain int) error {
+	if retain <= 0 || gateway == "" {
+		return nil
+	}
+	q := rebind(s.isPostgres, `DELETE FROM govbot_runs
+		WHERE gateway = ?
+		AND id NOT IN (
+			SELECT id FROM govbot_runs
+			WHERE gateway = ?
+			ORDER BY run_at DESC LIMIT ?
+		)`)
+	_, err := s.db.Exec(q, gateway, gateway, retain)
+	return err
+}
+
 // RecentRuns returns the last limit runs, newest first. Pass window="" to
 // return runs across all windows. Pass gateway="" to return all gateways.
 func (s *GovbotStore) RecentRuns(window, gateway string, limit int) ([]GovbotRun, error) {

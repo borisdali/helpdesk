@@ -300,3 +300,67 @@ func TestHistory_RemoteClient(t *testing.T) {
 		t.Fatalf("printTable: %v", err)
 	}
 }
+
+// TestHistory_RemoteClient_Retain verifies that the retain parameter is
+// forwarded as ?retain=N in the POST URL so that the remote store prunes old
+// rows. The fake server echoes back the query param to verify it arrived.
+func TestHistory_RemoteClient_Retain(t *testing.T) {
+	var gotRetain string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/govbot/runs", func(w http.ResponseWriter, r *http.Request) {
+		gotRetain = r.URL.Query().Get("retain")
+		var run audit.GovbotRun
+		if err := json.NewDecoder(r.Body).Decode(&run); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("GET /v1/govbot/runs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]audit.GovbotRun{}) //nolint:errcheck
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	rc := openRemoteHistory(srv.URL, "http://gateway:8080")
+	snap := makeSnap("healthy", "24h", 0, 0, true)
+	if err := rc.save(snap, 30); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if gotRetain != "30" {
+		t.Errorf("retain query param = %q, want %q", gotRetain, "30")
+	}
+}
+
+// TestCoveragePct verifies that coveragePct correctly parses the
+// InvocationsByResource JSON and computes checked/invoked × 100.
+func TestCoveragePct(t *testing.T) {
+	cases := []struct {
+		name    string
+		json    string
+		wantPct float64
+		wantOK  bool
+	}{
+		{"empty string", "", 0, false},
+		{"empty object", "{}", 0, false},
+		{"null", "null", 0, false},
+		{"all checked", `{"database/prod:write":{"invoked":4,"checked":4}}`, 100, true},
+		{"half checked", `{"database/prod:write":{"invoked":4,"checked":2}}`, 50, true},
+		{"zero invoked", `{"database/prod:write":{"invoked":0,"checked":0}}`, 0, false},
+		{"multi resource", `{"a:write":{"invoked":2,"checked":2},"b:read":{"invoked":2,"checked":0}}`, 50, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pct, ok := coveragePct(tc.json)
+			if ok != tc.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && pct != tc.wantPct {
+				t.Errorf("pct = %f, want %f", pct, tc.wantPct)
+			}
+		})
+	}
+}

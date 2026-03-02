@@ -1,4 +1,4 @@
-# Policy Explainability: govexplain Reference
+# aiHelpDesk Policy Engine Explainability: govexplain Reference
 
 This document covers the `govexplain` CLI and the supporting explainability
 infrastructure in auditd. It assumes the governance system is running (policy
