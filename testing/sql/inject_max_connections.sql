@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Saturate max_connections by opening idle connections via dblink.
 -- Requires the dblink extension. Runs inside the pgloader sidecar via docker exec.
 -- With max_connections=20 and ~3 reserved for superuser, opening 18 connections

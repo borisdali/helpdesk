@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Terminate the long-running query and clean up.
 
 -- Cancel the background query.

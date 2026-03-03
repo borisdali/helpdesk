@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Inject lock contention: two sessions each holding a lock the other wants.
 -- Session A locks row 1, then tries to lock row 2.
 -- Session B locks row 2, then tries to lock row 1.

@@ -317,3 +317,149 @@ The database server at `localhost:15432` **is running and accessible**, but it h
 Once you increase `max_connections` or reduce active connections, users should be able to reconnect.
 User ->
 ```
+
+---
+
+## Mutation Safeguard Verification
+
+The database and K8s agents implement two-level post-mutation verification for
+`terminate_connection`, `cancel_query`, `delete_pod`, `restart_deployment`, and
+`scale_deployment`. The tests below verify that these safeguards surface a clear
+failure message to the user instead of silently reporting success when the
+underlying operation did not take effect.
+
+### Layer 2 (Component) — Unit tests with sequence mocks
+
+The fast path. These run as part of `go test ./...` with no external
+dependencies:
+
+```
+go test ./agents/database/... -v -run "TestTerminateConnectionTool_Level|TestCancelQueryTool_Level"
+go test ./agents/k8s/...     -v -run "TestDeletePodTool_Verification|TestRestartDeploymentTool_Verification|TestScaleDeploymentTool_Verification"
+```
+
+Each test uses a sequence mock that injects the failure condition at the
+verification step (call #2 or #3), then asserts that the tool returns the
+expected `TERMINATION FAILED` / `CANCELLATION FAILED` / `VERIFICATION FAILED` /
+`VERIFICATION WARNING` message.
+
+| Test | Safeguard triggered | Injected condition |
+|---|---|---|
+| `TestTerminateConnectionTool_Level1_ReturnedFalse` | DB Level 1 | `pg_terminate_backend` returns `f` |
+| `TestTerminateConnectionTool_Level2_PidStillAlive` | DB Level 2 | `still_alive = 1` in verify query |
+| `TestCancelQueryTool_Level1_ReturnedFalse` | DB Level 1 | `pg_cancel_backend` returns `f` |
+| `TestCancelQueryTool_Level2_StillActive` | DB Level 2 | `state = active` in verify query |
+| `TestDeletePodTool_VerificationWarning_PodStillTerminating` | K8s Level 2 | `kubectl get pod` exits 0 (pod still visible) |
+| `TestRestartDeploymentTool_VerificationWarning_AnnotationMissing` | K8s Level 2 | `restartedAt` absent from annotations |
+| `TestScaleDeploymentTool_VerificationFailed_WrongReplicas` | K8s Level 2 | `spec.replicas` doesn't match requested count |
+
+
+### Layer 3/4 (Integration) — Real infrastructure scenarios
+
+These require a running database or cluster. They confirm the safeguards fire
+against real PostgreSQL and Kubernetes semantics, not just mock responses.
+
+---
+
+#### DB Level 1: non-superuser cannot terminate privileged session
+
+**What it tests:** `pg_terminate_backend()` returns `false` when a role without
+`pg_signal_backend` tries to terminate a superuser backend.
+
+**Infrastructure needed:** the test Docker Compose stack
+(`testing/docker/docker-compose.yaml`).
+
+**Steps:**
+
+```bash
+# 1. Start the test database
+docker compose -f testing/docker/docker-compose.yaml up -d
+
+# 2. Inject the scenario (runs inside the pgloader container)
+docker compose -f testing/docker/docker-compose.yaml exec pgloader \
+    bash /testing/sql/inject_terminate_permission_denied.sh
+
+# The script prints a restricted connection string, e.g.:
+#   host=postgres port=5432 dbname=testdb user=helpdesk_restricted_test password=Restricted1!
+
+# 3. Start the database agent and the orchestrator (or use gateway-repl.sh).
+#    Connect the agent using the RESTRICTED connection string.
+
+# 4. Ask the agent:
+#    "Show me all active connections on host=postgres port=5432 dbname=testdb
+#     user=helpdesk_restricted_test password=Restricted1!
+#     and terminate the pg_sleep session."
+
+# Expected: agent calls get_active_connections, identifies the sleeping PID,
+# calls terminate_connection, and reports:
+#   "TERMINATION FAILED: pg_terminate_backend(<pid>) returned false.
+#    The backend may have already exited or this role lacks pg_signal_backend privilege."
+# NOT: "✅ Connection terminated successfully."
+
+# 5. Tear down
+docker compose -f testing/docker/docker-compose.yaml exec pgloader \
+    bash /testing/sql/teardown_terminate_permission_denied.sh
+docker compose -f testing/docker/docker-compose.yaml down -v
+```
+
+---
+
+#### K8s Level 2: pod stuck in Terminating due to blocking finalizer
+
+**What it tests:** `kubectl delete pod` is accepted (exit 0) but the pod stays
+in `Terminating` state because a finalizer is never cleared. The Level-2
+verification check finds the pod still visible and returns `VERIFICATION WARNING`.
+
+**Infrastructure needed:** any reachable Kubernetes cluster (kind, minikube, or
+a real cluster).
+
+**Steps:**
+
+```bash
+# 1. Create a pod with a blocking finalizer
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stuck-terminating-test
+  namespace: default
+  finalizers:
+    - helpdesk.io/test-block   # never cleared — blocks deletion
+spec:
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+EOF
+
+# Wait for the pod to be Running
+kubectl wait pod stuck-terminating-test -n default --for=condition=Ready --timeout=60s
+
+# 2. Ask the agent:
+#    "Delete the pod stuck-terminating-test in namespace default."
+
+# Expected: agent calls delete_pod, kubectl accepts the deletion, but the
+# Level-2 check (kubectl get pod) finds the pod still present and returns:
+#   "VERIFICATION WARNING: pod "stuck-terminating-test" still appears in namespace
+#    "default" after deletion. It may still be in Terminating state."
+# NOT: silent success.
+
+# 3. Clean up — remove the finalizer so the pod can actually terminate
+kubectl patch pod stuck-terminating-test -n default \
+    -p '{"metadata":{"finalizers":[]}}' --type=merge
+kubectl delete pod stuck-terminating-test -n default --ignore-not-found
+```
+
+---
+
+#### DB Level 2: backend ignores SIGTERM (advanced / hard to reproduce)
+
+`pg_terminate_backend()` sends SIGTERM to the backend process. In rare cases a
+backend stuck in an uninterruptible kernel wait (e.g. waiting on NFS I/O or a
+blocking system call) will not respond to SIGTERM, leaving the PID present in
+`pg_stat_activity` even after `pg_terminate_backend` returns `true`.
+
+This scenario is difficult to reproduce reliably in CI. The safeguard for it is
+the Level-2 verify query (`SELECT count(*) AS still_alive FROM pg_stat_activity
+WHERE pid = X`). To test the code path in isolation, use the unit test
+`TestTerminateConnectionTool_Level2_PidStillAlive` which mocks the verify
+response to `still_alive = 1`.

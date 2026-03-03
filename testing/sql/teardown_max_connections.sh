@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Kill all flood psql processes spawned by inject_max_connections.sh.
 if [ -f /tmp/flood_pids.txt ]; then
     while read pid; do

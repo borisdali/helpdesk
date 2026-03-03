@@ -40,6 +40,38 @@ func withMockRunner(output string, err error) func() {
 	return func() { cmdRunner = old }
 }
 
+// psqlResponse holds one (output, error) pair for a sequenced psql mock.
+type psqlResponse struct {
+	out string
+	err error
+}
+
+// seqMockRunner is a CommandRunner that returns a different response for each
+// successive call. The last entry is reused once the slice is exhausted.
+type seqMockRunner struct {
+	calls []psqlResponse
+	i     int
+}
+
+func (m *seqMockRunner) Run(_ context.Context, _ string, _ []string, _ []string) (string, error) {
+	if m.i >= len(m.calls) {
+		last := m.calls[len(m.calls)-1]
+		return last.out, last.err
+	}
+	r := m.calls[m.i]
+	m.i++
+	return r.out, r.err
+}
+
+// withMockRunnerSequence replaces cmdRunner with a seqMockRunner.
+// Use this instead of withMockRunner when a tool makes more than one psql call
+// (e.g. inspectConnection + mutation + Level-2 verification).
+func withMockRunnerSequence(calls ...psqlResponse) func() {
+	old := cmdRunner
+	cmdRunner = &seqMockRunner{calls: calls}
+	return func() { cmdRunner = old }
+}
+
 // mockToolContext implements tool.Context for testing.
 type mockToolContext struct {
 	context.Context
@@ -1256,6 +1288,60 @@ func TestCancelQueryTool_Failure(t *testing.T) {
 	}
 }
 
+func TestCancelQueryTool_Level1_ReturnedFalse(t *testing.T) {
+	// pg_cancel_backend() returned "f" — SIGINT was not delivered.
+	// Level-1 check must surface CANCELLATION FAILED instead of silent success.
+	//   call #1: inspectConnection
+	//   call #2: runPsqlAs — pg_cancel_backend returns "f"
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\ncancelled       | f\npid             | 12345\n", err: nil},
+	)()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              12345,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "CANCELLATION FAILED") {
+		t.Errorf("cancelQueryTool() output = %q, want 'CANCELLATION FAILED'", result.Output)
+	}
+	if !strings.Contains(result.Output, "12345") {
+		t.Errorf("cancelQueryTool() output = %q, want PID in failure message", result.Output)
+	}
+}
+
+func TestCancelQueryTool_Level2_StillActive(t *testing.T) {
+	// pg_cancel_backend() returned "t" but the backend's state is still "active".
+	// The query may be in a non-interruptible kernel call; Level-2 fires a warning.
+	//   call #1: inspectConnection
+	//   call #2: runPsqlAs — pg_cancel_backend returns "t"
+	//   call #3: runPsql (verify) — state = active
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\ncancelled       | t\npid             | 12345\n", err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+------\nstate | active\n", err: nil},
+	)()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              12345,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("cancelQueryTool() output = %q, want 'VERIFICATION WARNING'", result.Output)
+	}
+	if !strings.Contains(result.Output, "12345") {
+		t.Errorf("cancelQueryTool() output = %q, want PID in warning", result.Output)
+	}
+}
+
 // =============================================================================
 // terminateConnectionTool
 // =============================================================================
@@ -1321,6 +1407,71 @@ func TestTerminateConnectionTool_Failure(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "terminate_connection") {
 		t.Errorf("terminateConnectionTool() output = %q, want tool name in error", result.Output)
+	}
+}
+
+// inspectOutput is a minimal pg_stat_activity record used as the response for
+// the inspectConnection step (call #1) in sequence-mock tests.
+const testInspectOutput = `-[ RECORD 1 ]---+------------------------------
+pid             | 5678
+usename         | slow_client
+datname         | appdb
+state           | idle in transaction
+current_query   | BEGIN
+`
+
+func TestTerminateConnectionTool_Level1_ReturnedFalse(t *testing.T) {
+	// pg_terminate_backend() returned "f" — the backend was not terminated.
+	// Level-1 check must surface a clear TERMINATION FAILED message instead of
+	// silently returning success (the hallucination scenario).
+	//   call #1: inspectConnection (get_session_info)
+	//   call #2: runPsqlAs — pg_terminate_backend returns "f"
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\nterminated      | f\npid             | 5678\n", err: nil},
+	)()
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "TERMINATION FAILED") {
+		t.Errorf("terminateConnectionTool() output = %q, want 'TERMINATION FAILED'", result.Output)
+	}
+	if !strings.Contains(result.Output, "5678") {
+		t.Errorf("terminateConnectionTool() output = %q, want PID in failure message", result.Output)
+	}
+}
+
+func TestTerminateConnectionTool_Level2_PidStillAlive(t *testing.T) {
+	// pg_terminate_backend() returned "t" but the backend is still present in
+	// pg_stat_activity — the Level-2 verification check must fire.
+	//   call #1: inspectConnection
+	//   call #2: runPsqlAs — pg_terminate_backend returns "t"
+	//   call #3: runPsql (verify) — still_alive = 1
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\nterminated      | t\npid             | 5678\n", err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+---\nstill_alive | 1\n", err: nil},
+	)()
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION FAILED") {
+		t.Errorf("terminateConnectionTool() output = %q, want 'VERIFICATION FAILED'", result.Output)
+	}
+	if !strings.Contains(result.Output, "5678") {
+		t.Errorf("terminateConnectionTool() output = %q, want PID in verification message", result.Output)
 	}
 }
 

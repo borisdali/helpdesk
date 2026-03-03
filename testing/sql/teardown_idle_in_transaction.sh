@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Tear down the idle-in-transaction fault scenario.
 
 # Kill the shell process (psql) if it is still running.

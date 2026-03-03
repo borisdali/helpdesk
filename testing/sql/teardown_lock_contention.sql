@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Clean up lock contention sessions.
 
 -- Terminate any sessions still holding locks on the test table.

@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Inject a long-running query that holds an ACCESS EXCLUSIVE lock on a table.
 -- This blocks all other queries against that table.
 

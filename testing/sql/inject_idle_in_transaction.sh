@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Inject: a session stuck in a long-running transaction with uncommitted writes.
 #
 # The injected backend:

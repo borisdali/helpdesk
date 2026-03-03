@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Kill the long-running query and clean up.
 
 if [ -f /tmp/long_query_pid.txt ]; then

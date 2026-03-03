@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Inject lock contention: two sessions each holding a row lock the other wants.
 # PostgreSQL detects the deadlock after deadlock_timeout and kills one session,
 # but the surviving session keeps its lock visible in pg_locks.

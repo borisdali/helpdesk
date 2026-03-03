@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Spawn 20 psql connections inside the pgloader container.
 # Each runs pg_sleep(3600) to hold the connection open for 1 hour.
 # With max_connections=20, this fills ALL slots including the 3

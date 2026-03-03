@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Close all flood connections opened by inject_max_connections.sql.
 DO $$
 DECLARE

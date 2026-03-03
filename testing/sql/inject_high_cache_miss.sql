@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Inject high cache miss ratio: create a table larger than shared_buffers (32MB)
 -- and perform a sequential scan, pushing the cache hit ratio down.
 

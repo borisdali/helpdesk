@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Clean up lock contention sessions.
 
 for f in /tmp/lock_sess_a_pid.txt /tmp/lock_sess_b_pid.txt; do

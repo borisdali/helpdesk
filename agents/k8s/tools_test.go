@@ -53,6 +53,33 @@ func withMockKubectl(output string, err error) func() {
 	return func() { runKubectl = orig }
 }
 
+// kubectlResponse holds one (output, error) pair for a sequenced kubectl mock.
+type kubectlResponse struct {
+	out string
+	err error
+}
+
+// withMockKubectlSequence replaces runKubectl with a mock that returns a
+// different response for each successive call. The last entry in calls is
+// reused for any calls beyond the slice length, so tests that don't care
+// about extra calls can provide a safe default as the last element.
+// Use this instead of withMockKubectl when a tool makes more than one
+// kubectl call (e.g. mutation + Level-2 verification).
+func withMockKubectlSequence(calls ...kubectlResponse) func() {
+	orig := runKubectl
+	i := 0
+	runKubectl = func(_ context.Context, _ string, _ ...string) (string, error) {
+		if i >= len(calls) {
+			last := calls[len(calls)-1]
+			return last.out, last.err
+		}
+		r := calls[i]
+		i++
+		return r.out, r.err
+	}
+	return func() { runKubectl = orig }
+}
+
 // withK8sPolicyEnforcer temporarily sets the package-level policyEnforcer.
 func withK8sPolicyEnforcer(e *agentutil.PolicyEnforcer) func() {
 	old := policyEnforcer
@@ -308,7 +335,11 @@ func TestParsePodsAffected(t *testing.T) {
 
 func TestDeletePodTool_Success(t *testing.T) {
 	mockOutput := `pod "web-abc123" deleted` + "\n"
-	defer withMockKubectl(mockOutput, nil)()
+	// Call 1: delete succeeds. Call 2: verification get-pod returns "not found" → pod is gone.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: "", err: fmt.Errorf(`kubectl failed: exit status 1\nOutput: Error from server (NotFound): pods "web-abc123" not found`)},
+	)()
 
 	ctx := newK8sTestContext()
 	result, err := deletePodTool(ctx, DeletePodArgs{
@@ -328,7 +359,10 @@ func TestDeletePodTool_Success(t *testing.T) {
 
 func TestDeletePodTool_WithGracePeriod(t *testing.T) {
 	mockOutput := `pod "stuck-pod-xyz" deleted` + "\n"
-	defer withMockKubectl(mockOutput, nil)()
+	defer withMockKubectlSequence(
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: "", err: fmt.Errorf(`kubectl failed: exit status 1\nOutput: Error from server (NotFound): pods "stuck-pod-xyz" not found`)},
+	)()
 
 	ctx := newK8sTestContext()
 	result, err := deletePodTool(ctx, DeletePodArgs{
@@ -360,6 +394,33 @@ func TestDeletePodTool_Failure(t *testing.T) {
 	}
 }
 
+func TestDeletePodTool_VerificationWarning_PodStillTerminating(t *testing.T) {
+	// Simulates a pod that entered Terminating state but the API still shows it.
+	// Level-2 verification fires because kubectl get pod returns exit 0.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil}, // delete accepted
+		kubectlResponse{out: "NAME      READY   STATUS\nstuck-pod 0/1     Terminating\n", err: nil}, // pod still visible
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := deletePodTool(ctx, DeletePodArgs{
+		Namespace: "production",
+		PodName:   "stuck-pod",
+	})
+	if err != nil {
+		t.Fatalf("deletePodTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("deletePodTool() output = %q, want VERIFICATION WARNING", result.Output)
+	}
+	if !strings.Contains(result.Output, "stuck-pod") {
+		t.Errorf("deletePodTool() output = %q, want pod name in warning", result.Output)
+	}
+	if !strings.Contains(result.Output, "Terminating") {
+		t.Errorf("deletePodTool() output = %q, want monitoring hint in warning", result.Output)
+	}
+}
+
 func TestDeletePodTool_PolicyDenied(t *testing.T) {
 	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
 	defer withMockKubectl("", nil)() // should not be reached
@@ -383,7 +444,11 @@ func TestDeletePodTool_PolicyDenied(t *testing.T) {
 
 func TestRestartDeploymentTool_Success(t *testing.T) {
 	mockOutput := `deployment.apps "api-server" restarted` + "\n"
-	defer withMockKubectl(mockOutput, nil)()
+	// Call 1: rollout restart. Call 2: verification get-deployment annotations → restartedAt present.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: `map[kubectl.kubernetes.io/restartedAt:2026-03-03T10:00:00Z]`, err: nil},
+	)()
 
 	ctx := newK8sTestContext()
 	result, err := restartDeploymentTool(ctx, RestartDeploymentArgs{
@@ -414,6 +479,30 @@ func TestRestartDeploymentTool_Failure(t *testing.T) {
 	}
 }
 
+func TestRestartDeploymentTool_VerificationWarning_AnnotationMissing(t *testing.T) {
+	// Simulates a restart command that appeared to succeed but the restartedAt
+	// annotation is absent from the deployment spec — Level-2 verification fires.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `deployment.apps "api-server" restarted` + "\n", err: nil},
+		kubectlResponse{out: `map[]`, err: nil}, // annotations map is empty
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := restartDeploymentTool(ctx, RestartDeploymentArgs{
+		Namespace:      "staging",
+		DeploymentName: "api-server",
+	})
+	if err != nil {
+		t.Fatalf("restartDeploymentTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("restartDeploymentTool() output = %q, want VERIFICATION WARNING", result.Output)
+	}
+	if !strings.Contains(result.Output, "api-server") {
+		t.Errorf("restartDeploymentTool() output = %q, want deployment name in warning", result.Output)
+	}
+}
+
 func TestRestartDeploymentTool_PolicyDenied(t *testing.T) {
 	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
 	defer withMockKubectl("", nil)() // should not be reached
@@ -437,7 +526,11 @@ func TestRestartDeploymentTool_PolicyDenied(t *testing.T) {
 
 func TestScaleDeploymentTool_Success(t *testing.T) {
 	mockOutput := `deployment.apps "web" scaled` + "\n"
-	defer withMockKubectl(mockOutput, nil)()
+	// Call 1: scale. Call 2: verification get spec.replicas → matches requested 5.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: "5", err: nil},
+	)()
 
 	ctx := newK8sTestContext()
 	result, err := scaleDeploymentTool(ctx, ScaleDeploymentArgs{
@@ -455,7 +548,11 @@ func TestScaleDeploymentTool_Success(t *testing.T) {
 
 func TestScaleDeploymentTool_ScaleToZero(t *testing.T) {
 	mockOutput := `deployment.apps "batch-worker" scaled` + "\n"
-	defer withMockKubectl(mockOutput, nil)()
+	// Call 1: scale to 0. Call 2: verification get spec.replicas → "0".
+	defer withMockKubectlSequence(
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: "0", err: nil},
+	)()
 
 	ctx := newK8sTestContext()
 	result, err := scaleDeploymentTool(ctx, ScaleDeploymentArgs{
@@ -488,6 +585,31 @@ func TestScaleDeploymentTool_Failure(t *testing.T) {
 	}
 }
 
+func TestScaleDeploymentTool_VerificationFailed_WrongReplicas(t *testing.T) {
+	// Simulates the kubectl scale command reporting success but spec.replicas
+	// not matching the requested count — Level-2 verification fires.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil},
+		kubectlResponse{out: "3", err: nil}, // actual replicas is 3, not the requested 5
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "production",
+		DeploymentName: "web",
+		Replicas:       5,
+	})
+	if err != nil {
+		t.Fatalf("scaleDeploymentTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION FAILED") {
+		t.Errorf("scaleDeploymentTool() output = %q, want VERIFICATION FAILED", result.Output)
+	}
+	if !strings.Contains(result.Output, "web") {
+		t.Errorf("scaleDeploymentTool() output = %q, want deployment name in output", result.Output)
+	}
+}
+
 func TestScaleDeploymentTool_PolicyDenied(t *testing.T) {
 	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
 	defer withMockKubectl("", nil)() // should not be reached
@@ -514,7 +636,10 @@ func TestDeletePodTool_BlastRadiusAllowed(t *testing.T) {
 	// Policy: allow destructive with max 2 pods; 1 pod deleted — should pass.
 	defer withK8sPolicyEnforcer(newK8sBlastRadiusEnforcer(t, 2))()
 	mockOutput := `pod "pod-one" deleted` + "\n"
-	defer withMockKubectl(mockOutput, nil)()
+	defer withMockKubectlSequence(
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: "", err: fmt.Errorf(`kubectl failed: exit status 1\nOutput: Error from server (NotFound): pods "pod-one" not found`)},
+	)()
 
 	ctx := newK8sTestContext()
 	result, err := deletePodTool(ctx, DeletePodArgs{

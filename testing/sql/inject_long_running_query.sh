@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# aiHelpDesk fault injection helpder script.
+#
 # Spawn a psql session that holds an ACCESS EXCLUSIVE lock on a table for 5 minutes.
 # This blocks all other queries against the table.
 

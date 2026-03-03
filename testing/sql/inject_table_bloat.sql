@@ -1,3 +1,6 @@
+--
+-- aiHelpDesk fault injection helpder script.
+--
 -- Inject table bloat: insert many rows, delete most, disable autovacuum.
 -- This creates a large number of dead tuples visible in pg_stat_user_tables.
 
