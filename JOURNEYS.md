@@ -62,10 +62,10 @@ curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=agent_reas
 | Prefix | Origin |
 |--------|--------|
 | `tr_` | Natural-language query via `POST /api/v1/query` (orchestrator-routed) |
-| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (gateway direct) |
+| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (Gateway direct) |
 
 Events without a `trace_id` are agent invocations that predate trace propagation
-or were made by scripts that bypassed the gateway entirely.
+or were made by scripts that bypassed the Gateway entirely.
 
 ---
 
@@ -88,7 +88,7 @@ User → Gateway :8080                  auditd :1199
              (read journeys)                             returns []JourneySummary
 ```
 
-The gateway proxies all governance reads under `/api/v1/governance/...`.
+The Gateway proxies all governance reads under `/api/v1/governance/...`.
 The raw endpoint at `/v1/journeys` is served directly by auditd.
 
 ---
@@ -96,7 +96,7 @@ The raw endpoint at `/v1/journeys` is served directly by auditd.
 ## 4. Accessing the API by Deployment Type
 
 The journey and events endpoints are served by **auditd** (port 1199) and
-proxied by the **gateway** (port 8080). Which address you use depends on your
+proxied by the **Gateway** (port 8080). Which address you use depends on your
 deployment.
 
 ### 4.1 Docker Compose / local binary
@@ -107,7 +107,7 @@ Both ports are available on localhost. Use either directly:
 # Via auditd (direct)
 curl "http://localhost:1199/v1/journeys"
 
-# Via gateway (proxy)
+# Via Gateway (proxy)
 curl "http://localhost:8080/api/v1/governance/journeys"
 ```
 
@@ -116,7 +116,7 @@ curl "http://localhost:8080/api/v1/governance/journeys"
 Neither port is reachable from outside the cluster. Use **`kubectl port-forward`**
 to open a local tunnel, then run the same `curl` commands against localhost.
 
-**Recommended: port-forward the gateway (single tunnel, all endpoints)**
+**Recommended: port-forward the Gateway (single tunnel, all endpoints)**
 
 ```bash
 kubectl port-forward -n helpdesk-system \
@@ -139,8 +139,8 @@ curl "http://localhost:1199/v1/journeys?user=alice&limit=10"
 curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e"
 ```
 
-The gateway path (`/api/v1/governance/journeys`) and the auditd path
-(`/v1/journeys`) return identical data — the gateway simply proxies the
+The Gateway path (`/api/v1/governance/journeys`) and the auditd path
+(`/v1/journeys`) return identical data — the Gateway simply proxies the
 request.
 
 ---
@@ -148,7 +148,7 @@ request.
 ## 5. Endpoint
 
 ### 5.1 `GET /v1/journeys` (auditd)
-### 5.2 `GET /api/v1/governance/journeys` (gateway proxy)
+### 5.2 `GET /api/v1/governance/journeys` (Gateway proxy)
 
 Returns an array of journey summaries, newest first.
 
@@ -215,7 +215,7 @@ are returned.
 ## 6. Examples
 
 > **On Kubernetes:** replace `http://localhost:1199` with
-> `http://localhost:8080/api/v1/governance` (gateway) after running
+> `http://localhost:8080/api/v1/governance` (Gateway) after running
 > `kubectl port-forward -n helpdesk-system svc/helpdesk-gateway 8080:8080`.
 > See [section 4.2](#42-kubernetes) for details.
 
@@ -225,7 +225,7 @@ are returned.
 # Local / Docker Compose
 curl "http://localhost:1199/v1/journeys?user=alice&limit=10"
 
-# Kubernetes (gateway port-forward)
+# Kubernetes (Gateway port-forward)
 curl "http://localhost:8080/api/v1/governance/journeys?user=alice&limit=10"
 ```
 
@@ -268,7 +268,7 @@ endpoint:
 curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e"
 curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=policy_decision"
 
-# Kubernetes (gateway port-forward)
+# Kubernetes (Gateway port-forward)
 curl "http://localhost:8080/api/v1/governance/events?trace_id=tr_7c2a1b9e"
 curl "http://localhost:8080/api/v1/governance/events?trace_id=tr_7c2a1b9e&event_type=policy_decision"
 ```
@@ -291,7 +291,7 @@ A journey only appears in `GET /v1/journeys` if it has at least one
 
 - NL queries via `POST /api/v1/query` always produce a journey (orchestrator
   creates the `delegation_decision` event and sets `trace_id`).
-- Direct tool calls via `POST /api/v1/db/{tool}` produce a gateway-side
+- Direct tool calls via `POST /api/v1/db/{tool}` produce a Gateway-side
   `gateway_request` event with a `dt_` trace, but no `delegation_decision`
   event. These appear in `GET /v1/events` but **not** in `GET /v1/journeys`.
 - Raw A2A calls to an agent endpoint with no `trace_id` in message metadata
@@ -316,7 +316,7 @@ To see all events regardless of journey status, use `GET /v1/events` directly.
 ### 9.1 `curl: (7) Failed to connect to localhost port 1199` on Kubernetes
 
 auditd is an in-cluster service and is not exposed outside the cluster. Use
-the gateway port-forward instead (see [section 4.2](#42-kubernetes)):
+the Gateway port-forward instead (see [section 4.2](#42-kubernetes)):
 
 ```bash
 kubectl port-forward -n helpdesk-system svc/helpdesk-gateway 8080:8080
@@ -349,5 +349,5 @@ above.
 
 `started_at` is the timestamp of the `delegation_decision` event;
 `ended_at` is the timestamp of the last event under that trace. If clocks are
-skewed between the gateway host and the agent host, these may appear reversed.
+skewed between the Gateway host and the agent host, these may appear reversed.
 Ensure NTP is synchronised across all components.

@@ -183,6 +183,7 @@ call_tool() {
     local response
     response=$(curl -s -X POST "${GATEWAY_URL}/api/v1/${agent_type}/${tool}" \
         -H "Content-Type: application/json" \
+        -H "X-User: ${USER:-$(whoami)}" \
         -d "$params")
 
     local state=$(echo "$response" | jq -r '.state // "unknown"')
@@ -244,6 +245,7 @@ Context: The '$db_id' database ($db_name) has connection_string: $db_conn"
     local response
     response=$(curl -s -X POST "${GATEWAY_URL}/api/v1/query" \
         -H "Content-Type: application/json" \
+        -H "X-User: ${USER:-$(whoami)}" \
         -d "{\"agent\": \"$agent\", \"message\": $(echo "$enriched_q" | jq -Rs .)}")
 
     local state=$(echo "$response" | jq -r '.state // "unknown"')

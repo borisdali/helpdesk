@@ -109,6 +109,7 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 		Agent   string `json:"agent"`
 		Message string `json:"message"`
 		Query   string `json:"query"` // alias for message; both are accepted
+		User    string `json:"user"`  // caller identity recorded in the audit trail
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -126,6 +127,13 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, incident)", req.Agent))
 		return
+	}
+
+	// Bridge JSON body "user" into the canonical X-User header so that
+	// proxyToAgentWithTool can read a single source of truth.
+	// The header takes precedence if both are supplied.
+	if req.User != "" && r.Header.Get("X-User") == "" {
+		r.Header.Set("X-User", req.User)
 	}
 
 	g.proxyToAgent(w, r, agentName, req.Message)
@@ -337,6 +345,8 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		}
 	}
 
+	principal := r.Header.Get("X-User")
+
 	client, ok := g.clients[agentName]
 	if !ok {
 		g.recordAudit(r.Context(), &audit.GatewayRequest{
@@ -353,6 +363,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			Status:         "error",
 			Error:          "agent not available",
 			HTTPCode:       http.StatusBadGateway,
+			Principal:      principal,
 		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("agent %q not available", agentName))
 		return
@@ -379,6 +390,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			Status:         "error",
 			Error:          err.Error(),
 			HTTPCode:       http.StatusBadGateway,
+			Principal:      principal,
 		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("A2A call to %s failed: %v", agentName, err))
 		return
@@ -402,6 +414,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		Duration:       time.Since(start),
 		Status:         "success",
 		HTTPCode:       http.StatusOK,
+		Principal:      r.Header.Get("X-User"),
 	})
 
 	// Include trace ID in response for client correlation
