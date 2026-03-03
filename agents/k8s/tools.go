@@ -636,6 +636,19 @@ func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) 
 		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
 	}
 
+	// Level 2: confirm the pod is no longer visible in the API server.
+	_, verifyErr := runKubectl(ctx, kubeContext, "get", "pod", args.PodName, "-n", namespace)
+	if verifyErr == nil {
+		// kubectl get pod returned exit 0 — the pod still exists (likely Terminating).
+		return KubectlResult{Output: fmt.Sprintf(
+			"VERIFICATION WARNING: pod %q still appears in namespace %q after deletion.\n"+
+				"It may still be in Terminating state. Monitor with:\n"+
+				"  kubectl get pod %s -n %s -w\n\n"+
+				"--- Delete result ---\n%s", args.PodName, namespace, args.PodName, namespace, output)}, nil
+	}
+	// verifyErr != nil is the expected outcome — "not found" confirms the pod is gone.
+	// For any other error the pod is also gone (or unreachable); return original output.
+
 	return KubectlResult{Output: output}, nil
 }
 
@@ -666,6 +679,17 @@ func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (Kubect
 
 	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
+	}
+
+	// Level 2: confirm the restartedAt annotation was applied to the pod template.
+	verifyOut, verifyErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+		"-n", namespace, "-o", "jsonpath={.spec.template.metadata.annotations}")
+	if verifyErr != nil || !strings.Contains(verifyOut, "restartedAt") {
+		return KubectlResult{Output: fmt.Sprintf(
+			"VERIFICATION WARNING: restartedAt annotation not visible on deployment %q after rollout restart.\n"+
+				"The command reported success but the restart could not be confirmed. Check:\n"+
+				"  kubectl get deployment %s -n %s -o jsonpath='{.spec.template.metadata.annotations}'\n\n"+
+				"--- Restart result ---\n%s", args.DeploymentName, args.DeploymentName, namespace, output)}, nil
 	}
 
 	return KubectlResult{Output: output}, nil
@@ -703,6 +727,22 @@ func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlRes
 
 	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
+	}
+
+	// Level 2: confirm spec.replicas was updated to the requested count.
+	verifyOut, verifyErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+		"-n", namespace, "-o", "jsonpath={.spec.replicas}")
+	if verifyErr == nil {
+		actual := strings.TrimSpace(verifyOut)
+		expected := strconv.Itoa(args.Replicas)
+		if actual != expected {
+			return KubectlResult{Output: fmt.Sprintf(
+				"VERIFICATION FAILED: deployment %q shows spec.replicas=%s but expected %d after scale.\n"+
+					"The scale command may not have been applied. Check:\n"+
+					"  kubectl get deployment %s -n %s\n\n"+
+					"--- Scale result ---\n%s",
+				args.DeploymentName, actual, args.Replicas, args.DeploymentName, namespace, output)}, nil
+		}
 	}
 
 	return KubectlResult{Output: output}, nil

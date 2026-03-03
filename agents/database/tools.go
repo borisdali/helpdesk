@@ -980,18 +980,37 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	// runPsqlAs uses parseRowsAffected which only reads DELETE/UPDATE/INSERT tags.
 	// cancel_query uses SELECT pg_cancel_backend(), so we must parse the boolean
 	// result explicitly and run a second post-execution blast-radius check.
+	cancelled := parsePgFunctionResult(output)
 	if policyEnforcer != nil {
 		dbInfo, err := resolveDatabaseInfo(args.ConnectionString)
 		if err != nil {
 			return errorResult("cancel_query", args.ConnectionString, err), nil
 		}
-		cancelled := parsePgFunctionResult(output)
 		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, policy.ActionWrite, dbInfo.Tags, agentutil.ToolOutcome{
 			RowsAffected: cancelled,
 		}); postErr != nil {
 			return errorResult("cancel_query", args.ConnectionString, postErr), nil
 		}
 	}
+
+	// Level 1: pg_cancel_backend returned false — SIGINT was not delivered.
+	if cancelled == 0 {
+		return PsqlResult{Output: fmt.Sprintf(
+			"CANCELLATION FAILED: pg_cancel_backend(%d) returned false.\n"+
+				"The backend may have already finished or this role lacks pg_signal_backend privilege.\n\n"+
+				"--- Session details ---\n%s", args.PID, formatConnectionPlan(plan))}, nil
+	}
+
+	// Level 2: verify the query is no longer active (state must have left 'active').
+	verifyQuery := fmt.Sprintf(`SELECT state FROM pg_stat_activity WHERE pid = %d;`, args.PID)
+	verifyOut, verifyErr := runPsql(ctx, args.ConnectionString, verifyQuery)
+	if verifyErr == nil && strings.Contains(verifyOut, "state | active") {
+		return PsqlResult{Output: fmt.Sprintf(
+			"VERIFICATION WARNING: PID %d is still in 'active' state after cancellation signal.\n"+
+				"The query may be in a non-interruptible kernel call. Monitor pg_stat_activity and consider terminate_connection if it persists.\n\n"+
+				"--- Session details ---\n%s\n--- Cancel result ---\n%s", args.PID, formatConnectionPlan(plan), output)}, nil
+	}
+
 	// Step 3: return plan context + execution result so the agent can relay both.
 	return PsqlResult{Output: formatConnectionPlan(plan) + "\n--- Result ---\n" + output}, nil
 }
@@ -1023,18 +1042,37 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	// runPsqlAs uses parseRowsAffected which only reads DELETE/UPDATE/INSERT tags.
 	// terminate_connection uses SELECT pg_terminate_backend(), so we must parse
 	// the boolean result explicitly and run a second post-execution blast-radius check.
+	terminated := parsePgFunctionResult(output)
 	if policyEnforcer != nil {
 		dbInfo, err := resolveDatabaseInfo(args.ConnectionString)
 		if err != nil {
 			return errorResult("terminate_connection", args.ConnectionString, err), nil
 		}
-		terminated := parsePgFunctionResult(output)
 		if postErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, policy.ActionDestructive, dbInfo.Tags, agentutil.ToolOutcome{
 			RowsAffected: terminated,
 		}); postErr != nil {
 			return errorResult("terminate_connection", args.ConnectionString, postErr), nil
 		}
 	}
+
+	// Level 1: pg_terminate_backend returned false — SIGTERM was not delivered.
+	if terminated == 0 {
+		return PsqlResult{Output: fmt.Sprintf(
+			"TERMINATION FAILED: pg_terminate_backend(%d) returned false.\n"+
+				"The backend may have already exited or this role lacks pg_signal_backend privilege.\n\n"+
+				"--- Session details ---\n%s", args.PID, formatConnectionPlan(plan))}, nil
+	}
+
+	// Level 2: verify the backend is actually gone from pg_stat_activity.
+	verifyQuery := fmt.Sprintf(`SELECT count(*) AS still_alive FROM pg_stat_activity WHERE pid = %d;`, args.PID)
+	verifyOut, verifyErr := runPsql(ctx, args.ConnectionString, verifyQuery)
+	if verifyErr == nil && strings.Contains(verifyOut, "still_alive | 1") {
+		return PsqlResult{Output: fmt.Sprintf(
+			"VERIFICATION FAILED: PID %d is still present in pg_stat_activity after termination.\n"+
+				"The backend ignored SIGTERM. Manual intervention may be required (e.g., pg_terminate_backend with superuser, or OS-level kill).\n\n"+
+				"--- Session details ---\n%s\n--- Termination result ---\n%s", args.PID, formatConnectionPlan(plan), output)}, nil
+	}
+
 	// Step 3: return plan context + execution result so the agent can relay both.
 	return PsqlResult{Output: formatConnectionPlan(plan) + "\n--- Result ---\n" + output}, nil
 }
