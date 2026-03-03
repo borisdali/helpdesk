@@ -502,22 +502,27 @@ type JourneySummary struct {
 	EventCount int      `json:"event_count"`
 }
 
-// QueryJourneys returns journey summaries for traces that have at least one
-// delegation_decision event matching the given filters.
+// QueryJourneys returns journey summaries for traces anchored by a
+// delegation_decision event (orchestrator mode) or a gateway_request event
+// without a tool_name (gateway NL-query mode).
 //
-// Two queries are issued: one to find matching trace IDs (from
-// delegation_decision events, which are the only rows that carry user_id and
-// user_query), and one to fetch all events for those traces so that tool
-// names, outcome, and wall-clock duration can be computed in Go.
+// Two queries are issued: one to find matching trace IDs from anchor events,
+// and one to fetch all events for those traces so that tool names, outcome,
+// and wall-clock duration can be computed in Go.
 func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]JourneySummary, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 50
 	}
 
-	// Step 1: find trace IDs from delegation_decision events matching filters.
+	// Step 1: find trace IDs from anchor events.
+	// Anchors are either delegation_decision events (old orchestrator path) or
+	// gateway_request events with no tool_name (gateway NL-query path).
+	// Direct tool calls (gateway_request with tool_name set) are excluded —
+	// they use dt_ prefixed trace IDs and are not surfaced as journeys.
 	q1 := `SELECT trace_id, MIN(timestamp) AS first_event
 		FROM audit_events
-		WHERE event_type = 'delegation_decision'
+		WHERE (event_type = 'delegation_decision'
+		    OR (event_type = 'gateway_request' AND (tool_name IS NULL OR tool_name = '')))
 		  AND trace_id != ''`
 	var args1 []any
 	if opts.UserID != "" {
@@ -617,6 +622,20 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.endedAt = ts
 		}
 		if eventType == string(EventTypeDelegation) {
+			// delegation_decision is authoritative — overwrite any previously set
+			// gateway_request values with the richer orchestrator-side metadata.
+			if userID.Valid && userID.String != "" {
+				d.userID = userID.String
+			}
+			if userQuery.Valid && userQuery.String != "" {
+				d.userQuery = userQuery.String
+			}
+			if agent.Valid && agent.String != "" {
+				d.agent = agent.String
+			}
+		} else if eventType == string(EventTypeGatewayRequest) {
+			// gateway_request is the anchor in gateway NL-query mode.
+			// Only use it as a fallback — don't overwrite delegation_decision data.
 			if userID.Valid && userID.String != "" && d.userID == "" {
 				d.userID = userID.String
 			}

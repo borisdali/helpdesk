@@ -286,15 +286,21 @@ See [GOVEXPLAIN.md](GOVEXPLAIN.md) for full govexplain reference.
 
 ## 7. Journey Coverage
 
-A journey only appears in `GET /v1/journeys` if it has at least one
-`delegation_decision` event with a non-empty `trace_id`. This means:
+A journey appears in `GET /v1/journeys` when its trace has an **anchor event**
+with a non-empty `trace_id`. Two event types serve as anchors:
 
-- NL queries via `POST /api/v1/query` always produce a journey (orchestrator
-  creates the `delegation_decision` event and sets `trace_id`).
-- Direct tool calls via `POST /api/v1/db/{tool}` produce a Gateway-side
-  `gateway_request` event with a `dt_` trace, but no `delegation_decision`
-  event. These appear in `GET /v1/events` but **not** in `GET /v1/journeys`.
-- Raw A2A calls to an agent endpoint with no `trace_id` in message metadata
+| Origin | Anchor event | Trace prefix |
+|--------|-------------|--------------|
+| Orchestrator REPL (`cmd/helpdesk`) | `delegation_decision` | `tr_` |
+| Gateway NL query (`POST /api/v1/query`) | `gateway_request` (no tool) | `tr_` |
+
+- **NL queries via `POST /api/v1/query`** always produce a journey — the
+  Gateway records a `gateway_request` anchor event that ties all subsequent
+  agent tool calls to the trace.
+- **Direct tool calls via `POST /api/v1/db/{tool}`** produce a Gateway-side
+  `gateway_request` event with a `dt_` trace and a `tool_name` set. These
+  appear in `GET /v1/events` but **not** in `GET /v1/journeys`.
+- **Raw A2A calls** to an agent endpoint with no `trace_id` in message metadata
   appear in `GET /v1/events` with an empty `trace_id` and are not surfaced by
   journeys at all.
 
