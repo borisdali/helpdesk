@@ -1,7 +1,7 @@
 # aiHelpDesk Mutation Tools
 
-This page documents the database and Kubernetes agent tools that perform
-mutations, explains the **two-step review-and-confirm** safeguard, followed
+This page documents the Database and Kubernetes agent tools that perform
+mutations, explains the two-step **review-and-confirm** safeguard, followed
 by the description of aiHelpDesk layers of testing and how every layer
 is tested.
 
@@ -90,8 +90,14 @@ connection and any open transaction remain alive. Safe to retry.
 2. Policy pre-check (`CheckDatabase`) with `session_plan` forwarded to the
    approval context
 3. Execute `SELECT pg_cancel_backend(pid)`
-4. Policy post-execution blast-radius check (`CheckDatabaseResult`)
-5. Return session plan + execution result to the orchestrator
+4. **Level 1 safeguard**: if `pg_cancel_backend` returns `false`, return
+   `CANCELLATION FAILED` immediately — the backend was already gone or the
+   role lacks `pg_signal_backend` privilege.
+5. **Level 2 safeguard**: run `SELECT state FROM pg_stat_activity WHERE pid = X`.
+   If the backend is still `active`, return `VERIFICATION WARNING` — the
+   cancellation signal was delivered but the query did not stop.
+6. Policy post-execution blast-radius check (`CheckDatabaseResult`)
+7. Return session plan + execution result to the orchestrator
 
 ---
 
@@ -108,13 +114,19 @@ pid                 int      required — PID of the backend to terminate
 Sends `pg_terminate_backend(pid)`. The connection is dropped immediately;
 any open transaction is rolled back by PostgreSQL.
 
-**Execution sequence** (same four-step pattern as `cancel_query`):
+**Execution sequence**:
 
 1. `inspectConnection(pid)` → session plan
 2. Policy pre-check (`ActionDestructive`)
 3. Execute `SELECT pg_terminate_backend(pid)`
-4. Post-execution blast-radius check
-5. Return session plan + result
+4. **Level 1 safeguard**: if `pg_terminate_backend` returns `false`, return
+   `TERMINATION FAILED` immediately — the backend was already gone or the
+   role lacks `pg_signal_backend` privilege.
+5. **Level 2 safeguard**: run `SELECT count(*) AS still_alive FROM pg_stat_activity WHERE pid = X`.
+   If the count is 1, return `VERIFICATION FAILED` — the connection was not
+   removed despite the positive signal.
+6. Post-execution blast-radius check
+7. Return session plan + result
 
 ---
 
@@ -191,7 +203,10 @@ rolling the entire deployment.
 1. Policy pre-check (`ActionDestructive`) — may trigger approval workflow
 2. Execute `kubectl delete pod ...`
 3. Post-execution blast-radius check (`checkK8sPolicyResult`)
-4. Return kubectl output to the orchestrator
+4. **Level 2 safeguard**: run `kubectl get pod <name> -n <namespace>`. If the
+   pod is still visible (e.g. stuck in `Terminating`), return
+   `VERIFICATION WARNING` — the pod may have a blocking finalizer.
+5. Return kubectl output to the orchestrator
 
 ---
 
@@ -211,8 +226,15 @@ pods in the deployment one at a time (rolling strategy), preserving availability
 throughout. Use when all replicas are unhealthy or after a configuration change
 that requires a full pod cycle.
 
-**Execution sequence**: identical to `delete_pod` (pre-check → execute →
-post-check).
+**Execution sequence**:
+
+1. Policy pre-check (`ActionDestructive`) — may trigger approval workflow
+2. Execute `kubectl rollout restart deployment ...`
+3. Post-execution blast-radius check (`checkK8sPolicyResult`)
+4. **Level 2 safeguard**: run `kubectl get deployment <name> -n <namespace> -o jsonpath={.spec.template.metadata.annotations}`.
+   If the `restartedAt` annotation is absent, return `VERIFICATION WARNING` —
+   the restart annotation was not applied.
+5. Return kubectl output to the orchestrator
 
 ---
 
@@ -232,8 +254,15 @@ Runs `kubectl scale deployment <name> --replicas=<n> -n <namespace>`. Scaling to
 `0` terminates all pods immediately (downtime). Scaling up adds capacity without
 touching running pods.
 
-**Execution sequence**: identical to `delete_pod` (pre-check → execute →
-post-check).
+**Execution sequence**:
+
+1. Policy pre-check (`ActionDestructive`) — may trigger approval workflow
+2. Execute `kubectl scale deployment <name> --replicas=<n> ...`
+3. Post-execution blast-radius check (`checkK8sPolicyResult`)
+4. **Level 2 safeguard**: run `kubectl get deployment <name> -n <namespace> -o jsonpath={.spec.replicas}`.
+   If the observed replica count doesn't match the requested count, return
+   `VERIFICATION FAILED`.
+5. Return kubectl output to the orchestrator
 
 ---
 
@@ -402,9 +431,45 @@ buffered channel and assert on the JSON structure.
 | `TestScaleDeploymentTool_Failure` | kubectl not-found error propagated |
 | `TestScaleDeploymentTool_PolicyDenied` | Pre-check denial blocks kubectl execution |
 
-Tests use `withMockKubectl` (replaces the kubectl binary path at test time) and
-`withK8sPolicyEnforcer` / `newDenyK8sDestructiveEnforcer` for policy fixture
-setup.
+Tests use `withMockKubectlSequence` (a sequential mock that returns a different
+response per successive `runKubectl` call — mutation call first, verification
+call second) and `withK8sPolicyEnforcer` / `newDenyK8sDestructiveEnforcer` for
+policy fixture setup. The older `withMockKubectl` single-response helper is still
+used for error and denial tests that don't reach the verification step.
+
+### Tier 1c — Unit: post-execution verification safeguards
+
+Seven new sequence-mock tests cover the Level 1 and Level 2 safeguards added to
+both agents. All tests use the sequence-mock helpers so the mutation call and the
+verification read receive independent responses.
+
+#### Database agent (`agents/database/tools_test.go`)
+
+| Test | Safeguard | Injected condition | Expected output |
+|---|---|---|---|
+| `TestTerminateConnectionTool_Level1_ReturnedFalse` | Level 1 | `pg_terminate_backend` returns `f` | `TERMINATION FAILED` |
+| `TestTerminateConnectionTool_Level2_PidStillAlive` | Level 2 | `still_alive \| 1` in verify output | `VERIFICATION FAILED` |
+| `TestCancelQueryTool_Level1_ReturnedFalse` | Level 1 | `pg_cancel_backend` returns `f` | `CANCELLATION FAILED` |
+| `TestCancelQueryTool_Level2_StillActive` | Level 2 | `state \| active` in verify output | `VERIFICATION WARNING` |
+
+Uses `withMockRunnerSequence` (new helper alongside existing `withMockRunner`)
+which feeds successive `cmdRunner.Run()` calls from a pre-defined slice of
+`psqlResponse{out, err}` pairs. Each DB mutation tool makes three `cmdRunner`
+calls: inspect → mutate → verify.
+
+#### Kubernetes agent (`agents/k8s/tools_test.go`)
+
+| Test | Safeguard | Injected condition | Expected output |
+|---|---|---|---|
+| `TestDeletePodTool_VerificationWarning_PodStillTerminating` | Level 2 | verify `kubectl get pod` exits 0 (pod visible) | `VERIFICATION WARNING` |
+| `TestRestartDeploymentTool_VerificationWarning_AnnotationMissing` | Level 2 | verify output missing `restartedAt` | `VERIFICATION WARNING` |
+| `TestScaleDeploymentTool_VerificationFailed_WrongReplicas` | Level 2 | verify returns `"3"` when `5` requested | `VERIFICATION FAILED` |
+
+Uses `withMockKubectlSequence`. Each K8s mutation tool makes two `runKubectl`
+calls: mutate → verify.
+
+For integration and manual fault-injection procedures see
+[Mutation Safeguard Verification](testing/FAULT_INJECTION_TESTING.md#mutation-safeguard-verification).
 
 ### Tier 2 — Unit: session plan wiring (`agents/database/tools_test.go`)
 
@@ -416,7 +481,9 @@ setup.
 These tests use `multiMockRunner` — a sequential psql mock that returns
 realistic session info output on call 1 (simulating `get_session_info`) and a
 cancel/terminate result on call 2. A `mockApprovalServerForTools` instance
-captures the approval body for assertion.
+captures the approval body for assertion. (The newer `withMockRunnerSequence`
+helper in Tier 1c uses the same sequential pattern extended to three calls for
+the verification step.)
 
 ### Tier 3a — Unit: ordering evaluator (`testing/faultlib/faultlib_test.go`)
 
