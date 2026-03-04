@@ -62,17 +62,21 @@ diagnose problems with your databases or infra, but also rectify them
 with your explicit consent and complete transparency of all the actions
 taken. To that end, a complete and tamper-proof [audit](AUDIT.md) is
 a non-negotiable must-have foundation of aiHelpDesk, accompanied by the
-enforced-in-code two-step ["review-and-confirm" process](AIGOVERNANCE.md#2-two-step-review-and-confirm-process)
+enforced-in-code two-step ["review-and-confirm" process](MUTATION_TOOLS.md#2-two-step-review-and-confirm-process)
 for informed consent, full [policy enforcement](AIGOVERNANCE.md#3-policy-engine),
-[compliance](COMPLIANCE.md), guardrails, two-level safeguards, human-in-the-loop
-manual [approval workflow](AIGOVERNANCE.md#4-approval-workflows) for mission
+[compliance](COMPLIANCE.md), [guardrails](AIGOVERNANCE.md#5-guardrails),
+three-level [enforcement mechanisms](MUTATION_TOOLS.md#3-enforcement-mechanisms),
+two-level safeguards (see for instance `cancel query`
+[safeguards](MUTATION_TOOLS.md#12-cancel_query--soft-interrupt)),
+human-in-the-loop manual [approval workflow](AIGOVERNANCE.md#4-approval-workflows) for mission
 critical PROD databases, [aiHelpDesk journeys](JOURNEYS.md) and the five-layer
 [pyramid testing](testing/README.md) that includes the mandatory
 [fault-injection](testing/FAULT_INJECTION_TESTING.md) scenario for every W or D mutation.
 
-To be clear, our quest to deliver AI based self-service diagnose and repair
-system can only be achieved with the trust that users put in aiHelpDesk.
-Trust must be earned and we invest heavilty into building that trust foundation.
+It's crystal clear in our mind that our quest to deliver AI based
+self-service diagnose and repair system can only be achieved with the
+trust that users put in aiHelpDesk. Trust must be earned and we invest
+heavilty into building that trust foundation.
 
 Through our lab experiements we clearly see the challenges in multi-agent
 workflows deployments based on LLMs. Different models react differently
@@ -88,7 +92,7 @@ engineering rigor that a distributed system deserves.
 In particular, we ensure that both the instructions and the tool's outcome
 are as clear as possible, we mandate no creativity in agent's intepretation
 of both, but also --and critically-- we add a mandatory deterministic
-validation steps for every single mutation.
+validation step for every single mutation.
 
 See aiHelpDesk [mutation doc](MUTATION_TOOLS.md) for specifics on what this means
 for every non R/O tool, be it cancelling a query, terminating a session,
