@@ -1,9 +1,10 @@
 # aiHelpDesk Mutation Tools
 
 This page documents the Database and Kubernetes agent tools that perform
-mutations, explains the two-step **review-and-confirm** safeguard, followed
-by the description of aiHelpDesk layers of testing (with the supporting
-enforcement mechanisms) and how every layer is tested.
+mutations, explains the two-step **review-and-confirm** mandatory,
+enforced in-code process, followed by the description of aiHelpDesk
+layers of testing (with the supporting enforcement mechanisms and
+two levels of safeguards) and how all of this is tested.
 
 The AI Governance module is critical for risk management associated with
 making changes to your databases and infrastructure (K8s/VM) and it has
@@ -11,7 +12,7 @@ to be explicitly enabled prior to changing aiHelpDesk operating mode
 from `readonly` to `fix` to allow mutations. For the broader AI Governance
 architecture see [here](AIGOVERNANCE.md). For AI Governance Policy Engine's
 decision history see [here](GOVEXPLAIN.md).
-For AI Governance Compliance sub-module see [here](GOVBOT_SAMPLE.md).
+For AI Governance Compliance sub-module see [here](COMPLIANCE.md).
 
 > **Important:** The three database-agent mutation tools and three K8s-agent mutation tools
 > documented here are presented solely for the purpose of testing aiHelpDesk
@@ -22,12 +23,16 @@ For AI Governance Compliance sub-module see [here](GOVBOT_SAMPLE.md).
 > Please wait until we are fully comfortable with the AI Governance module
 > to release these — and many more — mutation tools to you.
 
+Before proceeding, please review [our position](ARCHITECTURE.md#0-mutations)
+on mutations and how aiHelpDesk treats changes that it may do to your
+databases or your infra.
+
 ## Table of Contents
 
 1. [Tools](#1-tools)
    - [Database agent (1.1–1.4)](#database-agent)
    - [Kubernetes agent (1.5–1.8)](#kubernetes-agent)
-2. [Two-step review-and-confirm](#2-two-step-review-and-confirm)
+2. [Two-step review-and-confirm](#2-two-step-review-and-confirm-process)
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
 4. [Test coverage](#4-test-coverage)
 5. [Fault scenario: db-terminate-direct-command](#5-fault-scenario-db-terminate-direct-command)

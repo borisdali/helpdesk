@@ -53,6 +53,12 @@ to build a historical trend across days or weeks.
 
 ## 2. Architecture
 
+Please see [here](ARCHITECTURE.md) for the general overview of aiHelpDesk architecture
+and [here](AIGOVERNANCE.md) for the AI Governance module architecture in particular.
+The Compliance sub-module relies on other sub-modules within AI Governance
+(most notable on [Audit](AUDIT.md)) and the diagram below is meant to show how
+the data flows through the Audit Daemon and ends up in [`govbot`](GOVBOT_SAMPLE.md):
+
 ```
                         ┌─────────────────────────────────────────────────────┐
                         │                     aiHelpDesk                      │

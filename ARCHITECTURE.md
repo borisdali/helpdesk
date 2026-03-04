@@ -1,6 +1,6 @@
-# Architecture
+# aiHelpDesk Architecture
 
-aiHelpDesk is built on the idea of delegating specialized tasks to the expert sub-agents and coordinating them via the central Orchestrator. Sub-agents don't know or depend on each other, are stateless in nature and receive the requests and funnel their findings strictly through the Orchrestrator. This is powerful because by delegating a subtask to a separate agent, the details of that task in a confined to a separate context window. Once the subtask in question is done, the result is added to your main context window of the Orchtestrator and all the details of the subtask are discarded. This is better for context management because it avoids polution of the Orchtestrator's main context the irrelevant details of the subtasks.  
+aiHelpDesk is built on the idea of delegating specialized tasks to the expert sub-agents and coordinating them via the central Orchestrator. Sub-agents don't know or depend on each other, are stateless in nature (with the few exceptions, most notably the [`govebot`](GOVBOT_SAMPLE.md) supporting [Compliance](COMPLIANCE.md) within the broader [AI Governance](AIGOVERNANCE.md) module) and receive the requests and funnel their findings strictly through the Orchrestrator. This is powerful not only because it follows the cornerstone of the Unix philosophy of narrow specialized units that do "one thing and do it well", but also because by delegating a subtask to a separate agent, the details of that task is confined to a separate context window. Once the subtask in question is done, the result is added to your main context window of the Orchtestrator and all the details of the subtask are discarded. This is better for context management because it avoids polution of the Orchtestrator's main context the irrelevant details of the subtasks.  
 
 Sub-agents are standalone A2A servers. That means that if a provider with the deep domain expertise (e.g. K8s) can offer and swap aiHelpDesk's K8s agent with their own, as long it offers Agent Card at `/.well-known/agent-card.json` and abides by the other rules of the A2A protocol. Sub-agents are explicitly stateless — connection strings and Kubernetes contexts are passed per-request, not configured at startup. This means:
 
@@ -31,6 +31,75 @@ Sub-agents are standalone A2A servers. That means that if a provider with the de
   │ tools     │   │ tools     │   │ tools         │
   └───────────┘   └───────────┘   └───────────────┘
 ```
+
+## Table of Contents
+
+0. [Mutations](#0-mutations)
+1. [Infrastructure Inventory](#1-infrastructure-inventory)
+2. [Agent Discovery](#2-agent-discovery)
+3. [Prerequisites](#3-prerequisites)
+4. [Environment Variables](#4-environment-variables)
+5. [Running the System](#5-running-the-system)
+6. [Available Tools](#6-available-tools)
+7. [Verifying Agent Cards](#7-verifying-agent-cards)
+8. [Example Interactions](#8-example-interactions)
+9. [File Structure](#9-file-structure)
+10. [Extending the System](#10-extending-the-system)
+11. [Agent to Agent Integration](#11-agent-to-agent-integration)
+12. [AI Governance (including full audit) system](#12-ai-governance-including-full-audit-system)
+13. [Troubleshooting](#13-troubleshooting)
+
+---
+
+## 0. Mutations
+
+Before deliving into the architecture of aiHelpDesk, we'd like to point out
+that we treat extreamly seriously any of changes that aiHelpDesk may make
+to your databases or to your infrastructure (be it K8s or VMs).
+
+It is our intention to mature aiHelpDesk to the point where it can not only
+diagnose problems with your databases or infra, but also rectify them
+with your explicit consent and complete transparency of all the actions
+taken. To that end, a complete and tamper-proof [audit](AUDIT.md) is
+a non-negotiable must-have foundation of aiHelpDesk, accompanied by the
+enforced-in-code two-step ["review-and-confirm" process](AIGOVERNANCE.md#2-two-step-review-and-confirm-process)
+for informed consent, full [policy enforcement](AIGOVERNANCE.md#3-policy-engine),
+[compliance](COMPLIANCE.md), guardrails, two-level safeguards, human-in-the-loop
+manual [approval workflow](AIGOVERNANCE.md#4-approval-workflows) for mission
+critical PROD databases, [aiHelpDesk journeys](JOURNEYS.md) and the five-layer
+[pyramid testing](testing/README.md) that includes the mandatory
+[fault-injection](testing/FAULT_INJECTION_TESTING.md) scenario for every W or D mutation.
+
+To be clear, our quest to deliver AI based self-service diagnose and repair
+system can only be achieved with the trust that users put in aiHelpDesk.
+Trust must be earned and we invest heavilty into building that trust foundation.
+
+Through our lab experiements we clearly see the challenges in multi-agent
+workflows deployments based on LLMs. Different models react differently
+--and often unpredictably-- to **any** sign of ambigiuty in instructions or
+the tool's output. This leads to model's implicit assumptions about a state
+that a user's request is at and possible hallucinations, which may also
+vary from one run to the next. 
+
+At aiHelpDesk we plan and engineer for these types of failures, effectively
+treating our multi-agent system as a distributed one and applying the
+engineering rigor that a distributed system deserves.
+
+In particular, we ensure that both the instructions and the tool's outcome
+are as clear as possible, we mandate no creativity in agent's intepretation
+of both, but also --and critically-- we add a mandatory deterministic
+validation steps for every single mutation.
+
+See aiHelpDesk [mutation doc](MUTATION_TOOLS.md) for specifics on what this means
+for every non R/O tool, be it cancelling a query, terminating a session,
+rescheduling a K8s Pod or scaling a Deployment.
+
+To be sure, we subscribe to the idea that as agentic software becomes a decision
+maker for the responsibility delegation and the choice of the appropriate tools
+for a job, traditional security focus of protecting assets shifts to controlling
+and constraining authority. As they say, you can't manage what you can't measure
+and so to that end, aiHelpDesk is built on the foundation of a complete end-to-end
+reasoning and decision making traceability.
 
 ## 1. Infrastructure Inventory
 
@@ -572,7 +641,7 @@ echo $HELPDESK_API_KEY
 ```
 
 ### 13.4 AI Governance (and audit in particular) System Issues
-See the [here](AIGOVERNANCE.md#audit-system-issues) for known/reported issues
+See the [here](AIGOVERNANCE.md#10-troubleshooting) for known/reported issues
 pertaining to AI Governance in general and the built-in
 audit system in particular.
 

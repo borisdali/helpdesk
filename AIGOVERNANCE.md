@@ -1,4 +1,4 @@
-# AI Governance Architecture
+# aiHelpDesk AI Governance Architecture
 
 Please see [here](ARCHITECTURE.md) for the general overview of
 aiHelpDesk Architecture. This page presents a part of this architecture
