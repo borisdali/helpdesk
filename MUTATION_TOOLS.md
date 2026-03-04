@@ -2,8 +2,8 @@
 
 This page documents the Database and Kubernetes agent tools that perform
 mutations, explains the two-step **review-and-confirm** safeguard, followed
-by the description of aiHelpDesk layers of testing and how every layer
-is tested.
+by the description of aiHelpDesk layers of testing (with the supporting
+enforcement mechanisms) and how every layer is tested.
 
 The AI Governance module is critical for risk management associated with
 making changes to your databases and infrastructure (K8s/VM) and it has
@@ -28,7 +28,7 @@ For AI Governance Compliance sub-module see [here](GOVBOT_SAMPLE.md).
    - [Database agent (1.1–1.4)](#database-agent)
    - [Kubernetes agent (1.5–1.8)](#kubernetes-agent)
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm)
-3. [Enforcement layers](#3-enforcement-layers)
+3. [Enforcement mechanisms](#3-enforcement-mechanisms)
 4. [Test coverage](#4-test-coverage)
 5. [Fault scenario: db-terminate-direct-command](#5-fault-scenario-db-terminate-direct-command)
 6. [Compliance and Alerting](#6-compliance-and-alerting)
@@ -39,7 +39,7 @@ For AI Governance Compliance sub-module see [here](GOVBOT_SAMPLE.md).
 
 ### Database agent
 
-### 1.1 `get_session_info` — read-only inspector
+#### 1.1 `get_session_info` — read-only inspector
 
 **Action class**: `read` (no policy check needed)
 
@@ -72,7 +72,7 @@ exactly what will be affected.
 
 ---
 
-### 1.2 `cancel_query` — soft interrupt
+#### 1.2 `cancel_query` — soft interrupt
 
 **Action class**: `write` (policy pre-check + post-execution blast-radius check)
 
@@ -101,7 +101,7 @@ connection and any open transaction remain alive. Safe to retry.
 
 ---
 
-### 1.3 `terminate_connection` — hard disconnect
+#### 1.3 `terminate_connection` — hard disconnect
 
 **Action class**: `destructive` (highest policy tier; always requires approval
 on production-tagged databases)
@@ -130,7 +130,7 @@ any open transaction is rolled back by PostgreSQL.
 
 ---
 
-### 1.4 `terminate_idle_connections` — bulk terminator
+#### 1.4 `terminate_idle_connections` — bulk terminator
 
 **Action class**: `read` when `dry_run=true`, `destructive` when executing
 
@@ -161,9 +161,9 @@ All three K8s mutation tools share the same action class (`destructive`)
 and follow the same pre-check / execute / post-check pattern. Unlike the
 database tools, there is **no structural guard** inside the mutation tool that
 forces an inspection call — the enforce-first discipline relies on the system
-prompt (Layer A) and the approval context (Layer C) only.
+prompt (Mechanism A) and the approval context (Mechanism C) only.
 
-### 1.5 `describe_pod` — read-only inspector
+#### 1.5 `describe_pod` — read-only inspector
 
 **Action class**: `read` (no policy check needed)
 
@@ -180,7 +180,7 @@ the pod identity and understand the current state before acting.
 
 ---
 
-### 1.6 `delete_pod` — single pod deletion
+#### 1.6 `delete_pod` — single pod deletion
 
 **Action class**: `destructive` (policy pre-check + post-execution blast-radius
 check)
@@ -210,7 +210,7 @@ rolling the entire deployment.
 
 ---
 
-### 1.7 `restart_deployment` — rolling restart
+#### 1.7 `restart_deployment` — rolling restart
 
 **Action class**: `destructive` (policy pre-check + post-execution blast-radius
 check)
@@ -238,7 +238,7 @@ that requires a full pod cycle.
 
 ---
 
-### 1.8 `scale_deployment` — replica count change
+#### 1.8 `scale_deployment` — replica count change
 
 **Action class**: `destructive` (policy pre-check + post-execution blast-radius
 check)
@@ -290,8 +290,8 @@ Step 2: cancel_query(pid)  or  terminate_connection(pid)
         → approver sees the full plan before deciding
 ```
 
-This is enforced at three independent layers. No single layer can be bypassed
-without triggering a failure in at least one of the other two.
+This is guaranteed by three independent enforcement mechanisms. No single mechanism can be
+bypassed without triggering a failure in at least one of the other two.
 
 ### Kubernetes agent
 
@@ -307,23 +307,23 @@ Step 2: delete_pod(pod_name)  or  restart_deployment(name)  or  scale_deployment
 ```
 
 Unlike the database agent, **the k8s mutation tools do not call `describe_pod`
-internally** (no Layer B structural guard). Compliance with the inspect-first
-discipline depends on the system prompt (Layer A) and the approval workflow
-(Layer C).
+internally** (no Mechanism B structural guard). Compliance with the inspect-first
+discipline depends on the system prompt (Mechanism A) and the approval workflow
+(Mechanism C).
 
 ---
 
-## 3. Enforcement layers
+## 3. Enforcement Mechanisms
 
-The three layers apply differently across agents:
+The three mechanisms apply independently across agents:
 
-| Layer | Database agent | Kubernetes agent |
-|-------|---------------|-----------------|
+| Mechanism   | Database agent | Kubernetes agent |
+|-------------|----------------|------------------|
 | A — LLM prompt | Explicit CRITICAL section: inspect before cancel/terminate | Generic "fail fast on errors"; no explicit inspect-before-mutate rule |
 | B — Structural guard in tool | `inspectConnection` called unconditionally inside `cancelQueryTool` / `terminateConnectionTool` | **Absent** — `describe_pod` is not called inside `deletePodTool` |
 | C — Approval context | Full session plan attached to `request_context.session_info` | Namespace tags attached; no pod-level detail |
 
-### Layer A — LLM prompt instruction (`prompts/database.txt`)
+### Mechanism A: LLM prompt instruction (`prompts/database.txt`)
 
 A `CRITICAL` section at the end of the database agent's system prompt:
 
@@ -344,11 +344,11 @@ these three steps.
 sessions. A well-instructed model will not skip Step 1.
 
 **Limitation**: a misconfigured or adversarially prompted model could skip it.
-Layers B and C close this gap.
+Mechanisms B and C close this gap.
 
 ---
 
-### Layer B — Structural guard inside each tool (`agents/database/tools.go`)
+### Mechanism B: Structural guard inside each tool (`agents/database/tools.go`)
 
 `cancelQueryTool` and `terminateConnectionTool` unconditionally call
 `inspectConnection` as their **first internal step**, before the policy
@@ -373,7 +373,7 @@ physically execute without a preceding inspection.
 
 ---
 
-### Layer C — Approval context enrichment (`agentutil/agentutil.go`)
+### Mechanism C: Approval context enrichment (`agentutil/agentutil.go`)
 
 When the policy engine returns `require_approval`, `requestApproval` includes
 the session plan in the approval request body under `request_context`:
@@ -397,11 +397,15 @@ transaction".
 
 ## 4. Test coverage
 
-The three layers map to three test tiers. K8s tool tests cover Layers A
-and C only (no Layer B structural tests, because there is no structural guard
-to test).
+The three enforcement mechanisms map to testing pyramid layers. K8s tool tests
+cover Mechanisms A and C only (no Mechanism B structural tests, because there is
+no structural guard to test).
 
-### Tier 1 — Unit: approval context (`agentutil/agentutil_test.go`)
+### Layer 1: Unit tests
+
+All unit tests run without external dependencies via `go test ./...`.
+
+#### 1a: Approval context (`agentutil/agentutil_test.go`)
 
 | Test | What it verifies |
 |---|---|
@@ -413,7 +417,7 @@ These tests use a local `httptest` mock server implementing `POST /v1/approvals`
 and `GET /v1/approvals/{id}/wait`. They capture the raw request body via a
 buffered channel and assert on the JSON structure.
 
-### Tier 1b — Unit: K8s tool behaviour (`agents/k8s/tools_test.go`)
+#### 1b: K8s tool behaviour (`agents/k8s/tools_test.go`)
 
 | Test | What it verifies |
 |---|---|
@@ -437,7 +441,7 @@ call second) and `withK8sPolicyEnforcer` / `newDenyK8sDestructiveEnforcer` for
 policy fixture setup. The older `withMockKubectl` single-response helper is still
 used for error and denial tests that don't reach the verification step.
 
-### Tier 1c — Unit: post-execution verification safeguards
+#### 1c: Post-execution verification safeguards
 
 Seven new sequence-mock tests cover the Level 1 and Level 2 safeguards added to
 both agents. All tests use the sequence-mock helpers so the mutation call and the
@@ -471,7 +475,7 @@ calls: mutate → verify.
 For integration and manual fault-injection procedures see
 [Mutation Safeguard Verification](testing/FAULT_INJECTION_TESTING.md#mutation-safeguard-verification).
 
-### Tier 2 — Unit: session plan wiring (`agents/database/tools_test.go`)
+### 2: Unit: session plan wiring (`agents/database/tools_test.go`)
 
 | Test | What it verifies |
 |---|---|
@@ -485,7 +489,7 @@ captures the approval body for assertion. (The newer `withMockRunnerSequence`
 helper in Tier 1c uses the same sequential pattern extended to three calls for
 the verification step.)
 
-### Tier 3a — Unit: ordering evaluator (`testing/faultlib/faultlib_test.go`)
+### 3a: Unit: ordering evaluator (`testing/faultlib/faultlib_test.go`)
 
 The fault-test evaluator was extended with `ExpectedToolOrder` support. Five
 unit tests cover the new logic:
@@ -503,7 +507,7 @@ position for each tool name in the lowercased response text. If tool A's
 earliest evidence position is greater than or equal to tool B's earliest
 evidence position, the pair fails.
 
-### Tier 3b — Live fault injection scenario (`testing/catalog/failures.yaml`)
+### 3b: Live fault injection scenario (`testing/catalog/failures.yaml`)
 
 The `db-terminate-direct-command` scenario tests the full agent behaviour end
 to end:
@@ -558,11 +562,11 @@ make faulttest
 
 ### `db-terminate-direct-command`
 
-This scenario specifically tests **Layer A** (LLM behaviour) in a live
+This scenario specifically tests **Mechanism A** (LLM behaviour) in a live
 environment for the database agent. It is the only test that can catch a
 regression where the model is prompted to act without inspecting first.
 
-No equivalent k8s fault scenario exists yet. The absence of a Layer B
+No equivalent k8s fault scenario exists yet. The absence of a Mechanism B
 structural guard for the k8s mutation tools makes this a gap: a misbehaving
 model could call `delete_pod` without first calling `describe_pod` and there is
 currently no automated test that would catch it.
@@ -571,7 +575,7 @@ currently no automated test that would catch it.
 **Failure mode being tested**: an agent that calls `terminate_connection`
 directly after `get_active_connections`, skipping the `get_session_info` step.
 
-**Why Tier 2 alone is not sufficient**: the structural guard (Layer B) ensures
+**Why Tier 2 alone is not sufficient**: the structural guard (Mechanism B) ensures
 the tool calls `inspectConnection` internally regardless of what the LLM does.
 The fault scenario confirms that the **agent also presents the session info to
 the user** before acting — a purely structural test cannot verify this because

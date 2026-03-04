@@ -3,22 +3,33 @@
   ## TL;DR: as they say, a picture is worth a thousand words
 
 ```
-[boris@ ~/helpdesk]$ make test
-go test ./...
-ok  	helpdesk/agents/database	(cached)
-ok  	helpdesk/agents/incident	(cached)
-ok  	helpdesk/agents/k8s	(cached)
-ok  	helpdesk/agentutil	(cached)
-ok  	helpdesk/cmd/gateway	(cached)
-ok  	helpdesk/cmd/helpdesk	(cached)
-ok  	helpdesk/cmd/srebot	(cached)
-ok  	helpdesk/internal/discovery	(cached)
+[boris@ ~/helpdesk]$ make test-nocache
+go test --count=1 ./...
+ok  	helpdesk/agents/database	0.494s
+ok  	helpdesk/agents/incident	0.788s
+ok  	helpdesk/agents/k8s	0.479s
+?   	helpdesk/agents/research	[no test files]
+ok  	helpdesk/agentutil	0.824s
+?   	helpdesk/cmd/approvals	[no test files]
+ok  	helpdesk/cmd/auditd	1.074s
+?   	helpdesk/cmd/auditor	[no test files]
+ok  	helpdesk/cmd/gateway	1.303s
+ok  	helpdesk/cmd/govbot	1.592s
+?   	helpdesk/cmd/govexplain	[no test files]
+ok  	helpdesk/cmd/helpdesk	1.681s
+?   	helpdesk/cmd/secbot	[no test files]
+ok  	helpdesk/cmd/srebot	1.863s
+ok  	helpdesk/internal/audit	2.423s
+ok  	helpdesk/internal/discovery	2.176s
+?   	helpdesk/internal/infra	[no test files]
 ?   	helpdesk/internal/logging	[no test files]
 ?   	helpdesk/internal/model	[no test files]
-ok  	helpdesk/prompts	(cached)
-ok  	helpdesk/testing/cmd/faulttest	(cached)
-ok  	helpdesk/testing/faultlib	(cached)
-?   	helpdesk/testing/testutil	[no test files]
+ok  	helpdesk/internal/policy	2.261s
+ok  	helpdesk/prompts	2.320s
+ok  	helpdesk/testing/cmd/faulttest	2.072s
+ok  	helpdesk/testing/faultlib	2.005s
+ok  	helpdesk/testing/helm	2.458s
+ok  	helpdesk/testing/testutil	1.864s
 
 
 [boris@ ~/helpdesk]$ make integration
@@ -41,24 +52,59 @@ docker compose -f testing/docker/docker-compose.yaml down -v
  ✔ Network docker_default            Removed                                                                                                                                                                                                 0.2s
 
 
-[boris@ ~/helpdesk]$ make faulttest
+[boris@ ~/helpdesk]$ FAULTTEST_DB_AGENT_URL=http://localhost:1100 FAULTTEST_CONN_STR="host=localhost port=5432 dbname=postgres user=postgres" FAULTTEST_IDS=db-idle-in-transaction make faulttest
 Starting test infrastructure...
 docker compose -f testing/docker/docker-compose.yaml up -d --wait
-[+] Running 4/4
- ✔ Network docker_default            Created                                                                                                                                                                                                 0.0s
- ✔ Volume "docker_pgdata"            Created                                                                                                                                                                                                 0.0s
- ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 6.3s
- ✔ Container helpdesk-test-pgloader  Healthy                                                                                                                                                                                                 6.3s
+[+] Running 2/2
+ ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 1.0s
+ ✔ Container helpdesk-test-pgloader  Healthy                                                                                                                                                                                                 1.0s
 Running fault tests...
 go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
-SKIP: No agent URLs configured
-Set FAULTTEST_DB_AGENT_URL, FAULTTEST_K8S_AGENT_URL, or FAULTTEST_ORCHESTRATOR_URL
-ok  	helpdesk/testing/faulttest	0.332s
+=== RUN   TestFaultInjection
+    faulttest_test.go:129: Running 1 fault injection tests
+=== RUN   TestFaultInjection/db-idle-in-transaction
+    faulttest_test.go:163: Injecting failure...
+2026/03/03 19:02:19 INFO executing injection spec type=docker_exec phase=inject
+    faulttest_test.go:178: Sending prompt to agent...
+    faulttest_test.go:190: Agent responded in 8.632011458s (2293 chars)
+    faulttest_test.go:195: Evaluation: score=85%, keywords=true, diagnosis=true, tools=true
+    faulttest_test.go:170: Tearing down...
+2026/03/03 19:02:30 INFO executing injection spec type=docker_exec phase=teardown
+--- PASS: TestFaultInjection (10.95s)
+    --- PASS: TestFaultInjection/db-idle-in-transaction (10.94s)
+=== RUN   TestDatabaseFailures
+    faulttest_test.go:236: Found 11 database failures
+    faulttest_test.go:239:   - db-max-connections: Max connections exhausted
+    faulttest_test.go:239:   - db-long-running-query: Long-running query blocking
+    faulttest_test.go:239:   - db-lock-contention: Lock contention / deadlock
+    faulttest_test.go:239:   - db-table-bloat: Table bloat / dead tuples
+    faulttest_test.go:239:   - db-high-cache-miss: High cache miss ratio
+    faulttest_test.go:239:   - db-connection-refused: Database connection refused
+    faulttest_test.go:239:   - db-auth-failure: Authentication failure
+    faulttest_test.go:239:   - db-not-exist: Database does not exist
+    faulttest_test.go:239:   - db-replication-lag: Replication lag
+    faulttest_test.go:239:   - db-idle-in-transaction: Session stuck with uncommitted writes
+    faulttest_test.go:239:   - db-terminate-direct-command: Direct terminate — inspect-first check
+--- PASS: TestDatabaseFailures (0.00s)
+=== RUN   TestKubernetesFailures
+    faulttest_test.go:248: FAULTTEST_K8S_AGENT_URL not set
+--- SKIP: TestKubernetesFailures (0.00s)
+=== RUN   TestCatalogLoading
+    faulttest_test.go:290: Catalog: version=1, failures=19
+    faulttest_test.go:298:   kubernetes: 6
+    faulttest_test.go:298:   compound: 2
+    faulttest_test.go:298:   database: 11
+--- PASS: TestCatalogLoading (0.00s)
+=== RUN   TestEvaluatorSmokeTest
+    faulttest_test.go:338: Evaluator test: score=1.00, passed=true
+--- PASS: TestEvaluatorSmokeTest (0.00s)
+PASS
+ok  	helpdesk/testing/faulttest	11.304s
 Stopping test infrastructure...
 docker compose -f testing/docker/docker-compose.yaml down -v
 [+] Running 4/4
  ✔ Container helpdesk-test-pgloader  Removed                                                                                                                                                                                                10.2s
- ✔ Container helpdesk-test-pg        Removed                                                                                                                                                                                                 0.1s
+ ✔ Container helpdesk-test-pg        Removed                                                                                                                                                                                                 0.2s
  ✔ Volume docker_pgdata              Removed                                                                                                                                                                                                 0.0s
  ✔ Network docker_default            Removed                                                                                                                                                                                                 0.2s
 
