@@ -16,7 +16,7 @@ A Go-based AI multi-agent intelligent self-service help and support system for t
 * aiHelpDesk features a built-in fault injection framework. 
 * aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those shipped with aiHelpDesk out of the box.
 
-aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs.
+aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs. For the upstream agents, including agentic full-featured SRE systems, aiHelpDesk can be thought of as the database reasoning layer that aggregates the myriad of signals emitted by a database (statistics, metrics, wait events, logs, traces, etc.) into a coherent story and offers a way to repair any of the problems found.
 
 ## AI-Assisted Database Management
 While SaaS applications clearly have their market and cloud vendor DBaaS systems in particular are among the fastest growing and most profitable sectors on GCP, AWS and Azure, there are legitimate reasons for many customers to stay away from the black-box, vendor lock-in, cloud provider specific management systems. See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-8-182259e1720f) for extensive treatment of this topic and, in particular, see the 13 specific customer expectations of the cloud provider's DBaaS and how they mostly fall short of these expectations. 
@@ -65,10 +65,12 @@ See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configura
 
 ## AI Governance
 aiHelpDesk is proud to feature a sophisticated AI Governanance system,
-which rests on eight separate subsystems, including the full
-auditing. Please see [here](AIGOVERNANCE.md) for details.
-Compliance Reporting — the periodic governance posture assessment — is
-documented separately in [COMPLIANCE.md](COMPLIANCE.md).
+which rests on eight separate subsystems, including full
+[auditing](AUDIT.md). Compliance Reporting — the periodic governance
+and security posture assessment — is documented separately in
+[COMPLIANCE.md](COMPLIANCE.md) and so are the
+[aiHelpDesk Journeys](JOURNEYS.md), etc.
+Please see [here](AIGOVERNANCE.md) for details.
 
 ## Testing
 aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework, see [here](testing/FAULT_INJECTION_TESTING.md).
