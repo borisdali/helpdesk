@@ -53,9 +53,13 @@ Sub-agents are standalone A2A servers. That means that if a provider with the de
 
 ## 0. Mutations
 
-Before deliving into the architecture of aiHelpDesk, we'd like to point out
-that we treat extreamly seriously any of changes that aiHelpDesk may make
-to your databases or to your infrastructure (be it K8s or VMs).
+> **Yes, there's in fact section 0 in this architecture document**.
+> That is, before deliving into the architecture of aiHelpDesk, we'd
+> like to point out that we treat extreamly seriously any changes
+> that aiHelpDesk may make to your databases or to your infrastructure
+> (be it K8s or VMs). Please read this section first and if you disagree
+> with our position on it, aiHelpDesk may not be the right fit for you,
+> but we'd love to know your reasons. Reach out to us!
 
 It is our intention to mature aiHelpDesk to the point where it can not only
 diagnose problems with your databases or infra, but also rectify them
@@ -76,7 +80,8 @@ critical PROD databases, [aiHelpDesk journeys](JOURNEYS.md) and the five-layer
 It's crystal clear in our mind that our quest to deliver AI based
 self-service diagnose and repair system can only be achieved with the
 trust that users put in aiHelpDesk. Trust must be earned and we invest
-heavilty into building that trust foundation.
+heavilty into building the foundation for it (we refer to it as
+[AI Governance](AIGOVERNANCE.md)).
 
 Through our lab experiements we clearly see the challenges in multi-agent
 workflows deployments based on LLMs. Different models react differently
