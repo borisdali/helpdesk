@@ -13,6 +13,7 @@ import (
 	"google.golang.org/adk/tool"
 
 	"helpdesk/agentutil"
+	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/policy"
 )
@@ -22,6 +23,10 @@ var toolAuditor *audit.ToolAuditor
 
 // policyEnforcer is set during initialization for policy enforcement.
 var policyEnforcer *agentutil.PolicyEnforcer
+
+// verifyRetryConfig controls the re-check retry loop for Level 2 post-mutation
+// verification. Overridable in tests to use zero delays.
+var verifyRetryConfig = retryutil.Default
 
 // namespaceInfo holds resolved namespace information for policy checks.
 type namespaceInfo struct {
@@ -312,7 +317,9 @@ func recordClientGoAudit(ctx context.Context, toolName string, params map[string
 
 // KubectlResult is the standard output type for all kubectl tools.
 type KubectlResult struct {
-	Output string `json:"output"`
+	Output       string `json:"output"`
+	VerifyStatus string `json:"verify_status,omitempty"` // "ok"|"warning"|"failed"|"escalation_required"
+	RetryCount   int    `json:"retry_count,omitempty"`   // >0 when Level 2 resolved after re-checks
 }
 
 // GetPodsArgs defines arguments for the get_pods tool.
@@ -637,19 +644,37 @@ func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) 
 	}
 
 	// Level 2: confirm the pod is no longer visible in the API server.
-	_, verifyErr := runKubectl(ctx, kubeContext, "get", "pod", args.PodName, "-n", namespace)
-	if verifyErr == nil {
-		// kubectl get pod returned exit 0 — the pod still exists (likely Terminating).
-		return KubectlResult{Output: fmt.Sprintf(
-			"VERIFICATION WARNING: pod %q still appears in namespace %q after deletion.\n"+
-				"It may still be in Terminating state. Monitor with:\n"+
-				"  kubectl get pod %s -n %s -w\n\n"+
-				"--- Delete result ---\n%s", args.PodName, namespace, args.PodName, namespace, output)}, nil
+	// Re-check up to verifyRetryConfig.MaxAttempts times to handle graceful
+	// shutdown or finalizers that delay removal from the API server.
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			_, err := runKubectl(ctx, kubeContext, "get", "pod", args.PodName, "-n", namespace)
+			return err != nil, nil // "not found" error means pod is gone → resolved
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, "delete_pod", attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
 	}
-	// verifyErr != nil is the expected outcome — "not found" confirms the pod is gone.
-	// For any other error the pod is also gone (or unreachable); return original output.
-
-	return KubectlResult{Output: output}, nil
+	if !resolved {
+		return KubectlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION WARNING: pod %q still appears in namespace %q after %d check(s).\n"+
+					"It may be stuck in Terminating due to a finalizer. To force-remove:\n"+
+					"  kubectl delete pod %s -n %s --force --grace-period=0\n"+
+					"  kubectl patch pod %s -n %s -p '{\"metadata\":{\"finalizers\":[]}}' --type=merge\n\n"+
+					"--- Delete result ---\n%s",
+				args.PodName, namespace, attempts, args.PodName, namespace, args.PodName, namespace, output),
+			VerifyStatus: "warning",
+			RetryCount:   retryCount,
+		}, nil
+	}
+	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
 // RestartDeploymentArgs defines arguments for the restart_deployment tool.
@@ -682,17 +707,36 @@ func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (Kubect
 	}
 
 	// Level 2: confirm the restartedAt annotation was applied to the pod template.
-	verifyOut, verifyErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
-		"-n", namespace, "-o", "jsonpath={.spec.template.metadata.annotations}")
-	if verifyErr != nil || !strings.Contains(verifyOut, "restartedAt") {
-		return KubectlResult{Output: fmt.Sprintf(
-			"VERIFICATION WARNING: restartedAt annotation not visible on deployment %q after rollout restart.\n"+
-				"The command reported success but the restart could not be confirmed. Check:\n"+
-				"  kubectl get deployment %s -n %s -o jsonpath='{.spec.template.metadata.annotations}'\n\n"+
-				"--- Restart result ---\n%s", args.DeploymentName, args.DeploymentName, namespace, output)}, nil
+	// Re-check with backoff to handle K8s API propagation lag.
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			out, err := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+				"-n", namespace, "-o", "jsonpath={.spec.template.metadata.annotations}")
+			return err == nil && strings.Contains(out, "restartedAt"), nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, "restart_deployment", attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
 	}
-
-	return KubectlResult{Output: output}, nil
+	if !resolved {
+		return KubectlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION WARNING: restartedAt annotation not visible on deployment %q after %d check(s).\n"+
+					"The command reported success but the restart could not be confirmed. Check:\n"+
+					"  kubectl rollout status deployment/%s -n %s\n\n"+
+					"--- Restart result ---\n%s",
+				args.DeploymentName, attempts, args.DeploymentName, namespace, output),
+			VerifyStatus: "warning",
+			RetryCount:   retryCount,
+		}, nil
+	}
+	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
 // ScaleDeploymentArgs defines arguments for the scale_deployment tool.
@@ -730,20 +774,45 @@ func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlRes
 	}
 
 	// Level 2: confirm spec.replicas was updated to the requested count.
-	verifyOut, verifyErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
-		"-n", namespace, "-o", "jsonpath={.spec.replicas}")
-	if verifyErr == nil {
-		actual := strings.TrimSpace(verifyOut)
-		expected := strconv.Itoa(args.Replicas)
-		if actual != expected {
-			return KubectlResult{Output: fmt.Sprintf(
-				"VERIFICATION FAILED: deployment %q shows spec.replicas=%s but expected %d after scale.\n"+
-					"The scale command may not have been applied. Check:\n"+
-					"  kubectl get deployment %s -n %s\n\n"+
-					"--- Scale result ---\n%s",
-				args.DeploymentName, actual, args.Replicas, args.DeploymentName, namespace, output)}, nil
-		}
+	// Re-apply the scale command inside the loop before each re-poll to handle
+	// cases where the initial command was applied but the controller hasn't
+	// reconciled yet. The existing approval already covers idempotent re-applies.
+	expected := strconv.Itoa(args.Replicas)
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			out, err := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+				"-n", namespace, "-o", "jsonpath={.spec.replicas}")
+			if err != nil {
+				return false, err
+			}
+			if strings.TrimSpace(out) == expected {
+				return true, nil
+			}
+			// Re-apply scale before next poll (idempotent; existing approval covers it).
+			runKubectl(ctx, kubeContext, "scale", "deployment", args.DeploymentName, //nolint:errcheck
+				"--replicas", expected, "-n", namespace)
+			return false, nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, "scale_deployment", attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
 	}
-
-	return KubectlResult{Output: output}, nil
+	if !resolved {
+		return KubectlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION FAILED: spec.replicas mismatch after %d apply attempt(s).\n"+
+					"Check:\n  kubectl get deployment %s -n %s\n\n"+
+					"--- Scale result ---\n%s",
+				attempts, args.DeploymentName, namespace, output),
+			VerifyStatus: "failed",
+			RetryCount:   retryCount,
+		}, nil
+	}
+	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }

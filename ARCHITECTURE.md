@@ -53,8 +53,9 @@ Sub-agents are standalone A2A servers. That means that if a provider with the de
 
 ## 0. Mutations
 
-> **Yes, there's in fact section 0 in this architecture document**.
-> That is, before deliving into the architecture of aiHelpDesk, we'd
+> **Yes, there's in fact a section 0 in this architecture document**.
+>
+> That is, before diving into the aiHelpDesk architecture, we'd
 > like to point out that we treat extreamly seriously any changes
 > that aiHelpDesk may make to your databases or to your infrastructure
 > (be it K8s or VMs). Please read this section first and if you disagree
@@ -125,19 +126,23 @@ or VM info to the sub-agent:
       "connection_string": "host=db1.example.com port=5432 dbname=prod user=admin",
       "k8s_cluster": "global-prod",
       "k8s_namespace": "database"
+      "tags": ["production", "critical"]
     },
     "local-co-db": {
       "name": "Local Company Dev DB",
       "connection_string": "host=db2.local.example.io port=5432 dbname=dev user=dba",
       "vm_name": "vm-db-dev-01"
+      "tags": ["development"]
     }
   },
+
   "k8s_clusters": {
     "global-prod": {
       "name": "Global Corp Production Cluster",
       "context": "global-prod-cluster"
     }
   },
+
   "vms": {
     "vm-db-dev-01": {
       "name": "Dev Database VM",

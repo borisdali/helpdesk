@@ -14,6 +14,7 @@ import (
 	"google.golang.org/adk/tool"
 
 	"helpdesk/agentutil"
+	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/policy"
 )
@@ -23,6 +24,20 @@ var toolAuditor *audit.ToolAuditor
 
 // policyEnforcer is set during initialization for policy enforcement.
 var policyEnforcer *agentutil.PolicyEnforcer
+
+// verifyRetryConfig controls the re-check retry loop for Level 2 post-mutation
+// verification (cancel_query). Overridable in tests to use zero delays.
+var verifyRetryConfig = retryutil.Default
+
+// verifyTerminateConfig controls the re-check loop for terminate_connection
+// Level 2. Uses a longer initial delay (5 s) because SIGTERM needs time to
+// propagate before pg_stat_activity reflects the backend as gone.
+// Overridable in tests to use zero delays.
+var verifyTerminateConfig = retryutil.Config{
+	MaxAttempts:  2,
+	InitialDelay: 5 * time.Second,
+	MaxDelay:     30 * time.Second,
+}
 
 // databaseInfo holds resolved database information for policy checks.
 type databaseInfo struct {
@@ -604,7 +619,9 @@ func formatConnectionPlan(plan ConnectionPlan) string {
 
 // PsqlResult is the standard output type for all psql tools.
 type PsqlResult struct {
-	Output string `json:"output"`
+	Output       string `json:"output"`
+	VerifyStatus string `json:"verify_status,omitempty"` // "ok"|"warning"|"failed"|"escalation_required"
+	RetryCount   int    `json:"retry_count,omitempty"`   // >0 when Level 2 resolved after re-checks
 }
 
 // errorResult formats an error as a PsqlResult that the LLM can see.
@@ -1002,17 +1019,45 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}
 
 	// Level 2: verify the query is no longer active (state must have left 'active').
+	// Re-check up to verifyRetryConfig.MaxAttempts times with exponential backoff
+	// to handle transient lag between signal delivery and pg_stat_activity update.
 	verifyQuery := fmt.Sprintf(`SELECT state FROM pg_stat_activity WHERE pid = %d;`, args.PID)
-	verifyOut, verifyErr := runPsql(ctx, args.ConnectionString, verifyQuery)
-	if verifyErr == nil && strings.Contains(verifyOut, "state | active") {
-		return PsqlResult{Output: fmt.Sprintf(
-			"VERIFICATION WARNING: PID %d is still in 'active' state after cancellation signal.\n"+
-				"The query may be in a non-interruptible kernel call. Monitor pg_stat_activity and consider terminate_connection if it persists.\n\n"+
-				"--- Session details ---\n%s\n--- Cancel result ---\n%s", args.PID, formatConnectionPlan(plan), output)}, nil
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			out, err := runPsql(ctx, args.ConnectionString, verifyQuery)
+			if err != nil {
+				return true, nil // pid gone → resolved
+			}
+			return !strings.Contains(out, "state | active"), nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, "cancel_query", attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1 // first check is not a retry
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	if !resolved {
+		return PsqlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION WARNING: PID %d is still in 'active' state after %d check(s).\n"+
+					"The query may be in a non-interruptible kernel call. Monitor pg_stat_activity and consider terminate_connection if it persists.\n\n"+
+					"--- Session details ---\n%s\n--- Cancel result ---\n%s",
+				args.PID, attempts, formatConnectionPlan(plan), output),
+			VerifyStatus: "warning",
+			RetryCount:   retryCount,
+		}, nil
 	}
 
 	// Step 3: return plan context + execution result so the agent can relay both.
-	return PsqlResult{Output: formatConnectionPlan(plan) + "\n--- Result ---\n" + output}, nil
+	return PsqlResult{
+		Output:       formatConnectionPlan(plan) + "\n--- Result ---\n" + output,
+		VerifyStatus: "ok",
+		RetryCount:   retryCount,
+	}, nil
 }
 
 // TerminateConnectionArgs defines arguments for the terminate_connection tool.
@@ -1064,17 +1109,46 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}
 
 	// Level 2: verify the backend is actually gone from pg_stat_activity.
+	// A single re-check after a short delay handles the common case where the
+	// backend is in a brief kernel call. If it is still alive after that, escalate.
 	verifyQuery := fmt.Sprintf(`SELECT count(*) AS still_alive FROM pg_stat_activity WHERE pid = %d;`, args.PID)
-	verifyOut, verifyErr := runPsql(ctx, args.ConnectionString, verifyQuery)
-	if verifyErr == nil && strings.Contains(verifyOut, "still_alive | 1") {
-		return PsqlResult{Output: fmt.Sprintf(
-			"VERIFICATION FAILED: PID %d is still present in pg_stat_activity after termination.\n"+
-				"The backend ignored SIGTERM. Manual intervention may be required (e.g., pg_terminate_backend with superuser, or OS-level kill).\n\n"+
-				"--- Session details ---\n%s\n--- Termination result ---\n%s", args.PID, formatConnectionPlan(plan), output)}, nil
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx,
+		verifyTerminateConfig,
+		func() (bool, error) {
+			out, err := runPsql(ctx, args.ConnectionString, verifyQuery)
+			return err != nil || !strings.Contains(out, "still_alive | 1"), nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, "terminate_connection", attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	if !resolved {
+		return PsqlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION FAILED: PID %d is still present in pg_stat_activity after termination.\n"+
+					"ESCALATION REQUIRED: The backend ignored SIGTERM.\n"+
+					"Next steps (in order):\n"+
+					"  1. Retry as a superuser role (pg_terminate_backend requires pg_signal_backend for non-owned backends).\n"+
+					"  2. OS-level: kill -9 <os_pid> on the database host (find os_pid via pg_stat_activity).\n\n"+
+					"--- Session details ---\n%s\n--- Termination result ---\n%s",
+				args.PID, formatConnectionPlan(plan), output),
+			VerifyStatus: "escalation_required",
+			RetryCount:   retryCount,
+		}, nil
 	}
 
 	// Step 3: return plan context + execution result so the agent can relay both.
-	return PsqlResult{Output: formatConnectionPlan(plan) + "\n--- Result ---\n" + output}, nil
+	return PsqlResult{
+		Output:       formatConnectionPlan(plan) + "\n--- Result ---\n" + output,
+		VerifyStatus: "ok",
+		RetryCount:   retryCount,
+	}, nil
 }
 
 // TerminateIdleConnectionsArgs defines arguments for the terminate_idle_connections tool.

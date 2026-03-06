@@ -15,6 +15,7 @@ import (
 	"google.golang.org/genai"
 
 	"helpdesk/agentutil"
+	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/infra"
 )
 
@@ -41,6 +42,14 @@ func (mockK8sToolContext) RequestConfirmation(string, any) error                
 
 func newK8sTestContext() tool.Context {
 	return mockK8sToolContext{context.Background()}
+}
+
+// withZeroVerifyConfig replaces verifyRetryConfig with a zero-delay 1-attempt
+// config for the duration of the test, then restores the original on cleanup.
+func withZeroVerifyConfig() func() {
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 1, InitialDelay: 0, BackoffFactor: 1}
+	return func() { verifyRetryConfig = old }
 }
 
 // withMockKubectl temporarily replaces the runKubectl variable for a test.
@@ -397,8 +406,9 @@ func TestDeletePodTool_Failure(t *testing.T) {
 func TestDeletePodTool_VerificationWarning_PodStillTerminating(t *testing.T) {
 	// Simulates a pod that entered Terminating state but the API still shows it.
 	// Level-2 verification fires because kubectl get pod returns exit 0.
+	defer withZeroVerifyConfig()()
 	defer withMockKubectlSequence(
-		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil}, // delete accepted
+		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil},                          // delete accepted
 		kubectlResponse{out: "NAME      READY   STATUS\nstuck-pod 0/1     Terminating\n", err: nil}, // pod still visible
 	)()
 
@@ -416,8 +426,8 @@ func TestDeletePodTool_VerificationWarning_PodStillTerminating(t *testing.T) {
 	if !strings.Contains(result.Output, "stuck-pod") {
 		t.Errorf("deletePodTool() output = %q, want pod name in warning", result.Output)
 	}
-	if !strings.Contains(result.Output, "Terminating") {
-		t.Errorf("deletePodTool() output = %q, want monitoring hint in warning", result.Output)
+	if result.VerifyStatus != "warning" {
+		t.Errorf("deletePodTool() VerifyStatus = %q, want warning", result.VerifyStatus)
 	}
 }
 
@@ -482,6 +492,7 @@ func TestRestartDeploymentTool_Failure(t *testing.T) {
 func TestRestartDeploymentTool_VerificationWarning_AnnotationMissing(t *testing.T) {
 	// Simulates a restart command that appeared to succeed but the restartedAt
 	// annotation is absent from the deployment spec — Level-2 verification fires.
+	defer withZeroVerifyConfig()()
 	defer withMockKubectlSequence(
 		kubectlResponse{out: `deployment.apps "api-server" restarted` + "\n", err: nil},
 		kubectlResponse{out: `map[]`, err: nil}, // annotations map is empty
@@ -500,6 +511,9 @@ func TestRestartDeploymentTool_VerificationWarning_AnnotationMissing(t *testing.
 	}
 	if !strings.Contains(result.Output, "api-server") {
 		t.Errorf("restartDeploymentTool() output = %q, want deployment name in warning", result.Output)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("restartDeploymentTool() VerifyStatus = %q, want warning", result.VerifyStatus)
 	}
 }
 
@@ -588,6 +602,7 @@ func TestScaleDeploymentTool_Failure(t *testing.T) {
 func TestScaleDeploymentTool_VerificationFailed_WrongReplicas(t *testing.T) {
 	// Simulates the kubectl scale command reporting success but spec.replicas
 	// not matching the requested count — Level-2 verification fires.
+	defer withZeroVerifyConfig()()
 	defer withMockKubectlSequence(
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil},
 		kubectlResponse{out: "3", err: nil}, // actual replicas is 3, not the requested 5
@@ -608,6 +623,9 @@ func TestScaleDeploymentTool_VerificationFailed_WrongReplicas(t *testing.T) {
 	if !strings.Contains(result.Output, "web") {
 		t.Errorf("scaleDeploymentTool() output = %q, want deployment name in output", result.Output)
 	}
+	if result.VerifyStatus != "failed" {
+		t.Errorf("scaleDeploymentTool() VerifyStatus = %q, want failed", result.VerifyStatus)
+	}
 }
 
 func TestScaleDeploymentTool_PolicyDenied(t *testing.T) {
@@ -625,6 +643,176 @@ func TestScaleDeploymentTool_PolicyDenied(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "policy denied") {
 		t.Errorf("scaleDeploymentTool() error = %v, want 'policy denied'", err)
+	}
+}
+
+// =============================================================================
+// Retry scenario tests — Level-2 resolves after 1 or more re-checks
+// =============================================================================
+
+func TestDeletePodTool_VerificationWarning_ResolvesOnRetry(t *testing.T) {
+	// Pod is still Terminating on first verify but gone by second check.
+	// Tool should return ok with RetryCount=1.
+	//   call #1: delete (ok)
+	//   call #2: verify → pod still visible (exit 0) → not resolved
+	//   call #3: verify → not found (err != nil) → resolved
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil},
+		kubectlResponse{out: "NAME      READY   STATUS\nstuck-pod 0/1     Terminating\n", err: nil},
+		kubectlResponse{out: "", err: fmt.Errorf("not found")},
+	)()
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	ctx := newK8sTestContext()
+	result, err := deletePodTool(ctx, DeletePodArgs{
+		Namespace: "production",
+		PodName:   "stuck-pod",
+	})
+	if err != nil {
+		t.Fatalf("deletePodTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("deletePodTool() VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+	if result.RetryCount != 1 {
+		t.Errorf("deletePodTool() RetryCount = %d, want 1", result.RetryCount)
+	}
+	if strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("deletePodTool() output contains unexpected VERIFICATION WARNING when resolved")
+	}
+}
+
+func TestDeletePodTool_VerificationWarning_ExhaustedEscalation(t *testing.T) {
+	// Pod stays Terminating for all verify attempts; escalation guidance surfaced.
+	//   call #1: delete (ok)
+	//   call #2-4: verify → pod always visible (reused)
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil},
+		kubectlResponse{out: "NAME      READY   STATUS\nstuck-pod 0/1     Terminating\n", err: nil},
+	)()
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	ctx := newK8sTestContext()
+	result, err := deletePodTool(ctx, DeletePodArgs{
+		Namespace: "production",
+		PodName:   "stuck-pod",
+	})
+	if err != nil {
+		t.Fatalf("deletePodTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("deletePodTool() VerifyStatus = %q, want warning", result.VerifyStatus)
+	}
+	if result.RetryCount != 2 {
+		t.Errorf("deletePodTool() RetryCount = %d, want 2", result.RetryCount)
+	}
+	if !strings.Contains(result.Output, "--force") {
+		t.Errorf("deletePodTool() output = %q, want force-delete escalation guidance", result.Output)
+	}
+}
+
+func TestRestartDeploymentTool_VerificationWarning_ResolvesOnRetry(t *testing.T) {
+	// First verify shows no restartedAt annotation; second confirms it's present.
+	// Tool should return ok with RetryCount=1.
+	//   call #1: rollout restart (ok)
+	//   call #2: verify → map[] (no annotation)
+	//   call #3: verify → restartedAt present → resolved
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `deployment.apps "api-server" restarted` + "\n", err: nil},
+		kubectlResponse{out: `map[]`, err: nil},
+		kubectlResponse{out: `map[kubectl.kubernetes.io/restartedAt:2026-03-06T00:00:00Z]`, err: nil},
+	)()
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	ctx := newK8sTestContext()
+	result, err := restartDeploymentTool(ctx, RestartDeploymentArgs{
+		Namespace:      "staging",
+		DeploymentName: "api-server",
+	})
+	if err != nil {
+		t.Fatalf("restartDeploymentTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("restartDeploymentTool() VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+	if result.RetryCount != 1 {
+		t.Errorf("restartDeploymentTool() RetryCount = %d, want 1", result.RetryCount)
+	}
+	if strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("restartDeploymentTool() output contains unexpected VERIFICATION WARNING when resolved")
+	}
+}
+
+func TestScaleDeploymentTool_Level2_RetryApplySucceeds(t *testing.T) {
+	// First verify shows wrong replicas; scale re-applied; second verify confirms.
+	// Tool should return ok with RetryCount=1.
+	//   call #1: scale (ok)
+	//   call #2: verify → "3" (wrong) → re-apply scale → call #3 consumed by re-apply
+	//   call #4: verify → "5" (correct) → resolved
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // initial scale
+		kubectlResponse{out: "3", err: nil},                                    // verify #1: wrong
+		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // re-apply
+		kubectlResponse{out: "5", err: nil},                                    // verify #2: correct
+	)()
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	ctx := newK8sTestContext()
+	result, err := scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "production",
+		DeploymentName: "web",
+		Replicas:       5,
+	})
+	if err != nil {
+		t.Fatalf("scaleDeploymentTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("scaleDeploymentTool() VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+	if result.RetryCount != 1 {
+		t.Errorf("scaleDeploymentTool() RetryCount = %d, want 1", result.RetryCount)
+	}
+}
+
+func TestScaleDeploymentTool_Level2_RetryApplyFails(t *testing.T) {
+	// All verify calls return wrong replicas — failed after all re-apply attempts.
+	//   call #1: scale (ok)
+	//   call #2: verify → "3" (wrong) → re-apply (call #3)
+	//   call #4: verify → "3" (wrong) → re-apply (call #5)
+	//   call #6: verify → "3" (wrong) → done (last attempt, no re-apply)
+	defer withMockKubectlSequence(
+		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil},
+		kubectlResponse{out: "3", err: nil}, // always returns 3 (reused)
+	)()
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	ctx := newK8sTestContext()
+	result, err := scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "production",
+		DeploymentName: "web",
+		Replicas:       5,
+	})
+	if err != nil {
+		t.Fatalf("scaleDeploymentTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "failed" {
+		t.Errorf("scaleDeploymentTool() VerifyStatus = %q, want failed", result.VerifyStatus)
+	}
+	if result.RetryCount != 2 {
+		t.Errorf("scaleDeploymentTool() RetryCount = %d, want 2", result.RetryCount)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION FAILED") {
+		t.Errorf("scaleDeploymentTool() output = %q, want 'VERIFICATION FAILED'", result.Output)
 	}
 }
 

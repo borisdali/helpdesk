@@ -19,6 +19,7 @@ import (
 	"google.golang.org/genai"
 
 	"helpdesk/agentutil"
+	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 )
@@ -1314,12 +1315,28 @@ func TestCancelQueryTool_Level1_ReturnedFalse(t *testing.T) {
 	}
 }
 
+// withZeroVerifyConfig replaces verifyRetryConfig with a zero-delay 1-attempt
+// config for the duration of the test, then restores the original on cleanup.
+func withZeroVerifyConfig() func() {
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 1, InitialDelay: 0, BackoffFactor: 1}
+	return func() { verifyRetryConfig = old }
+}
+
+// withZeroTerminateConfig does the same for verifyTerminateConfig.
+func withZeroTerminateConfig() func() {
+	old := verifyTerminateConfig
+	verifyTerminateConfig = retryutil.Config{MaxAttempts: 1, InitialDelay: 0, BackoffFactor: 1}
+	return func() { verifyTerminateConfig = old }
+}
+
 func TestCancelQueryTool_Level2_StillActive(t *testing.T) {
 	// pg_cancel_backend() returned "t" but the backend's state is still "active".
 	// The query may be in a non-interruptible kernel call; Level-2 fires a warning.
 	//   call #1: inspectConnection
 	//   call #2: runPsqlAs — pg_cancel_backend returns "t"
-	//   call #3: runPsql (verify) — state = active
+	//   call #3: runPsql (verify) — state = active (exhausted → 1 attempt, immediate)
+	defer withZeroVerifyConfig()()
 	defer withMockRunnerSequence(
 		psqlResponse{out: testInspectOutput, err: nil},
 		psqlResponse{out: "-[ RECORD 1 ]---+-----\ncancelled       | t\npid             | 12345\n", err: nil},
@@ -1339,6 +1356,79 @@ func TestCancelQueryTool_Level2_StillActive(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "12345") {
 		t.Errorf("cancelQueryTool() output = %q, want PID in warning", result.Output)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("cancelQueryTool() VerifyStatus = %q, want warning", result.VerifyStatus)
+	}
+}
+
+func TestCancelQueryTool_Level2_ResolvesOnRetry(t *testing.T) {
+	// Level-2 re-check: first verify call still shows active; second shows cleared.
+	// The tool should return success with RetryCount=1.
+	//   call #1: inspectConnection
+	//   call #2: runPsqlAs — pg_cancel_backend returns "t"
+	//   call #3: verify — state = active (still running)
+	//   call #4: verify — no rows (pid gone) → resolved
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\ncancelled       | t\npid             | 12345\n", err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+------\nstate | active\n", err: nil},
+		psqlResponse{out: "(0 rows)", err: nil},
+	)()
+	// Use zero delays but keep MaxAttempts=3 so the retry loop runs.
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              12345,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("cancelQueryTool() VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+	if result.RetryCount != 1 {
+		t.Errorf("cancelQueryTool() RetryCount = %d, want 1", result.RetryCount)
+	}
+	if strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("cancelQueryTool() output contains unexpected VERIFICATION WARNING when resolved")
+	}
+}
+
+func TestCancelQueryTool_Level2_ExhaustedWarning(t *testing.T) {
+	// All re-checks return active — retry loop exhausted; tool returns warning.
+	//   call #1: inspectConnection
+	//   call #2: runPsqlAs — pg_cancel_backend returns "t"
+	//   call #3-5: verify — state = active (always, seqMockRunner reuses last)
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\ncancelled       | t\npid             | 12345\n", err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+------\nstate | active\n", err: nil},
+	)()
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              12345,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("cancelQueryTool() VerifyStatus = %q, want warning", result.VerifyStatus)
+	}
+	if result.RetryCount != 2 {
+		t.Errorf("cancelQueryTool() RetryCount = %d, want 2", result.RetryCount)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("cancelQueryTool() output = %q, want 'VERIFICATION WARNING'", result.Output)
 	}
 }
 
@@ -1452,7 +1542,8 @@ func TestTerminateConnectionTool_Level2_PidStillAlive(t *testing.T) {
 	// pg_stat_activity — the Level-2 verification check must fire.
 	//   call #1: inspectConnection
 	//   call #2: runPsqlAs — pg_terminate_backend returns "t"
-	//   call #3: runPsql (verify) — still_alive = 1
+	//   call #3: runPsql (verify) — still_alive = 1 (both attempts, reused)
+	defer withZeroTerminateConfig()()
 	defer withMockRunnerSequence(
 		psqlResponse{out: testInspectOutput, err: nil},
 		psqlResponse{out: "-[ RECORD 1 ]---+-----\nterminated      | t\npid             | 5678\n", err: nil},
@@ -1472,6 +1563,78 @@ func TestTerminateConnectionTool_Level2_PidStillAlive(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "5678") {
 		t.Errorf("terminateConnectionTool() output = %q, want PID in verification message", result.Output)
+	}
+	if result.VerifyStatus != "escalation_required" {
+		t.Errorf("terminateConnectionTool() VerifyStatus = %q, want escalation_required", result.VerifyStatus)
+	}
+}
+
+func TestTerminateConnectionTool_Level2_ResolvesOnRetry(t *testing.T) {
+	// Level-2 re-check: first verify still shows pid alive; second verify confirms gone.
+	// The tool should return success with RetryCount=1.
+	//   call #1: inspectConnection
+	//   call #2: runPsqlAs — pg_terminate_backend returns "t"
+	//   call #3: verify — still_alive = 1 (not yet gone)
+	//   call #4: verify — 0 rows (pid gone) → resolved
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\nterminated      | t\npid             | 5678\n", err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+---\nstill_alive | 1\n", err: nil},
+		psqlResponse{out: "(0 rows)", err: nil},
+	)()
+	old := verifyTerminateConfig
+	verifyTerminateConfig = retryutil.Config{MaxAttempts: 2, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyTerminateConfig = old }()
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("terminateConnectionTool() VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+	if result.RetryCount != 1 {
+		t.Errorf("terminateConnectionTool() RetryCount = %d, want 1", result.RetryCount)
+	}
+	if strings.Contains(result.Output, "VERIFICATION FAILED") {
+		t.Errorf("terminateConnectionTool() output contains unexpected VERIFICATION FAILED when resolved")
+	}
+}
+
+func TestTerminateConnectionTool_Level2_EscalationRequired(t *testing.T) {
+	// Both verify attempts show pid still alive — escalation required.
+	//   call #1: inspectConnection
+	//   call #2: runPsqlAs — pg_terminate_backend returns "t"
+	//   call #3-4: verify — still_alive = 1 (always, reused)
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\nterminated      | t\npid             | 5678\n", err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+---\nstill_alive | 1\n", err: nil},
+	)()
+	old := verifyTerminateConfig
+	verifyTerminateConfig = retryutil.Config{MaxAttempts: 2, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyTerminateConfig = old }()
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "escalation_required" {
+		t.Errorf("terminateConnectionTool() VerifyStatus = %q, want escalation_required", result.VerifyStatus)
+	}
+	if result.RetryCount != 1 {
+		t.Errorf("terminateConnectionTool() RetryCount = %d, want 1", result.RetryCount)
+	}
+	if !strings.Contains(result.Output, "ESCALATION REQUIRED") {
+		t.Errorf("terminateConnectionTool() output = %q, want 'ESCALATION REQUIRED'", result.Output)
 	}
 }
 

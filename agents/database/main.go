@@ -7,6 +7,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/uuid"
@@ -79,6 +81,23 @@ func main() {
 		AgentName:       "postgres_database_agent",
 		ToolAuditor:     toolAuditor,
 	})
+
+	// Apply HELPDESK_VERIFY_* env-var overrides for Level-2 post-mutation retry config.
+	// These allow operators to tune the re-check loop without recompiling the agent.
+	if v := envInt("HELPDESK_VERIFY_MAX_ATTEMPTS", 0); v > 0 {
+		verifyRetryConfig.MaxAttempts = v
+		verifyTerminateConfig.MaxAttempts = v
+	}
+	if v := envInt("HELPDESK_VERIFY_INITIAL_DELAY_S", 0); v > 0 {
+		verifyRetryConfig.InitialDelay = time.Duration(v) * time.Second
+	}
+	if v := envInt("HELPDESK_VERIFY_MAX_DELAY_S", 0); v > 0 {
+		verifyRetryConfig.MaxDelay = time.Duration(v) * time.Second
+	}
+	slog.Info("verify retry config",
+		"max_attempts", verifyRetryConfig.MaxAttempts,
+		"initial_delay", verifyRetryConfig.InitialDelay,
+		"terminate_delay", verifyTerminateConfig.InitialDelay)
 
 	slog.Info("governance",
 		"audit", auditStore != nil,
@@ -283,3 +302,15 @@ func createTools() ([]tool.Tool, error) {
 		terminateIdleConnectionsToolDef,
 	}, nil
 }
+
+// envInt returns the integer value of an environment variable, or fallback if
+// the variable is unset or cannot be parsed.
+func envInt(key string, fallback int) int {
+	if s := os.Getenv(key); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			return v
+		}
+	}
+	return fallback
+}
+

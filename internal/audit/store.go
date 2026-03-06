@@ -500,6 +500,10 @@ type JourneySummary struct {
 	ToolsUsed  []string `json:"tools_used"`
 	Outcome    string   `json:"outcome,omitempty"`
 	EventCount int      `json:"event_count"`
+	// RetryCount is the number of post-mutation verification re-check attempts
+	// recorded for this journey (tool_retry events). Non-zero means a mutation
+	// tool had to wait for state to propagate but eventually confirmed success.
+	RetryCount int `json:"retry_count,omitempty"`
 }
 
 // QueryJourneys returns journey summaries for traces anchored by a
@@ -582,15 +586,16 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	defer rows2.Close()
 
 	type traceData struct {
-		startedAt string
-		endedAt   string
-		userID    string
-		userQuery string
-		agent     string
-		toolsSeen map[string]bool
-		tools     []string
-		outcome   string
-		count     int
+		startedAt  string
+		endedAt    string
+		userID     string
+		userQuery  string
+		agent      string
+		toolsSeen  map[string]bool
+		tools      []string
+		outcome    string
+		count      int
+		retryCount int // number of tool_retry events in this trace
 	}
 
 	// Preserve the order returned by step 1.
@@ -650,7 +655,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.toolsSeen[toolName.String] = true
 			d.tools = append(d.tools, toolName.String)
 		}
-		if outcomeStatus.Valid && outcomeStatus.String != "" {
+		// tool_retry events: count retries but never let their outcome_status
+		// ("retrying" / "resolved") overwrite the journey's real outcome.
+		if eventType == string(EventTypeToolRetry) {
+			d.retryCount++
+		} else if outcomeStatus.Valid && outcomeStatus.String != "" {
 			if d.outcome == "" || outcomeStatus.String == "error" {
 				d.outcome = outcomeStatus.String
 			}
@@ -687,6 +696,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			ToolsUsed:  tools,
 			Outcome:    d.outcome,
 			EventCount: d.count,
+			RetryCount: d.retryCount,
 		})
 	}
 	return summaries, nil

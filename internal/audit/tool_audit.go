@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -158,6 +159,39 @@ func (ta *ToolAuditor) RecordToolInvoked(ctx context.Context, resourceType, reso
 
 	if err := ta.auditor.Record(ctx, event); err != nil {
 		slog.Warn("failed to record tool invoked event", "resource", resourceName, "err", err)
+	}
+}
+
+// RecordToolRetry records a single re-check attempt from a post-mutation
+// verification recovery loop (e.g. WaitUntilResolved). Call via the
+// afterAttempt callback passed to retryutil.WaitUntilResolved.
+//
+// outcome_status is "retrying" when the check did not yet resolve, or
+// "resolved" when it did. It is never "error" so it cannot flip a journey's
+// outcome status from "success" to failure.
+func (ta *ToolAuditor) RecordToolRetry(ctx context.Context, toolName string, attempt int, resolved bool) {
+	if ta.auditor == nil {
+		return
+	}
+
+	status := "retrying"
+	if resolved {
+		status = "resolved"
+	}
+	event := &Event{
+		EventID:     "rty_" + uuid.New().String()[:8],
+		Timestamp:   time.Now().UTC(),
+		EventType:   EventTypeToolRetry,
+		TraceID:     ta.getTraceID(),
+		ActionClass: ActionRead, // re-checks are read-only
+		Session:     Session{ID: ta.sessionID},
+		Tool:        &ToolExecution{Name: toolName, Agent: ta.agentName},
+		Input:       Input{UserQuery: fmt.Sprintf("retry check %d for %s", attempt, toolName)},
+		Outcome:     &Outcome{Status: status},
+	}
+
+	if err := ta.auditor.Record(ctx, event); err != nil {
+		slog.Warn("failed to record tool retry event", "tool", toolName, "attempt", attempt, "err", err)
 	}
 }
 

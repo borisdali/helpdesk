@@ -588,6 +588,149 @@ func TestQueryJourneys(t *testing.T) {
 	}
 }
 
+// TestQueryJourneys_RetryCountPopulated verifies that tool_retry events increment
+// JourneySummary.RetryCount without corrupting the journey outcome.
+func TestQueryJourneys_RetryCountPopulated(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_retry_count_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	events := []*Event{
+		{
+			EventID:   "del_retry1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_retry",
+			Session:   Session{ID: "sess_r", UserID: "carol"},
+			Input:     Input{UserQuery: "cancel query 42"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_retry1",
+			Timestamp: base.Add(500 * time.Millisecond),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_retry",
+			Session:   Session{ID: "dbagent_r"},
+			Tool:      &ToolExecution{Name: "cancel_query"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// Two tool_retry re-check events — these should not change Outcome to "retrying".
+		{
+			EventID:   "rty_retry1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolRetry,
+			TraceID:   "tr_retry",
+			Session:   Session{ID: "dbagent_r"},
+			Tool:      &ToolExecution{Name: "cancel_query"},
+			Outcome:   &Outcome{Status: "retrying"},
+		},
+		{
+			EventID:   "rty_retry2",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeToolRetry,
+			TraceID:   "tr_retry",
+			Session:   Session{ID: "dbagent_r"},
+			Tool:      &ToolExecution{Name: "cancel_query"},
+			Outcome:   &Outcome{Status: "resolved"},
+		},
+	}
+
+	for _, e := range events {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("record event %s: %v", e.EventID, err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d journeys, want 1", len(journeys))
+	}
+
+	j := journeys[0]
+	if j.RetryCount != 2 {
+		t.Errorf("RetryCount = %d, want 2", j.RetryCount)
+	}
+	// tool_retry events must NOT flip the outcome from success to "retrying".
+	if j.Outcome != "success" {
+		t.Errorf("Outcome = %q, want success (retry events must not corrupt outcome)", j.Outcome)
+	}
+	// EventCount includes the tool_retry events.
+	if j.EventCount != 4 {
+		t.Errorf("EventCount = %d, want 4", j.EventCount)
+	}
+}
+
+// TestQueryJourneys_RetryCountZeroOmitted verifies that a journey with no tool_retry
+// events has RetryCount == 0 (which is JSON-omitted via omitempty).
+func TestQueryJourneys_RetryCountZeroOmitted(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_retry_zero_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	events := []*Event{
+		{
+			EventID:   "del_noretry",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_noretry",
+			Session:   Session{ID: "sess_n", UserID: "dave"},
+			Input:     Input{UserQuery: "get pods"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_noretry",
+			Timestamp: base.Add(500 * time.Millisecond),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_noretry",
+			Session:   Session{ID: "k8sagent_n"},
+			Tool:      &ToolExecution{Name: "get_pods"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	}
+
+	for _, e := range events {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("record event %s: %v", e.EventID, err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].RetryCount != 0 {
+		t.Errorf("RetryCount = %d, want 0 for journey with no retries", journeys[0].RetryCount)
+	}
+}
+
 // TestRebind verifies that rebind rewrites ? placeholders to $N for PostgreSQL
 // and leaves queries unchanged for SQLite.
 func TestRebind(t *testing.T) {

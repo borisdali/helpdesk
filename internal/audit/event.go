@@ -21,6 +21,12 @@ const (
 	// tool dispatch, before any policy check. Comparing tool_invoked events
 	// against policy_decision events reveals tool calls that bypassed policy.
 	EventTypeToolInvoked EventType = "tool_invoked"
+	// EventTypeToolRetry is emitted for each re-check attempt made by
+	// post-mutation verification recovery loops (e.g. waiting for a pod to
+	// finish terminating). Each attempt emits one event with outcome_status
+	// "retrying" or "resolved". These events are intentionally NOT "error"
+	// so they never flip a journey's outcome status to failure.
+	EventTypeToolRetry EventType = "tool_retry"
 )
 
 // RequestCategory classifies the type of user request.

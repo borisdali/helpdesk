@@ -202,3 +202,77 @@ func TestRecordAgentReasoning_DynamicTraceID(t *testing.T) {
 		t.Errorf("TraceID = %q, want dynamic-trace-xyz", events[0].TraceID)
 	}
 }
+
+func TestRecordToolRetry_NilAuditor(t *testing.T) {
+	ta := NewToolAuditor(nil, "test-agent", "sess-1", "trace-1")
+	// Should be a no-op and not panic.
+	ta.RecordToolRetry(context.Background(), "cancel_query", 1, false)
+}
+
+func TestRecordToolRetry_StatusRetrying(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "db-agent", "sess-rty", "trace-rty-1")
+
+	ta.RecordToolRetry(context.Background(), "cancel_query", 1, false)
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolRetry})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 tool_retry event, got %d", len(events))
+	}
+
+	evt := events[0]
+	if evt.EventType != EventTypeToolRetry {
+		t.Errorf("EventType = %q, want %q", evt.EventType, EventTypeToolRetry)
+	}
+	if evt.Outcome == nil {
+		t.Fatal("Outcome is nil")
+	}
+	if evt.Outcome.Status != "retrying" {
+		t.Errorf("Outcome.Status = %q, want retrying", evt.Outcome.Status)
+	}
+	if evt.TraceID != "trace-rty-1" {
+		t.Errorf("TraceID = %q, want trace-rty-1", evt.TraceID)
+	}
+	if evt.ActionClass != ActionRead {
+		t.Errorf("ActionClass = %q, want %q", evt.ActionClass, ActionRead)
+	}
+}
+
+func TestRecordToolRetry_StatusResolved(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s-agent", "sess-rty2", "trace-rty-2")
+
+	ta.RecordToolRetry(context.Background(), "delete_pod", 2, true)
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolRetry})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 tool_retry event, got %d", len(events))
+	}
+	if events[0].Outcome.Status != "resolved" {
+		t.Errorf("Outcome.Status = %q, want resolved", events[0].Outcome.Status)
+	}
+}
+
+func TestRecordToolRetry_EventIDHasRtyPrefix(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "db-agent", "sess-rty3", "")
+
+	ta.RecordToolRetry(context.Background(), "cancel_query", 1, false)
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolRetry})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no events recorded")
+	}
+	if len(events[0].EventID) < 4 || events[0].EventID[:4] != "rty_" {
+		t.Errorf("EventID = %q, want rty_ prefix", events[0].EventID)
+	}
+}
