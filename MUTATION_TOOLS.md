@@ -34,9 +34,11 @@ databases or your infra.
    - [Kubernetes agent (1.5–1.8)](#kubernetes-agent)
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm-process)
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
-4. [Test coverage](#4-test-coverage)
-5. [Fault scenario: db-terminate-direct-command](#5-fault-scenario-db-terminate-direct-command)
-6. [Compliance and Alerting](#6-compliance-and-alerting)
+4. [Safeguards and Automatic Recovery](#4-safeguards-and-automatic-recovery)
+5. [Test coverage](#5-test-coverage)
+6. [Fault scenarios](#6-fault-scenarios)
+7. [Run all mutation-tool tests locally](#7-run-all-mutation-tool-tests-locally)
+8. [Compliance and Alerting](#8-compliance-and-alerting)
 
 ---
 
@@ -97,10 +99,12 @@ connection and any open transaction remain alive. Safe to retry.
 3. Execute `SELECT pg_cancel_backend(pid)`
 4. **Level 1 safeguard**: if `pg_cancel_backend` returns `false`, return
    `CANCELLATION FAILED` immediately — the backend was already gone or the
-   role lacks `pg_signal_backend` privilege.
-5. **Level 2 safeguard**: run `SELECT state FROM pg_stat_activity WHERE pid = X`.
-   If the backend is still `active`, return `VERIFICATION WARNING` — the
-   cancellation signal was delivered but the query did not stop.
+   role lacks `pg_signal_backend` privilege. No retry.
+5. **Level 2 safeguard + automatic recovery**: run `SELECT state FROM pg_stat_activity WHERE pid = X`.
+   If the backend is still `active`, enter the recovery loop: re-poll up to
+   `MaxAttempts` times with exponential backoff (the signal was delivered;
+   don't re-cancel). Returns `VERIFICATION WARNING` with escalation guidance
+   only after all attempts are exhausted. See [§4](#4-safeguards-and-automatic-recovery).
 6. Policy post-execution blast-radius check (`CheckDatabaseResult`)
 7. Return session plan + execution result to the orchestrator
 
@@ -126,10 +130,12 @@ any open transaction is rolled back by PostgreSQL.
 3. Execute `SELECT pg_terminate_backend(pid)`
 4. **Level 1 safeguard**: if `pg_terminate_backend` returns `false`, return
    `TERMINATION FAILED` immediately — the backend was already gone or the
-   role lacks `pg_signal_backend` privilege.
-5. **Level 2 safeguard**: run `SELECT count(*) AS still_alive FROM pg_stat_activity WHERE pid = X`.
-   If the count is 1, return `VERIFICATION FAILED` — the connection was not
-   removed despite the positive signal.
+   role lacks `pg_signal_backend` privilege. No retry.
+5. **Level 2 safeguard + automatic recovery**: run `SELECT count(*) AS still_alive FROM pg_stat_activity WHERE pid = X`.
+   If the count is 1, enter the recovery loop: re-poll after a 5 s delay
+   (SIGTERM propagation window) up to `MaxAttempts` times. Returns
+   `VERIFICATION FAILED` with escalation guidance (superuser retry, OS-level
+   `kill -9`) only after all attempts are exhausted. See [§4](#4-safeguards-and-automatic-recovery).
 6. Post-execution blast-radius check
 7. Return session plan + result
 
@@ -208,9 +214,12 @@ rolling the entire deployment.
 1. Policy pre-check (`ActionDestructive`) — may trigger approval workflow
 2. Execute `kubectl delete pod ...`
 3. Post-execution blast-radius check (`checkK8sPolicyResult`)
-4. **Level 2 safeguard**: run `kubectl get pod <name> -n <namespace>`. If the
-   pod is still visible (e.g. stuck in `Terminating`), return
-   `VERIFICATION WARNING` — the pod may have a blocking finalizer.
+4. **Level 2 safeguard + automatic recovery**: run `kubectl get pod <name> -n <namespace>`.
+   If the pod is still visible (e.g. stuck in `Terminating`), enter the recovery
+   loop: re-poll until the pod is gone or `MaxAttempts` exhausted. Returns
+   `VERIFICATION WARNING` with force-delete escalation guidance
+   (`--force --grace-period=0` and `kubectl patch` to remove finalizers) only
+   after all attempts exhausted. See [§4](#4-safeguards-and-automatic-recovery).
 5. Return kubectl output to the orchestrator
 
 ---
@@ -236,9 +245,11 @@ that requires a full pod cycle.
 1. Policy pre-check (`ActionDestructive`) — may trigger approval workflow
 2. Execute `kubectl rollout restart deployment ...`
 3. Post-execution blast-radius check (`checkK8sPolicyResult`)
-4. **Level 2 safeguard**: run `kubectl get deployment <name> -n <namespace> -o jsonpath={.spec.template.metadata.annotations}`.
-   If the `restartedAt` annotation is absent, return `VERIFICATION WARNING` —
-   the restart annotation was not applied.
+4. **Level 2 safeguard + automatic recovery**: run `kubectl get deployment <name> -n <namespace> -o jsonpath={.spec.template.metadata.annotations}`.
+   If the `restartedAt` annotation is absent (API propagation lag), enter the
+   recovery loop: re-poll up to `MaxAttempts` times. Returns `VERIFICATION WARNING`
+   with `kubectl rollout status` guidance only after all attempts exhausted.
+   See [§4](#4-safeguards-and-automatic-recovery).
 5. Return kubectl output to the orchestrator
 
 ---
@@ -264,9 +275,11 @@ touching running pods.
 1. Policy pre-check (`ActionDestructive`) — may trigger approval workflow
 2. Execute `kubectl scale deployment <name> --replicas=<n> ...`
 3. Post-execution blast-radius check (`checkK8sPolicyResult`)
-4. **Level 2 safeguard**: run `kubectl get deployment <name> -n <namespace> -o jsonpath={.spec.replicas}`.
-   If the observed replica count doesn't match the requested count, return
-   `VERIFICATION FAILED`.
+4. **Level 2 safeguard + automatic recovery**: run `kubectl get deployment <name> -n <namespace> -o jsonpath={.spec.replicas}`.
+   If the observed replica count doesn't match the requested count, re-apply
+   `kubectl scale` (idempotent; existing approval covers the retry) then re-poll.
+   Returns `VERIFICATION FAILED` only after all retry attempts exhausted.
+   See [§4](#4-safeguards-and-automatic-recovery).
 5. Return kubectl output to the orchestrator
 
 ---
@@ -400,7 +413,150 @@ transaction".
 
 ---
 
-## 4. Test coverage
+## 4. Safeguards and Automatic Recovery
+
+Every mutation tool applies two independent in-code safeguards immediately
+after the mutation command executes. These run unconditionally, before the
+result is returned to the orchestrator.
+
+### Level 1: Return-value check
+
+Every mutation function (`pg_cancel_backend`, `pg_terminate_backend`,
+`kubectl delete`) returns a boolean or exit code. If it returns `false` /
+non-zero, the tool immediately returns a structured failure without reaching
+Level 2.
+
+| Tool | Level 1 signal | Failure output |
+|---|---|---|
+| `cancel_query` | `pg_cancel_backend` returns `f` | `CANCELLATION FAILED` |
+| `terminate_connection` | `pg_terminate_backend` returns `f` | `TERMINATION FAILED` |
+| `delete_pod` | kubectl exits non-zero | error text propagated |
+| `restart_deployment` | kubectl exits non-zero | error text propagated |
+| `scale_deployment` | kubectl exits non-zero | error text propagated |
+
+Level 1 failures are **not retried** — a `false` return from
+`pg_cancel_backend` indicates the backend is already gone or the role lacks
+`pg_signal_backend` privilege. Retrying would not fix either condition.
+
+### Level 2: Post-mutation state verification
+
+After a Level 1 success, every mutation tool re-reads the target state to
+confirm the mutation took effect:
+
+| Tool | Verification query | Success condition |
+|---|---|---|
+| `cancel_query` | `SELECT state FROM pg_stat_activity WHERE pid = X` | row absent or state ≠ `active` |
+| `terminate_connection` | `SELECT count(*) AS still_alive FROM pg_stat_activity WHERE pid = X` | `still_alive = 0` |
+| `delete_pod` | `kubectl get pod <name> -n <ns>` | command exits non-zero (not found) |
+| `restart_deployment` | `kubectl get deployment <name> -o jsonpath={.spec.template.metadata.annotations}` | output contains `restartedAt` |
+| `scale_deployment` | `kubectl get deployment <name> -o jsonpath={.spec.replicas}` | value matches requested count |
+
+### Automatic recovery: `WaitUntilResolved`
+
+When a Level 2 check fails, the tool does not immediately return a warning.
+Instead it enters a bounded retry loop — implemented in `agentutil/retryutil`
+— that re-polls the verification query with exponential backoff and optional
+jitter:
+
+```
+Level 2 verify fails
+  → WaitUntilResolved loop (up to MaxAttempts, exponential backoff + jitter)
+    → iteration N: sleep(delay) → re-poll verification query
+    → resolved on any iteration: tool returns VerifyStatus "ok" with RetryCount annotation
+  → all attempts exhausted: return VerifyStatus warning/escalation + escalation guidance
+```
+
+**`WaitUntilResolved` signature** (`agentutil/retryutil/retryutil.go`):
+
+```go
+func WaitUntilResolved(
+    ctx context.Context,
+    cfg Config,
+    check func() (resolved bool, err error),
+    afterAttempt func(attempt int, resolved bool), // nil = no callback
+) (resolved bool, attempts int, err error)
+```
+
+The `afterAttempt` callback wires to `toolAuditor.RecordToolRetry`, recording
+each re-poll as an audit event without coupling retry config to the auditor.
+
+### Configuration
+
+Defaults; override at agent startup via environment variables:
+
+| Env var | Default | Description |
+|---|---|---|
+| `HELPDESK_VERIFY_MAX_ATTEMPTS` | 3 | Maximum re-poll attempts before giving up |
+| `HELPDESK_VERIFY_INITIAL_DELAY_S` | 3 | Initial backoff delay in seconds |
+| `HELPDESK_VERIFY_MAX_DELAY_S` | 15 | Maximum delay cap in seconds |
+
+Both agents (`database` and `k8s`) read these at startup and apply them to
+the package-level `verifyRetryConfig` variable. The `terminate_connection`
+tool uses a separate `verifyTerminateConfig` with a 5 s initial delay (SIGTERM
+propagation window) and 30 s max delay. `HELPDESK_VERIFY_MAX_ATTEMPTS` also
+updates `verifyTerminateConfig.MaxAttempts`.
+
+For zero-delay testing, override the package-level var directly before each test:
+```go
+defer func(old retryutil.Config) { verifyRetryConfig = old }(verifyRetryConfig)
+verifyRetryConfig = retryutil.Config{MaxAttempts: 1, InitialDelay: 0}
+```
+
+### Structured result fields
+
+Both `PsqlResult` and `KubectlResult` carry two machine-readable fields:
+
+```go
+VerifyStatus string `json:"verify_status,omitempty"` // "ok" | "warning" | "failed" | "escalation_required"
+RetryCount   int    `json:"retry_count,omitempty"`    // number of re-poll attempts made (0 = first check passed)
+```
+
+`VerifyStatus` gives the LLM and orchestrator a signal that does not require
+parsing free-form output strings. `RetryCount > 0` means the tool had to
+retry but ultimately succeeded — the LLM sees a clean success; `RetryCount`
+is an annotation for observability.
+
+### Recovery strategies by tool
+
+| Tool | Failure cause | Recovery action | `VerifyStatus` on exhaust | Escalation guidance |
+|---|---|---|---|---|
+| `cancel_query` | Query still `active` after cancel signal | Re-poll `pg_stat_activity` (don't re-send cancel — signal already delivered) | `"warning"` | `"Consider terminate_connection if it persists"` |
+| `terminate_connection` | PID still present in `pg_stat_activity` | Single re-poll after 5 s (SIGTERM propagation time) | `"escalation_required"` | `"Retry as superuser; OS-level kill -9 on the database host"` |
+| `delete_pod` | Pod stuck in `Terminating` (finalizer blocking) | Re-poll `kubectl get pod` until not found | `"warning"` | `kubectl delete pod --force --grace-period=0` + `kubectl patch` to remove finalizers |
+| `restart_deployment` | `restartedAt` annotation missing (API lag) | Re-poll deployment annotations | `"warning"` | `kubectl rollout status deployment/<name>` |
+| `scale_deployment` | `spec.replicas` mismatch (controller lag) | Re-apply `kubectl scale` (idempotent; existing approval covers retry), then re-poll | `"failed"` | `kubectl get deployment <name>` |
+
+### Audit trail for retries
+
+Every re-poll attempt is recorded as a `tool_retry` event in the audit store
+on the same `trace_id` as the original tool call:
+
+```json
+{
+  "event_type": "tool_retry",
+  "outcome_status": "retrying",   // or "resolved" on final successful check
+  "tool": { "name": "cancel_query", "agent": "postgres_database_agent" },
+  "input": { "user_query": "retry check 2 for cancel_query" }
+}
+```
+
+`tool_retry` events increment `JourneySummary.retry_count` in the Journeys
+API but **do not corrupt the journey outcome** — a journey where two retries
+were needed and the mutation ultimately succeeded still shows
+`outcome: "success"`. Journeys with retries appear as:
+
+```json
+{
+  "trace_id": "trace_abc123",
+  "outcome": "success",
+  "retry_count": 2,
+  "event_count": 7
+}
+```
+
+---
+
+## 5. Test coverage
 
 The three enforcement mechanisms map to testing pyramid layers. K8s tool tests
 cover Mechanisms A and C only (no Mechanism B structural tests, because there is
@@ -448,18 +604,18 @@ used for error and denial tests that don't reach the verification step.
 
 #### 1c: Post-execution verification safeguards
 
-Seven new sequence-mock tests cover the Level 1 and Level 2 safeguards added to
-both agents. All tests use the sequence-mock helpers so the mutation call and the
-verification read receive independent responses.
+Seven tests cover the Level 1 and Level 2 safeguards. All use sequence-mock
+helpers so the mutation call and the verification read receive independent
+responses.
 
 #### Database agent (`agents/database/tools_test.go`)
 
 | Test | Safeguard | Injected condition | Expected output |
 |---|---|---|---|
 | `TestTerminateConnectionTool_Level1_ReturnedFalse` | Level 1 | `pg_terminate_backend` returns `f` | `TERMINATION FAILED` |
-| `TestTerminateConnectionTool_Level2_PidStillAlive` | Level 2 | `still_alive \| 1` in verify output | `VERIFICATION FAILED` |
+| `TestTerminateConnectionTool_Level2_PidStillAlive` | Level 2 | `still_alive \| 1` in verify output | `VerifyStatus:"escalation_required"` |
 | `TestCancelQueryTool_Level1_ReturnedFalse` | Level 1 | `pg_cancel_backend` returns `f` | `CANCELLATION FAILED` |
-| `TestCancelQueryTool_Level2_StillActive` | Level 2 | `state \| active` in verify output | `VERIFICATION WARNING` |
+| `TestCancelQueryTool_Level2_StillActive` | Level 2 | `state \| active` in verify output | `VerifyStatus:"warning"` |
 
 Uses `withMockRunnerSequence` (new helper alongside existing `withMockRunner`)
 which feeds successive `cmdRunner.Run()` calls from a pre-defined slice of
@@ -470,12 +626,61 @@ calls: inspect → mutate → verify.
 
 | Test | Safeguard | Injected condition | Expected output |
 |---|---|---|---|
-| `TestDeletePodTool_VerificationWarning_PodStillTerminating` | Level 2 | verify `kubectl get pod` exits 0 (pod visible) | `VERIFICATION WARNING` |
-| `TestRestartDeploymentTool_VerificationWarning_AnnotationMissing` | Level 2 | verify output missing `restartedAt` | `VERIFICATION WARNING` |
-| `TestScaleDeploymentTool_VerificationFailed_WrongReplicas` | Level 2 | verify returns `"3"` when `5` requested | `VERIFICATION FAILED` |
+| `TestDeletePodTool_VerificationWarning_PodStillTerminating` | Level 2 | verify `kubectl get pod` exits 0 (pod visible) | `VerifyStatus:"warning"` |
+| `TestRestartDeploymentTool_VerificationWarning_AnnotationMissing` | Level 2 | verify output missing `restartedAt` | `VerifyStatus:"warning"` |
+| `TestScaleDeploymentTool_VerificationFailed_WrongReplicas` | Level 2 | verify returns `"3"` when `5` requested | `VerifyStatus:"failed"` |
 
 Uses `withMockKubectlSequence`. Each K8s mutation tool makes two `runKubectl`
 calls: mutate → verify.
+
+#### 1d: Automatic recovery (retry) tests
+
+All recovery tests override `verifyRetryConfig` (and `verifyTerminateConfig`)
+to zero delays so they run in milliseconds.
+
+#### `agentutil/retryutil` package (`agentutil/retryutil/retryutil_test.go`)
+
+| Test | What it verifies |
+|---|---|
+| `TestWaitUntilResolved_FirstAttempt` | `check()` true on call 1 → returns `(true, 1, nil)` |
+| `TestWaitUntilResolved_ThirdAttempt` | `check()` false×2, true×1 → returns `(true, 3, nil)` |
+| `TestWaitUntilResolved_Exhausted` | `check()` always false → returns `(false, MaxAttempts, nil)` |
+| `TestWaitUntilResolved_ContextCancelled` | ctx cancelled mid-delay → returns early |
+| `TestNextDelay_Backoff` | delay doubles each attempt, capped at `MaxDelay` |
+| `TestNextDelay_Jitter` | repeated calls with jitter produce values within ±25% band |
+| `TestNextDelay_ZeroMaxDelay` | `MaxDelay=0` does not cap delay to zero |
+| `TestAfterAttemptCallback` | callback receives correct `(attempt, resolved)` values |
+| `TestWaitUntilResolved_CheckError` | `check()` returning error treats attempt as unresolved, continues |
+
+#### Database agent retry (`agents/database/tools_test.go`)
+
+| Test | Mock sequence | Expected result |
+|---|---|---|
+| `TestCancelQueryTool_Level2_ResolvesOnRetry` | inspect → cancel(t) → still-active → cleared | `VerifyStatus:"ok"`, `RetryCount:2` |
+| `TestCancelQueryTool_Level2_ExhaustedWarning` | inspect → cancel(t) → active×3 | `VerifyStatus:"warning"`, output contains `"VERIFICATION WARNING"` |
+| `TestTerminateConnectionTool_Level2_ResolvesOnRetry` | inspect → terminate(t) → still-alive → gone | `VerifyStatus:"ok"`, `RetryCount:2` |
+| `TestTerminateConnectionTool_Level2_EscalationRequired` | inspect → terminate(t) → still-alive×2 | `VerifyStatus:"escalation_required"`, output contains `"ESCALATION REQUIRED"` |
+
+#### Kubernetes agent retry (`agents/k8s/tools_test.go`)
+
+| Test | Mock sequence | Expected result |
+|---|---|---|
+| `TestDeletePodTool_VerificationWarning_ResolvesOnRetry` | delete(ok) → pod-visible → pod-gone | `VerifyStatus:"ok"`, `RetryCount:2` |
+| `TestDeletePodTool_VerificationWarning_ExhaustedEscalation` | delete(ok) → pod-visible×3 | `VerifyStatus:"warning"`, output contains `"--force"` |
+| `TestRestartDeploymentTool_VerificationWarning_ResolvesOnRetry` | restart(ok) → no-annotation → annotation-present | `VerifyStatus:"ok"`, `RetryCount:2` |
+| `TestScaleDeploymentTool_Level2_RetryApplySucceeds` | scale(ok) → wrong-replicas → correct-replicas | `VerifyStatus:"ok"`, `RetryCount:2` |
+| `TestScaleDeploymentTool_Level2_RetryApplyFails` | scale(ok) → wrong×3 | `VerifyStatus:"failed"` |
+
+#### Audit retry events (`internal/audit/`)
+
+| Test | File | What it verifies |
+|---|---|---|
+| `TestRecordToolRetry_NilAuditor` | `tool_audit_test.go` | `RecordToolRetry` on nil auditor is a no-op |
+| `TestRecordToolRetry_StatusRetrying` | `tool_audit_test.go` | `resolved=false` → `outcome_status:"retrying"` |
+| `TestRecordToolRetry_StatusResolved` | `tool_audit_test.go` | `resolved=true` → `outcome_status:"resolved"` |
+| `TestRecordToolRetry_EventIDHasRtyPrefix` | `tool_audit_test.go` | event ID starts with `"rty_"` |
+| `TestQueryJourneys_RetryCountPopulated` | `store_test.go` | Journey with 2 `tool_retry` events shows `retry_count:2`; `outcome` stays `"success"` |
+| `TestQueryJourneys_RetryCountZeroOmitted` | `store_test.go` | Journey with no retry events omits `retry_count` from JSON |
 
 For integration and manual fault-injection procedures see
 [Mutation Safeguard Verification](testing/FAULT_INJECTION_TESTING.md#mutation-safeguard-verification).
@@ -563,7 +768,7 @@ make faulttest
 
 ---
 
-## 5. Fault scenarios
+## 6. Fault scenarios
 
 ### `db-terminate-direct-command`
 
@@ -595,7 +800,7 @@ position(A) < position(B).
 
 ---
 
-## 6. Run all mutation-tool tests locally
+## 7. Run all mutation-tool tests locally
 
 ```bash
 # Database + k8s unit tests + fault-lib ordering tests (no infrastructure needed)
@@ -605,7 +810,7 @@ make test-governance
 make faulttest
 ```
 
-## 7. Compliance and Alerting
+## 8. Compliance and Alerting
 
 AI Governance module and in particular the Compliance Reporter
 (`govbot`) have been enhanced to track and if necessary alert on unusual
