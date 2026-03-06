@@ -223,7 +223,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("orchestrator initialized", "available_agents", len(remoteAgents))
+	slog.Info("orchestrator initialized", "available_agents", len(agentConfigs)-len(unavailableAgents))
 	if len(unavailableAgents) > 0 {
 		slog.Warn("some agents unavailable", "agents", strings.Join(unavailableAgents, ", "))
 	}

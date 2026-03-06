@@ -164,7 +164,13 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 	// Remote check mode: policy evaluation is delegated to auditd.
 	// The PolicyEnforcer will call POST /v1/governance/check instead of a local engine.
 	if cfg.PolicyCheckURL != "" {
-		slog.Info("policy enforcement enabled (remote check mode)", "url", cfg.PolicyCheckURL)
+		if probeRemotePolicyEngine(cfg.PolicyCheckURL) {
+			slog.Info("policy enforcement enabled (remote check mode)", "url", cfg.PolicyCheckURL)
+		} else {
+			slog.Warn("policy enforcement enabled (remote check mode) but remote has no policy engine",
+				"url", cfg.PolicyCheckURL,
+				"hint", "set HELPDESK_POLICY_FILE and HELPDESK_POLICY_ENABLED on the auditd server")
+		}
 		return nil, nil
 	}
 
@@ -576,6 +582,33 @@ type policyCheckResp struct {
 	EventID     string `json:"event_id"`
 }
 
+// probeRemotePolicyEngine calls GET /v1/governance/info on the auditd service and
+// returns true if the remote has a policy engine configured and enabled.
+// The call is best-effort: any network or parse error returns false.
+func probeRemotePolicyEngine(checkURL string) bool {
+	infoURL := strings.TrimRight(checkURL, "/") + "/v1/governance/info"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, infoURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var info struct {
+		Policy *struct {
+			Enabled bool `json:"enabled"`
+		} `json:"policy"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return false
+	}
+	return info.Policy != nil && info.Policy.Enabled
+}
+
 // callRemotePolicyCheck sends a policy check request to the auditd service.
 // On any network or server error it returns a non-nil error (fail closed).
 func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCheckReq) (policyCheckResp, error) {
@@ -601,6 +634,15 @@ func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCh
 		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service unreachable")
 	}
 	defer httpResp.Body.Close()
+
+	// 403 is the expected status for a deny decision (body still carries the effect).
+	// Any other non-2xx (e.g. 503 "policy engine not configured") is an infrastructure
+	// error — fail closed rather than silently decoding an error body as an allow.
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusForbidden {
+		slog.Warn("remote policy check: unexpected status; failing closed",
+			"url", checkURL, "status", httpResp.StatusCode)
+		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service returned %d", httpResp.StatusCode)
+	}
 
 	var resp policyCheckResp
 	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
