@@ -43,9 +43,13 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 
 		// Use the trace_id from the message metadata when present (gateway/orchestrator
 		// forwarded the request). Otherwise generate one so direct calls are traceable.
+		// Empty trace_id must never reach the audit store — ungrouped events are
+		// invisible to journey aggregation.
+		// Generated IDs use the "ar_" prefix (agent request) to distinguish them from
+		// orchestrator-injected IDs ("tr_") in the audit log.
 		traceID := parsed.traceID
 		if traceID == "" {
-			traceID = NewTraceIDWithPrefix("agr_")
+			traceID = NewTraceIDWithPrefix("ar_")
 		}
 		store.Set(traceID)
 		defer store.Clear()
@@ -61,7 +65,7 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 				sessionID = "asess_" + uuid.New().String()[:8]
 			}
 			event := &Event{
-				EventID:   "agr_" + uuid.New().String()[:8],
+				EventID:   "req_" + uuid.New().String()[:8],
 				Timestamp: time.Now().UTC(),
 				EventType: EventTypeGatewayRequest,
 				TraceID:   traceID,
