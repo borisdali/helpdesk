@@ -159,7 +159,7 @@ func main() {
 		},
 	}
 
-	if err := agentutil.ServeWithTracing(ctx, k8sAgent, cfg, traceStore, cardOpts); err != nil {
+	if err := agentutil.ServeWithTracing(ctx, k8sAgent, cfg, traceStore, auditStore, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

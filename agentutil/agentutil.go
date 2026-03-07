@@ -874,7 +874,9 @@ func NewReasoningCallback(auditor *audit.ToolAuditor) func(agent.CallbackContext
 
 // ServeWithTracing starts an A2A server with trace_id extraction from incoming messages.
 // The traceStore is populated with trace_id from A2A message metadata for each request.
-func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, opts ...CardOptions) error {
+// When auditor is non-nil, a gateway_request anchor event is emitted for every incoming
+// NL-query request so the request is visible as a journey even without an upstream gateway.
+func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, auditor audit.Auditor, opts ...CardOptions) error {
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
@@ -916,8 +918,10 @@ func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore
 	})
 	requestHandler := a2asrv.NewHandler(executor)
 
-	// Wrap with trace middleware to extract trace_id from incoming messages
-	tracedHandler := audit.TraceMiddleware(traceStore, a2asrv.NewJSONRPCHandler(requestHandler))
+	// Wrap with audit-aware trace middleware: extracts or generates a trace_id for
+	// every request and emits a gateway_request anchor event so direct agent calls
+	// are visible as journeys even when bypassing the orchestrator/gateway.
+	tracedHandler := audit.TraceMiddlewareWithAudit(traceStore, auditor, a.Name(), a2asrv.NewJSONRPCHandler(requestHandler))
 	mux.Handle(agentPath, tracedHandler)
 
 	slog.Info("starting A2A server with tracing",

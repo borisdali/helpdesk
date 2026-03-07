@@ -166,7 +166,7 @@ func main() {
 		},
 	}
 
-	if err := agentutil.ServeWithTracing(ctx, dbAgent, cfg, traceStore, cardOpts); err != nil {
+	if err := agentutil.ServeWithTracing(ctx, dbAgent, cfg, traceStore, auditStore, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
