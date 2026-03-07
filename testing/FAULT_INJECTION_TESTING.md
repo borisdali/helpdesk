@@ -14,7 +14,7 @@ to proceed.
   go run ./testing/cmd/faulttest list
 ```
 
-Sample log of running the above command:
+Abridged sample log of running the above command (see the [full log](FAULT_INJECTION_TESTING_LOG.md) for details):
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest list
@@ -29,6 +29,8 @@ db-connection-refused          database     critical   Database connection refus
 db-auth-failure                database     critical   Authentication failure
 db-not-exist                   database     critical   Database does not exist
 db-replication-lag             database     high       Replication lag
+db-idle-in-transaction         database     high       Session stuck with uncommitted writes
+db-terminate-direct-command    database     high       Direct terminate — inspect-first check
 k8s-crashloop                  kubernetes   critical   CrashLoopBackOff
 k8s-pending                    kubernetes   critical   Pending pod (unschedulable)
 k8s-image-pull                 kubernetes   critical   ImagePullBackOff
@@ -38,7 +40,7 @@ k8s-oomkilled                  kubernetes   critical   OOMKilled
 compound-db-pod-crash          compound     critical   DB unreachable + pod crashing
 compound-db-no-endpoints       compound     critical   DB timeout + no endpoints
 
-Total: 17 failure modes
+Total: 19 failure modes
 ```
 
 This is a good start because in this step we verify the
