@@ -203,12 +203,14 @@ func (ta *ToolAuditor) RecordToolRetry(ctx context.Context, toolName string, att
 // "escalation_required") are mapped to the canonical journey outcome
 // vocabulary before being stored.
 func (ta *ToolAuditor) RecordToolVerification(ctx context.Context, toolName, verifyStatus string) {
-	if ta.auditor == nil || verifyStatus == "ok" || verifyStatus == "" {
+	if ta.auditor == nil {
 		return
 	}
 
 	outcomeStatus := verifyStatus
 	switch verifyStatus {
+	case "ok", "":
+		outcomeStatus = "verified_ok"
 	case "warning":
 		outcomeStatus = "verified_warning"
 	case "failed":

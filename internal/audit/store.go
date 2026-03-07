@@ -285,9 +285,14 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		outcomeDurationMs = event.Outcome.Duration.Milliseconds()
 	} else if event.PolicyDecision != nil {
 		// For policy decision events, surface the effect in outcome_status so it is
-		// queryable without json_extract. Denied access is then visible as "deny" in
-		// the same column that shows "success"/"error" for tool executions.
-		outcomeStatus = event.PolicyDecision.Effect
+		// queryable without json_extract. Normalize "deny" → "denied" so the stored
+		// value matches the canonical journey outcome vocabulary.
+		switch event.PolicyDecision.Effect {
+		case "deny":
+			outcomeStatus = "denied"
+		default:
+			outcomeStatus = event.PolicyDecision.Effect
+		}
 	}
 
 	var toolName, toolAgent string
@@ -580,7 +585,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	placeholders = placeholders[:len(placeholders)-1]
 	q2 := fmt.Sprintf(
 		`SELECT trace_id, event_type, user_id, user_query, decision_agent,
-		        decision_category, tool_name, outcome_status, timestamp
+		        decision_category, tool_name, outcome_status, approval_status, timestamp
 		 FROM audit_events
 		 WHERE trace_id IN (%s)
 		 ORDER BY trace_id, timestamp ASC`, placeholders)
@@ -596,16 +601,17 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	defer rows2.Close()
 
 	type traceData struct {
-		startedAt  string
-		endedAt    string
-		userID     string
-		userQuery  string
-		agent      string
-		category   string
-		tools      []string
-		outcome    string
-		count      int
-		retryCount int // number of tool_retry events in this trace
+		startedAt          string
+		endedAt            string
+		userID             string
+		userQuery          string
+		agent              string
+		category           string
+		tools              []string
+		outcome            string
+		count              int
+		retryCount         int  // number of tool_retry events in this trace
+		sawRequireApproval bool // true if a require_approval policy decision was seen
 	}
 
 	// Preserve the order returned by step 1.
@@ -616,13 +622,13 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 
 	for rows2.Next() {
 		var (
-			traceID, eventType                          string
-			userID, userQuery, agent, decisionCategory  sql.NullString
-			toolName, outcomeStatus                     sql.NullString
-			ts                                          string
+			traceID, eventType                                  string
+			userID, userQuery, agent, decisionCategory          sql.NullString
+			toolName, outcomeStatus, approvalStatus             sql.NullString
+			ts                                                  string
 		)
 		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &agent,
-			&decisionCategory, &toolName, &outcomeStatus, &ts); err != nil {
+			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts); err != nil {
 			return nil, fmt.Errorf("scan journey event: %w", err)
 		}
 		d := byTrace[traceID]
@@ -689,9 +695,19 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		if eventType == string(EventTypeToolRetry) {
 			d.retryCount++
 		} else if outcomeStatus.Valid && outcomeStatus.String != "" {
-			if outcomePriority(outcomeStatus.String) > outcomePriority(d.outcome) {
-				d.outcome = outcomeStatus.String
+			status := outcomeStatus.String
+			if status == "require_approval" {
+				// Record that a human approval was required; we'll upgrade the
+				// journey outcome to "approved" at the end if the tool succeeded.
+				d.sawRequireApproval = true
+			} else if outcomePriority(status) > outcomePriority(d.outcome) {
+				d.outcome = status
 			}
+		}
+
+		// Approval events with status="approved" carry the grant signal.
+		if approvalStatus.Valid && approvalStatus.String == "approved" {
+			d.sawRequireApproval = true
 		}
 	}
 	if err := rows2.Err(); err != nil {
@@ -712,6 +728,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		tools := d.tools
 		if tools == nil {
 			tools = []string{}
+		}
+		// If an approval was required and the tool ran successfully (any positive
+		// outcome), upgrade to "approved" so human involvement is visible.
+		if d.sawRequireApproval && (d.outcome == "success" || d.outcome == "verified_ok") {
+			d.outcome = "approved"
 		}
 		summaries = append(summaries, JourneySummary{
 			TraceID:    id,
@@ -752,17 +773,19 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 // outcomePriority returns the severity rank for a journey outcome string.
 // Higher priority outcomes win when aggregating events within a trace.
 //
-//	error(6) > denied(5) > escalation_required(4) > verified_failed(3)
-//	> verified_warning(2) > success(1) > unknown(0)
+//	error(8) > denied(7) > escalation_required(6) > verified_failed(5)
+//	> verified_warning(4) > approved(3) > verified_ok(2) > success(1) > unknown(0)
 func outcomePriority(o string) int {
 	switch o {
-	case "error":                return 6
-	case "denied":               return 5
-	case "escalation_required":  return 4
-	case "verified_failed":      return 3
-	case "verified_warning":     return 2
-	case "success":              return 1
-	default:                     return 0
+	case "error":               return 8
+	case "denied":              return 7
+	case "escalation_required": return 6
+	case "verified_failed":     return 5
+	case "verified_warning":    return 4
+	case "approved":            return 3
+	case "verified_ok":         return 2
+	case "success":             return 1
+	default:                    return 0
 	}
 }
 

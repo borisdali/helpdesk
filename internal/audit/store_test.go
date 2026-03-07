@@ -1407,3 +1407,159 @@ func TestQueryJourneys_FilterByHasRetries(t *testing.T) {
 		t.Errorf("RetryCount = %d, want 1", journeys[0].RetryCount)
 	}
 }
+
+// TestQueryJourneys_DeniedOutcome verifies that a policy_decision with
+// Effect="deny" surfaces as outcome="denied" in the journey summary.
+func TestQueryJourneys_DeniedOutcome(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_dn1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_dn1",
+			Session:   Session{ID: "sess_dn1", UserID: "alice"},
+			Input:     Input{UserQuery: "drop production table"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "pol_dn1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypePolicyDecision,
+			TraceID:   "tr_dn1",
+			Session:   Session{ID: "dbagent_dn"},
+			PolicyDecision: &PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "prod-db",
+				Action:       "destructive",
+				Effect:       "deny",
+				PolicyName:   "no-drops",
+			},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "denied" {
+		t.Errorf("Outcome = %q, want denied", journeys[0].Outcome)
+	}
+}
+
+// TestQueryJourneys_ApprovedOutcome verifies that a require_approval policy decision
+// followed by a successful tool execution produces outcome="approved".
+func TestQueryJourneys_ApprovedOutcome(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_ap1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_ap1",
+			Session:   Session{ID: "sess_ap1", UserID: "bob"},
+			Input:     Input{UserQuery: "restart the payment deployment"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "pol_ap1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypePolicyDecision,
+			TraceID:   "tr_ap1",
+			Session:   Session{ID: "k8sagent_ap"},
+			PolicyDecision: &PolicyDecision{
+				ResourceType: "kubernetes",
+				ResourceName: "payment",
+				Action:       "write",
+				Effect:       "require_approval",
+				PolicyName:   "prod-writes-need-approval",
+			},
+		},
+		{
+			EventID:   "tool_ap1",
+			Timestamp: base.Add(5 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_ap1",
+			Session:   Session{ID: "k8sagent_ap"},
+			Tool:      &ToolExecution{Name: "restart_deployment", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "approved" {
+		t.Errorf("Outcome = %q, want approved", journeys[0].Outcome)
+	}
+}
+
+// TestQueryJourneys_VerifiedOkOutcome verifies that a verification_outcome event
+// with outcome_status="verified_ok" produces outcome="verified_ok" in the journey,
+// which is distinct from a plain "success" (no verification loop).
+func TestQueryJourneys_VerifiedOkOutcome(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_vok1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_vok1",
+			Session:   Session{ID: "sess_vok1", UserID: "carol"},
+			Input:     Input{UserQuery: "delete the stuck pod"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_vok1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_vok1",
+			Session:   Session{ID: "k8sagent_vok"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "vfy_vok1",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeVerificationOutcome,
+			TraceID:   "tr_vok1",
+			Session:   Session{ID: "k8sagent_vok"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "verified_ok"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "verified_ok" {
+		t.Errorf("Outcome = %q, want verified_ok", journeys[0].Outcome)
+	}
+	// verification_outcome events must not inflate event_count or tools_used.
+	if journeys[0].EventCount != 2 {
+		t.Errorf("EventCount = %d, want 2 (delegation + tool_execution only)", journeys[0].EventCount)
+	}
+	if len(journeys[0].ToolsUsed) != 1 || journeys[0].ToolsUsed[0] != "delete_pod" {
+		t.Errorf("ToolsUsed = %v, want [delete_pod]", journeys[0].ToolsUsed)
+	}
+}

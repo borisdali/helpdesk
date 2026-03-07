@@ -283,21 +283,26 @@ func TestRecordToolVerification_NilAuditor(t *testing.T) {
 	ta.RecordToolVerification(context.Background(), "delete_pod", "warning")
 }
 
-func TestRecordToolVerification_OK_DoesNotEmit(t *testing.T) {
+func TestRecordToolVerification_OK_EmitsVerifiedOk(t *testing.T) {
 	store := newToolAuditTestStore(t)
 	ta := NewToolAuditor(store, "k8s-agent", "sess-vfy-ok", "trace-vfy-ok")
 
-	// "ok" means clean success — the parent tool_execution event already records
-	// "success", so no additional event should be emitted.
+	// "ok" and "" both map to "verified_ok" so callers can distinguish
+	// "explicitly verified and passed" from a plain "success".
 	ta.RecordToolVerification(context.Background(), "delete_pod", "ok")
 	ta.RecordToolVerification(context.Background(), "delete_pod", "")
 
-	events, err := store.Query(context.Background(), QueryOptions{})
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeVerificationOutcome})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(events) != 0 {
-		t.Errorf("expected 0 events for ok/empty verifyStatus, got %d", len(events))
+	if len(events) != 2 {
+		t.Fatalf("expected 2 verification_outcome events, got %d", len(events))
+	}
+	for _, evt := range events {
+		if evt.Outcome == nil || evt.Outcome.Status != "verified_ok" {
+			t.Errorf("Outcome.Status = %q, want verified_ok", evt.Outcome.Status)
+		}
 	}
 }
 
