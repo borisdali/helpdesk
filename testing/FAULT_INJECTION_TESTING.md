@@ -46,11 +46,20 @@ This is a good start because in this step we verify the
 of failure modes successfully.
 
 
-## Manual Testing: Start the test database
+## Manual Testing: Start the test database (with replica for replication tests)
 
 ```
-  docker compose -f testing/docker/docker-compose.yaml up -d
+  docker compose \
+    -f testing/docker/docker-compose.yaml \
+    -f testing/docker/docker-compose.repl.yaml \
+    up -d
 ```
+
+> **Note:** `docker-compose.repl.yaml` adds a streaming replica on port 15433
+> required by the `db-replication-lag` test.  If you only need database tests
+> that don't involve replication, the base compose file is sufficient.
+
+
 
 Sample log of running the above command:
 
@@ -110,6 +119,38 @@ exit
         1
 (1 row)
 ```
+
+## Starting the agents for faulttest
+
+Kubernetes tests inject failures into the `helpdesk-test` namespace.  For the
+k8s agent to access that namespace it needs to know about it (via
+`HELPDESK_INFRA_CONFIG`) and a policy that permits it (via `HELPDESK_POLICY_FILE`).
+Pre-built test versions of both files live under `testing/`:
+
+```bash
+# Database agent
+HELPDESK_MODEL_VENDOR=anthropic \
+HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 \
+HELPDESK_API_KEY=$HELPDESK_API_KEY \
+HELPDESK_INFRA_CONFIG=testing/testing.infra.json \
+HELPDESK_POLICY_FILE=testing/testing.policy.yaml \
+HELPDESK_POLICY_ENABLED=true \
+  go run ./agents/database &
+
+# Kubernetes agent  (set HELPDESK_KUBE_CONTEXT to your local cluster context)
+HELPDESK_MODEL_VENDOR=anthropic \
+HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001 \
+HELPDESK_API_KEY=$HELPDESK_API_KEY \
+HELPDESK_INFRA_CONFIG=testing/testing.infra.json \
+HELPDESK_POLICY_FILE=testing/testing.policy.yaml \
+HELPDESK_POLICY_ENABLED=true \
+  go run ./agents/k8s &
+```
+
+`testing/testing.infra.json` registers the `helpdesk-test` namespace as a
+test-environment database.  `testing/testing.policy.yaml` grants unrestricted
+read/write/destructive access to resources tagged `test`.  **Do not use these
+files in production.**
 
 ## Manual Testing: Inject/teardown manually (no agents needed)
 

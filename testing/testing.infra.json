@@ -1,0 +1,23 @@
+{
+  "_comment": "Infrastructure config for fault injection tests. Registers helpdesk-test as a test-environment database so the k8s agent's resolveNamespaceInfo allows it.",
+
+  "db_servers": {
+    "faulttest-db": {
+      "name": "Fault Test Database",
+      "connection_string": "host=localhost port=15432 dbname=testdb user=postgres password=testpass",
+      "k8s_cluster": "faulttest-cluster",
+      "k8s_namespace": "helpdesk-test",
+      "tags": ["test"]
+    }
+  },
+
+  "k8s_clusters": {
+    "faulttest-cluster": {
+      "name": "Local Fault Test Cluster",
+      "context": "",
+      "tags": ["test"]
+    }
+  },
+
+  "vms": {}
+}

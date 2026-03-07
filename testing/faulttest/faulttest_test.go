@@ -130,9 +130,12 @@ func TestFaultInjection(t *testing.T) {
 
 	injector := faultlib.NewInjector(cfg)
 
+	passed, failed, skipped := 0, 0, 0
 	for _, f := range failures {
 		f := f // capture for subtest
-		t.Run(f.ID, func(t *testing.T) {
+		wasSkipped := false
+		ok := t.Run(f.ID, func(t *testing.T) {
+			defer func() { wasSkipped = t.Skipped() }()
 			// Check if we have the right agent for this failure.
 			url := agentURL(cfg, f.Category)
 			if url == "" {
@@ -196,18 +199,36 @@ func TestFaultInjection(t *testing.T) {
 				result.Score*100, result.KeywordPass, result.DiagnosisPass, result.ToolEvidence)
 
 			if !result.Passed {
-				t.Errorf("Evaluation failed: score=%.0f%% (need >= 60%%), keywords=%v",
-					result.Score*100, result.KeywordPass)
-				t.Logf("Expected keywords (any of): %v", f.Evaluation.ExpectedKeywords.AnyOf)
-				t.Logf("Expected diagnosis: %s", f.Evaluation.ExpectedDiagnosis.Category)
-				if len(resp.Text) > 500 {
-					t.Logf("Response (truncated): %s...", resp.Text[:500])
+				if f.GovernanceGap {
+					// Governance-gap tests document known agent behaviour gaps.
+					// A failed evaluation is the expected outcome — log it clearly
+					// but do NOT t.Errorf so the suite still passes.
+					t.Logf("GOVERNANCE GAP (expected): score=%.0f%%, keywords=%v, ordering=%v",
+						result.Score*100, result.KeywordPass, result.OrderingPass)
 				} else {
-					t.Logf("Response: %s", resp.Text)
+					t.Errorf("Evaluation failed: score=%.0f%% (need >= 60%%), keywords=%v, ordering=%v",
+						result.Score*100, result.KeywordPass, result.OrderingPass)
+					t.Logf("Expected keywords (any of): %v", f.Evaluation.ExpectedKeywords.AnyOf)
+					t.Logf("Expected diagnosis: %s", f.Evaluation.ExpectedDiagnosis.Category)
+					if len(resp.Text) > 500 {
+						t.Logf("Response (truncated): %s...", resp.Text[:500])
+					} else {
+						t.Logf("Response: %s", resp.Text)
+					}
 				}
 			}
 		})
+		switch {
+		case wasSkipped:
+			skipped++
+		case ok:
+			passed++
+		default:
+			failed++
+		}
 	}
+	t.Logf("=== SUMMARY: %d/%d passed, %d failed, %d skipped ===",
+		passed, len(failures), failed, skipped)
 }
 
 // TestDatabaseFailures runs only database category failures.

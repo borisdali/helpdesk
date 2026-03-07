@@ -106,12 +106,19 @@ integration:
 # Fault injection tests (requires Docker + agents + LLM API key)
 # ---------------------------------------------------------------------------
 faulttest:
-	@echo "Starting test infrastructure..."
-	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	@echo "Starting test infrastructure (primary + replica)..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		up -d --wait
 	@echo "Running fault tests..."
-	-go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
+	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
+	go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
 	@echo "Stopping test infrastructure..."
-	docker compose -f testing/docker/docker-compose.yaml down -v
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		down -v
 
 # ---------------------------------------------------------------------------
 # End-to-end tests (requires full stack + LLM API key)

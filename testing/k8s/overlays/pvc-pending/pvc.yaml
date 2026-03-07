@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-bad-pvc
+  namespace: helpdesk-test
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nonexistent-storage-class
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,22 @@
+# Policy file for fault injection tests.
+# Permits all operations (read, write, destructive) on resources tagged "test"
+# so the agents can freely diagnose and remediate injected failures in the
+# helpdesk-test namespace and faulttest-db database without being blocked.
+version: "1"
+
+policies:
+  - name: faulttest-permissive
+    description: Fault injection tests require unrestricted access to test resources
+    priority: 100
+
+    resources:
+      - type: kubernetes
+        match:
+          tags: [test]
+      - type: database
+        match:
+          tags: [test]
+
+    rules:
+      - action: [read, write, destructive]
+        effect: allow

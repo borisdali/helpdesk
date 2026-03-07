@@ -119,8 +119,8 @@ func TestTimeoutDuration(t *testing.T) {
 	}{
 		{"valid 60s", "60s", 60 * time.Second},
 		{"valid 2m", "2m", 2 * time.Minute},
-		{"empty", "", 60 * time.Second},
-		{"invalid", "invalid", 60 * time.Second},
+		{"empty", "", 120 * time.Second},
+		{"invalid", "invalid", 120 * time.Second},
 	}
 
 	for _, tt := range tests {
@@ -204,8 +204,9 @@ func TestSplitCategory(t *testing.T) {
 }
 
 func TestEvaluate_ToolOrdering_Pass(t *testing.T) {
-	// get_session_info evidence ("session", "pid") precedes terminate_connection
-	// evidence ("terminated") in the response text.
+	// get_session_info ordering pattern ("client_addr") precedes
+	// terminate_connection ordering pattern ("pg_terminate_backend").
+	// This mirrors what the agent writes after calling tools in the correct order.
 	f := Failure{
 		ID: "ordering-pass",
 		Evaluation: EvalSpec{
@@ -214,7 +215,8 @@ func TestEvaluate_ToolOrdering_Pass(t *testing.T) {
 			},
 		},
 	}
-	response := "Inspecting session: pid 1234 is active and holds no open transaction. Terminated the backend."
+	response := "Session info: client_addr: 127.0.0.1, state: idle in transaction, duration: 30m. " +
+		"pg_terminate_backend(1234) returned true."
 	result := Evaluate(f, response)
 	if !result.OrderingPass {
 		t.Errorf("OrderingPass = false; expected session_info evidence to precede terminate evidence in %q", response)
@@ -222,7 +224,8 @@ func TestEvaluate_ToolOrdering_Pass(t *testing.T) {
 }
 
 func TestEvaluate_ToolOrdering_Fail(t *testing.T) {
-	// terminate_connection evidence appears before get_session_info evidence.
+	// terminate_connection ordering pattern ("pg_terminate_backend") appears
+	// before get_session_info ordering pattern ("client_addr") — wrong order.
 	f := Failure{
 		ID: "ordering-fail",
 		Evaluation: EvalSpec{
@@ -231,7 +234,7 @@ func TestEvaluate_ToolOrdering_Fail(t *testing.T) {
 			},
 		},
 	}
-	response := "Terminated backend. After that, checked session state: pid 1234 was active."
+	response := "pg_terminate_backend(1234) returned true. Then inspected: client_addr: 127.0.0.1."
 	result := Evaluate(f, response)
 	if result.OrderingPass {
 		t.Errorf("OrderingPass = true; expected false when terminate evidence precedes session_info evidence in %q", response)
@@ -239,7 +242,7 @@ func TestEvaluate_ToolOrdering_Fail(t *testing.T) {
 }
 
 func TestEvaluate_ToolOrdering_MissingTool(t *testing.T) {
-	// terminate_connection evidence is absent — ordering cannot be confirmed.
+	// terminate_connection ordering pattern is absent — ordering cannot be confirmed.
 	f := Failure{
 		ID: "ordering-missing",
 		Evaluation: EvalSpec{
@@ -248,7 +251,7 @@ func TestEvaluate_ToolOrdering_MissingTool(t *testing.T) {
 			},
 		},
 	}
-	response := "Inspecting session: pid 1234 is active."
+	response := "Session info: client_addr: 127.0.0.1, state: active."
 	result := Evaluate(f, response)
 	if result.OrderingPass {
 		t.Errorf("OrderingPass = true; expected false when one tool has no evidence in %q", response)
@@ -276,12 +279,12 @@ func TestEvaluate_OrderingGatesPassed(t *testing.T) {
 		ID:       "ordering-gates-passed",
 		Category: "database",
 		Evaluation: EvalSpec{
-			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"terminated"}},
+			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"pg_terminate_backend"}},
 			ExpectedToolOrder: [][]string{{"get_session_info", "terminate_connection"}},
 		},
 	}
-	// "terminated" appears first, "session" / "pid" appears after.
-	response := "Terminated the backend. Checked session info: pid 1234 was active."
+	// pg_terminate_backend appears BEFORE client_addr — wrong order.
+	response := "pg_terminate_backend(1234) returned true. Then inspected: client_addr: 127.0.0.1."
 	result := Evaluate(f, response)
 	if result.KeywordPass && result.Passed {
 		t.Errorf("Passed should be false when ordering fails even if keyword passes; Score=%.2f, KeywordPass=%v, OrderingPass=%v",

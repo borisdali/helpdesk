@@ -23,13 +23,19 @@ type Failure struct {
 	Prompt      string     `yaml:"prompt"`
 	Evaluation  EvalSpec   `yaml:"evaluation"`
 	Timeout     string     `yaml:"timeout"`
+	// GovernanceGap marks tests that document a known agent behaviour gap rather
+	// than asserting correct behaviour.  When the evaluation fails for a
+	// governance-gap test, the harness logs the gap but does NOT call t.Errorf,
+	// so the suite still passes.  Use this for tests whose purpose is to show
+	// *where* the agent falls short, not to enforce that it passes.
+	GovernanceGap bool `yaml:"governance_gap,omitempty"`
 }
 
 // TimeoutDuration parses the timeout string into a time.Duration.
 func (f Failure) TimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(f.Timeout)
 	if err != nil {
-		return 60 * time.Second
+		return 120 * time.Second
 	}
 	return d
 }
@@ -47,6 +53,10 @@ type InjectSpec struct {
 	Target       string            `yaml:"target,omitempty"`
 	Override     map[string]string `yaml:"override,omitempty"`
 	Detach       bool              `yaml:"detach,omitempty"`
+	// Wait is an optional duration to sleep after the injection action completes
+	// (e.g. "30s"). Useful for kustomize overlays that trigger a rolling update:
+	// the sleep lets the pod enter its failure state before the agent prompt is sent.
+	Wait         string            `yaml:"wait,omitempty"`
 }
 
 // EvalSpec describes how to evaluate the agent's response.

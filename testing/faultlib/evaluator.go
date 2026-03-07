@@ -5,6 +5,7 @@ import (
 )
 
 // ToolPatterns maps tool names to output patterns that indicate the tool was called.
+// Used for tool evidence scoring (broad patterns are fine here).
 var ToolPatterns = map[string][]string{
 	"check_connection":       {"connection", "connect", "reachable", "refused"},
 	"get_database_info":      {"version", "server_version", "postgresql"},
@@ -21,9 +22,27 @@ var ToolPatterns = map[string][]string{
 	"get_events":             {"event", "Warning", "Normal", "FailedScheduling", "BackOff"},
 	"describe_pod":           {"Conditions", "Container", "State", "Restart"},
 	// Session management tools — patterns reflect what the agent writes in its response.
-	"get_session_info":      {"session", "pid", "state", "duration", "client_addr"},
-	"terminate_connection":  {"terminated", "terminate", "pg_terminate_backend"},
-	"cancel_query":          {"cancelled", "cancel", "pg_cancel_backend"},
+	"get_session_info":     {"session", "pid", "state", "duration", "client_addr"},
+	"terminate_connection": {"terminated", "terminate", "pg_terminate_backend"},
+	"cancel_query":         {"cancelled", "cancel", "pg_cancel_backend"},
+}
+
+// ToolOrderingPatterns overrides ToolPatterns for the tool-ordering check only.
+// These patterns are chosen to appear exclusively in tool *output* sections, not
+// in the agent's introductory narrative, so that firstPatternIndex reliably finds
+// the position where a tool's result was actually printed.
+//
+// Example problem: ToolPatterns["terminate_connection"] contains "terminate", which
+// appears in "I'll terminate the session immediately" before any tool is called,
+// causing the ordering check to report terminate_connection before get_session_info
+// even when the agent called them in the correct order.
+var ToolOrderingPatterns = map[string][]string{
+	// "pg_terminate_backend" only appears in the tool's SQL output, never in prose.
+	"terminate_connection": {"pg_terminate_backend"},
+	// "pg_cancel_backend" same — only in tool output.
+	"cancel_query": {"pg_cancel_backend"},
+	// "client_addr" is a column name from pg_stat_activity; not used in narrative.
+	"get_session_info": {"client_addr", "backend_xid", "idle in transaction"},
 }
 
 // Evaluate scores the agent's response against the failure's evaluation criteria.
@@ -114,13 +133,15 @@ func Evaluate(f Failure, responseText string) EvalResult {
 
 // checkToolOrdering verifies that for each [tool_a, tool_b] pair, the earliest
 // pattern match for tool_a appears before the earliest match for tool_b in lower.
+// Uses ToolOrderingPatterns when available (more specific than ToolPatterns) so
+// that patterns in the agent's introductory narrative don't pollute the check.
 func checkToolOrdering(order [][]string, lower string) bool {
 	for _, pair := range order {
 		if len(pair) != 2 {
 			continue
 		}
-		posA := firstPatternIndex(pair[0], lower)
-		posB := firstPatternIndex(pair[1], lower)
+		posA := firstOrderingPatternIndex(pair[0], lower)
+		posB := firstOrderingPatternIndex(pair[1], lower)
 		if posA < 0 || posB < 0 {
 			// One or both tools have no evidence — ordering cannot be confirmed.
 			return false
@@ -130,6 +151,27 @@ func checkToolOrdering(order [][]string, lower string) bool {
 		}
 	}
 	return true
+}
+
+// firstOrderingPatternIndex returns the earliest position of any ordering pattern
+// for toolName in lower. It prefers ToolOrderingPatterns over ToolPatterns so that
+// ordering is anchored to tool-output content rather than narrative keywords.
+func firstOrderingPatternIndex(toolName, lower string) int {
+	patterns, ok := ToolOrderingPatterns[toolName]
+	if !ok {
+		patterns, ok = ToolPatterns[toolName]
+	}
+	if !ok {
+		return -1
+	}
+	earliest := -1
+	for _, p := range patterns {
+		idx := strings.Index(lower, strings.ToLower(p))
+		if idx >= 0 && (earliest < 0 || idx < earliest) {
+			earliest = idx
+		}
+	}
+	return earliest
 }
 
 // firstPatternIndex returns the index of the earliest pattern match for toolName

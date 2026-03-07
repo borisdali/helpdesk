@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"helpdesk/testing/testutil"
 )
@@ -33,24 +34,43 @@ func (i *Injector) Teardown(ctx context.Context, f Failure) error {
 func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) error {
 	slog.Info("executing injection spec", "type", spec.Type, "phase", phase)
 
+	var err error
 	switch spec.Type {
 	case "":
-		return nil
+		return nil // no-op; skip wait
 	case "sql":
-		return i.execSQL(ctx, spec)
+		err = i.execSQL(ctx, spec)
 	case "docker":
-		return i.execDocker(ctx, spec)
+		err = i.execDocker(ctx, spec)
 	case "docker_exec":
-		return i.execDockerExec(ctx, spec)
+		err = i.execDockerExec(ctx, spec)
 	case "kustomize":
-		return i.execKustomize(ctx, spec)
+		err = i.execKustomize(ctx, spec)
 	case "kustomize_delete":
-		return i.execKustomizeDelete(ctx, spec)
+		err = i.execKustomizeDelete(ctx, spec)
 	case "config":
-		return i.execConfig(ctx, spec)
+		err = i.execConfig(ctx, spec)
 	default:
 		return fmt.Errorf("unknown inject type: %s", spec.Type)
 	}
+	if err != nil {
+		return err
+	}
+
+	if spec.Wait != "" {
+		d, parseErr := time.ParseDuration(spec.Wait)
+		if parseErr != nil {
+			slog.Warn("invalid wait duration, skipping", "phase", phase, "wait", spec.Wait, "err", parseErr)
+		} else {
+			slog.Info("waiting after injection", "phase", phase, "duration", d)
+			select {
+			case <-time.After(d):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return nil
 }
 
 func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
