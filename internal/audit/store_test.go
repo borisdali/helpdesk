@@ -538,8 +538,16 @@ func TestQueryJourneys(t *testing.T) {
 	if j1.Agent != "postgres_database_agent" {
 		t.Errorf("j1.Agent = %q", j1.Agent)
 	}
-	if len(j1.ToolsUsed) != 2 {
-		t.Errorf("j1.ToolsUsed = %v, want 2 tools", j1.ToolsUsed)
+	// ToolsUsed is now ordered by insertion time with repeats preserved (no dedup/sort).
+	wantTools := []string{"get_active_connections", "get_connection_stats"}
+	if len(j1.ToolsUsed) != len(wantTools) {
+		t.Errorf("j1.ToolsUsed = %v, want %v", j1.ToolsUsed, wantTools)
+	} else {
+		for i, want := range wantTools {
+			if j1.ToolsUsed[i] != want {
+				t.Errorf("j1.ToolsUsed[%d] = %q, want %q (wrong order or content)", i, j1.ToolsUsed[i], want)
+			}
+		}
 	}
 	if j1.Outcome != "success" {
 		t.Errorf("j1.Outcome = %q, want success", j1.Outcome)
@@ -837,4 +845,565 @@ func TestStoreConfig_DSNRouting(t *testing.T) {
 			t.Errorf("pgx driver not registered: %v", err)
 		}
 	})
+}
+
+// newJourneyStore is a test helper that creates a temp SQLite store and registers
+// a cleanup to close it.
+func newJourneyStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "audit.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
+
+// recordAll records all events and fatally fails the test on any error.
+func recordAll(t *testing.T, store *Store, events []*Event) {
+	t.Helper()
+	for _, e := range events {
+		if err := store.Record(context.Background(), e); err != nil {
+			t.Fatalf("record event %s: %v", e.EventID, err)
+		}
+	}
+}
+
+// TestQueryJourneys_VerifiedWarningOutcome verifies that a verification_outcome event
+// with outcome_status="verified_warning" overrides the journey outcome from "success".
+func TestQueryJourneys_VerifiedWarningOutcome(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_vw1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_vw",
+			Session:   Session{ID: "sess_vw", UserID: "alice"},
+			Input:     Input{UserQuery: "delete the stuck pod"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_vw1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_vw",
+			Session:   Session{ID: "k8sagent_vw"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "vfy_vw1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeVerificationOutcome,
+			TraceID:   "tr_vw",
+			Session:   Session{ID: "k8sagent_vw"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "verified_warning"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "verified_warning" {
+		t.Errorf("Outcome = %q, want verified_warning (verification_outcome must override success)", journeys[0].Outcome)
+	}
+}
+
+// TestQueryJourneys_OutcomePriority_ErrorWins verifies that "error" beats
+// "verified_warning" in the priority ordering.
+func TestQueryJourneys_OutcomePriority_ErrorWins(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_pw1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_pw",
+			Session:   Session{ID: "sess_pw", UserID: "bob"},
+			Input:     Input{UserQuery: "restart and check"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		// First tool succeeds but verification is warning.
+		{
+			EventID:   "tool_pw1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_pw",
+			Session:   Session{ID: "k8sagent_pw"},
+			Tool:      &ToolExecution{Name: "restart_deployment", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "vfy_pw1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeVerificationOutcome,
+			TraceID:   "tr_pw",
+			Session:   Session{ID: "k8sagent_pw"},
+			Tool:      &ToolExecution{Name: "restart_deployment", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "verified_warning"},
+		},
+		// Second tool errors — error(6) > verified_warning(2).
+		{
+			EventID:   "tool_pw2",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_pw",
+			Session:   Session{ID: "k8sagent_pw"},
+			Tool:      &ToolExecution{Name: "get_pods", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "error", ErrorMessage: "connection refused"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "error" {
+		t.Errorf("Outcome = %q, want error (error must beat verified_warning)", journeys[0].Outcome)
+	}
+}
+
+// TestQueryJourneys_ToolsUsedOrdered_WithRepeats verifies that the same tool
+// appearing twice is listed twice, in insertion order.
+func TestQueryJourneys_ToolsUsedOrdered_WithRepeats(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_rep1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_rep",
+			Session:   Session{ID: "sess_rep", UserID: "carol"},
+			Input:     Input{UserQuery: "check session then cancel then check again"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		// get_session_info called first
+		{
+			EventID:   "tool_rep1",
+			Timestamp: base.Add(500 * time.Millisecond),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_rep",
+			Session:   Session{ID: "dbagent_rep"},
+			Tool:      &ToolExecution{Name: "get_session_info", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// cancel_query called
+		{
+			EventID:   "tool_rep2",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_rep",
+			Session:   Session{ID: "dbagent_rep"},
+			Tool:      &ToolExecution{Name: "cancel_query", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// get_session_info called again to confirm
+		{
+			EventID:   "tool_rep3",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_rep",
+			Session:   Session{ID: "dbagent_rep"},
+			Tool:      &ToolExecution{Name: "get_session_info", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+	want := []string{"get_session_info", "cancel_query", "get_session_info"}
+	got := journeys[0].ToolsUsed
+	if len(got) != len(want) {
+		t.Fatalf("ToolsUsed = %v, want %v (repeats must be preserved)", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("ToolsUsed[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+// TestQueryJourneys_CategoryPopulated verifies that the decision_category from a
+// delegation_decision event is surfaced in JourneySummary.Category.
+func TestQueryJourneys_CategoryPopulated(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_cat1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_cat",
+			Session:   Session{ID: "sess_cat", UserID: "dave"},
+			Input:     Input{UserQuery: "check database connections"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+	if journeys[0].Category != "database" {
+		t.Errorf("Category = %q, want database", journeys[0].Category)
+	}
+}
+
+// TestQueryJourneys_VerificationOutcome_NotInToolsUsed verifies that a
+// verification_outcome event does NOT appear in ToolsUsed.
+func TestQueryJourneys_VerificationOutcome_NotInToolsUsed(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_nt1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_nt",
+			Session:   Session{ID: "sess_nt", UserID: "eve"},
+			Input:     Input{UserQuery: "delete pod"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_nt1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_nt",
+			Session:   Session{ID: "k8sagent_nt"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "vfy_nt1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeVerificationOutcome,
+			TraceID:   "tr_nt",
+			Session:   Session{ID: "k8sagent_nt"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "verified_warning"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+	// Only "delete_pod" (from tool_execution) should appear; the verification_outcome
+	// event also has tool_name="delete_pod" but must not add another entry.
+	if len(journeys[0].ToolsUsed) != 1 {
+		t.Errorf("ToolsUsed = %v, want [delete_pod] (verification_outcome must not add to tools_used)", journeys[0].ToolsUsed)
+	}
+}
+
+// TestQueryJourneys_VerificationOutcome_NotInEventCount verifies that a
+// verification_outcome event does NOT increment EventCount.
+func TestQueryJourneys_VerificationOutcome_NotInEventCount(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_nec1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_nec",
+			Session:   Session{ID: "sess_nec", UserID: "frank"},
+			Input:     Input{UserQuery: "delete pod"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_nec1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_nec",
+			Session:   Session{ID: "k8sagent_nec"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// This verification_outcome event must NOT count toward EventCount.
+		{
+			EventID:   "vfy_nec1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeVerificationOutcome,
+			TraceID:   "tr_nec",
+			Session:   Session{ID: "k8sagent_nec"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "verified_warning"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+	// 1 delegation_decision + 1 tool_execution = 2; verification_outcome excluded.
+	if journeys[0].EventCount != 2 {
+		t.Errorf("EventCount = %d, want 2 (verification_outcome must not increment event_count)", journeys[0].EventCount)
+	}
+}
+
+// TestQueryJourneys_FilterBySince verifies that opts.Since excludes journeys
+// whose anchor event is older than Since.
+func TestQueryJourneys_FilterBySince(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+
+	oldBase := time.Now().UTC().Add(-2 * time.Hour)
+	newBase := time.Now().UTC()
+
+	recordAll(t, store, []*Event{
+		// Old journey — anchor 2 hours ago.
+		{
+			EventID:   "del_since_old",
+			Timestamp: oldBase,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_since_old",
+			Session:   Session{ID: "sess_so", UserID: "grace"},
+			Input:     Input{UserQuery: "old request"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		// New journey — anchor just now.
+		{
+			EventID:   "del_since_new",
+			Timestamp: newBase,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_since_new",
+			Session:   Session{ID: "sess_sn", UserID: "grace"},
+			Input:     Input{UserQuery: "new request"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+	})
+
+	// Query with Since=5 minutes — only the new journey should be returned.
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{Since: 5 * time.Minute})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys(Since=5m) = %d, want 1 (old journey must be excluded)", len(journeys))
+	}
+	if journeys[0].TraceID != "tr_since_new" {
+		t.Errorf("TraceID = %q, want tr_since_new", journeys[0].TraceID)
+	}
+}
+
+// TestQueryJourneys_FilterByCategory verifies that opts.Category post-filters
+// journeys by their decision_category.
+func TestQueryJourneys_FilterByCategory(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		// Database journey.
+		{
+			EventID:   "del_fc_db",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_fc_db",
+			Session:   Session{ID: "sess_fc1", UserID: "henry"},
+			Input:     Input{UserQuery: "check replication lag"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+		// Kubernetes journey.
+		{
+			EventID:   "del_fc_k8s",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_fc_k8s",
+			Session:   Session{ID: "sess_fc2", UserID: "henry"},
+			Input:     Input{UserQuery: "list unhealthy pods"},
+			Decision:  &Decision{Agent: "k8s_agent", RequestCategory: CategoryKubernetes},
+		},
+	})
+
+	// Only database journeys.
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{Category: "database"})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys(Category=database) = %d, want 1", len(journeys))
+	}
+	if journeys[0].TraceID != "tr_fc_db" {
+		t.Errorf("TraceID = %q, want tr_fc_db", journeys[0].TraceID)
+	}
+}
+
+// TestQueryJourneys_FilterByOutcome verifies that opts.Outcome post-filters
+// journeys by their computed outcome.
+func TestQueryJourneys_FilterByOutcome(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		// Journey 1: ends with verified_warning (via verification_outcome event).
+		{
+			EventID:   "del_fo1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_fo1",
+			Session:   Session{ID: "sess_fo1", UserID: "iris"},
+			Input:     Input{UserQuery: "delete stuck pod"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_fo1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_fo1",
+			Session:   Session{ID: "k8sagent_fo"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "vfy_fo1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeVerificationOutcome,
+			TraceID:   "tr_fo1",
+			Session:   Session{ID: "k8sagent_fo"},
+			Tool:      &ToolExecution{Name: "delete_pod", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "verified_warning"},
+		},
+		// Journey 2: clean success.
+		{
+			EventID:   "del_fo2",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_fo2",
+			Session:   Session{ID: "sess_fo2", UserID: "iris"},
+			Input:     Input{UserQuery: "get pods"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_fo2",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_fo2",
+			Session:   Session{ID: "k8sagent_fo"},
+			Tool:      &ToolExecution{Name: "get_pods", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{Outcome: "verified_warning"})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys(Outcome=verified_warning) = %d, want 1", len(journeys))
+	}
+	if journeys[0].TraceID != "tr_fo1" {
+		t.Errorf("TraceID = %q, want tr_fo1", journeys[0].TraceID)
+	}
+}
+
+// TestQueryJourneys_FilterByHasRetries verifies that opts.HasRetries=true excludes
+// journeys with RetryCount == 0.
+func TestQueryJourneys_FilterByHasRetries(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		// Journey 1: has retries.
+		{
+			EventID:   "del_hr1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_hr1",
+			Session:   Session{ID: "sess_hr1", UserID: "jack"},
+			Input:     Input{UserQuery: "cancel long query"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_hr1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_hr1",
+			Session:   Session{ID: "dbagent_hr"},
+			Tool:      &ToolExecution{Name: "cancel_query", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "rty_hr1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeToolRetry,
+			TraceID:   "tr_hr1",
+			Session:   Session{ID: "dbagent_hr"},
+			Tool:      &ToolExecution{Name: "cancel_query", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "resolved"},
+		},
+		// Journey 2: no retries.
+		{
+			EventID:   "del_hr2",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_hr2",
+			Session:   Session{ID: "sess_hr2", UserID: "jack"},
+			Input:     Input{UserQuery: "get pods"},
+			Decision:  &Decision{Agent: "k8s_agent"},
+		},
+		{
+			EventID:   "tool_hr2",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_hr2",
+			Session:   Session{ID: "k8sagent_hr"},
+			Tool:      &ToolExecution{Name: "get_pods", Agent: "k8s_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{HasRetries: true})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys(HasRetries=true) = %d, want 1", len(journeys))
+	}
+	if journeys[0].TraceID != "tr_hr1" {
+		t.Errorf("TraceID = %q, want tr_hr1", journeys[0].TraceID)
+	}
+	if journeys[0].RetryCount != 1 {
+		t.Errorf("RetryCount = %d, want 1", journeys[0].RetryCount)
+	}
 }

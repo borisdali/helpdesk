@@ -195,6 +195,44 @@ func (ta *ToolAuditor) RecordToolRetry(ctx context.Context, toolName string, att
 	}
 }
 
+// RecordToolVerification records the final outcome of a post-mutation verification
+// loop. It is a no-op when verifyStatus is "ok" or empty (the parent
+// tool_execution event already carries "success" in that case).
+//
+// verifyStatus values from WaitUntilResolved ("warning", "failed",
+// "escalation_required") are mapped to the canonical journey outcome
+// vocabulary before being stored.
+func (ta *ToolAuditor) RecordToolVerification(ctx context.Context, toolName, verifyStatus string) {
+	if ta.auditor == nil || verifyStatus == "ok" || verifyStatus == "" {
+		return
+	}
+
+	outcomeStatus := verifyStatus
+	switch verifyStatus {
+	case "warning":
+		outcomeStatus = "verified_warning"
+	case "failed":
+		outcomeStatus = "verified_failed"
+	case "escalation_required":
+		// already canonical
+	}
+
+	event := &Event{
+		EventID:   "vfy_" + uuid.New().String()[:8],
+		Timestamp: time.Now().UTC(),
+		EventType: EventTypeVerificationOutcome,
+		TraceID:   ta.getTraceID(),
+		Session:   Session{ID: ta.sessionID},
+		Tool:      &ToolExecution{Name: toolName, Agent: ta.agentName},
+		Input:     Input{UserQuery: fmt.Sprintf("verification outcome for %s", toolName)},
+		Outcome:   &Outcome{Status: outcomeStatus},
+	}
+
+	if err := ta.auditor.Record(ctx, event); err != nil {
+		slog.Warn("failed to record tool verification event", "tool", toolName, "err", err)
+	}
+}
+
 // RecordAgentReasoning records the LLM's deliberation text that preceded a tool decision.
 // Call from an AfterModelCallback whenever the model emits both text and function calls.
 // No-op when auditor is nil or reasoning is empty.

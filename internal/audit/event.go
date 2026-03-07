@@ -27,6 +27,16 @@ const (
 	// "retrying" or "resolved". These events are intentionally NOT "error"
 	// so they never flip a journey's outcome status to failure.
 	EventTypeToolRetry EventType = "tool_retry"
+	// EventTypeVerificationOutcome is emitted once after the full
+	// post-mutation verification loop completes with a non-OK status.
+	// It carries the final VerifyStatus as outcome_status using the
+	// canonical vocabulary: "verified_warning", "verified_failed", or
+	// "escalation_required". It is NOT emitted when verification passes
+	// cleanly (VerifyStatus "ok" or ""), since the parent tool_execution
+	// event already records "success" in that case.
+	// These events do NOT contribute to tools_used or event_count in
+	// journey aggregation — they are internal plumbing, not user-visible steps.
+	EventTypeVerificationOutcome EventType = "verification_outcome"
 )
 
 // RequestCategory classifies the type of user request.

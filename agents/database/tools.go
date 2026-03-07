@@ -1040,6 +1040,9 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	if retryCount < 0 {
 		retryCount = 0
 	}
+	if !resolved && toolAuditor != nil {
+		toolAuditor.RecordToolVerification(ctx, "cancel_query", "warning")
+	}
 	if !resolved {
 		return PsqlResult{
 			Output: fmt.Sprintf(
@@ -1127,6 +1130,9 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	retryCount := attempts - 1
 	if retryCount < 0 {
 		retryCount = 0
+	}
+	if !resolved && toolAuditor != nil {
+		toolAuditor.RecordToolVerification(ctx, "terminate_connection", "escalation_required")
 	}
 	if !resolved {
 		return PsqlResult{

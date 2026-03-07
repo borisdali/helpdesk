@@ -276,3 +276,98 @@ func TestRecordToolRetry_EventIDHasRtyPrefix(t *testing.T) {
 		t.Errorf("EventID = %q, want rty_ prefix", events[0].EventID)
 	}
 }
+
+func TestRecordToolVerification_NilAuditor(t *testing.T) {
+	ta := NewToolAuditor(nil, "k8s-agent", "sess-1", "trace-1")
+	// Should be a no-op and not panic.
+	ta.RecordToolVerification(context.Background(), "delete_pod", "warning")
+}
+
+func TestRecordToolVerification_OK_DoesNotEmit(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s-agent", "sess-vfy-ok", "trace-vfy-ok")
+
+	// "ok" means clean success — the parent tool_execution event already records
+	// "success", so no additional event should be emitted.
+	ta.RecordToolVerification(context.Background(), "delete_pod", "ok")
+	ta.RecordToolVerification(context.Background(), "delete_pod", "")
+
+	events, err := store.Query(context.Background(), QueryOptions{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 events for ok/empty verifyStatus, got %d", len(events))
+	}
+}
+
+func TestRecordToolVerification_Warning(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s-agent", "sess-vfy-warn", "trace-vfy-warn")
+
+	ta.RecordToolVerification(context.Background(), "delete_pod", "warning")
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeVerificationOutcome})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 verification_outcome event, got %d", len(events))
+	}
+
+	evt := events[0]
+	if evt.EventType != EventTypeVerificationOutcome {
+		t.Errorf("EventType = %q, want %q", evt.EventType, EventTypeVerificationOutcome)
+	}
+	if evt.Outcome == nil {
+		t.Fatal("Outcome is nil")
+	}
+	if evt.Outcome.Status != "verified_warning" {
+		t.Errorf("Outcome.Status = %q, want verified_warning", evt.Outcome.Status)
+	}
+	if evt.Tool == nil || evt.Tool.Name != "delete_pod" {
+		t.Errorf("Tool.Name = %q, want delete_pod", evt.Tool.Name)
+	}
+	if evt.TraceID != "trace-vfy-warn" {
+		t.Errorf("TraceID = %q, want trace-vfy-warn", evt.TraceID)
+	}
+	if len(evt.EventID) < 4 || evt.EventID[:4] != "vfy_" {
+		t.Errorf("EventID = %q, want vfy_ prefix", evt.EventID)
+	}
+}
+
+func TestRecordToolVerification_Failed(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "db-agent", "sess-vfy-fail", "trace-vfy-fail")
+
+	ta.RecordToolVerification(context.Background(), "cancel_query", "failed")
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeVerificationOutcome})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 verification_outcome event, got %d", len(events))
+	}
+	if events[0].Outcome.Status != "verified_failed" {
+		t.Errorf("Outcome.Status = %q, want verified_failed", events[0].Outcome.Status)
+	}
+}
+
+func TestRecordToolVerification_EscalationRequired(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s-agent", "sess-vfy-esc", "trace-vfy-esc")
+
+	ta.RecordToolVerification(context.Background(), "restart_deployment", "escalation_required")
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeVerificationOutcome})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 verification_outcome event, got %d", len(events))
+	}
+	if events[0].Outcome.Status != "escalation_required" {
+		t.Errorf("Outcome.Status = %q, want escalation_required (passed through unchanged)", events[0].Outcome.Status)
+	}
+}

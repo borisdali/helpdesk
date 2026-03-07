@@ -346,6 +346,20 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 			opts.Limit = n
 		}
 	}
+	if v := q.Get("since"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			opts.Since = d
+		}
+	}
+	if v := q.Get("category"); v != "" {
+		opts.Category = v
+	}
+	if v := q.Get("outcome"); v != "" {
+		opts.Outcome = v
+	}
+	if q.Get("has_retries") == "true" {
+		opts.HasRetries = true
+	}
 
 	journeys, err := s.store.QueryJourneys(r.Context(), opts)
 	if err != nil {

@@ -59,6 +59,10 @@ services:
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+      # Post-mutation verification retry tuning (optional)
+      HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
+      HELPDESK_VERIFY_INITIAL_DELAY_S: ${HELPDESK_VERIFY_INITIAL_DELAY_S:-}
+      HELPDESK_VERIFY_MAX_DELAY_S: ${HELPDESK_VERIFY_MAX_DELAY_S:-}
       # Optional: set PGPASSWORD in .env as a single global DB password.
       # This is not secure and not recommended for anything beyond
       # throw-away development databases.
@@ -94,6 +98,10 @@ services:
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+      # Post-mutation verification retry tuning (optional)
+      HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
+      HELPDESK_VERIFY_INITIAL_DELAY_S: ${HELPDESK_VERIFY_INITIAL_DELAY_S:-}
+      HELPDESK_VERIFY_MAX_DELAY_S: ${HELPDESK_VERIFY_MAX_DELAY_S:-}
     volumes:
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro

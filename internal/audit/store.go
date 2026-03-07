@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -482,10 +481,14 @@ type QueryOptions struct {
 
 // JourneyOptions specifies filters for QueryJourneys.
 type JourneyOptions struct {
-	UserID string    // optional; empty = all users
-	From   time.Time // inclusive lower bound on timestamp
-	Until  time.Time // exclusive upper bound on timestamp
-	Limit  int       // max journeys returned; default 50
+	UserID     string        // optional; empty = all users
+	From       time.Time     // inclusive lower bound on timestamp
+	Until      time.Time     // exclusive upper bound on timestamp
+	Limit      int           // max journeys returned; default 50
+	Since      time.Duration // if non-zero, overrides From = time.Now().Add(-Since)
+	Category   string        // filter by decision_category (e.g. "database", "kubernetes")
+	Outcome    string        // filter by computed journey outcome (post-aggregation)
+	HasRetries bool          // only journeys with retry_count > 0 (post-aggregation)
 }
 
 // JourneySummary summarises a single end-to-end user request (one trace_id).
@@ -497,6 +500,7 @@ type JourneySummary struct {
 	UserID     string   `json:"user_id,omitempty"`
 	UserQuery  string   `json:"user_query,omitempty"`
 	Agent      string   `json:"agent,omitempty"`
+	Category   string   `json:"category,omitempty"` // decision_category from delegation_decision event
 	ToolsUsed  []string `json:"tools_used"`
 	Outcome    string   `json:"outcome,omitempty"`
 	EventCount int      `json:"event_count"`
@@ -516,6 +520,12 @@ type JourneySummary struct {
 func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]JourneySummary, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 50
+	}
+
+	// Since overrides From when set. Use UTC so the resulting timestamp is
+	// lexicographically comparable with UTC timestamps stored in the database.
+	if opts.Since > 0 {
+		opts.From = time.Now().UTC().Add(-opts.Since)
 	}
 
 	// Step 1: find trace IDs from anchor events.
@@ -570,7 +580,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	placeholders = placeholders[:len(placeholders)-1]
 	q2 := fmt.Sprintf(
 		`SELECT trace_id, event_type, user_id, user_query, decision_agent,
-		        tool_name, outcome_status, timestamp
+		        decision_category, tool_name, outcome_status, timestamp
 		 FROM audit_events
 		 WHERE trace_id IN (%s)
 		 ORDER BY trace_id, timestamp ASC`, placeholders)
@@ -591,7 +601,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		userID     string
 		userQuery  string
 		agent      string
-		toolsSeen  map[string]bool
+		category   string
 		tools      []string
 		outcome    string
 		count      int
@@ -601,31 +611,45 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	// Preserve the order returned by step 1.
 	byTrace := make(map[string]*traceData, len(traceIDs))
 	for _, id := range traceIDs {
-		byTrace[id] = &traceData{toolsSeen: make(map[string]bool)}
+		byTrace[id] = &traceData{}
 	}
 
 	for rows2.Next() {
 		var (
-			traceID, eventType            string
-			userID, userQuery, agent      sql.NullString
-			toolName, outcomeStatus       sql.NullString
-			ts                            string
+			traceID, eventType                          string
+			userID, userQuery, agent, decisionCategory  sql.NullString
+			toolName, outcomeStatus                     sql.NullString
+			ts                                          string
 		)
 		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &agent,
-			&toolName, &outcomeStatus, &ts); err != nil {
+			&decisionCategory, &toolName, &outcomeStatus, &ts); err != nil {
 			return nil, fmt.Errorf("scan journey event: %w", err)
 		}
 		d := byTrace[traceID]
 		if d == nil {
 			continue
 		}
-		d.count++
 		if d.startedAt == "" || ts < d.startedAt {
 			d.startedAt = ts
 		}
 		if ts > d.endedAt {
 			d.endedAt = ts
 		}
+
+		// verification_outcome events are internal plumbing: they contribute to
+		// the outcome priority but are NOT counted in event_count and NOT added
+		// to tools_used.
+		if eventType == string(EventTypeVerificationOutcome) {
+			if outcomeStatus.Valid && outcomeStatus.String != "" {
+				if outcomePriority(outcomeStatus.String) > outcomePriority(d.outcome) {
+					d.outcome = outcomeStatus.String
+				}
+			}
+			continue
+		}
+
+		d.count++
+
 		if eventType == string(EventTypeDelegation) {
 			// delegation_decision is authoritative — overwrite any previously set
 			// gateway_request values with the richer orchestrator-side metadata.
@@ -637,6 +661,9 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			}
 			if agent.Valid && agent.String != "" {
 				d.agent = agent.String
+			}
+			if d.category == "" && decisionCategory.Valid && decisionCategory.String != "" {
+				d.category = decisionCategory.String
 			}
 		} else if eventType == string(EventTypeGatewayRequest) {
 			// gateway_request is the anchor in gateway NL-query mode.
@@ -651,16 +678,18 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 				d.agent = agent.String
 			}
 		}
-		if toolName.Valid && toolName.String != "" && !d.toolsSeen[toolName.String] {
-			d.toolsSeen[toolName.String] = true
+
+		// Append every tool call in timestamp order, including repeats.
+		if toolName.Valid && toolName.String != "" {
 			d.tools = append(d.tools, toolName.String)
 		}
+
 		// tool_retry events: count retries but never let their outcome_status
 		// ("retrying" / "resolved") overwrite the journey's real outcome.
 		if eventType == string(EventTypeToolRetry) {
 			d.retryCount++
 		} else if outcomeStatus.Valid && outcomeStatus.String != "" {
-			if d.outcome == "" || outcomeStatus.String == "error" {
+			if outcomePriority(outcomeStatus.String) > outcomePriority(d.outcome) {
 				d.outcome = outcomeStatus.String
 			}
 		}
@@ -684,7 +713,6 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		if tools == nil {
 			tools = []string{}
 		}
-		sort.Strings(tools)
 		summaries = append(summaries, JourneySummary{
 			TraceID:    id,
 			StartedAt:  d.startedAt,
@@ -693,13 +721,60 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			UserID:     d.userID,
 			UserQuery:  d.userQuery,
 			Agent:      d.agent,
+			Category:   d.category,
 			ToolsUsed:  tools,
 			Outcome:    d.outcome,
 			EventCount: d.count,
 			RetryCount: d.retryCount,
 		})
 	}
+
+	// Post-aggregation filters (applied in Go after SQL aggregation).
+	if opts.Category != "" {
+		summaries = filterJourneys(summaries, func(j JourneySummary) bool {
+			return j.Category == opts.Category
+		})
+	}
+	if opts.Outcome != "" {
+		summaries = filterJourneys(summaries, func(j JourneySummary) bool {
+			return j.Outcome == opts.Outcome
+		})
+	}
+	if opts.HasRetries {
+		summaries = filterJourneys(summaries, func(j JourneySummary) bool {
+			return j.RetryCount > 0
+		})
+	}
+
 	return summaries, nil
+}
+
+// outcomePriority returns the severity rank for a journey outcome string.
+// Higher priority outcomes win when aggregating events within a trace.
+//
+//	error(6) > denied(5) > escalation_required(4) > verified_failed(3)
+//	> verified_warning(2) > success(1) > unknown(0)
+func outcomePriority(o string) int {
+	switch o {
+	case "error":                return 6
+	case "denied":               return 5
+	case "escalation_required":  return 4
+	case "verified_failed":      return 3
+	case "verified_warning":     return 2
+	case "success":              return 1
+	default:                     return 0
+	}
+}
+
+// filterJourneys returns a new slice containing only journeys for which keep returns true.
+func filterJourneys(journeys []JourneySummary, keep func(JourneySummary) bool) []JourneySummary {
+	out := journeys[:0]
+	for _, j := range journeys {
+		if keep(j) {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // VerifyIntegrity verifies the hash chain integrity of the audit log.

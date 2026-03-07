@@ -55,6 +55,18 @@ spec:
             - name: HELPDESK_APPROVAL_TIMEOUT
               value: "{{ .Values.governance.approvals.timeout }}"
             {{- end }}
+            {{- if .Values.agents.k8s.verify.maxAttempts }}
+            - name: HELPDESK_VERIFY_MAX_ATTEMPTS
+              value: "{{ .Values.agents.k8s.verify.maxAttempts }}"
+            {{- end }}
+            {{- if .Values.agents.k8s.verify.initialDelayS }}
+            - name: HELPDESK_VERIFY_INITIAL_DELAY_S
+              value: "{{ .Values.agents.k8s.verify.initialDelayS }}"
+            {{- end }}
+            {{- if .Values.agents.k8s.verify.maxDelayS }}
+            - name: HELPDESK_VERIFY_MAX_DELAY_S
+              value: "{{ .Values.agents.k8s.verify.maxDelayS }}"
+            {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
           volumeMounts:
             {{- if .Values.infrastructure }}

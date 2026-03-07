@@ -661,6 +661,9 @@ func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) 
 	if retryCount < 0 {
 		retryCount = 0
 	}
+	if !resolved && toolAuditor != nil {
+		toolAuditor.RecordToolVerification(ctx, "delete_pod", "warning")
+	}
 	if !resolved {
 		return KubectlResult{
 			Output: fmt.Sprintf(
@@ -723,6 +726,9 @@ func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (Kubect
 	retryCount := attempts - 1
 	if retryCount < 0 {
 		retryCount = 0
+	}
+	if !resolved && toolAuditor != nil {
+		toolAuditor.RecordToolVerification(ctx, "restart_deployment", "warning")
 	}
 	if !resolved {
 		return KubectlResult{
@@ -802,6 +808,9 @@ func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlRes
 	retryCount := attempts - 1
 	if retryCount < 0 {
 		retryCount = 0
+	}
+	if !resolved && toolAuditor != nil {
+		toolAuditor.RecordToolVerification(ctx, "scale_deployment", "failed")
 	}
 	if !resolved {
 		return KubectlResult{
