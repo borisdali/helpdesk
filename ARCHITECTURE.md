@@ -68,13 +68,14 @@ with your explicit consent and complete transparency of all the actions
 taken. To that end, a complete and tamper-proof [audit](AUDIT.md) is
 a non-negotiable must-have foundation of aiHelpDesk, accompanied by the
 enforced-in-code two-step ["review-and-confirm" process](MUTATION_TOOLS.md#2-two-step-review-and-confirm-process)
-for informed consent, full [policy enforcement](AIGOVERNANCE.md#3-policy-engine),
+for informed consent, non-negotiable [policy engine control](AIGOVERNANCE.md#3-policy-engine),
 [compliance](COMPLIANCE.md), [guardrails](AIGOVERNANCE.md#5-guardrails),
 three-level [enforcement mechanisms](MUTATION_TOOLS.md#3-enforcement-mechanisms),
 two-level safeguards (see for instance `cancel query`
 [safeguards](MUTATION_TOOLS.md#12-cancel_query--soft-interrupt)),
 human-in-the-loop manual [approval workflow](AIGOVERNANCE.md#4-approval-workflows) for mission
-critical PROD databases, [aiHelpDesk journeys](JOURNEYS.md) and the five-layer
+critical PROD databases, [aiHelpDesk journeys](JOURNEYS.md), retry on partial
+failures and attempts at automatic recovery mechanism and the five-layer
 [pyramid testing](testing/README.md) that includes the mandatory
 [fault-injection](testing/FAULT_INJECTION_TESTING.md) scenario for every W or D mutation.
 
@@ -84,8 +85,8 @@ trust that users put in aiHelpDesk. Trust must be earned and we invest
 heavilty into building the foundation for it (we refer to it as
 [AI Governance](AIGOVERNANCE.md)).
 
-Through our lab experiements we clearly see the challenges in multi-agent
-workflows deployments based on LLMs. Different models react differently
+Through our lab experiements we recognize the challenges and the complexity
+in multi-agent workflows deployments based on LLMs. Different models react differently
 --and often unpredictably-- to **any** sign of ambigiuty in instructions or
 the tool's output. This leads to model's implicit assumptions about a state
 that a user's request is at and possible hallucinations, which may also
@@ -96,9 +97,10 @@ treating our multi-agent system as a distributed one and applying the
 engineering rigor that a distributed system deserves.
 
 In particular, we ensure that both the instructions and the tool's outcome
-are as clear as possible, we mandate no creativity in agent's intepretation
-of both, but also --and critically-- we add a mandatory deterministic
-validation step for every single mutation.
+are as clear as possible. We further mandate no creativity in agent's intepretation
+of both. We mount the safeguards and policy guardrails. And finally
+--and critically-- we add a mandatory deterministic validation step
+for every single mutation.
 
 See aiHelpDesk [mutation doc](MUTATION_TOOLS.md) for specifics on what this means
 for every non R/O tool, be it cancelling a query, terminating a session,
