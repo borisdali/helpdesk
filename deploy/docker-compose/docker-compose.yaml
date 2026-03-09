@@ -58,6 +58,7 @@ services:
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
       # Post-mutation verification retry tuning (optional)
       HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
@@ -97,6 +98,7 @@ services:
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
       # Post-mutation verification retry tuning (optional)
       HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
@@ -131,6 +133,7 @@ services:
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
       - incidents:/data/incidents
@@ -163,6 +166,7 @@ services:
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro

@@ -4,7 +4,13 @@
 # Or via Docker Compose (see deploy/docker-compose/docker-compose.yaml).
 
 # Stage 1: Build all helpdesk binaries.
-FROM golang:1.25 AS builder
+# Always run the builder on the host platform so the Go toolchain executes
+# natively. Go cross-compilation (GOOS/GOARCH) produces the target binary
+# without any QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -21,21 +27,26 @@ RUN go mod edit -replace google.golang.org/adk=/src/adk-go
 
 # Download dependencies and build all binaries.
 RUN go mod download
-RUN CGO_ENABLED=0 go build -o /out/database-agent  ./agents/database/
-RUN CGO_ENABLED=0 go build -o /out/k8s-agent       ./agents/k8s/
-RUN CGO_ENABLED=0 go build -o /out/incident-agent  ./agents/incident/
-RUN CGO_ENABLED=0 go build -o /out/research-agent  ./agents/research/
-RUN CGO_ENABLED=0 go build -o /out/gateway         ./cmd/gateway/
-RUN CGO_ENABLED=0 go build -o /out/helpdesk        ./cmd/helpdesk/
-RUN CGO_ENABLED=0 go build -o /out/srebot          ./cmd/srebot/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/database-agent  ./agents/database/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/k8s-agent       ./agents/k8s/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/incident-agent  ./agents/incident/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/research-agent  ./agents/research/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/gateway         ./cmd/gateway/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/helpdesk        ./cmd/helpdesk/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/srebot          ./cmd/srebot/
 
 # AI Governance tools
-RUN CGO_ENABLED=0 go build -o /out/auditd          ./cmd/auditd/
-RUN CGO_ENABLED=0 go build -o /out/auditor         ./cmd/auditor/
-RUN CGO_ENABLED=0 go build -o /out/approvals       ./cmd/approvals/
-RUN CGO_ENABLED=0 go build -o /out/secbot          ./cmd/secbot/
-RUN CGO_ENABLED=0 go build -o /out/govbot          ./cmd/govbot/
-RUN CGO_ENABLED=0 go build -o /out/govexplain     ./cmd/govexplain/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/auditd          ./cmd/auditd/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/auditor         ./cmd/auditor/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/approvals       ./cmd/approvals/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/secbot          ./cmd/secbot/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/govbot          ./cmd/govbot/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/govexplain     ./cmd/govexplain/
+
+# Pre-create runtime directories here so the runtime stage needs no RUN mkdir.
+# This avoids QEMU emulation requirements for cross-platform runtime-stage builds.
+RUN mkdir -p /out/data/incidents /out/etc/helpdesk
+COPY helpdesk/policies.example.yaml /out/etc/helpdesk/policies.example.yaml
 
 # Stage 2: Runtime image with psql and kubectl.
 FROM debian:bookworm-slim
@@ -77,14 +88,11 @@ COPY --from=builder /out/auditor         /usr/local/bin/auditor
 COPY --from=builder /out/approvals       /usr/local/bin/approvals
 COPY --from=builder /out/secbot          /usr/local/bin/secbot
 COPY --from=builder /out/govbot          /usr/local/bin/govbot
-COPY --from=builder /out/govexplain     /usr/local/bin/govexplain
+COPY --from=builder /out/govexplain      /usr/local/bin/govexplain
 
-# Incident bundles default directory.
-RUN mkdir -p /data/incidents
+# Directories and sample policy file (pre-created in builder to avoid RUN in runtime stage).
+COPY --from=builder /out/data            /data
+COPY --from=builder /out/etc/helpdesk    /etc/helpdesk
 ENV HELPDESK_INCIDENT_DIR=/data/incidents
-
-# Sample policy file — set HELPDESK_POLICY_FILE=/etc/helpdesk/policies.example.yaml to use it.
-RUN mkdir -p /etc/helpdesk
-COPY helpdesk/policies.example.yaml /etc/helpdesk/policies.example.yaml
 
 # No default CMD — each service specifies its own command.

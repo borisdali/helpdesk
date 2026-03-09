@@ -197,7 +197,7 @@ binaries:
 # ---------------------------------------------------------------------------
 bundle:
 	@bundledir=$(DIST)/helpdesk-$(VERSION)-deploy; \
-	mkdir -p $$bundledir/docker-compose $$bundledir/helm $$bundledir/scripts; \
+	mkdir -p $$bundledir/docker-compose $$bundledir/helm $$bundledir/host $$bundledir/scripts; \
 	\
 	echo "==> docker-compose files"; \
 	cp deploy/docker-compose/.env.example $$bundledir/docker-compose/; \
@@ -217,6 +217,14 @@ bundle:
 	    -e 's|^  tag: latest|  tag: $(VERSION)|' \
 	    $$bundledir/helm/helpdesk/values.yaml; \
 	rm -f $$bundledir/helm/helpdesk/values.yaml.bak; \
+	\
+	echo "==> host deploy files"; \
+	cp deploy/host/startall.sh $$bundledir/host/; \
+	cp deploy/host/README.md $$bundledir/host/; \
+	cp deploy/docker-compose/.env.example $$bundledir/host/; \
+	cp deploy/docker-compose/infrastructure.json.example $$bundledir/host/; \
+	cp policies.example.yaml $$bundledir/host/; \
+	chmod +x $$bundledir/host/startall.sh; \
 	\
 	echo "==> helper scripts"; \
 	cp scripts/gateway-repl.sh $$bundledir/scripts/; \
