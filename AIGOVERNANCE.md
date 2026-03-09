@@ -52,7 +52,7 @@ aiHelpDesk Governance consists of eight well-defined components:
 | [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
 | [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
 | [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
-| [Guardrails](#5-guardrails) | Partial | Blast-radius enforcement implemented; rate limits and circuit breaker planned |
+| [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
 | [Operating Mode](#6-operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | Identity & Access | Planned | User/role-based permissions |
@@ -386,88 +386,99 @@ Email notifications use the same SMTP settings as the auditor (see
 
 ## 5. Guardrails
 
-Guardrails are hard safety constraints that cannot be overridden, even with approval.
+Guardrails are hard safety constraints enforced by the policy engine. Three are
+quantitative limits (`max_*` conditions); one is a time-based gate (`schedule`).
+All four are evaluated before the LLM receives any result.
 
-| Guardrail | Status | Description |
-|-----------|--------|-------------|
-| **Blast Radius** | **Implemented** | Caps rows/pods affected per operation |
-| Rate Limits | Planned | Max write frequency per session |
-| Circuit Breaker | Planned | Auto-stop on consecutive errors |
+| Guardrail | Policy condition | Applies to | Pre-exec | Post-exec |
+|-----------|-----------------|------------|----------|-----------|
+| **DB blast radius** | `max_rows_affected` | `run_query`, `cancel_query`, `terminate_connection`, `kill_idle_connections` | ✓ EXPLAIN estimate | ✓ command tag / function result |
+| **K8s blast radius** | `max_pods_affected` | `delete_pod`, `restart_deployment`, `scale_deployment` | ✓ `scale_deployment` only (replica count known upfront) | ✓ `delete_pod`, `restart_deployment` (count from kubectl output) |
+| **Transaction age** | `max_xact_age_secs` | `cancel_query`, `terminate_connection` | ✓ from `inspectConnection` before action | — |
+| **Schedule** | `schedule` (days/hours/tz) | all write/destructive tools | ✓ timestamp check | — |
 
-### 5.1 Blast Radius (Implemented)
-
-Blast radius limits cap how many rows or pods a single operation may affect.
-They are evaluated **post-execution** — after the tool runs but before the LLM
-receives the result. If the limit is exceeded, the result is withheld and an
-error is returned to the LLM, and a `PostExecution: true` policy denial event
-is recorded in the audit trail.
-
-> **Design note:** post-execution evaluation has important limitations for large
+> **Blast-radius design note:** post-execution evaluation has important limitations for large
 > DML, DDL statements, and distributed topologies. See [GOVPOSTEVAL.md](GOVPOSTEVAL.md)
 > for a full analysis of trade-offs, the rollback problem, and the planned
 > pre-execution COUNT estimation approach.
 
-Configure limits in your policy file under a rule's `conditions`:
+Configure guardrails in your policy file under a rule's `conditions`:
 
 ```yaml
 rules:
-  - action: write
+  - action: [write, destructive]
     effect: allow
     conditions:
-      max_rows_affected: 1000   # database: rows modified (DELETE/UPDATE/INSERT)
-      max_pods_affected: 10     # kubernetes: resources created/configured/deleted
+      max_rows_affected: 1000      # database: rows modified (DELETE/UPDATE/INSERT)
+      max_pods_affected: 10        # kubernetes: resources created/configured/deleted
+      max_xact_age_secs: 300       # block cancel/terminate when open txn > 5 min
+      schedule:                    # only allow during business hours
+        days: [mon, tue, wed, thu, fri]
+        hours: [9, 10, 11, 12, 13, 14, 15, 16, 17]
+        timezone: America/New_York
 ```
 
 See [`policies.example.yaml`](policies.example.yaml) for a complete policy configuration example.
 
-#### 5.1.1 How it works
+### 5.1 DB Blast Radius (`max_rows_affected`)
+
+Caps rows modified by a single database operation. Enforced at two points:
 
 ```
-Pre-execution:   CheckDatabase / CheckKubernetes  → allow/deny/require_approval
+Pre-execution:   EXPLAIN estimate  → deny if estimated rows > limit
                          │
                     tool executes
                          │
-Post-execution:  CheckDatabaseResult              → blast-radius enforcement
-                 CheckKubernetesResult
+Post-execution:  parse command tag → deny if actual rows > limit
+                 (DELETE N / UPDATE N / INSERT 0 N / terminated N)
                          │
                  ┌───────┴────────┐
                  │ within limit   │ exceeded limit
                  ▼                ▼
               return result    return error +
-                               audit PostExecution denial
+                               audit PostExecution: true denial
 ```
 
-Row counts are parsed from psql command tag output (`DELETE N`, `UPDATE N`,
-`INSERT 0 N`). Pod counts are parsed from kubectl confirmation lines
-(`pod "x" deleted`, `deployment "y" configured`, etc.).
+`cancel_query` and `terminate_connection` use `parsePgFunctionResult` (boolean
+result of `pg_cancel_backend` / `pg_terminate_backend`). `kill_idle_connections`
+uses `parseTerminatedCount` (integer from the `terminated | N` expanded row).
 
-#### 5.1.2 Agent Integration
+### 5.2 K8s Blast Radius (`max_pods_affected`)
 
-**Database agent** — `runPsqlWithToolName` calls `CheckDatabaseResult`
-automatically. When adding a new write tool, pass `policy.ActionWrite` (or
-`policy.ActionDestructive`) via the `action` variable — the post-execution
-check is already wired.
+Caps resources affected by a single Kubernetes operation. `scale_deployment`
+enforces pre-execution only (replica count is known from `args.Replicas` before
+kubectl runs). `delete_pod` and `restart_deployment` enforce post-execution
+(count parsed from kubectl confirmation lines: `pod "x" deleted`,
+`deployment "y" restarted`, etc.).
 
-**Kubernetes agent** — call `checkK8sPolicyResult` after any write or
-destructive `runKubectlWithToolName` call:
+### 5.3 Transaction Age (`max_xact_age_secs`)
 
-```go
-// Pre-execution check (existing pattern)
-nsInfo := resolveNamespaceInfo(namespace)
-if err := checkK8sPolicy(ctx, nsInfo.Namespace, policy.ActionWrite, nsInfo.Tags); err != nil {
-    return "", err
-}
+Blocks `cancel_query` and `terminate_connection` when the target session has
+uncommitted writes in a transaction open longer than the configured limit.
+Evaluated pre-execution via `inspectConnection` (which runs `get_session_info`
+against the backend PID before any destructive action). Only fires when
+`HasWrites = true` (i.e. `backend_xid IS NOT NULL`).
 
-// Execute
-output, execErr := runKubectlWithToolName(ctx, kubeCtx, "tool_name", args...)
-
-// Post-execution blast-radius check
-if err := checkK8sPolicyResult(ctx, nsInfo.Namespace, policy.ActionWrite, nsInfo.Tags, output, execErr); err != nil {
-    return "", err
-}
+```yaml
+conditions:
+  max_xact_age_secs: 300   # block if open transaction with writes > 5 min
 ```
 
-### 5.2 Planned Guardrails
+### 5.4 Schedule
+
+Gates write and destructive operations to specific days and hours. Evaluated
+pre-execution by checking `time.Now()` against the configured window. No
+post-execution component — the operation is blocked before it starts.
+
+```yaml
+conditions:
+  schedule:
+    days: [mon, tue, wed, thu, fri]
+    hours: [9, 10, 11, 12, 13, 14, 15, 16, 17]  # 9am–5pm
+    timezone: America/New_York
+```
+
+### 5.5 Planned Guardrails
 
 **Rate limits** — cap write frequency per session (e.g. max 20 writes/minute).
 Requires a per-session counter with TTL; not yet implemented.
@@ -1120,7 +1131,7 @@ date  # Check current local time
 ### 11.2 Phase 2: Enforcement (Complete)
 - [x] Approval workflows (cmd/approvals/, auditd API, Slack/email notifications)
 - [x] Compliance reporting (cmd/govbot/, Kubernetes CronJob)
-- [x] Blast-radius guardrails (`max_rows_affected`, `max_pods_affected`, post-execution hooks)
+- [x] Guardrails: DB blast radius (`max_rows_affected`), K8s blast radius (`max_pods_affected`), transaction age (`max_xact_age_secs`), schedule — pre- and post-execution hooks
 - [x] Explainability — decision trace, `govexplain` CLI, explain API endpoints
 - [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
 
