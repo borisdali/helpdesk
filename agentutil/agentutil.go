@@ -557,6 +557,109 @@ func (e *PolicyEnforcer) CheckKubernetesResult(ctx context.Context, namespace st
 	return e.CheckResult(ctx, "kubernetes", namespace, action, tags, outcome)
 }
 
+// CheckDatabaseSessionAge blocks terminate_connection/cancel_query when the
+// target session has uncommitted writes in a transaction open longer than the
+// max_xact_age_secs policy limit. No-op when hasWrites is false (read-only
+// transactions roll back instantly), when xactAgeSecs is 0, or when no policy
+// limit is configured.
+func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName string, action policy.ActionClass, tags []string, xactAgeSecs int, hasWrites bool) error {
+	if e.engine == nil && e.policyCheckURL == "" {
+		return nil
+	}
+	// Read-only transactions roll back instantly; no risk.
+	if !hasWrites || xactAgeSecs == 0 {
+		return nil
+	}
+
+	// Remote check mode.
+	if e.policyCheckURL != "" {
+		traceID := ""
+		if e.traceStore != nil {
+			traceID = e.traceStore.Get()
+		}
+		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
+			ResourceType: "database",
+			ResourceName: dbName,
+			Action:       string(action),
+			Tags:         tags,
+			TraceID:      traceID,
+			AgentName:    e.agentName,
+			XactAgeSecs:  xactAgeSecs,
+		})
+		if err != nil {
+			return err
+		}
+		if resp.Effect != "deny" {
+			return nil
+		}
+		slog.Warn("remote pre-execution policy check: transaction age exceeded",
+			"resource_name", dbName,
+			"action", action,
+			"xact_age_secs", xactAgeSecs,
+			"policy", resp.PolicyName,
+			"message", resp.Message,
+		)
+		return &policy.DeniedError{
+			Decision: policy.Decision{
+				Effect:     policy.EffectDeny,
+				PolicyName: resp.PolicyName,
+				Message:    resp.Message,
+			},
+			Explanation: resp.Explanation,
+		}
+	}
+
+	traceID := ""
+	if e.traceStore != nil {
+		traceID = e.traceStore.Get()
+	}
+
+	req := policy.Request{
+		Resource: policy.RequestResource{
+			Type: "database",
+			Name: dbName,
+			Tags: tags,
+		},
+		Action: action,
+		Context: policy.RequestContext{
+			TraceID:     traceID,
+			XactAgeSecs: xactAgeSecs,
+		},
+	}
+
+	trace := e.engine.Explain(req)
+	decision := trace.Decision
+	if decision.Effect != policy.EffectDeny {
+		return nil
+	}
+
+	traceJSON, _ := json.Marshal(trace)
+
+	if e.toolAuditor != nil {
+		e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+			ResourceType: "database",
+			ResourceName: dbName,
+			Action:       string(action),
+			Tags:         tags,
+			Effect:       string(decision.Effect),
+			PolicyName:   decision.PolicyName,
+			RuleIndex:    decision.RuleIndex,
+			Message:      decision.Message,
+			Trace:        traceJSON,
+			Explanation:  trace.Explanation,
+		})
+	}
+
+	slog.Warn("pre-execution policy check: transaction age exceeded",
+		"resource_name", dbName,
+		"action", action,
+		"xact_age_secs", xactAgeSecs,
+		"policy", decision.PolicyName,
+		"message", decision.Message,
+	)
+	return &policy.DeniedError{Decision: decision, Explanation: trace.Explanation}
+}
+
 // policyCheckReq is the body sent to POST /v1/governance/check.
 // Field names match PolicyCheckRequest in cmd/auditd/governance_handlers.go.
 type policyCheckReq struct {
@@ -569,6 +672,7 @@ type policyCheckReq struct {
 	Note          string   `json:"note,omitempty"`
 	RowsAffected  int      `json:"rows_affected,omitempty"`
 	PodsAffected  int      `json:"pods_affected,omitempty"`
+	XactAgeSecs   int      `json:"xact_age_secs,omitempty"`
 	PostExecution bool     `json:"post_execution,omitempty"`
 }
 

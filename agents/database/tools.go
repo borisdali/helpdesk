@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -253,6 +254,21 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 		}
 	}
 
+	// Pre-execution blast-radius estimate for DELETE/UPDATE: run EXPLAIN to get
+	// the query planner's row count before the mutation commits. Silently skipped
+	// for non-DML statements or when EXPLAIN fails (post-execution check is the
+	// backstop). The estimate may be imprecise — treat it as an order-of-magnitude
+	// check.
+	if policyEnforcer != nil && (action == policy.ActionWrite || action == policy.ActionDestructive) {
+		if estRows, ok := estimateRowsAffected(ctx, dbInfo.ConnectionStr, query); ok {
+			if preErr := policyEnforcer.CheckDatabaseResult(ctx, dbInfo.Name, action, dbInfo.Tags, agentutil.ToolOutcome{
+				RowsAffected: estRows,
+			}); preErr != nil {
+				return "", fmt.Errorf("blast radius check (estimated %d rows): %w", estRows, preErr)
+			}
+		}
+	}
+
 	start := time.Now()
 	connStr = dbInfo.ConnectionStr
 
@@ -396,6 +412,39 @@ func parseRowsAffected(output string) int {
 		}
 	}
 	return 0
+}
+
+// estimateRowsAffected runs EXPLAIN (FORMAT JSON) on a DELETE or UPDATE query
+// and returns the query planner's estimated row count before the statement
+// executes. Returns (0, false) if:
+//   - the statement is not a DELETE or UPDATE
+//   - psql returns an error (e.g. syntax error, connection failure)
+//   - the EXPLAIN JSON cannot be parsed
+//
+// The estimate is approximate; callers should treat it as an order-of-magnitude
+// check rather than an exact count. Uses -t -A flags for clean JSON output.
+func estimateRowsAffected(ctx context.Context, connStr, query string) (int, bool) {
+	upper := strings.ToUpper(strings.TrimSpace(query))
+	if !strings.HasPrefix(upper, "DELETE") && !strings.HasPrefix(upper, "UPDATE") {
+		return 0, false
+	}
+	args := []string{"-t", "-A", "-c", "EXPLAIN (FORMAT JSON) " + query}
+	if connStr != "" {
+		args = append([]string{connStr}, args...)
+	}
+	out, err := cmdRunner.Run(ctx, "psql", args, []string{"PGCONNECT_TIMEOUT=10"})
+	if err != nil {
+		return 0, false
+	}
+	var plans []struct {
+		Plan struct {
+			PlanRows int `json:"Plan Rows"`
+		} `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &plans); err != nil || len(plans) == 0 {
+		return 0, false
+	}
+	return plans[0].Plan.PlanRows, true
 }
 
 // ConnectionPlan holds the result of inspecting a database session before a
@@ -984,6 +1033,17 @@ func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error)
 		return errorResult("cancel_query", args.ConnectionString, err), nil
 	}
 
+	// Pre-execution transaction age guardrail: if the session has uncommitted
+	// writes in a long-running transaction, cancellation may cause a lengthy
+	// rollback. Check against max_xact_age_secs policy condition.
+	if policyEnforcer != nil {
+		dbInfo, _ := resolveDatabaseInfo(args.ConnectionString)
+		if ageErr := policyEnforcer.CheckDatabaseSessionAge(ctx, dbInfo.Name,
+			policy.ActionWrite, dbInfo.Tags, plan.OpenTxAgeSecs, plan.HasWrites); ageErr != nil {
+			return errorResult("cancel_query", args.ConnectionString, ageErr), nil
+		}
+	}
+
 	// Step 2: cancel the query (policy pre-check happens inside runPsqlAs).
 	query := fmt.Sprintf(`SELECT pg_cancel_backend(%d) AS cancelled, pid, usename, datname, state, LEFT(query, 100) AS query_preview
 FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
@@ -1075,6 +1135,17 @@ func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (Ps
 	plan, err := inspectConnection(ctx, args.ConnectionString, args.PID)
 	if err != nil {
 		return errorResult("terminate_connection", args.ConnectionString, err), nil
+	}
+
+	// Pre-execution transaction age guardrail: if the session has uncommitted
+	// writes in a long-running transaction, termination triggers a rollback that
+	// may take as long as the transaction age. Check against max_xact_age_secs.
+	if policyEnforcer != nil {
+		dbInfo, _ := resolveDatabaseInfo(args.ConnectionString)
+		if ageErr := policyEnforcer.CheckDatabaseSessionAge(ctx, dbInfo.Name,
+			policy.ActionDestructive, dbInfo.Tags, plan.OpenTxAgeSecs, plan.HasWrites); ageErr != nil {
+			return errorResult("terminate_connection", args.ConnectionString, ageErr), nil
+		}
 	}
 
 	// Step 2: terminate the connection (policy pre-check happens inside runPsqlAs).

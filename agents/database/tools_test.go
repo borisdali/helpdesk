@@ -22,6 +22,7 @@ import (
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
+	"helpdesk/internal/policy"
 )
 
 // mockRunner implements CommandRunner for testing.
@@ -2318,5 +2319,215 @@ query_preview   | UPDATE accounts SET balance = 0
 		}
 	default:
 		t.Fatal("no approval request captured; policy enforcer was not called or did not require approval")
+	}
+}
+
+// =============================================================================
+// estimateRowsAffected
+// =============================================================================
+
+func TestEstimateRowsAffected(t *testing.T) {
+	// Minimal EXPLAIN (FORMAT JSON) output that parseRowsAffected parses.
+	explainJSON := `[{"Plan": {"Node Type": "Seq Scan", "Plan Rows": 5000}}]`
+
+	tests := []struct {
+		name        string
+		query       string
+		mockOut     string
+		mockErr     error
+		wantRows    int
+		wantOk      bool
+		callsRunner bool
+	}{
+		{
+			name:        "SELECT is skipped without calling runner",
+			query:       "SELECT * FROM orders",
+			wantRows:    0,
+			wantOk:      false,
+			callsRunner: false,
+		},
+		{
+			name:        "DELETE returns planner estimate",
+			query:       "DELETE FROM orders WHERE status = 'cancelled'",
+			mockOut:     explainJSON,
+			wantRows:    5000,
+			wantOk:      true,
+			callsRunner: true,
+		},
+		{
+			name:        "UPDATE returns planner estimate",
+			query:       "UPDATE orders SET shipped = true WHERE id = 42",
+			mockOut:     explainJSON,
+			wantRows:    5000,
+			wantOk:      true,
+			callsRunner: true,
+		},
+		{
+			name:        "psql error silently skipped",
+			query:       "DELETE FROM orders",
+			mockErr:     errors.New("exit status 1"),
+			wantRows:    0,
+			wantOk:      false,
+			callsRunner: true,
+		},
+		{
+			name:        "malformed JSON silently skipped",
+			query:       "DELETE FROM orders",
+			mockOut:     "not valid json at all",
+			wantRows:    0,
+			wantOk:      false,
+			callsRunner: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.callsRunner {
+				defer withMockRunner(tt.mockOut, tt.mockErr)()
+			}
+			gotRows, gotOk := estimateRowsAffected(ctx, "", tt.query)
+			if gotOk != tt.wantOk {
+				t.Errorf("estimateRowsAffected() ok = %v, want %v", gotOk, tt.wantOk)
+			}
+			if gotRows != tt.wantRows {
+				t.Errorf("estimateRowsAffected() rows = %d, want %d", gotRows, tt.wantRows)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// runPsqlAs — pre-execution EXPLAIN blast-radius check
+// =============================================================================
+
+func TestRunPsqlAs_PreExecBlastRadiusDenied(t *testing.T) {
+	// Policy allows destructive ops with max_rows_affected: 1000.
+	// EXPLAIN estimates 50 000 rows — exceeds the limit.
+	// runPsqlAs must be denied before the actual DML executes.
+	defer withPolicyEnforcer(newBlastRadiusDBEnforcer(t, 1000))()
+
+	explainJSON := `[{"Plan": {"Plan Rows": 50000}}]`
+	// call #1 = EXPLAIN; call #2 = real DML (must never be reached).
+	defer withMockRunnerSequence(
+		psqlResponse{out: explainJSON, err: nil},
+		psqlResponse{out: "DELETE 50000\n", err: nil},
+	)()
+
+	ctx := context.Background()
+	_, err := runPsqlAs(ctx, "", "DELETE FROM orders WHERE status = 'old'",
+		"delete_old_orders", policy.ActionDestructive, "")
+	if err == nil {
+		t.Fatal("runPsqlAs() error = nil, want blast radius denial")
+	}
+	if !strings.Contains(err.Error(), "blast radius check") {
+		t.Errorf("runPsqlAs() error = %q, want 'blast radius check'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "50000") {
+		t.Errorf("runPsqlAs() error = %q, want estimated row count 50000", err.Error())
+	}
+}
+
+// =============================================================================
+// xact-age guardrail helpers and tests
+// =============================================================================
+
+// testInspectOutputWithWriteTx is a fully-parsed pg_stat_activity record for a
+// session that has been running a write transaction for 2 hours (7200 s).
+// Used as the inspectConnection mock in xact-age guardrail tests.
+const testInspectOutputWithWriteTx = `-[ RECORD 1 ]---+------------------------------
+pid                  | 5678
+usename              | slow_client
+datname              | appdb
+client_addr          | 10.0.0.1
+state                | idle in transaction
+state_duration_secs  | 7200
+has_open_tx          | t
+open_tx_secs         | 7200
+has_writes           | t
+total_locks          | 1
+row_locks            | 0
+locked_tables        | orders
+current_query        | UPDATE orders SET x = 1`
+
+// newXactAgeEnforcer returns a PolicyEnforcer that enforces max_xact_age_secs
+// for the given action class ("destructive" or "write").
+func newXactAgeEnforcer(t *testing.T, maxSecs int, action string) *agentutil.PolicyEnforcer {
+	t.Helper()
+	yamlContent := fmt.Sprintf(`
+version: "1"
+policies:
+  - name: xact-age-limit
+    resources:
+      - type: database
+    rules:
+      - action: %s
+        effect: allow
+        conditions:
+          max_xact_age_secs: %d
+`, action, maxSecs)
+	path := writeTempDBPolicyFile(t, yamlContent)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+func TestTerminateConnectionTool_XactAgeGuardrail(t *testing.T) {
+	// Session has a 2-hour write transaction. Policy blocks termination when
+	// the open transaction is older than 30 min (1800 s). The tool must return
+	// an error before pg_terminate_backend is ever executed.
+	defer withPolicyEnforcer(newXactAgeEnforcer(t, 1800, "destructive"))()
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutputWithWriteTx, err: nil},
+		// pg_terminate_backend must NOT be reached:
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\nterminated | t\npid | 5678\n", err: nil},
+	)()
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("terminateConnectionTool() output = %q, want ERROR for xact-age denial", result.Output)
+	}
+	if !strings.Contains(result.Output, "rollback") {
+		t.Errorf("terminateConnectionTool() output = %q, want rollback warning in denial message", result.Output)
+	}
+}
+
+func TestCancelQueryTool_XactAgeGuardrail(t *testing.T) {
+	// Session has a 2-hour write transaction. Policy blocks cancellation when
+	// the open transaction is older than 30 min (1800 s). The tool must return
+	// an error before pg_cancel_backend is ever executed.
+	defer withPolicyEnforcer(newXactAgeEnforcer(t, 1800, "write"))()
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutputWithWriteTx, err: nil},
+		// pg_cancel_backend must NOT be reached:
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\ncancelled | t\npid | 5678\n", err: nil},
+	)()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("cancelQueryTool() output = %q, want ERROR for xact-age denial", result.Output)
+	}
+	if !strings.Contains(result.Output, "rollback") {
+		t.Errorf("cancelQueryTool() output = %q, want rollback warning in denial message", result.Output)
 	}
 }

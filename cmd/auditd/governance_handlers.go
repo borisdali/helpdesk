@@ -445,6 +445,9 @@ type PolicyCheckRequest struct {
 	// blast-radius context (post-execution checks)
 	RowsAffected  int  `json:"rows_affected,omitempty"`
 	PodsAffected  int  `json:"pods_affected,omitempty"`
+	// XactAgeSecs carries the age of an open database transaction for the
+	// pre-execution max_xact_age_secs condition (terminate_connection / cancel_query).
+	XactAgeSecs   int  `json:"xact_age_secs,omitempty"`
 	PostExecution bool `json:"post_execution,omitempty"`
 }
 
@@ -515,6 +518,7 @@ func (s *governanceServer) handlePolicyCheck(w http.ResponseWriter, r *http.Requ
 			TraceID:      req.TraceID,
 			RowsAffected: req.RowsAffected,
 			PodsAffected: req.PodsAffected,
+			XactAgeSecs:  req.XactAgeSecs,
 		},
 	}
 

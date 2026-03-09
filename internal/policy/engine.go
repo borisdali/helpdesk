@@ -310,7 +310,36 @@ func (e *Engine) applyConditionsWithTrace(decision Decision, cond *Conditions, r
 		traces = append(traces, ct)
 	}
 
+	if cond.MaxXactAgeSecs > 0 && req.Context.XactAgeSecs > 0 {
+		exceeded := req.Context.XactAgeSecs > cond.MaxXactAgeSecs
+		ct := ConditionTrace{
+			Name:   "max_xact_age_secs",
+			Passed: !exceeded,
+			Detail: fmt.Sprintf("transaction age %ds, limit %ds", req.Context.XactAgeSecs, cond.MaxXactAgeSecs),
+		}
+		if exceeded {
+			decision.Effect = EffectDeny
+			decision.Message = formatMessage(
+				"Transaction has been open for %s; rollback may take as long. Limit is %s",
+				fmtAgeSecs(req.Context.XactAgeSecs), fmtAgeSecs(cond.MaxXactAgeSecs))
+			decision.Conditions = append(decision.Conditions,
+				formatMessage("max_xact_age: %ds", cond.MaxXactAgeSecs))
+		}
+		traces = append(traces, ct)
+	}
+
 	return decision, traces
+}
+
+// fmtAgeSecs formats a duration in seconds as "Xh Ym" or "Xs" for policy messages.
+func fmtAgeSecs(secs int) string {
+	if secs >= 3600 {
+		return fmt.Sprintf("%dh %dm", secs/3600, (secs%3600)/60)
+	}
+	if secs >= 60 {
+		return fmt.Sprintf("%dm %ds", secs/60, secs%60)
+	}
+	return fmt.Sprintf("%ds", secs)
 }
 
 func formatMessage(format string, args ...any) string {

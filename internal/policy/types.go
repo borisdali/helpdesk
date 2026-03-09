@@ -120,6 +120,10 @@ type Conditions struct {
 	// Blast radius limits
 	MaxRowsAffected int `yaml:"max_rows_affected,omitempty"`
 	MaxPodsAffected int `yaml:"max_pods_affected,omitempty"`
+	// MaxXactAgeSecs blocks terminate_connection/cancel_query when the target
+	// session has uncommitted writes in a transaction open longer than this many
+	// seconds. 0 = disabled (no limit).
+	MaxXactAgeSecs int `yaml:"max_xact_age_secs,omitempty"`
 
 	// Time-based conditions
 	Schedule *Schedule `yaml:"schedule,omitempty"`
@@ -236,6 +240,7 @@ type RequestContext struct {
 	TraceID      string    // Correlation ID
 	RowsAffected int       // For database operations
 	PodsAffected int       // For K8s operations
+	XactAgeSecs  int       // For database: age of the open transaction in seconds
 }
 
 // Decision is the result of policy evaluation.

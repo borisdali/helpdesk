@@ -326,6 +326,16 @@ func TestParsePodsAffected(t *testing.T) {
 			output: "Error from server (NotFound): pods \"bad\" not found\n",
 			want:   0,
 		},
+		{
+			name:   "deployment restarted",
+			output: `deployment.apps "my-deploy" restarted` + "\n",
+			want:   1,
+		},
+		{
+			name:   "deployment scaled",
+			output: `deployment.apps "my-deploy" scaled` + "\n",
+			want:   1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -859,6 +869,57 @@ func TestDeletePodTool_BlastRadiusDenied(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "policy denied after execution") {
 		t.Errorf("deletePodTool() error = %v, want 'policy denied after execution'", err)
+	}
+}
+
+func TestScaleDeploymentTool_BlastRadiusDenied_PreExec(t *testing.T) {
+	// Policy: allow destructive with max 5 pods. scale to 20 → denied pre-exec.
+	defer withK8sPolicyEnforcer(newK8sBlastRadiusEnforcer(t, 5))()
+	// kubectl must never be called — the pre-execution blast-radius check fires first.
+	kubectlCalled := false
+	orig := runKubectl
+	runKubectl = func(ctx context.Context, kubeContext string, args ...string) (string, error) {
+		kubectlCalled = true
+		return "", nil
+	}
+	defer func() { runKubectl = orig }()
+
+	ctx := newK8sTestContext()
+	_, err := scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "default",
+		DeploymentName: "web",
+		Replicas:       20,
+	})
+	if err == nil {
+		t.Fatal("scaleDeploymentTool() expected error when blast-radius pre-exec check (20 > 5) fires")
+	}
+	if !strings.Contains(err.Error(), "blast radius check denied") {
+		t.Errorf("scaleDeploymentTool() error = %v, want 'blast radius check denied'", err)
+	}
+	if kubectlCalled {
+		t.Error("kubectl was called despite pre-execution blast-radius denial — check should block before execution")
+	}
+}
+
+func TestRestartDeploymentTool_BlastRadiusEnforced_PostExec(t *testing.T) {
+	// After the parsePodsAffected fix, " restarted" suffix is recognised.
+	// Policy: allow up to 1 resource; mock returns 2 "restarted" lines → post-exec
+	// check fires with count=2 which exceeds the limit.
+	defer withK8sPolicyEnforcer(newK8sBlastRadiusEnforcer(t, 1))()
+	// Simulate two deployments restarted in one rollout-restart command.
+	mockOutput := "deployment.apps \"api\" restarted\ndeployment.apps \"worker\" restarted\n"
+	defer withMockKubectl(mockOutput, nil)()
+
+	ctx := newK8sTestContext()
+	_, err := restartDeploymentTool(ctx, RestartDeploymentArgs{
+		Namespace:      "default",
+		DeploymentName: "api",
+	})
+	if err == nil {
+		t.Fatal("restartDeploymentTool() expected error when blast-radius post-exec check fires with count=2 > limit=1")
+	}
+	if !strings.Contains(err.Error(), "policy denied after execution") {
+		t.Errorf("restartDeploymentTool() error = %v, want 'policy denied after execution'", err)
 	}
 }
 

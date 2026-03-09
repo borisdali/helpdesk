@@ -287,3 +287,95 @@ policies:
 		t.Errorf("dev-db should not match prod pattern, got policy %q", decision.PolicyName)
 	}
 }
+
+func TestMaxXactAgeSecs_Deny(t *testing.T) {
+	yamlConfig := `
+version: "1"
+policies:
+  - name: xact-age-limit
+    resources:
+      - type: database
+    rules:
+      - action: destructive
+        effect: allow
+        conditions:
+          max_xact_age_secs: 1800
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg, DefaultEffect: EffectAllow})
+
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "prod-db"},
+		Action:   ActionDestructive,
+		Context:  RequestContext{XactAgeSecs: 7200}, // 2 hours — exceeds 30 min limit
+	}
+	decision := engine.Evaluate(req)
+	if decision.Effect != EffectDeny {
+		t.Errorf("xact age 7200s > limit 1800s should be denied, got %q", decision.Effect)
+	}
+	if decision.PolicyName != "xact-age-limit" {
+		t.Errorf("expected policy 'xact-age-limit', got %q", decision.PolicyName)
+	}
+}
+
+func TestMaxXactAgeSecs_Allow(t *testing.T) {
+	yamlConfig := `
+version: "1"
+policies:
+  - name: xact-age-limit
+    resources:
+      - type: database
+    rules:
+      - action: destructive
+        effect: allow
+        conditions:
+          max_xact_age_secs: 1800
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg, DefaultEffect: EffectAllow})
+
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "prod-db"},
+		Action:   ActionDestructive,
+		Context:  RequestContext{XactAgeSecs: 60}, // 1 minute — within limit
+	}
+	decision := engine.Evaluate(req)
+	if decision.Effect != EffectAllow {
+		t.Errorf("xact age 60s < limit 1800s should be allowed, got %q", decision.Effect)
+	}
+}
+
+func TestMaxXactAgeSecs_ZeroDisabled(t *testing.T) {
+	// max_xact_age_secs: 0 means disabled — any age is allowed.
+	yamlConfig := `
+version: "1"
+policies:
+  - name: no-xact-limit
+    resources:
+      - type: database
+    rules:
+      - action: destructive
+        effect: allow
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg, DefaultEffect: EffectAllow})
+
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "prod-db"},
+		Action:   ActionDestructive,
+		Context:  RequestContext{XactAgeSecs: 999999}, // huge age, but no limit set
+	}
+	decision := engine.Evaluate(req)
+	if decision.Effect != EffectAllow {
+		t.Errorf("no limit configured, should allow any age, got %q", decision.Effect)
+	}
+}

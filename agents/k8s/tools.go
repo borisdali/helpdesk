@@ -187,13 +187,17 @@ func checkK8sPolicy(ctx context.Context, namespace string, action policy.ActionC
 //	pod "foo" deleted
 //	deployment.apps "bar" configured
 //	service "baz" created
+//	deployment.apps "bar" restarted
+//	deployment.apps "bar" scaled
 func parsePodsAffected(output string) int {
 	count := 0
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasSuffix(line, " deleted") ||
 			strings.HasSuffix(line, " configured") ||
-			strings.HasSuffix(line, " created") {
+			strings.HasSuffix(line, " created") ||
+			strings.HasSuffix(line, " restarted") ||
+			strings.HasSuffix(line, " scaled") {
 			count++
 		}
 	}
@@ -210,6 +214,19 @@ func checkK8sPolicyResult(ctx context.Context, namespace string, action policy.A
 	return policyEnforcer.CheckKubernetesResult(ctx, namespace, action, tags, agentutil.ToolOutcome{
 		PodsAffected: parsePodsAffected(output),
 		Err:          execErr,
+	})
+}
+
+// checkK8sBlastRadiusPreExec runs a pre-execution blast-radius check with a
+// caller-supplied resource count. Use when the target count is available before
+// execution (e.g. args.Replicas for scale_deployment). No-op when policyEnforcer
+// is nil.
+func checkK8sBlastRadiusPreExec(ctx context.Context, namespace string, action policy.ActionClass, tags []string, podsAffected int) error {
+	if policyEnforcer == nil {
+		return nil
+	}
+	return policyEnforcer.CheckKubernetesResult(ctx, namespace, action, tags, agentutil.ToolOutcome{
+		PodsAffected: podsAffected,
 	})
 }
 
@@ -763,6 +780,11 @@ func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlRes
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	// Pre-execution blast-radius: args.Replicas is the target state, known now.
+	if err := checkK8sBlastRadiusPreExec(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, args.Replicas); err != nil {
+		return KubectlResult{}, fmt.Errorf("blast radius check denied: %w", err)
 	}
 
 	cmdArgs := []string{
