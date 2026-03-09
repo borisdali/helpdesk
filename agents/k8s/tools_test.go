@@ -956,13 +956,17 @@ func makeK8sTestInfraConfig() *infra.Config {
 	}
 }
 
-func TestResolveNamespaceInfo_InfraEnforced_UnknownNamespace(t *testing.T) {
-	// infraConfig is set but namespace is not registered → hard reject.
-	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+func TestResolveNamespaceInfo_InfraEnforced_UnknownNamespaceUnknownContext(t *testing.T) {
+	// infraConfig is set, namespace is not a DB namespace, and context doesn't match
+	// any registered cluster → hard reject (can't determine which cluster this belongs to).
+	cfg := makeK8sTestInfraConfig()
+	// Add a second cluster so the sole-cluster fallback doesn't apply.
+	cfg.K8sClusters["other-cluster"] = infra.K8sCluster{Name: "other", Context: "gke_staging", Tags: []string{"staging"}}
+	defer withK8sInfraConfig(cfg)()
 
-	_, err := resolveNamespaceInfo("unknown-namespace")
+	_, err := resolveNamespaceInfo("unknown-namespace", "unknown-context")
 	if err == nil {
-		t.Fatal("resolveNamespaceInfo() error = nil, want error for unregistered namespace with infra config set")
+		t.Fatal("resolveNamespaceInfo() error = nil, want error for namespace in unrecognized context with infra config set")
 	}
 	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
 		t.Errorf("resolveNamespaceInfo() error = %q, want 'not registered in infrastructure config'", err.Error())
@@ -976,7 +980,7 @@ func TestResolveNamespaceInfo_InfraEnforced_RegisteredByDBName(t *testing.T) {
 	// infraConfig is set and input is a registered database name → succeed with namespace + tags.
 	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
 
-	info, err := resolveNamespaceInfo("prod-db")
+	info, err := resolveNamespaceInfo("prod-db", "")
 	if err != nil {
 		t.Fatalf("resolveNamespaceInfo() error = %v, want nil for registered DB name", err)
 	}
@@ -992,7 +996,7 @@ func TestResolveNamespaceInfo_InfraEnforced_RegisteredByNamespace(t *testing.T) 
 	// infraConfig is set and input is the actual K8s namespace of a registered DB → allowed.
 	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
 
-	info, err := resolveNamespaceInfo("prod-namespace")
+	info, err := resolveNamespaceInfo("prod-namespace", "")
 	if err != nil {
 		t.Fatalf("resolveNamespaceInfo() error = %v, want nil for registered K8s namespace", err)
 	}
@@ -1001,11 +1005,45 @@ func TestResolveNamespaceInfo_InfraEnforced_RegisteredByNamespace(t *testing.T) 
 	}
 }
 
+func TestResolveNamespaceInfo_InfraEnforced_NonDBNamespaceInKnownCluster(t *testing.T) {
+	// infraConfig is set and namespace is not a DB namespace, but the context matches
+	// a registered cluster → succeed with cluster-level tags (e.g. "default" namespace
+	// on a cluster tagged "development" should inherit those tags).
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+
+	info, err := resolveNamespaceInfo("default", "gke_prod")
+	if err != nil {
+		t.Fatalf("resolveNamespaceInfo() error = %v, want nil for non-DB namespace in registered cluster", err)
+	}
+	if info.Namespace != "default" {
+		t.Errorf("resolveNamespaceInfo() Namespace = %q, want 'default'", info.Namespace)
+	}
+	if len(info.Tags) == 0 || info.Tags[0] != "production" {
+		t.Errorf("resolveNamespaceInfo() Tags = %v, want cluster tags ['production']", info.Tags)
+	}
+}
+
+func TestResolveNamespaceInfo_InfraEnforced_NonDBNamespaceNoContextSoleCluster(t *testing.T) {
+	// infraConfig has exactly one cluster; no context passed → use sole cluster's tags.
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+
+	info, err := resolveNamespaceInfo("default", "")
+	if err != nil {
+		t.Fatalf("resolveNamespaceInfo() error = %v, want nil for non-DB namespace with sole cluster default", err)
+	}
+	if info.Namespace != "default" {
+		t.Errorf("resolveNamespaceInfo() Namespace = %q, want 'default'", info.Namespace)
+	}
+	if len(info.Tags) == 0 || info.Tags[0] != "production" {
+		t.Errorf("resolveNamespaceInfo() Tags = %v, want sole cluster tags ['production']", info.Tags)
+	}
+}
+
 func TestResolveNamespaceInfo_InfraPermissive_UnknownNamespace(t *testing.T) {
 	// infraConfig is nil (dev mode) → any namespace is allowed.
 	defer withK8sInfraConfig(nil)()
 
-	info, err := resolveNamespaceInfo("any-namespace")
+	info, err := resolveNamespaceInfo("any-namespace", "")
 	if err != nil {
 		t.Fatalf("resolveNamespaceInfo() error = %v, want nil in dev mode (no infra config)", err)
 	}
@@ -1015,16 +1053,20 @@ func TestResolveNamespaceInfo_InfraPermissive_UnknownNamespace(t *testing.T) {
 }
 
 func TestGetPodsTool_InfraEnforced_Rejected(t *testing.T) {
-	// infraConfig is set but namespace is not registered → tool returns error.
-	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+	// infraConfig is set with multiple clusters; namespace is not registered and
+	// context doesn't match any cluster → tool returns access denied.
+	cfg := makeK8sTestInfraConfig()
+	cfg.K8sClusters["other-cluster"] = infra.K8sCluster{Name: "other", Context: "gke_staging", Tags: []string{"staging"}}
+	defer withK8sInfraConfig(cfg)()
 	defer withMockKubectl("", nil)() // should not be reached
 
 	ctx := newK8sTestContext()
 	_, err := getPodsTool(ctx, GetPodsArgs{
 		Namespace: "unknown-namespace",
+		Context:   "unknown-context",
 	})
 	if err == nil {
-		t.Fatal("getPodsTool() expected error for unregistered namespace with infra config set")
+		t.Fatal("getPodsTool() expected error for namespace in unrecognized context with infra config set")
 	}
 	if !strings.Contains(err.Error(), "access denied") {
 		t.Errorf("getPodsTool() error = %v, want 'access denied'", err)
