@@ -250,7 +250,7 @@ release: push binaries bundle
 # ---------------------------------------------------------------------------
 github-release: release
 	git tag -f $(VERSION)
-	git push origin $(VERSION)
+	git push origin refs/tags/$(VERSION)
 	gh release create $(VERSION) $(DIST)/*.tar.gz \
 		--title "$(VERSION)" \
 		--generate-notes
