@@ -5,7 +5,13 @@ See the Fault Injection documentation [here](FAULT_INJECTION_TESTING.md)
 and the overall aiHelpDesk Testing approach [here](https://github.com/borisdali/helpdesk/blob/v0.5.0/testing/README.md).
 
 ```
-[boris@ ~/helpdesk]$ date; time FAULTTEST_DB_AGENT_URL=http://localhost:1100 FAULTTEST_K8S_AGENT_URL=http://localhost:1102 FAULTTEST_KUBE_CONTEXT=minikube FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass"  make faulttest
+[boris@ ~/helpdesk]$ date; \
+time FAULTTEST_DB_AGENT_URL=http://localhost:1100 \
+FAULTTEST_K8S_AGENT_URL=http://localhost:1102 \
+FAULTTEST_KUBE_CONTEXT=minikube \
+FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass"  \
+make faulttest
+
 Sat Mar  7 16:59:28 EST 2026
 Starting test infrastructure (primary + replica)...
 docker compose \

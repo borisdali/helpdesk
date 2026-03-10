@@ -42,6 +42,18 @@ spec:
             - name: HELPDESK_POLICY_FILE
               value: /etc/helpdesk/policies.yaml
             {{- end }}
+            {{- if .Values.governance.approvals.enabled }}
+            - name: HELPDESK_APPROVAL_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if .Values.governance.approvals.timeout }}
+            - name: HELPDESK_APPROVAL_TIMEOUT
+              value: "{{ .Values.governance.approvals.timeout }}"
+            {{- end }}
+            {{- if .Values.infrastructure }}
+            - name: HELPDESK_INFRA_CONFIG
+              value: /etc/helpdesk/infrastructure.json
+            {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
           ports:
             - name: a2a
@@ -59,17 +71,28 @@ spec:
               port: a2a
             initialDelaySeconds: 3
             periodSeconds: 10
-          {{- if .Values.agents.incident.persistence.enabled }}
           volumeMounts:
+            {{- if .Values.agents.incident.persistence.enabled }}
             - name: incidents
               mountPath: /data/incidents
-          {{- end }}
-      {{- if .Values.agents.incident.persistence.enabled }}
+            {{- end }}
+            {{- if .Values.infrastructure }}
+            - name: infra-config
+              mountPath: /etc/helpdesk/infrastructure.json
+              subPath: infrastructure.json
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- if .Values.agents.incident.persistence.enabled }}
         - name: incidents
           persistentVolumeClaim:
             claimName: {{ include "helpdesk.fullname" . }}-incidents
-      {{- end }}
+        {{- end }}
+        {{- if .Values.infrastructure }}
+        - name: infra-config
+          configMap:
+            name: {{ include "helpdesk.fullname" . }}-config
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

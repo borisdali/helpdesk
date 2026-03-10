@@ -6,9 +6,9 @@
 - Helm 3.x
 - `kubectl` configured to access your cluster
 
-## 2. Quick Start (deployment from prebuilt binaries)
+## 2. Quick Start (deployment from prebuilt bundle/images)
 
-Similar to [VM-based Deployment](../docker-compose/README.md), the binary route is simpler and doesn't require cloning of the repo, but see deployment from source below if desired:
+Similar to [VM-based Deployment](../docker-compose/README.md), the prebuilt bundle route is simpler and doesn't require cloning of the repo, but please see the "deployment from source" section below if desired:
 
 ```bash
 # Extract the deploy bundle
