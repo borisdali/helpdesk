@@ -37,6 +37,14 @@ const (
 	// These events do NOT contribute to tools_used or event_count in
 	// journey aggregation — they are internal plumbing, not user-visible steps.
 	EventTypeVerificationOutcome EventType = "verification_outcome"
+	// EventTypeDelegationVerification is emitted by DelegateTool after every
+	// sub-agent call. It records which tools the sub-agent actually executed
+	// (from the audit trail), independent of the agent's text response.
+	// When Mismatch is true — a destructive delegation produced no confirmed
+	// destructive tool calls — the journey outcome is set to "unverified_claim".
+	// Like verification_outcome, these events do NOT contribute to tools_used
+	// or event_count in journey aggregation.
+	EventTypeDelegationVerification EventType = "delegation_verification"
 )
 
 // RequestCategory classifies the type of user request.
@@ -149,6 +157,22 @@ type AgentReasoning struct {
 	ToolCalls []string `json:"tool_calls"`
 }
 
+// DelegationVerification records the audit-trail evidence for a single delegation.
+// It is emitted by DelegateTool after every sub-agent call, regardless of outcome.
+type DelegationVerification struct {
+	// DelegationEventID is the evt_ ID of the corresponding delegation_decision event.
+	DelegationEventID string `json:"delegation_event_id"`
+	// Agent is the sub-agent that was called.
+	Agent string `json:"agent"`
+	// ToolsConfirmed lists every tool name confirmed in the audit trail for this delegation.
+	ToolsConfirmed []string `json:"tools_confirmed"`
+	// DestructiveConfirmed is the subset of ToolsConfirmed whose ActionClass is Destructive.
+	DestructiveConfirmed []string `json:"destructive_confirmed"`
+	// Mismatch is true when the delegation was classified as destructive but the audit
+	// trail contains no confirmed destructive tool execution.
+	Mismatch bool `json:"mismatch"`
+}
+
 // GovernanceViolation records a compliance violation when a required governance
 // module is disabled or misconfigured in fix mode (HELPDESK_OPERATING_MODE=fix).
 type GovernanceViolation struct {
@@ -184,8 +208,9 @@ type Event struct {
 	Decision            *Decision            `json:"decision,omitempty"`
 	PolicyDecision      *PolicyDecision      `json:"policy_decision,omitempty"`
 	AgentReasoning      *AgentReasoning      `json:"agent_reasoning,omitempty"`
-	GovernanceViolation *GovernanceViolation `json:"governance_violation,omitempty"`
-	Outcome             *Outcome             `json:"outcome,omitempty"`
+	GovernanceViolation     *GovernanceViolation     `json:"governance_violation,omitempty"`
+	DelegationVerification  *DelegationVerification  `json:"delegation_verification,omitempty"`
+	Outcome                 *Outcome                 `json:"outcome,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

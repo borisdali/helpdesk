@@ -13,6 +13,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/prompts"
 )
 
@@ -23,7 +24,17 @@ func main() {
 	// Enforce governance compliance in fix mode before any other initialization.
 	agentutil.EnforceFixMode(ctx, agentutil.CheckFixModeViolations(cfg), "incident_agent", cfg.AuditURL)
 
-	slog.Info("governance", "audit", false, "policy", false)
+	auditStore, err := agentutil.InitAuditStore(cfg)
+	if err != nil {
+		slog.Error("failed to initialize audit store", "err", err)
+		os.Exit(1)
+	}
+	if auditStore != nil {
+		defer auditStore.Close()
+	}
+	traceStore := &audit.CurrentTraceStore{}
+
+	slog.Info("governance", "audit", cfg.AuditEnabled, "policy", false)
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {
@@ -66,7 +77,7 @@ func main() {
 		},
 	}
 
-	if err := agentutil.Serve(ctx, incidentAgent, cfg, cardOpts); err != nil {
+	if err := agentutil.ServeWithTracing(ctx, incidentAgent, cfg, traceStore, auditStore, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

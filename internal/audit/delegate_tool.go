@@ -87,12 +87,14 @@ func (r *AgentRegistry) List() []string {
 }
 
 // DelegateTool creates the delegate_to_agent tool with audit logging.
-func DelegateTool(auditor Auditor, registry *AgentRegistry, sessionID, userID string) (tool.Tool, error) {
-	return DelegateToolWithTrace(auditor, registry, sessionID, userID, "")
+// auditURL is the base URL of the auditd service used for post-delegation
+// verification queries; pass "" to disable verification.
+func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID string) (tool.Tool, error) {
+	return DelegateToolWithTrace(auditor, auditURL, registry, sessionID, userID, "")
 }
 
 // DelegateToolWithTrace creates the delegate_to_agent tool with audit logging and trace ID.
-func DelegateToolWithTrace(auditor Auditor, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, error) {
+func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, error) {
 	delegationCount := 0
 
 	// Generate trace ID if not provided (top-level orchestrator request)
@@ -218,6 +220,26 @@ func DelegateToolWithTrace(auditor Auditor, registry *AgentRegistry, sessionID, 
 			}, nil
 		}
 
+		// Post-delegation audit verification: query the audit trail to confirm
+		// which tools the sub-agent actually executed, independent of its text
+		// response. This closes the gap where an LLM can fabricate a success
+		// message without calling any tool.
+		verif := buildDelegationVerification(auditURL, traceID, start, actionClass, event.EventID, args.Agent)
+		if auditor != nil {
+			verifEvent := &Event{
+				EventID:                "evt_" + uuid.New().String()[:8],
+				Timestamp:              time.Now().UTC(),
+				EventType:              EventTypeDelegationVerification,
+				TraceID:                traceID,
+				Session:                event.Session,
+				DelegationVerification: verif,
+			}
+			if verifErr := auditor.Record(context.Background(), verifEvent); verifErr != nil {
+				slog.Warn("failed to record delegation verification event", "error", verifErr)
+			}
+		}
+		response += formatVerificationBlock(verif)
+
 		return DelegateResult{
 			Agent:    args.Agent,
 			Response: response,
@@ -331,6 +353,97 @@ func extractResponseText(result a2a.SendMessageResult) string {
 		return partsToText(v.Parts)
 	}
 	return ""
+}
+
+// buildDelegationVerification queries the audit trail for tool_execution events
+// belonging to this delegation (same traceID, after the delegation start time)
+// and returns a DelegationVerification recording what was actually executed.
+// It retries once after 200 ms to absorb async write propagation from RemoteStore.
+func buildDelegationVerification(auditURL, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
+	verif := &DelegationVerification{
+		DelegationEventID: delegationEventID,
+		Agent:             agent,
+	}
+	if auditURL == "" {
+		return verif
+	}
+
+	events := fetchToolExecutionEvents(auditURL, traceID, since)
+	for _, ev := range events {
+		if ev.Tool == nil || ev.Tool.Name == "" {
+			continue
+		}
+		name := ev.Tool.Name
+		verif.ToolsConfirmed = append(verif.ToolsConfirmed, name)
+		if ClassifyTool(name) == ActionDestructive {
+			verif.DestructiveConfirmed = append(verif.DestructiveConfirmed, name)
+		}
+	}
+
+	// Mismatch: delegation expected a destructive action but audit trail has none.
+	verif.Mismatch = actionClass == ActionDestructive && len(verif.DestructiveConfirmed) == 0
+	return verif
+}
+
+// fetchToolExecutionEvents queries auditd for tool_execution events in the given
+// trace after a start time. Retries once after 200 ms for async propagation.
+func fetchToolExecutionEvents(auditURL, traceID string, since time.Time) []Event {
+	reqURL := strings.TrimRight(auditURL, "/") +
+		"/v1/events?event_type=tool_execution&trace_id=" + traceID +
+		"&since=" + since.UTC().Format(time.RFC3339)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+		resp, err := http.Get(reqURL) //nolint:noctx
+		if err != nil {
+			slog.Debug("delegation verification: fetch failed", "attempt", attempt, "err", err)
+			continue
+		}
+		var events []Event
+		decodeErr := json.NewDecoder(resp.Body).Decode(&events)
+		resp.Body.Close()
+		if decodeErr != nil {
+			slog.Debug("delegation verification: decode failed", "attempt", attempt, "err", decodeErr)
+			continue
+		}
+		return events
+	}
+	return nil
+}
+
+// formatVerificationBlock builds the [AUDIT VERIFICATION] text appended to the
+// DelegateResult.Response. The orchestrator LLM reads this and must use it as
+// ground truth when formulating its reply.
+func formatVerificationBlock(v *DelegationVerification) string {
+	var sb strings.Builder
+	sb.WriteString("\n\n---[AUDIT VERIFICATION | delegation: ")
+	sb.WriteString(v.DelegationEventID)
+	sb.WriteString("]\n")
+
+	if len(v.ToolsConfirmed) == 0 {
+		sb.WriteString("Tools confirmed by audit trail: none\n")
+	} else {
+		parts := make([]string, len(v.ToolsConfirmed))
+		for i, t := range v.ToolsConfirmed {
+			parts[i] = t + " (" + string(ClassifyTool(t)) + ")"
+		}
+		sb.WriteString("Tools confirmed by audit trail: " + strings.Join(parts, ", ") + "\n")
+	}
+
+	if len(v.DestructiveConfirmed) > 0 {
+		sb.WriteString("Destructive tools confirmed: " + strings.Join(v.DestructiveConfirmed, ", ") + "\n")
+	} else {
+		sb.WriteString("Destructive tools confirmed: none\n")
+	}
+
+	if v.Mismatch {
+		sb.WriteString("⚠️  MISMATCH: this delegation was classified as destructive but NO destructive tool execution appears in the audit trail.\n")
+		sb.WriteString("You MUST tell the user the action could not be verified and was likely not executed. Do NOT claim success.\n")
+	}
+	sb.WriteString("---")
+	return sb.String()
 }
 
 func partsToText(parts a2a.ContentParts) string {

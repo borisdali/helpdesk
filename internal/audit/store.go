@@ -293,6 +293,14 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		default:
 			outcomeStatus = event.PolicyDecision.Effect
 		}
+	} else if event.DelegationVerification != nil {
+		// Surface mismatch as "unverified_claim" so QueryJourneys can elevate the
+		// journey outcome. Clean verifications are recorded as "verified".
+		if event.DelegationVerification.Mismatch {
+			outcomeStatus = "unverified_claim"
+		} else {
+			outcomeStatus = "verified"
+		}
 	}
 
 	var toolName, toolAgent string
@@ -642,10 +650,10 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.endedAt = ts
 		}
 
-		// verification_outcome events are internal plumbing: they contribute to
-		// the outcome priority but are NOT counted in event_count and NOT added
-		// to tools_used.
-		if eventType == string(EventTypeVerificationOutcome) {
+		// verification_outcome and delegation_verification events are internal plumbing:
+		// they contribute to the outcome priority but are NOT counted in event_count
+		// and NOT added to tools_used.
+		if eventType == string(EventTypeVerificationOutcome) || eventType == string(EventTypeDelegationVerification) {
 			if outcomeStatus.Valid && outcomeStatus.String != "" {
 				if outcomePriority(outcomeStatus.String) > outcomePriority(d.outcome) {
 					d.outcome = outcomeStatus.String
@@ -773,10 +781,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 // outcomePriority returns the severity rank for a journey outcome string.
 // Higher priority outcomes win when aggregating events within a trace.
 //
-//	error(8) > denied(7) > escalation_required(6) > verified_failed(5)
-//	> verified_warning(4) > approved(3) > verified_ok(2) > success(1) > unknown(0)
+//	unverified_claim(9) > error(8) > denied(7) > escalation_required(6) > verified_failed(5)
+//	> verified_warning(4) > approved(3) > verified_ok(2) > success(1) > verified(0.5) > unknown(0)
 func outcomePriority(o string) int {
 	switch o {
+	case "unverified_claim":    return 9
 	case "error":               return 8
 	case "denied":              return 7
 	case "escalation_required": return 6
@@ -785,6 +794,7 @@ func outcomePriority(o string) int {
 	case "approved":            return 3
 	case "verified_ok":         return 2
 	case "success":             return 1
+	case "verified":            return 0 // clean verification doesn't override a real outcome
 	default:                    return 0
 	}
 }
