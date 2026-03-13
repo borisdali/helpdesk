@@ -86,6 +86,7 @@ type Decision struct {
 type Session struct {
 	ID              string    `json:"id"`
 	UserID          string    `json:"user_id,omitempty"`
+	AgentName       string    `json:"agent_name,omitempty"` // name of the agent that owns this session (e.g. "helpdesk_orchestrator")
 	StartedAt       time.Time `json:"started_at"`
 	DelegationCount int       `json:"delegation_count"`
 }

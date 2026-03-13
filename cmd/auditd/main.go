@@ -360,6 +360,9 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 	if q.Get("has_retries") == "true" {
 		opts.HasRetries = true
 	}
+	if v := q.Get("trace_id"); v != "" {
+		opts.TraceID = v
+	}
 
 	journeys, err := s.store.QueryJourneys(r.Context(), opts)
 	if err != nil {

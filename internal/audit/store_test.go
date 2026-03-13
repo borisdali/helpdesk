@@ -1786,3 +1786,81 @@ func TestQueryJourneys_VerifiedOkOutcome(t *testing.T) {
 		t.Errorf("ToolsUsed = %v, want [delete_pod]", journeys[0].ToolsUsed)
 	}
 }
+
+// TestQueryJourneys_SessionAgentUsedAsJourneyAgent verifies that when a
+// delegation_decision event carries a Session.AgentName (e.g. "helpdesk_orchestrator"),
+// the journey's Agent field reflects the orchestrator, not the sub-agent being
+// delegated to.
+func TestQueryJourneys_SessionAgentUsedAsJourneyAgent(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_orch1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_orch",
+			Session:   Session{ID: "sess_orch", UserID: "alice", AgentName: "helpdesk_orchestrator"},
+			Input:     Input{UserQuery: "Terminate the idle session for PID 1234"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+		{
+			EventID:   "tool_orch1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_orch",
+			Session:   Session{ID: "dbagent_orch"},
+			Tool:      &ToolExecution{Name: "terminate_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	j := journeys[0]
+	if j.Agent != "helpdesk_orchestrator" {
+		t.Errorf("Agent = %q, want helpdesk_orchestrator (session_agent takes precedence over decision_agent)", j.Agent)
+	}
+	if j.UserQuery != "Terminate the idle session for PID 1234" {
+		t.Errorf("UserQuery = %q, want user intent string", j.UserQuery)
+	}
+}
+
+// TestQueryJourneys_NoSessionAgent_FallbackToDecisionAgent verifies that when
+// Session.AgentName is absent (e.g. a direct gateway call), the journey's Agent
+// field falls back to the decision_agent (sub-agent name).
+func TestQueryJourneys_NoSessionAgent_FallbackToDecisionAgent(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_direct1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_direct",
+			Session:   Session{ID: "sess_direct", UserID: "bob"}, // no AgentName
+			Input:     Input{UserQuery: "Check active connections"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Agent != "postgres_database_agent" {
+		t.Errorf("Agent = %q, want postgres_database_agent (fallback when no session_agent)", journeys[0].Agent)
+	}
+}

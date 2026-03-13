@@ -89,15 +89,17 @@ func (r *AgentRegistry) List() []string {
 // DelegateTool creates the delegate_to_agent tool with audit logging.
 // auditURL is the base URL of the auditd service used for post-delegation
 // verification queries; pass "" to disable verification.
+// callerName is the name of the orchestrator agent (e.g. "helpdesk_orchestrator");
+// it is recorded in audit events and surfaced as the journey agent name.
 // It also creates and returns a DelegationGuard shared with NoDelegationCallback.
-func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID string) (tool.Tool, *DelegationGuard, error) {
-	return DelegateToolWithTrace(auditor, auditURL, registry, sessionID, userID, "")
+func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, callerName string) (tool.Tool, *DelegationGuard, error) {
+	return DelegateToolWithTrace(auditor, auditURL, registry, sessionID, userID, "", callerName)
 }
 
 // DelegateToolWithTrace creates the delegate_to_agent tool with audit logging and trace ID.
 // The returned DelegationGuard must be passed to NoDelegationCallback so the callback
 // can detect invocations where delegate_to_agent was not called.
-func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, *DelegationGuard, error) {
+func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID, callerName string) (tool.Tool, *DelegationGuard, error) {
 	guard := NewDelegationGuard()
 	delegationCount := 0
 
@@ -133,11 +135,12 @@ func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegi
 			Session: Session{
 				ID:              sessionID,
 				UserID:          userID,
+				AgentName:       callerName,
 				StartedAt:       start, // Will be overwritten if we track session start
 				DelegationCount: delegationCount,
 			},
 			Input: Input{
-				UserQuery: args.Message,
+				UserQuery: args.UserIntent,
 			},
 			Decision: &Decision{
 				Agent:           args.Agent,

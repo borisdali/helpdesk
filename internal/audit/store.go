@@ -185,6 +185,7 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		prev_hash TEXT,
 		event_hash TEXT,
 		session_id TEXT NOT NULL,
+		session_agent TEXT,
 		user_id TEXT,
 		user_query TEXT,
 		tool_name TEXT,
@@ -224,6 +225,7 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "tool_json TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_status TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_json TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "session_agent TEXT",
 	}
 	for _, m := range migrations {
 		db.Exec(m) //nolint:errcheck
@@ -327,12 +329,12 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		INSERT INTO audit_events (
 			event_id, timestamp, event_type, trace_id, parent_id, action_class,
 			prev_hash, event_hash,
-			session_id, user_id, user_query,
+			session_id, session_agent, user_id, user_query,
 			tool_name, tool_json,
 			approval_status, approval_json,
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		event.EventID,
 		event.Timestamp.Format(time.RFC3339Nano),
@@ -343,6 +345,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		event.PrevHash,
 		event.EventHash,
 		event.Session.ID,
+		event.Session.AgentName,
 		event.Session.UserID,
 		event.Input.UserQuery,
 		toolName,
@@ -502,6 +505,7 @@ type JourneyOptions struct {
 	Category   string        // filter by decision_category (e.g. "database", "kubernetes")
 	Outcome    string        // filter by computed journey outcome (post-aggregation)
 	HasRetries bool          // only journeys with retry_count > 0 (post-aggregation)
+	TraceID    string        // filter by exact trace ID; returns at most one journey
 }
 
 // JourneySummary summarises a single end-to-end user request (one trace_id).
@@ -552,6 +556,10 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		    OR (event_type = 'gateway_request' AND (tool_name IS NULL OR tool_name = '')))
 		  AND trace_id != ''`
 	var args1 []any
+	if opts.TraceID != "" {
+		q1 += " AND trace_id = ?"
+		args1 = append(args1, opts.TraceID)
+	}
 	if opts.UserID != "" {
 		q1 += " AND user_id = ?"
 		args1 = append(args1, opts.UserID)
@@ -592,7 +600,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	placeholders := strings.Repeat("?,", len(traceIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	q2 := fmt.Sprintf(
-		`SELECT trace_id, event_type, user_id, user_query, decision_agent,
+		`SELECT trace_id, event_type, user_id, user_query, session_agent, decision_agent,
 		        decision_category, tool_name, outcome_status, approval_status, timestamp
 		 FROM audit_events
 		 WHERE trace_id IN (%s)
@@ -613,7 +621,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		endedAt            string
 		userID             string
 		userQuery          string
-		agent              string
+		agent              string // name of the owning agent (orchestrator name when session_agent is set, else sub-agent)
 		category           string
 		tools              []string
 		outcome            string
@@ -630,12 +638,12 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 
 	for rows2.Next() {
 		var (
-			traceID, eventType                                  string
-			userID, userQuery, agent, decisionCategory          sql.NullString
-			toolName, outcomeStatus, approvalStatus             sql.NullString
-			ts                                                  string
+			traceID, eventType                                           string
+			userID, userQuery, sessionAgent, agent, decisionCategory    sql.NullString
+			toolName, outcomeStatus, approvalStatus                     sql.NullString
+			ts                                                           string
 		)
-		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &agent,
+		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &sessionAgent, &agent,
 			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts); err != nil {
 			return nil, fmt.Errorf("scan journey event: %w", err)
 		}
@@ -673,7 +681,12 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			if userQuery.Valid && userQuery.String != "" {
 				d.userQuery = userQuery.String
 			}
-			if agent.Valid && agent.String != "" {
+			// Prefer the session's owning agent name (e.g. "helpdesk_orchestrator")
+			// over the sub-agent being delegated to. This makes orchestrator-mediated
+			// journeys show the orchestrator as the top-level agent.
+			if sessionAgent.Valid && sessionAgent.String != "" {
+				d.agent = sessionAgent.String
+			} else if agent.Valid && agent.String != "" {
 				d.agent = agent.String
 			}
 			if d.category == "" && decisionCategory.Valid && decisionCategory.String != "" {
