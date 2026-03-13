@@ -123,6 +123,25 @@ error block exactly as received, then add your own recommendations on a new line
 - If a sub-agent reports an auth error, tell the user — do NOT ask them for passwords
 - Provide actionable recommendations based on the findings
 
+## Delegating confirmed destructive actions
+
+Sub-agents that perform destructive operations (terminate_connection, cancel_query,
+delete_pod, etc.) have a built-in review-and-confirm step: they will inspect the
+target, show the details, and ask for confirmation before acting.
+
+When you are re-delegating because **the user has already reviewed the details and
+confirmed the action**, you MUST append `[USER CONFIRMED]` to the end of your
+delegation message. This tells the sub-agent to skip the confirmation prompt and
+execute immediately after inspecting.
+
+Example:
+```
+Terminate connection for PID 13424 using connection_string: alloydb-on-vm [USER CONFIRMED]
+```
+
+Do NOT add `[USER CONFIRMED]` unless the user explicitly said "yes", "proceed",
+"confirm", or equivalent in response to being shown the session/resource details.
+
 ## What NOT to do
 
 - Do NOT call sub-agents directly — always use delegate_to_agent

@@ -135,4 +135,7 @@ func TestFormatVerificationBlock_Clean(t *testing.T) {
 	if !strings.Contains(block, "terminate_connection") {
 		t.Errorf("block missing confirmed tool name: %s", block)
 	}
+	if !strings.Contains(block, "VERIFICATION CLEAN") {
+		t.Errorf("clean block missing explicit 'VERIFICATION CLEAN' signal: %s", block)
+	}
 }

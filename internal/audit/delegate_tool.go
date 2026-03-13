@@ -89,12 +89,16 @@ func (r *AgentRegistry) List() []string {
 // DelegateTool creates the delegate_to_agent tool with audit logging.
 // auditURL is the base URL of the auditd service used for post-delegation
 // verification queries; pass "" to disable verification.
-func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID string) (tool.Tool, error) {
+// It also creates and returns a DelegationGuard shared with NoDelegationCallback.
+func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID string) (tool.Tool, *DelegationGuard, error) {
 	return DelegateToolWithTrace(auditor, auditURL, registry, sessionID, userID, "")
 }
 
 // DelegateToolWithTrace creates the delegate_to_agent tool with audit logging and trace ID.
-func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, error) {
+// The returned DelegationGuard must be passed to NoDelegationCallback so the callback
+// can detect invocations where delegate_to_agent was not called.
+func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID string) (tool.Tool, *DelegationGuard, error) {
+	guard := NewDelegationGuard()
 	delegationCount := 0
 
 	// Generate trace ID if not provided (top-level orchestrator request)
@@ -103,6 +107,9 @@ func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegi
 	}
 
 	delegateFunc := func(ctx tool.Context, args DelegateArgs) (DelegateResult, error) {
+		// Mark this invocation as having called delegate_to_agent so
+		// NoDelegationCallback skips correction injection.
+		guard.MarkCalled(ctx.InvocationID())
 		start := time.Now()
 		delegationCount++
 
@@ -248,13 +255,17 @@ func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegi
 		}, nil
 	}
 
-	return functiontool.New(functiontool.Config{
+	t, err := functiontool.New(functiontool.Config{
 		Name: "delegate_to_agent",
 		Description: `Delegate a task to a specialist agent. You MUST use this tool for ALL delegations.
 Before calling, provide your reasoning chain explaining why this agent was chosen.
 Available agents: postgres_database_agent (database issues), k8s_agent (Kubernetes issues),
 incident_agent (incident bundles), research_agent (web search for current info).`,
 	}, delegateFunc)
+	if err != nil {
+		return nil, nil, err
+	}
+	return t, guard, nil
 }
 
 // callAgentWithTrace sends a message to an A2A agent with trace_id in metadata.
@@ -441,6 +452,8 @@ func formatVerificationBlock(v *DelegationVerification) string {
 	if v.Mismatch {
 		sb.WriteString("⚠️  MISMATCH: this delegation was classified as destructive but NO destructive tool execution appears in the audit trail.\n")
 		sb.WriteString("You MUST tell the user the action could not be verified and was likely not executed. Do NOT claim success.\n")
+	} else {
+		sb.WriteString("✓ VERIFICATION CLEAN: no mismatch. Tool execution matches delegation. Report the agent's result as-is (success or error).\n")
 	}
 	sb.WriteString("---")
 	return sb.String()

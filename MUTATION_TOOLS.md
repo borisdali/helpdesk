@@ -312,6 +312,16 @@ Step 2: cancel_query(pid)  or  terminate_connection(pid)
 This is guaranteed by three independent enforcement mechanisms. No single mechanism can be
 bypassed without triggering a failure in at least one of the other two.
 
+#### Orchestrator-mediated flow
+
+When used through the orchestrator, the two-step flow spans two separate user
+turns: the orchestrator first delegates to get session info, the user confirms,
+then the orchestrator re-delegates with `[USER CONFIRMED]` appended to the
+message. The db agent recognises this token, runs `get_session_info` (still
+required for policy checks and the audit trail), then immediately executes the
+mutation without prompting again. See [§3 Mechanism A](#mechanism-a-llm-prompt-instruction-promptsdatabasetxt)
+for the full protocol.
+
 ### Kubernetes agent
 
 The same intent applies but the implementation is shallower:
@@ -357,6 +367,14 @@ Before calling `terminate_connection` or `cancel_query`, you MUST:
 
 Do NOT call `terminate_connection` or `cancel_query` without first completing
 these three steps.
+
+Exception — pre-confirmed delegations: If the incoming request contains the
+phrase [USER CONFIRMED], the user has already reviewed the session details and
+confirmed the action at the orchestrator level. In that case:
+- Still call `get_session_info` first (required for the audit trail and policy
+  checks).
+- Then immediately call `terminate_connection` or `cancel_query` — do NOT ask
+  for confirmation again.
 ```
 
 **What this enforces**: LLM behaviour for interactive (non-approval-workflow)
@@ -364,6 +382,26 @@ sessions. A well-instructed model will not skip Step 1.
 
 **Limitation**: a misconfigured or adversarially prompted model could skip it.
 Mechanisms B and C close this gap.
+
+#### Confirmed-delegation flow
+
+When the db agent is called via the orchestrator's `delegate_to_agent` tool,
+each delegation is a **single A2A round-trip**. The db agent cannot keep the
+conversation open and wait for the user to type "yes". Without a signal, the
+db agent completes Step 1, returns session info, and the delegation ends —
+leaving the orchestrator in a loop that repeats Step 1 indefinitely.
+
+The orchestrator system prompt (`prompts/orchestrator_audit.txt`) instructs
+the orchestrator to append `[USER CONFIRMED]` to the delegation message once
+the user has reviewed the details and explicitly confirmed:
+
+```
+Terminate connection for PID 13424 using connection_string: alloydb-on-vm [USER CONFIRMED]
+```
+
+On receiving `[USER CONFIRMED]`, the db agent runs `get_session_info` (Step 1,
+required for policy checks and the audit trail) and then immediately calls the
+mutation tool — no intermediate confirmation prompt.
 
 ---
 
@@ -606,6 +644,14 @@ mandatory section that the LLM must follow:
 >
 > **On MISMATCH:** tell the user the requested action could not be verified in
 > the audit trail and was likely NOT executed. Do NOT say the action succeeded.
+>
+> **On VERIFICATION CLEAN:** no mismatch detected — report the agent's result
+> as-is (success or error).
+
+The orchestrator is also instructed to append `[USER CONFIRMED]` to delegation
+messages when re-delegating a destructive action the user has already confirmed.
+This prevents the sub-agent from re-asking for confirmation in a loop (see
+[§3 Mechanism A](#mechanism-a-llm-prompt-instruction-promptsdatabasetxt)).
 
 ### 5.4 Properties
 

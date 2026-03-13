@@ -45,6 +45,14 @@ const (
 	// Like verification_outcome, these events do NOT contribute to tools_used
 	// or event_count in journey aggregation.
 	EventTypeDelegationVerification EventType = "delegation_verification"
+	// EventTypeNoDelegationTurn is emitted by NoDelegationCallback whenever the
+	// orchestrator LLM produced a text-only response in an invocation where
+	// delegate_to_agent was never called. This is the real-time signal for
+	// LLM fabrication: the model answered a request without actually delegating.
+	// Attempt records which correction injection attempt this is (1-based);
+	// Final=true means max retries were exhausted and the suppressed response
+	// was returned to the user.
+	EventTypeNoDelegationTurn EventType = "no_delegation_turn"
 )
 
 // RequestCategory classifies the type of user request.
