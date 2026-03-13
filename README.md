@@ -61,16 +61,16 @@ See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instruct
 See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on how to deploy aiHelpDesk on K8s.
 
 ## Architecture
-See aiHelpDesk's [ARCHITECTURE.md](ARCHITECTURE.md) for system design, configuration, and extension guide.
+See aiHelpDesk's [ARCHITECTURE.md](docs/ARCHITECTURE.md) for system design, configuration, and extension guide.
 
 ## AI Governance
 aiHelpDesk is proud to feature a sophisticated AI Governanance system,
 which rests on eight separate subsystems, including full
-[auditing](AUDIT.md). Compliance Reporting — the periodic governance
+[auditing](docs/AUDIT.md). Compliance Reporting — the periodic governance
 and security posture assessment — is documented separately in
-[COMPLIANCE.md](COMPLIANCE.md) and so are the
-[aiHelpDesk Journeys](JOURNEYS.md), etc.
-Please see [here](AIGOVERNANCE.md) for details.
+[COMPLIANCE.md](docs/COMPLIANCE.md) and so are the
+[aiHelpDesk Journeys](docs/JOURNEYS.md), etc.
+Please see [here](docs/AIGOVERNANCE.md) for details.
 
 ## Testing
 aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework, see [here](testing/FAULT_INJECTION_TESTING.md).
@@ -96,7 +96,7 @@ curl -X POST http://localhost:8080/api/v1/db/get_server_info \
   -d '{"connection_string": "host=db.example.com port=5432 dbname=mydb user=admin"}'
 ```
 
-The [Gateway API](API.md#gateway-rest-api-port-8080) documents the full REST API reference: all 17 endpoints with request/response shapes, query parameters, and `curl` examples. It is recommended for CI/CD pipelines, automation, and containerized environments. See deployment READMEs for details: for [Docker](deploy/docker-compose/README.md), for running [directly on a host](deploy/host/README.md) or for running [on K8s](deploy/helm/README.md).
+The [Gateway API](docs/API.md#gateway-rest-api-port-8080) documents the full REST API reference: all 17 endpoints with request/response shapes, query parameters, and `curl` examples. It is recommended for CI/CD pipelines, automation, and containerized environments. See deployment READMEs for details: for [Docker](deploy/docker-compose/README.md), for running [directly on a host](deploy/host/README.md) or for running [on K8s](deploy/helm/README.md).
 
 ## Helper Scripts
 
@@ -118,10 +118,10 @@ See [a sample](cmd/secbot/README.md) of a Security Responder bot that automatica
 
 See [a sample](cmd/govbot/README.md) of a Compliance Reporter bot that queries the aiHelpDesk Gateway's governance API endpoints and produces a structured compliance snapshot. It is designed to run on-demand or on a schedule (e.g. daily cron / Kubernetes CronJob) and optionally post a summary to a Slack webhook. In contrast to SEC bot (reactive, threat-driven) and Auditor (streaming, rule-based alerts), GOV bot is designed to be periodic and analytical — the compliance officer's tool rather than the on-call engineer's troubleshooter.
 
-See [a Real-Time Auditor](AIGOVERNANCE.md#77-auditor-cli-cmdauditor) that can be used as an inspiration for an upstream long-running agent. In constrast to the SRE bot and the GOV bot that can be considered as one-shot automation agents, the SEC bot and the Auditor can be viewed as the core daemons. Indeed, both are long-running and both connect to the audit Unix socket and process events in real time. The distinction is purely in what they do: the Auditor fires webhook/email/syslog alerts, while SEC bot creates an incident bundle (via aiHelpDesk Gateway).
+See [a Real-Time Auditor](docs/AIGOVERNANCE.md#77-auditor-cli-cmdauditor) that can be used as an inspiration for an upstream long-running agent. In constrast to the SRE bot and the GOV bot that can be considered as one-shot automation agents, the SEC bot and the Auditor can be viewed as the core daemons. Indeed, both are long-running and both connect to the audit Unix socket and process events in real time. The distinction is purely in what they do: the Auditor fires webhook/email/syslog alerts, while SEC bot creates an incident bundle (via aiHelpDesk Gateway).
 
 ## Sample interactive dialog with a human operator
-aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").
+aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](docs/INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").
 
 ## LLM
 aiHelpDesk relies on Google ADK (Agent Development Kit) for Go, which was built around Gemini models. We've extended aiHelpDesk to work with both Anthropic and Gemini models.

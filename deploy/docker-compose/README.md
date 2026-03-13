@@ -175,7 +175,7 @@ See the [sample log](INSTALL_from_source_sample_SRE_bot_log.md)  of running the 
 
 ## 3. AI Governance Components
 
-aiHelpDesk includes an [AI Governance framework](../../AIGOVERNANCE.md) with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging. The governance components are:
+aiHelpDesk includes an [AI Governance framework](../../docs/AIGOVERNANCE.md) with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging. The governance components are:
 
 | Component | Description | Port |
 |-----------|-------------|------|
@@ -383,7 +383,7 @@ HELPDESK_EMAIL_TO=ops@example.com
 
 ## 4. Using the Gateway API
 
-In addition to the interactive orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+In addition to the interactive orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
 
 ```bash
 # Query the system

@@ -832,7 +832,7 @@ Journey store tests for the `unverified_claim` outcome (`internal/audit/store_te
 | `TestQueryJourneys_CleanVerification_DoesNotOverrideSuccess` | `Mismatch=false` → outcome `"verified"` does not override `"success"` |
 
 For integration and manual fault-injection procedures see
-[Mutation Safeguard Verification](testing/FAULT_INJECTION_TESTING.md#mutation-safeguard-verification).
+[Mutation Safeguard Verification](../testing/FAULT_INJECTION_TESTING.md#mutation-safeguard-verification).
 
 #### Integration tests (`testing/integration/governance/`)
 

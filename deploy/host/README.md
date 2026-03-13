@@ -135,7 +135,7 @@ tail -f /tmp/helpdesk-gateway.log
 
 ## 6. Headless / API Mode
 
-To use the REST gateway API without the interactive REPL. See [API.md](../../API.md) for the full endpoint reference.
+To use the REST gateway API without the interactive REPL. See [API.md](../../docs/API.md) for the full endpoint reference.
 
 ```bash
 ./startall.sh --no-repl &
@@ -150,7 +150,7 @@ curl -s -X POST http://localhost:8080/api/v1/query \
 
 ## 7. AI Governance
 
-See [here](../../AIGOVERNANCE.md) for details on aiHelpDesk AI Governance module and its sub-modules.
+See [here](../../docs/AIGOVERNANCE.md) for details on aiHelpDesk AI Governance module and its sub-modules.
 
 ### 7.1 Enabling Governance
 
