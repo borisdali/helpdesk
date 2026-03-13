@@ -1864,3 +1864,111 @@ func TestQueryJourneys_NoSessionAgent_FallbackToDecisionAgent(t *testing.T) {
 		t.Errorf("Agent = %q, want postgres_database_agent (fallback when no session_agent)", journeys[0].Agent)
 	}
 }
+
+// TestQueryJourneys_DelegationsPartitioned verifies that tools are partitioned
+// per delegation: each delegation_decision event starts a new DelegationSummary,
+// and tool_execution events are assigned to the delegation that preceded them.
+func TestQueryJourneys_DelegationsPartitioned(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		// Turn 1: show active connections → 2 tool calls
+		{
+			EventID:   "del_p1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "sess_part", UserID: "alice", AgentName: "helpdesk_orchestrator"},
+			Input:     Input{UserQuery: "Show active connections"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+		{
+			EventID:   "tool_p1a",
+			Timestamp: base.Add(1 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "get_active_connections", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "tool_p1b",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "get_active_connections", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// Turn 2: terminate connection → 2 tool calls
+		{
+			EventID:   "del_p2",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "sess_part", UserID: "alice", AgentName: "helpdesk_orchestrator"},
+			Input:     Input{UserQuery: "Terminate connection for PID 16779"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+		{
+			EventID:   "tool_p2a",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "get_session_info", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "tool_p2b",
+			Timestamp: base.Add(5 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "terminate_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	j := journeys[0]
+
+	if len(j.Delegations) != 2 {
+		t.Fatalf("Delegations = %d entries, want 2", len(j.Delegations))
+	}
+
+	d1 := j.Delegations[0]
+	if d1.Intent != "Show active connections" {
+		t.Errorf("Delegations[0].Intent = %q, want \"Show active connections\"", d1.Intent)
+	}
+	if len(d1.Tools) != 2 || d1.Tools[0] != "get_active_connections" || d1.Tools[1] != "get_active_connections" {
+		t.Errorf("Delegations[0].Tools = %v, want [get_active_connections get_active_connections]", d1.Tools)
+	}
+
+	d2 := j.Delegations[1]
+	if d2.Intent != "Terminate connection for PID 16779" {
+		t.Errorf("Delegations[1].Intent = %q, want \"Terminate connection for PID 16779\"", d2.Intent)
+	}
+	if len(d2.Tools) != 2 || d2.Tools[0] != "get_session_info" || d2.Tools[1] != "terminate_connection" {
+		t.Errorf("Delegations[1].Tools = %v, want [get_session_info terminate_connection]", d2.Tools)
+	}
+
+	// ToolsUsed remains the flat chronological list.
+	wantFlat := []string{"get_active_connections", "get_active_connections", "get_session_info", "terminate_connection"}
+	if len(j.ToolsUsed) != len(wantFlat) {
+		t.Fatalf("ToolsUsed = %v, want %v", j.ToolsUsed, wantFlat)
+	}
+	for i, w := range wantFlat {
+		if j.ToolsUsed[i] != w {
+			t.Errorf("ToolsUsed[%d] = %q, want %q", i, j.ToolsUsed[i], w)
+		}
+	}
+}

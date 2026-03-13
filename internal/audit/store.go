@@ -508,19 +508,27 @@ type JourneyOptions struct {
 	TraceID    string        // filter by exact trace ID; returns at most one journey
 }
 
+// DelegationSummary captures one orchestrator-to-sub-agent delegation turn:
+// the intent that drove it and the tools the sub-agent actually called.
+type DelegationSummary struct {
+	Intent string   `json:"intent"`
+	Tools  []string `json:"tools"`
+}
+
 // JourneySummary summarises a single end-to-end user request (one trace_id).
 type JourneySummary struct {
-	TraceID    string   `json:"trace_id"`
-	StartedAt  string   `json:"started_at"`
-	EndedAt    string   `json:"ended_at"`
-	DurationMs int64    `json:"duration_ms"`
-	UserID     string   `json:"user_id,omitempty"`
-	UserQuery  string   `json:"user_query,omitempty"`
-	Agent      string   `json:"agent,omitempty"`
-	Category   string   `json:"category,omitempty"` // decision_category from delegation_decision event
-	ToolsUsed  []string `json:"tools_used"`
-	Outcome    string   `json:"outcome,omitempty"`
-	EventCount int      `json:"event_count"`
+	TraceID     string              `json:"trace_id"`
+	StartedAt   string              `json:"started_at"`
+	EndedAt     string              `json:"ended_at"`
+	DurationMs  int64               `json:"duration_ms"`
+	UserID      string              `json:"user_id,omitempty"`
+	UserQuery   string              `json:"user_query,omitempty"`
+	Agent       string              `json:"agent,omitempty"`
+	Category    string              `json:"category,omitempty"` // decision_category from delegation_decision event
+	Delegations []DelegationSummary `json:"delegations,omitempty"`
+	ToolsUsed   []string            `json:"tools_used"`
+	Outcome     string              `json:"outcome,omitempty"`
+	EventCount  int                 `json:"event_count"`
 	// RetryCount is the number of post-mutation verification re-check attempts
 	// recorded for this journey (tool_retry events). Non-zero means a mutation
 	// tool had to wait for state to propagate but eventually confirmed success.
@@ -624,6 +632,8 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		agent              string // name of the owning agent (orchestrator name when session_agent is set, else sub-agent)
 		category           string
 		tools              []string
+		delegations        []DelegationSummary
+		currentDelegIdx    int // index into delegations for the in-progress delegation; -1 = none
 		outcome            string
 		count              int
 		retryCount         int  // number of tool_retry events in this trace
@@ -633,7 +643,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	// Preserve the order returned by step 1.
 	byTrace := make(map[string]*traceData, len(traceIDs))
 	for _, id := range traceIDs {
-		byTrace[id] = &traceData{}
+		byTrace[id] = &traceData{currentDelegIdx: -1}
 	}
 
 	for rows2.Next() {
@@ -692,6 +702,14 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			if d.category == "" && decisionCategory.Valid && decisionCategory.String != "" {
 				d.category = decisionCategory.String
 			}
+			// Start a new delegation entry. Tools recorded after this event and
+			// before the next delegation_decision will be attached to this entry.
+			intent := ""
+			if userQuery.Valid {
+				intent = userQuery.String
+			}
+			d.delegations = append(d.delegations, DelegationSummary{Intent: intent, Tools: []string{}})
+			d.currentDelegIdx = len(d.delegations) - 1
 		} else if eventType == string(EventTypeGatewayRequest) {
 			// gateway_request is the anchor in gateway NL-query mode.
 			// Only use it as a fallback — don't overwrite delegation_decision data.
@@ -709,6 +727,9 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		// Append every tool call in timestamp order, including repeats.
 		if toolName.Valid && toolName.String != "" {
 			d.tools = append(d.tools, toolName.String)
+			if d.currentDelegIdx >= 0 {
+				d.delegations[d.currentDelegIdx].Tools = append(d.delegations[d.currentDelegIdx].Tools, toolName.String)
+			}
 		}
 
 		// tool_retry events: count retries but never let their outcome_status
@@ -756,18 +777,19 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.outcome = "approved"
 		}
 		summaries = append(summaries, JourneySummary{
-			TraceID:    id,
-			StartedAt:  d.startedAt,
-			EndedAt:    d.endedAt,
-			DurationMs: durationMs,
-			UserID:     d.userID,
-			UserQuery:  d.userQuery,
-			Agent:      d.agent,
-			Category:   d.category,
-			ToolsUsed:  tools,
-			Outcome:    d.outcome,
-			EventCount: d.count,
-			RetryCount: d.retryCount,
+			TraceID:     id,
+			StartedAt:   d.startedAt,
+			EndedAt:     d.endedAt,
+			DurationMs:  durationMs,
+			UserID:      d.userID,
+			UserQuery:   d.userQuery,
+			Agent:       d.agent,
+			Category:    d.category,
+			Delegations: d.delegations,
+			ToolsUsed:   tools,
+			Outcome:     d.outcome,
+			EventCount:  d.count,
+			RetryCount:  d.retryCount,
 		})
 	}
 
