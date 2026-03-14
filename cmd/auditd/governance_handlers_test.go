@@ -1026,3 +1026,211 @@ func TestHandlePolicyCheck_DirectCallAutoGeneratesChkTraceID(t *testing.T) {
 		t.Errorf("stored trace_id = %q, want %q", events[0].TraceID, resp.TraceID)
 	}
 }
+
+// ── Identity & Purpose field propagation ─────────────────────────────────────
+
+const identityPolicyYAML = `
+version: "1"
+policies:
+  - name: pii-protection
+    priority: 110
+    resources:
+      - type: database
+        match:
+          sensitivity: [pii]
+    rules:
+      - action: read
+        effect: allow
+        conditions:
+          allowed_purposes: [diagnostic, compliance]
+        message: "PII read requires a declared purpose."
+      - action: write
+        effect: deny
+        message: "Writes to PII databases are prohibited."
+
+  - name: default-allow-read
+    resources:
+      - type: database
+    rules:
+      - action: read
+        effect: allow
+`
+
+func TestHandlePolicyCheck_IdentityFieldsInAuditEvent(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   store,
+	}
+
+	body := strings.NewReader(`{
+		"resource_type":"database",
+		"resource_name":"dev-db",
+		"action":"read",
+		"trace_id":"trace-ident",
+		"principal":{"user_id":"alice@example.com","roles":["dba","sre"],"auth_method":"jwt"},
+		"purpose":"diagnostic",
+		"purpose_note":"investigating slow query"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no audit event persisted")
+	}
+	pd := events[0].PolicyDecision
+	if pd == nil {
+		t.Fatal("missing policy_decision in audit event")
+	}
+	if pd.UserID != "alice@example.com" {
+		t.Errorf("UserID = %q, want alice@example.com", pd.UserID)
+	}
+	if len(pd.Roles) != 2 || pd.Roles[0] != "dba" {
+		t.Errorf("Roles = %v, want [dba sre]", pd.Roles)
+	}
+	if pd.AuthMethod != "jwt" {
+		t.Errorf("AuthMethod = %q, want jwt", pd.AuthMethod)
+	}
+	if pd.Purpose != "diagnostic" {
+		t.Errorf("Purpose = %q, want diagnostic", pd.Purpose)
+	}
+	if pd.PurposeNote != "investigating slow query" {
+		t.Errorf("PurposeNote = %q, want 'investigating slow query'", pd.PurposeNote)
+	}
+}
+
+func TestHandlePolicyCheck_ServicePrincipal(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, minimalPolicyYAML),
+		auditStore:   store,
+	}
+
+	body := strings.NewReader(`{
+		"resource_type":"database",
+		"resource_name":"dev-db",
+		"action":"read",
+		"trace_id":"trace-svc",
+		"principal":{"service":"srebot","auth_method":"api_key"}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no audit event persisted")
+	}
+	pd := events[0].PolicyDecision
+	if pd.Service != "srebot" {
+		t.Errorf("Service = %q, want srebot", pd.Service)
+	}
+	if pd.AuthMethod != "api_key" {
+		t.Errorf("AuthMethod = %q, want api_key", pd.AuthMethod)
+	}
+	if pd.UserID != "" {
+		t.Errorf("UserID = %q, want empty for service principal", pd.UserID)
+	}
+}
+
+func TestHandlePolicyCheck_SensitivityCallerSupplied(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, identityPolicyYAML),
+		auditStore:   store,
+	}
+
+	// Caller supplies sensitivity=[pii] and purpose=diagnostic → should allow.
+	body := strings.NewReader(`{
+		"resource_type":"database",
+		"resource_name":"customers",
+		"action":"read",
+		"trace_id":"trace-sens",
+		"sensitivity":["pii"],
+		"purpose":"diagnostic",
+		"principal":{"user_id":"bob@example.com","roles":["sre"]}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Effect != "allow" {
+		t.Errorf("Effect = %q, want allow", resp.Effect)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no audit event persisted")
+	}
+	pd := events[0].PolicyDecision
+	if len(pd.Sensitivity) != 1 || pd.Sensitivity[0] != "pii" {
+		t.Errorf("Sensitivity = %v, want [pii]", pd.Sensitivity)
+	}
+	if pd.Purpose != "diagnostic" {
+		t.Errorf("Purpose = %q, want diagnostic", pd.Purpose)
+	}
+}
+
+func TestHandlePolicyCheck_SensitivityPurposeMissing_Deny(t *testing.T) {
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, identityPolicyYAML),
+		auditStore:   store,
+	}
+
+	// PII resource without a declared purpose → pii-protection policy denies (falls through to deny).
+	body := strings.NewReader(`{
+		"resource_type":"database",
+		"resource_name":"customers",
+		"action":"read",
+		"trace_id":"trace-nopurpose",
+		"sensitivity":["pii"]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	// Effect should be deny (allowed_purposes condition not met, falls through, no allow rule matches).
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PolicyCheckResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Effect != "deny" {
+		t.Errorf("Effect = %q, want deny", resp.Effect)
+	}
+}

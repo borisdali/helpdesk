@@ -15,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/policy"
 )
 
@@ -860,5 +861,193 @@ func TestApplyCardOptions_SkillExamples(t *testing.T) {
 	}
 	if card.Skills[0].Examples[0] != "example 1" {
 		t.Errorf("examples[0] = %q, want %q", card.Skills[0].Examples[0], "example 1")
+	}
+}
+
+// ── Identity & Purpose propagation ───────────────────────────────────────────
+
+// mockCapturingPolicyServer captures the decoded policyCheckReq and returns the
+// given effect. The captured request is sent on the returned channel.
+func mockCapturingPolicyServer(t *testing.T, effect string, httpStatus int) (*httptest.Server, <-chan policyCheckReq) {
+	t.Helper()
+	ch := make(chan policyCheckReq, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/governance/check" || r.Method != http.MethodPost {
+			http.Error(w, "unexpected path", http.StatusNotFound)
+			return
+		}
+		var req policyCheckReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		ch <- req
+		resp := policyCheckResp{
+			Effect:      effect,
+			PolicyName:  "mock-policy",
+			Explanation: "mock explanation: " + strings.ToUpper(effect),
+			EventID:     "pol_mock0001",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(httpStatus)
+		json.NewEncoder(w).Encode(resp)
+	}))
+	return srv, ch
+}
+
+// ctxWithPrincipalAndPurpose returns a context carrying the given identity and purpose
+// via a TraceContext, matching what TraceMiddleware injects in production.
+func ctxWithPrincipalAndPurpose(principal identity.ResolvedPrincipal, purpose, purposeNote string) context.Context {
+	tc := audit.NewTraceContext("test", principal)
+	tc.Purpose = purpose
+	tc.PurposeNote = purposeNote
+	return audit.WithTraceContext(context.Background(), tc)
+}
+
+func TestCheckTool_RemoteCheck_PropagatesPrincipal(t *testing.T) {
+	srv, captured := mockCapturingPolicyServer(t, "allow", http.StatusOK)
+	defer srv.Close()
+
+	principal := identity.ResolvedPrincipal{
+		UserID:     "alice@example.com",
+		Roles:      []string{"dba", "sre"},
+		AuthMethod: "jwt",
+	}
+	ctx := ctxWithPrincipalAndPurpose(principal, "diagnostic", "investigating INC-123")
+	e := newRemoteEnforcer(srv.URL)
+	if err := e.CheckTool(ctx, "database", "prod-db", policy.ActionRead, nil, "test"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	req := <-captured
+	if req.Principal.UserID != "alice@example.com" {
+		t.Errorf("Principal.UserID = %q, want alice@example.com", req.Principal.UserID)
+	}
+	if len(req.Principal.Roles) != 2 || req.Principal.Roles[0] != "dba" {
+		t.Errorf("Principal.Roles = %v, want [dba sre]", req.Principal.Roles)
+	}
+	if req.Principal.AuthMethod != "jwt" {
+		t.Errorf("Principal.AuthMethod = %q, want jwt", req.Principal.AuthMethod)
+	}
+	if req.Purpose != "diagnostic" {
+		t.Errorf("Purpose = %q, want diagnostic", req.Purpose)
+	}
+	if req.PurposeNote != "investigating INC-123" {
+		t.Errorf("PurposeNote = %q, want 'investigating INC-123'", req.PurposeNote)
+	}
+}
+
+func TestCheckTool_RemoteCheck_PropagatesServicePrincipal(t *testing.T) {
+	srv, captured := mockCapturingPolicyServer(t, "allow", http.StatusOK)
+	defer srv.Close()
+
+	principal := identity.ResolvedPrincipal{
+		Service:    "srebot",
+		AuthMethod: "api_key",
+	}
+	ctx := ctxWithPrincipalAndPurpose(principal, "", "")
+	e := newRemoteEnforcer(srv.URL)
+	if err := e.CheckTool(ctx, "database", "dev-db", policy.ActionRead, nil, "automated"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	req := <-captured
+	if req.Principal.Service != "srebot" {
+		t.Errorf("Principal.Service = %q, want srebot", req.Principal.Service)
+	}
+	if req.Principal.AuthMethod != "api_key" {
+		t.Errorf("Principal.AuthMethod = %q, want api_key", req.Principal.AuthMethod)
+	}
+	if req.Principal.UserID != "" {
+		t.Errorf("Principal.UserID = %q, want empty for service principal", req.Principal.UserID)
+	}
+}
+
+func TestCheckTool_LocalEngine_PrincipalInPolicyRequest(t *testing.T) {
+	// Use a policy that allows dba role and denies others.
+	yaml := `
+version: "1"
+policies:
+  - name: dba-only
+    priority: 100
+    principals:
+      - role: dba
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: allow
+  - name: default-deny
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: deny
+        message: "unauthorized"
+`
+	cfg, err := policy.Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	engine := policy.NewEngine(policy.EngineConfig{PolicyConfig: cfg})
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+
+	// DBA principal — should be allowed.
+	dbaCtx := ctxWithPrincipalAndPurpose(
+		identity.ResolvedPrincipal{UserID: "alice@example.com", Roles: []string{"dba"}, AuthMethod: "jwt"},
+		"", "",
+	)
+	if err := e.CheckTool(dbaCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err != nil {
+		t.Errorf("dba should be allowed, got: %v", err)
+	}
+
+	// Developer principal — should be denied.
+	devCtx := ctxWithPrincipalAndPurpose(
+		identity.ResolvedPrincipal{UserID: "bob@example.com", Roles: []string{"developer"}, AuthMethod: "jwt"},
+		"", "",
+	)
+	if err := e.CheckTool(devCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err == nil {
+		t.Error("developer should be denied, got nil error")
+	}
+}
+
+func TestCheckTool_LocalEngine_PurposeInPolicyRequest(t *testing.T) {
+	// Diagnostic purpose is read-only; remediation can write.
+	yaml := `
+version: "1"
+policies:
+  - name: diagnostic-readonly
+    priority: 90
+    resources:
+      - type: database
+    rules:
+      - action: [write, destructive]
+        effect: allow
+        conditions:
+          blocked_purposes: [diagnostic]
+  - name: default-allow-read
+    resources:
+      - type: database
+    rules:
+      - action: read
+        effect: allow
+`
+	cfg, err := policy.Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	engine := policy.NewEngine(policy.EngineConfig{PolicyConfig: cfg})
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+
+	// diagnostic purpose — write should be denied.
+	diagCtx := ctxWithPrincipalAndPurpose(identity.ResolvedPrincipal{UserID: "alice@example.com"}, "diagnostic", "")
+	if err := e.CheckTool(diagCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err == nil {
+		t.Error("diagnostic purpose: write should be denied, got nil")
+	}
+
+	// remediation purpose — write should be allowed.
+	remCtx := ctxWithPrincipalAndPurpose(identity.ResolvedPrincipal{UserID: "alice@example.com"}, "remediation", "INC-5678")
+	if err := e.CheckTool(remCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err != nil {
+		t.Errorf("remediation purpose: write should be allowed, got: %v", err)
 	}
 }

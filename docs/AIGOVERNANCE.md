@@ -1816,9 +1816,8 @@ All changes are additive. No existing behaviour changes in `none` mode (default)
 
 ## 11. Troubleshooting
 
-Please refer to [here](ARCHITECTURE.md#troubleshooting) for the general purpose
-troubleshooting tips and known issues beyond AI Governance and Audit.
-This troubleshooting section is specific to just these two topics.
+Please refer to [here](ARCHITECTURE.md#13-troubleshooting) for the general purpose
+troubleshooting tips and known issues beyond AI Governance.
 
 #### 11.1 Events Not Being Recorded
 
