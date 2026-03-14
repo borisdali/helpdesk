@@ -12,6 +12,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/logging"
 )
@@ -42,6 +43,16 @@ func main() {
 	}
 
 	gw := NewGateway(registry)
+
+	// Initialize identity provider.
+	idProvider, err := identity.NewFromEnv()
+	if err != nil {
+		slog.Error("failed to initialize identity provider", "err", err)
+		os.Exit(1)
+	}
+	gw.SetIdentityProvider(idProvider)
+	gw.SetOperatingMode(os.Getenv("HELPDESK_OPERATING_MODE"))
+	slog.Info("identity provider initialized", "mode", os.Getenv("HELPDESK_IDENTITY_PROVIDER"))
 
 	// Initialize audit store if enabled.
 	auditURL := os.Getenv("HELPDESK_AUDIT_URL")

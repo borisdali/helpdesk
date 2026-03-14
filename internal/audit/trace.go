@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	"helpdesk/internal/identity"
 )
 
 // traceContextKey is the context key for trace information.
@@ -21,8 +23,15 @@ type TraceContext struct {
 	// Origin identifies where the request originated.
 	Origin string `json:"origin"` // "gateway", "orchestrator", "api"
 
-	// Principal is the authenticated user or API key identity.
-	Principal string `json:"principal,omitempty"`
+	// Principal is the verified identity of the caller.
+	Principal identity.ResolvedPrincipal `json:"principal,omitempty"`
+
+	// Purpose is the declared or operating-mode-derived reason for this request.
+	// One of: diagnostic, remediation, maintenance, compliance, emergency.
+	Purpose string `json:"purpose,omitempty"`
+
+	// PurposeNote is an optional free-text explanation (e.g. incident number).
+	PurposeNote string `json:"purpose_note,omitempty"`
 }
 
 // NewTraceID generates a new trace ID with the default "tr_" prefix.
@@ -42,7 +51,7 @@ func NewTraceIDWithPrefix(prefix string) string {
 }
 
 // NewTraceContext creates a new trace context for a top-level request.
-func NewTraceContext(origin, principal string) *TraceContext {
+func NewTraceContext(origin string, principal identity.ResolvedPrincipal) *TraceContext {
 	return &TraceContext{
 		TraceID:   NewTraceID(),
 		Origin:    origin,
@@ -53,10 +62,12 @@ func NewTraceContext(origin, principal string) *TraceContext {
 // Child creates a child trace context with this event as the parent.
 func (tc *TraceContext) Child(parentEventID string) *TraceContext {
 	return &TraceContext{
-		TraceID:   tc.TraceID,
-		ParentID:  parentEventID,
-		Origin:    tc.Origin,
-		Principal: tc.Principal,
+		TraceID:     tc.TraceID,
+		ParentID:    parentEventID,
+		Origin:      tc.Origin,
+		Principal:   tc.Principal,
+		Purpose:     tc.Purpose,
+		PurposeNote: tc.PurposeNote,
 	}
 }
 
@@ -79,6 +90,23 @@ func TraceIDFromContext(ctx context.Context) string {
 		return tc.TraceID
 	}
 	return ""
+}
+
+// PrincipalFromContext extracts the resolved principal from trace context.
+// Returns a zero ResolvedPrincipal if no trace context is present.
+func PrincipalFromContext(ctx context.Context) identity.ResolvedPrincipal {
+	if tc := TraceContextFromContext(ctx); tc != nil {
+		return tc.Principal
+	}
+	return identity.ResolvedPrincipal{}
+}
+
+// PurposeFromContext extracts the purpose and purpose note from trace context.
+func PurposeFromContext(ctx context.Context) (purpose, purposeNote string) {
+	if tc := TraceContextFromContext(ctx); tc != nil {
+		return tc.Purpose, tc.PurposeNote
+	}
+	return "", ""
 }
 
 // CurrentTraceStore provides thread-safe storage for the current trace ID.

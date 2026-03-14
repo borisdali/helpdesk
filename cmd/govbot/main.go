@@ -962,6 +962,144 @@ func main() {
 	}
 	fmt.Println()
 
+	// ── Phase 11: Identity Coverage ───────────────────────────────────────────
+	logPhase(11, "Identity Coverage")
+	logf("Checks what fraction of policy decisions carry verified identity (user_id/service).")
+	fmt.Println()
+
+	if len(events) == 0 {
+		logf("No events available for identity coverage analysis")
+	} else {
+		totalPol := 0
+		withIdentity := 0
+		withPurpose := 0
+		writeDestructiveTotal := 0
+		writeDestructiveWithPurpose := 0
+
+		for i := range events {
+			e := &events[i]
+			if e.EventType != audit.EventTypePolicyDecision || e.PolicyDecision == nil {
+				continue
+			}
+			totalPol++
+			pd := e.PolicyDecision
+			if pd.UserID != "" || pd.Service != "" {
+				withIdentity++
+			}
+			if pd.Purpose != "" {
+				withPurpose++
+			}
+			if pd.Action == string(audit.ActionWrite) || pd.Action == string(audit.ActionDestructive) {
+				writeDestructiveTotal++
+				if pd.Purpose != "" {
+					writeDestructiveWithPurpose++
+				}
+			}
+		}
+
+		if totalPol == 0 {
+			logf("No policy_decision events in this window")
+		} else {
+			identityPct := withIdentity * 100 / totalPol
+			purposePct := withPurpose * 100 / totalPol
+
+			logf("Policy decisions with identity:  %d / %d  (%d%%)", withIdentity, totalPol, identityPct)
+			if identityPct < 50 {
+				msg := fmt.Sprintf("only %d%% of policy decisions carry identity — identity provider may not be configured", identityPct)
+				logf("  ⚠ WARN  %s", msg)
+				warnings = append(warnings, msg)
+			} else if identityPct >= 90 {
+				logf("  ✓  identity propagation looks healthy")
+			} else {
+				logf("  ⚠ WARN  some requests are reaching the policy engine without identity")
+			}
+
+			fmt.Println()
+			logf("Policy decisions with purpose:   %d / %d  (%d%%)", withPurpose, totalPol, purposePct)
+			if writeDestructiveTotal > 0 {
+				wdPct := writeDestructiveWithPurpose * 100 / writeDestructiveTotal
+				logf("  Write/destructive with purpose: %d / %d  (%d%%)", writeDestructiveWithPurpose, writeDestructiveTotal, wdPct)
+				if wdPct < 50 {
+					msg := fmt.Sprintf("only %d%% of write/destructive policy decisions declare a purpose", wdPct)
+					logf("  ⚠ WARN  %s", msg)
+					warnings = append(warnings, msg)
+				} else if wdPct >= 90 {
+					logf("  ✓  purpose propagation for write/destructive looks healthy")
+				}
+			}
+		}
+	}
+	fmt.Println()
+
+	// ── Phase 12: Purpose Coverage ────────────────────────────────────────────
+	logPhase(12, "Purpose Coverage")
+	logf("Checks declared purposes on sensitive and write/destructive operations.")
+	fmt.Println()
+
+	if len(events) == 0 {
+		logf("No events available for purpose coverage analysis")
+	} else {
+		type purposeKey struct {
+			purpose string
+		}
+		purposeCounts := make(map[string]int)
+		sensitiveWithoutPurpose := 0
+		sensitiveTotal := 0
+
+		for i := range events {
+			e := &events[i]
+			if e.EventType != audit.EventTypePolicyDecision || e.PolicyDecision == nil {
+				continue
+			}
+			pd := e.PolicyDecision
+			if pd.Purpose != "" {
+				purposeCounts[pd.Purpose]++
+			}
+			if len(pd.Sensitivity) > 0 {
+				sensitiveTotal++
+				if pd.Purpose == "" {
+					sensitiveWithoutPurpose++
+				}
+			}
+		}
+
+		if len(purposeCounts) == 0 {
+			logf("No purpose declarations found in this window")
+			logf("  (Set HELPDESK_IDENTITY_PROVIDER and propagate X-Purpose header to enable)")
+		} else {
+			logf("Purpose breakdown:")
+			purposes := make([]string, 0, len(purposeCounts))
+			for p := range purposeCounts {
+				purposes = append(purposes, p)
+			}
+			sort.Strings(purposes)
+			for _, p := range purposes {
+				logf("  %-20s %d decision(s)", p, purposeCounts[p])
+			}
+		}
+
+		if sensitiveTotal > 0 {
+			fmt.Println()
+			logf("Sensitive resource decisions:       %d total", sensitiveTotal)
+			logf("  Without declared purpose:         %d", sensitiveWithoutPurpose)
+			if sensitiveWithoutPurpose > 0 {
+				pct := sensitiveWithoutPurpose * 100 / sensitiveTotal
+				if pct >= 50 {
+					msg := fmt.Sprintf("%d%% of sensitive resource accesses lack a declared purpose", pct)
+					logf("  ✗ ALERT  %s", msg)
+					alerts = append(alerts, msg)
+				} else {
+					msg := fmt.Sprintf("%d sensitive resource access(es) without declared purpose", sensitiveWithoutPurpose)
+					logf("  ⚠ WARN   %s", msg)
+					warnings = append(warnings, msg)
+				}
+			} else {
+				logf("  ✓  all sensitive resource accesses have a declared purpose")
+			}
+		}
+	}
+	fmt.Println()
+
 	// ── Phase 10: Summary ─────────────────────────────────────────────────────
 	logPhase(10, "Compliance Summary")
 

@@ -47,6 +47,8 @@ func main() {
 	tags := flag.String("tags", "", "Comma-separated resource tags (e.g. production,critical)")
 	userID := flag.String("user", "", "Evaluate as a specific user ID")
 	role := flag.String("role", "", "Evaluate with a specific role")
+	purpose := flag.String("purpose", "", "Declared purpose: diagnostic, remediation, maintenance, compliance, emergency")
+	sensitivity := flag.String("sensitivity", "", "Comma-separated sensitivity classes (e.g. pii,critical)")
 	asJSON := flag.Bool("json", false, "Output raw JSON instead of human-readable text")
 
 	// List mode flags
@@ -71,7 +73,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
 			os.Exit(3)
 		}
-		os.Exit(runLocalExplain(*policyFile, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+		os.Exit(runLocalExplain(*policyFile, parts[0], parts[1], *action, *tags, *userID, *role, *purpose, *sensitivity, *asJSON))
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -95,7 +97,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
 			os.Exit(3)
 		}
-		os.Exit(runHypotheticalDirect(client, *auditd, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+		os.Exit(runHypotheticalDirect(client, *auditd, parts[0], parts[1], *action, *tags, *userID, *role, *purpose, *sensitivity, *asJSON))
 	}
 
 	if *list {
@@ -118,7 +120,7 @@ func main() {
 		os.Exit(3)
 	}
 
-	os.Exit(runHypothetical(client, *gateway, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+	os.Exit(runHypothetical(client, *gateway, parts[0], parts[1], *action, *tags, *userID, *role, *purpose, *sensitivity, *asJSON))
 }
 
 func printUsage() {
@@ -347,7 +349,7 @@ func effectToCode(effect string) int {
 
 // runHypotheticalDirect talks to auditd's native /v1/governance/explain endpoint.
 // Only auditd needs to be running — no gateway required.
-func runHypotheticalDirect(client *http.Client, auditdURL, resourceType, resourceName, action, tags, userID, role string, asJSON bool) int {
+func runHypotheticalDirect(client *http.Client, auditdURL, resourceType, resourceName, action, tags, userID, role, purpose, sensitivity string, asJSON bool) int {
 	q := url.Values{}
 	q.Set("resource_type", resourceType)
 	q.Set("resource_name", resourceName)
@@ -360,6 +362,12 @@ func runHypotheticalDirect(client *http.Client, auditdURL, resourceType, resourc
 	}
 	if role != "" {
 		q.Set("role", role)
+	}
+	if purpose != "" {
+		q.Set("purpose", purpose)
+	}
+	if sensitivity != "" {
+		q.Set("sensitivity", sensitivity)
 	}
 	endpoint := strings.TrimRight(auditdURL, "/") + "/v1/governance/explain?" + q.Encode()
 	return doExplainRequest(client, endpoint, asJSON)
@@ -372,7 +380,7 @@ func runRetrospectiveDirect(client *http.Client, auditdURL, eventID string, asJS
 	return doExplainRequest(client, endpoint, asJSON)
 }
 
-func runHypothetical(client *http.Client, gateway, resourceType, resourceName, action, tags, userID, role string, asJSON bool) int {
+func runHypothetical(client *http.Client, gateway, resourceType, resourceName, action, tags, userID, role, purpose, sensitivity string, asJSON bool) int {
 	q := url.Values{}
 	q.Set("resource_type", resourceType)
 	q.Set("resource_name", resourceName)
@@ -385,6 +393,12 @@ func runHypothetical(client *http.Client, gateway, resourceType, resourceName, a
 	}
 	if role != "" {
 		q.Set("role", role)
+	}
+	if purpose != "" {
+		q.Set("purpose", purpose)
+	}
+	if sensitivity != "" {
+		q.Set("sensitivity", sensitivity)
 	}
 
 	endpoint := strings.TrimRight(gateway, "/") + "/api/v1/governance/explain?" + q.Encode()
@@ -495,7 +509,7 @@ func extractEffect(m map[string]json.RawMessage) string {
 // runLocalExplain evaluates a hypothetical policy check entirely in-process —
 // no gateway or auditd required. Used when --policy-file (or HELPDESK_POLICY_FILE)
 // is set.
-func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, userID, role string, asJSON bool) int {
+func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, userID, role, purpose, sensitivityStr string, asJSON bool) int {
 	cfg, err := policy.LoadFile(policyFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error loading policy file:", err)
@@ -511,16 +525,27 @@ func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, us
 		}
 	}
 
+	var sensitivity []string
+	for _, s := range strings.Split(sensitivityStr, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			sensitivity = append(sensitivity, s)
+		}
+	}
+
 	req := policy.Request{
 		Principal: policy.RequestPrincipal{
 			UserID: userID,
 		},
 		Resource: policy.RequestResource{
-			Type: resourceType,
-			Name: resourceName,
-			Tags: tags,
+			Type:        resourceType,
+			Name:        resourceName,
+			Tags:        tags,
+			Sensitivity: sensitivity,
 		},
 		Action: policy.ActionClass(action),
+		Context: policy.RequestContext{
+			Purpose: purpose,
+		},
 	}
 	if role != "" {
 		req.Principal.Roles = []string{role}

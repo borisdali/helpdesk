@@ -219,11 +219,32 @@ func (e *Engine) matchesResource(policy Policy, resource RequestResource) bool {
 			}
 		}
 
+		// Sensitivity matching: all listed classes must be present on the resource.
+		if len(r.Match.Sensitivity) > 0 {
+			if !allPresent(r.Match.Sensitivity, resource.Sensitivity) {
+				continue
+			}
+		}
+
 		// All criteria matched
 		return true
 	}
 
 	return false
+}
+
+// allPresent returns true if every item in required is present in available.
+func allPresent(required, available []string) bool {
+	avail := make(map[string]bool, len(available))
+	for _, s := range available {
+		avail[s] = true
+	}
+	for _, s := range required {
+		if !avail[s] {
+			return false
+		}
+	}
+	return true
 }
 
 // resourceTagSets returns the tag sets from a policy's resource specs that
@@ -328,6 +349,56 @@ func (e *Engine) applyConditionsWithTrace(decision Decision, cond *Conditions, r
 		traces = append(traces, ct)
 	}
 
+	// Purpose: AllowedPurposes
+	if len(cond.AllowedPurposes) > 0 {
+		purpose := req.Context.Purpose
+		allowed := false
+		for _, p := range cond.AllowedPurposes {
+			if p == purpose {
+				allowed = true
+				break
+			}
+		}
+		ct := ConditionTrace{
+			Name:   "allowed_purposes",
+			Passed: allowed,
+			Detail: fmt.Sprintf("purpose=%q allowed=%v", purpose, cond.AllowedPurposes),
+		}
+		traces = append(traces, ct)
+		if !allowed {
+			decision.Effect = EffectDeny
+			decision.Message = formatMessage("Purpose %q is not in the allowed list %v", purpose, cond.AllowedPurposes)
+			decision.Conditions = append(decision.Conditions,
+				formatMessage("allowed_purposes: %v", cond.AllowedPurposes))
+			return decision, traces
+		}
+	}
+
+	// Purpose: BlockedPurposes
+	if len(cond.BlockedPurposes) > 0 {
+		purpose := req.Context.Purpose
+		blocked := false
+		for _, p := range cond.BlockedPurposes {
+			if p == purpose {
+				blocked = true
+				break
+			}
+		}
+		ct := ConditionTrace{
+			Name:   "blocked_purposes",
+			Passed: !blocked,
+			Detail: fmt.Sprintf("purpose=%q blocked=%v", purpose, cond.BlockedPurposes),
+		}
+		traces = append(traces, ct)
+		if blocked {
+			decision.Effect = EffectDeny
+			decision.Message = formatMessage("Purpose %q is in the blocked list %v", purpose, cond.BlockedPurposes)
+			decision.Conditions = append(decision.Conditions,
+				formatMessage("blocked_purposes: %v", cond.BlockedPurposes))
+			return decision, traces
+		}
+	}
+
 	return decision, traces
 }
 
@@ -360,6 +431,12 @@ func logDecision(req Request, decision Decision, dryRun bool) {
 	}
 	if req.Principal.Service != "" {
 		attrs = append(attrs, "service", req.Principal.Service)
+	}
+	if len(req.Resource.Sensitivity) > 0 {
+		attrs = append(attrs, "resource_sensitivity", req.Resource.Sensitivity)
+	}
+	if req.Context.Purpose != "" {
+		attrs = append(attrs, "purpose", req.Context.Purpose)
 	}
 	if decision.Message != "" {
 		attrs = append(attrs, "message", decision.Message)

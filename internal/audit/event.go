@@ -153,6 +153,19 @@ type PolicyDecision struct {
 	// Trace is the JSON-serialised policy.DecisionTrace (stored as raw JSON to avoid import cycles).
 	Trace       json.RawMessage `json:"trace,omitempty"`       // full evaluation trace
 	Explanation string          `json:"explanation,omitempty"` // human-readable explanation
+
+	// Identity fields — who made the request.
+	UserID     string   `json:"user_id,omitempty"`
+	Roles      []string `json:"roles,omitempty"`
+	Service    string   `json:"service,omitempty"`
+	AuthMethod string   `json:"auth_method,omitempty"`
+
+	// Purpose fields — why the request was made.
+	Purpose     string `json:"purpose,omitempty"`
+	PurposeNote string `json:"purpose_note,omitempty"`
+
+	// Sensitivity — data sensitivity classes of the resource accessed.
+	Sensitivity []string `json:"sensitivity,omitempty"`
 }
 
 // AgentReasoning captures the LLM's text deliberation immediately before

@@ -295,10 +295,35 @@ func callAgentWithTrace(ctx context.Context, agentURL, message, traceID string) 
 		return "", fmt.Errorf("creating A2A client: %w", err)
 	}
 
-	// Send message with trace_id in metadata
+	// Send message with trace_id and principal/purpose in metadata so
+	// downstream agents can enforce policy on behalf of the original caller.
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: message})
+	meta := map[string]any{}
 	if traceID != "" {
-		msg.Metadata = map[string]any{"trace_id": traceID}
+		meta["trace_id"] = traceID
+	}
+	if tc := TraceContextFromContext(ctx); tc != nil {
+		if tc.Principal.UserID != "" {
+			meta["user_id"] = tc.Principal.UserID
+		}
+		if len(tc.Principal.Roles) > 0 {
+			meta["roles"] = tc.Principal.Roles
+		}
+		if tc.Principal.Service != "" {
+			meta["service"] = tc.Principal.Service
+		}
+		if tc.Principal.AuthMethod != "" {
+			meta["auth_method"] = tc.Principal.AuthMethod
+		}
+		if tc.Purpose != "" {
+			meta["purpose"] = tc.Purpose
+		}
+		if tc.PurposeNote != "" {
+			meta["purpose_note"] = tc.PurposeNote
+		}
+	}
+	if len(meta) > 0 {
+		msg.Metadata = meta
 	}
 	result, err := client.SendMessage(ctx, &a2a.MessageSendParams{Message: msg})
 	if err != nil {

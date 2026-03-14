@@ -8,8 +8,9 @@ dedicated to aiHelpDesk's critical subsystem that we refer to as AI Governance.
 
 As aiHelpDesk evolves from read-only diagnostics to actively *fixing* infrastructure
 issues, governance becomes critical for trust. The AI Governance system ensures that
-when agents can modify databases, scale deployments, or restart services, they do so
-safely, accountably, and with appropriate human oversight.
+when aiHelpDesk agents are instructed to remedy a problem and so they have to modify
+databases, scale deployments, or restart services, they do so safely, accountably,
+and with appropriate human oversight.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -55,7 +56,7 @@ aiHelpDesk Governance consists of eight well-defined components:
 | [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
 | [Operating Mode](#6-operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
-| Identity & Access | Planned | User/role-based permissions |
+| [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
 | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
@@ -1053,13 +1054,773 @@ preserving full backwards compatibility.
 
 ---
 
-## 10. Troubleshooting
+## 10. Identity & Access
+
+The Identity & Access sub-module of aiHelpDesk AI Governance module answers two specific questions:
+
+1. **Who is making this request?** — verified identity, not a header anyone can set
+2. **Why are they making it?** — declared purpose, not just what they're allowed to do
+
+These two questions, combined with the existing resource tag system, produce the
+three-dimension access control model that the policy engine's `principals` block
+is designed to support.
+
+### 10.1 Why Role-Based Access Alone Is Insufficient
+
+The policy engine supports principal matching, e.g. `role: dba`, `user: alice@example.com`,
+`service: srebot`. This alone however is not sufficient or otherwise the policy engine
+would just receive an empty `RequestPrincipal{}` because no code path connects, resolves
+and propagates identity. This is the *plumbing* gap.
+
+Beyond the plumbing, RBAC has a deeper limitation for agent systems.
+An agent combines data sources and acts at scale in ways a human user does not —
+and the same data can be legitimately accessed for one reason and not for another.
+A DBA role authorizes access to production databases, but it does not authorize
+bulk-exporting customer records for data analysis. The same access, the same role,
+different purposes — and policy must be able to distinguish them.
+
+The three access control dimensions this sub-module adds:
+
+| Dimension | Without this sub-module | With this sub-module |
+|-----------|--------------|-------------|
+| **Role** | Defined in policy YAML, never populated in requests | Full resolution: identity provider → verified user → roles |
+| **Data sensitivity** | Resource tags exist (`production`, `staging`) but no sensitivity classification | Explicit sensitivity class per resource: `pii`, `sensitive`, `internal`, `public`, `critical` |
+| **Purpose** | Absent | Declared per request; enforced as a policy condition alongside role and sensitivity |
+
+---
+
+### 10.2 Identity Provider
+
+Authentication happens at the Gateway — the single entry point for all requests.
+The Gateway instantiates an identity provider, resolves a `ResolvedPrincipal` for
+every incoming request, and attaches it to the `TraceContext` that flows through
+the rest of the stack.
+
+Three provider modes are supported, configured via `HELPDESK_IDENTITY_PROVIDER`:
+
+| Mode | Use case | Mechanism |
+|------|----------|-----------|
+| `none` | Default — backwards compatible | `X-User` header accepted as-is; no validation; no role resolution |
+| `static` | Self-hosted / simple deployments | Users, roles, and service account API keys declared in `users.yaml` |
+| `jwt` | Orgs with SSO (Okta, Auth0, Azure AD, Google) | JWT validated against JWKS endpoint; roles extracted from a configured claim |
+
+`none` preserves the behaviour before the Identity & Access sub-module was
+introduced. Setting it to `none` allows existing deployments continue
+to work without any configuration change.
+
+#### 10.2.1 Go Interface
+
+```go
+// Package identity resolves verified principals from incoming requests.
+package identity
+
+import "net/http"
+
+// Provider authenticates a request and returns the resolved principal.
+// It is called by the Gateway on every incoming request.
+type Provider interface {
+    // Resolve extracts and verifies identity from the HTTP request.
+    // Returns an error if authentication fails (wrong key, invalid token, etc.).
+    // In "none" mode, Resolve never returns an error — it always succeeds.
+    Resolve(r *http.Request) (ResolvedPrincipal, error)
+}
+
+// ResolvedPrincipal is the verified identity attached to a request.
+// Created by the Gateway and propagated through every downstream call.
+type ResolvedPrincipal struct {
+    UserID     string   // Verified user ID (email, JWT sub, service account name)
+    Roles      []string // Resolved roles (from users.yaml or JWT claim)
+    Service    string   // Non-empty if this is a service account (e.g., "srebot")
+    AuthMethod string   // "api_key", "jwt", "header" (legacy no-auth)
+}
+
+// IsAnonymous returns true when identity was not verified (AuthMethod == "header").
+func (p ResolvedPrincipal) IsAnonymous() bool {
+    return p.AuthMethod == "header"
+}
+```
+
+#### 10.2.2 Static Identity Provider
+
+Configured via `HELPDESK_USERS_FILE`:
+
+```yaml
+# /etc/helpdesk/users.yaml
+version: "1"
+
+users:
+  - id: alice@example.com
+    roles: [dba, sre]
+
+  - id: bob@example.com
+    roles: [sre]
+
+  - id: carol@example.com
+    roles: [developer]
+
+service_accounts:
+  - id: srebot
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=1,p=4$..."   # hash of the API key
+
+  - id: secbot
+    roles: [security-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=1,p=4$..."
+```
+
+Human users authenticate via `X-User: alice@example.com` header (unverified
+in `none` mode; cross-referenced against `users.yaml` in `static` mode —
+users not in the file are rejected).
+
+Service accounts authenticate via `Authorization: Bearer <api-key>`. The key
+is hashed with Argon2id and compared against `api_key_hash`.
+
+#### 10.2.3 JWT Identity Provider
+
+```bash
+export HELPDESK_IDENTITY_PROVIDER="jwt"
+export HELPDESK_JWT_JWKS_URL="https://idp.example.com/.well-known/jwks.json"
+export HELPDESK_JWT_ISSUER="https://idp.example.com/"
+export HELPDESK_JWT_ROLES_CLAIM="groups"   # JWT claim containing role list
+export HELPDESK_JWT_AUDIENCE="helpdesk"    # optional — validates aud claim
+export HELPDESK_JWT_CACHE_TTL="5m"         # JWKS key cache TTL
+```
+
+The Gateway validates the JWT signature against the JWKS endpoint, checks expiry,
+issuer, and audience, then extracts `sub` as `UserID` and the configured claim
+(default: `groups`) as `Roles`. JWKS keys are cached with TTL to avoid per-request
+round-trips to the IdP.
+
+---
+
+### 10.3 Data Sensitivity Markings
+
+Data markings declare what kind of data a resource contains, independently of its
+environment tag. A database tagged `[production]` may or may not contain personal
+data — those are orthogonal facts. Sensitivity markings make the distinction
+machine-readable and policy-enforceable.
+
+#### 10.3.1 Sensitivity Classes
+
+| Class | Meaning | Typical resources |
+|-------|---------|------------------|
+| `public` | No sensitivity restrictions | Internal metrics, status dashboards |
+| `internal` | Business data, not personally identifiable | Operational databases, deployment configs |
+| `sensitive` | Commercially sensitive or under regulatory scope | Financial, legal, partner data |
+| `pii` | Contains personal data (GDPR, CCPA scope) | Customer records, user tables |
+| `critical` | High blast-radius or systems-of-record | Primary production databases, core K8s clusters |
+
+Multiple classes are additive. A database can be both `pii` and `critical`.
+
+#### 10.3.2 Declaring Sensitivity in Infra Config
+
+`sensitivity` is a new field on `DBServer` and `K8sCluster` in `HELPDESK_INFRA_CONFIG`:
+
+```json
+{
+  "db_servers": {
+    "prod-db": {
+      "name": "Production Database",
+      "connection_string": "host=prod-db.example.com ...",
+      "tags": ["production"],
+      "sensitivity": ["pii", "critical"]
+    },
+    "analytics-db": {
+      "name": "Analytics Read Replica",
+      "connection_string": "...",
+      "tags": ["production"],
+      "sensitivity": ["internal"]
+    },
+    "dev-db": {
+      "name": "Development Database",
+      "connection_string": "...",
+      "tags": ["development"],
+      "sensitivity": ["internal"]
+    }
+  },
+  "k8s_clusters": {
+    "prod-cluster": {
+      "context": "prod",
+      "tags": ["production"],
+      "sensitivity": ["critical"]
+    }
+  }
+}
+```
+
+#### 10.3.3 Using Sensitivity in Policy
+
+Sensitivity classes extend `ResourceMatch` — a policy can now target resources
+by what data they contain, not just by their environment tag:
+
+```yaml
+resources:
+  - type: database
+    match:
+      sensitivity: [pii]          # any database containing personal data
+
+  - type: database
+    match:
+      tags: [production]
+      sensitivity: [critical]     # production + critical (both must match)
+```
+
+A full policy example targeting PII databases with tighter controls than the
+environment policy alone would provide:
+
+```yaml
+- name: pii-data-protection
+  description: Extra controls on databases containing personal data
+  priority: 110    # evaluated before environment-level policies
+
+  resources:
+    - type: database
+      match:
+        sensitivity: [pii]
+
+  rules:
+    - action: read
+      effect: allow
+      conditions:
+        allowed_purposes: [diagnostic, remediation, compliance]
+
+    - action: write
+      effect: allow
+      conditions:
+        require_approval: true
+        allowed_purposes: [remediation]
+        approval_quorum: 2
+
+    - action: destructive
+      effect: deny
+      message: "Destructive operations on PII databases require explicit DBA override policy"
+```
+
+---
+
+### 10.4 Purpose-Based Access
+
+Purpose answers "why is this access happening?" It is the dimension that makes
+identical role + resource combinations distinguishable by intent.
+
+#### 10.4.1 Purpose Vocabulary
+
+| Purpose | Meaning | Typical operations |
+|---------|---------|-------------------|
+| `diagnostic` | Read-only investigation of an issue | Queries, pod inspection, log reads |
+| `remediation` | Fixing an active problem | Cancel query, restart pod, scale deployment |
+| `maintenance` | Planned change during a maintenance window | Any write or destructive operation |
+| `compliance` | Compliance or audit-driven read of sensitive data | Sensitive reads that need extra traceability |
+| `emergency` | Break-glass override for on-call response | Any operation — subject to post-hoc review |
+
+#### 10.4.2 How Purpose Is Declared
+
+**Implicit (default):** When no purpose is declared by the caller, it is derived
+from the operating mode:
+
+| Operating mode | Default purpose |
+|---------------|----------------|
+| `readonly` | `diagnostic` |
+| `fix` | `remediation` |
+
+**Explicit via request body** (preferred for audit clarity):
+
+```json
+{
+  "query": "The analytics pipeline is blocked on prod-db. Please cancel the blocking query.",
+  "purpose": "remediation",
+  "purpose_note": "Blocking query preventing nightly analytics jobs — incident INC-2891"
+}
+```
+
+**Explicit via header** (for programmatic callers):
+
+```
+X-Purpose: remediation
+X-Purpose-Note: INC-2891 blocker removal
+```
+
+#### 10.4.3 Purpose Conditions in Policy Rules
+
+Two new conditions extend the `Conditions` block in policy rules:
+
+```yaml
+conditions:
+  allowed_purposes: [remediation, maintenance]   # deny if purpose not in this list
+  blocked_purposes: [data_export, bulk_analysis]  # deny if purpose is in this list
+```
+
+If `allowed_purposes` is omitted, all purposes are permitted (backwards-compatible
+default — existing rules behave exactly as today).
+
+`blocked_purposes` can be used to harden a policy regardless of other conditions:
+
+```yaml
+- action: read
+  effect: allow
+  conditions:
+    blocked_purposes: [data_export]
+  message: "Bulk data export from this database is not permitted through the agent"
+```
+
+#### 10.4.4 Emergency Purpose
+
+The `emergency` purpose is a structured break-glass mechanism. It can override
+restrictive policies, but it never bypasses the audit trail and always requires
+approval — the point is controlled override, not invisible override.
+
+A break-glass policy that allows `oncall` role full access under emergency purpose:
+
+```yaml
+- name: emergency-break-glass
+  description: Emergency access for on-call engineers during active incidents
+  priority: 200    # highest possible — evaluated first
+
+  principals:
+    - role: oncall
+
+  resources:
+    - type: database
+    - type: kubernetes
+
+  rules:
+    - action: [read, write, destructive]
+      effect: allow
+      conditions:
+        allowed_purposes: [emergency]
+        require_approval: true      # human sign-off still required
+        approval_quorum: 1
+      message: "Emergency access granted. All actions audited with elevated severity."
+```
+
+Every `emergency`-purpose audit event is flagged with elevated severity in the
+audit trail, making it straightforward for govbot to report on break-glass usage.
+
+#### 10.4.5 Requiring Explicit Purpose for Sensitive Resources
+
+When `HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE=true`, any access to a resource
+with `sensitivity: [pii]` or `sensitivity: [critical]` without an explicit purpose
+declaration is denied at the Gateway before the request reaches an agent:
+
+```
+POST /api/v1/query
+ │
+ ├─ resource resolved as pii + critical
+ ├─ purpose not declared in request
+ └─ HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE=true
+     → 403: "Access to sensitive resources requires an explicit purpose declaration.
+             Add 'purpose' to your request body."
+```
+
+This is disabled by default so existing callers are not broken.
+
+---
+
+### 10.5 Principal Propagation
+
+The most significant implementation gap: principal resolved at the Gateway is
+currently discarded after the audit event is written. It never reaches the policy
+engine that needs it.
+
+The fix: principal and purpose flow as structured fields through every layer.
+
+```
+User / Service Account
+      │ Authorization: Bearer <api-key>       (static or jwt mode)
+      │ X-User: alice@example.com             (none mode — unverified)
+      │ X-Purpose: remediation
+      ▼
+┌───────────────────────────────────────────────────────────┐
+│  Gateway                                                  │
+│  IdentityProvider.Resolve(r)                              │
+│  → ResolvedPrincipal{                                     │
+│      UserID:     "alice@example.com",                     │
+│      Roles:      ["dba", "sre"],                          │
+│      AuthMethod: "api_key",                               │
+│    }                                                      │
+│  TraceContext{                                            │
+│    TraceID:     "tr_a1b2c3d4e5f6",                        │
+│    Principal:   ResolvedPrincipal{...},   ← structured    │
+│    Purpose:     "remediation",                            │
+│    PurposeNote: "INC-2891",                               │
+│  }                                                        │
+└──────────────────────────┬────────────────────────────────┘
+                           │ A2A message metadata
+                           │ { "trace_id":    "tr_...",
+                           │   "user_id":     "alice@example.com",
+                           │   "roles":       ["dba", "sre"],
+                           │   "auth_method": "api_key",
+                           │   "purpose":     "remediation",
+                           │   "purpose_note":"INC-2891" }
+                           ▼
+┌───────────────────────────────────────────────────────────┐
+│  Orchestrator                                             │
+│  Reads principal from incoming A2A metadata               │
+│  Forwards it in outgoing A2A calls to sub-agents          │
+└──────────────────────────┬────────────────────────────────┘
+                           │ same A2A metadata forwarded downstream
+                           ▼
+┌───────────────────────────────────────────────────────────┐
+│  DB Agent / K8s Agent                                     │
+│  agentutil.PolicyEnforcer.CheckTool(ctx, ...)             │
+│  → reads TraceContext from ctx                            │
+│  → policy.Request{                                        │
+│      Principal: {UserID, Roles, Service},                 │
+│      Resource:  {Type, Name, Tags, Sensitivity},          │
+│      Action:    ActionWrite,                              │
+│      Context:   {Purpose, PurposeNote, ...},              │
+│    }                                                      │
+└──────────────────────────┬────────────────────────────────┘
+                           │ POST /v1/governance/check
+                           │ { principal, sensitivity,
+                           │   purpose, purpose_note, ... }
+                           ▼
+┌───────────────────────────────────────────────────────────┐
+│  auditd — policy engine evaluation                        │
+│  PolicyDecision audit event includes:                     │
+│    user_id, roles, auth_method                            │
+│    purpose, purpose_note                                  │
+│    sensitivity classes seen                               │
+└───────────────────────────────────────────────────────────┘
+```
+
+#### 10.5.1 TraceContext Extension
+
+`TraceContext.Principal` changes from a plain `string` to the structured
+`identity.ResolvedPrincipal`. Purpose fields are added:
+
+```go
+// TraceContext extended with verified principal and purpose.
+type TraceContext struct {
+    TraceID     string                    `json:"trace_id"`
+    ParentID    string                    `json:"parent_id,omitempty"`
+    Origin      string                    `json:"origin"`
+    Principal   identity.ResolvedPrincipal `json:"principal,omitempty"`  // was string
+    Purpose     string                    `json:"purpose,omitempty"`
+    PurposeNote string                    `json:"purpose_note,omitempty"`
+}
+```
+
+`NewTraceContext` is updated to accept `ResolvedPrincipal` instead of a string.
+All existing callers that pass a plain string are updated at the same time.
+
+#### 10.5.2 A2A Metadata Convention
+
+The orchestrator reads principal and purpose from its incoming A2A message metadata
+and forwards them to every sub-agent it calls. The metadata keys are:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `trace_id` | string | Existing — unchanged |
+| `user_id` | string | Resolved user ID |
+| `roles` | `[]string` | Resolved role list |
+| `service` | string | Set only for service accounts |
+| `auth_method` | string | `"api_key"`, `"jwt"`, `"header"` |
+| `purpose` | string | Declared or derived purpose |
+| `purpose_note` | string | Optional free-text note |
+
+Sub-agents reconstruct a `TraceContext` from these fields when they receive a task.
+Unknown keys are ignored — forwards compatibility.
+
+#### 10.5.3 Policy Check Request Extension
+
+`policyCheckReq` in `agentutil` and `PolicyCheckRequest` in `auditd` gain identity
+and sensitivity fields:
+
+```go
+type policyCheckReq struct {
+    ResourceType  string                    `json:"resource_type"`
+    ResourceName  string                    `json:"resource_name"`
+    Action        string                    `json:"action"`
+    Tags          []string                  `json:"tags,omitempty"`
+    Sensitivity   []string                  `json:"sensitivity,omitempty"`  // NEW
+    TraceID       string                    `json:"trace_id,omitempty"`
+    AgentName     string                    `json:"agent_name,omitempty"`
+    Note          string                    `json:"note,omitempty"`
+    // existing blast-radius fields unchanged ...
+
+    // NEW identity and purpose fields:
+    Principal     identity.ResolvedPrincipal `json:"principal,omitempty"`
+    Purpose       string                    `json:"purpose,omitempty"`
+    PurposeNote   string                    `json:"purpose_note,omitempty"`
+}
+```
+
+#### 10.5.4 Audit Event Extension
+
+`PolicyDecision` gains identity and purpose fields:
+
+```go
+type PolicyDecision struct {
+    // existing fields unchanged ...
+
+    // NEW — identity fields:
+    UserID      string   `json:"user_id,omitempty"`
+    Roles       []string `json:"roles,omitempty"`
+    Service     string   `json:"service,omitempty"`
+    AuthMethod  string   `json:"auth_method,omitempty"`
+
+    // NEW — purpose fields:
+    Purpose     string   `json:"purpose,omitempty"`
+    PurposeNote string   `json:"purpose_note,omitempty"`
+
+    // NEW — sensitivity classes of the resource accessed:
+    Sensitivity []string `json:"sensitivity,omitempty"`
+}
+```
+
+---
+
+### 10.6 Policy Engine Extensions
+
+The engine already implements `matchesPrincipal` — it evaluates `RequestPrincipal`
+against `policy.Principals`. Three additive extensions are needed:
+
+#### 10.6.1 Sensitivity Matching in Resource Rules
+
+`ResourceMatch` gains a `Sensitivity` field. When set, a policy matches a resource
+only if the resource's sensitivity list contains **all** of the listed classes
+(same AND semantics as `tags`):
+
+```go
+// ResourceMatch extended:
+type ResourceMatch struct {
+    Name        string   `yaml:"name,omitempty"`
+    NamePattern string   `yaml:"name_pattern,omitempty"`
+    Tags        []string `yaml:"tags,omitempty"`
+    Namespace   string   `yaml:"namespace,omitempty"`
+    Sensitivity []string `yaml:"sensitivity,omitempty"` // NEW
+}
+```
+
+`matchesResource` evaluates `Sensitivity` the same way it evaluates `Tags`:
+the resource must carry all listed classes. Empty `Sensitivity` matches any resource.
+
+#### 10.6.2 Purpose Conditions
+
+`Conditions` gains purpose restriction fields:
+
+```go
+type Conditions struct {
+    // existing conditions unchanged ...
+
+    // NEW: Purpose-based conditions.
+    // AllowedPurposes: if non-empty, the request purpose must be in this list.
+    AllowedPurposes []string `yaml:"allowed_purposes,omitempty"`
+    // BlockedPurposes: if non-empty, the request purpose must NOT be in this list.
+    BlockedPurposes []string `yaml:"blocked_purposes,omitempty"`
+}
+```
+
+`evaluateConditions` evaluates purpose after all other conditions. A purpose
+mismatch produces a `ConditionTrace` entry (for explainability) and denies the
+rule match, causing evaluation to continue to the next rule.
+
+#### 10.6.3 RequestContext and RequestResource Extensions
+
+```go
+type RequestContext struct {
+    // existing fields unchanged ...
+    Purpose     string `json:"purpose,omitempty"`
+    PurposeNote string `json:"purpose_note,omitempty"`
+}
+
+type RequestResource struct {
+    Type        string   `json:"type"`
+    Name        string   `json:"name"`
+    Tags        []string `json:"tags,omitempty"`
+    Sensitivity []string `json:"sensitivity,omitempty"` // NEW
+}
+```
+
+---
+
+### 10.7 Service Account Identity vs. Human Caller Identity
+
+Requests carry two distinct identities simultaneously:
+
+| Identity | Who | Resolved from |
+|----------|-----|--------------|
+| **Human caller** | The person who initiated the request | Authentication header at Gateway |
+| **Executing agent** | The agent service that is running the tool | Hardcoded service account name in agent binary |
+
+Policy rules can target either. Most rules should target the human caller —
+the agent's service account is used only for service-level restrictions (e.g.,
+the `automated-services` policy that caps automated writes to 100 rows).
+
+The `agentutil.PolicyEnforcer` populates both: `Principal.UserID/Roles` from
+the human caller (extracted from `TraceContext`), and `Principal.Service` from
+the agent's own identity (set at agent startup from config).
+
+---
+
+### 10.8 Backwards Compatibility
+
+All changes are strictly additive and layered. Existing deployments continue to
+work without any configuration change:
+
+| Scenario | Behaviour |
+|----------|-----------|
+| `HELPDESK_IDENTITY_PROVIDER` not set | Defaults to `none`: `X-User` header accepted as-is, `AuthMethod="header"`, no roles resolved |
+| Policy rules with no `principals:` | Match any caller — unchanged |
+| Policy rules with `principals:` | Now actually enforced (were silently matched against empty principal before — effectively `any`) |
+| Infra config without `sensitivity` | Sensitivity list is empty; sensitivity-based policy match conditions evaluate as "no restriction" |
+| Policy rules without `allowed_purposes` / `blocked_purposes` | All purposes permitted — unchanged |
+| `X-Purpose` header absent, purpose not in body | Purpose derived from operating mode (`readonly` → `diagnostic`, `fix` → `remediation`) |
+
+> **Note on silent change:** Policy rules with `principals: [{role: dba}]` that
+> previously matched all callers (because principal was always empty) will now
+> correctly match *only* DBA-role callers in `static` or `jwt` mode. In `none`
+> mode they continue to match all callers. Operators upgrading to `static` or
+> `jwt` should audit their policies to ensure role-restricted rules have the
+> intended scope.
+
+---
+
+### 10.9 Security Considerations
+
+**Principal spoofing in `none` mode:** The `X-User` header is accepted without
+validation. Anyone with network access to the Gateway can claim any identity.
+This is the pre-existing behaviour and is acceptable only in trusted networks.
+Upgrading to `static` or `jwt` mode closes this gap.
+
+**Purpose integrity:** Purpose is declared by the caller and cannot be
+cryptographically verified. The enforcement mechanism is the audit trail — every
+purpose declaration is recorded and all misuse is retrospectively detectable via
+govbot. High-risk purposes (`emergency`) additionally require approval, adding
+human oversight as a second control layer.
+
+**API key storage:** Service account API keys are stored only as Argon2id hashes
+in `users.yaml`. The plaintext key is generated once and given to the service;
+the system never stores or logs it.
+
+**JWT JWKS caching:** Cached JWKS keys reduce per-request latency but create a
+window where a revoked key is still valid. The default TTL of 5 minutes is a
+reasonable enterprise trade-off. Set `HELPDESK_JWT_CACHE_TTL=0` to disable
+caching for environments with aggressive key rotation.
+
+**Agent impersonation:** An agent cannot claim a human principal — it can only
+forward the principal it received from the Gateway via `TraceContext`. Agents
+have their own service identity (`Principal.Service`) that is set at startup from
+config, not from incoming requests.
+
+---
+
+### 10.10 Configuration Reference
+
+```bash
+# Identity provider (default: "none")
+export HELPDESK_IDENTITY_PROVIDER="static"    # or "jwt"
+
+# Static provider
+export HELPDESK_USERS_FILE="/etc/helpdesk/users.yaml"
+
+# JWT provider
+export HELPDESK_JWT_JWKS_URL="https://idp.example.com/.well-known/jwks.json"
+export HELPDESK_JWT_ISSUER="https://idp.example.com/"
+export HELPDESK_JWT_ROLES_CLAIM="groups"        # JWT claim containing role list
+export HELPDESK_JWT_AUDIENCE="helpdesk"         # optional: validate aud claim
+export HELPDESK_JWT_CACHE_TTL="5m"             # JWKS key cache TTL (0 = no cache)
+
+# Purpose
+export HELPDESK_DEFAULT_PURPOSE=""             # empty = infer from operating mode
+export HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE="false"  # deny access to pii/critical
+                                                        # resources without purpose
+```
+
+---
+
+### 10.11 Compliance Reporting Integration
+
+govbot gains two new phases to report on identity and purpose coverage:
+
+**Phase 11 — Identity Coverage**
+
+```
+Phase 11 — Identity Coverage
+  Identity provider: static
+  Requests with resolved principal:   847 / 851  (99.5%)
+  Requests with anonymous principal:    4 / 851   (0.5%)  ← WARN if > 0 in static/jwt mode
+  Policy decisions with role match:   712 / 847  (84.0%)
+  Policy decisions with empty roles:  135 / 847  (15.9%)  ← identifies misconfigured users
+```
+
+**Phase 12 — Purpose Coverage**
+
+```
+Phase 12 — Purpose Coverage
+  Requests with explicit purpose:     623 / 847  (73.6%)
+  Requests with implicit purpose:     224 / 847  (26.4%)
+  Emergency-purpose requests:           3 / 847   (0.4%)  ← ALERT if not reviewed
+  Purpose breakdown:
+    diagnostic:   401 (47.3%)
+    remediation:  382 (45.1%)
+    maintenance:   58  (6.8%)
+    emergency:      3  (0.4%)
+  PII resource accesses without explicit purpose: 12  ← WARN
+```
+
+---
+
+### 10.12 govexplain Integration
+
+`govexplain` gains `--user`, `--roles`, and `--purpose` flags for hypothetical
+checks that include identity and purpose in the evaluation:
+
+```bash
+# Would alice (as dba) be allowed to write to prod-db for remediation?
+govexplain \
+  --gateway http://localhost:8080 \
+  --resource database:prod-db \
+  --action write \
+  --user alice@example.com \
+  --roles dba,sre \
+  --purpose remediation
+
+# Would the same action be denied for data_export purpose?
+govexplain \
+  --gateway http://localhost:8080 \
+  --resource database:prod-db \
+  --action read \
+  --user alice@example.com \
+  --roles dba \
+  --purpose data_export
+```
+
+---
+
+### 10.13 Implementation
+
+All changes are additive. No existing behaviour changes in `none` mode (default).
+
+| Component | Change | Location | Status |
+|-----------|--------|----------|--------|
+| **New package** | `identity.Provider` interface; `ResolvedPrincipal` type; `NoAuthProvider`, `StaticProvider`, `JWTProvider` implementations | `internal/identity/` | ✅ Done |
+| **New config** | `users.yaml` format and loader | `internal/identity/config.go` | ✅ Done |
+| Policy types | `Sensitivity []string` on `ResourceMatch`; `AllowedPurposes`, `BlockedPurposes` on `Conditions`; `Sensitivity`, `Purpose`/`PurposeNote` on `RequestResource`, `RequestContext` | `internal/policy/types.go` | ✅ Done |
+| Policy engine | Sensitivity matching in `matchesResource`; purpose evaluation in `evaluateConditions`; ConditionTrace entries for purpose mismatches | `internal/policy/engine.go` | ✅ Done |
+| Infra config | `Sensitivity []string` on `DBServer`, `K8sCluster` | `internal/infra/infra.go` | ✅ Done |
+| Audit trace | `TraceContext.Principal` → `identity.ResolvedPrincipal`; add `Purpose`, `PurposeNote`; `PrincipalFromContext`, `PurposeFromContext` helpers | `internal/audit/trace.go` | ✅ Done |
+| Trace middleware | Extract `user_id`, `roles`, `service`, `auth_method`, `purpose`, `purpose_note` from A2A metadata; build full `TraceContext` with principal+purpose | `internal/audit/trace_middleware.go` | ✅ Done |
+| Delegate tool | Propagate principal + purpose fields in outgoing A2A message metadata | `internal/audit/delegate_tool.go` | ✅ Done |
+| Audit events | `UserID`, `Roles`, `Service`, `AuthMethod`, `Purpose`, `PurposeNote`, `Sensitivity` on `PolicyDecision` | `internal/audit/event.go` | ✅ Done |
+| agentutil | Extract principal + purpose from `context.Context`; populate `policy.Request.Principal`, `Resource.Sensitivity`, `Context.Purpose/PurposeNote`; propagate in `policyCheckReq` for remote mode and local `PolicyDecision` audit events | `agentutil/agentutil.go` | ✅ Done |
+| Gateway | Instantiate identity provider from env; resolve principal on every request; propagate principal + purpose in A2A message metadata | `cmd/gateway/gateway.go`, `cmd/gateway/main.go` | ✅ Done |
+| auditd governance | `Principal`, `Sensitivity`, `Purpose`, `PurposeNote` on `PolicyCheckRequest`; wire into `policy.Request` and `PolicyDecision` audit event; `sensitivityFromInfra` helper; `handleExplain` accepts `purpose` + `sensitivity` query params | `cmd/auditd/governance_handlers.go` | ✅ Done |
+| govexplain | `--purpose` and `--sensitivity` flags; wired through local, direct, and gateway explain paths | `cmd/govexplain/main.go` | ✅ Done |
+| govbot | Phase 11 (identity coverage) and Phase 12 (purpose coverage) reports | `cmd/govbot/main.go` | ✅ Done |
+| policies.example.yaml | Sensitivity-based resource matching, purpose conditions, emergency break-glass policy | `policies.example.yaml` | ✅ Done |
+| users.example.yaml | Example file for static identity provider (human users + service accounts with Argon2id hashes) | `users.example.yaml` | ✅ Done |
+
+---
+
+## 11. Troubleshooting
 
 Please refer to [here](ARCHITECTURE.md#troubleshooting) for the general purpose
 troubleshooting tips and known issues beyond AI Governance and Audit.
 This troubleshooting section is specific to just these two topics.
 
-#### 10.1 Events Not Being Recorded
+#### 11.1 Events Not Being Recorded
 
 1. Verify auditd is running:
    ```bash
@@ -1074,7 +1835,7 @@ This troubleshooting section is specific to just these two topics.
 
 3. Check auditd logs for connection errors
 
-#### 10.2 Auditor Not Receiving Events
+#### 11.2 Auditor Not Receiving Events
 
 1. Verify socket path matches between auditd and auditor:
    ```bash
@@ -1091,7 +1852,7 @@ This troubleshooting section is specific to just these two topics.
 3. Ensure auditor connects before events are sent (events sent before
    connection are not replayed)
 
-#### 10.3 Chain Verification Fails
+#### 11.3 Chain Verification Fails
 
 If chain verification reports broken links:
 
@@ -1108,7 +1869,7 @@ If chain verification reports broken links:
 3. For legitimate issues, the audit log should be considered compromised
    and investigated
 
-#### 10.4 Off-Hours Alerts Not Working
+#### 11.4 Off-Hours Alerts Not Working
 
 The auditor uses local time for off-hours detection. Verify your system
 timezone is set correctly:
@@ -1119,30 +1880,29 @@ date  # Check current local time
 
 ---
 
-## 11. Roadmap
+## 12. Roadmap
 
-### 11.1 Phase 1: Foundation (Complete)
+### 12.1 Phase 1: Foundation (Complete)
 - [x] Audit system with hash chains
 - [x] Real-time monitoring (auditor)
 - [x] Security alerting (secbot)
 - [x] Policy engine (internal/policy/)
 - [x] Policy enforcement in agents (database, k8s)
 
-### 11.2 Phase 2: Enforcement (Complete)
+### 12.2 Phase 2: Enforcement (Complete)
 - [x] Approval workflows (cmd/approvals/, auditd API, Slack/email notifications)
 - [x] Compliance reporting (cmd/govbot/, Kubernetes CronJob)
 - [x] Guardrails: DB blast radius (`max_rows_affected`), K8s blast radius (`max_pods_affected`), transaction age (`max_xact_age_secs`), schedule — pre- and post-execution hooks
 - [x] Explainability — decision trace, `govexplain` CLI, explain API endpoints
 - [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
 
-### 11.3 Phase 3: Operations
+### 12.3 Phase 3: Operations (In Design)
+- [ ] **Identity & access** — three-dimension access control: role (verified via identity provider), data sensitivity markings, and purpose-based conditions. Design complete; see [§10](#10-identity--access).
+- [ ] **Rollback & Undo** — recovery from agent-initiated mutations. Design pending.
 - [ ] Rate limits (write frequency per session)
 - [ ] Circuit breaker (auto-pause on consecutive errors)
-- [ ] Identity & access control (principal/role matching in policy engine)
-- [ ] Time-based policy conditions (schedule: days/hours/timezone)
-- [ ] Rollback capabilities
 
-### 11.4 Phase 4: Intelligence
+### 12.4 Phase 4: Intelligence
 - [ ] Anomaly detection (ML-based)
 - [ ] Risk scoring
 - [ ] Automated remediation suggestions

@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/session"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
 	"helpdesk/internal/model"
 	"helpdesk/internal/policy"
@@ -282,6 +283,8 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		if e.traceStore != nil {
 			traceID = e.traceStore.Get()
 		}
+		principal := audit.PrincipalFromContext(ctx)
+		purpose, purposeNote := audit.PurposeFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType: resourceType,
 			ResourceName: resourceName,
@@ -290,6 +293,9 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			TraceID:      traceID,
 			AgentName:    e.agentName,
 			Note:         note,
+			Principal:    principal,
+			Purpose:      purpose,
+			PurposeNote:  purposeNote,
 		})
 		if err != nil {
 			return err
@@ -298,7 +304,14 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	}
 
 	// Local engine path.
+	principal := audit.PrincipalFromContext(ctx)
+	purpose, purposeNote := audit.PurposeFromContext(ctx)
 	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID:  principal.UserID,
+			Roles:   principal.Roles,
+			Service: principal.Service,
+		},
 		Resource: policy.RequestResource{
 			Type: resourceType,
 			Name: resourceName,
@@ -313,6 +326,8 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		traceID = e.traceStore.Get()
 		req.Context.TraceID = traceID
 	}
+	req.Context.Purpose = purpose
+	req.Context.PurposeNote = purposeNote
 
 	trace := e.engine.Explain(req)
 	decision := trace.Decision
@@ -335,6 +350,12 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Note:         note,
 			Trace:        traceJSON,
 			Explanation:  trace.Explanation,
+			UserID:       principal.UserID,
+			Roles:        principal.Roles,
+			Service:      principal.Service,
+			AuthMethod:   principal.AuthMethod,
+			Purpose:      purpose,
+			PurposeNote:  purposeNote,
 		})
 	}
 
@@ -454,6 +475,8 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 		if e.traceStore != nil {
 			traceID = e.traceStore.Get()
 		}
+		principal := audit.PrincipalFromContext(ctx)
+		purpose, purposeNote := audit.PurposeFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType:  resourceType,
 			ResourceName:  resourceName,
@@ -464,6 +487,9 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 			RowsAffected:  outcome.RowsAffected,
 			PodsAffected:  outcome.PodsAffected,
 			PostExecution: true,
+			Principal:     principal,
+			Purpose:       purpose,
+			PurposeNote:   purposeNote,
 		})
 		if err != nil {
 			return err
@@ -494,8 +520,15 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 	if e.traceStore != nil {
 		traceID = e.traceStore.Get()
 	}
+	principal2 := audit.PrincipalFromContext(ctx)
+	purpose2, purposeNote2 := audit.PurposeFromContext(ctx)
 
 	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID:  principal2.UserID,
+			Roles:   principal2.Roles,
+			Service: principal2.Service,
+		},
 		Resource: policy.RequestResource{
 			Type: resourceType,
 			Name: resourceName,
@@ -506,6 +539,8 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 			TraceID:      traceID,
 			RowsAffected: outcome.RowsAffected,
 			PodsAffected: outcome.PodsAffected,
+			Purpose:      purpose2,
+			PurposeNote:  purposeNote2,
 		},
 	}
 
@@ -531,6 +566,12 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 			PostExecution: true,
 			Trace:         traceJSON,
 			Explanation:   trace.Explanation,
+			UserID:        principal2.UserID,
+			Roles:         principal2.Roles,
+			Service:       principal2.Service,
+			AuthMethod:    principal2.AuthMethod,
+			Purpose:       purpose2,
+			PurposeNote:   purposeNote2,
 		})
 	}
 
@@ -577,6 +618,8 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 		if e.traceStore != nil {
 			traceID = e.traceStore.Get()
 		}
+		principal := audit.PrincipalFromContext(ctx)
+		purpose, purposeNote := audit.PurposeFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType: "database",
 			ResourceName: dbName,
@@ -585,6 +628,9 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 			TraceID:      traceID,
 			AgentName:    e.agentName,
 			XactAgeSecs:  xactAgeSecs,
+			Principal:    principal,
+			Purpose:      purpose,
+			PurposeNote:  purposeNote,
 		})
 		if err != nil {
 			return err
@@ -613,8 +659,15 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 	if e.traceStore != nil {
 		traceID = e.traceStore.Get()
 	}
+	principal3 := audit.PrincipalFromContext(ctx)
+	purpose3, purposeNote3 := audit.PurposeFromContext(ctx)
 
 	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID:  principal3.UserID,
+			Roles:   principal3.Roles,
+			Service: principal3.Service,
+		},
 		Resource: policy.RequestResource{
 			Type: "database",
 			Name: dbName,
@@ -624,6 +677,8 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 		Context: policy.RequestContext{
 			TraceID:     traceID,
 			XactAgeSecs: xactAgeSecs,
+			Purpose:     purpose3,
+			PurposeNote: purposeNote3,
 		},
 	}
 
@@ -647,6 +702,12 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 			Message:      decision.Message,
 			Trace:        traceJSON,
 			Explanation:  trace.Explanation,
+			UserID:       principal3.UserID,
+			Roles:        principal3.Roles,
+			Service:      principal3.Service,
+			AuthMethod:   principal3.AuthMethod,
+			Purpose:      purpose3,
+			PurposeNote:  purposeNote3,
 		})
 	}
 
@@ -674,6 +735,11 @@ type policyCheckReq struct {
 	PodsAffected  int      `json:"pods_affected,omitempty"`
 	XactAgeSecs   int      `json:"xact_age_secs,omitempty"`
 	PostExecution bool     `json:"post_execution,omitempty"`
+	// Identity and purpose propagated from the originating user request.
+	Principal   identity.ResolvedPrincipal `json:"principal,omitempty"`
+	Purpose     string                     `json:"purpose,omitempty"`
+	PurposeNote string                     `json:"purpose_note,omitempty"`
+	Sensitivity []string                   `json:"sensitivity,omitempty"`
 }
 
 // policyCheckResp is the response from POST /v1/governance/check.

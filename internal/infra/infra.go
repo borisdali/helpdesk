@@ -15,14 +15,16 @@ type DBServer struct {
 	K8sCluster       string   `json:"k8s_cluster,omitempty"`
 	K8sNamespace     string   `json:"k8s_namespace,omitempty"`
 	VMName           string   `json:"vm_name,omitempty"`
-	Tags             []string `json:"tags,omitempty"` // Tags for policy matching (e.g., "production", "staging")
+	Tags             []string `json:"tags,omitempty"`        // Tags for policy matching (e.g., "production", "staging")
+	Sensitivity      []string `json:"sensitivity,omitempty"` // Sensitivity classes (e.g., "pii", "critical")
 }
 
 // K8sCluster represents a managed Kubernetes cluster.
 type K8sCluster struct {
-	Name    string   `json:"name"`
-	Context string   `json:"context"`
-	Tags    []string `json:"tags,omitempty"` // Tags for policy matching (e.g., "production", "staging")
+	Name        string   `json:"name"`
+	Context     string   `json:"context"`
+	Tags        []string `json:"tags,omitempty"`        // Tags for policy matching (e.g., "production", "staging")
+	Sensitivity []string `json:"sensitivity,omitempty"` // Sensitivity classes (e.g., "critical")
 }
 
 // VM represents a virtual machine hosting infrastructure.
