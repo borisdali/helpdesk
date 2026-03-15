@@ -4,6 +4,8 @@ package audit
 import (
 	"encoding/json"
 	"time"
+
+	"helpdesk/internal/identity"
 )
 
 // EventType identifies the type of audit event.
@@ -221,6 +223,12 @@ type Event struct {
 	// Hash chain for tamper evidence
 	PrevHash  string `json:"prev_hash,omitempty"`  // hash of previous event
 	EventHash string `json:"event_hash,omitempty"` // hash of this event
+
+	// Principal is the verified identity of the caller. Set on gateway_request
+	// and other entry-point events so every journey has an identity anchor.
+	Principal   *identity.ResolvedPrincipal `json:"principal,omitempty"`
+	Purpose     string                      `json:"purpose,omitempty"`
+	PurposeNote string                      `json:"purpose_note,omitempty"`
 
 	Session  Session   `json:"session"`
 	Input    Input     `json:"input"`

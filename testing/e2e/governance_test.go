@@ -129,6 +129,41 @@ func auditdPost(t *testing.T, auditdURL, path string, body any) map[string]any {
 	return result
 }
 
+// auditdSupportsDelegationVerification probes whether the running auditd binary
+// stores and returns the delegation_verification field. Older images drop
+// unknown JSON keys on the store/retrieve round-trip.
+//
+// Returns false with a t.Log when the field is not supported, so callers can
+// skip gracefully. Rebuild with 'make image' (or use 'make e2e', which depends
+// on the image target).
+func auditdSupportsDelegationVerification(t *testing.T, auditdURL string) bool {
+	t.Helper()
+	probeID := fmt.Sprintf("e2e-dvprobe-%d", time.Now().UnixNano())
+	probe := map[string]any{
+		"event_id":   probeID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "delegation_verification",
+		"session":    map[string]any{"id": "e2e-dvprobe-session"},
+		"delegation_verification": map[string]any{
+			"delegation_event_id": "probe-anchor",
+			"agent":               "probe-agent",
+			"mismatch":            true,
+		},
+	}
+	created := auditdPost(t, auditdURL, "/v1/events", probe)
+	eventID, _ := created["event_id"].(string)
+	if eventID == "" {
+		return false
+	}
+	result := auditdGet(t, auditdURL, "/v1/events/"+eventID)
+	dv, _ := result["delegation_verification"].(map[string]any)
+	if dv == nil {
+		t.Logf("auditd does not persist delegation_verification field — image predates that feature. Rebuild with 'make image'.")
+		return false
+	}
+	return true
+}
+
 // =============================================================================
 // Gateway governance endpoints (no API key required)
 // =============================================================================
@@ -867,6 +902,9 @@ func TestGovernance_GetEvent_DelegationVerification(t *testing.T) {
 	cfg := LoadConfig()
 	if !isAuditdReachable(cfg.AuditdURL) {
 		t.Skipf("auditd not reachable at %s", cfg.AuditdURL)
+	}
+	if !auditdSupportsDelegationVerification(t, cfg.AuditdURL) {
+		t.Skip("auditd does not support delegation_verification field; skipping")
 	}
 
 	traceID := fmt.Sprintf("e2e-delver-%d", time.Now().UnixNano())

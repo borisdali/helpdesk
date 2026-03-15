@@ -77,13 +77,17 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 			if sessionID == "" {
 				sessionID = "asess_" + uuid.New().String()[:8]
 			}
+			p := tc.Principal
 			event := &Event{
-				EventID:   "req_" + uuid.New().String()[:8],
-				Timestamp: time.Now().UTC(),
-				EventType: EventTypeGatewayRequest,
-				TraceID:   traceID,
-				Session:   Session{ID: sessionID},
-				Input:     Input{UserQuery: parsed.userQuery},
+				EventID:     "req_" + uuid.New().String()[:8],
+				Timestamp:   time.Now().UTC(),
+				EventType:   EventTypeGatewayRequest,
+				TraceID:     traceID,
+				Principal:   &p,
+				Purpose:     tc.Purpose,
+				PurposeNote: tc.PurposeNote,
+				Session:     Session{ID: sessionID},
+				Input:       Input{UserQuery: parsed.userQuery},
 				// Tool.Agent is stored as decision_agent so the journey summary
 				// can show which agent handled the request.
 				Tool: &ToolExecution{Name: "", Agent: agentName},

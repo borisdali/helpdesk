@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"helpdesk/internal/identity"
 )
 
 // GatewayAuditor provides audit logging for gateway requests.
@@ -80,6 +81,11 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 		})
 	}
 
+	p := req.ResolvedPrincipal
+	var principal *identity.ResolvedPrincipal
+	if p.EffectiveID() != "" || p.AuthMethod != "" {
+		principal = &p
+	}
 	event := &Event{
 		EventID:     "gw_" + uuid.New().String()[:8],
 		Timestamp:   req.StartTime.UTC(),
@@ -87,6 +93,9 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 		TraceID:     traceID,
 		ParentID:    req.ParentID,
 		ActionClass: actionClass,
+		Principal:   principal,
+		Purpose:     req.Purpose,
+		PurposeNote: req.PurposeNote,
 		Session: Session{
 			ID:     req.RequestID,
 			UserID: req.Principal,
@@ -122,11 +131,14 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 
 // GatewayRequest contains the data for a gateway audit event.
 type GatewayRequest struct {
-	RequestID      string
-	TraceID        string         // end-to-end trace ID
-	ParentID       string         // parent event ID (if this is a child event)
-	Principal      string         // authenticated user or API key
-	Environment    string         // environment context (e.g., "prod", "staging")
+	RequestID         string
+	TraceID           string                    // end-to-end trace ID
+	ParentID          string                    // parent event ID (if this is a child event)
+	Principal         string                    // authenticated user or API key (legacy; EffectiveID)
+	ResolvedPrincipal identity.ResolvedPrincipal // full verified identity
+	Purpose           string                    // declared purpose (diagnostic, remediation, …)
+	PurposeNote       string                    // free-text context (e.g. incident ID)
+	Environment       string                    // environment context (e.g., "prod", "staging")
 	Endpoint       string
 	Method         string
 	Agent          string
