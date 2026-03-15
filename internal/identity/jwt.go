@@ -176,7 +176,7 @@ func (p *JWTProvider) validateJWT(token string) (map[string]any, error) {
 func (p *JWTProvider) getKey(kid string) (any, error) {
 	p.mu.RLock()
 	if time.Now().Before(p.cacheExpiry) {
-		if key, ok := p.cachedKeys[kid]; ok {
+		if key := p.lookupKey(kid); key != nil {
 			p.mu.RUnlock()
 			return key, nil
 		}
@@ -195,11 +195,26 @@ func (p *JWTProvider) getKey(kid string) (any, error) {
 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	key, ok := p.cachedKeys[kid]
-	if !ok {
-		return nil, fmt.Errorf("key ID %q not found in JWKS (have %d keys)", kid, len(p.cachedKeys))
+	if key := p.lookupKey(kid); key != nil {
+		return key, nil
 	}
-	return key, nil
+	return nil, fmt.Errorf("key ID %q not found in JWKS (have %d keys)", kid, len(p.cachedKeys))
+}
+
+// lookupKey finds a key by kid. When the JWT carries no kid (kid=="") and the
+// JWKS contains exactly one key, that key is returned — many dev/internal IdPs
+// omit the kid field. Caller must hold at least p.mu.RLock.
+func (p *JWTProvider) lookupKey(kid string) any {
+	if kid != "" {
+		return p.cachedKeys[kid] // may be nil
+	}
+	// No kid in JWT: use the sole JWKS key if unambiguous.
+	if len(p.cachedKeys) == 1 {
+		for _, v := range p.cachedKeys {
+			return v
+		}
+	}
+	return nil
 }
 
 type jwkJSON struct {

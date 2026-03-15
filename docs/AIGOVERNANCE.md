@@ -1075,22 +1075,24 @@ is designed to support.
 
 At aiHelpDesk we stipulate that agentic systems require even tighter control than those
 that are accessed and operated strictly by humans (or service accounts, but working
-on behalf of strictly deterministic and fully predictable automation).
+on behalf of the strictly deterministic and fully predictable automation).
 
 We strongly discourage aiHelpDesk users from allowing agents to make use of
 the system-wide predefined roles, especially those shared with humans, e.g. DBA.
-Carving out a dedicated agent's role is a good first step, but we claim that alone is
-nearly not sufficient because once you allow an agent access your data, you should
-have the flexibility to *exclude* actions like exporting the sensitive data about
-your customers. If that's in fact a legitimate operation that you want an agent
-to do on your behalf, don't allow it without a clear justification.
+Carving out a dedicated agent's role is a good first step, but we claim that this
+precaution alone is nearly not sufficient because once you allow an agent to access
+your data, you should have the flexibility to *exclude* actions that you know
+an agent should not be attempting (likely flagged in your security review).
+An example may be an action of exporting the sensitive data about your customers.
+If that's in fact a legitimate operation that you want an agent to do
+on your behalf, don't allow it without a clear, agent provided justification.
 
-Some data may be less sensitive and a wide range agent's access may be not a concern,
-but for many mission critical databases it is. At aiHelpDesk we believe that as a user
-you should have the flexibility to classify your data to drive access.
+To be sure, some data may be less sensitive and a wide agent's access may be not
+a concern, but for many mission critical databases it is. At aiHelpDesk we believe
+that as a user you should have the flexibility to classify your data to drive access.
 
-Hence the three access control dimensions that this sub-module adds on top of the
-existing structural resource dimension of the policy tags:
+Hence the three access control dimensions that this AI Governance sub-module
+adds on top of the existing structural resource dimension of the policy tags:
 
 | Dimension | Without this sub-module | With this sub-module |
 |-----------|--------------|-------------|
@@ -1100,9 +1102,15 @@ existing structural resource dimension of the policy tags:
 
 To be clear on the split: the three identity-aware dimensions answer who is asking
 and why, while the tag-based dimensions answer what are they asking to do and
-against which resource. A full policy decision is the intersection of both.
-For instance, "alice (dba-agent, purpose=remediation) writing to a production PII database"
-requires matching on all five axes simultaneously (and may require a human approval).
+against which resource. A full policy decision to allow or deny data access is the
+intersection of both. For instance, you could configure aiHelpDesk to allow
+"alice (role=dba-agent, purpose=remediation) writing to a sensitive production
+PII database", which would require matching on all five axes simultaneously
+(and may further require a human approval too).
+
+To put it another way, aiHelpDesk allows you as a user to answer "which agent,
+acting on behalf of which user, for which purpose, can access which data attributes."
+That's a much harder problem than just RBAC, which resolves user → roles.
 
 ---
 
