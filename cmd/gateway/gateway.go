@@ -85,15 +85,14 @@ func (g *Gateway) SetOperatingMode(mode string) {
 
 // resolveRequest extracts the verified principal and declared purpose from an
 // HTTP request. Falls back to NoAuthProvider behaviour when no provider is set.
-func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFromBody string) (identity.ResolvedPrincipal, string, string) {
+func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFromBody string) (identity.ResolvedPrincipal, string, string, error) {
 	var principal identity.ResolvedPrincipal
 	if g.identityProvider != nil {
 		var err error
 		principal, err = g.identityProvider.Resolve(r)
 		if err != nil {
-			// Log but don't block — authentication errors are handled at the handler level
-			// when strict mode is needed. For now, degrade gracefully.
 			slog.Warn("gateway: identity resolution failed", "err", err)
+			return identity.ResolvedPrincipal{}, "", "", err
 		}
 	} else {
 		// No provider configured — legacy no-auth behaviour.
@@ -112,7 +111,7 @@ func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFr
 	if purposeNote == "" {
 		purposeNote = purposeNoteFromBody
 	}
-	return principal, purpose, purposeNote
+	return principal, purpose, purposeNote, nil
 }
 
 // agentAliases maps short names (used in the /query endpoint) to internal
@@ -401,7 +400,25 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 
 	// Resolve caller identity and purpose. Purpose fields may arrive via headers
 	// (set directly or bridged from the JSON body in handleQuery).
-	resolvedPrincipal, purpose, purposeNote := g.resolveRequest(r, "", "")
+	resolvedPrincipal, purpose, purposeNote, err := g.resolveRequest(r, "", "")
+	if err != nil {
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID: requestID,
+			TraceID:   traceID,
+			Endpoint:  r.URL.Path,
+			Method:    r.Method,
+			Agent:     agentName,
+			ToolName:  toolName,
+			Message:   prompt,
+			StartTime: start,
+			Duration:  time.Since(start),
+			Status:    "error",
+			Error:     "authentication failed: " + err.Error(),
+			HTTPCode:  http.StatusUnauthorized,
+		})
+		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
+		return
+	}
 	principalStr := resolvedPrincipal.EffectiveID()
 
 	client, ok := g.clients[agentName]

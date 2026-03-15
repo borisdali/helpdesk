@@ -14,7 +14,7 @@ and with appropriate human oversight.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           AI GOVERNANCE LAYERS                              │
+│                       aiHelpDesk AI Governance layers                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                        ┌──────────────┐     │
 │                                                        │  aiHelpDesk  │     │
@@ -50,7 +50,8 @@ and with appropriate human oversight.
 
 aiHelpDesk Governance consists of eight well-defined components (we don't count 
 the `Operating Mode` as a standalone component, rather a way to run aiHelpDesk
-AI Governance):
+AI Governance, but it's listed below for completeness as it controls the
+behavior of the components):
 
 | § | Component | Status | Description |
 |----|------|--------|-------------|
@@ -1070,27 +1071,38 @@ These two questions, combined with the existing resource tag system, produce the
 three-dimension access control model that the policy engine's `principals` block
 is designed to support.
 
-### 10.1 Why Role-Based Access Alone Is Insufficient
+### 10.1 Why Role-Based Access (RBAC) Alone Is Insufficient
 
-The policy engine supports principal matching, e.g. `role: dba`, `user: alice@example.com`,
-`service: srebot`. This alone however is not sufficient or otherwise the policy engine
-would just receive an empty `RequestPrincipal{}` because no code path connects, resolves
-and propagates identity. This is the *plumbing* gap.
+At aiHelpDesk we stipulate that agentic systems require even tighter control than those
+that are accessed and operated strictly by humans (or service accounts, but working
+on behalf of strictly deterministic and fully predictable automation).
 
-Beyond the plumbing, RBAC has a deeper limitation for agent systems.
-An agent combines data sources and acts at scale in ways a human user does not —
-and the same data can be legitimately accessed for one reason and not for another.
-A DBA role authorizes access to production databases, but it does not authorize
-bulk-exporting customer records for data analysis. The same access, the same role,
-different purposes — and policy must be able to distinguish them.
+We strongly discourage aiHelpDesk users from allowing agents to make use of
+the system-wide predefined roles, especially those shared with humans, e.g. DBA.
+Carving out a dedicated agent's role is a good first step, but we claim that alone is
+nearly not sufficient because once you allow an agent access your data, you should
+have the flexibility to *exclude* actions like exporting the sensitive data about
+your customers. If that's in fact a legitimate operation that you want an agent
+to do on your behalf, don't allow it without a clear justification.
 
-The three access control dimensions this sub-module adds:
+Some data may be less sensitive and a wide range agent's access may be not a concern,
+but for many mission critical databases it is. At aiHelpDesk we believe that as a user
+you should have the flexibility to classify your data to drive access.
+
+Hence the three access control dimensions that this sub-module adds on top of the
+existing structural resource dimension of the policy tags:
 
 | Dimension | Without this sub-module | With this sub-module |
 |-----------|--------------|-------------|
 | **Role** | Defined in policy YAML, never populated in requests | Full resolution: identity provider → verified user → roles |
 | **Data sensitivity** | Resource tags exist (`production`, `staging`) but no sensitivity classification | Explicit sensitivity class per resource: `pii`, `sensitive`, `internal`, `public`, `critical` |
 | **Purpose** | Absent | Declared per request; enforced as a policy condition alongside role and sensitivity |
+
+To be clear on the split: the three identity-aware dimensions answer who is asking
+and why, while the tag-based dimensions answer what are they asking to do and
+against which resource. A full policy decision is the intersection of both.
+For instance, "alice (dba-agent, purpose=remediation) writing to a production PII database"
+requires matching on all five axes simultaneously (and may require a human approval).
 
 ---
 
