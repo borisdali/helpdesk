@@ -86,7 +86,7 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 				Principal:   &p,
 				Purpose:     tc.Purpose,
 				PurposeNote: tc.PurposeNote,
-				Session:     Session{ID: sessionID},
+				Session:     Session{ID: sessionID, UserID: p.EffectiveID()},
 				Input:       Input{UserQuery: parsed.userQuery},
 				// Tool.Agent is stored as decision_agent so the journey summary
 				// can show which agent handled the request.

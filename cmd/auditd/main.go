@@ -351,6 +351,9 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 			opts.Since = d
 		}
 	}
+	if v := q.Get("purpose"); v != "" {
+		opts.Purpose = v
+	}
 	if v := q.Get("category"); v != "" {
 		opts.Category = v
 	}

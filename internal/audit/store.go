@@ -188,6 +188,8 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		session_agent TEXT,
 		user_id TEXT,
 		user_query TEXT,
+		purpose TEXT,
+		purpose_note TEXT,
 		tool_name TEXT,
 		tool_json TEXT,
 		approval_status TEXT,
@@ -226,6 +228,8 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_status TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_json TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "session_agent TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose_note TEXT",
 	}
 	for _, m := range migrations {
 		db.Exec(m) //nolint:errcheck
@@ -305,6 +309,17 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		}
 	}
 
+	// Extract purpose at the top level for indexed querying.
+	// Top-level Event.Purpose is set on gateway_request anchor events.
+	// PolicyDecision.Purpose is set on policy_decision events.
+	// Both sources are consolidated into a single queryable column.
+	purposeVal := event.Purpose
+	purposeNoteVal := event.PurposeNote
+	if purposeVal == "" && event.PolicyDecision != nil {
+		purposeVal = event.PolicyDecision.Purpose
+		purposeNoteVal = event.PolicyDecision.PurposeNote
+	}
+
 	var toolName, toolAgent string
 	var toolJSON []byte
 	if event.Tool != nil {
@@ -330,11 +345,12 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 			event_id, timestamp, event_type, trace_id, parent_id, action_class,
 			prev_hash, event_hash,
 			session_id, session_agent, user_id, user_query,
+			purpose, purpose_note,
 			tool_name, tool_json,
 			approval_status, approval_json,
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		event.EventID,
 		event.Timestamp.Format(time.RFC3339Nano),
@@ -348,6 +364,8 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		event.Session.AgentName,
 		event.Session.UserID,
 		event.Input.UserQuery,
+		purposeVal,
+		purposeNoteVal,
 		toolName,
 		string(toolJSON),
 		approvalStatus,
@@ -498,6 +516,7 @@ type QueryOptions struct {
 // JourneyOptions specifies filters for QueryJourneys.
 type JourneyOptions struct {
 	UserID     string        // optional; empty = all users
+	Purpose    string        // optional; filter by declared purpose (e.g. "diagnostic")
 	From       time.Time     // inclusive lower bound on timestamp
 	Until      time.Time     // exclusive upper bound on timestamp
 	Limit      int           // max journeys returned; default 50
@@ -523,6 +542,8 @@ type JourneySummary struct {
 	DurationMs  int64               `json:"duration_ms"`
 	UserID      string              `json:"user_id,omitempty"`
 	UserQuery   string              `json:"user_query,omitempty"`
+	Purpose     string              `json:"purpose,omitempty"`
+	PurposeNote string              `json:"purpose_note,omitempty"`
 	Agent       string              `json:"agent,omitempty"`
 	Category    string              `json:"category,omitempty"` // decision_category from delegation_decision event
 	Delegations []DelegationSummary `json:"delegations,omitempty"`
@@ -572,6 +593,10 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		q1 += " AND user_id = ?"
 		args1 = append(args1, opts.UserID)
 	}
+	if opts.Purpose != "" {
+		q1 += " AND purpose = ?"
+		args1 = append(args1, opts.Purpose)
+	}
 	if !opts.From.IsZero() {
 		q1 += " AND timestamp >= ?"
 		args1 = append(args1, opts.From.Format(time.RFC3339Nano))
@@ -609,7 +634,8 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	placeholders = placeholders[:len(placeholders)-1]
 	q2 := fmt.Sprintf(
 		`SELECT trace_id, event_type, user_id, user_query, session_agent, decision_agent,
-		        decision_category, tool_name, outcome_status, approval_status, timestamp
+		        decision_category, tool_name, outcome_status, approval_status, timestamp,
+		        purpose, purpose_note
 		 FROM audit_events
 		 WHERE trace_id IN (%s)
 		 ORDER BY trace_id, timestamp ASC`, placeholders)
@@ -629,6 +655,8 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		endedAt            string
 		userID             string
 		userQuery          string
+		purpose            string
+		purposeNote        string
 		agent              string // name of the owning agent (orchestrator name when session_agent is set, else sub-agent)
 		category           string
 		tools              []string
@@ -652,9 +680,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			userID, userQuery, sessionAgent, agent, decisionCategory    sql.NullString
 			toolName, outcomeStatus, approvalStatus                     sql.NullString
 			ts                                                           string
+			purposeCol, purposeNoteCol                                  sql.NullString
 		)
 		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &sessionAgent, &agent,
-			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts); err != nil {
+			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts,
+			&purposeCol, &purposeNoteCol); err != nil {
 			return nil, fmt.Errorf("scan journey event: %w", err)
 		}
 		d := byTrace[traceID]
@@ -691,6 +721,12 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			if userQuery.Valid && userQuery.String != "" {
 				d.userQuery = userQuery.String
 			}
+			if purposeCol.Valid && purposeCol.String != "" {
+				d.purpose = purposeCol.String
+			}
+			if purposeNoteCol.Valid && purposeNoteCol.String != "" {
+				d.purposeNote = purposeNoteCol.String
+			}
 			// Prefer the session's owning agent name (e.g. "helpdesk_orchestrator")
 			// over the sub-agent being delegated to. This makes orchestrator-mediated
 			// journeys show the orchestrator as the top-level agent.
@@ -718,6 +754,12 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			}
 			if userQuery.Valid && userQuery.String != "" && d.userQuery == "" {
 				d.userQuery = userQuery.String
+			}
+			if purposeCol.Valid && purposeCol.String != "" && d.purpose == "" {
+				d.purpose = purposeCol.String
+			}
+			if purposeNoteCol.Valid && purposeNoteCol.String != "" && d.purposeNote == "" {
+				d.purposeNote = purposeNoteCol.String
 			}
 			if agent.Valid && agent.String != "" && d.agent == "" {
 				d.agent = agent.String
@@ -783,6 +825,8 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			DurationMs:  durationMs,
 			UserID:      d.userID,
 			UserQuery:   d.userQuery,
+			Purpose:     d.purpose,
+			PurposeNote: d.purposeNote,
 			Agent:       d.agent,
 			Category:    d.category,
 			Delegations: d.delegations,
