@@ -862,6 +862,85 @@ func TestJWTProvider_JWKS_KeyCaching(t *testing.T) {
 	}
 }
 
+// ── lookupKey: no-kid fallback ────────────────────────────────────────────────
+
+// TestJWTProvider_NoKid_SingleKey verifies that a JWT with no kid field is
+// accepted when the JWKS contains exactly one key (common in dev/internal IdPs).
+func TestJWTProvider_NoKid_SingleKey(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	// JWKS has one key with a kid; JWT header omits the kid entirely.
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(rsaJWKS("only-key", &key.PublicKey))
+	}))
+	defer jwksServer.Close()
+
+	provider := NewJWTProvider(JWTConfig{JWKSUrl: jwksServer.URL})
+
+	// Sign a JWT without a kid in the header.
+	claims := map[string]any{"sub": "alice@example.com", "exp": float64(time.Now().Add(time.Hour).Unix())}
+	hb, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"}) // no kid
+	cb, _ := json.Marshal(claims)
+	signingInput := base64.RawURLEncoding.EncodeToString(hb) + "." + base64.RawURLEncoding.EncodeToString(cb)
+	h := sha256.New()
+	h.Write([]byte(signingInput))
+	sig, _ := rsa.SignPKCS1v15(rand.Reader, key, gocrypto.SHA256, h.Sum(nil))
+	token := signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+
+	principal, err := provider.Resolve(r)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if principal.UserID != "alice@example.com" {
+		t.Errorf("UserID = %q, want alice@example.com", principal.UserID)
+	}
+}
+
+// TestJWTProvider_NoKid_MultipleKeys verifies that a JWT with no kid is rejected
+// when the JWKS contains multiple keys (ambiguous — cannot pick the right one).
+func TestJWTProvider_NoKid_MultipleKeys(t *testing.T) {
+	key1, _ := rsa.GenerateKey(rand.Reader, 2048)
+	key2, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n1 := base64.RawURLEncoding.EncodeToString(key1.PublicKey.N.Bytes())
+		e1 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key1.PublicKey.E)).Bytes())
+		n2 := base64.RawURLEncoding.EncodeToString(key2.PublicKey.N.Bytes())
+		e2 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key2.PublicKey.E)).Bytes())
+		body, _ := json.Marshal(map[string]any{"keys": []map[string]any{
+			{"kty": "RSA", "alg": "RS256", "kid": "key-a", "n": n1, "e": e1},
+			{"kty": "RSA", "alg": "RS256", "kid": "key-b", "n": n2, "e": e2},
+		}})
+		w.Write(body)
+	}))
+	defer jwksServer.Close()
+
+	provider := NewJWTProvider(JWTConfig{JWKSUrl: jwksServer.URL})
+
+	claims := map[string]any{"sub": "alice", "exp": float64(time.Now().Add(time.Hour).Unix())}
+	hb, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"}) // no kid
+	cb, _ := json.Marshal(claims)
+	signingInput := base64.RawURLEncoding.EncodeToString(hb) + "." + base64.RawURLEncoding.EncodeToString(cb)
+	h := sha256.New()
+	h.Write([]byte(signingInput))
+	sig, _ := rsa.SignPKCS1v15(rand.Reader, key1, gocrypto.SHA256, h.Sum(nil))
+	token := signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+
+	_, err := provider.Resolve(r)
+	if err == nil {
+		t.Fatal("expected error for no-kid JWT with multiple JWKS keys, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found in JWKS") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // ── HashAPIKey / verifyArgon2id round-trip ────────────────────────────────────
 
 func TestHashAPIKey_RoundTrip(t *testing.T) {

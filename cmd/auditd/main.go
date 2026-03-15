@@ -309,6 +309,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 			opts.Since = t
 		}
 	}
+	if v := r.URL.Query().Get("outcome_status"); v != "" {
+		opts.OutcomeStatus = v
+	}
 
 	events, err := s.store.Query(r.Context(), opts)
 	if err != nil {

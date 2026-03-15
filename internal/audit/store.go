@@ -460,6 +460,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		query += " AND approval_status = ?"
 		args = append(args, string(opts.ApprovalStatus))
 	}
+	if opts.OutcomeStatus != "" {
+		query += " AND outcome_status = ?"
+		args = append(args, opts.OutcomeStatus)
+	}
 
 	// Chronological order for trace/prefix queries, reverse chronological otherwise
 	if opts.TraceID != "" || opts.TraceIDPrefix != "" {
@@ -511,6 +515,7 @@ type QueryOptions struct {
 	ActionClass    ActionClass    // filter by action class (read, write, destructive)
 	ToolName       string         // filter by tool name
 	ApprovalStatus ApprovalStatus // filter by approval status
+	OutcomeStatus  string         // filter by outcome_status (e.g. "error", "denied", "allow")
 }
 
 // JourneyOptions specifies filters for QueryJourneys.

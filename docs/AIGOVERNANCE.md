@@ -1100,9 +1100,9 @@ adds on top of the existing structural resource dimension of the policy tags:
 | **Data sensitivity** | Resource tags exist (`production`, `staging`) but no sensitivity classification | Explicit sensitivity class per resource: `pii`, `sensitive`, `internal`, `public`, `critical` |
 | **Purpose** | Absent | Declared per request; enforced as a policy condition alongside role and sensitivity |
 
-To be clear on the split: the three identity-aware dimensions answer who is asking
-and why, while the tag-based dimensions answer what are they asking to do and
-against which resource. A full policy decision to allow or deny data access is the
+To be clear on the split: the three identity-aware dimensions answer *who* is asking
+and *why*, while the tag-based dimensions answer *what* are they asking to do and
+against *which resource*. A full policy decision to allow or deny data access is the
 intersection of both. For instance, you could configure aiHelpDesk to allow
 "alice (role=dba-agent, purpose=remediation) writing to a sensitive production
 PII database", which would require matching on all five axes simultaneously
