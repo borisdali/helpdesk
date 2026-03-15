@@ -16,13 +16,16 @@ and with appropriate human oversight.
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           AI GOVERNANCE LAYERS                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
+│                                                        ┌──────────────┐     │
+│                                                        │  aiHelpDesk  │     │
+│                                                        │   Journeys   │     │
+│                                                        └──────────────┘     │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
 │  │   POLICY     │  │   APPROVAL   │  │  GUARDRAILS  │  │    AUDIT     │     │
 │  │   ENGINE     │  │   WORKFLOWS  │  │   & LIMITS   │  │   SYSTEM     │     │
 │  │              │  │              │  │              │  │              │     │
-│  │ What's       │  │ Human-in-    │  │ Hard safety  │  │ Tamper-proof │     │
-│  │ allowed?     │  │ the-loop     │  │ constraints  │  │ record       │     │
+│  │    What's    │  │   Human-in-  │  │ Hard safety  │  │ Tamper-proof │     │
+│  │   allowed?   │  │   the-loop   │  │ constraints  │  │    record    │     │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
 │         │                 │                 │                 │             │
 │         └─────────────────┴─────────────────┴─────────────────┘             │
@@ -37,7 +40,7 @@ and with appropriate human oversight.
 │  │  & ACCESS    │  │  ABILITY     │  │   & UNDO     │  │  REPORTING   │     │
 │  │              │  │              │  │              │  │              │     │
 │  │ Who can do   │  │ Why did AI   │  │ Recover from │  │ Prove it     │     │
-│  │ what?        │  │ decide this? │  │ mistakes     │  │ works        │     │
+│  │    what?     │  │ decide this? │  │   mistakes   │  │   works      │     │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -45,19 +48,21 @@ and with appropriate human oversight.
 
 ## 2. Components
 
-aiHelpDesk Governance consists of eight well-defined components:
+aiHelpDesk Governance consists of eight well-defined components (we don't count 
+the `Operating Mode` as a standalone component, rather a way to run aiHelpDesk
+AI Governance):
 
-| Component | Status | Description |
-|-----------|--------|-------------|
-| [Audit System](#7-audit-system) | **Implemented** | Tamper-evident logging with hash chains |
-| [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
-| [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
-| [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
-| [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
-| [Operating Mode](#6-operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
-| [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
-| [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
-| Rollback & Undo | Planned | Recovery from mistakes |
+| § | Component | Status | Description |
+|----|------|--------|-------------|
+| 3 | [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
+| 4 | [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
+| 5 | [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
+| 6 | [Operating Mode](#6-operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
+| 7 | [Audit System](#7-audit-system) | **Implemented** | Tamper-evident logging with hash chains |
+| 8 | [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
+| 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
+| 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
+| ?? | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
 

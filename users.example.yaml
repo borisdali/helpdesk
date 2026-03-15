@@ -8,38 +8,35 @@
 # stored hash is verified with Argon2id.
 #
 # To generate an Argon2id hash for a service account API key:
-#   echo -n "your-secret-key" | argon2 somesalt -id -e
-# Or use the helpdesk/internal/identity package's HashAPIKey helper.
+#   go run ./cmd/hashapikey                     # prompts for key (no echo)
+#   go run ./cmd/hashapikey my-secret-key       # key as argument
+#   echo -n "my-secret-key" | go run ./cmd/hashapikey  # from pipe
 
 users:
-  - user_id: alice@example.com
+  - id: alice@example.com
     roles: [dba, sre]
-    display_name: Alice (Lead DBA)
 
-  - user_id: bob@example.com
+  - id: bob@example.com
     roles: [developer]
-    display_name: Bob (Backend Engineer)
 
-  - user_id: carol@example.com
+  - id: carol@example.com
     roles: [sre, oncall]
-    display_name: Carol (SRE On-call)
 
-  - user_id: dave@example.com
+  - id: dave@example.com
     roles: [readonly]
-    display_name: Dave (Readonly Observer)
 
 service_accounts:
   # srebot: automated SRE tooling. API key hashed with Argon2id.
   # Real deployments: store the hash in a secret manager and inject at startup.
-  - name: srebot
+  - id: srebot
     roles: [sre-automation]
     # Hash of the API key "srebot-secret-key-replace-in-production"
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$c2FsdGhlcmU$placeholder-replace-with-real-hash"
 
-  - name: secbot
+  - id: secbot
     roles: [security-scanner]
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$c2VjYm90c2FsdA$placeholder-replace-with-real-hash"
 
-  - name: ci-pipeline
+  - id: ci-pipeline
     roles: [ci-readonly]
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$Y2lwaXBlbGluZQ$placeholder-replace-with-real-hash"

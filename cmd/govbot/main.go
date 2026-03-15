@@ -962,8 +962,8 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 11: Identity Coverage ───────────────────────────────────────────
-	logPhase(11, "Identity Coverage")
+	// ── Phase 10: Identity Coverage ───────────────────────────────────────────
+	logPhase(10, "Identity Coverage")
 	logf("Checks what fraction of policy decisions carry verified identity (user_id/service).")
 	fmt.Println()
 
@@ -1031,8 +1031,8 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 12: Purpose Coverage ────────────────────────────────────────────
-	logPhase(12, "Purpose Coverage")
+	// ── Phase 11: Purpose Coverage ────────────────────────────────────────────
+	logPhase(11, "Purpose Coverage")
 	logf("Checks declared purposes on sensitive and write/destructive operations.")
 	fmt.Println()
 
@@ -1100,8 +1100,8 @@ func main() {
 	}
 	fmt.Println()
 
-	// ── Phase 10: Summary ─────────────────────────────────────────────────────
-	logPhase(10, "Compliance Summary")
+	// ── Phase 12: Summary ─────────────────────────────────────────────────────
+	logPhase(12, "Compliance Summary")
 
 	overall := "✓ HEALTHY"
 	if len(alerts) > 0 {

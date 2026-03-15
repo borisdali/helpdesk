@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
@@ -93,6 +94,23 @@ func (p *StaticProvider) resolveServiceAccount(apiKey string) (ResolvedPrincipal
 		}
 	}
 	return ResolvedPrincipal{}, fmt.Errorf("identity: invalid API key")
+}
+
+// HashAPIKey hashes a plaintext API key with Argon2id and returns a string
+// suitable for use as api_key_hash in users.yaml.
+// Parameters: m=65536 (64 MiB), t=3 iterations, p=4 threads, 32-byte output.
+func HashAPIKey(key string) (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generating salt: %w", err)
+	}
+	const memory, iterations, threads, keyLen = 65536, 3, 4, 32
+	hash := argon2.IDKey([]byte(key), salt, iterations, memory, threads, keyLen)
+	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
+		memory, iterations, threads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(hash),
+	), nil
 }
 
 // verifyArgon2id checks a plaintext key against an Argon2id hash string.

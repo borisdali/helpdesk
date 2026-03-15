@@ -861,3 +861,50 @@ func TestJWTProvider_JWKS_KeyCaching(t *testing.T) {
 		t.Errorf("JWKS should be fetched exactly once due to caching, got %d fetches", fetchCount)
 	}
 }
+
+// ── HashAPIKey / verifyArgon2id round-trip ────────────────────────────────────
+
+func TestHashAPIKey_RoundTrip(t *testing.T) {
+	key := "my-test-secret-key"
+	hash, err := HashAPIKey(key)
+	if err != nil {
+		t.Fatalf("HashAPIKey: %v", err)
+	}
+	ok, err := verifyArgon2id(key, hash)
+	if err != nil {
+		t.Fatalf("verifyArgon2id: %v", err)
+	}
+	if !ok {
+		t.Error("correct key did not verify against its own hash")
+	}
+}
+
+func TestHashAPIKey_WrongKey(t *testing.T) {
+	hash, err := HashAPIKey("correct-key")
+	if err != nil {
+		t.Fatalf("HashAPIKey: %v", err)
+	}
+	ok, err := verifyArgon2id("wrong-key", hash)
+	if err != nil {
+		t.Fatalf("verifyArgon2id: %v", err)
+	}
+	if ok {
+		t.Error("wrong key should not verify")
+	}
+}
+
+func TestHashAPIKey_UniqueHashes(t *testing.T) {
+	// Two hashes of the same key must differ (random salt).
+	h1, _ := HashAPIKey("same-key")
+	h2, _ := HashAPIKey("same-key")
+	if h1 == h2 {
+		t.Error("two hashes of the same key should differ due to random salt")
+	}
+	// But both must verify correctly.
+	for _, h := range []string{h1, h2} {
+		ok, err := verifyArgon2id("same-key", h)
+		if err != nil || !ok {
+			t.Errorf("hash %q did not verify: err=%v ok=%v", h, err, ok)
+		}
+	}
+}

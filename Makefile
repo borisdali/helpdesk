@@ -31,9 +31,10 @@ BIN_PKGS := \
 	approvals:./cmd/approvals/ \
 	secbot:./cmd/secbot/ \
 	govbot:./cmd/govbot/ \
-	govexplain:./cmd/govexplain/
+	govexplain:./cmd/govexplain/ \
+	hashapikey:./cmd/hashapikey/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
