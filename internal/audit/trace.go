@@ -32,6 +32,10 @@ type TraceContext struct {
 
 	// PurposeNote is an optional free-text explanation (e.g. incident number).
 	PurposeNote string `json:"purpose_note,omitempty"`
+
+	// PurposeExplicit is true when the purpose was explicitly declared by the caller
+	// (via X-Purpose header or request body), false when derived from operating mode.
+	PurposeExplicit bool `json:"purpose_explicit,omitempty"`
 }
 
 // NewTraceID generates a new trace ID with the default "tr_" prefix.
@@ -62,12 +66,13 @@ func NewTraceContext(origin string, principal identity.ResolvedPrincipal) *Trace
 // Child creates a child trace context with this event as the parent.
 func (tc *TraceContext) Child(parentEventID string) *TraceContext {
 	return &TraceContext{
-		TraceID:     tc.TraceID,
-		ParentID:    parentEventID,
-		Origin:      tc.Origin,
-		Principal:   tc.Principal,
-		Purpose:     tc.Purpose,
-		PurposeNote: tc.PurposeNote,
+		TraceID:         tc.TraceID,
+		ParentID:        parentEventID,
+		Origin:          tc.Origin,
+		Principal:       tc.Principal,
+		Purpose:         tc.Purpose,
+		PurposeNote:     tc.PurposeNote,
+		PurposeExplicit: tc.PurposeExplicit,
 	}
 }
 
@@ -107,6 +112,16 @@ func PurposeFromContext(ctx context.Context) (purpose, purposeNote string) {
 		return tc.Purpose, tc.PurposeNote
 	}
 	return "", ""
+}
+
+// PurposeExplicitFromContext returns true when the purpose was explicitly
+// declared by the caller (via header or request body), false when derived
+// from the operating mode.
+func PurposeExplicitFromContext(ctx context.Context) bool {
+	if tc := TraceContextFromContext(ctx); tc != nil {
+		return tc.PurposeExplicit
+	}
+	return false
 }
 
 // CurrentTraceStore provides thread-safe storage for the current trace ID.

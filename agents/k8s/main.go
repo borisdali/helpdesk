@@ -73,13 +73,14 @@ func main() {
 	approvalClient := agentutil.InitApprovalClient(cfg)
 
 	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
-		Engine:          policyEngine,
-		PolicyCheckURL:  cfg.PolicyCheckURL,
-		TraceStore:      traceStore,
-		ApprovalClient:  approvalClient,
-		ApprovalTimeout: cfg.ApprovalTimeout,
-		AgentName:       "k8s_agent",
-		ToolAuditor:     toolAuditor,
+		Engine:                     policyEngine,
+		PolicyCheckURL:             cfg.PolicyCheckURL,
+		TraceStore:                 traceStore,
+		ApprovalClient:             approvalClient,
+		ApprovalTimeout:            cfg.ApprovalTimeout,
+		AgentName:                  "k8s_agent",
+		ToolAuditor:                toolAuditor,
+		RequirePurposeForSensitive: os.Getenv("HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE") == "true",
 	})
 
 	// Apply HELPDESK_VERIFY_* env-var overrides for Level-2 post-mutation retry config.

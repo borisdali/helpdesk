@@ -42,9 +42,10 @@ var verifyTerminateConfig = retryutil.Config{
 
 // databaseInfo holds resolved database information for policy checks.
 type databaseInfo struct {
-	Name           string
-	ConnectionStr  string
-	Tags           []string
+	Name              string
+	ConnectionStr     string
+	Tags              []string
+	Sensitivity       []string
 	IsFromInfraConfig bool
 }
 
@@ -76,6 +77,7 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 						Name:              id,
 						ConnectionStr:     connStrOrName,
 						Tags:              db.Tags,
+						Sensitivity:       db.Sensitivity,
 						IsFromInfraConfig: true,
 					}, nil
 				}
@@ -111,6 +113,7 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 				Name:              connStrOrName,
 				ConnectionStr:     db.ConnectionString,
 				Tags:              db.Tags,
+				Sensitivity:       db.Sensitivity,
 				IsFromInfraConfig: true,
 			}, nil
 		}
@@ -242,7 +245,7 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 			}
 			note += "connection string not found in infraConfig; no tags available for policy matching"
 		}
-		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags, note); err != nil {
+		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags, note, dbInfo.Sensitivity); err != nil {
 			slog.Warn("policy denied database access",
 				"tool", toolName,
 				"database", dbInfo.Name,

@@ -61,11 +61,12 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 		// Build a TraceContext from the parsed A2A metadata and store it in the
 		// request context so tools can access principal and purpose via context helpers.
 		tc := &TraceContext{
-			TraceID:     traceID,
-			Origin:      "agent",
-			Principal:   parsed.resolvedPrincipal(),
-			Purpose:     parsed.purpose,
-			PurposeNote: parsed.purposeNote,
+			TraceID:         traceID,
+			Origin:          "agent",
+			Principal:       parsed.resolvedPrincipal(),
+			Purpose:         parsed.purpose,
+			PurposeNote:     parsed.purposeNote,
+			PurposeExplicit: parsed.purposeExplicit,
 		}
 		r = r.WithContext(WithTraceContext(r.Context(), tc))
 
@@ -107,12 +108,13 @@ type a2aRequestData struct {
 	userQuery   string
 	contextID   string
 	// Identity and purpose propagated from the upstream gateway/orchestrator:
-	userID      string
-	roles       []string
-	service     string
-	authMethod  string
-	purpose     string
-	purposeNote string
+	userID          string
+	roles           []string
+	service         string
+	authMethod      string
+	purpose         string
+	purposeNote     string
+	purposeExplicit bool
 }
 
 // resolvedPrincipal reconstructs the ResolvedPrincipal from A2A metadata fields.
@@ -164,6 +166,9 @@ func parseA2ARequest(body []byte) a2aRequestData {
 		}
 		if pn, ok := meta["purpose_note"].(string); ok {
 			out.purposeNote = pn
+		}
+		if pe, ok := meta["purpose_explicit"].(bool); ok {
+			out.purposeExplicit = pe
 		}
 		// roles may arrive as []any (JSON array) or []string.
 		if rawRoles, ok := meta["roles"]; ok {

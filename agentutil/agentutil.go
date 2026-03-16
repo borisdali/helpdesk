@@ -208,26 +208,28 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 
 // PolicyEnforcer wraps a policy engine with convenience methods for agents.
 type PolicyEnforcer struct {
-	engine             *policy.Engine
-	policyCheckURL     string        // non-empty → remote check mode via auditd
-	policyCheckTimeout time.Duration // HTTP timeout for remote checks (default 5s)
-	traceStore         *audit.CurrentTraceStore
-	approvalClient     *audit.ApprovalClient
-	approvalTimeout    time.Duration
-	agentName          string
-	toolAuditor        *audit.ToolAuditor // records policy decisions to the audit trail
+	engine                     *policy.Engine
+	policyCheckURL             string        // non-empty → remote check mode via auditd
+	policyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
+	traceStore                 *audit.CurrentTraceStore
+	approvalClient             *audit.ApprovalClient
+	approvalTimeout            time.Duration
+	agentName                  string
+	toolAuditor                *audit.ToolAuditor // records policy decisions to the audit trail
+	requirePurposeForSensitive bool               // enforce explicit purpose for pii/critical resources
 }
 
 // PolicyEnforcerConfig configures the policy enforcer.
 type PolicyEnforcerConfig struct {
-	Engine             *policy.Engine
-	PolicyCheckURL     string        // auditd base URL for remote checks (set from cfg.PolicyCheckURL)
-	PolicyCheckTimeout time.Duration // HTTP timeout for remote checks (default 5s)
-	TraceStore         *audit.CurrentTraceStore
-	ApprovalClient     *audit.ApprovalClient
-	ApprovalTimeout    time.Duration
-	AgentName          string
-	ToolAuditor        *audit.ToolAuditor // optional; enables policy decision audit events
+	Engine                     *policy.Engine
+	PolicyCheckURL             string        // auditd base URL for remote checks (set from cfg.PolicyCheckURL)
+	PolicyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
+	TraceStore                 *audit.CurrentTraceStore
+	ApprovalClient             *audit.ApprovalClient
+	ApprovalTimeout            time.Duration
+	AgentName                  string
+	ToolAuditor                *audit.ToolAuditor // optional; enables policy decision audit events
+	RequirePurposeForSensitive bool               // deny access to pii/critical resources without explicit purpose
 }
 
 // NewPolicyEnforcer creates a policy enforcer. If engine is nil, enforcement is disabled.
@@ -250,14 +252,15 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 		checkTimeout = 5 * time.Second
 	}
 	return &PolicyEnforcer{
-		engine:             cfg.Engine,
-		policyCheckURL:     cfg.PolicyCheckURL,
-		policyCheckTimeout: checkTimeout,
-		traceStore:         cfg.TraceStore,
-		approvalClient:     cfg.ApprovalClient,
-		toolAuditor:        cfg.ToolAuditor,
-		approvalTimeout:    timeout,
-		agentName:          cfg.AgentName,
+		engine:                     cfg.Engine,
+		policyCheckURL:             cfg.PolicyCheckURL,
+		policyCheckTimeout:         checkTimeout,
+		traceStore:                 cfg.TraceStore,
+		approvalClient:             cfg.ApprovalClient,
+		toolAuditor:                cfg.ToolAuditor,
+		approvalTimeout:            timeout,
+		agentName:                  cfg.AgentName,
+		requirePurposeForSensitive: cfg.RequirePurposeForSensitive,
 	}
 }
 
@@ -265,12 +268,25 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 // Returns nil if allowed, error if denied.
 // If approval is required and an approval client is configured, it will request
 // approval and wait for resolution.
-func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
+// sensitivity is a list of sensitivity labels from the infra config (e.g., "pii", "critical").
+func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string, sensitivity []string) error {
 	// Emit unconditional tool_invoked event before any policy evaluation.
 	// Fires even when enforcement is disabled, so govbot can detect tool calls
 	// that were never policy-checked (tool_invoked with no matching policy_decision).
 	if e.toolAuditor != nil {
 		e.toolAuditor.RecordToolInvoked(ctx, resourceType, resourceName, string(action), tags)
+	}
+
+	// Pre-check: if HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE is set and this resource
+	// has pii or critical sensitivity, require an explicit purpose declaration.
+	if e.requirePurposeForSensitive && hasSensitiveSensitivity(sensitivity) {
+		if !audit.PurposeExplicitFromContext(ctx) {
+			purpose, _ := audit.PurposeFromContext(ctx)
+			return fmt.Errorf("access to %s/%s requires an explicit purpose declaration "+
+				"(sensitivity: %s, current purpose %q was derived from operating mode, not declared); "+
+				"add 'purpose' to your request body or X-Purpose header",
+				resourceType, resourceName, strings.Join(sensitivity, ","), purpose)
+		}
 	}
 
 	if e.engine == nil && e.policyCheckURL == "" {
@@ -296,6 +312,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Principal:    principal,
 			Purpose:      purpose,
 			PurposeNote:  purposeNote,
+			Sensitivity:  sensitivity,
 		})
 		if err != nil {
 			return err
@@ -313,9 +330,10 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Service: principal.Service,
 		},
 		Resource: policy.RequestResource{
-			Type: resourceType,
-			Name: resourceName,
-			Tags: tags,
+			Type:        resourceType,
+			Name:        resourceName,
+			Tags:        tags,
+			Sensitivity: sensitivity,
 		},
 		Action: action,
 	}
@@ -425,13 +443,25 @@ func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceT
 }
 
 // CheckDatabase is a convenience method for database operations.
-func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, action policy.ActionClass, tags []string, note string) error {
-	return e.CheckTool(ctx, "database", dbName, action, tags, note)
+// sensitivity is a list of sensitivity labels from the infra config (e.g., "pii", "critical").
+func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, action policy.ActionClass, tags []string, note string, sensitivity []string) error {
+	return e.CheckTool(ctx, "database", dbName, action, tags, note, sensitivity)
 }
 
 // CheckKubernetes is a convenience method for Kubernetes operations.
-func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string, note string) error {
-	return e.CheckTool(ctx, "kubernetes", namespace, action, tags, note)
+// sensitivity is a list of sensitivity labels from the infra config (e.g., "pii", "critical").
+func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string, note string, sensitivity []string) error {
+	return e.CheckTool(ctx, "kubernetes", namespace, action, tags, note, sensitivity)
+}
+
+// hasSensitiveSensitivity returns true if any sensitivity label is "pii" or "critical".
+func hasSensitiveSensitivity(sensitivity []string) bool {
+	for _, s := range sensitivity {
+		if s == "pii" || s == "critical" {
+			return true
+		}
+	}
+	return false
 }
 
 // ToolOutcome carries the measured result of a tool execution for

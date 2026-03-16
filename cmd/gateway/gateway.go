@@ -85,14 +85,16 @@ func (g *Gateway) SetOperatingMode(mode string) {
 
 // resolveRequest extracts the verified principal and declared purpose from an
 // HTTP request. Falls back to NoAuthProvider behaviour when no provider is set.
-func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFromBody string) (identity.ResolvedPrincipal, string, string, error) {
+// The returned bool indicates whether the purpose was explicitly declared by the
+// caller (true) or derived from the operating mode (false).
+func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFromBody string) (identity.ResolvedPrincipal, string, string, bool, error) {
 	var principal identity.ResolvedPrincipal
 	if g.identityProvider != nil {
 		var err error
 		principal, err = g.identityProvider.Resolve(r)
 		if err != nil {
 			slog.Warn("gateway: identity resolution failed", "err", err)
-			return identity.ResolvedPrincipal{}, "", "", err
+			return identity.ResolvedPrincipal{}, "", "", false, err
 		}
 	} else {
 		// No provider configured — legacy no-auth behaviour.
@@ -102,7 +104,7 @@ func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFr
 		}
 	}
 
-	purpose := identity.PurposeFromRequest(
+	purpose, purposeExplicit := identity.PurposeFromRequest(
 		r.Header.Get("X-Purpose"),
 		purposeFromBody,
 		g.operatingMode,
@@ -111,7 +113,7 @@ func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFr
 	if purposeNote == "" {
 		purposeNote = purposeNoteFromBody
 	}
-	return principal, purpose, purposeNote, nil
+	return principal, purpose, purposeNote, purposeExplicit, nil
 }
 
 // agentAliases maps short names (used in the /query endpoint) to internal
@@ -400,7 +402,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 
 	// Resolve caller identity and purpose. Purpose fields may arrive via headers
 	// (set directly or bridged from the JSON body in handleQuery).
-	resolvedPrincipal, purpose, purposeNote, err := g.resolveRequest(r, "", "")
+	resolvedPrincipal, purpose, purposeNote, purposeExplicit, err := g.resolveRequest(r, "", "")
 	if err != nil {
 		g.recordAudit(r.Context(), &audit.GatewayRequest{
 			RequestID: requestID,
@@ -470,6 +472,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	if purposeNote != "" {
 		meta["purpose_note"] = purposeNote
 	}
+	meta["purpose_explicit"] = purposeExplicit
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
 	msg.Metadata = meta

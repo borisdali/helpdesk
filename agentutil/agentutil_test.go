@@ -179,7 +179,7 @@ func newMinimalEnforcer(t *testing.T) *PolicyEnforcer {
 
 func TestCheckTool_AllowReturnsNil(t *testing.T) {
 	e := newMinimalEnforcer(t)
-	err := e.CheckTool(context.Background(), "database", "mydb", policy.ActionRead, nil, "unit test")
+	err := e.CheckTool(context.Background(), "database", "mydb", policy.ActionRead, nil, "unit test", nil)
 	if err != nil {
 		t.Errorf("read action should be allowed, got: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestCheckTool_AllowReturnsNil(t *testing.T) {
 
 func TestCheckTool_DeniedError_HasExplanation(t *testing.T) {
 	e := newMinimalEnforcer(t)
-	err := e.CheckTool(context.Background(), "database", "mydb", policy.ActionDestructive, nil, "unit test")
+	err := e.CheckTool(context.Background(), "database", "mydb", policy.ActionDestructive, nil, "unit test", nil)
 	if err == nil {
 		t.Fatal("destructive action should be denied")
 	}
@@ -264,7 +264,7 @@ func TestCheckTool_RemoteCheck_Allow(t *testing.T) {
 	defer srv.Close()
 
 	e := newRemoteEnforcer(srv.URL)
-	err := e.CheckTool(context.Background(), "database", "dev-db", policy.ActionRead, nil, "unit test")
+	err := e.CheckTool(context.Background(), "database", "dev-db", policy.ActionRead, nil, "unit test", nil)
 	if err != nil {
 		t.Errorf("allow: expected nil error, got: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestCheckTool_RemoteCheck_Deny(t *testing.T) {
 	defer srv.Close()
 
 	e := newRemoteEnforcer(srv.URL)
-	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "unit test")
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "unit test", nil)
 	if err == nil {
 		t.Fatal("deny: expected error, got nil")
 	}
@@ -294,7 +294,7 @@ func TestCheckTool_RemoteCheck_Deny(t *testing.T) {
 func TestCheckTool_RemoteCheck_Unreachable(t *testing.T) {
 	// Point to a port with no listener — should fail closed.
 	e := newRemoteEnforcer("http://127.0.0.1:19999")
-	err := e.CheckTool(context.Background(), "database", "dev-db", policy.ActionRead, nil, "unit test")
+	err := e.CheckTool(context.Background(), "database", "dev-db", policy.ActionRead, nil, "unit test", nil)
 	if err == nil {
 		t.Fatal("unreachable service: expected error, got nil")
 	}
@@ -308,7 +308,7 @@ func TestCheckTool_RemoteCheck_RequireApproval_NoClient(t *testing.T) {
 	defer srv.Close()
 
 	e := newRemoteEnforcer(srv.URL) // no approvalClient
-	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "unit test")
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "unit test", nil)
 	if err == nil {
 		t.Fatal("require_approval: expected error, got nil")
 	}
@@ -371,7 +371,7 @@ func TestCheckResult_RemoteCheck_SkipsPureReadWithZeroRows(t *testing.T) {
 func TestCheckTool_NilEnforcer_NoRemoteURL(t *testing.T) {
 	// Neither engine nor remote URL — no-op.
 	e := &PolicyEnforcer{}
-	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, "test")
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, "test", nil)
 	if err != nil {
 		t.Errorf("nil enforcer: expected nil error, got: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestCheckTool_EmitsToolInvokedWhenPolicyDisabled(t *testing.T) {
 		// No Engine, no PolicyCheckURL — enforcement disabled.
 	})
 
-	if err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, []string{"env:prod"}, ""); err != nil {
+	if err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, []string{"env:prod"}, "", nil); err != nil {
 		t.Errorf("expected nil (no enforcement), got: %v", err)
 	}
 
@@ -505,7 +505,7 @@ func TestRequestApproval_SessionInfoInContext(t *testing.T) {
 	e := newRequireApprovalEnforcer(t, appSrv.URL)
 
 	note := "Session PID 1234\n  User:     app\n  Database: prod\n  State:    active"
-	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, note)
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, note, nil)
 	if err != nil {
 		t.Fatalf("CheckTool (require_approval → approved): %v", err)
 	}
@@ -532,7 +532,7 @@ func TestRequestApproval_NoSessionInfoWhenNoteEmpty(t *testing.T) {
 	e := newRequireApprovalEnforcer(t, appSrv.URL)
 
 	// Empty note → session_info must NOT appear in the approval context.
-	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "")
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "", nil)
 	if err != nil {
 		t.Fatalf("CheckTool: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestCheckTool_RequireApproval_RemoteCheck_NoteForwarded(t *testing.T) {
 	})
 
 	note := "Session PID 9999\n  User:     slow_client\n  State:    active (5m 10s)"
-	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, note)
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, note, nil)
 	if err != nil {
 		t.Fatalf("CheckTool (remote require_approval → approved): %v", err)
 	}
@@ -915,7 +915,7 @@ func TestCheckTool_RemoteCheck_PropagatesPrincipal(t *testing.T) {
 	}
 	ctx := ctxWithPrincipalAndPurpose(principal, "diagnostic", "investigating INC-123")
 	e := newRemoteEnforcer(srv.URL)
-	if err := e.CheckTool(ctx, "database", "prod-db", policy.ActionRead, nil, "test"); err != nil {
+	if err := e.CheckTool(ctx, "database", "prod-db", policy.ActionRead, nil, "test", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -947,7 +947,7 @@ func TestCheckTool_RemoteCheck_PropagatesServicePrincipal(t *testing.T) {
 	}
 	ctx := ctxWithPrincipalAndPurpose(principal, "", "")
 	e := newRemoteEnforcer(srv.URL)
-	if err := e.CheckTool(ctx, "database", "dev-db", policy.ActionRead, nil, "automated"); err != nil {
+	if err := e.CheckTool(ctx, "database", "dev-db", policy.ActionRead, nil, "automated", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -997,7 +997,7 @@ policies:
 		identity.ResolvedPrincipal{UserID: "alice@example.com", Roles: []string{"dba"}, AuthMethod: "jwt"},
 		"", "",
 	)
-	if err := e.CheckTool(dbaCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err != nil {
+	if err := e.CheckTool(dbaCtx, "database", "prod-db", policy.ActionWrite, nil, "test", nil); err != nil {
 		t.Errorf("dba should be allowed, got: %v", err)
 	}
 
@@ -1006,7 +1006,7 @@ policies:
 		identity.ResolvedPrincipal{UserID: "bob@example.com", Roles: []string{"developer"}, AuthMethod: "jwt"},
 		"", "",
 	)
-	if err := e.CheckTool(devCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err == nil {
+	if err := e.CheckTool(devCtx, "database", "prod-db", policy.ActionWrite, nil, "test", nil); err == nil {
 		t.Error("developer should be denied, got nil error")
 	}
 }
@@ -1041,13 +1041,13 @@ policies:
 
 	// diagnostic purpose — write should be denied.
 	diagCtx := ctxWithPrincipalAndPurpose(identity.ResolvedPrincipal{UserID: "alice@example.com"}, "diagnostic", "")
-	if err := e.CheckTool(diagCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err == nil {
+	if err := e.CheckTool(diagCtx, "database", "prod-db", policy.ActionWrite, nil, "test", nil); err == nil {
 		t.Error("diagnostic purpose: write should be denied, got nil")
 	}
 
 	// remediation purpose — write should be allowed.
 	remCtx := ctxWithPrincipalAndPurpose(identity.ResolvedPrincipal{UserID: "alice@example.com"}, "remediation", "INC-5678")
-	if err := e.CheckTool(remCtx, "database", "prod-db", policy.ActionWrite, nil, "test"); err != nil {
+	if err := e.CheckTool(remCtx, "database", "prod-db", policy.ActionWrite, nil, "test", nil); err != nil {
 		t.Errorf("remediation purpose: write should be allowed, got: %v", err)
 	}
 }
