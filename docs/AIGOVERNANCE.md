@@ -12,6 +12,14 @@ when aiHelpDesk agents are instructed to remedy a problem and so they have to mo
 databases, scale deployments, or restart services, they do so safely, accountably,
 and with appropriate human oversight.
 
+A distinctive feature of aiHelpDesk governance is **LLM Fabrication Detection** (§1.1):
+the ability to detect when an AI agent claims to have taken an action it never actually
+performed. This addresses a fundamental property of LLMs — they can generate plausible
+success narratives from training data, bypassing all in-tool safeguards if no tool was
+ever called. aiHelpDesk counters this at two independent layers: intra-agent
+post-mutation re-verification (§4 of mutation tools) and inter-agent audit-based
+delegation verification (§5 of mutation tools).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                       aiHelpDesk AI Governance layers                       │
@@ -43,8 +51,100 @@ and with appropriate human oversight.
 │  │    what?     │  │ decide this? │  │   mistakes   │  │   works      │     │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
 │                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    LLM FABRICATION DETECTION  (§1.1)                  │  │
+│  │                                                                       │  │
+│  │  Layer 1: intra-agent post-mutation re-verification (did it stick?)   │  │
+│  │  Layer 2: inter-agent audit-based delegation verification             │  │
+│  │           (did the sub-agent actually call the tool?)                 │  │
+│  │  Outcome: unverified_claim journey flag + queryable audit events      │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## 1.1 LLM Fabrication Detection
+
+A key challenge in multi-agent AI systems is that the orchestrating LLM can
+*fabricate* outcomes: it can generate a plausible-sounding "I have terminated
+the connection" message entirely from pattern memory, without ever invoking
+`delegate_to_agent`. If no tool call is made, none of the in-tool safeguards
+(blast radius, approval checks, policy engine, Level 2 verification) are
+reachable — they simply never run.
+
+aiHelpDesk addresses this through two independent detection layers:
+
+### Layer 1 — Intra-agent post-mutation verification (§4 of mutation tools)
+
+Every mutation tool independently re-reads the target state after the write to
+confirm the change took effect. The database agent re-queries `pg_stat_activity`
+after terminating a connection; the Kubernetes agent re-queries the deployment
+spec after a restart. This catches silent failures (permission denied, already
+gone, partial apply) that would otherwise produce a false-success response.
+
+When re-verification fails, the tool enters a bounded retry loop
+(`WaitUntilResolved`) with exponential back-off before escalating. Retry
+attempts are individually recorded as audit events.
+
+**Limitation:** this layer runs inside the sub-agent. It is unreachable if the
+orchestrator fabricates a success without calling the sub-agent at all.
+
+### Layer 2 — Inter-agent audit-based delegation verification (§5 of mutation tools)
+
+After every `delegate_to_agent` call, the orchestrator queries the audit trail
+independently of the agent's text response:
+
+```
+GET /v1/events?event_type=tool_execution&trace_id=X&since=T
+```
+
+It classifies each confirmed tool (`terminate_connection` → `destructive`, etc.)
+and records a `delegation_verification` event with:
+
+- `tools_confirmed` — the tools the sub-agent *actually* executed
+- `mismatch` — `true` when the delegation was destructive but no destructive
+  tool appears in the trail
+
+When a mismatch is detected, the orchestrator is instructed by its system prompt
+to tell the user the action could **not be verified** and was likely **not
+executed** — overriding whatever the agent's text response claimed. The journey
+outcome is simultaneously elevated to `unverified_claim` in the audit database,
+making all such incidents queryable:
+
+```
+GET /v1/journeys?outcome=unverified_claim
+```
+
+**Properties:**
+
+| Property | Value |
+|----------|-------|
+| **Generic** | Works for any tool in the action-class map — current and future |
+| **Independent** | Queries auditd directly, not the agent's text |
+| **Persistent** | The verification is itself an auditable event |
+| **Queryable** | All unverified-claim incidents are surfaced via journeys API |
+| **Non-invasive** | Read and write delegations are verified but never flagged as mismatch |
+
+**Coverage and gaps:**
+
+| Session path | Layer 1 | Layer 2 |
+|---|---|---|
+| Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify |
+| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ⚠️ no inter-agent verification (gateway callers are not orchestrators) |
+| Read-only tool output content | — | ⚠️ content fabrication not detected (structural gap) |
+
+The Layer 2 gap for gateway-direct calls is a known limitation. A future SDK
+giving upstream callers access to the audit trail (trace_id → confirmed tools)
+could provide equivalent structural verification at the gateway boundary.
+
+For full implementation details, unit test coverage, and the investigation
+workflow when a mismatch is detected, see:
+- [docs/MUTATION_TOOLS.md §4–§5](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery) — implementation details
+- [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) — investigation guide
+
+---
 
 ## 2. Components
 
@@ -55,6 +155,7 @@ behavior of the components):
 
 | § | Component | Status | Description |
 |----|------|--------|-------------|
+| 1.1 | [LLM Fabrication Detection](#11-llm-fabrication-detection) | **Implemented** | Two-layer detection: intra-agent post-mutation re-verification + inter-agent audit-based delegation verification |
 | 3 | [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
 | 4 | [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
 | 5 | [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
@@ -1174,6 +1275,7 @@ date  # Check current local time
 - [x] Guardrails: DB blast radius (`max_rows_affected`), K8s blast radius (`max_pods_affected`), transaction age (`max_xact_age_secs`), schedule — pre- and post-execution hooks
 - [x] Explainability — decision trace, `govexplain` CLI, explain API endpoints
 - [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
+- [x] **LLM Fabrication Detection** — intra-agent post-mutation re-verification (L2 verify) and inter-agent audit-based delegation verification; `unverified_claim` journey outcome; queryable via `GET /v1/journeys?outcome=unverified_claim`. See [§1.1](#11-llm-fabrication-detection).
 
 ### 12.3 Phase 3: Operations (In Progress)
 - [x] **Identity & access** — three-dimension access control: verified identity (static/JWT providers), data sensitivity markings, and purpose-based conditions. See [§10](#10-identity--access) and [docs/IDENTITY.md](IDENTITY.md).
