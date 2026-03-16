@@ -94,14 +94,17 @@ of the agent's text, and it is the authoritative record of what actually happene
 
 **Rules you MUST follow:**
 
-1. **The audit block overrides the agent's text.** If the agent says "terminated" but
-   the audit block shows no destructive tool was confirmed, the action did NOT happen.
+1. **The audit block overrides the agent's text.** If the agent says "terminated"
+   or "cancelled" but the audit block shows no tool of that class was confirmed,
+   the action did NOT happen.
 
 2. **On MISMATCH:** If the block contains `⚠️  MISMATCH`, you MUST tell the user:
    - The requested action could not be verified in the audit trail
    - The action was likely NOT executed
    - They should retry or take manual action
    Do NOT say the action succeeded. Do NOT soften the message.
+   The `action_class` in the block tells you whether this was a write or destructive
+   mismatch — include that context when explaining to the user.
 
 3. **On clean verification:** If the audit block lists the expected tools, you may
    report the outcome as confirmed. Mention the audit confirmation briefly.

@@ -402,6 +402,7 @@ func buildDelegationVerification(auditURL, traceID string, since time.Time, acti
 	verif := &DelegationVerification{
 		DelegationEventID: delegationEventID,
 		Agent:             agent,
+		ActionClass:       actionClass,
 	}
 	if auditURL == "" {
 		return verif
@@ -414,13 +415,22 @@ func buildDelegationVerification(auditURL, traceID string, since time.Time, acti
 		}
 		name := ev.Tool.Name
 		verif.ToolsConfirmed = append(verif.ToolsConfirmed, name)
-		if ClassifyTool(name) == ActionDestructive {
+		switch ClassifyTool(name) {
+		case ActionDestructive:
 			verif.DestructiveConfirmed = append(verif.DestructiveConfirmed, name)
+		case ActionWrite:
+			verif.WriteConfirmed = append(verif.WriteConfirmed, name)
 		}
 	}
 
-	// Mismatch: delegation expected a destructive action but audit trail has none.
-	verif.Mismatch = actionClass == ActionDestructive && len(verif.DestructiveConfirmed) == 0
+	// Mismatch: delegation expected a write-or-stronger action but audit trail has none.
+	// A destructive tool satisfies a write delegation (destructive ⊇ write).
+	switch actionClass {
+	case ActionDestructive:
+		verif.Mismatch = len(verif.DestructiveConfirmed) == 0
+	case ActionWrite:
+		verif.Mismatch = len(verif.WriteConfirmed) == 0 && len(verif.DestructiveConfirmed) == 0
+	}
 	return verif
 }
 
@@ -471,6 +481,11 @@ func formatVerificationBlock(v *DelegationVerification) string {
 		sb.WriteString("Tools confirmed by audit trail: " + strings.Join(parts, ", ") + "\n")
 	}
 
+	if len(v.WriteConfirmed) > 0 {
+		sb.WriteString("Write tools confirmed: " + strings.Join(v.WriteConfirmed, ", ") + "\n")
+	} else {
+		sb.WriteString("Write tools confirmed: none\n")
+	}
 	if len(v.DestructiveConfirmed) > 0 {
 		sb.WriteString("Destructive tools confirmed: " + strings.Join(v.DestructiveConfirmed, ", ") + "\n")
 	} else {
@@ -478,7 +493,7 @@ func formatVerificationBlock(v *DelegationVerification) string {
 	}
 
 	if v.Mismatch {
-		sb.WriteString("⚠️  MISMATCH: this delegation was classified as destructive but NO destructive tool execution appears in the audit trail.\n")
+		sb.WriteString("⚠️  MISMATCH: this delegation was classified as " + string(v.ActionClass) + " but NO " + string(v.ActionClass) + "-or-stronger tool execution appears in the audit trail.\n")
 		sb.WriteString("You MUST tell the user the action could not be verified and was likely not executed. Do NOT claim success.\n")
 	} else {
 		sb.WriteString("✓ VERIFICATION CLEAN: no mismatch. Tool execution matches delegation. Report the agent's result as-is (success or error).\n")

@@ -625,10 +625,12 @@ After every `delegate_to_agent` call returns, the orchestrator:
 2. **Classifies each confirmed tool** using the same action-class map as the
    policy engine (`terminate_connection` → `destructive`, etc.)
 3. **Records a `delegation_verification` event** in the audit log with:
+   - `action_class` — the class of the delegation (`write` or `destructive`)
    - `tools_confirmed` — all tools the agent actually executed
+   - `write_confirmed` — which of those were write-class
    - `destructive_confirmed` — which of those were destructive
-   - `mismatch` — `true` when the delegation was destructive but no destructive
-     tool is in the trail
+   - `mismatch` — `true` when the delegation was write-or-destructive but no
+     tool of that class or stronger is in the trail (destructive satisfies write)
 4. **Appends an `[AUDIT VERIFICATION]` block** to the response fed back to the
    orchestrator LLM
 5. **Elevates the journey outcome to `unverified_claim`** when `mismatch=true`
@@ -661,7 +663,8 @@ This prevents the sub-agent from re-asking for confirmation in a loop (see
 | **Independent** | Queries auditd directly, not the agent's text |
 | **Persistent** | The verification itself is an auditable `delegation_verification` event |
 | **Queryable** | `GET /v1/journeys?outcome=unverified_claim` surfaces all incidents |
-| **Non-invasive** | Read and write delegations are not subject to the mismatch check |
+| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
+| **Non-invasive** | Read delegations are not subject to the mismatch check |
 
 ### 5.5 Limitations
 
@@ -672,8 +675,8 @@ This prevents the sub-agent from re-asking for confirmation in a loop (see
   a genuine execution may appear as a mismatch. The implementation retries
   once after 200 ms to reduce this. A user who retries will get a clean
   second verification.
-- Only `destructive` delegations trigger the mismatch check. `read` and
-  `write` delegations are verified (the event is recorded) but never flagged
+- Only `destructive` and `write` delegations trigger the mismatch check.
+  `read` delegations are verified (the event is recorded) but never flagged
   as `unverified_claim`.
 
 For the investigation workflow and root-cause guide, see

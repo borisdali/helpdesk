@@ -85,24 +85,59 @@ func TestBuildDelegationVerification_NoAuditURL(t *testing.T) {
 	}
 }
 
-func TestBuildDelegationVerification_WriteAction_NeverMismatch(t *testing.T) {
-	// Write delegations without any write tool are not flagged as mismatch —
-	// only Destructive delegations are subject to the zero-tolerance check.
+func TestBuildDelegationVerification_WriteAction_Mismatch(t *testing.T) {
+	// Write delegation with only a read tool confirmed — no write-or-stronger tool.
 	srv := serveFakeEvents(t, []Event{
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
 	})
 
 	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del5", "postgres_database_agent")
 
-	if v.Mismatch {
-		t.Error("Mismatch = true, want false: write delegations are not mismatch-checked")
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: write delegation with no write-or-stronger tool confirmed")
+	}
+	if v.ActionClass != ActionWrite {
+		t.Errorf("ActionClass = %q, want %q", v.ActionClass, ActionWrite)
 	}
 }
 
-func TestFormatVerificationBlock_Mismatch(t *testing.T) {
+func TestBuildDelegationVerification_WriteAction_ConfirmedWrite(t *testing.T) {
+	// Write delegation confirmed by a write tool — no mismatch.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "cancel_query"}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del6", "postgres_database_agent")
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: cancel_query (write) satisfies a write delegation")
+	}
+	if len(v.WriteConfirmed) != 1 || v.WriteConfirmed[0] != "cancel_query" {
+		t.Errorf("WriteConfirmed = %v, want [cancel_query]", v.WriteConfirmed)
+	}
+}
+
+func TestBuildDelegationVerification_WriteAction_ConfirmedDestructive(t *testing.T) {
+	// Write delegation confirmed by a destructive tool — destructive satisfies write, no mismatch.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "terminate_connection"}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del7", "postgres_database_agent")
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: terminate_connection (destructive) satisfies a write delegation")
+	}
+	if len(v.DestructiveConfirmed) != 1 || v.DestructiveConfirmed[0] != "terminate_connection" {
+		t.Errorf("DestructiveConfirmed = %v, want [terminate_connection]", v.DestructiveConfirmed)
+	}
+}
+
+func TestFormatVerificationBlock_Mismatch_Destructive(t *testing.T) {
 	v := &DelegationVerification{
 		DelegationEventID: "evt_abc",
 		Agent:             "postgres_database_agent",
+		ActionClass:       ActionDestructive,
 		ToolsConfirmed:    []string{"get_session_info"},
 		Mismatch:          true,
 	}
@@ -111,8 +146,32 @@ func TestFormatVerificationBlock_Mismatch(t *testing.T) {
 	if !strings.Contains(block, "MISMATCH") {
 		t.Errorf("block missing MISMATCH: %s", block)
 	}
+	if !strings.Contains(block, "destructive") {
+		t.Errorf("block missing action_class 'destructive': %s", block)
+	}
 	if !strings.Contains(block, "evt_abc") {
 		t.Errorf("block missing delegation event ID: %s", block)
+	}
+	if !strings.Contains(block, "Do NOT claim success") {
+		t.Errorf("block missing 'Do NOT claim success' instruction: %s", block)
+	}
+}
+
+func TestFormatVerificationBlock_Mismatch_Write(t *testing.T) {
+	v := &DelegationVerification{
+		DelegationEventID: "evt_wri",
+		Agent:             "postgres_database_agent",
+		ActionClass:       ActionWrite,
+		ToolsConfirmed:    []string{"check_connection"},
+		Mismatch:          true,
+	}
+	block := formatVerificationBlock(v)
+
+	if !strings.Contains(block, "MISMATCH") {
+		t.Errorf("block missing MISMATCH: %s", block)
+	}
+	if !strings.Contains(block, "write") {
+		t.Errorf("block missing action_class 'write': %s", block)
 	}
 	if !strings.Contains(block, "Do NOT claim success") {
 		t.Errorf("block missing 'Do NOT claim success' instruction: %s", block)

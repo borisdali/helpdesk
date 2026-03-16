@@ -17,52 +17,52 @@ the ability to detect when an AI agent claims to have taken an action it never a
 performed. This addresses a fundamental property of LLMs — they can generate plausible
 success narratives from training data, bypassing all in-tool safeguards if no tool was
 ever called. aiHelpDesk counters this at two independent layers: intra-agent
-post-mutation re-verification (§4 of mutation tools) and inter-agent audit-based
-delegation verification (§5 of mutation tools).
+post-mutation re-verification (see [here](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery))
+and inter-agent audit-based delegation verification (see [here](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)).
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       aiHelpDesk AI Governance layers                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                        ┌──────────────┐     │
-│                                                        │  aiHelpDesk  │     │
-│                                                        │   Journeys   │     │
-│                                                        └──────────────┘     │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   POLICY     │  │   APPROVAL   │  │  GUARDRAILS  │  │    AUDIT     │     │
-│  │   ENGINE     │  │   WORKFLOWS  │  │   & LIMITS   │  │   SYSTEM     │     │
-│  │              │  │              │  │              │  │              │     │
-│  │    What's    │  │   Human-in-  │  │ Hard safety  │  │ Tamper-proof │     │
-│  │   allowed?   │  │   the-loop   │  │ constraints  │  │    record    │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
-│         │                 │                 │                 │             │
-│         └─────────────────┴─────────────────┴─────────────────┘             │
-│                                    │                                        │
-│                           Enforcement Point                                 │
-│                          (before tool execution)                            │
-│                                                                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │  IDENTITY    │  │  EXPLAIN-    │  │   ROLLBACK   │  │  COMPLIANCE  │     │
-│  │  & ACCESS    │  │  ABILITY     │  │   & UNDO     │  │  REPORTING   │     │
-│  │              │  │              │  │              │  │              │     │
-│  │ Who can do   │  │ Why did AI   │  │ Recover from │  │ Prove it     │     │
-│  │    what?     │  │ decide this? │  │   mistakes   │  │   works      │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
-│                                                                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                    LLM FABRICATION DETECTION  (§1.1)                  │  │
-│  │                                                                       │  │
-│  │  Layer 1: intra-agent post-mutation re-verification (did it stick?)   │  │
-│  │  Layer 2: inter-agent audit-based delegation verification             │  │
-│  │           (did the sub-agent actually call the tool?)                 │  │
-│  │  Outcome: unverified_claim journey flag + queryable audit events      │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                       aiHelpDesk AI Governance layers                     │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                        ┌──────────────┐   │
+│                                                        │  aiHelpDesk  │   │
+│                                                        │   Journeys   │   │
+│                                                        └──────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │   POLICY     │  │   APPROVAL   │  │  GUARDRAILS  │  │    AUDIT     │   │
+│  │   ENGINE     │  │   WORKFLOWS  │  │   & LIMITS   │  │   SYSTEM     │   │
+│  │              │  │              │  │              │  │              │   │
+│  │    What's    │  │   Human-in-  │  │ Hard safety  │  │ Tamper-proof │   │
+│  │   allowed?   │  │   the-loop   │  │ constraints  │  │    record    │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+│         │                 │                 │                 │           │
+│         └─────────────────┴─────────────────┴─────────────────┘           │
+│                                    │                                      │
+│                           Enforcement Point                               │
+│                          (before tool execution)                          │
+│                                                                           │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  IDENTITY    │  │  EXPLAIN-    │  │   ROLLBACK   │  │  COMPLIANCE  │   │
+│  │  & ACCESS    │  │  ABILITY     │  │   & UNDO     │  │  REPORTING   │   │
+│  │              │  │              │  │              │  │              │   │
+│  │ Who can do   │  │ Why did AI   │  │ Recover from │  │ Prove it     │   │
+│  │    what?     │  │ decide this? │  │   mistakes   │  │   works      │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+│                                                                           │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │                    LLM FABRICATION DETECTION  (§1.1)                │  │
+│  │                                                                     │  │
+│  │  Layer 1: intra-agent post-mutation re-verification (did it stick?) │  │
+│  │  Layer 2: inter-agent audit-based delegation verification           │  │
+│  │           (did the sub-agent actually call the tool?)               │  │
+│  │  Outcome: unverified_claim journey flag + queryable audit events    │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 1.1 LLM Fabrication Detection
@@ -76,7 +76,7 @@ reachable — they simply never run.
 
 aiHelpDesk addresses this through two independent detection layers:
 
-### Layer 1 — Intra-agent post-mutation verification (§4 of mutation tools)
+### Layer 1 — Intra-agent post-mutation verification
 
 Every mutation tool independently re-reads the target state after the write to
 confirm the change took effect. The database agent re-queries `pg_stat_activity`
@@ -88,12 +88,14 @@ When re-verification fails, the tool enters a bounded retry loop
 (`WaitUntilResolved`) with exponential back-off before escalating. Retry
 attempts are individually recorded as audit events.
 
+See [here](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery) for details.
+
 **Limitation:** this layer runs inside the sub-agent. It is unreachable if the
-orchestrator fabricates a success without calling the sub-agent at all.
+Orchestrator fabricates a success without calling the sub-agent at all.
 
-### Layer 2 — Inter-agent audit-based delegation verification (§5 of mutation tools)
+### Layer 2 — Inter-agent audit-based delegation verification
 
-After every `delegate_to_agent` call, the orchestrator queries the audit trail
+After every `delegate_to_agent` call, the Orchestrator queries the audit trail
 independently of the agent's text response:
 
 ```
@@ -107,7 +109,7 @@ and records a `delegation_verification` event with:
 - `mismatch` — `true` when the delegation was destructive but no destructive
   tool appears in the trail
 
-When a mismatch is detected, the orchestrator is instructed by its system prompt
+When a mismatch is detected, the Orchestrator is instructed by its system prompt
 to tell the user the action could **not be verified** and was likely **not
 executed** — overriding whatever the agent's text response claimed. The journey
 outcome is simultaneously elevated to `unverified_claim` in the audit database,
@@ -117,6 +119,8 @@ making all such incidents queryable:
 GET /v1/journeys?outcome=unverified_claim
 ```
 
+See [here](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) for details.
+
 **Properties:**
 
 | Property | Value |
@@ -125,19 +129,20 @@ GET /v1/journeys?outcome=unverified_claim
 | **Independent** | Queries auditd directly, not the agent's text |
 | **Persistent** | The verification is itself an auditable event |
 | **Queryable** | All unverified-claim incidents are surfaced via journeys API |
-| **Non-invasive** | Read and write delegations are verified but never flagged as mismatch |
+| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
+| **Non-invasive** | Read delegations are verified but never flagged as mismatch |
 
 **Coverage and gaps:**
 
 | Session path | Layer 1 | Layer 2 |
 |---|---|---|
 | Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify |
-| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ⚠️ no inter-agent verification (gateway callers are not orchestrators) |
+| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ⚠️ no inter-agent verification (Gateway callers are not Orchestrators) |
 | Read-only tool output content | — | ⚠️ content fabrication not detected (structural gap) |
 
-The Layer 2 gap for gateway-direct calls is a known limitation. A future SDK
+The Layer 2 gap for Gateway-direct calls is a known limitation. A future SDK
 giving upstream callers access to the audit trail (trace_id → confirmed tools)
-could provide equivalent structural verification at the gateway boundary.
+could provide equivalent structural verification at the Gateway boundary.
 
 For full implementation details, unit test coverage, and the investigation
 workflow when a mismatch is detected, see:
@@ -661,7 +666,7 @@ Five governance modules are validated at startup via `agentutil.EnforceFixMode`:
 For every violation the agent:
 1. Logs at `ERROR` (fatal) or `WARN` (warning) level
 2. Best-effort POSTs a `governance_violation` audit event to auditd (if `HELPDESK_AUDIT_URL` is set)
-3. Best-effort POSTs an incident to the gateway (if `HELPDESK_GATEWAY_URL` is set)
+3. Best-effort POSTs an incident to the Gateway (if `HELPDESK_GATEWAY_URL` is set)
 
 ### 6.3 Runtime Enforcement
 
@@ -699,7 +704,7 @@ agent uses a two-stage fallback:
    via the gateway, which routes it to the incident agent outside the
    broken audit path.
 2. **Write to stderr** — ensure the violation is captured in container/system
-   logs even if the gateway is also unreachable.
+   logs even if the Gateway is also unreachable.
 
 This guarantees that governance failures are always visible, even when the
 audit system itself has failed.
@@ -717,8 +722,8 @@ audit system itself has failed.
 Key integration points:
 
 - `agentutil.CheckFixModeViolations(cfg)` — validates all five modules from `agentutil.Config`
-- `agentutil.CheckFixModeAuditViolations(auditEnabled, auditURL)` — audit-only check for the orchestrator (which delegates policy enforcement to sub-agents)
-- `agentutil.EnforceFixMode(ctx, violations, componentName, auditURL)` — logs, records `governance_violation` audit events, creates gateway incidents, and exits on fatal violations
+- `agentutil.CheckFixModeAuditViolations(auditEnabled, auditURL)` — audit-only check for the Orchestrator (which delegates policy enforcement to sub-agents)
+- `agentutil.EnforceFixMode(ctx, violations, componentName, auditURL)` — logs, records `governance_violation` audit events, creates Gateway incidents, and exits on fatal violations
 - `agents/*/main.go` and `cmd/helpdesk/main.go` — call `EnforceFixMode` immediately after config loading, before any agent initialization
 
 ---
@@ -726,13 +731,13 @@ Key integration points:
 ## 7. Audit System
 
 The audit system records every tool execution, policy decision, delegation, and
-gateway request into a tamper-evident, hash-chained log managed by `auditd`.
+Gateway request into a tamper-evident, hash-chained log managed by `auditd`.
 
 | Component | Location | Description |
 |-----------|----------|-------------|
 | `auditd` | `cmd/auditd/` | Central HTTP service; stores events, manages hash chain, serves approval and governance APIs |
 | `auditor` | `cmd/auditor/` | Real-time monitoring CLI; reads the Unix socket, fires security alerts, verifies chain integrity |
-| `secbot` | `cmd/secbot/` | Automated incident responder; listens to the audit socket and creates incident bundles via the gateway |
+| `secbot` | `cmd/secbot/` | Automated incident responder; listens to the audit socket and creates incident bundles via the Gateway |
 | `audit` package | `internal/audit/` | Core event types, hash chain implementation, store, trace middleware |
 
 For the full API reference, event schema, auditor flags, environment variables,
@@ -767,7 +772,7 @@ For deployment-specific instructions see:
 
 ## 8. Compliance Reporting (cmd/govbot/)
 
-The `govbot` is a one-shot compliance reporter that queries the gateway's
+The `govbot` is a one-shot compliance reporter that queries the Gateway's
 governance API endpoints and produces a structured compliance snapshot. It
 is designed to run on-demand or on a schedule (daily cron / Kubernetes CronJob)
 and optionally post a summary to a Slack webhook.
@@ -777,7 +782,7 @@ Gateway /api/v1/governance/* → govbot → compliance report + optional Slack a
 ```
 
 govbot is stateless and read-only. No audit socket access or cluster privileges
-are required — only network access to the gateway.
+are required — only network access to the Gateway.
 
 For the full compliance architecture — tool invocation instrumentation, policy
 coverage gap analysis, dead rule detection, compliance history, and the
@@ -803,7 +808,7 @@ Phase 10 — Compliance Summary
 | Code | Meaning |
 |------|---------|
 | `0`  | Healthy — no alerts or warnings |
-| `1`  | Fatal — could not reach gateway |
+| `1`  | Fatal — could not reach Gateway |
 | `2`  | Alerts present — chain integrity failure or other critical finding |
 
 Exit code `2` is useful for CI pipelines and cron alerting.
@@ -1015,7 +1020,7 @@ govexplain --gateway http://localhost:8080 --event tool_a1b2c3d4
 GET /api/v1/governance/events/tool_a1b2c3d4/explain
 ```
 
-The gateway retrieves the stored `DecisionTrace` from the audit event and
+The Gateway retrieves the stored `DecisionTrace` from the audit event and
 returns it. No re-evaluation is needed — the trace was recorded at the time.
 
 #### 9.3.3 Hypothetical — what would happen if?
@@ -1031,7 +1036,7 @@ govexplain --gateway http://localhost:8080 \
 GET /api/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write&tags=production,critical
 ```
 
-The gateway calls `engine.Explain()` in dry-run mode with the provided
+The Gateway calls `engine.Explain()` in dry-run mode with the provided
 parameters. No audit event is written, no tool is executed.
 
 ### 9.4 Audit Enrichment
@@ -1151,7 +1156,7 @@ Changes are additive — no existing behaviour changes:
 | Audit types | Add `Trace` and `Explanation` to `PolicyDecision` | `internal/audit/event.go` |
 | agentutil | Call `Explain` instead of `Evaluate`; populate audit fields; enrich `DeniedError` | `agentutil/agentutil.go` |
 | Gateway | Add two explain endpoints; call auditd for event lookup | `cmd/gateway/` |
-| govexplain CLI | New binary — thin HTTP client for the two gateway endpoints | `cmd/govexplain/` |
+| govexplain CLI | New binary — thin HTTP client for the two Gateway endpoints | `cmd/govexplain/` |
 
 The largest single change is instrumenting `evaluate()` to record the trace
 without altering its return value. The trace is built as a side-effect,

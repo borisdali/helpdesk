@@ -42,8 +42,10 @@ const (
 	// EventTypeDelegationVerification is emitted by DelegateTool after every
 	// sub-agent call. It records which tools the sub-agent actually executed
 	// (from the audit trail), independent of the agent's text response.
-	// When Mismatch is true — a destructive delegation produced no confirmed
-	// destructive tool calls — the journey outcome is set to "unverified_claim".
+	// When Mismatch is true — a destructive or write delegation produced no
+	// confirmed tool execution of that class or stronger — the journey outcome
+	// is set to "unverified_claim". The ActionClass field distinguishes write
+	// mismatches from destructive mismatches without joining to the delegation event.
 	// Like verification_outcome, these events do NOT contribute to tools_used
 	// or event_count in journey aggregation.
 	EventTypeDelegationVerification EventType = "delegation_verification"
@@ -188,12 +190,18 @@ type DelegationVerification struct {
 	DelegationEventID string `json:"delegation_event_id"`
 	// Agent is the sub-agent that was called.
 	Agent string `json:"agent"`
+	// ActionClass is the class of the delegation (read, write, destructive).
+	// Stored here so consumers can distinguish write vs destructive mismatches
+	// without joining back to the delegation_decision event.
+	ActionClass ActionClass `json:"action_class"`
 	// ToolsConfirmed lists every tool name confirmed in the audit trail for this delegation.
 	ToolsConfirmed []string `json:"tools_confirmed"`
+	// WriteConfirmed is the subset of ToolsConfirmed whose ActionClass is Write.
+	WriteConfirmed []string `json:"write_confirmed"`
 	// DestructiveConfirmed is the subset of ToolsConfirmed whose ActionClass is Destructive.
 	DestructiveConfirmed []string `json:"destructive_confirmed"`
-	// Mismatch is true when the delegation was classified as destructive but the audit
-	// trail contains no confirmed destructive tool execution.
+	// Mismatch is true when the delegation was classified as destructive or write but
+	// the audit trail contains no confirmed tool execution of that class or stronger.
 	Mismatch bool `json:"mismatch"`
 }
 

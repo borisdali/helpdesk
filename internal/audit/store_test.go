@@ -904,6 +904,62 @@ func TestQueryJourneys_UnverifiedClaimOutcome(t *testing.T) {
 	}
 }
 
+// TestQueryJourneys_UnverifiedClaimOutcome_Write verifies that a write delegation
+// verification event with Mismatch=true also elevates the journey to "unverified_claim".
+func TestQueryJourneys_UnverifiedClaimOutcome_Write(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_wuc1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_wuc1",
+			Session:   Session{ID: "sess_wuc1", UserID: "alice"},
+			Input:     Input{UserQuery: "cancel the slow query on pid 1234"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_wuc1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_wuc1",
+			Session:   Session{ID: "dbagent_wuc"},
+			Tool:      &ToolExecution{Name: "check_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// delegation_verification: write delegation but only a read tool confirmed.
+		{
+			EventID:   "dv_wuc1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_wuc1",
+			Session:   Session{ID: "sess_wuc1"},
+			DelegationVerification: &DelegationVerification{
+				DelegationEventID: "del_wuc1",
+				Agent:             "postgres_database_agent",
+				ActionClass:       ActionWrite,
+				ToolsConfirmed:    []string{"check_connection"},
+				WriteConfirmed:    nil,
+				Mismatch:          true,
+			},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "unverified_claim" {
+		t.Errorf("Outcome = %q, want unverified_claim", journeys[0].Outcome)
+	}
+}
+
 // TestQueryJourneys_DelegationVerification_NotInToolsUsedOrEventCount verifies that
 // delegation_verification events do not inflate tools_used or event_count.
 func TestQueryJourneys_DelegationVerification_NotInToolsUsedOrEventCount(t *testing.T) {
