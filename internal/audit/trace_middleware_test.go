@@ -104,9 +104,10 @@ func TestParseA2ARequest_ServicePrincipal(t *testing.T) {
 
 func TestParseA2ARequest_PurposeFields(t *testing.T) {
 	body := makeA2ABody(t, map[string]any{
-		"trace_id":     "tr_purp",
-		"purpose":      "remediation",
-		"purpose_note": "INC-4567",
+		"trace_id":        "tr_purp",
+		"purpose":         "remediation",
+		"purpose_note":    "INC-4567",
+		"purpose_explicit": true,
 	}, "")
 	d := parseA2ARequest(body)
 
@@ -115,6 +116,9 @@ func TestParseA2ARequest_PurposeFields(t *testing.T) {
 	}
 	if d.purposeNote != "INC-4567" {
 		t.Errorf("purposeNote = %q, want INC-4567", d.purposeNote)
+	}
+	if !d.purposeExplicit {
+		t.Error("purposeExplicit = false, want true")
 	}
 }
 

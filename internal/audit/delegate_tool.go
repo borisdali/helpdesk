@@ -321,6 +321,9 @@ func callAgentWithTrace(ctx context.Context, agentURL, message, traceID string) 
 		if tc.PurposeNote != "" {
 			meta["purpose_note"] = tc.PurposeNote
 		}
+		if tc.PurposeExplicit {
+			meta["purpose_explicit"] = true
+		}
 	}
 	if len(meta) > 0 {
 		msg.Metadata = meta

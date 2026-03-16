@@ -34,6 +34,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
 
@@ -41,6 +42,7 @@ func main() {
 	gateway := flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway base URL (requires gateway + auditd)")
 	auditd := flag.String("auditd", envOrDefault("HELPDESK_AUDIT_URL", ""), "Auditd base URL — bypasses the gateway (e.g. http://localhost:1199)")
 	policyFile := flag.String("policy-file", envOrDefault("HELPDESK_POLICY_FILE", ""), "Policy file for local evaluation — no server required (e.g. policies.yaml)")
+	infraConfig := flag.String("infra-config", envOrDefault("HELPDESK_INFRA_CONFIG", ""), "Infrastructure config for tag/sensitivity auto-resolution (e.g. infrastructure.json)")
 	event := flag.String("event", "", "Audit event ID to explain (retrospective mode)")
 	resource := flag.String("resource", "", "Resource to check: type:name (e.g. database:prod-db)")
 	action := flag.String("action", "", "Action to check: read, write, destructive")
@@ -73,7 +75,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
 			os.Exit(3)
 		}
-		os.Exit(runLocalExplain(*policyFile, parts[0], parts[1], *action, *tags, *userID, *role, *purpose, *sensitivity, *asJSON))
+		resolvedTags, resolvedSensitivity := resolveFromInfra(*infraConfig, parts[0], parts[1], *tags, *sensitivity)
+		os.Exit(runLocalExplain(*policyFile, parts[0], parts[1], *action, resolvedTags, *userID, *role, *purpose, resolvedSensitivity, *asJSON))
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -97,7 +100,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
 			os.Exit(3)
 		}
-		os.Exit(runHypotheticalDirect(client, *auditd, parts[0], parts[1], *action, *tags, *userID, *role, *purpose, *sensitivity, *asJSON))
+		resolvedTags, resolvedSensitivity := resolveFromInfra(*infraConfig, parts[0], parts[1], *tags, *sensitivity)
+		os.Exit(runHypotheticalDirect(client, *auditd, parts[0], parts[1], *action, resolvedTags, *userID, *role, *purpose, resolvedSensitivity, *asJSON))
 	}
 
 	if *list {
@@ -120,7 +124,47 @@ func main() {
 		os.Exit(3)
 	}
 
-	os.Exit(runHypothetical(client, *gateway, parts[0], parts[1], *action, *tags, *userID, *role, *purpose, *sensitivity, *asJSON))
+	resolvedTags, resolvedSensitivity := resolveFromInfra(*infraConfig, parts[0], parts[1], *tags, *sensitivity)
+	os.Exit(runHypothetical(client, *gateway, parts[0], parts[1], *action, resolvedTags, *userID, *role, *purpose, resolvedSensitivity, *asJSON))
+}
+
+// resolveFromInfra loads the infra config (if a path is given) and fills in
+// tags and sensitivity for the named resource when the caller didn't supply them
+// explicitly. Caller-supplied values always win — this is a fallback only.
+func resolveFromInfra(infraPath, resourceType, resourceName, tags, sensitivity string) (string, string) {
+	if infraPath == "" {
+		return tags, sensitivity
+	}
+	cfg, err := infra.Load(infraPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not load infra config %q: %v\n", infraPath, err)
+		return tags, sensitivity
+	}
+	if tags == "" {
+		switch resourceType {
+		case "database":
+			if db, ok := cfg.DBServers[resourceName]; ok && len(db.Tags) > 0 {
+				tags = strings.Join(db.Tags, ",")
+			}
+		case "kubernetes":
+			if k8s, ok := cfg.K8sClusters[resourceName]; ok && len(k8s.Tags) > 0 {
+				tags = strings.Join(k8s.Tags, ",")
+			}
+		}
+	}
+	if sensitivity == "" {
+		switch resourceType {
+		case "database":
+			if db, ok := cfg.DBServers[resourceName]; ok && len(db.Sensitivity) > 0 {
+				sensitivity = strings.Join(db.Sensitivity, ",")
+			}
+		case "kubernetes":
+			if k8s, ok := cfg.K8sClusters[resourceName]; ok && len(k8s.Sensitivity) > 0 {
+				sensitivity = strings.Join(k8s.Sensitivity, ",")
+			}
+		}
+	}
+	return tags, sensitivity
 }
 
 func printUsage() {

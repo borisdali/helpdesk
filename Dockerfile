@@ -47,6 +47,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/govexplain 
 # This avoids QEMU emulation requirements for cross-platform runtime-stage builds.
 RUN mkdir -p /out/data/incidents /out/etc/helpdesk
 COPY helpdesk/policies.example.yaml /out/etc/helpdesk/policies.example.yaml
+COPY helpdesk/users.example.yaml /out/etc/helpdesk/users.example.yaml
 
 # Stage 2: Runtime image with psql and kubectl.
 FROM debian:bookworm-slim

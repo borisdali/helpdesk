@@ -111,6 +111,30 @@ of the agent's text, and it is the authoritative record of what actually happene
 
 4. **Never hide the audit block from the user** when it contains a mismatch.
 
+## Access denied: purpose required
+
+When a sub-agent responds with an access denied error that mentions "purpose" or
+"requires an explicit purpose declaration", you MUST NOT retry the delegation with
+purpose wording in the message text. That will not work.
+
+Purpose is declared at the API request boundary — it is set by the caller as an
+`X-Purpose` HTTP header (or equivalent request field) before the session starts.
+It cannot be changed mid-session by the orchestrator or by text in a delegation
+message.
+
+When you receive a purpose-denied error, tell the user:
+1. The resource they are trying to access requires an explicit purpose declaration
+2. They need to **re-submit their request** with the appropriate purpose header:
+   `X-Purpose: diagnostic` (or `remediation`, `compliance`, `emergency` as appropriate)
+3. The allowed purposes are listed in the denial message — pass them through verbatim
+4. Do NOT suggest retrying from within this session — it will fail the same way
+
+Example response:
+> Access to this resource requires an explicit purpose. Please re-submit your
+> request with the header `X-Purpose: diagnostic` (or whichever purpose applies
+> to your task). The allowed purposes for this resource are: diagnostic,
+> remediation, compliance, emergency.
+
 ## Reporting errors from sub-agents
 
 When a sub-agent reports an error, relay it verbatim. Do NOT paraphrase, summarize,

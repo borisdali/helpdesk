@@ -379,7 +379,8 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 	// When no tags were provided explicitly, try to resolve them from the infra config.
 	// This mirrors how agents derive tags at runtime, so the explain result reflects
 	// the same policy evaluation the agent would perform.
-	if len(tags) == 0 {
+	tagsProvidedExplicitly := len(tags) > 0
+	if !tagsProvidedExplicitly {
 		tags = s.tagsFromInfra(resourceType, resourceName)
 	}
 
@@ -394,6 +395,11 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 	if len(sensitivity) == 0 {
 		sensitivity = s.sensitivityFromInfra(resourceType, resourceName)
 	}
+
+	// Detect when the infra config is loaded but the resource name was not found.
+	// This is distinct from "resource exists with no tags" and produces a more
+	// actionable error message than the generic "no tags" diagnostic.
+	notFoundInInfra := !tagsProvidedExplicitly && s.infraConfig != nil && len(tags) == 0 && !s.resourceInInfra(resourceType, resourceName)
 
 	req := policy.Request{
 		Principal: policy.RequestPrincipal{
@@ -418,6 +424,13 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 	}
 
 	trace := s.policyEngine.Explain(req)
+
+	if notFoundInInfra {
+		trace.Explanation = "⚠️  Resource \"" + resourceName + "\" was not found in the infrastructure config.\n" +
+			"Tags and sensitivity could not be resolved — policy evaluation used no tags.\n" +
+			"Check that the resource name matches exactly (case-sensitive) in HELPDESK_INFRA_CONFIG.\n\n" +
+			trace.Explanation
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(trace)
@@ -448,6 +461,24 @@ func (s *governanceServer) tagsFromInfra(resourceType, resourceName string) []st
 		}
 	}
 	return nil
+}
+
+// resourceInInfra reports whether the named resource exists in the infra config,
+// regardless of whether it has tags. Used to distinguish "resource not found"
+// from "resource found but has no tags" in explain output.
+func (s *governanceServer) resourceInInfra(resourceType, resourceName string) bool {
+	if s.infraConfig == nil {
+		return false
+	}
+	switch resourceType {
+	case "database":
+		_, ok := s.infraConfig.DBServers[resourceName]
+		return ok
+	case "kubernetes":
+		_, ok := s.infraConfig.K8sClusters[resourceName]
+		return ok
+	}
+	return false
 }
 
 // sensitivityFromInfra resolves the sensitivity classes for a resource from the

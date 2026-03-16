@@ -215,6 +215,7 @@ binaries:
 		cp deploy/docker-compose/.env.example $$outdir/; \
 		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
 		cp policies.example.yaml $$outdir/; \
+		cp users.example.yaml $$outdir/; \
 		tar -czf $(DIST)/helpdesk-$(VERSION)-$$os-$$arch.tar.gz \
 			-C $(DIST) helpdesk-$(VERSION)-$$os-$$arch; \
 		rm -rf $$outdir; \
