@@ -27,8 +27,8 @@ existing structural resource dimension of policy tags:
 The three dimensions answer *who* is asking and *why*; the tag-based dimensions
 answer *what* and against *which resource*. A full policy decision is the
 intersection of both. For example: "alice (role=dba-agent, purpose=remediation)
-writing to a sensitive production PII database" — matching all five axes,
-potentially requiring human approval.
+writing to a sensitive production PII database" — matching all five of the axes
+results in either `deny` or `allow` (possibly with the human review/approval).
 
 ---
 

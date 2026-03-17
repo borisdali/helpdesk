@@ -233,6 +233,7 @@ bundle:
 	cp deploy/docker-compose/.env.example $$bundledir/docker-compose/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/docker-compose/; \
 	cp policies.example.yaml $$bundledir/docker-compose/; \
+	cp users.example.yaml $$bundledir/docker-compose/; \
 	sed -e '/^    build:/,/^      dockerfile:/d' \
 	    -e 's|image: helpdesk:latest|image: $(IMAGE):$(VERSION)|' \
 	    deploy/docker-compose/docker-compose.yaml \

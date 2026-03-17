@@ -56,6 +56,10 @@ spec:
             - name: HELPDESK_APPROVAL_TIMEOUT
               value: "{{ .Values.governance.approvals.timeout }}"
             {{- end }}
+            {{- if .Values.governance.policy.requirePurposeForSensitive }}
+            - name: HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE
+              value: "true"
+            {{- end }}
             {{- if .Values.agents.database.verify.maxAttempts }}
             - name: HELPDESK_VERIFY_MAX_ATTEMPTS
               value: "{{ .Values.agents.database.verify.maxAttempts }}"

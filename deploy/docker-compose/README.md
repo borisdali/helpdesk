@@ -381,6 +381,74 @@ HELPDESK_EMAIL_FROM=helpdesk@example.com
 HELPDESK_EMAIL_TO=ops@example.com
 ```
 
+### 3.10 Identity & Access Control
+
+By default the gateway accepts `X-User` and `X-Roles` headers without verification (`HELPDESK_IDENTITY_PROVIDER=none`). For production deployments, enable the static or JWT identity provider.
+
+#### Static identity provider
+
+The static provider verifies human users by `X-User` header and service accounts by `Authorization: Bearer <api_key>`.
+
+**Step 1: Create `users.yaml` from the example**
+
+```bash
+cp users.example.yaml users.yaml
+# Edit users.yaml — add your real users and roles
+```
+
+**Step 2: Generate Argon2id hashes for service account API keys**
+
+`hashapikey` is baked into the Docker image:
+
+```bash
+# Interactive prompt (no echo — recommended)
+docker compose run --rm auditd hashapikey
+
+# Or pass the key as an argument
+docker compose run --rm auditd hashapikey my-secret-api-key
+```
+
+Copy the printed hash into the `api_key_hash` field of the relevant `service_accounts` entry in `users.yaml`.
+
+**Step 3: Enable in `.env`**
+
+```bash
+HELPDESK_IDENTITY_PROVIDER=static
+# HELPDESK_USERS_FILE_HOST defaults to ./users.example.yaml — override if you renamed:
+HELPDESK_USERS_FILE_HOST=./users.yaml
+```
+
+Restart the gateway:
+
+```bash
+docker compose up -d --force-recreate gateway
+```
+
+#### JWT identity provider
+
+For SSO/OIDC integrations, set in `.env`:
+
+```bash
+HELPDESK_IDENTITY_PROVIDER=jwt
+HELPDESK_JWT_JWKS_URL=https://your-idp.example.com/.well-known/jwks.json
+HELPDESK_JWT_ISSUER=https://your-idp.example.com/
+HELPDESK_JWT_AUDIENCE=helpdesk
+# Optional: claim name that carries roles (default: roles)
+HELPDESK_JWT_ROLES_CLAIM=roles
+```
+
+Clients send `Authorization: Bearer <jwt-token>`. The gateway validates the signature, issuer, and audience, then looks up roles from `HELPDESK_JWT_ROLES_CLAIM`.
+
+#### Requiring explicit purpose for sensitive resources
+
+To block access to `pii` or `critical` resources unless the caller declares a purpose:
+
+```bash
+HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE=true
+```
+
+This is an agent-level pre-check, independent of `allowed_purposes` policy conditions. Callers pass `X-Purpose: diagnostic` (HTTP API) or set `HELPDESK_SESSION_PURPOSE=diagnostic` (orchestrator REPL / `.env`).
+
 ## 4. Using the Gateway API
 
 In addition to the interactive orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).

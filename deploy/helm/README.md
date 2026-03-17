@@ -207,7 +207,89 @@ helm install helpdesk ./helm/helpdesk \
     ...
 ```
 
-### 3.5 Custom Namespace
+### 3.5 Identity & Access Control
+
+By default the gateway accepts `X-User` and `X-Roles` headers without verification (`gateway.identity.provider: none`). For production deployments, enable the static or JWT identity provider.
+
+#### Static identity provider
+
+**Option A: Inline `users.yaml` (chart-managed Secret)**
+
+```yaml
+gateway:
+  identity:
+    provider: static
+    usersConfig: |
+      users:
+        - id: alice@example.com
+          roles: [dba, sre]
+        - id: bob@example.com
+          roles: [readonly]
+      service_accounts:
+        - id: srebot
+          roles: [sre-automation]
+          api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."
+```
+
+**Option B: Pre-existing Secret (out-of-band)**
+
+```bash
+kubectl -n helpdesk-system create secret generic helpdesk-users \
+  --from-file=users.yaml=./users.yaml
+```
+
+```yaml
+gateway:
+  identity:
+    provider: static
+    usersSecret: helpdesk-users
+```
+
+**Generating Argon2id hashes for service account API keys**
+
+`hashapikey` is baked into the Docker image:
+
+```bash
+# Interactive prompt (no echo — recommended)
+kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey
+
+# Or pass the key as an argument
+kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey my-secret-api-key
+```
+
+Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`.
+
+#### JWT identity provider
+
+```yaml
+gateway:
+  identity:
+    provider: jwt
+    jwt:
+      jwksURL: "https://your-idp.example.com/.well-known/jwks.json"
+      issuer: "https://your-idp.example.com/"
+      audience: "helpdesk"
+      rolesClaim: "roles"   # optional, default: roles
+      cacheTTL: "5m"        # optional, JWKS cache duration
+```
+
+Clients send `Authorization: Bearer <jwt-token>`. The gateway validates the signature, issuer, and audience, then extracts roles from the configured claim.
+
+#### Requiring explicit purpose for sensitive resources
+
+To block access to `pii` or `critical` resources unless the caller declares a purpose:
+
+```yaml
+governance:
+  policy:
+    requirePurposeForSensitive: true
+```
+
+This is an agent-level pre-check. Callers pass `X-Purpose: diagnostic` (HTTP API) or set `orchestrator.sessionPurpose: diagnostic` (interactive REPL).
+
+### 3.7 Custom Namespace
 
 Install to any namespace using `--namespace` and `--create-namespace`:
 
@@ -219,7 +301,7 @@ helm install helpdesk ./helm/helpdesk \
     --set model.name=claude-haiku-4-5-20251001
 ```
 
-### 3.6 Gateway Access
+### 3.8 Gateway Access
 
 By default, the gateway uses `ClusterIP`. For external access:
 
