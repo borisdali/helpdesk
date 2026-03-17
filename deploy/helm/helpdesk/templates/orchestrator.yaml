@@ -28,6 +28,10 @@ spec:
               value: {{ include "helpdesk.agentURLs" . | quote }}
             - name: HELPDESK_STREAMING_MODE
               value: {{ .Values.orchestrator.streamingMode | default "none" | quote }}
+            {{- if .Values.orchestrator.sessionPurpose }}
+            - name: HELPDESK_SESSION_PURPOSE
+              value: {{ .Values.orchestrator.sessionPurpose | quote }}
+            {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
             {{- if .Values.governance.auditd.enabled }}
             - name: HELPDESK_AUDIT_ENABLED

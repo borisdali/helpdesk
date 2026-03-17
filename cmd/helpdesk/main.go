@@ -29,6 +29,16 @@ import (
 func main() {
 	remainingArgs := logging.InitLogging(os.Args[1:])
 
+	// Extract --purpose flag before remaining args are forwarded to the launcher.
+	// Falls back to HELPDESK_SESSION_PURPOSE env var.
+	sessionPurpose, remainingArgs := extractPurposeFlag(remainingArgs)
+	if sessionPurpose == "" {
+		sessionPurpose = os.Getenv("HELPDESK_SESSION_PURPOSE")
+	}
+	if sessionPurpose != "" {
+		slog.Info("session purpose set", "purpose", sessionPurpose)
+	}
+
 	ctx := context.Background()
 
 	cfg := agentutil.Config{
@@ -187,7 +197,7 @@ func main() {
 		// Create delegate tool with audit logging and delegation guard.
 		sessionID := "sess_" + uuid.New().String()[:8]
 		userID := os.Getenv("USER")
-		delegateTool, guard, err := audit.DelegateTool(auditor, os.Getenv("HELPDESK_AUDIT_URL"), agentRegistry, sessionID, userID, "helpdesk_orchestrator")
+		delegateTool, guard, err := audit.DelegateTool(auditor, os.Getenv("HELPDESK_AUDIT_URL"), agentRegistry, sessionID, userID, "helpdesk_orchestrator", sessionPurpose)
 		if err != nil {
 			slog.Error("failed to create delegate tool", "err", err)
 			os.Exit(1)

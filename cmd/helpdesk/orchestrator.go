@@ -235,3 +235,17 @@ func createRemoteAgents(configs []AgentConfig) ([]agent.Agent, []string) {
 
 // Ensure saveReportFunc has the correct signature.
 var _ llmagent.AfterModelCallback = saveReportFunc
+
+// extractPurposeFlag scans args for --purpose <value> or --purpose=<value>,
+// removes it, and returns the purpose string plus the remaining args.
+func extractPurposeFlag(args []string) (purpose string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--purpose" && i+1 < len(args) {
+			return args[i+1], append(append([]string{}, args[:i]...), args[i+2:]...)
+		}
+		if strings.HasPrefix(args[i], "--purpose=") {
+			return strings.TrimPrefix(args[i], "--purpose="), append(append([]string{}, args[:i]...), args[i+1:]...)
+		}
+	}
+	return "", args
+}

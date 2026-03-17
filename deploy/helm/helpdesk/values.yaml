@@ -75,7 +75,13 @@ orchestrator:
   # Streaming mode for LLM responses: "sse" (streaming) or "none" (disabled).
   # Default "none" works around ADK REPL bug in containers.
   # Set to "sse" to enable streaming if the bug is fixed.
-  streamingMode: "none"
+  streamingMode: "sse"
+  # Session-level purpose injected into every delegation from the REPL.
+  # Equivalent to X-Purpose: <value> on API requests. Required when policies
+  # have allowed_purposes conditions (e.g., pii-data-protection). Leave empty
+  # if not needed. Common values: diagnostic, remediation, compliance, emergency.
+  # sessionPurpose: "diagnostic"
+  sessionPurpose: ""
 
 # Infrastructure inventory — database servers, K8s clusters, and VMs the
 # orchestrator knows about. Passed to the LLM so it can pick the right

@@ -91,15 +91,19 @@ func (r *AgentRegistry) List() []string {
 // verification queries; pass "" to disable verification.
 // callerName is the name of the orchestrator agent (e.g. "helpdesk_orchestrator");
 // it is recorded in audit events and surfaced as the journey agent name.
+// sessionPurpose, if non-empty, is injected as an explicit purpose into every
+// delegation (equivalent to X-Purpose on API requests).
 // It also creates and returns a DelegationGuard shared with NoDelegationCallback.
-func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, callerName string) (tool.Tool, *DelegationGuard, error) {
-	return DelegateToolWithTrace(auditor, auditURL, registry, sessionID, userID, "", callerName)
+func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, callerName, sessionPurpose string) (tool.Tool, *DelegationGuard, error) {
+	return DelegateToolWithTrace(auditor, auditURL, registry, sessionID, userID, "", callerName, sessionPurpose)
 }
 
 // DelegateToolWithTrace creates the delegate_to_agent tool with audit logging and trace ID.
 // The returned DelegationGuard must be passed to NoDelegationCallback so the callback
 // can detect invocations where delegate_to_agent was not called.
-func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID, callerName string) (tool.Tool, *DelegationGuard, error) {
+// sessionPurpose, if non-empty, is injected as an explicit purpose into every
+// delegation (equivalent to X-Purpose on API requests).
+func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID, callerName, sessionPurpose string) (tool.Tool, *DelegationGuard, error) {
 	guard := NewDelegationGuard()
 	delegationCount := 0
 
@@ -188,13 +192,24 @@ func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegi
 			}, nil
 		}
 
+		// Build the call context: inject session-level purpose (if set) so
+		// callAgentWithTrace includes it in the A2A metadata for all delegations.
+		callCtx := context.Background()
+		if sessionPurpose != "" {
+			callCtx = WithTraceContext(callCtx, &TraceContext{
+				TraceID:         traceID,
+				Purpose:         sessionPurpose,
+				PurposeExplicit: true,
+			})
+		}
+
 		// Call the agent via A2A
 		slog.Debug("calling agent via A2A",
 			"agent", args.Agent,
 			"url", agentURL,
 			"message", args.Message,
 			"trace_id", traceID)
-		response, err := callAgentWithTrace(context.Background(), agentURL, args.Message, traceID)
+		response, err := callAgentWithTrace(callCtx, agentURL, args.Message, traceID)
 		duration := time.Since(start)
 		slog.Debug("agent response received",
 			"agent", args.Agent,
