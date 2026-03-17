@@ -32,6 +32,7 @@ spec:
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             {{- if .Values.governance.auditd.enabled }}
             - name: HELPDESK_AUDIT_ENABLED
               value: "true"

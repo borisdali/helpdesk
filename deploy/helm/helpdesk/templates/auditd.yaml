@@ -42,6 +42,7 @@ spec:
           env:
             # Set so that approvals/govexplain binaries exec'd inside this pod
             # can find auditd without requiring an explicit --url flag.
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             - name: HELPDESK_AUDIT_URL
               value: "http://localhost:{{ .Values.governance.auditd.port }}"
             {{- if .Values.governance.policy.configMap }}

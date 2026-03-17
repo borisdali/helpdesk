@@ -40,6 +40,7 @@ spec:
               value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
             {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             {{- if .Values.infrastructure }}
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json

@@ -72,6 +72,7 @@ spec:
               value: "{{ .Values.agents.k8s.verify.maxDelayS }}"
             {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           volumeMounts:
             {{- if .Values.infrastructure }}
             - name: infra-config

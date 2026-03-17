@@ -39,6 +39,7 @@ spec:
             - "-email-to={{ .Values.governance.email.to }}"
             {{- end }}
           env:
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             {{- if and .Values.governance.email.enabled .Values.governance.email.smtpSecret }}
             - name: SMTP_USER
               valueFrom:

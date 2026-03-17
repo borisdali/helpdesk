@@ -3,6 +3,12 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# Log level for all services.
+# "info"  = default — startup messages and warnings only
+# "debug" = per-event audit logs, policy decisions, A2A calls, tool traces
+# "warn"  = warnings and errors only
+logLevel: ""
+
 # LLM model configuration. All agents and the orchestrator use these.
 model:
   # Supported vendors: anthropic, gemini (or google)

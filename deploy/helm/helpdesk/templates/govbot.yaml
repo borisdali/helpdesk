@@ -38,6 +38,7 @@ spec:
                 - "-history-retain={{ .Values.governance.govbot.historyRetain }}"
                 {{- end }}
               env:
+                {{- include "helpdesk.logLevelEnv" . | nindent 16 }}
                 {{- if not .Values.governance.govbot.historyDB }}
                 # Compliance history: govbot POSTs run snapshots to auditd (no PVC needed).
                 - name: HELPDESK_AUDIT_URL

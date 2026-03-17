@@ -59,6 +59,7 @@ spec:
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.incident.port }}

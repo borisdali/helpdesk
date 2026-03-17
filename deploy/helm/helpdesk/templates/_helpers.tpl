@@ -35,6 +35,16 @@ Include this in every process that calls EnforceFixMode or CheckFixModeAuditViol
 {{- end -}}
 
 {{/*
+Log level environment variable. Include in every service pod.
+*/}}
+{{- define "helpdesk.logLevelEnv" -}}
+{{- if .Values.logLevel }}
+- name: HELPDESK_LOG_LEVEL
+  value: {{ .Values.logLevel | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Common model environment variables injected into every agent/orchestrator pod.
 */}}
 {{- define "helpdesk.modelEnv" -}}

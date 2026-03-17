@@ -12,8 +12,8 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── policies.example.yaml       # Policy rules template
 ├── users.example.yaml          # Identity & access template (static provider)
 │
-├── helpdesk                    # Interactive orchestrator (multi-agent REPL)
-├── gateway                     # REST API gateway
+├── helpdesk                    # Interactive Orchestrator (multi-agent REPL)
+├── gateway                     # REST API Gateway
 ├── database-agent              # PostgreSQL diagnostics agent
 ├── k8s-agent                   # Kubernetes diagnostics agent
 ├── incident-agent              # Incident bundle collector
@@ -47,7 +47,7 @@ cp infrastructure.json.example infrastructure.json
 ./startall.sh
 ```
 
-`startall.sh` starts `auditd`, all agents, and the `gateway` in the background, then drops you into the interactive orchestrator REPL. Type your question and press Enter. Press `Ctrl-C` or type `exit` to stop everything.
+`startall.sh` starts `auditd`, all agents, and the `gateway` in the background, then drops you into the interactive Orchestrator REPL. Type your question and press Enter. Press `Ctrl-C` or type `exit` to stop everything.
 
 ## 3. Prerequisites
 
@@ -93,7 +93,7 @@ host=localhost port=5432 dbname=myapp user=admin
 host=my-postgres-container port=5432 dbname=myapp user=admin
 ```
 
-On Linux with Docker Engine (no Desktop), use `172.17.0.1` (the Docker bridge gateway IP) or the host's LAN IP if `localhost` doesn't work.
+On Linux with Docker Engine (no Desktop), use `172.17.0.1` (the Docker bridge Gateway IP) or the host's LAN IP if `localhost` doesn't work.
 
 **Database credentials:** Create a `.pgpass` file alongside `.env` for passwordless authentication:
 
@@ -105,7 +105,7 @@ EOF
 chmod 600 .pgpass
 ```
 
-**Infrastructure inventory:** Set `HELPDESK_INFRA_CONFIG` in `.env` to point at your `infrastructure.json` so the orchestrator knows which servers exist:
+**Infrastructure inventory:** Set `HELPDESK_INFRA_CONFIG` in `.env` to point at your `infrastructure.json` so the Orchestrator knows which servers exist:
 
 ```bash
 HELPDESK_INFRA_CONFIG=./infrastructure.json
@@ -137,12 +137,12 @@ tail -f /tmp/helpdesk-gateway.log
 
 ## 6. Headless / API Mode
 
-To use the REST gateway API without the interactive REPL. See [API.md](../../docs/API.md) for the full endpoint reference.
+To use the REST Gateway API without the interactive REPL. See [API.md](../../docs/API.md) for the full endpoint reference.
 
 ```bash
 ./startall.sh --no-repl &
 
-# Query via the gateway
+# Query via the Gateway
 curl -s http://localhost:8080/api/v1/agents | jq .
 
 curl -s -X POST http://localhost:8080/api/v1/query \
@@ -214,7 +214,7 @@ See `policies.example.yaml` for the full schema including time-based schedules, 
 
 ### 7.3 Identity & Access Control
 
-By default the gateway accepts `X-User` and `X-Roles` headers without verification. For production deployments, enable the static or JWT identity provider in `.env`.
+By default the Gateway accepts `X-User` and `X-Roles` headers without verification. For production deployments, enable the static or JWT identity provider in `.env`.
 
 #### Static identity provider
 
@@ -348,7 +348,7 @@ tail -f /tmp/helpdesk-auditor.log
 
 ### 7.7 Running the SRE Bot (srebot)
 
-`srebot` is a one-shot automation tool. Run it while the stack is up — it contacts the gateway, runs AI diagnosis on a database, and creates an incident bundle:
+`srebot` is a one-shot automation tool. Run it while the stack is up — it contacts the Gateway, runs AI diagnosis on a database, and creates an incident bundle:
 
 ```bash
 ./srebot \

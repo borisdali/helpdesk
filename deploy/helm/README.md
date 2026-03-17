@@ -109,7 +109,7 @@ image:
   tag: v0.1.0
   pullPolicy: IfNotPresent
 
-# LLM model configuration. All agents and the orchestrator use these.
+# LLM model configuration. All agents and the Orchestrator use these.
 model:
   vendor: anthropic
   name: claude-haiku-4-5-20251001
@@ -209,7 +209,7 @@ helm install helpdesk ./helm/helpdesk \
 
 ### 3.5 Identity & Access Control
 
-By default the gateway accepts `X-User` and `X-Roles` headers without verification (`gateway.identity.provider: none`). For production deployments, enable the static or JWT identity provider.
+By default the Gateway accepts `X-User` and `X-Roles` headers without verification (`gateway.identity.provider: none`). For production deployments, enable the static or JWT identity provider.
 
 #### Static identity provider
 
@@ -275,7 +275,7 @@ gateway:
       cacheTTL: "5m"        # optional, JWKS cache duration
 ```
 
-Clients send `Authorization: Bearer <jwt-token>`. The gateway validates the signature, issuer, and audience, then extracts roles from the configured claim.
+Clients send `Authorization: Bearer <jwt-token>`. The Gateway validates the signature, issuer, and audience, then extracts roles from the configured claim.
 
 #### Requiring explicit purpose for sensitive resources
 
@@ -303,7 +303,7 @@ helm install helpdesk ./helm/helpdesk \
 
 ### 3.8 Gateway Access
 
-By default, the gateway uses `ClusterIP`. For external access:
+By default, the Gateway uses `ClusterIP`. For external access:
 
 ```bash
 helm install helpdesk ./helm/helpdesk \
@@ -398,10 +398,10 @@ To include infrastructure config, create a `my-values.yaml` as shown above and a
 
 ## 7. Using the Gateway API
 
-While the interactive orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
 
 ```bash
-# Port-forward the gateway
+# Port-forward the Gateway
 kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
 
 # In another terminal, query the system
@@ -435,7 +435,7 @@ The deploy bundle includes helper scripts in the `scripts/` directory:
 | Script | Description |
 |--------|-------------|
 | `gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
-| `k8s-local-repl.sh` | Run orchestrator locally with K8s agents port-forwarded |
+| `k8s-local-repl.sh` | Run Orchestrator locally with K8s agents port-forwarded |
 
 See [scripts/README.md](../../scripts/README.md) for detailed usage.
 
@@ -668,7 +668,7 @@ kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
 kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
   govexplain --resource database:prod-db --action write --tags production
 
-# Talk directly to auditd (bypass gateway, exec into auditd pod)
+# Talk directly to auditd (bypass Gateway, exec into auditd pod)
 kubectl -n helpdesk-system exec -it deploy/helpdesk-auditd -- \
   govexplain --auditd http://localhost:1199 --list --since 1h
 ```
@@ -748,7 +748,7 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 
 ### 10.1 Interactive REPL Shows Empty Responses
 
-**Symptom:** When running the interactive orchestrator in a container, agent responses appear empty and require pressing Enter to display.
+**Symptom:** When running the interactive Orchestrator in a container, agent responses appear empty and require pressing Enter to display.
 
 **Cause:** This is a known issue with the ADK (Agent Development Kit) REPL in containerized environments where TTY handling differs from local execution.
 
@@ -760,7 +760,7 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
    ./scripts/gateway-repl.sh
    ```
 
-2. **Local orchestrator** - Run orchestrator locally with port-forwarded agents:
+2. **Local Orchestrator** - Run Orchestrator locally with port-forwarded agents:
    ```bash
    ./scripts/k8s-local-repl.sh [namespace]
    ```
