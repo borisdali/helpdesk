@@ -282,10 +282,28 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	if e.requirePurposeForSensitive && hasSensitiveSensitivity(sensitivity) {
 		if !audit.PurposeExplicitFromContext(ctx) {
 			purpose, _ := audit.PurposeFromContext(ctx)
-			return fmt.Errorf("access to %s/%s requires an explicit purpose declaration "+
+			denyMsg := fmt.Sprintf("access to %s/%s requires an explicit purpose declaration "+
 				"(sensitivity: %s, current purpose %q was derived from operating mode, not declared); "+
 				"add 'purpose' to your request body or X-Purpose header",
 				resourceType, resourceName, strings.Join(sensitivity, ","), purpose)
+			if e.toolAuditor != nil {
+				principal := audit.PrincipalFromContext(ctx)
+				e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+					ResourceType: resourceType,
+					ResourceName: resourceName,
+					Action:       string(action),
+					Tags:         tags,
+					Effect:       "deny",
+					PolicyName:   "require_purpose_for_sensitive",
+					Message:      denyMsg,
+					Note:         note,
+					UserID:       principal.UserID,
+					Roles:        principal.Roles,
+					Service:      principal.Service,
+					AuthMethod:   principal.AuthMethod,
+				})
+			}
+			return fmt.Errorf("%s", denyMsg)
 		}
 	}
 
