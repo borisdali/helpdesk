@@ -536,7 +536,7 @@ func (g *Gateway) recordAudit(ctx context.Context, req *audit.GatewayRequest) {
 		return
 	}
 	if err := g.auditor.RecordRequest(ctx, req); err != nil {
-		slog.Debug("failed to record audit", "error", err)
+		slog.Warn("failed to record audit", "error", err)
 	}
 }
 

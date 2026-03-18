@@ -157,7 +157,7 @@ func runQuery(ctx context.Context, c *client.Client, agentName, message string) 
 
 	fmt.Println(resp.Text)
 	if isTTY && resp.TraceID != "" {
-		fmt.Printf("[trace: %s]\n", resp.TraceID)
+		fmt.Printf("[trace: %s  %s]\n", resp.TraceID, time.Now().Format("2006-01-02 15:04:05"))
 	}
 	return nil
 }

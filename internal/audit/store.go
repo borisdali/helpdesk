@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -99,14 +100,28 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 				return nil, fmt.Errorf("create audit directory: %w", err)
 			}
 		}
-		db, err = sql.Open("sqlite", dsn)
+		// Set journal_mode=DELETE and synchronous=FULL via DSN pragmas so
+		// the driver applies them at connection-open time.  Post-open PRAGMA
+		// statements via modernc.org/sqlite do not reliably persist writes to
+		// disk (WAL pages stay in process memory), so the DSN approach is
+		// required.  DELETE mode ensures every committed transaction is flushed
+		// to the main .db file immediately; FULL sync prevents data loss on
+		// power failure.
+		sqliteDSN := "file:" + dsn + "?_pragma=journal_mode(delete)&_pragma=synchronous(full)"
+		db, err = sql.Open("sqlite", sqliteDSN)
 		if err != nil {
 			return nil, fmt.Errorf("open audit database: %w", err)
 		}
-		// Enable WAL mode for better concurrent read performance (SQLite only).
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("enable WAL mode: %w", err)
+		// Limit to one open connection so writes are serialised.
+		db.SetMaxOpenConns(1)
+
+		// Verify the journal mode and confirm writes reach disk.
+		var journalMode string
+		if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err == nil {
+			slog.Info("sqlite journal mode", "mode", journalMode, "path", dsn)
+			if journalMode != "delete" {
+				slog.Warn("sqlite NOT in delete mode — writes may not persist to disk", "mode", journalMode)
+			}
 		}
 	}
 
