@@ -40,7 +40,7 @@ type Gateway struct {
 	auditor          *audit.GatewayAuditor
 	auditURL         string            // URL to auditd service for governance queries
 	identityProvider identity.Provider // resolves caller identity on every request
-	operatingMode    string            // "readonly" or "fix" — used for default purpose derivation
+	operatingMode    string            // "readonly" or "fix"
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -78,15 +78,14 @@ func (g *Gateway) SetIdentityProvider(p identity.Provider) {
 	g.identityProvider = p
 }
 
-// SetOperatingMode sets the operating mode for default purpose derivation.
+// SetOperatingMode sets the operating mode.
 func (g *Gateway) SetOperatingMode(mode string) {
 	g.operatingMode = mode
 }
 
 // resolveRequest extracts the verified principal and declared purpose from an
 // HTTP request. Falls back to NoAuthProvider behaviour when no provider is set.
-// The returned bool indicates whether the purpose was explicitly declared by the
-// caller (true) or derived from the operating mode (false).
+// The returned bool is true only when the caller explicitly declared a purpose.
 func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFromBody string) (identity.ResolvedPrincipal, string, string, bool, error) {
 	var principal identity.ResolvedPrincipal
 	if g.identityProvider != nil {
@@ -107,7 +106,6 @@ func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFr
 	purpose, purposeExplicit := identity.PurposeFromRequest(
 		r.Header.Get("X-Purpose"),
 		purposeFromBody,
-		g.operatingMode,
 	)
 	purposeNote := r.Header.Get("X-Purpose-Note")
 	if purposeNote == "" {

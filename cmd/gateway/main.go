@@ -4,11 +4,13 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
@@ -36,7 +38,18 @@ func main() {
 		urls[i] = strings.TrimSpace(urls[i])
 	}
 
-	registry, err := discovery.Discover(urls)
+	discoveryTimeout := 60 * time.Second
+	if v := os.Getenv("HELPDESK_DISCOVERY_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			discoveryTimeout = d
+		} else {
+			slog.Warn("invalid HELPDESK_DISCOVERY_TIMEOUT, using default", "value", v, "default", discoveryTimeout)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+	defer cancel()
+
+	registry, err := discovery.DiscoverWithRetry(ctx, urls, 3*time.Second)
 	if err != nil {
 		slog.Error("failed to discover agents", "err", err)
 		os.Exit(1)
