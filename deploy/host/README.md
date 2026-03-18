@@ -13,6 +13,7 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── users.example.yaml          # Identity & access template (static provider)
 │
 ├── helpdesk                    # Interactive Orchestrator (multi-agent REPL)
+├── helpdesk-client             # Authenticated gateway CLI (operators, scripts, CI)
 ├── gateway                     # REST API Gateway
 ├── database-agent              # PostgreSQL diagnostics agent
 ├── k8s-agent                   # Kubernetes diagnostics agent

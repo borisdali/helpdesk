@@ -33,6 +33,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/incident-ag
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/research-agent  ./agents/research/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/gateway         ./cmd/gateway/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/helpdesk        ./cmd/helpdesk/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/helpdesk-client ./cmd/helpdesk-client/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/srebot          ./cmd/srebot/
 
 # AI Governance tools
@@ -82,6 +83,7 @@ COPY --from=builder /out/incident-agent  /usr/local/bin/incident-agent
 COPY --from=builder /out/research-agent  /usr/local/bin/research-agent
 COPY --from=builder /out/gateway         /usr/local/bin/gateway
 COPY --from=builder /out/helpdesk        /usr/local/bin/helpdesk
+COPY --from=builder /out/helpdesk-client /usr/local/bin/helpdesk-client
 COPY --from=builder /out/srebot          /usr/local/bin/srebot
 
 # AI Governance tools

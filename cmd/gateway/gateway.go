@@ -123,6 +123,7 @@ var agentAliases = map[string]string{
 	"db":       agentNameDB,
 	"k8s":      agentNameK8s,
 	"incident": agentNameIncident,
+	"research": agentNameResearch,
 }
 
 // RegisterRoutes sets up the REST endpoint handlers.
@@ -173,7 +174,7 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	agentName, ok := agentAliases[req.Agent]
 	if !ok {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, incident)", req.Agent))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, incident, research)", req.Agent))
 		return
 	}
 

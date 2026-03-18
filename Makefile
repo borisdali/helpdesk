@@ -25,6 +25,7 @@ BIN_PKGS := \
 	research-agent:./agents/research/ \
 	gateway:./cmd/gateway/ \
 	helpdesk:./cmd/helpdesk/ \
+	helpdesk-client:./cmd/helpdesk-client/ \
 	srebot:./cmd/srebot/ \
 	auditd:./cmd/auditd/ \
 	auditor:./cmd/auditor/ \
