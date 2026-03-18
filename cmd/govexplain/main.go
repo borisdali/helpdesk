@@ -34,6 +34,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
 
@@ -41,12 +42,15 @@ func main() {
 	gateway := flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway base URL (requires gateway + auditd)")
 	auditd := flag.String("auditd", envOrDefault("HELPDESK_AUDIT_URL", ""), "Auditd base URL — bypasses the gateway (e.g. http://localhost:1199)")
 	policyFile := flag.String("policy-file", envOrDefault("HELPDESK_POLICY_FILE", ""), "Policy file for local evaluation — no server required (e.g. policies.yaml)")
+	infraConfig := flag.String("infra-config", envOrDefault("HELPDESK_INFRA_CONFIG", ""), "Infrastructure config for tag/sensitivity auto-resolution (e.g. infrastructure.json)")
 	event := flag.String("event", "", "Audit event ID to explain (retrospective mode)")
 	resource := flag.String("resource", "", "Resource to check: type:name (e.g. database:prod-db)")
 	action := flag.String("action", "", "Action to check: read, write, destructive")
 	tags := flag.String("tags", "", "Comma-separated resource tags (e.g. production,critical)")
 	userID := flag.String("user", "", "Evaluate as a specific user ID")
 	role := flag.String("role", "", "Evaluate with a specific role")
+	purpose := flag.String("purpose", "", "Declared purpose: diagnostic, remediation, maintenance, compliance, emergency")
+	sensitivity := flag.String("sensitivity", "", "Comma-separated sensitivity classes (e.g. pii,critical)")
 	asJSON := flag.Bool("json", false, "Output raw JSON instead of human-readable text")
 
 	// List mode flags
@@ -71,7 +75,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
 			os.Exit(3)
 		}
-		os.Exit(runLocalExplain(*policyFile, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+		resolvedTags, resolvedSensitivity := resolveFromInfra(*infraConfig, parts[0], parts[1], *tags, *sensitivity)
+		os.Exit(runLocalExplain(*policyFile, parts[0], parts[1], *action, resolvedTags, *userID, *role, *purpose, resolvedSensitivity, *asJSON))
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -95,7 +100,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --resource must be TYPE:NAME (e.g. database:prod-db)")
 			os.Exit(3)
 		}
-		os.Exit(runHypotheticalDirect(client, *auditd, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+		resolvedTags, resolvedSensitivity := resolveFromInfra(*infraConfig, parts[0], parts[1], *tags, *sensitivity)
+		os.Exit(runHypotheticalDirect(client, *auditd, parts[0], parts[1], *action, resolvedTags, *userID, *role, *purpose, resolvedSensitivity, *asJSON))
 	}
 
 	if *list {
@@ -118,7 +124,47 @@ func main() {
 		os.Exit(3)
 	}
 
-	os.Exit(runHypothetical(client, *gateway, parts[0], parts[1], *action, *tags, *userID, *role, *asJSON))
+	resolvedTags, resolvedSensitivity := resolveFromInfra(*infraConfig, parts[0], parts[1], *tags, *sensitivity)
+	os.Exit(runHypothetical(client, *gateway, parts[0], parts[1], *action, resolvedTags, *userID, *role, *purpose, resolvedSensitivity, *asJSON))
+}
+
+// resolveFromInfra loads the infra config (if a path is given) and fills in
+// tags and sensitivity for the named resource when the caller didn't supply them
+// explicitly. Caller-supplied values always win — this is a fallback only.
+func resolveFromInfra(infraPath, resourceType, resourceName, tags, sensitivity string) (string, string) {
+	if infraPath == "" {
+		return tags, sensitivity
+	}
+	cfg, err := infra.Load(infraPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not load infra config %q: %v\n", infraPath, err)
+		return tags, sensitivity
+	}
+	if tags == "" {
+		switch resourceType {
+		case "database":
+			if db, ok := cfg.DBServers[resourceName]; ok && len(db.Tags) > 0 {
+				tags = strings.Join(db.Tags, ",")
+			}
+		case "kubernetes":
+			if k8s, ok := cfg.K8sClusters[resourceName]; ok && len(k8s.Tags) > 0 {
+				tags = strings.Join(k8s.Tags, ",")
+			}
+		}
+	}
+	if sensitivity == "" {
+		switch resourceType {
+		case "database":
+			if db, ok := cfg.DBServers[resourceName]; ok && len(db.Sensitivity) > 0 {
+				sensitivity = strings.Join(db.Sensitivity, ",")
+			}
+		case "kubernetes":
+			if k8s, ok := cfg.K8sClusters[resourceName]; ok && len(k8s.Sensitivity) > 0 {
+				sensitivity = strings.Join(k8s.Sensitivity, ",")
+			}
+		}
+	}
+	return tags, sensitivity
 }
 
 func printUsage() {
@@ -347,7 +393,7 @@ func effectToCode(effect string) int {
 
 // runHypotheticalDirect talks to auditd's native /v1/governance/explain endpoint.
 // Only auditd needs to be running — no gateway required.
-func runHypotheticalDirect(client *http.Client, auditdURL, resourceType, resourceName, action, tags, userID, role string, asJSON bool) int {
+func runHypotheticalDirect(client *http.Client, auditdURL, resourceType, resourceName, action, tags, userID, role, purpose, sensitivity string, asJSON bool) int {
 	q := url.Values{}
 	q.Set("resource_type", resourceType)
 	q.Set("resource_name", resourceName)
@@ -360,6 +406,12 @@ func runHypotheticalDirect(client *http.Client, auditdURL, resourceType, resourc
 	}
 	if role != "" {
 		q.Set("role", role)
+	}
+	if purpose != "" {
+		q.Set("purpose", purpose)
+	}
+	if sensitivity != "" {
+		q.Set("sensitivity", sensitivity)
 	}
 	endpoint := strings.TrimRight(auditdURL, "/") + "/v1/governance/explain?" + q.Encode()
 	return doExplainRequest(client, endpoint, asJSON)
@@ -372,7 +424,7 @@ func runRetrospectiveDirect(client *http.Client, auditdURL, eventID string, asJS
 	return doExplainRequest(client, endpoint, asJSON)
 }
 
-func runHypothetical(client *http.Client, gateway, resourceType, resourceName, action, tags, userID, role string, asJSON bool) int {
+func runHypothetical(client *http.Client, gateway, resourceType, resourceName, action, tags, userID, role, purpose, sensitivity string, asJSON bool) int {
 	q := url.Values{}
 	q.Set("resource_type", resourceType)
 	q.Set("resource_name", resourceName)
@@ -385,6 +437,12 @@ func runHypothetical(client *http.Client, gateway, resourceType, resourceName, a
 	}
 	if role != "" {
 		q.Set("role", role)
+	}
+	if purpose != "" {
+		q.Set("purpose", purpose)
+	}
+	if sensitivity != "" {
+		q.Set("sensitivity", sensitivity)
 	}
 
 	endpoint := strings.TrimRight(gateway, "/") + "/api/v1/governance/explain?" + q.Encode()
@@ -495,7 +553,7 @@ func extractEffect(m map[string]json.RawMessage) string {
 // runLocalExplain evaluates a hypothetical policy check entirely in-process —
 // no gateway or auditd required. Used when --policy-file (or HELPDESK_POLICY_FILE)
 // is set.
-func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, userID, role string, asJSON bool) int {
+func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, userID, role, purpose, sensitivityStr string, asJSON bool) int {
 	cfg, err := policy.LoadFile(policyFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error loading policy file:", err)
@@ -511,16 +569,27 @@ func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, us
 		}
 	}
 
+	var sensitivity []string
+	for _, s := range strings.Split(sensitivityStr, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			sensitivity = append(sensitivity, s)
+		}
+	}
+
 	req := policy.Request{
 		Principal: policy.RequestPrincipal{
 			UserID: userID,
 		},
 		Resource: policy.RequestResource{
-			Type: resourceType,
-			Name: resourceName,
-			Tags: tags,
+			Type:        resourceType,
+			Name:        resourceName,
+			Tags:        tags,
+			Sensitivity: sensitivity,
 		},
 		Action: policy.ActionClass(action),
+		Context: policy.RequestContext{
+			Purpose: purpose,
+		},
 	}
 	if role != "" {
 		req.Principal.Roles = []string{role}

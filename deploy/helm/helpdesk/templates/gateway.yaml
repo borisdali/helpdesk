@@ -32,17 +32,55 @@ spec:
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             {{- if .Values.governance.auditd.enabled }}
             - name: HELPDESK_AUDIT_ENABLED
               value: "true"
             - name: HELPDESK_AUDIT_URL
               value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
             {{- end }}
-          {{- if .Values.infrastructure }}
+            {{- if ne .Values.gateway.identity.provider "none" }}
+            - name: HELPDESK_IDENTITY_PROVIDER
+              value: {{ .Values.gateway.identity.provider | quote }}
+            {{- end }}
+            {{- if or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret }}
+            - name: HELPDESK_USERS_FILE
+              value: /etc/helpdesk/users.yaml
+            {{- end }}
+            {{- if .Values.gateway.identity.jwt.jwksURL }}
+            - name: HELPDESK_JWT_JWKS_URL
+              value: {{ .Values.gateway.identity.jwt.jwksURL | quote }}
+            {{- end }}
+            {{- if .Values.gateway.identity.jwt.issuer }}
+            - name: HELPDESK_JWT_ISSUER
+              value: {{ .Values.gateway.identity.jwt.issuer | quote }}
+            {{- end }}
+            {{- if .Values.gateway.identity.jwt.audience }}
+            - name: HELPDESK_JWT_AUDIENCE
+              value: {{ .Values.gateway.identity.jwt.audience | quote }}
+            {{- end }}
+            {{- if .Values.gateway.identity.jwt.rolesClaim }}
+            - name: HELPDESK_JWT_ROLES_CLAIM
+              value: {{ .Values.gateway.identity.jwt.rolesClaim | quote }}
+            {{- end }}
+            {{- if .Values.gateway.identity.jwt.cacheTTL }}
+            - name: HELPDESK_JWT_CACHE_TTL
+              value: {{ .Values.gateway.identity.jwt.cacheTTL | quote }}
+            {{- end }}
+          {{- if or .Values.infrastructure (or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret) }}
           volumeMounts:
+            {{- if .Values.infrastructure }}
             - name: config
-              mountPath: /etc/helpdesk
+              mountPath: /etc/helpdesk/infrastructure.json
+              subPath: infrastructure.json
               readOnly: true
+            {{- end }}
+            {{- if or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret }}
+            - name: users
+              mountPath: /etc/helpdesk/users.yaml
+              subPath: users.yaml
+              readOnly: true
+            {{- end }}
           {{- end }}
           ports:
             - name: http
@@ -60,14 +98,24 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-      {{- if .Values.infrastructure }}
+      {{- if or .Values.infrastructure (or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret) }}
       volumes:
+        {{- if .Values.infrastructure }}
         - name: config
           configMap:
             name: {{ include "helpdesk.fullname" . }}-config
             items:
               - key: infrastructure.json
                 path: infrastructure.json
+        {{- end }}
+        {{- if or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret }}
+        - name: users
+          secret:
+            secretName: {{ if .Values.gateway.identity.usersSecret }}{{ .Values.gateway.identity.usersSecret }}{{ else }}{{ include "helpdesk.fullname" . }}-users{{ end }}
+            items:
+              - key: users.yaml
+                path: users.yaml
+        {{- end }}
       {{- end }}
 ---
 apiVersion: v1

@@ -373,6 +373,66 @@ func TestOperatingModeAbsentByDefault(t *testing.T) {
 	}
 }
 
+// TestLogLevelPropagate verifies that logLevel is propagated to all services.
+func TestLogLevelPropagate(t *testing.T) {
+	objects := render(t,
+		"logLevel=debug",
+		"governance.auditd.enabled=true",
+		"governance.auditor.enabled=true",
+		"governance.secbot.enabled=true",
+	)
+
+	components := []struct{ deployment, container string }{
+		{"Deployment/test-database-agent", "database-agent"},
+		{"Deployment/test-k8s-agent", "k8s-agent"},
+		{"Deployment/test-incident-agent", "incident-agent"},
+		{"Deployment/test-research-agent", "research-agent"},
+		{"Deployment/test-orchestrator", "orchestrator"},
+		{"Deployment/test-gateway", "gateway"},
+		{"Deployment/test-auditd", "auditd"},
+		{"Deployment/test-auditor", "auditor"},
+		{"Deployment/test-secbot", "secbot"},
+	}
+
+	for _, tc := range components {
+		t.Run(tc.container, func(t *testing.T) {
+			dep, ok := objects[tc.deployment]
+			if !ok {
+				t.Fatalf("Deployment %q not found", tc.deployment)
+			}
+			env := containerEnvMap(containerByName(t, dep, tc.container))
+			if env["HELPDESK_LOG_LEVEL"] != "debug" {
+				t.Errorf("HELPDESK_LOG_LEVEL: want \"debug\", got %q", env["HELPDESK_LOG_LEVEL"])
+			}
+		})
+	}
+}
+
+// TestLogLevelAbsentByDefault verifies that HELPDESK_LOG_LEVEL is
+// NOT set when logLevel is empty (the default).
+func TestLogLevelAbsentByDefault(t *testing.T) {
+	objects := render(t) // all defaults
+
+	components := []struct{ deployment, container string }{
+		{"Deployment/test-database-agent", "database-agent"},
+		{"Deployment/test-k8s-agent", "k8s-agent"},
+		{"Deployment/test-orchestrator", "orchestrator"},
+	}
+
+	for _, tc := range components {
+		t.Run(tc.container, func(t *testing.T) {
+			dep, ok := objects[tc.deployment]
+			if !ok {
+				t.Fatalf("Deployment %q not found", tc.deployment)
+			}
+			env := containerEnvMap(containerByName(t, dep, tc.container))
+			if v, set := env["HELPDESK_LOG_LEVEL"]; set && v != "" {
+				t.Errorf("HELPDESK_LOG_LEVEL should be absent by default, got %q", v)
+			}
+		})
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // K8s agent RBAC
 // ─────────────────────────────────────────────────────────────────────────────

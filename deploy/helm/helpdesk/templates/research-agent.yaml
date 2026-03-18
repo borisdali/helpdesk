@@ -48,11 +48,16 @@ spec:
             - name: HELPDESK_APPROVAL_TIMEOUT
               value: "{{ .Values.governance.approvals.timeout }}"
             {{- end }}
+            {{- if .Values.governance.policy.requirePurposeForSensitive }}
+            - name: HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE
+              value: "true"
+            {{- end }}
             {{- if .Values.infrastructure }}
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.research.port }}
@@ -69,18 +74,33 @@ spec:
               port: a2a
             initialDelaySeconds: 3
             periodSeconds: 10
-          {{- if .Values.infrastructure }}
+          {{- if or .Values.infrastructure .Values.governance.policy.enabled }}
           volumeMounts:
+            {{- if .Values.infrastructure }}
             - name: infra-config
               mountPath: /etc/helpdesk/infrastructure.json
               subPath: infrastructure.json
               readOnly: true
+            {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: policy-config
+              mountPath: /etc/helpdesk/policies.yaml
+              subPath: policies.yaml
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if .Values.infrastructure }}
+      {{- if or .Values.infrastructure .Values.governance.policy.enabled }}
       volumes:
+        {{- if .Values.infrastructure }}
         - name: infra-config
           configMap:
             name: {{ include "helpdesk.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.governance.policy.enabled }}
+        - name: policy-config
+          configMap:
+            name: {{ required "governance.policy.configMap must be set when governance.policy.enabled is true" .Values.governance.policy.configMap }}
+        {{- end }}
       {{- end }}
 ---
 apiVersion: v1

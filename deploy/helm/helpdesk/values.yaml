@@ -3,6 +3,12 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# Log level for all services.
+# "info"  = default — startup messages and warnings only
+# "debug" = per-event audit logs, policy decisions, A2A calls, tool traces
+# "warn"  = warnings and errors only
+logLevel: ""
+
 # LLM model configuration. All agents and the orchestrator use these.
 model:
   # Supported vendors: anthropic, gemini (or google)
@@ -68,6 +74,33 @@ gateway:
   port: 8080
   service:
     type: ClusterIP       # set to LoadBalancer for external access
+  identity:
+    # Identity provider: none (default), static, or jwt.
+    # "none"   = accept X-User / X-Roles headers without verification (dev only).
+    # "static" = verify users against usersConfig or usersSecret.
+    # "jwt"    = verify JWT Bearer tokens.
+    provider: none
+
+    # Inline users.yaml content — rendered into a chart-managed Secret.
+    # Copy from users.example.yaml and edit. Ignored when provider != static.
+    # usersConfig: |
+    #   users:
+    #     - id: alice@example.com
+    #       roles: [dba, sre]
+    usersConfig: ""
+
+    # Name of a pre-existing Secret with a "users.yaml" key.
+    # Use instead of usersConfig when managing secrets out-of-band.
+    # Ignored when usersConfig is set.
+    usersSecret: ""
+
+    jwt:
+      # Required when provider=jwt.
+      jwksURL: ""
+      issuer: ""
+      audience: ""
+      rolesClaim: ""
+      cacheTTL: ""
 
 orchestrator:
   # Deploy an interactive pod that users can exec into.
@@ -75,7 +108,13 @@ orchestrator:
   # Streaming mode for LLM responses: "sse" (streaming) or "none" (disabled).
   # Default "none" works around ADK REPL bug in containers.
   # Set to "sse" to enable streaming if the bug is fixed.
-  streamingMode: "none"
+  streamingMode: "sse"
+  # Session-level purpose injected into every delegation from the REPL.
+  # Equivalent to X-Purpose: <value> on API requests. Required when policies
+  # have allowed_purposes conditions (e.g., pii-data-protection). Leave empty
+  # if not needed. Common values: diagnostic, remediation, compliance, emergency.
+  # sessionPurpose: "diagnostic"
+  sessionPurpose: ""
 
 # Infrastructure inventory — database servers, K8s clusters, and VMs the
 # orchestrator knows about. Passed to the LLM so it can pick the right
@@ -149,6 +188,10 @@ governance:
     enabled: false
     # Name of ConfigMap containing policies.yaml
     configMap: ""
+    # Require an explicit purpose for any action on sensitive resources
+    # (i.e. resources tagged pii, critical, etc.). Independent of allowed_purposes
+    # policy conditions — this is an agent-level pre-check.
+    requirePurposeForSensitive: false
 
   # Operating mode: set to "fix" to require all governance modules (audit, policy,
   # approvals) to be active before agents will start. Agents refuse to start if any

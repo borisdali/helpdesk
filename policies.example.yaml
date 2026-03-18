@@ -159,3 +159,107 @@ policies:
       - action: destructive
         effect: deny
         message: "Automated services cannot perform destructive operations"
+
+  # ── Identity & Access: sensitivity-based policies ────────────────────────────
+  # Resources are tagged with sensitivity classes in infra.yaml:
+  #   db_servers:
+  #     prod-customers:
+  #       sensitivity: [pii, critical]
+
+  # Protect PII data: only diagnostic/compliance reads, no writes without approval
+  - name: pii-data-protection
+    description: Restrict access to resources containing personally identifiable information
+    priority: 110
+
+    resources:
+      - type: database
+        match:
+          sensitivity: [pii]
+
+    rules:
+      # Reads require a declared purpose; block anonymous reads of PII data
+      - action: read
+        effect: allow
+        conditions:
+          allowed_purposes: [diagnostic, compliance, remediation, emergency]
+        message: "PII data access requires a declared purpose. Use X-Purpose header."
+
+      # Writes to PII databases always require approval
+      - action: write
+        effect: allow
+        conditions:
+          require_approval: true
+          allowed_purposes: [remediation, compliance, emergency]
+        message: "Write access to PII databases requires approval and a declared purpose."
+
+      # Destructive operations on PII data are prohibited
+      - action: destructive
+        effect: deny
+        message: "Destructive operations on PII databases are prohibited. Contact DBA + Legal."
+
+  # Critical infrastructure: only emergency or maintenance purpose allows writes
+  - name: critical-infra-write-guard
+    description: Writes to critical resources require explicit maintenance or emergency purpose
+    priority: 105
+
+    resources:
+      - type: database
+        match:
+          sensitivity: [critical]
+      - type: kubernetes
+        match:
+          sensitivity: [critical]
+
+    rules:
+      - action: read
+        effect: allow
+      - action: write
+        effect: allow
+        conditions:
+          allowed_purposes: [maintenance, emergency, remediation]
+          require_approval: true
+        message: "Writes to critical resources require maintenance or emergency purpose."
+      - action: destructive
+        effect: deny
+        conditions:
+          blocked_purposes: [diagnostic]
+        message: "Destructive actions on critical resources are not allowed for diagnostic purposes."
+
+  # ── Identity & Access: purpose-based break-glass override ────────────────────
+  # Emergency break-glass: SRE on-call can bypass approval with emergency purpose.
+  # Audited at highest priority so it runs before any deny rule.
+  - name: emergency-break-glass
+    description: SRE on-call can perform any action with emergency purpose (fully audited)
+    priority: 200  # Highest priority — evaluated before any other policy
+
+    principals:
+      - role: oncall
+      - role: sre
+
+    resources:
+      - type: database
+      - type: kubernetes
+
+    rules:
+      - action: [read, write, destructive]
+        effect: allow
+        conditions:
+          allowed_purposes: [emergency]
+        message: "Emergency break-glass: action allowed and fully audited."
+
+  # ── Identity & Access: purpose-based diagnostic restriction ──────────────────
+  # Diagnostic-purpose requests should never perform writes.
+  - name: diagnostic-readonly-enforcement
+    description: Requests with diagnostic purpose are restricted to read-only operations
+    priority: 95
+
+    resources:
+      - type: database
+      - type: kubernetes
+
+    rules:
+      - action: [write, destructive]
+        effect: deny
+        conditions:
+          blocked_purposes: [diagnostic]
+        message: "Diagnostic purpose is read-only. Use 'remediation' purpose for write operations."

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -34,6 +35,16 @@ func SendPrompt(ctx context.Context, agentURL, prompt string) AgentResponse {
 		}
 	}
 
+	// Override the host in card.URL with the host from agentURL. Agent cards
+	// advertise their Docker-internal hostname (e.g. http://research-agent:1106/invoke)
+	// which is not reachable from outside the Docker network. Replace it with the
+	// externally-reachable host that the caller used to fetch the card.
+	if card.URL != "" {
+		if overridden, oErr := overrideCardHost(card.URL, agentURL); oErr == nil {
+			card.URL = overridden
+		}
+	}
+
 	client, err := a2aclient.NewFromCard(ctx, card)
 	if err != nil {
 		return AgentResponse{
@@ -56,6 +67,23 @@ func SendPrompt(ctx context.Context, agentURL, prompt string) AgentResponse {
 		Text:     text,
 		Duration: time.Since(start),
 	}
+}
+
+// overrideCardHost replaces the host (and scheme) in cardURL with the host
+// from agentURL. This corrects Docker-internal hostnames advertised in agent
+// cards so they resolve correctly from outside the Docker network.
+func overrideCardHost(cardURL, agentURL string) (string, error) {
+	cu, err := url.Parse(cardURL)
+	if err != nil {
+		return cardURL, err
+	}
+	au, err := url.Parse(agentURL)
+	if err != nil {
+		return cardURL, err
+	}
+	cu.Host = au.Host
+	cu.Scheme = au.Scheme
+	return cu.String(), nil
 }
 
 func fetchCard(ctx context.Context, cardURL string) (*a2a.AgentCard, error) {

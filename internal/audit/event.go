@@ -4,6 +4,8 @@ package audit
 import (
 	"encoding/json"
 	"time"
+
+	"helpdesk/internal/identity"
 )
 
 // EventType identifies the type of audit event.
@@ -37,6 +39,24 @@ const (
 	// These events do NOT contribute to tools_used or event_count in
 	// journey aggregation — they are internal plumbing, not user-visible steps.
 	EventTypeVerificationOutcome EventType = "verification_outcome"
+	// EventTypeDelegationVerification is emitted by DelegateTool after every
+	// sub-agent call. It records which tools the sub-agent actually executed
+	// (from the audit trail), independent of the agent's text response.
+	// When Mismatch is true — a destructive or write delegation produced no
+	// confirmed tool execution of that class or stronger — the journey outcome
+	// is set to "unverified_claim". The ActionClass field distinguishes write
+	// mismatches from destructive mismatches without joining to the delegation event.
+	// Like verification_outcome, these events do NOT contribute to tools_used
+	// or event_count in journey aggregation.
+	EventTypeDelegationVerification EventType = "delegation_verification"
+	// EventTypeNoDelegationTurn is emitted by NoDelegationCallback whenever the
+	// orchestrator LLM produced a text-only response in an invocation where
+	// delegate_to_agent was never called. This is the real-time signal for
+	// LLM fabrication: the model answered a request without actually delegating.
+	// Attempt records which correction injection attempt this is (1-based);
+	// Final=true means max retries were exhausted and the suppressed response
+	// was returned to the user.
+	EventTypeNoDelegationTurn EventType = "no_delegation_turn"
 )
 
 // RequestCategory classifies the type of user request.
@@ -70,6 +90,7 @@ type Decision struct {
 type Session struct {
 	ID              string    `json:"id"`
 	UserID          string    `json:"user_id,omitempty"`
+	AgentName       string    `json:"agent_name,omitempty"` // name of the agent that owns this session (e.g. "helpdesk_orchestrator")
 	StartedAt       time.Time `json:"started_at"`
 	DelegationCount int       `json:"delegation_count"`
 }
@@ -136,6 +157,19 @@ type PolicyDecision struct {
 	// Trace is the JSON-serialised policy.DecisionTrace (stored as raw JSON to avoid import cycles).
 	Trace       json.RawMessage `json:"trace,omitempty"`       // full evaluation trace
 	Explanation string          `json:"explanation,omitempty"` // human-readable explanation
+
+	// Identity fields — who made the request.
+	UserID     string   `json:"user_id,omitempty"`
+	Roles      []string `json:"roles,omitempty"`
+	Service    string   `json:"service,omitempty"`
+	AuthMethod string   `json:"auth_method,omitempty"`
+
+	// Purpose fields — why the request was made.
+	Purpose     string `json:"purpose,omitempty"`
+	PurposeNote string `json:"purpose_note,omitempty"`
+
+	// Sensitivity — data sensitivity classes of the resource accessed.
+	Sensitivity []string `json:"sensitivity,omitempty"`
 }
 
 // AgentReasoning captures the LLM's text deliberation immediately before
@@ -147,6 +181,28 @@ type AgentReasoning struct {
 	Reasoning string `json:"reasoning"`
 	// ToolCalls lists the names of the tools the model decided to invoke.
 	ToolCalls []string `json:"tool_calls"`
+}
+
+// DelegationVerification records the audit-trail evidence for a single delegation.
+// It is emitted by DelegateTool after every sub-agent call, regardless of outcome.
+type DelegationVerification struct {
+	// DelegationEventID is the evt_ ID of the corresponding delegation_decision event.
+	DelegationEventID string `json:"delegation_event_id"`
+	// Agent is the sub-agent that was called.
+	Agent string `json:"agent"`
+	// ActionClass is the class of the delegation (read, write, destructive).
+	// Stored here so consumers can distinguish write vs destructive mismatches
+	// without joining back to the delegation_decision event.
+	ActionClass ActionClass `json:"action_class"`
+	// ToolsConfirmed lists every tool name confirmed in the audit trail for this delegation.
+	ToolsConfirmed []string `json:"tools_confirmed"`
+	// WriteConfirmed is the subset of ToolsConfirmed whose ActionClass is Write.
+	WriteConfirmed []string `json:"write_confirmed"`
+	// DestructiveConfirmed is the subset of ToolsConfirmed whose ActionClass is Destructive.
+	DestructiveConfirmed []string `json:"destructive_confirmed"`
+	// Mismatch is true when the delegation was classified as destructive or write but
+	// the audit trail contains no confirmed tool execution of that class or stronger.
+	Mismatch bool `json:"mismatch"`
 }
 
 // GovernanceViolation records a compliance violation when a required governance
@@ -176,6 +232,12 @@ type Event struct {
 	PrevHash  string `json:"prev_hash,omitempty"`  // hash of previous event
 	EventHash string `json:"event_hash,omitempty"` // hash of this event
 
+	// Principal is the verified identity of the caller. Set on gateway_request
+	// and other entry-point events so every journey has an identity anchor.
+	Principal   *identity.ResolvedPrincipal `json:"principal,omitempty"`
+	Purpose     string                      `json:"purpose,omitempty"`
+	PurposeNote string                      `json:"purpose_note,omitempty"`
+
 	Session  Session   `json:"session"`
 	Input    Input     `json:"input"`
 	Output   *Output   `json:"output,omitempty"`
@@ -184,8 +246,9 @@ type Event struct {
 	Decision            *Decision            `json:"decision,omitempty"`
 	PolicyDecision      *PolicyDecision      `json:"policy_decision,omitempty"`
 	AgentReasoning      *AgentReasoning      `json:"agent_reasoning,omitempty"`
-	GovernanceViolation *GovernanceViolation `json:"governance_violation,omitempty"`
-	Outcome             *Outcome             `json:"outcome,omitempty"`
+	GovernanceViolation     *GovernanceViolation     `json:"governance_violation,omitempty"`
+	DelegationVerification  *DelegationVerification  `json:"delegation_verification,omitempty"`
+	Outcome                 *Outcome                 `json:"outcome,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

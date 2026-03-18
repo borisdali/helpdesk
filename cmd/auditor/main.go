@@ -121,6 +121,11 @@ func main() {
 		cfg.SMTPPassword = os.Getenv("SMTP_PASSWORD")
 	}
 
+	// Allow log-all from environment
+	if !cfg.LogAll && (os.Getenv("HELPDESK_AUDITOR_LOG_ALL") == "true" || os.Getenv("HELPDESK_AUDITOR_LOG_ALL") == "1") {
+		cfg.LogAll = true
+	}
+
 	// Handle verify mode
 	if cfg.Verify {
 		runVerifyMode(cfg)

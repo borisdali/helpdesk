@@ -31,9 +31,10 @@ BIN_PKGS := \
 	approvals:./cmd/approvals/ \
 	secbot:./cmd/secbot/ \
 	govbot:./cmd/govbot/ \
-	govexplain:./cmd/govexplain/
+	govexplain:./cmd/govexplain/ \
+	hashapikey:./cmd/hashapikey/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance image push binaries bundle release github-release clean
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
@@ -89,7 +90,7 @@ cover-governance:
 # AI Governance integration tests (no Docker required; builds auditd internally)
 # ---------------------------------------------------------------------------
 integration-governance:
-	go test -tags integration -timeout 120s ./testing/integration/governance/...
+	go test -tags integration -timeout 120s -v ./testing/integration/governance/...
 
 # ---------------------------------------------------------------------------
 # Integration tests (requires Docker)
@@ -98,7 +99,19 @@ integration:
 	@echo "Starting test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running integration tests..."
-	-go test -tags integration -timeout 120s ./testing/integration/...
+	-go test -tags integration -timeout 120s -v ./testing/integration/...
+	@echo "Stopping test infrastructure..."
+	docker compose -f testing/docker/docker-compose.yaml down -v
+
+# ---------------------------------------------------------------------------
+# Integration tests (requires Docker) - same as above, but with "nocache"
+# ---------------------------------------------------------------------------
+# Target to force a fresh run by bypassing the cache
+integration-nocache:
+	@echo "Starting test infrastructure..."
+	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	@echo "Running integration tests..."
+	-go test --count=1 -tags integration -timeout 120s -v ./testing/integration/...
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml down -v
 
@@ -123,7 +136,7 @@ faulttest:
 # ---------------------------------------------------------------------------
 # End-to-end tests (requires full stack + LLM API key)
 # ---------------------------------------------------------------------------
-e2e:
+e2e: image
 	@echo "Starting full stack..."
 	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Running E2E tests..."
@@ -144,6 +157,22 @@ e2e-governance: image
 	done
 	@echo "Running governance E2E tests..."
 	-go test -tags e2e -timeout 300s -v -run TestGovernance ./testing/e2e/...
+	@echo "Stopping full stack..."
+	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+
+# ---------------------------------------------------------------------------
+# Identity & Access E2E tests (requires full stack; API key only for gateway tests)
+# ---------------------------------------------------------------------------
+e2e-identity: image
+	@echo "Starting full stack..."
+	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	@echo "Waiting for gateway to be ready..."
+	@for i in $$(seq 1 30); do \
+		curl -sf http://localhost:8080/api/v1/agents >/dev/null 2>&1 && echo "Gateway ready." && break; \
+		echo "  waiting ($$i/30)..."; sleep 3; \
+	done
+	@echo "Running Identity & Access E2E tests..."
+	-go test -tags e2e -timeout 300s -v -run TestIdentityE2E ./testing/e2e/...
 	@echo "Stopping full stack..."
 	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
@@ -186,6 +215,7 @@ binaries:
 		cp deploy/docker-compose/.env.example $$outdir/; \
 		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
 		cp policies.example.yaml $$outdir/; \
+		cp users.example.yaml $$outdir/; \
 		tar -czf $(DIST)/helpdesk-$(VERSION)-$$os-$$arch.tar.gz \
 			-C $(DIST) helpdesk-$(VERSION)-$$os-$$arch; \
 		rm -rf $$outdir; \
@@ -203,6 +233,7 @@ bundle:
 	cp deploy/docker-compose/.env.example $$bundledir/docker-compose/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/docker-compose/; \
 	cp policies.example.yaml $$bundledir/docker-compose/; \
+	cp users.example.yaml $$bundledir/docker-compose/; \
 	sed -e '/^    build:/,/^      dockerfile:/d' \
 	    -e 's|image: helpdesk:latest|image: $(IMAGE):$(VERSION)|' \
 	    deploy/docker-compose/docker-compose.yaml \
@@ -212,6 +243,7 @@ bundle:
 	cp -r deploy/helm/helpdesk $$bundledir/helm/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/helm/; \
 	cp policies.example.yaml $$bundledir/helm/; \
+	cp users.example.yaml $$bundledir/helm/; \
 	sed -i.bak \
 	    -e 's|^  repository: helpdesk|  repository: $(IMAGE)|' \
 	    -e 's|^  tag: latest|  tag: $(VERSION)|' \

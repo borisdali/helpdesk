@@ -379,3 +379,415 @@ policies:
 		t.Errorf("no limit configured, should allow any age, got %q", decision.Effect)
 	}
 }
+
+// ── Purpose-based conditions ──────────────────────────────────────────────────
+
+func TestAllowedPurposes_Allow(t *testing.T) {
+	yamlConfig := `
+version: "1"
+policies:
+  - name: pii-purpose-guard
+    resources:
+      - type: database
+    rules:
+      - action: read
+        effect: allow
+        conditions:
+          allowed_purposes: [diagnostic, compliance]
+        message: "PII data requires diagnostic or compliance purpose"
+      - action: read
+        effect: deny
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	// diagnostic purpose → first rule matches → allow
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "prod-db"},
+		Action:   ActionRead,
+		Context:  RequestContext{Purpose: "diagnostic"},
+	}
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("diagnostic purpose should be allowed, got %q", decision.Effect)
+	}
+
+	// compliance purpose → also allowed
+	req.Context.Purpose = "compliance"
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("compliance purpose should be allowed, got %q", decision.Effect)
+	}
+}
+
+func TestAllowedPurposes_Deny(t *testing.T) {
+	yamlConfig := `
+version: "1"
+policies:
+  - name: pii-purpose-guard
+    resources:
+      - type: database
+    rules:
+      - action: read
+        effect: allow
+        conditions:
+          allowed_purposes: [diagnostic, compliance]
+      - action: read
+        effect: deny
+        message: "purpose not allowed"
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	// no purpose → first rule condition fails → falls through to deny
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "prod-db"},
+		Action:   ActionRead,
+		Context:  RequestContext{},
+	}
+	if decision := engine.Evaluate(req); decision.Effect != EffectDeny {
+		t.Errorf("missing purpose should be denied, got %q", decision.Effect)
+	}
+
+	// wrong purpose → same result
+	req.Context.Purpose = "remediation"
+	if decision := engine.Evaluate(req); decision.Effect != EffectDeny {
+		t.Errorf("wrong purpose should be denied, got %q", decision.Effect)
+	}
+}
+
+func TestBlockedPurposes_Deny(t *testing.T) {
+	// blocked_purposes on an allow rule: allow unless purpose is blocked.
+	// The condition forces deny when the purpose IS in the blocked list.
+	yamlConfig := `
+version: "1"
+policies:
+  - name: diagnostic-readonly
+    resources:
+      - type: database
+    rules:
+      - action: [write, destructive]
+        effect: allow
+        conditions:
+          blocked_purposes: [diagnostic]
+        message: "Diagnostic purpose is read-only"
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg, DefaultEffect: EffectAllow})
+
+	// diagnostic purpose → condition blocks → deny
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "prod-db"},
+		Action:   ActionWrite,
+		Context:  RequestContext{Purpose: "diagnostic"},
+	}
+	if decision := engine.Evaluate(req); decision.Effect != EffectDeny {
+		t.Errorf("write with diagnostic purpose should be denied, got %q", decision.Effect)
+	}
+
+	// remediation purpose → not blocked → allow
+	req.Context.Purpose = "remediation"
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("write with remediation purpose should be allowed, got %q", decision.Effect)
+	}
+
+	// no purpose → not blocked → allow
+	req.Context.Purpose = ""
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("write with no purpose should be allowed (only diagnostic is blocked), got %q", decision.Effect)
+	}
+}
+
+func TestBlockedPurposes_MultipleBlocked(t *testing.T) {
+	yamlConfig := `
+version: "1"
+policies:
+  - name: write-restrictions
+    resources:
+      - type: database
+    rules:
+      - action: write
+        effect: allow
+        conditions:
+          blocked_purposes: [diagnostic, research]
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	for _, blocked := range []string{"diagnostic", "research"} {
+		req := Request{
+			Resource: RequestResource{Type: "database", Name: "db"},
+			Action:   ActionWrite,
+			Context:  RequestContext{Purpose: blocked},
+		}
+		if decision := engine.Evaluate(req); decision.Effect != EffectDeny {
+			t.Errorf("purpose %q should be blocked, got %q", blocked, decision.Effect)
+		}
+	}
+
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "db"},
+		Action:   ActionWrite,
+		Context:  RequestContext{Purpose: "maintenance"},
+	}
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("maintenance purpose should be allowed, got %q", decision.Effect)
+	}
+}
+
+func TestPurpose_EmergencyBreakGlass(t *testing.T) {
+	// High-priority emergency policy allows any action; lower-priority deny blocks it.
+	yamlConfig := `
+version: "1"
+policies:
+  - name: emergency-override
+    priority: 200
+    principals:
+      - role: oncall
+    resources:
+      - type: database
+    rules:
+      - action: [read, write, destructive]
+        effect: allow
+        conditions:
+          allowed_purposes: [emergency]
+
+  - name: production-protection
+    priority: 100
+    resources:
+      - type: database
+        match:
+          tags: [production]
+    rules:
+      - action: destructive
+        effect: deny
+        message: "Destructive ops on production are blocked"
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	// oncall + emergency purpose → higher-priority rule allows despite production-protection
+	req := Request{
+		Principal: RequestPrincipal{Roles: []string{"oncall"}},
+		Resource:  RequestResource{Type: "database", Name: "prod-db", Tags: []string{"production"}},
+		Action:    ActionDestructive,
+		Context:   RequestContext{Purpose: "emergency"},
+	}
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("oncall + emergency should override production protection, got %q: %s", decision.Effect, decision.Message)
+	}
+
+	// non-oncall + emergency → emergency policy principal doesn't match → still denied
+	req.Principal = RequestPrincipal{Roles: []string{"developer"}}
+	if decision := engine.Evaluate(req); decision.Effect != EffectDeny {
+		t.Errorf("developer + emergency should still be denied on production, got %q", decision.Effect)
+	}
+}
+
+// ── Sensitivity-based resource matching ──────────────────────────────────────
+
+func TestSensitivityMatching_Allow(t *testing.T) {
+	yamlConfig := `
+version: "1"
+policies:
+  - name: pii-protection
+    resources:
+      - type: database
+        match:
+          sensitivity: [pii]
+    rules:
+      - action: read
+        effect: allow
+        conditions:
+          allowed_purposes: [diagnostic, compliance]
+      - action: read
+        effect: deny
+        message: "PII access requires declared purpose"
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg, DefaultEffect: EffectAllow})
+
+	// PII resource + diagnostic purpose → allow
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "customers", Sensitivity: []string{"pii"}},
+		Action:   ActionRead,
+		Context:  RequestContext{Purpose: "diagnostic"},
+	}
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("pii + diagnostic should be allowed, got %q", decision.Effect)
+	}
+
+	// PII resource + no purpose → deny
+	req.Context.Purpose = ""
+	if decision := engine.Evaluate(req); decision.Effect != EffectDeny {
+		t.Errorf("pii + no purpose should be denied, got %q", decision.Effect)
+	}
+
+	// Non-PII resource + no purpose → policy doesn't match → default allow
+	req.Resource.Sensitivity = []string{"internal"}
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("non-pii resource: policy should not match, got %q", decision.Effect)
+	}
+}
+
+func TestSensitivityMatching_MultipleRequired(t *testing.T) {
+	// Policy requires both "pii" AND "critical" to match.
+	yamlConfig := `
+version: "1"
+policies:
+  - name: critical-pii
+    resources:
+      - type: database
+        match:
+          sensitivity: [pii, critical]
+    rules:
+      - action: destructive
+        effect: deny
+        message: "No destructive ops on critical PII data"
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg, DefaultEffect: EffectAllow})
+
+	// Both pii and critical → policy matches → deny
+	req := Request{
+		Resource: RequestResource{Type: "database", Name: "db", Sensitivity: []string{"pii", "critical"}},
+		Action:   ActionDestructive,
+	}
+	if decision := engine.Evaluate(req); decision.Effect != EffectDeny {
+		t.Errorf("pii+critical should be denied, got %q", decision.Effect)
+	}
+
+	// Only pii (missing critical) → policy doesn't match → default allow
+	req.Resource.Sensitivity = []string{"pii"}
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("pii only (no critical) should not match policy, got %q", decision.Effect)
+	}
+
+	// Only critical (missing pii) → policy doesn't match → default allow
+	req.Resource.Sensitivity = []string{"critical"}
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("critical only (no pii) should not match policy, got %q", decision.Effect)
+	}
+
+	// No sensitivity → policy doesn't match → default allow
+	req.Resource.Sensitivity = nil
+	if decision := engine.Evaluate(req); decision.Effect != EffectAllow {
+		t.Errorf("no sensitivity: policy should not match, got %q", decision.Effect)
+	}
+}
+
+func TestSensitivityAndPurpose_Combined(t *testing.T) {
+	// Sensitivity matching + purpose condition together.
+	yamlConfig := `
+version: "1"
+policies:
+  - name: sensitive-write-guard
+    resources:
+      - type: database
+        match:
+          sensitivity: [sensitive]
+    rules:
+      - action: write
+        effect: allow
+        conditions:
+          allowed_purposes: [maintenance, remediation]
+      - action: write
+        effect: deny
+        message: "Writes to sensitive resources require maintenance or remediation purpose"
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg, DefaultEffect: EffectAllow})
+
+	cases := []struct {
+		purpose string
+		want    Effect
+	}{
+		{"maintenance", EffectAllow},
+		{"remediation", EffectAllow},
+		{"diagnostic", EffectDeny},
+		{"", EffectDeny},
+	}
+	for _, tc := range cases {
+		req := Request{
+			Resource: RequestResource{Type: "database", Name: "db", Sensitivity: []string{"sensitive"}},
+			Action:   ActionWrite,
+			Context:  RequestContext{Purpose: tc.purpose},
+		}
+		if decision := engine.Evaluate(req); decision.Effect != tc.want {
+			t.Errorf("purpose=%q: want %q, got %q", tc.purpose, tc.want, decision.Effect)
+		}
+	}
+}
+
+func TestSensitivityAndPrincipal_Combined(t *testing.T) {
+	// DBA role can write to PII resources; others cannot.
+	yamlConfig := `
+version: "1"
+policies:
+  - name: pii-dba-only
+    principals:
+      - role: dba
+    resources:
+      - type: database
+        match:
+          sensitivity: [pii]
+    rules:
+      - action: write
+        effect: allow
+
+  - name: pii-others-deny
+    resources:
+      - type: database
+        match:
+          sensitivity: [pii]
+    rules:
+      - action: write
+        effect: deny
+        message: "Only DBAs can write to PII resources"
+`
+	cfg, err := Load([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	dbaReq := Request{
+		Principal: RequestPrincipal{Roles: []string{"dba"}},
+		Resource:  RequestResource{Type: "database", Name: "db", Sensitivity: []string{"pii"}},
+		Action:    ActionWrite,
+	}
+	if decision := engine.Evaluate(dbaReq); decision.Effect != EffectAllow {
+		t.Errorf("DBA should be allowed on PII resource, got %q", decision.Effect)
+	}
+
+	devReq := Request{
+		Principal: RequestPrincipal{Roles: []string{"developer"}},
+		Resource:  RequestResource{Type: "database", Name: "db", Sensitivity: []string{"pii"}},
+		Action:    ActionWrite,
+	}
+	if decision := engine.Evaluate(devReq); decision.Effect != EffectDeny {
+		t.Errorf("developer should be denied on PII resource, got %q", decision.Effect)
+	}
+}

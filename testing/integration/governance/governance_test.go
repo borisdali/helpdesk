@@ -972,3 +972,111 @@ func TestAudit_DestructiveApprovalWorkflow_ForNewTools(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// Delegation verification audit layer
+// =============================================================================
+
+// newDelegationVerificationEvent returns an audit event body for a
+// delegation_verification event with the given trace ID and mismatch flag.
+func newDelegationVerificationEvent(sessionID, traceID, delegationEventID string, mismatch bool) map[string]any {
+	toolsConfirmed := []string{"get_session_info"}
+	destructiveConfirmed := []string{}
+	if !mismatch {
+		toolsConfirmed = []string{"terminate_connection"}
+		destructiveConfirmed = []string{"terminate_connection"}
+	}
+	return map[string]any{
+		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"input":      map[string]any{"user_query": "terminate the slow connection"},
+		"delegation_verification": map[string]any{
+			"delegation_event_id":   delegationEventID,
+			"agent":                 "postgres_database_agent",
+			"tools_confirmed":       toolsConfirmed,
+			"destructive_confirmed": destructiveConfirmed,
+			"mismatch":              mismatch,
+		},
+	}
+}
+
+// TestIntegration_DelegationVerification_MismatchSurfacesInJourneys verifies
+// that a delegation_verification event with Mismatch=true elevates the journey
+// outcome to "unverified_claim" and is queryable via ?outcome=unverified_claim.
+// It also confirms the event does not pollute tools_used or event_count.
+func TestIntegration_DelegationVerification_MismatchSurfacesInJourneys(t *testing.T) {
+	traceID := fmt.Sprintf("dv-mismatch-%d", time.Now().UnixNano())
+	sessionID := "dv-session-" + traceID
+
+	// Record the delegation_decision anchor so QueryJourneys can find this trace.
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	anchorResult := post(t, auditdAddr, "/v1/events", anchor)
+	anchorID, _ := anchorResult["event_id"].(string)
+
+	// Record a delegation_verification with Mismatch=true.
+	post(t, auditdAddr, "/v1/events", newDelegationVerificationEvent(sessionID, traceID, anchorID, true))
+
+	// Query journeys filtered by outcome=unverified_claim and find our trace.
+	journeys := getList(t, auditdAddr, "/v1/journeys?outcome=unverified_claim")
+	found := false
+	for _, j := range journeys {
+		if j["trace_id"] != traceID {
+			continue
+		}
+		found = true
+		if j["outcome"] != "unverified_claim" {
+			t.Errorf("journey outcome = %q, want unverified_claim", j["outcome"])
+		}
+		// delegation_verification must NOT appear in tools_used.
+		if tools, ok := j["tools_used"].([]any); ok {
+			for _, tool := range tools {
+				if tool == "delegation_verification" {
+					t.Error("delegation_verification should not appear in tools_used")
+				}
+			}
+		}
+		// event_count should be 1: the delegation_decision only; delegation_verification is excluded.
+		if count, ok := j["event_count"].(float64); ok && count != 1 {
+			t.Errorf("event_count = %.0f, want 1 (delegation_verification excluded from count)", count)
+		}
+	}
+	if !found {
+		t.Errorf("journey with trace_id=%s not found in outcome=unverified_claim results", traceID)
+	}
+}
+
+// TestIntegration_DelegationVerification_CleanVerification verifies that a
+// delegation_verification event with Mismatch=false records outcome "verified"
+// and does NOT elevate the journey to "unverified_claim".
+func TestIntegration_DelegationVerification_CleanVerification(t *testing.T) {
+	traceID := fmt.Sprintf("dv-clean-%d", time.Now().UnixNano())
+	sessionID := "dv-clean-" + traceID
+
+	// Anchor event.
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	anchorResult := post(t, auditdAddr, "/v1/events", anchor)
+	anchorID, _ := anchorResult["event_id"].(string)
+
+	// Clean delegation_verification (Mismatch=false).
+	post(t, auditdAddr, "/v1/events", newDelegationVerificationEvent(sessionID, traceID, anchorID, false))
+
+	// The journey must exist but must NOT have outcome=unverified_claim.
+	journeys := getList(t, auditdAddr, "/v1/journeys")
+	found := false
+	for _, j := range journeys {
+		if j["trace_id"] == traceID {
+			found = true
+			if j["outcome"] == "unverified_claim" {
+				t.Error("clean verification should not result in unverified_claim outcome")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("journey with trace_id=%s not found in journeys", traceID)
+	}
+}

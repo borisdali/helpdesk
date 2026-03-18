@@ -76,8 +76,8 @@ two-level safeguards (see for instance `cancel query`
 human-in-the-loop manual [approval workflow](AIGOVERNANCE.md#4-approval-workflows) for mission
 critical PROD databases, [aiHelpDesk journeys](JOURNEYS.md), retry on partial
 failures and attempts at automatic recovery mechanism and the five-layer
-[pyramid testing](testing/README.md) that includes the mandatory
-[fault-injection](testing/FAULT_INJECTION_TESTING.md) scenario for every W or D mutation.
+[pyramid testing](../testing/README.md) that includes the mandatory
+[fault-injection](../testing/FAULT_INJECTION_TESTING.md) scenario for every W or D mutation.
 
 It's crystal clear in our mind that our quest to deliver AI based
 self-service diagnose and repair system can only be achieved with the

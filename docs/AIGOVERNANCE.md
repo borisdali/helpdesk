@@ -8,55 +8,168 @@ dedicated to aiHelpDesk's critical subsystem that we refer to as AI Governance.
 
 As aiHelpDesk evolves from read-only diagnostics to actively *fixing* infrastructure
 issues, governance becomes critical for trust. The AI Governance system ensures that
-when agents can modify databases, scale deployments, or restart services, they do so
-safely, accountably, and with appropriate human oversight.
+when aiHelpDesk agents are instructed to remedy a problem and so they have to modify
+databases, scale deployments, or restart services, they do so safely, accountably,
+and with appropriate human oversight.
+
+A distinctive feature of aiHelpDesk governance is **LLM Fabrication Detection** (§1.1):
+the ability to detect when an AI agent claims to have taken an action it never actually
+performed. This addresses a fundamental property of LLMs — they can generate plausible
+success narratives from training data, bypassing all in-tool safeguards if no tool was
+ever called. aiHelpDesk counters this at two independent layers: intra-agent
+post-mutation re-verification (see [here](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery))
+and inter-agent audit-based delegation verification (see [here](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)).
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           AI GOVERNANCE LAYERS                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   POLICY     │  │   APPROVAL   │  │  GUARDRAILS  │  │    AUDIT     │     │
-│  │   ENGINE     │  │   WORKFLOWS  │  │   & LIMITS   │  │   SYSTEM     │     │
-│  │              │  │              │  │              │  │              │     │
-│  │ What's       │  │ Human-in-    │  │ Hard safety  │  │ Tamper-proof │     │
-│  │ allowed?     │  │ the-loop     │  │ constraints  │  │ record       │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
-│         │                 │                 │                 │             │
-│         └─────────────────┴─────────────────┴─────────────────┘             │
-│                                    │                                        │
-│                           Enforcement Point                                 │
-│                          (before tool execution)                            │
-│                                                                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │  IDENTITY    │  │  EXPLAIN-    │  │   ROLLBACK   │  │  COMPLIANCE  │     │
-│  │  & ACCESS    │  │  ABILITY     │  │   & UNDO     │  │  REPORTING   │     │
-│  │              │  │              │  │              │  │              │     │
-│  │ Who can do   │  │ Why did AI   │  │ Recover from │  │ Prove it     │     │
-│  │ what?        │  │ decide this? │  │ mistakes     │  │ works        │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                       aiHelpDesk AI Governance layers                     │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                        ┌──────────────┐   │
+│                                                        │  aiHelpDesk  │   │
+│                                                        │   Journeys   │   │
+│                                                        └──────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │   POLICY     │  │   APPROVAL   │  │  GUARDRAILS  │  │    AUDIT     │   │
+│  │   ENGINE     │  │   WORKFLOWS  │  │   & LIMITS   │  │   SYSTEM     │   │
+│  │              │  │              │  │              │  │              │   │
+│  │    What's    │  │   Human-in-  │  │ Hard safety  │  │ Tamper-proof │   │
+│  │   allowed?   │  │   the-loop   │  │ constraints  │  │    record    │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+│         │                 │                 │                 │           │
+│         └─────────────────┴─────────────────┴─────────────────┘           │
+│                                    │                                      │
+│                           Enforcement Point                               │
+│                          (before tool execution)                          │
+│                                                                           │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  IDENTITY    │  │  EXPLAIN-    │  │   ROLLBACK   │  │  COMPLIANCE  │   │
+│  │  & ACCESS    │  │  ABILITY     │  │   & UNDO     │  │  REPORTING   │   │
+│  │              │  │              │  │              │  │              │   │
+│  │ Who can do   │  │ Why did AI   │  │ Recover from │  │ Prove it     │   │
+│  │    what?     │  │ decide this? │  │   mistakes   │  │   works      │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │
+│                                                                           │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │                    LLM FABRICATION DETECTION  (§1.1)                │  │
+│  │                                                                     │  │
+│  │  Layer 1: intra-agent post-mutation re-verification (did it stick?) │  │
+│  │  Layer 2: inter-agent audit-based delegation verification           │  │
+│  │           (did the sub-agent actually call the tool?)               │  │
+│  │  Outcome: unverified_claim journey flag + queryable audit events    │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
+
+## 1.1 LLM Fabrication Detection
+
+A key challenge in multi-agent AI systems is that the orchestrating LLM can
+*fabricate* outcomes: it can generate a plausible-sounding "I have terminated
+the connection" message entirely from pattern memory, without ever invoking
+`delegate_to_agent`. If no tool call is made, none of the in-tool safeguards
+(blast radius, approval checks, policy engine, Level 2 verification) are
+reachable — they simply never run.
+
+aiHelpDesk addresses this through two independent detection layers:
+
+### Layer 1 — Intra-agent post-mutation verification
+
+Every mutation tool independently re-reads the target state after the write to
+confirm the change took effect. The database agent re-queries `pg_stat_activity`
+after terminating a connection; the Kubernetes agent re-queries the deployment
+spec after a restart. This catches silent failures (permission denied, already
+gone, partial apply) that would otherwise produce a false-success response.
+
+When re-verification fails, the tool enters a bounded retry loop
+(`WaitUntilResolved`) with exponential back-off before escalating. Retry
+attempts are individually recorded as audit events.
+
+See [here](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery) for details.
+
+**Limitation:** this layer runs inside the sub-agent. It is unreachable if the
+Orchestrator fabricates a success without calling the sub-agent at all.
+
+### Layer 2 — Inter-agent audit-based delegation verification
+
+After every `delegate_to_agent` call, the Orchestrator queries the audit trail
+independently of the agent's text response:
+
+```
+GET /v1/events?event_type=tool_execution&trace_id=X&since=T
+```
+
+It classifies each confirmed tool (`terminate_connection` → `destructive`, etc.)
+and records a `delegation_verification` event with:
+
+- `tools_confirmed` — the tools the sub-agent *actually* executed
+- `mismatch` — `true` when the delegation was destructive but no destructive
+  tool appears in the trail
+
+When a mismatch is detected, the Orchestrator is instructed by its system prompt
+to tell the user the action could **not be verified** and was likely **not
+executed** — overriding whatever the agent's text response claimed. The journey
+outcome is simultaneously elevated to `unverified_claim` in the audit database,
+making all such incidents queryable:
+
+```
+GET /v1/journeys?outcome=unverified_claim
+```
+
+See [here](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) for details.
+
+**Properties:**
+
+| Property | Value |
+|----------|-------|
+| **Generic** | Works for any tool in the action-class map — current and future |
+| **Independent** | Queries auditd directly, not the agent's text |
+| **Persistent** | The verification is itself an auditable event |
+| **Queryable** | All unverified-claim incidents are surfaced via journeys API |
+| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
+| **Non-invasive** | Read delegations are verified but never flagged as mismatch |
+
+**Coverage and gaps:**
+
+| Session path | Layer 1 | Layer 2 |
+|---|---|---|
+| Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify |
+| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ⚠️ no inter-agent verification (Gateway callers are not Orchestrators) |
+| Read-only tool output content | — | ⚠️ content fabrication not detected (structural gap) |
+
+The Layer 2 gap for Gateway-direct calls is a known limitation. A future SDK
+giving upstream callers access to the audit trail (trace_id → confirmed tools)
+could provide equivalent structural verification at the Gateway boundary.
+
+For full implementation details, unit test coverage, and the investigation
+workflow when a mismatch is detected, see:
+- [docs/MUTATION_TOOLS.md §4–§5](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery) — implementation details
+- [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) — investigation guide
+
+---
 
 ## 2. Components
 
-aiHelpDesk Governance consists of eight well-defined components:
+aiHelpDesk Governance consists of eight well-defined components (we don't count 
+the `Operating Mode` as a standalone component, rather a way to run aiHelpDesk
+AI Governance, but it's listed below for completeness as it controls the
+behavior of the components):
 
-| Component | Status | Description |
-|-----------|--------|-------------|
-| [Audit System](#7-audit-system) | **Implemented** | Tamper-evident logging with hash chains |
-| [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
-| [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
-| [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
-| [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
-| [Operating Mode](#6-operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
-| [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
-| Identity & Access | Planned | User/role-based permissions |
-| Rollback & Undo | Planned | Recovery from mistakes |
+| § | Component | Status | Description |
+|----|------|--------|-------------|
+| 1.1 | [LLM Fabrication Detection](#11-llm-fabrication-detection) | **Implemented** | Two-layer detection: intra-agent post-mutation re-verification + inter-agent audit-based delegation verification |
+| 3 | [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
+| 4 | [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
+| 5 | [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
+| 6 | [Operating Mode](#6-operating-mode) | **Implemented** | `fix` mode enforces all governance modules at startup; violations generate compliance alerts and incidents |
+| 7 | [Audit System](#7-audit-system) | **Implemented** | Tamper-evident logging with hash chains |
+| 8 | [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
+| 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
+| 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
+| ?? | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
 
@@ -345,7 +458,7 @@ approvals approve <approval-id> --url http://localhost:1199
 # Deny a specific request
 approvals deny <approval-id> --url http://localhost:1199
 ```
-For details on how to run `approvals` in your specific deployment environment see [here](deploy/docker-compose/README.md#34-managing-approvals) for running via Docker containers, [here](deploy/host/README.md#73-managing-approvals) for running directly on a host and [here](deploy/helm/README.md#94-approval-workflow) for running on K8s.
+For details on how to run `approvals` in your specific deployment environment see [here](../deploy/docker-compose/README.md#34-managing-approvals) for running via Docker containers, [here](../deploy/host/README.md#73-managing-approvals) for running directly on a host and [here](../deploy/helm/README.md#94-approval-workflow) for running on K8s.
 
 ### 4.4 Approval API Endpoints
 
@@ -553,7 +666,7 @@ Five governance modules are validated at startup via `agentutil.EnforceFixMode`:
 For every violation the agent:
 1. Logs at `ERROR` (fatal) or `WARN` (warning) level
 2. Best-effort POSTs a `governance_violation` audit event to auditd (if `HELPDESK_AUDIT_URL` is set)
-3. Best-effort POSTs an incident to the gateway (if `HELPDESK_GATEWAY_URL` is set)
+3. Best-effort POSTs an incident to the Gateway (if `HELPDESK_GATEWAY_URL` is set)
 
 ### 6.3 Runtime Enforcement
 
@@ -591,7 +704,7 @@ agent uses a two-stage fallback:
    via the gateway, which routes it to the incident agent outside the
    broken audit path.
 2. **Write to stderr** — ensure the violation is captured in container/system
-   logs even if the gateway is also unreachable.
+   logs even if the Gateway is also unreachable.
 
 This guarantees that governance failures are always visible, even when the
 audit system itself has failed.
@@ -609,8 +722,8 @@ audit system itself has failed.
 Key integration points:
 
 - `agentutil.CheckFixModeViolations(cfg)` — validates all five modules from `agentutil.Config`
-- `agentutil.CheckFixModeAuditViolations(auditEnabled, auditURL)` — audit-only check for the orchestrator (which delegates policy enforcement to sub-agents)
-- `agentutil.EnforceFixMode(ctx, violations, componentName, auditURL)` — logs, records `governance_violation` audit events, creates gateway incidents, and exits on fatal violations
+- `agentutil.CheckFixModeAuditViolations(auditEnabled, auditURL)` — audit-only check for the Orchestrator (which delegates policy enforcement to sub-agents)
+- `agentutil.EnforceFixMode(ctx, violations, componentName, auditURL)` — logs, records `governance_violation` audit events, creates Gateway incidents, and exits on fatal violations
 - `agents/*/main.go` and `cmd/helpdesk/main.go` — call `EnforceFixMode` immediately after config loading, before any agent initialization
 
 ---
@@ -618,13 +731,13 @@ Key integration points:
 ## 7. Audit System
 
 The audit system records every tool execution, policy decision, delegation, and
-gateway request into a tamper-evident, hash-chained log managed by `auditd`.
+Gateway request into a tamper-evident, hash-chained log managed by `auditd`.
 
 | Component | Location | Description |
 |-----------|----------|-------------|
 | `auditd` | `cmd/auditd/` | Central HTTP service; stores events, manages hash chain, serves approval and governance APIs |
 | `auditor` | `cmd/auditor/` | Real-time monitoring CLI; reads the Unix socket, fires security alerts, verifies chain integrity |
-| `secbot` | `cmd/secbot/` | Automated incident responder; listens to the audit socket and creates incident bundles via the gateway |
+| `secbot` | `cmd/secbot/` | Automated incident responder; listens to the audit socket and creates incident bundles via the Gateway |
 | `audit` package | `internal/audit/` | Core event types, hash chain implementation, store, trace middleware |
 
 For the full API reference, event schema, auditor flags, environment variables,
@@ -653,13 +766,13 @@ go run ./cmd/secbot/ --socket /tmp/helpdesk-audit.sock --dry-run
 ```
 
 For deployment-specific instructions see:
-[Docker Compose](deploy/docker-compose/README.md#38-security-responder-secbot) ·
-[Host](deploy/host/README.md#77-security-responder-secbot) ·
-[Helm](deploy/helm/README.md#98-security-responder-secbot)
+[Docker Compose](../deploy/docker-compose/README.md#38-security-responder-secbot) ·
+[Host](../deploy/host/README.md#77-security-responder-secbot) ·
+[Helm](../deploy/helm/README.md#98-security-responder-secbot)
 
 ## 8. Compliance Reporting (cmd/govbot/)
 
-The `govbot` is a one-shot compliance reporter that queries the gateway's
+The `govbot` is a one-shot compliance reporter that queries the Gateway's
 governance API endpoints and produces a structured compliance snapshot. It
 is designed to run on-demand or on a schedule (daily cron / Kubernetes CronJob)
 and optionally post a summary to a Slack webhook.
@@ -669,7 +782,7 @@ Gateway /api/v1/governance/* → govbot → compliance report + optional Slack a
 ```
 
 govbot is stateless and read-only. No audit socket access or cluster privileges
-are required — only network access to the gateway.
+are required — only network access to the Gateway.
 
 For the full compliance architecture — tool invocation instrumentation, policy
 coverage gap analysis, dead rule detection, compliance history, and the
@@ -695,7 +808,7 @@ Phase 10 — Compliance Summary
 | Code | Meaning |
 |------|---------|
 | `0`  | Healthy — no alerts or warnings |
-| `1`  | Fatal — could not reach gateway |
+| `1`  | Fatal — could not reach Gateway |
 | `2`  | Alerts present — chain integrity failure or other critical finding |
 
 Exit code `2` is useful for CI pipelines and cron alerting.
@@ -714,7 +827,7 @@ be working correctly.
 
 **Phase 6 — Chain integrity:** A broken hash chain raises an **alert** (exit 2).
 
-See more on `secbot` [here](cmd/secbot/README.md).
+See more on `secbot` [here](../cmd/secbot/README.md).
 
 ### 8.4 Running govbot
 
@@ -736,7 +849,7 @@ docker compose --profile governance run govbot
 kubectl create job govbot-manual --from=cronjob/helpdesk-govbot
 ```
 
-For details on how to run `govbot` in your specific deployment environment see [here](deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers, [here](deploy/host#76-running-the-compliance-reporter-govbot) for running directly on a host and [here](deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
+For details on how to run `govbot` in your specific deployment environment see [here](../deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot) for running via Docker containers, [here](../deploy/host#76-running-the-compliance-reporter-govbot) for running directly on a host and [here](../deploy/helm/README.md#97-running-the-compliance-reporter-govbot) for running on K8s.
 
 See this [sample](GOVBOT_SAMPLE.md) of running `govbot` on demand.
 
@@ -753,7 +866,7 @@ governance:
     webhook: "https://hooks.slack.com/services/..."
 ```
 
-See [cmd/govbot/README.md](cmd/govbot/README.md) for the full documentation.
+See [cmd/govbot/README.md](../cmd/govbot/README.md) for the full documentation.
 
 ---
 
@@ -907,7 +1020,7 @@ govexplain --gateway http://localhost:8080 --event tool_a1b2c3d4
 GET /api/v1/governance/events/tool_a1b2c3d4/explain
 ```
 
-The gateway retrieves the stored `DecisionTrace` from the audit event and
+The Gateway retrieves the stored `DecisionTrace` from the audit event and
 returns it. No re-evaluation is needed — the trace was recorded at the time.
 
 #### 9.3.3 Hypothetical — what would happen if?
@@ -923,7 +1036,7 @@ govexplain --gateway http://localhost:8080 \
 GET /api/v1/governance/explain?resource_type=database&resource_name=prod-db&action=write&tags=production,critical
 ```
 
-The gateway calls `engine.Explain()` in dry-run mode with the provided
+The Gateway calls `engine.Explain()` in dry-run mode with the provided
 parameters. No audit event is written, no tool is executed.
 
 ### 9.4 Audit Enrichment
@@ -1029,7 +1142,7 @@ govexplain --gateway http://localhost:8080 \
 
 Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
 
-For details on how to run `govexplain` in your specific deployment environment see [here](deploy/docker-compose/README.md#35-explaining-policy-decisions-govexplain) for running via Docker containers, [here](deploy/host#74-explaining-policy-decisions-govexplain) for running directly on a host and [here](deploy/helm/README.md#95-explaining-policy-decisions-govexplain) for running on K8s.
+For details on how to run `govexplain` in your specific deployment environment see [here](../deploy/docker-compose/README.md#35-explaining-policy-decisions-govexplain) for running via Docker containers, [here](../deploy/host#74-explaining-policy-decisions-govexplain) for running directly on a host and [here](../deploy/helm/README.md#95-explaining-policy-decisions-govexplain) for running on K8s.
 
 ### 9.7 Implementation Plan
 
@@ -1043,7 +1156,7 @@ Changes are additive — no existing behaviour changes:
 | Audit types | Add `Trace` and `Explanation` to `PolicyDecision` | `internal/audit/event.go` |
 | agentutil | Call `Explain` instead of `Evaluate`; populate audit fields; enrich `DeniedError` | `agentutil/agentutil.go` |
 | Gateway | Add two explain endpoints; call auditd for event lookup | `cmd/gateway/` |
-| govexplain CLI | New binary — thin HTTP client for the two gateway endpoints | `cmd/govexplain/` |
+| govexplain CLI | New binary — thin HTTP client for the two Gateway endpoints | `cmd/govexplain/` |
 
 The largest single change is instrumenting `evaluate()` to record the trace
 without altering its return value. The trace is built as a side-effect,
@@ -1053,13 +1166,46 @@ preserving full backwards compatibility.
 
 ---
 
-## 10. Troubleshooting
+## 10. Identity & Access
 
-Please refer to [here](ARCHITECTURE.md#troubleshooting) for the general purpose
-troubleshooting tips and known issues beyond AI Governance and Audit.
-This troubleshooting section is specific to just these two topics.
+The Identity & Access sub-module answers two questions for every request:
 
-#### 10.1 Events Not Being Recorded
+1. **Who is making this request?** — verified identity, not a header anyone can set
+2. **Why are they making it?** — declared purpose, not just what they're allowed to do
+
+Combined with the existing resource tag system, this produces a three-dimension
+access control model on top of the policy engine's `principals` block:
+
+| Dimension | Description |
+|-----------|-------------|
+| **Role** | Verified identity → resolved roles (from IdP or `users.yaml`) |
+| **Data sensitivity** | Per-resource sensitivity class: `pii`, `sensitive`, `internal`, `public`, `critical` |
+| **Purpose** | Declared per request; enforced as a policy condition |
+
+Authentication is enforced at the Gateway (the single ingress point). Three
+identity provider modes are supported via `HELPDESK_IDENTITY_PROVIDER`:
+
+| Mode | Use case |
+|------|----------|
+| `none` | Default — `X-User` header accepted as-is; backwards compatible |
+| `static` | Self-hosted — users and service accounts in `users.yaml` |
+| `jwt` | SSO (Okta, Auth0, Azure AD, Google) — JWT validated against JWKS |
+
+The resolved principal propagates through every downstream layer via A2A message
+metadata, reaching the policy engine at the agent level without re-authentication
+at each hop. Auth failures return HTTP 401 and are recorded in the audit trail
+(queryable via `?outcome_status=error`).
+
+For full details see **[docs/IDENTITY.md](IDENTITY.md)**.
+
+---
+
+## 11. Troubleshooting
+
+Please refer to [here](ARCHITECTURE.md#13-troubleshooting) for the general purpose
+troubleshooting tips and known issues beyond AI Governance.
+
+#### 11.1 Events Not Being Recorded
 
 1. Verify auditd is running:
    ```bash
@@ -1074,7 +1220,7 @@ This troubleshooting section is specific to just these two topics.
 
 3. Check auditd logs for connection errors
 
-#### 10.2 Auditor Not Receiving Events
+#### 11.2 Auditor Not Receiving Events
 
 1. Verify socket path matches between auditd and auditor:
    ```bash
@@ -1091,7 +1237,7 @@ This troubleshooting section is specific to just these two topics.
 3. Ensure auditor connects before events are sent (events sent before
    connection are not replayed)
 
-#### 10.3 Chain Verification Fails
+#### 11.3 Chain Verification Fails
 
 If chain verification reports broken links:
 
@@ -1108,7 +1254,7 @@ If chain verification reports broken links:
 3. For legitimate issues, the audit log should be considered compromised
    and investigated
 
-#### 10.4 Off-Hours Alerts Not Working
+#### 11.4 Off-Hours Alerts Not Working
 
 The auditor uses local time for off-hours detection. Verify your system
 timezone is set correctly:
@@ -1119,30 +1265,30 @@ date  # Check current local time
 
 ---
 
-## 11. Roadmap
+## 12. Roadmap
 
-### 11.1 Phase 1: Foundation (Complete)
+### 12.1 Phase 1: Foundation (Complete)
 - [x] Audit system with hash chains
 - [x] Real-time monitoring (auditor)
 - [x] Security alerting (secbot)
 - [x] Policy engine (internal/policy/)
 - [x] Policy enforcement in agents (database, k8s)
 
-### 11.2 Phase 2: Enforcement (Complete)
+### 12.2 Phase 2: Enforcement (Complete)
 - [x] Approval workflows (cmd/approvals/, auditd API, Slack/email notifications)
 - [x] Compliance reporting (cmd/govbot/, Kubernetes CronJob)
 - [x] Guardrails: DB blast radius (`max_rows_affected`), K8s blast radius (`max_pods_affected`), transaction age (`max_xact_age_secs`), schedule — pre- and post-execution hooks
 - [x] Explainability — decision trace, `govexplain` CLI, explain API endpoints
 - [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
+- [x] **LLM Fabrication Detection** — intra-agent post-mutation re-verification (L2 verify) and inter-agent audit-based delegation verification; `unverified_claim` journey outcome; queryable via `GET /v1/journeys?outcome=unverified_claim`. See [§1.1](#11-llm-fabrication-detection).
 
-### 11.3 Phase 3: Operations
+### 12.3 Phase 3: Operations (In Progress)
+- [x] **Identity & access** — three-dimension access control: verified identity (static/JWT providers), data sensitivity markings, and purpose-based conditions. See [§10](#10-identity--access) and [docs/IDENTITY.md](IDENTITY.md).
+- [ ] **Rollback & Undo** — recovery from agent-initiated mutations. Design pending.
 - [ ] Rate limits (write frequency per session)
 - [ ] Circuit breaker (auto-pause on consecutive errors)
-- [ ] Identity & access control (principal/role matching in policy engine)
-- [ ] Time-based policy conditions (schedule: days/hours/timezone)
-- [ ] Rollback capabilities
 
-### 11.4 Phase 4: Intelligence
+### 12.4 Phase 4: Intelligence
 - [ ] Anomaly detection (ML-based)
 - [ ] Risk scoring
 - [ ] Automated remediation suggestions

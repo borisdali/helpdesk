@@ -849,6 +849,285 @@ func TestStoreConfig_DSNRouting(t *testing.T) {
 
 // newJourneyStore is a test helper that creates a temp SQLite store and registers
 // a cleanup to close it.
+// TestQueryJourneys_UnverifiedClaimOutcome verifies that a delegation_verification
+// event with Mismatch=true elevates the journey outcome to "unverified_claim".
+func TestQueryJourneys_UnverifiedClaimOutcome(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_uc1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_uc1",
+			Session:   Session{ID: "sess_uc1", UserID: "alice"},
+			Input:     Input{UserQuery: "terminate connection pid 5292"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_uc1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_uc1",
+			Session:   Session{ID: "dbagent_uc"},
+			Tool:      &ToolExecution{Name: "get_session_info", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// delegation_verification: destructive delegation but no destructive tool called.
+		{
+			EventID:   "dv_uc1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_uc1",
+			Session:   Session{ID: "sess_uc1"},
+			DelegationVerification: &DelegationVerification{
+				DelegationEventID:    "del_uc1",
+				Agent:                "postgres_database_agent",
+				ToolsConfirmed:       []string{"get_session_info"},
+				DestructiveConfirmed: nil,
+				Mismatch:             true,
+			},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "unverified_claim" {
+		t.Errorf("Outcome = %q, want unverified_claim", journeys[0].Outcome)
+	}
+}
+
+// TestQueryJourneys_UnverifiedClaimOutcome_Write verifies that a write delegation
+// verification event with Mismatch=true also elevates the journey to "unverified_claim".
+func TestQueryJourneys_UnverifiedClaimOutcome_Write(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_wuc1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_wuc1",
+			Session:   Session{ID: "sess_wuc1", UserID: "alice"},
+			Input:     Input{UserQuery: "cancel the slow query on pid 1234"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_wuc1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_wuc1",
+			Session:   Session{ID: "dbagent_wuc"},
+			Tool:      &ToolExecution{Name: "check_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// delegation_verification: write delegation but only a read tool confirmed.
+		{
+			EventID:   "dv_wuc1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_wuc1",
+			Session:   Session{ID: "sess_wuc1"},
+			DelegationVerification: &DelegationVerification{
+				DelegationEventID: "del_wuc1",
+				Agent:             "postgres_database_agent",
+				ActionClass:       ActionWrite,
+				ToolsConfirmed:    []string{"check_connection"},
+				WriteConfirmed:    nil,
+				Mismatch:          true,
+			},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "unverified_claim" {
+		t.Errorf("Outcome = %q, want unverified_claim", journeys[0].Outcome)
+	}
+}
+
+// TestQueryJourneys_DelegationVerification_NotInToolsUsedOrEventCount verifies that
+// delegation_verification events do not inflate tools_used or event_count.
+func TestQueryJourneys_DelegationVerification_NotInToolsUsedOrEventCount(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_dv2",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_dv2",
+			Session:   Session{ID: "sess_dv2", UserID: "bob"},
+			Input:     Input{UserQuery: "terminate connection"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_dv2",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_dv2",
+			Session:   Session{ID: "dbagent_dv2"},
+			Tool:      &ToolExecution{Name: "get_session_info", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "dv_dv2",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_dv2",
+			Session:   Session{ID: "sess_dv2"},
+			DelegationVerification: &DelegationVerification{
+				DelegationEventID: "del_dv2",
+				Agent:             "postgres_database_agent",
+				ToolsConfirmed:    []string{"get_session_info"},
+				Mismatch:          true,
+			},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	// delegation_decision + tool_execution = 2; delegation_verification excluded.
+	if journeys[0].EventCount != 2 {
+		t.Errorf("EventCount = %d, want 2 (delegation_verification must not be counted)", journeys[0].EventCount)
+	}
+	// tools_used must only contain get_session_info, not anything from the verification event.
+	if len(journeys[0].ToolsUsed) != 1 || journeys[0].ToolsUsed[0] != "get_session_info" {
+		t.Errorf("ToolsUsed = %v, want [get_session_info]", journeys[0].ToolsUsed)
+	}
+}
+
+// TestQueryJourneys_UnverifiedClaimWinsOverError verifies that "unverified_claim"
+// (priority 9) beats "error" (priority 8) when both appear in the same trace.
+func TestQueryJourneys_UnverifiedClaimWinsOverError(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_uw1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_uw1",
+			Session:   Session{ID: "sess_uw1", UserID: "carol"},
+			Input:     Input{UserQuery: "terminate connection"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		// A tool that errors.
+		{
+			EventID:   "tool_uw1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_uw1",
+			Session:   Session{ID: "dbagent_uw"},
+			Tool:      &ToolExecution{Name: "check_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "error", ErrorMessage: "connection refused"},
+		},
+		// delegation_verification: mismatch → unverified_claim must win over error.
+		{
+			EventID:   "dv_uw1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_uw1",
+			Session:   Session{ID: "sess_uw1"},
+			DelegationVerification: &DelegationVerification{
+				DelegationEventID: "del_uw1",
+				Agent:             "postgres_database_agent",
+				Mismatch:          true,
+			},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "unverified_claim" {
+		t.Errorf("Outcome = %q, want unverified_claim (must beat error)", journeys[0].Outcome)
+	}
+}
+
+// TestQueryJourneys_CleanVerification_DoesNotOverrideSuccess verifies that a
+// delegation_verification with Mismatch=false ("verified") does not replace a
+// "success" outcome — clean verifications are neutral.
+func TestQueryJourneys_CleanVerification_DoesNotOverrideSuccess(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_cv1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_cv1",
+			Session:   Session{ID: "sess_cv1", UserID: "dave"},
+			Input:     Input{UserQuery: "terminate connection"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_cv1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_cv1",
+			Session:   Session{ID: "dbagent_cv"},
+			Tool:      &ToolExecution{Name: "terminate_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// Clean verification — Mismatch=false → outcome_status="verified" (priority 0).
+		{
+			EventID:   "dv_cv1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_cv1",
+			Session:   Session{ID: "sess_cv1"},
+			DelegationVerification: &DelegationVerification{
+				DelegationEventID:    "del_cv1",
+				Agent:                "postgres_database_agent",
+				ToolsConfirmed:       []string{"terminate_connection"},
+				DestructiveConfirmed: []string{"terminate_connection"},
+				Mismatch:             false,
+			},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Outcome != "success" {
+		t.Errorf("Outcome = %q, want success (clean verification must not overwrite success)", journeys[0].Outcome)
+	}
+}
+
 func newJourneyStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "audit.db")})
@@ -1561,5 +1840,191 @@ func TestQueryJourneys_VerifiedOkOutcome(t *testing.T) {
 	}
 	if len(journeys[0].ToolsUsed) != 1 || journeys[0].ToolsUsed[0] != "delete_pod" {
 		t.Errorf("ToolsUsed = %v, want [delete_pod]", journeys[0].ToolsUsed)
+	}
+}
+
+// TestQueryJourneys_SessionAgentUsedAsJourneyAgent verifies that when a
+// delegation_decision event carries a Session.AgentName (e.g. "helpdesk_orchestrator"),
+// the journey's Agent field reflects the orchestrator, not the sub-agent being
+// delegated to.
+func TestQueryJourneys_SessionAgentUsedAsJourneyAgent(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_orch1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_orch",
+			Session:   Session{ID: "sess_orch", UserID: "alice", AgentName: "helpdesk_orchestrator"},
+			Input:     Input{UserQuery: "Terminate the idle session for PID 1234"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+		{
+			EventID:   "tool_orch1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_orch",
+			Session:   Session{ID: "dbagent_orch"},
+			Tool:      &ToolExecution{Name: "terminate_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	j := journeys[0]
+	if j.Agent != "helpdesk_orchestrator" {
+		t.Errorf("Agent = %q, want helpdesk_orchestrator (session_agent takes precedence over decision_agent)", j.Agent)
+	}
+	if j.UserQuery != "Terminate the idle session for PID 1234" {
+		t.Errorf("UserQuery = %q, want user intent string", j.UserQuery)
+	}
+}
+
+// TestQueryJourneys_NoSessionAgent_FallbackToDecisionAgent verifies that when
+// Session.AgentName is absent (e.g. a direct gateway call), the journey's Agent
+// field falls back to the decision_agent (sub-agent name).
+func TestQueryJourneys_NoSessionAgent_FallbackToDecisionAgent(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_direct1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_direct",
+			Session:   Session{ID: "sess_direct", UserID: "bob"}, // no AgentName
+			Input:     Input{UserQuery: "Check active connections"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	if journeys[0].Agent != "postgres_database_agent" {
+		t.Errorf("Agent = %q, want postgres_database_agent (fallback when no session_agent)", journeys[0].Agent)
+	}
+}
+
+// TestQueryJourneys_DelegationsPartitioned verifies that tools are partitioned
+// per delegation: each delegation_decision event starts a new DelegationSummary,
+// and tool_execution events are assigned to the delegation that preceded them.
+func TestQueryJourneys_DelegationsPartitioned(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	recordAll(t, store, []*Event{
+		// Turn 1: show active connections → 2 tool calls
+		{
+			EventID:   "del_p1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "sess_part", UserID: "alice", AgentName: "helpdesk_orchestrator"},
+			Input:     Input{UserQuery: "Show active connections"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+		{
+			EventID:   "tool_p1a",
+			Timestamp: base.Add(1 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "get_active_connections", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "tool_p1b",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "get_active_connections", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		// Turn 2: terminate connection → 2 tool calls
+		{
+			EventID:   "del_p2",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "sess_part", UserID: "alice", AgentName: "helpdesk_orchestrator"},
+			Input:     Input{UserQuery: "Terminate connection for PID 16779"},
+			Decision:  &Decision{Agent: "postgres_database_agent", RequestCategory: CategoryDatabase},
+		},
+		{
+			EventID:   "tool_p2a",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "get_session_info", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+		{
+			EventID:   "tool_p2b",
+			Timestamp: base.Add(5 * time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_part",
+			Session:   Session{ID: "dbagent_part"},
+			Tool:      &ToolExecution{Name: "terminate_connection", Agent: "postgres_database_agent"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1", len(journeys))
+	}
+	j := journeys[0]
+
+	if len(j.Delegations) != 2 {
+		t.Fatalf("Delegations = %d entries, want 2", len(j.Delegations))
+	}
+
+	d1 := j.Delegations[0]
+	if d1.Intent != "Show active connections" {
+		t.Errorf("Delegations[0].Intent = %q, want \"Show active connections\"", d1.Intent)
+	}
+	if len(d1.Tools) != 2 || d1.Tools[0] != "get_active_connections" || d1.Tools[1] != "get_active_connections" {
+		t.Errorf("Delegations[0].Tools = %v, want [get_active_connections get_active_connections]", d1.Tools)
+	}
+
+	d2 := j.Delegations[1]
+	if d2.Intent != "Terminate connection for PID 16779" {
+		t.Errorf("Delegations[1].Intent = %q, want \"Terminate connection for PID 16779\"", d2.Intent)
+	}
+	if len(d2.Tools) != 2 || d2.Tools[0] != "get_session_info" || d2.Tools[1] != "terminate_connection" {
+		t.Errorf("Delegations[1].Tools = %v, want [get_session_info terminate_connection]", d2.Tools)
+	}
+
+	// ToolsUsed remains the flat chronological list.
+	wantFlat := []string{"get_active_connections", "get_active_connections", "get_session_info", "terminate_connection"}
+	if len(j.ToolsUsed) != len(wantFlat) {
+		t.Fatalf("ToolsUsed = %v, want %v", j.ToolsUsed, wantFlat)
+	}
+	for i, w := range wantFlat {
+		if j.ToolsUsed[i] != w {
+			t.Errorf("ToolsUsed[%d] = %q, want %q", i, j.ToolsUsed[i], w)
+		}
 	}
 }

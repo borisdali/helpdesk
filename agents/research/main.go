@@ -16,6 +16,7 @@ import (
 	"google.golang.org/adk/tool/geminitool"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/prompts"
 )
 
@@ -26,13 +27,23 @@ func main() {
 	// Enforce governance compliance in fix mode before any other initialization.
 	agentutil.EnforceFixMode(ctx, agentutil.CheckFixModeViolations(cfg), "research_agent", cfg.AuditURL)
 
+	auditStore, err := agentutil.InitAuditStore(cfg)
+	if err != nil {
+		slog.Error("failed to initialize audit store", "err", err)
+		os.Exit(1)
+	}
+	if auditStore != nil {
+		defer auditStore.Close()
+	}
+	traceStore := &audit.CurrentTraceStore{}
+
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {
 		slog.Error("failed to create LLM model", "err", err)
 		os.Exit(1)
 	}
 
-	slog.Info("governance", "audit", false, "policy", false)
+	slog.Info("governance", "audit", cfg.AuditEnabled, "policy", false)
 
 	// Only add GoogleSearch for Gemini models
 	var tools []tool.Tool
@@ -68,7 +79,7 @@ func main() {
 		},
 	}
 
-	if err := agentutil.Serve(ctx, researchAgent, cfg, cardOpts); err != nil {
+	if err := agentutil.ServeWithTracing(ctx, researchAgent, cfg, traceStore, auditStore, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

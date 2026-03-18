@@ -16,6 +16,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 )
 
@@ -33,11 +34,13 @@ const agentNameResearch = "research_agent"
 
 // Gateway translates REST requests into A2A calls to sub-agents.
 type Gateway struct {
-	agents   map[string]*discovery.Agent
-	clients  map[string]*a2aclient.Client
-	infra    *infra.Config
-	auditor  *audit.GatewayAuditor
-	auditURL string // URL to auditd service for governance queries
+	agents           map[string]*discovery.Agent
+	clients          map[string]*a2aclient.Client
+	infra            *infra.Config
+	auditor          *audit.GatewayAuditor
+	auditURL         string            // URL to auditd service for governance queries
+	identityProvider identity.Provider // resolves caller identity on every request
+	operatingMode    string            // "readonly" or "fix" — used for default purpose derivation
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -68,6 +71,49 @@ func (g *Gateway) SetAuditor(auditor *audit.GatewayAuditor) {
 // SetAuditURL sets the auditd service URL for governance queries.
 func (g *Gateway) SetAuditURL(url string) {
 	g.auditURL = url
+}
+
+// SetIdentityProvider sets the identity provider used to resolve caller identity.
+func (g *Gateway) SetIdentityProvider(p identity.Provider) {
+	g.identityProvider = p
+}
+
+// SetOperatingMode sets the operating mode for default purpose derivation.
+func (g *Gateway) SetOperatingMode(mode string) {
+	g.operatingMode = mode
+}
+
+// resolveRequest extracts the verified principal and declared purpose from an
+// HTTP request. Falls back to NoAuthProvider behaviour when no provider is set.
+// The returned bool indicates whether the purpose was explicitly declared by the
+// caller (true) or derived from the operating mode (false).
+func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFromBody string) (identity.ResolvedPrincipal, string, string, bool, error) {
+	var principal identity.ResolvedPrincipal
+	if g.identityProvider != nil {
+		var err error
+		principal, err = g.identityProvider.Resolve(r)
+		if err != nil {
+			slog.Warn("gateway: identity resolution failed", "err", err)
+			return identity.ResolvedPrincipal{}, "", "", false, err
+		}
+	} else {
+		// No provider configured — legacy no-auth behaviour.
+		principal = identity.ResolvedPrincipal{
+			UserID:     r.Header.Get("X-User"),
+			AuthMethod: "header",
+		}
+	}
+
+	purpose, purposeExplicit := identity.PurposeFromRequest(
+		r.Header.Get("X-Purpose"),
+		purposeFromBody,
+		g.operatingMode,
+	)
+	purposeNote := r.Header.Get("X-Purpose-Note")
+	if purposeNote == "" {
+		purposeNote = purposeNoteFromBody
+	}
+	return principal, purpose, purposeNote, purposeExplicit, nil
 }
 
 // agentAliases maps short names (used in the /query endpoint) to internal
@@ -106,10 +152,12 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 
 func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Agent   string `json:"agent"`
-		Message string `json:"message"`
-		Query   string `json:"query"` // alias for message; both are accepted
-		User    string `json:"user"`  // caller identity recorded in the audit trail
+		Agent       string `json:"agent"`
+		Message     string `json:"message"`
+		Query       string `json:"query"`        // alias for message; both are accepted
+		User        string `json:"user"`         // caller identity recorded in the audit trail
+		Purpose     string `json:"purpose"`      // why this request is being made
+		PurposeNote string `json:"purpose_note"` // optional free-text (e.g. incident number)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -134,6 +182,13 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// The header takes precedence if both are supplied.
 	if req.User != "" && r.Header.Get("X-User") == "" {
 		r.Header.Set("X-User", req.User)
+	}
+	// Bridge purpose fields into headers so proxyToAgentWithTool has one place to read them.
+	if req.Purpose != "" && r.Header.Get("X-Purpose") == "" {
+		r.Header.Set("X-Purpose", req.Purpose)
+	}
+	if req.PurposeNote != "" && r.Header.Get("X-Purpose-Note") == "" {
+		r.Header.Set("X-Purpose-Note", req.PurposeNote)
 	}
 
 	g.proxyToAgent(w, r, agentName, req.Message)
@@ -345,52 +400,103 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		}
 	}
 
-	principal := r.Header.Get("X-User")
+	// Resolve caller identity and purpose. Purpose fields may arrive via headers
+	// (set directly or bridged from the JSON body in handleQuery).
+	resolvedPrincipal, purpose, purposeNote, purposeExplicit, err := g.resolveRequest(r, "", "")
+	if err != nil {
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID: requestID,
+			TraceID:   traceID,
+			Endpoint:  r.URL.Path,
+			Method:    r.Method,
+			Agent:     agentName,
+			ToolName:  toolName,
+			Message:   prompt,
+			StartTime: start,
+			Duration:  time.Since(start),
+			Status:    "error",
+			Error:     "authentication failed: " + err.Error(),
+			HTTPCode:  http.StatusUnauthorized,
+		})
+		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
+		return
+	}
+	principalStr := resolvedPrincipal.EffectiveID()
 
 	client, ok := g.clients[agentName]
 	if !ok {
 		g.recordAudit(r.Context(), &audit.GatewayRequest{
-			RequestID:      requestID,
-			TraceID:        traceID,
-			Endpoint:       r.URL.Path,
-			Method:         r.Method,
-			Agent:          agentName,
-			ToolName:       toolName,
-			ToolParameters: toolParams,
-			Message:        prompt,
-			StartTime:      start,
-			Duration:       time.Since(start),
-			Status:         "error",
-			Error:          "agent not available",
-			HTTPCode:       http.StatusBadGateway,
-			Principal:      principal,
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    toolParams,
+			Message:           prompt,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "error",
+			Error:             "agent not available",
+			HTTPCode:          http.StatusBadGateway,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
 		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("agent %q not available", agentName))
 		return
 	}
 
-	slog.Info("gateway: proxying request", "agent", agentName, "prompt_len", len(prompt))
+	slog.Info("gateway: proxying request", "agent", agentName, "prompt_len", len(prompt),
+		"principal", principalStr, "purpose", purpose)
+
+	// Build A2A metadata: trace_id plus the full principal and purpose so that
+	// downstream agents can enforce policy on behalf of the original caller.
+	meta := map[string]any{"trace_id": traceID}
+	if resolvedPrincipal.UserID != "" {
+		meta["user_id"] = resolvedPrincipal.UserID
+	}
+	if len(resolvedPrincipal.Roles) > 0 {
+		meta["roles"] = resolvedPrincipal.Roles
+	}
+	if resolvedPrincipal.Service != "" {
+		meta["service"] = resolvedPrincipal.Service
+	}
+	if resolvedPrincipal.AuthMethod != "" {
+		meta["auth_method"] = resolvedPrincipal.AuthMethod
+	}
+	if purpose != "" {
+		meta["purpose"] = purpose
+	}
+	if purposeNote != "" {
+		meta["purpose_note"] = purposeNote
+	}
+	meta["purpose_explicit"] = purposeExplicit
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
-	msg.Metadata = map[string]any{"trace_id": traceID}
+	msg.Metadata = meta
 	result, err := client.SendMessage(r.Context(), &a2a.MessageSendParams{Message: msg})
 	if err != nil {
 		slog.Error("gateway: A2A call failed", "agent", agentName, "err", err)
 		g.recordAudit(r.Context(), &audit.GatewayRequest{
-			RequestID:      requestID,
-			TraceID:        traceID,
-			Endpoint:       r.URL.Path,
-			Method:         r.Method,
-			Agent:          agentName,
-			ToolName:       toolName,
-			ToolParameters: toolParams,
-			Message:        prompt,
-			StartTime:      start,
-			Duration:       time.Since(start),
-			Status:         "error",
-			Error:          err.Error(),
-			HTTPCode:       http.StatusBadGateway,
-			Principal:      principal,
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    toolParams,
+			Message:           prompt,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "error",
+			Error:             err.Error(),
+			HTTPCode:          http.StatusBadGateway,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
 		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("A2A call to %s failed: %v", agentName, err))
 		return
@@ -401,20 +507,23 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 
 	// Record successful request with response
 	g.recordAudit(r.Context(), &audit.GatewayRequest{
-		RequestID:      requestID,
-		TraceID:        traceID,
-		Endpoint:       r.URL.Path,
-		Method:         r.Method,
-		Agent:          agentName,
-		ToolName:       toolName,
-		ToolParameters: toolParams,
-		Message:        prompt,
-		Response:       response.Text,
-		StartTime:      start,
-		Duration:       time.Since(start),
-		Status:         "success",
-		HTTPCode:       http.StatusOK,
-		Principal:      r.Header.Get("X-User"),
+		RequestID:         requestID,
+		TraceID:           traceID,
+		Endpoint:          r.URL.Path,
+		Method:            r.Method,
+		Agent:             agentName,
+		ToolName:          toolName,
+		ToolParameters:    toolParams,
+		Message:           prompt,
+		Response:          response.Text,
+		StartTime:         start,
+		Duration:          time.Since(start),
+		Status:            "success",
+		HTTPCode:          http.StatusOK,
+		Principal:         principalStr,
+		ResolvedPrincipal: resolvedPrincipal,
+		Purpose:           purpose,
+		PurposeNote:       purposeNote,
 	})
 
 	// Include trace ID in response for client correlation

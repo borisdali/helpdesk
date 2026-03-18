@@ -67,6 +67,7 @@ type ResourceMatch struct {
 	NamePattern string   `yaml:"name_pattern,omitempty"` // Glob pattern (e.g., "prod-*")
 	Tags        []string `yaml:"tags,omitempty"`         // Must have all tags
 	Namespace   string   `yaml:"namespace,omitempty"`    // K8s namespace
+	Sensitivity []string `yaml:"sensitivity,omitempty"` // match resources by sensitivity class
 }
 
 // Rule defines an access control rule within a policy.
@@ -127,6 +128,12 @@ type Conditions struct {
 
 	// Time-based conditions
 	Schedule *Schedule `yaml:"schedule,omitempty"`
+
+	// Purpose-based conditions:
+	// AllowedPurposes: if non-empty, the request purpose must be in this list.
+	AllowedPurposes []string `yaml:"allowed_purposes,omitempty"`
+	// BlockedPurposes: if non-empty, the request purpose must NOT be in this list.
+	BlockedPurposes []string `yaml:"blocked_purposes,omitempty"`
 }
 
 // Schedule defines time-based conditions.
@@ -227,11 +234,12 @@ type RequestPrincipal struct {
 
 // RequestResource identifies the resource being accessed.
 type RequestResource struct {
-	Type      string            // database, kubernetes, etc.
-	Name      string            // Resource name
-	Tags      []string          // Resource tags
-	Namespace string            // K8s namespace (if applicable)
-	Extra     map[string]string // Additional attributes
+	Type        string            // database, kubernetes, etc.
+	Name        string            // Resource name
+	Tags        []string          // Resource tags
+	Namespace   string            // K8s namespace (if applicable)
+	Extra       map[string]string // Additional attributes
+	Sensitivity []string          // sensitivity classes of this resource (from infra config)
 }
 
 // RequestContext provides additional context for evaluation.
@@ -241,6 +249,8 @@ type RequestContext struct {
 	RowsAffected int       // For database operations
 	PodsAffected int       // For K8s operations
 	XactAgeSecs  int       // For database: age of the open transaction in seconds
+	Purpose      string    // declared or derived purpose (diagnostic, remediation, maintenance, compliance, emergency)
+	PurposeNote  string    // optional free-text note
 }
 
 // Decision is the result of policy evaluation.

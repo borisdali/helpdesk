@@ -50,11 +50,16 @@ spec:
             - name: HELPDESK_APPROVAL_TIMEOUT
               value: "{{ .Values.governance.approvals.timeout }}"
             {{- end }}
+            {{- if .Values.governance.policy.requirePurposeForSensitive }}
+            - name: HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE
+              value: "true"
+            {{- end }}
             {{- if .Values.infrastructure }}
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.incident.port }}
@@ -82,6 +87,12 @@ spec:
               subPath: infrastructure.json
               readOnly: true
             {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: policy-config
+              mountPath: /etc/helpdesk/policies.yaml
+              subPath: policies.yaml
+              readOnly: true
+            {{- end }}
       volumes:
         {{- if .Values.agents.incident.persistence.enabled }}
         - name: incidents
@@ -92,6 +103,11 @@ spec:
         - name: infra-config
           configMap:
             name: {{ include "helpdesk.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.governance.policy.enabled }}
+        - name: policy-config
+          configMap:
+            name: {{ required "governance.policy.configMap must be set when governance.policy.enabled is true" .Values.governance.policy.configMap }}
         {{- end }}
 ---
 apiVersion: v1

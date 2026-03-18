@@ -607,5 +607,5 @@ configured.
 | [AUDIT.md](AUDIT.md) | Audit hash chain, event schema, `auditd` and `auditor` API reference |
 | [GOVEXPLAIN.md](GOVEXPLAIN.md) | `govexplain` CLI — explain why a specific past event was allowed or denied |
 | [MUTATION_TOOLS.md](MUTATION_TOOLS.md) | Write and destructive tool inventory; blast-radius enforcement |
-| [cmd/govbot/README.md](cmd/govbot/README.md) | `govbot` quick-start and sample runs |
+| [cmd/govbot/README.md](../cmd/govbot/README.md) | `govbot` quick-start and sample runs |
 | [GOVBOT_SAMPLE.md](GOVBOT_SAMPLE.md) | Full annotated sample `govbot` output |

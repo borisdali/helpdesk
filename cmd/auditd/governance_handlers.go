@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
@@ -344,6 +345,8 @@ func (s *governanceServer) handleGetPolicySummary(w http.ResponseWriter, r *http
 //	tags           optional  comma-separated tags, e.g. "production,critical"
 //	user_id        optional  evaluate as a specific user
 //	role           optional  evaluate with a specific role
+//	purpose        optional  declared purpose: diagnostic, remediation, maintenance, compliance, emergency
+//	sensitivity    optional  comma-separated sensitivity classes, e.g. "pii,critical"
 func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request) {
 	if s.policyEngine == nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -376,14 +379,32 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 	// When no tags were provided explicitly, try to resolve them from the infra config.
 	// This mirrors how agents derive tags at runtime, so the explain result reflects
 	// the same policy evaluation the agent would perform.
-	if len(tags) == 0 {
+	tagsProvidedExplicitly := len(tags) > 0
+	if !tagsProvidedExplicitly {
 		tags = s.tagsFromInfra(resourceType, resourceName)
 	}
+
+	var sensitivity []string
+	if raw := q.Get("sensitivity"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				sensitivity = append(sensitivity, s)
+			}
+		}
+	}
+	if len(sensitivity) == 0 {
+		sensitivity = s.sensitivityFromInfra(resourceType, resourceName)
+	}
+
+	// Detect when the infra config is loaded but the resource name was not found.
+	// This is distinct from "resource exists with no tags" and produces a more
+	// actionable error message than the generic "no tags" diagnostic.
+	notFoundInInfra := !tagsProvidedExplicitly && s.infraConfig != nil && len(tags) == 0 && !s.resourceInInfra(resourceType, resourceName)
 
 	req := policy.Request{
 		Principal: policy.RequestPrincipal{
 			UserID: q.Get("user_id"),
-			Roles:  func() []string {
+			Roles: func() []string {
 				if r := q.Get("role"); r != "" {
 					return []string{r}
 				}
@@ -391,14 +412,25 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 			}(),
 		},
 		Resource: policy.RequestResource{
-			Type: resourceType,
-			Name: resourceName,
-			Tags: tags,
+			Type:        resourceType,
+			Name:        resourceName,
+			Tags:        tags,
+			Sensitivity: sensitivity,
 		},
 		Action: policy.ActionClass(actionStr),
+		Context: policy.RequestContext{
+			Purpose: q.Get("purpose"),
+		},
 	}
 
 	trace := s.policyEngine.Explain(req)
+
+	if notFoundInInfra {
+		trace.Explanation = "⚠️  Resource \"" + resourceName + "\" was not found in the infrastructure config.\n" +
+			"Tags and sensitivity could not be resolved — policy evaluation used no tags.\n" +
+			"Check that the resource name matches exactly (case-sensitive) in HELPDESK_INFRA_CONFIG.\n\n" +
+			trace.Explanation
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(trace)
@@ -431,6 +463,44 @@ func (s *governanceServer) tagsFromInfra(resourceType, resourceName string) []st
 	return nil
 }
 
+// resourceInInfra reports whether the named resource exists in the infra config,
+// regardless of whether it has tags. Used to distinguish "resource not found"
+// from "resource found but has no tags" in explain output.
+func (s *governanceServer) resourceInInfra(resourceType, resourceName string) bool {
+	if s.infraConfig == nil {
+		return false
+	}
+	switch resourceType {
+	case "database":
+		_, ok := s.infraConfig.DBServers[resourceName]
+		return ok
+	case "kubernetes":
+		_, ok := s.infraConfig.K8sClusters[resourceName]
+		return ok
+	}
+	return false
+}
+
+// sensitivityFromInfra resolves the sensitivity classes for a resource from the
+// infrastructure config. Returns nil when the config is not loaded or the resource
+// is not found.
+func (s *governanceServer) sensitivityFromInfra(resourceType, resourceName string) []string {
+	if s.infraConfig == nil {
+		return nil
+	}
+	switch resourceType {
+	case "database":
+		if db, ok := s.infraConfig.DBServers[resourceName]; ok {
+			return db.Sensitivity
+		}
+	case "kubernetes":
+		if k8s, ok := s.infraConfig.K8sClusters[resourceName]; ok {
+			return k8s.Sensitivity
+		}
+	}
+	return nil
+}
+
 // PolicyCheckRequest is the body for POST /v1/governance/check.
 // Agents send this instead of evaluating locally and POSTing a separate pol_* event.
 type PolicyCheckRequest struct {
@@ -443,12 +513,20 @@ type PolicyCheckRequest struct {
 	AgentName    string   `json:"agent_name,omitempty"`
 	Note         string   `json:"note,omitempty"`
 	// blast-radius context (post-execution checks)
-	RowsAffected  int  `json:"rows_affected,omitempty"`
-	PodsAffected  int  `json:"pods_affected,omitempty"`
+	RowsAffected int `json:"rows_affected,omitempty"`
+	PodsAffected int `json:"pods_affected,omitempty"`
 	// XactAgeSecs carries the age of an open database transaction for the
 	// pre-execution max_xact_age_secs condition (terminate_connection / cancel_query).
 	XactAgeSecs   int  `json:"xact_age_secs,omitempty"`
 	PostExecution bool `json:"post_execution,omitempty"`
+
+	// Identity and purpose — propagated from the originating HTTP request via A2A metadata.
+	Principal   identity.ResolvedPrincipal `json:"principal,omitempty"`
+	Purpose     string                     `json:"purpose,omitempty"`
+	PurposeNote string                     `json:"purpose_note,omitempty"`
+	// Sensitivity classes of the resource being accessed (e.g. ["pii", "critical"]).
+	// When non-empty, overrides infra-derived sensitivity for this evaluation.
+	Sensitivity []string `json:"sensitivity,omitempty"`
 }
 
 // PolicyCheckResponse is returned by POST /v1/governance/check.
@@ -507,11 +585,23 @@ func (s *governanceServer) handlePolicyCheck(w http.ResponseWriter, r *http.Requ
 		tags = s.tagsFromInfra(req.ResourceType, req.ResourceName)
 	}
 
+	// Resolve sensitivity: caller-supplied wins; fall back to infra config.
+	sensitivity := req.Sensitivity
+	if len(sensitivity) == 0 {
+		sensitivity = s.sensitivityFromInfra(req.ResourceType, req.ResourceName)
+	}
+
 	polReq := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID:  req.Principal.UserID,
+			Roles:   req.Principal.Roles,
+			Service: req.Principal.Service,
+		},
 		Resource: policy.RequestResource{
-			Type: req.ResourceType,
-			Name: req.ResourceName,
-			Tags: tags,
+			Type:        req.ResourceType,
+			Name:        req.ResourceName,
+			Tags:        tags,
+			Sensitivity: sensitivity,
 		},
 		Action: policy.ActionClass(req.Action),
 		Context: policy.RequestContext{
@@ -519,6 +609,8 @@ func (s *governanceServer) handlePolicyCheck(w http.ResponseWriter, r *http.Requ
 			RowsAffected: req.RowsAffected,
 			PodsAffected: req.PodsAffected,
 			XactAgeSecs:  req.XactAgeSecs,
+			Purpose:      req.Purpose,
+			PurposeNote:  req.PurposeNote,
 		},
 	}
 
@@ -556,6 +648,13 @@ func (s *governanceServer) handlePolicyCheck(w http.ResponseWriter, r *http.Requ
 			PostExecution: req.PostExecution,
 			Trace:         traceJSON,
 			Explanation:   trace.Explanation,
+			Sensitivity:   sensitivity,
+			UserID:        req.Principal.UserID,
+			Roles:         req.Principal.Roles,
+			Service:       req.Principal.Service,
+			AuthMethod:    req.Principal.AuthMethod,
+			Purpose:       req.Purpose,
+			PurposeNote:   req.PurposeNote,
 		},
 	}
 

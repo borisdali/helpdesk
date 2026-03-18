@@ -205,7 +205,7 @@ func checkK8sPolicy(ctx context.Context, namespace string, action policy.ActionC
 	if policyEnforcer == nil {
 		return nil
 	}
-	return policyEnforcer.CheckKubernetes(ctx, namespace, action, tags, "")
+	return policyEnforcer.CheckKubernetes(ctx, namespace, action, tags, "", nil)
 }
 
 // parsePodsAffected counts the number of Kubernetes resources modified from

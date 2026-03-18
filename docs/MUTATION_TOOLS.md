@@ -35,10 +35,11 @@ databases or your infra.
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm-process)
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
 4. [Safeguards and Automatic Recovery](#4-safeguards-and-automatic-recovery)
-5. [Test coverage](#5-test-coverage)
-6. [Fault scenarios](#6-fault-scenarios)
-7. [Run all mutation-tool tests locally](#7-run-all-mutation-tool-tests-locally)
-8. [Compliance and Alerting](#8-compliance-and-alerting)
+5. [Delegation Verification](#5-delegation-verification-zero-trust-in-agent-outcome)
+6. [Test coverage](#6-test-coverage)
+7. [Fault scenarios](#7-fault-scenarios)
+8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
+9. [Compliance and Alerting](#9-compliance-and-alerting)
 
 ---
 
@@ -311,6 +312,16 @@ Step 2: cancel_query(pid)  or  terminate_connection(pid)
 This is guaranteed by three independent enforcement mechanisms. No single mechanism can be
 bypassed without triggering a failure in at least one of the other two.
 
+#### Orchestrator-mediated flow
+
+When used through the orchestrator, the two-step flow spans two separate user
+turns: the orchestrator first delegates to get session info, the user confirms,
+then the orchestrator re-delegates with `[USER CONFIRMED]` appended to the
+message. The db agent recognises this token, runs `get_session_info` (still
+required for policy checks and the audit trail), then immediately executes the
+mutation without prompting again. See [§3 Mechanism A](#mechanism-a-llm-prompt-instruction-promptsdatabasetxt)
+for the full protocol.
+
 ### Kubernetes agent
 
 The same intent applies but the implementation is shallower:
@@ -356,6 +367,14 @@ Before calling `terminate_connection` or `cancel_query`, you MUST:
 
 Do NOT call `terminate_connection` or `cancel_query` without first completing
 these three steps.
+
+Exception — pre-confirmed delegations: If the incoming request contains the
+phrase [USER CONFIRMED], the user has already reviewed the session details and
+confirmed the action at the orchestrator level. In that case:
+- Still call `get_session_info` first (required for the audit trail and policy
+  checks).
+- Then immediately call `terminate_connection` or `cancel_query` — do NOT ask
+  for confirmation again.
 ```
 
 **What this enforces**: LLM behaviour for interactive (non-approval-workflow)
@@ -363,6 +382,26 @@ sessions. A well-instructed model will not skip Step 1.
 
 **Limitation**: a misconfigured or adversarially prompted model could skip it.
 Mechanisms B and C close this gap.
+
+#### Confirmed-delegation flow
+
+When the db agent is called via the orchestrator's `delegate_to_agent` tool,
+each delegation is a **single A2A round-trip**. The db agent cannot keep the
+conversation open and wait for the user to type "yes". Without a signal, the
+db agent completes Step 1, returns session info, and the delegation ends —
+leaving the orchestrator in a loop that repeats Step 1 indefinitely.
+
+The orchestrator system prompt (`prompts/orchestrator_audit.txt`) instructs
+the orchestrator to append `[USER CONFIRMED]` to the delegation message once
+the user has reviewed the details and explicitly confirmed:
+
+```
+Terminate connection for PID 13424 using connection_string: alloydb-on-vm [USER CONFIRMED]
+```
+
+On receiving `[USER CONFIRMED]`, the db agent runs `get_session_info` (Step 1,
+required for policy checks and the audit trail) and then immediately calls the
+mutation tool — no intermediate confirmation prompt.
 
 ---
 
@@ -556,13 +595,102 @@ were needed and the mutation ultimately succeeded still shows
 
 ---
 
-## 5. Test coverage
+## 5. Delegation Verification: Zero Trust in Agent Outcome
+
+Levels 1 and 2 safeguards (§4) run *inside* the mutation tool. They are
+unreachable if the orchestrator LLM fabricates a success response without
+actually calling `delegate_to_agent`. This is not a theoretical concern — an
+LLM can generate a plausible-sounding "I terminated the connection" message
+from pattern memory, bypassing all in-tool safeguards because no tool was
+ever invoked.
+
+### 5.1 The Problem
+
+An orchestrator session where the LLM hallucinates a destructive outcome:
+
+1. User: "Terminate the connection holding the lock"
+2. LLM generates: "I have successfully terminated connection pid 5292"
+3. `delegate_to_agent` is **never called** → no A2A call → no tool executions → no audit events
+4. Level 1 and Level 2 safeguards are never reached — they live inside `terminateConnectionTool`
+5. The user believes the action was taken; the connection is still running
+
+### 5.2 The Fix: Audit-Based Verification
+
+After every `delegate_to_agent` call returns, the orchestrator:
+
+1. **Queries the audit trail** independently of the agent's text response:
+   ```
+   GET /v1/events?event_type=tool_execution&trace_id=X&since=T
+   ```
+2. **Classifies each confirmed tool** using the same action-class map as the
+   policy engine (`terminate_connection` → `destructive`, etc.)
+3. **Records a `delegation_verification` event** in the audit log with:
+   - `action_class` — the class of the delegation (`write` or `destructive`)
+   - `tools_confirmed` — all tools the agent actually executed
+   - `write_confirmed` — which of those were write-class
+   - `destructive_confirmed` — which of those were destructive
+   - `mismatch` — `true` when the delegation was write-or-destructive but no
+     tool of that class or stronger is in the trail (destructive satisfies write)
+4. **Appends an `[AUDIT VERIFICATION]` block** to the response fed back to the
+   orchestrator LLM
+5. **Elevates the journey outcome to `unverified_claim`** when `mismatch=true`
+
+### 5.3 Orchestrator LLM Instructions
+
+The orchestrator system prompt (`prompts/orchestrator_audit.txt`) contains a
+mandatory section that the LLM must follow:
+
+> **The audit block overrides the agent's text.** If the agent says "terminated"
+> but the audit block shows no destructive tool was confirmed, the action did
+> NOT happen.
+>
+> **On MISMATCH:** tell the user the requested action could not be verified in
+> the audit trail and was likely NOT executed. Do NOT say the action succeeded.
+>
+> **On VERIFICATION CLEAN:** no mismatch detected — report the agent's result
+> as-is (success or error).
+
+The orchestrator is also instructed to append `[USER CONFIRMED]` to delegation
+messages when re-delegating a destructive action the user has already confirmed.
+This prevents the sub-agent from re-asking for confirmation in a loop (see
+[§3 Mechanism A](#mechanism-a-llm-prompt-instruction-promptsdatabasetxt)).
+
+### 5.4 Properties
+
+| Property | Value |
+|----------|-------|
+| **Generic** | Works for any tool in the action map — current and future |
+| **Independent** | Queries auditd directly, not the agent's text |
+| **Persistent** | The verification itself is an auditable `delegation_verification` event |
+| **Queryable** | `GET /v1/journeys?outcome=unverified_claim` surfaces all incidents |
+| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
+| **Non-invasive** | Read delegations are not subject to the mismatch check |
+
+### 5.5 Limitations
+
+- Requires `HELPDESK_AUDIT_URL` to be set on the orchestrator. Without it,
+  verification is skipped (no mismatch flagged — fail open by design).
+- A small async race window exists: if `delegation_verification` queries
+  auditd before the sub-agent's `tool_execution` event is persisted,
+  a genuine execution may appear as a mismatch. The implementation retries
+  once after 200 ms to reduce this. A user who retries will get a clean
+  second verification.
+- Only `destructive` and `write` delegations trigger the mismatch check.
+  `read` delegations are verified (the event is recorded) but never flagged
+  as `unverified_claim`.
+
+For the investigation workflow and root-cause guide, see
+[JOURNEYS.md — §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection).
+
+---
+
+## 6. Test coverage
 
 The three enforcement mechanisms map to testing pyramid layers. K8s tool tests
 cover Mechanisms A and C only (no Mechanism B structural tests, because there is
 no structural guard to test).
 
-### Layer 1: Unit tests
+### Layer 1: Unit tests (§4 safeguards and §5 delegation verification)
 
 All unit tests run without external dependencies via `go test ./...`.
 
@@ -682,8 +810,47 @@ to zero delays so they run in milliseconds.
 | `TestQueryJourneys_RetryCountPopulated` | `store_test.go` | Journey with 2 `tool_retry` events shows `retry_count:2`; `outcome` stays `"success"` |
 | `TestQueryJourneys_RetryCountZeroOmitted` | `store_test.go` | Journey with no retry events omits `retry_count` from JSON |
 
+#### Delegation verification (`internal/audit/`)
+
+Unit tests for `buildDelegationVerification` and `formatVerificationBlock`
+(`internal/audit/delegate_tool_test.go`):
+
+| Test | What it verifies |
+|---|---|
+| `TestBuildDelegationVerification_Mismatch` | Destructive delegation with no destructive tool confirmed → `Mismatch=true` |
+| `TestBuildDelegationVerification_Confirmed` | `terminate_connection` present in trail → `Mismatch=false`, `DestructiveConfirmed=["terminate_connection"]` |
+| `TestBuildDelegationVerification_ReadDelegation_NeverMismatch` | Read delegations with no tools are never a mismatch |
+| `TestBuildDelegationVerification_NoAuditURL` | Empty `auditURL` → zero-value verification, no mismatch |
+| `TestBuildDelegationVerification_WriteAction_NeverMismatch` | Write delegations are not subject to the mismatch check |
+| `TestFormatVerificationBlock_Mismatch` | Block contains `MISMATCH`, delegation event ID, and `Do NOT claim success` instruction |
+| `TestFormatVerificationBlock_Clean` | Clean block does not contain `MISMATCH`; does contain confirmed tool name |
+
+Journey store tests for the `unverified_claim` outcome (`internal/audit/store_test.go`):
+
+| Test | What it verifies |
+|---|---|
+| `TestQueryJourneys_UnverifiedClaimOutcome` | `delegation_verification` with `Mismatch=true` → journey `outcome="unverified_claim"` |
+| `TestQueryJourneys_DelegationVerification_NotInToolsUsedOrEventCount` | Verification events excluded from `tools_used` and `event_count` |
+| `TestQueryJourneys_UnverifiedClaimWinsOverError` | `unverified_claim` (priority 9) beats `error` (priority 8) in the same trace |
+| `TestQueryJourneys_CleanVerification_DoesNotOverrideSuccess` | `Mismatch=false` → outcome `"verified"` does not override `"success"` |
+
 For integration and manual fault-injection procedures see
-[Mutation Safeguard Verification](testing/FAULT_INJECTION_TESTING.md#mutation-safeguard-verification).
+[Mutation Safeguard Verification](../testing/FAULT_INJECTION_TESTING.md#mutation-safeguard-verification).
+
+#### Integration tests (`testing/integration/governance/`)
+
+| Test | What it verifies |
+|---|---|
+| `TestIntegration_DelegationVerification_MismatchSurfacesInJourneys` | HTTP round-trip: posting a `delegation_verification` event with `Mismatch=true` produces a journey with `outcome=unverified_claim`; event excluded from `tools_used` and `event_count` |
+| `TestIntegration_DelegationVerification_CleanVerification` | `Mismatch=false` → journey does not get `unverified_claim` |
+
+#### E2e tests (`testing/e2e/`)
+
+| Test | What it verifies |
+|---|---|
+| `TestGovernance_GetEvent_DelegationVerification` | Full pipeline: event POST → store round-trip → field retrieval → journey outcome elevation → gateway proxy |
+
+---
 
 ### 2: Unit: session plan wiring (`agents/database/tools_test.go`)
 
@@ -700,6 +867,7 @@ helper in Tier 1c uses the same sequential pattern extended to three calls for
 the verification step.)
 
 ### 3a: Unit: ordering evaluator (`testing/faultlib/faultlib_test.go`)
+
 
 The fault-test evaluator was extended with `ExpectedToolOrder` support. Five
 unit tests cover the new logic:
@@ -768,7 +936,7 @@ make faulttest
 
 ---
 
-## 6. Fault scenarios
+## 7. Fault scenarios
 
 ### `db-terminate-direct-command`
 
@@ -800,7 +968,7 @@ position(A) < position(B).
 
 ---
 
-## 7. Run all mutation-tool tests locally
+## 8. Run all mutation-tool tests locally
 
 ```bash
 # Database + k8s unit tests + fault-lib ordering tests (no infrastructure needed)
@@ -810,7 +978,7 @@ make test-governance
 make faulttest
 ```
 
-## 8. Compliance and Alerting
+## 9. Compliance and Alerting
 
 AI Governance module and in particular the Compliance Reporter
 (`govbot`) have been enhanced to track and if necessary alert on unusual

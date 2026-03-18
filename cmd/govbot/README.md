@@ -33,7 +33,7 @@ Phase  9 — Policy Coverage Analysis:  tool_invoked vs policy_decision gap anal
 Phase 10 — Compliance Summary:        Aggregated alerts and warnings + optional Slack post
 ```
 
-See [COMPLIANCE.md](../../COMPLIANCE.md) for a full description of each phase,
+See [COMPLIANCE.md](../../docs/COMPLIANCE.md) for a full description of each phase,
 coverage gap detection, dead rule detection, and the historical trend block.
 
 ## 3. Exit Codes
@@ -267,7 +267,7 @@ To fix the `no_match` warning, ensure the database host in the agent's
 connection string matches a `db_servers` entry in the infrastructure config
 (see [Policy Configuration](../../deploy/helm/README.md#94-policy-configuration)).
 
-Also see [this](GOVBOT_SAMPLE.md) as a complete sample run of the `govbot` Compliance Reporter.
+Also see [this](../../docs/GOVBOT_SAMPLE.md) as a complete sample run of the `govbot` Compliance Reporter.
 
 ## 9. Running in Docker Compose
 

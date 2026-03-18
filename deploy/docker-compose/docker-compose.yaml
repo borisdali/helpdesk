@@ -9,6 +9,7 @@ services:
     image: helpdesk:latest
     command: ["/usr/local/bin/auditd"]
     environment:
+      HELPDESK_LOG_LEVEL: ${HELPDESK_LOG_LEVEL:-info}
       # Core audit configuration
       HELPDESK_AUDIT_ADDR: "0.0.0.0:1199"
       HELPDESK_AUDIT_DB: /data/audit/audit.db
@@ -22,6 +23,9 @@ services:
       # Set HELPDESK_POLICY_ENABLED=false in .env to suppress loading entirely.
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      # Infrastructure config — enables tag/sensitivity resolution in the
+      # /v1/governance/explain endpoint without relying on caller-supplied values.
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       # Approval notification (optional)
       HELPDESK_APPROVAL_WEBHOOK: ${HELPDESK_APPROVAL_WEBHOOK:-}
       HELPDESK_APPROVAL_BASE_URL: ${HELPDESK_APPROVAL_BASE_URL:-http://localhost:1199}
@@ -35,6 +39,7 @@ services:
     volumes:
       - audit-data:/data/audit
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     ports:
       - "1199:1199"
     restart: unless-stopped
@@ -60,6 +65,7 @@ services:
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+      HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE: ${HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE:-false}
       # Post-mutation verification retry tuning (optional)
       HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
       HELPDESK_VERIFY_INITIAL_DELAY_S: ${HELPDESK_VERIFY_INITIAL_DELAY_S:-}
@@ -100,6 +106,7 @@ services:
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+      HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE: ${HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE:-false}
       # Post-mutation verification retry tuning (optional)
       HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
       HELPDESK_VERIFY_INITIAL_DELAY_S: ${HELPDESK_VERIFY_INITIAL_DELAY_S:-}
@@ -191,6 +198,16 @@ services:
       # AI Governance - enables /api/v1/governance endpoints
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      # Identity & access (optional; defaults to "none" — unverified X-User headers)
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
+      HELPDESK_JWT_JWKS_URL: ${HELPDESK_JWT_JWKS_URL:-}
+      HELPDESK_JWT_ISSUER: ${HELPDESK_JWT_ISSUER:-}
+      HELPDESK_JWT_AUDIENCE: ${HELPDESK_JWT_AUDIENCE:-}
+      HELPDESK_JWT_ROLES_CLAIM: ${HELPDESK_JWT_ROLES_CLAIM:-}
+      HELPDESK_JWT_CACHE_TTL: ${HELPDESK_JWT_CACHE_TTL:-}
+    volumes:
+      - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -216,6 +233,10 @@ services:
       # Streaming mode: "sse" (streaming) or "none" (disabled, default)
       # Set to "none" to work around ADK REPL bug in containers
       HELPDESK_STREAMING_MODE: ${HELPDESK_STREAMING_MODE:-none}
+      # Session-level purpose: injects an explicit purpose into every delegation.
+      # Equivalent to X-Purpose: <value> on API requests. Required when policies
+      # use allowed_purposes conditions (e.g., pii-data-protection). Set in .env.
+      HELPDESK_SESSION_PURPOSE: ${HELPDESK_SESSION_PURPOSE:-}
       # AI Governance
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
@@ -244,6 +265,8 @@ services:
       - -socket=/data/audit/audit.sock
       - -webhook=${HELPDESK_ALERT_WEBHOOK:-}
     environment:
+      HELPDESK_LOG_LEVEL: ${HELPDESK_LOG_LEVEL:-info}
+      HELPDESK_AUDITOR_LOG_ALL: ${HELPDESK_AUDITOR_LOG_ALL:-false}
       # Email alerting (optional)
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}

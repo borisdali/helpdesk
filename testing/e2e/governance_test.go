@@ -129,6 +129,41 @@ func auditdPost(t *testing.T, auditdURL, path string, body any) map[string]any {
 	return result
 }
 
+// auditdSupportsDelegationVerification probes whether the running auditd binary
+// stores and returns the delegation_verification field. Older images drop
+// unknown JSON keys on the store/retrieve round-trip.
+//
+// Returns false with a t.Log when the field is not supported, so callers can
+// skip gracefully. Rebuild with 'make image' (or use 'make e2e', which depends
+// on the image target).
+func auditdSupportsDelegationVerification(t *testing.T, auditdURL string) bool {
+	t.Helper()
+	probeID := fmt.Sprintf("e2e-dvprobe-%d", time.Now().UnixNano())
+	probe := map[string]any{
+		"event_id":   probeID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "delegation_verification",
+		"session":    map[string]any{"id": "e2e-dvprobe-session"},
+		"delegation_verification": map[string]any{
+			"delegation_event_id": "probe-anchor",
+			"agent":               "probe-agent",
+			"mismatch":            true,
+		},
+	}
+	created := auditdPost(t, auditdURL, "/v1/events", probe)
+	eventID, _ := created["event_id"].(string)
+	if eventID == "" {
+		return false
+	}
+	result := auditdGet(t, auditdURL, "/v1/events/"+eventID)
+	dv, _ := result["delegation_verification"].(map[string]any)
+	if dv == nil {
+		t.Logf("auditd does not persist delegation_verification field — image predates that feature. Rebuild with 'make image'.")
+		return false
+	}
+	return true
+}
+
 // =============================================================================
 // Gateway governance endpoints (no API key required)
 // =============================================================================
@@ -850,5 +885,130 @@ func TestGovernance_ReasoningEventsInTrace(t *testing.T) {
 			"Verify NewReasoningCallback is wired in agents/database/main.go.", traceID)
 	} else {
 		t.Logf("found %d agent_reasoning event(s) in trace %s", reasoningCount, traceID)
+	}
+}
+
+// =============================================================================
+// Delegation verification audit layer
+// =============================================================================
+
+// TestGovernance_GetEvent_DelegationVerification verifies that a
+// delegation_verification event — written exactly as buildDelegationVerification
+// emits it — survives the full HTTP → auditd store → HTTP round-trip with all
+// DelegationVerification fields intact, and that the journey outcome is elevated
+// to "unverified_claim" when Mismatch=true.
+// No API key required; the events are synthesised directly via POST /v1/events.
+func TestGovernance_GetEvent_DelegationVerification(t *testing.T) {
+	cfg := LoadConfig()
+	if !isAuditdReachable(cfg.AuditdURL) {
+		t.Skipf("auditd not reachable at %s", cfg.AuditdURL)
+	}
+	if !auditdSupportsDelegationVerification(t, cfg.AuditdURL) {
+		t.Skip("auditd does not support delegation_verification field; skipping")
+	}
+
+	traceID := fmt.Sprintf("e2e-delver-%d", time.Now().UnixNano())
+	sessionID := "e2e-dv-" + traceID
+
+	// Step 1: record a delegation_decision anchor so QueryJourneys can find this trace.
+	anchorEventID := fmt.Sprintf("e2e-anchor-%d", time.Now().UnixNano())
+	anchor := map[string]any{
+		"event_id":   anchorEventID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "delegation_decision",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID, "user_id": "e2e-dv-user"},
+		"input":      map[string]any{"user_query": "terminate the slow connection"},
+	}
+	auditdPost(t, cfg.AuditdURL, "/v1/events", anchor)
+
+	// Step 2: record a delegation_verification event with Mismatch=true.
+	dvEventID := fmt.Sprintf("e2e-dv-%d", time.Now().UnixNano())
+	dvPayload := map[string]any{
+		"event_id":   dvEventID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"input":      map[string]any{"user_query": "terminate the slow connection"},
+		"delegation_verification": map[string]any{
+			"delegation_event_id":   anchorEventID,
+			"agent":                 "postgres_database_agent",
+			"tools_confirmed":       []string{"get_session_info"},
+			"destructive_confirmed": []string{},
+			"mismatch":              true,
+		},
+	}
+	created := auditdPost(t, cfg.AuditdURL, "/v1/events", dvPayload)
+	if created["event_id"] == nil {
+		t.Fatalf("POST delegation_verification: event_id missing from response: %v", created)
+	}
+	t.Logf("created delegation_verification event: %s", dvEventID)
+
+	// Step 3: retrieve by event ID and verify all fields survive the store round-trip.
+	result := auditdGet(t, cfg.AuditdURL, "/v1/events/"+dvEventID)
+	if result["event_id"] != dvEventID {
+		t.Errorf("event_id = %v, want %s", result["event_id"], dvEventID)
+	}
+	if result["event_type"] != "delegation_verification" {
+		t.Errorf("event_type = %v, want delegation_verification", result["event_type"])
+	}
+	dv, _ := result["delegation_verification"].(map[string]any)
+	if dv == nil {
+		t.Fatal("delegation_verification field missing from retrieved event")
+	}
+	if mismatch, _ := dv["mismatch"].(bool); !mismatch {
+		t.Error("delegation_verification.mismatch = false, want true")
+	}
+	if agent, _ := dv["agent"].(string); agent != "postgres_database_agent" {
+		t.Errorf("delegation_verification.agent = %q, want postgres_database_agent", agent)
+	}
+	toolsConfirmed, _ := dv["tools_confirmed"].([]any)
+	if len(toolsConfirmed) != 1 || toolsConfirmed[0] != "get_session_info" {
+		t.Errorf("delegation_verification.tools_confirmed = %v, want [get_session_info]", toolsConfirmed)
+	}
+	t.Logf("delegation_verification round-trip OK: mismatch=%v agent=%v tools=%v",
+		dv["mismatch"], dv["agent"], dv["tools_confirmed"])
+
+	// Step 4: query journeys filtered by outcome=unverified_claim and find our trace.
+	journeys := auditdGetList(t, cfg.AuditdURL, "/v1/journeys?outcome=unverified_claim")
+	found := false
+	for _, j := range journeys {
+		if j["trace_id"] != traceID {
+			continue
+		}
+		found = true
+		if j["outcome"] != "unverified_claim" {
+			t.Errorf("journey outcome = %q, want unverified_claim", j["outcome"])
+		}
+		// delegation_verification must NOT appear in tools_used.
+		if tools, ok := j["tools_used"].([]any); ok {
+			for _, tool := range tools {
+				if tool == "delegation_verification" {
+					t.Error("delegation_verification should not appear in journey tools_used")
+				}
+			}
+		}
+		t.Logf("journey found: trace_id=%s outcome=%v tools_used=%v event_count=%v",
+			traceID, j["outcome"], j["tools_used"], j["event_count"])
+	}
+	if !found {
+		t.Errorf("journey with trace_id=%s not found in ?outcome=unverified_claim results; "+
+			"check that delegation_verification events with mismatch=true elevate journey outcome", traceID)
+	}
+
+	// Step 5: verify via gateway proxy path if available.
+	if IsGatewayReachable(cfg.GatewayURL) {
+		gatewayResult := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/events/"+dvEventID)
+		if gatewayResult["event_id"] != dvEventID {
+			t.Errorf("gateway: event_id = %v, want %s", gatewayResult["event_id"], dvEventID)
+		}
+		gdv, _ := gatewayResult["delegation_verification"].(map[string]any)
+		if gdv == nil {
+			t.Error("gateway: delegation_verification field missing after proxy round-trip")
+		} else if m, _ := gdv["mismatch"].(bool); !m {
+			t.Error("gateway: delegation_verification.mismatch = false, want true")
+		}
+		t.Logf("gateway proxy delegation_verification round-trip OK")
 	}
 }

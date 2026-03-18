@@ -55,11 +55,11 @@ essential for querying and correlating events.
 | Prefix | Event type | Recorded by |
 |--------|-----------|-------------|
 | `evt_` | `delegation_decision` | Orchestrator — routes a request to an agent |
-| `tool_` | `tool_call` | Agent — records tool name, params, result, duration |
+| `evt_` | `gateway_request` | Gateway — records every inbound request; anchor for NL-query journeys |
+| `tool_` | `tool_execution` | Agent — records tool name, params, result, duration |
 | `pol_` | `policy_decision` | Agent / auditd — records policy evaluation outcome |
 | `rsn_` | `agent_reasoning` | Agent — LLM deliberation text captured automatically when audit is enabled and the model emits text alongside a tool call |
-
-Gateway `gateway_request` events use `evt_` prefix as well.
+| `dv_` | `delegation_verification` | Orchestrator — records what a sub-agent actually executed vs. what it claimed; used to detect LLM fabrication |
 
 ### 2.2 trace_id prefix → request origin
 
@@ -100,14 +100,14 @@ Core fields present on every event:
 |-------|-------------|
 | `event_id` | Unique identifier (e.g. `tool_a1b2c3d4`) |
 | `timestamp` | UTC timestamp (RFC3339Nano) |
-| `event_type` | `delegation_decision`, `tool_call`, `policy_decision`, `agent_reasoning`, `governance_violation` |
+| `event_type` | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation` |
 | `session_id` | Session identifier of the recording component |
 | `trace_id` | End-to-end correlation ID; empty when no orchestrator context |
 | `agent` | Name of the agent that recorded the event |
 | `prev_hash` | SHA-256 of the previous event in the chain |
 | `event_hash` | SHA-256 of this event's canonical JSON |
 
-### 4.1 tool_call fields
+### 4.1 tool_execution fields
 
 | Field | Description |
 |-------|-------------|
@@ -139,6 +139,28 @@ Core fields present on every event:
 | `user_id` | User who sent the original request |
 | `user_query` | Original natural-language query text |
 | `decision_agent` | Agent the orchestrator selected |
+
+### 4.4 delegation_verification fields (orchestrator)
+
+Emitted by the orchestrator after every `delegate_to_agent` call completes.
+The orchestrator queries the audit trail independently of the agent's text
+response — this is the authoritative record of what the sub-agent actually did.
+
+| Field | Description |
+|-------|-------------|
+| `delegation_event_id` | `event_id` of the corresponding `delegation_decision` event |
+| `agent` | Name of the sub-agent that was delegated to |
+| `tools_confirmed` | Tool names that appear in the audit trail for this trace since the delegation started |
+| `destructive_confirmed` | Subset of `tools_confirmed` that are classified as `destructive` |
+| `mismatch` | `true` when the delegation was classified as `destructive` but no destructive tool execution is in the trail — strong signal of LLM fabrication |
+
+When `mismatch=true`, the journey outcome is elevated to `unverified_claim` (see
+[§5](#5-action-classification) and [JOURNEYS.md — Outcomes](JOURNEYS.md#journey-outcomes)).
+The orchestrator prompt instructs the LLM to report mismatches to the user and
+**not** claim success.
+
+`delegation_verification` events do **not** contribute to `tools_used` or
+`event_count` in journey summaries — they are internal governance plumbing.
 
 ---
 
@@ -211,7 +233,7 @@ Base URL: `http://localhost:1199` (default). All paths are under `/v1/`.
 | `session_id` | string | Filter by agent session ID |
 | `trace_id` | string | Filter by exact trace ID |
 | `trace_id_prefix` | string | Filter by trace ID prefix (e.g. `tr_`) |
-| `event_type` | string | `delegation_decision`, `tool_call`, `policy_decision`, `agent_reasoning`, `governance_violation` |
+| `event_type` | string | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation` |
 | `agent` | string | Filter by agent name |
 | `action_class` | string | `read`, `write`, or `destructive` |
 | `since` | RFC3339 | Only events at or after this timestamp |
@@ -226,6 +248,9 @@ curl "http://localhost:1199/v1/events?event_type=policy_decision&since=2026-03-0
 
 # All destructive tool calls from the database agent
 curl "http://localhost:1199/v1/events?agent=postgres_database_agent&action_class=destructive"
+
+# All delegation verifications — reveals mismatches (LLM fabrication incidents)
+curl "http://localhost:1199/v1/events?event_type=delegation_verification"
 
 # Verify chain integrity
 curl "http://localhost:1199/v1/verify" | jq

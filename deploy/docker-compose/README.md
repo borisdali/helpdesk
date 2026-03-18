@@ -101,9 +101,9 @@ EOF
   - Sources `.env` if present
   - Validates required env vars
   - Starts all 3 agents + Gateway in the background (logs go to `/tmp/helpdesk-*.log`)
-  - Launches the interactive orchestrator in the foreground
+  - Launches the interactive Orchestrator in the foreground
   - Cleans up all background processes on exit/`Ctrl-C`
-  - `--no-repl` runs headless (gateway only, no orchestrator)
+  - `--no-repl` runs headless (Gateway only, no Orchestrator)
   - `--stop` kills any running helpdesk processes
 
 N.B: Please note that the binary tarballs expect `psql` and `kubectl` already installed on the host — those are baked into the Docker image (see option 1.1), but not into the Go binaries (this option 1.2).
@@ -146,7 +146,7 @@ HELPDESK_API_KEY=<your-api-key-here>
 # Kubeconfig path for K8s and incident agents (optional)
 KUBECONFIG=~/.kube/config
 
-# Infrastructure inventory for the orchestrator (optional).
+# Infrastructure inventory for the Orchestrator (optional).
 # Path to a JSON file describing your database servers, K8s clusters, and VMs.
 # Copy the example and edit it with your real servers:
 #   cp infrastructure.json.example infrastructure.json
@@ -175,7 +175,7 @@ See the [sample log](INSTALL_from_source_sample_SRE_bot_log.md)  of running the 
 
 ## 3. AI Governance Components
 
-aiHelpDesk includes an [AI Governance framework](../../AIGOVERNANCE.md) with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging. The governance components are:
+aiHelpDesk includes an [AI Governance framework](../../docs/AIGOVERNANCE.md) with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging. The governance components are:
 
 | Component | Description | Port |
 |-----------|-------------|------|
@@ -362,7 +362,7 @@ Key flags (set via `command:` in `docker-compose.yaml`):
 | `-dry-run` | `false` | Log alerts without creating incidents |
 | `-verbose` | `false` | Log every received audit event |
 
-> **Note:** `secbot` must be able to reach the audit socket at `/data/audit/audit.sock` (the shared `audit-data` volume) and the gateway at `http://gateway:8080`. Both are wired correctly in the provided `docker-compose.yaml`.
+> **Note:** `secbot` must be able to reach the audit socket at `/data/audit/audit.sock` (the shared `audit-data` volume) and the Gateway at `http://gateway:8080`. Both are wired correctly in the provided `docker-compose.yaml`.
 
 ### 3.9 Notification Configuration
 
@@ -381,9 +381,77 @@ HELPDESK_EMAIL_FROM=helpdesk@example.com
 HELPDESK_EMAIL_TO=ops@example.com
 ```
 
+### 3.10 Identity & Access Control
+
+By default the Gateway accepts `X-User` and `X-Roles` headers without verification (`HELPDESK_IDENTITY_PROVIDER=none`). For production deployments, enable the static or JWT identity provider.
+
+#### Static identity provider
+
+The static provider verifies human users by `X-User` header and service accounts by `Authorization: Bearer <api_key>`.
+
+**Step 1: Create `users.yaml` from the example**
+
+```bash
+cp users.example.yaml users.yaml
+# Edit users.yaml — add your real users and roles
+```
+
+**Step 2: Generate Argon2id hashes for service account API keys**
+
+`hashapikey` is baked into the Docker image:
+
+```bash
+# Interactive prompt (no echo — recommended)
+docker compose run --rm auditd hashapikey
+
+# Or pass the key as an argument
+docker compose run --rm auditd hashapikey my-secret-api-key
+```
+
+Copy the printed hash into the `api_key_hash` field of the relevant `service_accounts` entry in `users.yaml`.
+
+**Step 3: Enable in `.env`**
+
+```bash
+HELPDESK_IDENTITY_PROVIDER=static
+# HELPDESK_USERS_FILE_HOST defaults to ./users.example.yaml — override if you renamed:
+HELPDESK_USERS_FILE_HOST=./users.yaml
+```
+
+Restart the Gateway:
+
+```bash
+docker compose up -d --force-recreate gateway
+```
+
+#### JWT identity provider
+
+For SSO/OIDC integrations, set in `.env`:
+
+```bash
+HELPDESK_IDENTITY_PROVIDER=jwt
+HELPDESK_JWT_JWKS_URL=https://your-idp.example.com/.well-known/jwks.json
+HELPDESK_JWT_ISSUER=https://your-idp.example.com/
+HELPDESK_JWT_AUDIENCE=helpdesk
+# Optional: claim name that carries roles (default: roles)
+HELPDESK_JWT_ROLES_CLAIM=roles
+```
+
+Clients send `Authorization: Bearer <jwt-token>`. The Gateway validates the signature, issuer, and audience, then looks up roles from `HELPDESK_JWT_ROLES_CLAIM`.
+
+#### Requiring explicit purpose for sensitive resources
+
+To block access to `pii` or `critical` resources unless the caller declares a purpose:
+
+```bash
+HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE=true
+```
+
+This is an agent-level pre-check, independent of `allowed_purposes` policy conditions. Callers pass `X-Purpose: diagnostic` (HTTP API) or set `HELPDESK_SESSION_PURPOSE=diagnostic` (Orchestrator REPL / `.env`).
+
 ## 4. Using the Gateway API
 
-In addition to the interactive orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+In addition to the interactive Orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
 
 ```bash
 # Query the system
@@ -414,7 +482,7 @@ The Gateway API is useful for:
 
 ### Interactive REPL Shows Empty Responses
 
-**Symptom:** When running the interactive orchestrator in a Docker container, agent responses appear empty and require pressing Enter to display.
+**Symptom:** When running the interactive Orchestrator in a Docker container, agent responses appear empty and require pressing Enter to display.
 
 **Cause:** This is a known issue with the ADK (Agent Development Kit) REPL in containerized environments where TTY handling differs from local execution.
 

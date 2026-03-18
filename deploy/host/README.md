@@ -10,9 +10,10 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── .env.example                # Configuration template — copy to .env and edit
 ├── infrastructure.json.example # Infrastructure inventory template
 ├── policies.example.yaml       # Policy rules template
+├── users.example.yaml          # Identity & access template (static provider)
 │
-├── helpdesk                    # Interactive orchestrator (multi-agent REPL)
-├── gateway                     # REST API gateway
+├── helpdesk                    # Interactive Orchestrator (multi-agent REPL)
+├── gateway                     # REST API Gateway
 ├── database-agent              # PostgreSQL diagnostics agent
 ├── k8s-agent                   # Kubernetes diagnostics agent
 ├── incident-agent              # Incident bundle collector
@@ -23,7 +24,8 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── secbot                      # AI Governance: security responder
 ├── govbot                      # AI Governance: compliance reporter
 ├── approvals                   # AI Governance: approval management CLI
-└── govexplain                  # AI Governance: policy explainability CLI
+├── govexplain                  # AI Governance: policy explainability CLI
+└── hashapikey                  # Identity: generate Argon2id hashes for service account API keys
 ```
 
 ## 2. Quick Start
@@ -45,7 +47,7 @@ cp infrastructure.json.example infrastructure.json
 ./startall.sh
 ```
 
-`startall.sh` starts `auditd`, all agents, and the `gateway` in the background, then drops you into the interactive orchestrator REPL. Type your question and press Enter. Press `Ctrl-C` or type `exit` to stop everything.
+`startall.sh` starts `auditd`, all agents, and the `gateway` in the background, then drops you into the interactive Orchestrator REPL. Type your question and press Enter. Press `Ctrl-C` or type `exit` to stop everything.
 
 ## 3. Prerequisites
 
@@ -91,7 +93,7 @@ host=localhost port=5432 dbname=myapp user=admin
 host=my-postgres-container port=5432 dbname=myapp user=admin
 ```
 
-On Linux with Docker Engine (no Desktop), use `172.17.0.1` (the Docker bridge gateway IP) or the host's LAN IP if `localhost` doesn't work.
+On Linux with Docker Engine (no Desktop), use `172.17.0.1` (the Docker bridge Gateway IP) or the host's LAN IP if `localhost` doesn't work.
 
 **Database credentials:** Create a `.pgpass` file alongside `.env` for passwordless authentication:
 
@@ -103,7 +105,7 @@ EOF
 chmod 600 .pgpass
 ```
 
-**Infrastructure inventory:** Set `HELPDESK_INFRA_CONFIG` in `.env` to point at your `infrastructure.json` so the orchestrator knows which servers exist:
+**Infrastructure inventory:** Set `HELPDESK_INFRA_CONFIG` in `.env` to point at your `infrastructure.json` so the Orchestrator knows which servers exist:
 
 ```bash
 HELPDESK_INFRA_CONFIG=./infrastructure.json
@@ -135,12 +137,12 @@ tail -f /tmp/helpdesk-gateway.log
 
 ## 6. Headless / API Mode
 
-To use the REST gateway API without the interactive REPL. See [API.md](../../API.md) for the full endpoint reference.
+To use the REST Gateway API without the interactive REPL. See [API.md](../../docs/API.md) for the full endpoint reference.
 
 ```bash
 ./startall.sh --no-repl &
 
-# Query via the gateway
+# Query via the Gateway
 curl -s http://localhost:8080/api/v1/agents | jq .
 
 curl -s -X POST http://localhost:8080/api/v1/query \
@@ -150,7 +152,7 @@ curl -s -X POST http://localhost:8080/api/v1/query \
 
 ## 7. AI Governance
 
-See [here](../../AIGOVERNANCE.md) for details on aiHelpDesk AI Governance module and its sub-modules.
+See [here](../../docs/AIGOVERNANCE.md) for details on aiHelpDesk AI Governance module and its sub-modules.
 
 ### 7.1 Enabling Governance
 
@@ -210,7 +212,56 @@ policies:
 
 See `policies.example.yaml` for the full schema including time-based schedules, principal-based rules, row limits, and multi-approver quorum.
 
-### 7.3 Managing Approvals
+### 7.3 Identity & Access Control
+
+By default the Gateway accepts `X-User` and `X-Roles` headers without verification. For production deployments, enable the static or JWT identity provider in `.env`.
+
+#### Static identity provider
+
+```bash
+cp users.example.yaml users.yaml
+# Edit users.yaml — add your real users, roles, and service accounts
+```
+
+Generate Argon2id hashes for service account API keys using the bundled `hashapikey` binary:
+
+```bash
+# Interactive prompt (no echo — recommended)
+./hashapikey
+
+# Or pass the key as an argument
+./hashapikey my-secret-api-key
+
+# Or from a pipe
+echo -n "my-secret-api-key" | ./hashapikey
+```
+
+Copy the printed hash into the `api_key_hash` field of the relevant service account in `users.yaml`. Then set in `.env`:
+
+```bash
+HELPDESK_IDENTITY_PROVIDER=static
+HELPDESK_USERS_FILE=./users.yaml
+```
+
+#### JWT identity provider
+
+```bash
+HELPDESK_IDENTITY_PROVIDER=jwt
+HELPDESK_JWT_JWKS_URL=https://your-idp.example.com/.well-known/jwks.json
+HELPDESK_JWT_ISSUER=https://your-idp.example.com/
+HELPDESK_JWT_AUDIENCE=helpdesk
+HELPDESK_JWT_ROLES_CLAIM=roles   # optional, default: roles
+```
+
+#### Requiring explicit purpose for sensitive resources
+
+```bash
+HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE=true
+```
+
+Callers pass `X-Purpose: diagnostic` (HTTP API) or start the REPL with `./helpdesk --purpose diagnostic` (or `HELPDESK_SESSION_PURPOSE=diagnostic` in `.env`).
+
+### 7.4 Managing Approvals
 
 When a policy requires human approval, the agent pauses and waits. Use the `approvals` CLI to respond — it reads `HELPDESK_AUDIT_URL` from the environment (set automatically by `startall.sh` when `auditd` is running):
 
@@ -241,7 +292,7 @@ curl -X POST http://localhost:1199/v1/approvals/apr_abc123/approve \
   -d '{"approved_by": "admin", "reason": "Verified safe"}'
 ```
 
-### 7.4 Explaining Policy Decisions (govexplain)
+### 7.5 Explaining Policy Decisions (govexplain)
 
 `govexplain` queries the audit trail to explain why a past action was allowed or denied, and can also answer hypothetical "what would happen if…" questions. It reads `HELPDESK_AUDIT_URL` from the environment:
 
@@ -265,7 +316,7 @@ curl -X POST http://localhost:1199/v1/approvals/apr_abc123/approve \
 
 Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
 
-### 7.5 Real-time Audit Monitor (auditor)
+### 7.6 Real-time Audit Monitor (auditor)
 
 `auditor` watches the audit stream and fires alerts (log, Slack webhook, email) when it detects low-confidence reasoning, unauthorized destructive actions, or chain integrity failures.
 
@@ -295,9 +346,9 @@ Check the live alert log:
 tail -f /tmp/helpdesk-auditor.log
 ```
 
-### 7.6 Running the SRE Bot (srebot)
+### 7.7 Running the SRE Bot (srebot)
 
-`srebot` is a one-shot automation tool. Run it while the stack is up — it contacts the gateway, runs AI diagnosis on a database, and creates an incident bundle:
+`srebot` is a one-shot automation tool. Run it while the stack is up — it contacts the Gateway, runs AI diagnosis on a database, and creates an incident bundle:
 
 ```bash
 ./srebot \
@@ -316,7 +367,7 @@ tail -f /tmp/helpdesk-auditor.log
   -symptom "Replication lag exceeded 30 seconds on the primary."
 ```
 
-### 7.7 Running the Compliance Reporter (govbot)
+### 7.8 Running the Compliance Reporter (govbot)
 
 `govbot` generates a compliance summary from the audit trail and optionally posts it to Slack:
 
@@ -332,7 +383,7 @@ tail -f /tmp/helpdesk-auditor.log
   -webhook https://hooks.slack.com/services/...
 ```
 
-### 7.8 Security Responder (secbot)
+### 7.9 Security Responder (secbot)
 
 `secbot` is a **long-running daemon**, not a one-shot CLI. `startall.sh --governance` starts it automatically in the background alongside `auditor`. It reads from the audit socket in real time and automatically creates incident bundles when it detects:
 

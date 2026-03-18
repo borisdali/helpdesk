@@ -309,6 +309,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 			opts.Since = t
 		}
 	}
+	if v := r.URL.Query().Get("outcome_status"); v != "" {
+		opts.OutcomeStatus = v
+	}
 
 	events, err := s.store.Query(r.Context(), opts)
 	if err != nil {
@@ -351,6 +354,9 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 			opts.Since = d
 		}
 	}
+	if v := q.Get("purpose"); v != "" {
+		opts.Purpose = v
+	}
 	if v := q.Get("category"); v != "" {
 		opts.Category = v
 	}
@@ -359,6 +365,9 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Get("has_retries") == "true" {
 		opts.HasRetries = true
+	}
+	if v := q.Get("trace_id"); v != "" {
+		opts.TraceID = v
 	}
 
 	journeys, err := s.store.QueryJourneys(r.Context(), opts)

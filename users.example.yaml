@@ -1,0 +1,42 @@
+# Example aiHelpDesk Static Identity Provider Configuration.
+# Copy this to /etc/helpdesk/users.yaml or set HELPDESK_USERS_FILE.
+# Used when HELPDESK_IDENTITY_PROVIDER=static.
+#
+# Human users are identified by the X-User header (or JWT sub claim when
+# HELPDESK_IDENTITY_PROVIDER=jwt). Roles are looked up here.
+# Service accounts authenticate via "Authorization: Bearer <api_key>" — the
+# stored hash is verified with Argon2id.
+#
+# To generate an Argon2id hash for a service account API key:
+#   go run ./cmd/hashapikey                     # prompts for key (no echo)
+#   go run ./cmd/hashapikey my-secret-key       # key as argument
+#   echo -n "my-secret-key" | go run ./cmd/hashapikey  # from pipe
+
+users:
+  - id: alice@example.com
+    roles: [dba, sre]
+
+  - id: bob@example.com
+    roles: [developer]
+
+  - id: carol@example.com
+    roles: [sre, oncall]
+
+  - id: dave@example.com
+    roles: [readonly]
+
+service_accounts:
+  # srebot: automated SRE tooling. API key hashed with Argon2id.
+  # Real deployments: store the hash in a secret manager and inject at startup.
+  - id: srebot
+    roles: [sre-automation]
+    # Hash of the API key "srebot-secret-key-replace-in-production"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$c2FsdGhlcmU$placeholder-replace-with-real-hash"
+
+  - id: secbot
+    roles: [security-scanner]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$c2VjYm90c2FsdA$placeholder-replace-with-real-hash"
+
+  - id: ci-pipeline
+    roles: [ci-readonly]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$Y2lwaXBlbGluZQ$placeholder-replace-with-real-hash"

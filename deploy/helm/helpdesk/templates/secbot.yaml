@@ -36,6 +36,8 @@ spec:
             {{- if .Values.governance.secbot.maxEventsPerMinute }}
             - "-max-events-per-minute={{ .Values.governance.secbot.maxEventsPerMinute }}"
             {{- end }}
+          env:
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           ports:
             - name: metrics
               containerPort: {{ .Values.governance.secbot.port }}

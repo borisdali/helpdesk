@@ -109,7 +109,7 @@ image:
   tag: v0.1.0
   pullPolicy: IfNotPresent
 
-# LLM model configuration. All agents and the orchestrator use these.
+# LLM model configuration. All agents and the Orchestrator use these.
 model:
   vendor: anthropic
   name: claude-haiku-4-5-20251001
@@ -207,7 +207,89 @@ helm install helpdesk ./helm/helpdesk \
     ...
 ```
 
-### 3.5 Custom Namespace
+### 3.5 Identity & Access Control
+
+By default the Gateway accepts `X-User` and `X-Roles` headers without verification (`gateway.identity.provider: none`). For production deployments, enable the static or JWT identity provider.
+
+#### Static identity provider
+
+**Option A: Inline `users.yaml` (chart-managed Secret)**
+
+```yaml
+gateway:
+  identity:
+    provider: static
+    usersConfig: |
+      users:
+        - id: alice@example.com
+          roles: [dba, sre]
+        - id: bob@example.com
+          roles: [readonly]
+      service_accounts:
+        - id: srebot
+          roles: [sre-automation]
+          api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."
+```
+
+**Option B: Pre-existing Secret (out-of-band)**
+
+```bash
+kubectl -n helpdesk-system create secret generic helpdesk-users \
+  --from-file=users.yaml=./users.yaml
+```
+
+```yaml
+gateway:
+  identity:
+    provider: static
+    usersSecret: helpdesk-users
+```
+
+**Generating Argon2id hashes for service account API keys**
+
+`hashapikey` is baked into the Docker image:
+
+```bash
+# Interactive prompt (no echo — recommended)
+kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey
+
+# Or pass the key as an argument
+kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey my-secret-api-key
+```
+
+Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`.
+
+#### JWT identity provider
+
+```yaml
+gateway:
+  identity:
+    provider: jwt
+    jwt:
+      jwksURL: "https://your-idp.example.com/.well-known/jwks.json"
+      issuer: "https://your-idp.example.com/"
+      audience: "helpdesk"
+      rolesClaim: "roles"   # optional, default: roles
+      cacheTTL: "5m"        # optional, JWKS cache duration
+```
+
+Clients send `Authorization: Bearer <jwt-token>`. The Gateway validates the signature, issuer, and audience, then extracts roles from the configured claim.
+
+#### Requiring explicit purpose for sensitive resources
+
+To block access to `pii` or `critical` resources unless the caller declares a purpose:
+
+```yaml
+governance:
+  policy:
+    requirePurposeForSensitive: true
+```
+
+This is an agent-level pre-check. Callers pass `X-Purpose: diagnostic` (HTTP API) or set `orchestrator.sessionPurpose: diagnostic` (interactive REPL).
+
+### 3.7 Custom Namespace
 
 Install to any namespace using `--namespace` and `--create-namespace`:
 
@@ -219,9 +301,9 @@ helm install helpdesk ./helm/helpdesk \
     --set model.name=claude-haiku-4-5-20251001
 ```
 
-### 3.6 Gateway Access
+### 3.8 Gateway Access
 
-By default, the gateway uses `ClusterIP`. For external access:
+By default, the Gateway uses `ClusterIP`. For external access:
 
 ```bash
 helm install helpdesk ./helm/helpdesk \
@@ -268,7 +350,7 @@ kubectl -n helpdesk-system exec -it deploy/helpdesk-orchestrator -- helpdesk
 
 Only the **Orchestrator** needs the infrastructure inventory. Agents receive connection details as parameters when called.
 
-Please see the complete aiHelpDesk architecture description [here](../../ARCHITECTURE.md).
+Please see the complete aiHelpDesk architecture description [here](../../docs/ARCHITECTURE.md).
 
 ## 6. Deployment from Source
 
@@ -316,10 +398,10 @@ To include infrastructure config, create a `my-values.yaml` as shown above and a
 
 ## 7. Using the Gateway API
 
-While the interactive orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
 
 ```bash
-# Port-forward the gateway
+# Port-forward the Gateway
 kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
 
 # In another terminal, query the system
@@ -353,7 +435,7 @@ The deploy bundle includes helper scripts in the `scripts/` directory:
 | Script | Description |
 |--------|-------------|
 | `gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
-| `k8s-local-repl.sh` | Run orchestrator locally with K8s agents port-forwarded |
+| `k8s-local-repl.sh` | Run Orchestrator locally with K8s agents port-forwarded |
 
 See [scripts/README.md](../../scripts/README.md) for detailed usage.
 
@@ -586,7 +668,7 @@ kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
 kubectl -n helpdesk-system exec -it deploy/helpdesk-gateway -- \
   govexplain --resource database:prod-db --action write --tags production
 
-# Talk directly to auditd (bypass gateway, exec into auditd pod)
+# Talk directly to auditd (bypass Gateway, exec into auditd pod)
 kubectl -n helpdesk-system exec -it deploy/helpdesk-auditd -- \
   govexplain --auditd http://localhost:1199 --list --since 1h
 ```
@@ -666,7 +748,7 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 
 ### 10.1 Interactive REPL Shows Empty Responses
 
-**Symptom:** When running the interactive orchestrator in a container, agent responses appear empty and require pressing Enter to display.
+**Symptom:** When running the interactive Orchestrator in a container, agent responses appear empty and require pressing Enter to display.
 
 **Cause:** This is a known issue with the ADK (Agent Development Kit) REPL in containerized environments where TTY handling differs from local execution.
 
@@ -678,7 +760,7 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
    ./scripts/gateway-repl.sh
    ```
 
-2. **Local orchestrator** - Run orchestrator locally with port-forwarded agents:
+2. **Local Orchestrator** - Run Orchestrator locally with port-forwarded agents:
    ```bash
    ./scripts/k8s-local-repl.sh [namespace]
    ```

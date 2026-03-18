@@ -29,6 +29,16 @@ import (
 func main() {
 	remainingArgs := logging.InitLogging(os.Args[1:])
 
+	// Extract --purpose flag before remaining args are forwarded to the launcher.
+	// Falls back to HELPDESK_SESSION_PURPOSE env var.
+	sessionPurpose, remainingArgs := extractPurposeFlag(remainingArgs)
+	if sessionPurpose == "" {
+		sessionPurpose = os.Getenv("HELPDESK_SESSION_PURPOSE")
+	}
+	if sessionPurpose != "" {
+		slog.Info("session purpose set", "purpose", sessionPurpose)
+	}
+
 	ctx := context.Background()
 
 	cfg := agentutil.Config{
@@ -179,11 +189,15 @@ func main() {
 	// Create tools list
 	var tools []tool.Tool
 	var orchestratorAuditor *audit.ToolAuditor
+	afterModelCallbacks := []llmagent.AfterModelCallback{
+		saveReportFunc,
+		agentutil.NewReasoningCallback(orchestratorAuditor),
+	}
 	if auditEnabled {
-		// Create delegate tool with audit logging
+		// Create delegate tool with audit logging and delegation guard.
 		sessionID := "sess_" + uuid.New().String()[:8]
 		userID := os.Getenv("USER")
-		delegateTool, err := audit.DelegateTool(auditor, agentRegistry, sessionID, userID)
+		delegateTool, guard, err := audit.DelegateTool(auditor, os.Getenv("HELPDESK_AUDIT_URL"), agentRegistry, sessionID, userID, "helpdesk_orchestrator", sessionPurpose)
 		if err != nil {
 			slog.Error("failed to create delegate tool", "err", err)
 			os.Exit(1)
@@ -191,22 +205,37 @@ func main() {
 		tools = append(tools, delegateTool)
 		slog.Info("delegate_to_agent tool created", "session_id", sessionID)
 
+		// Correction pseudo-tool: registered so handleFunctionCalls can resolve
+		// the _delegation_required calls injected by NoDelegationCallback.
+		correctionTool, err := audit.NoDelegationCorrectionTool(auditor, sessionID)
+		if err != nil {
+			slog.Error("failed to create correction tool", "err", err)
+			os.Exit(1)
+		}
+		tools = append(tools, correctionTool)
+
 		// ToolAuditor for capturing the orchestrator's LLM reasoning (why it
 		// chose to delegate to a particular agent). Shares the same session ID
 		// as the delegate tool so all events are correlated.
 		orchestratorAuditor = audit.NewToolAuditor(auditor, "helpdesk_orchestrator", sessionID, "")
+
+		// NoDelegationCallback injects a correction when the LLM responds
+		// without calling delegate_to_agent, giving it up to
+		// DefaultMaxDelegationRetries chances before suppressing the response.
+		afterModelCallbacks = []llmagent.AfterModelCallback{
+			saveReportFunc,
+			agentutil.NewReasoningCallback(orchestratorAuditor),
+			audit.NoDelegationCallback(guard, 0 /* use default */),
+		}
 	}
 
 	// Create the root agent
 	agentConfig := llmagent.Config{
-		Name:        "helpdesk_orchestrator",
-		Model:       llmModel,
-		Description: "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
-		Instruction: instruction,
-		AfterModelCallbacks: []llmagent.AfterModelCallback{
-			saveReportFunc,
-			agentutil.NewReasoningCallback(orchestratorAuditor),
-		},
+		Name:                "helpdesk_orchestrator",
+		Model:               llmModel,
+		Description:         "Multi-agent helpdesk system for database and infrastructure troubleshooting.",
+		Instruction:         instruction,
+		AfterModelCallbacks: afterModelCallbacks,
 	}
 
 	if auditEnabled {

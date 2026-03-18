@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"helpdesk/internal/identity"
 )
 
 // TraceMiddleware wraps an HTTP handler to extract trace_id from A2A message metadata.
@@ -56,6 +58,18 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 
 		slog.Debug("trace middleware: trace_id set", "trace_id", traceID, "generated", parsed.traceID == "")
 
+		// Build a TraceContext from the parsed A2A metadata and store it in the
+		// request context so tools can access principal and purpose via context helpers.
+		tc := &TraceContext{
+			TraceID:         traceID,
+			Origin:          "agent",
+			Principal:       parsed.resolvedPrincipal(),
+			Purpose:         parsed.purpose,
+			PurposeNote:     parsed.purposeNote,
+			PurposeExplicit: parsed.purposeExplicit,
+		}
+		r = r.WithContext(WithTraceContext(r.Context(), tc))
+
 		// Emit the gateway_request anchor event. This is what makes the request
 		// visible as a journey: QueryJourneys Q1 anchors on gateway_request events
 		// (with no tool_name) or delegation_decision events.
@@ -64,13 +78,17 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 			if sessionID == "" {
 				sessionID = "asess_" + uuid.New().String()[:8]
 			}
+			p := tc.Principal
 			event := &Event{
-				EventID:   "req_" + uuid.New().String()[:8],
-				Timestamp: time.Now().UTC(),
-				EventType: EventTypeGatewayRequest,
-				TraceID:   traceID,
-				Session:   Session{ID: sessionID},
-				Input:     Input{UserQuery: parsed.userQuery},
+				EventID:     "req_" + uuid.New().String()[:8],
+				Timestamp:   time.Now().UTC(),
+				EventType:   EventTypeGatewayRequest,
+				TraceID:     traceID,
+				Principal:   &p,
+				Purpose:     tc.Purpose,
+				PurposeNote: tc.PurposeNote,
+				Session:     Session{ID: sessionID, UserID: p.EffectiveID()},
+				Input:       Input{UserQuery: parsed.userQuery},
 				// Tool.Agent is stored as decision_agent so the journey summary
 				// can show which agent handled the request.
 				Tool: &ToolExecution{Name: "", Agent: agentName},
@@ -86,13 +104,31 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 
 // a2aRequestData holds the fields extracted from an incoming A2A JSON-RPC request.
 type a2aRequestData struct {
-	traceID   string
-	userQuery string
-	contextID string
+	traceID     string
+	userQuery   string
+	contextID   string
+	// Identity and purpose propagated from the upstream gateway/orchestrator:
+	userID          string
+	roles           []string
+	service         string
+	authMethod      string
+	purpose         string
+	purposeNote     string
+	purposeExplicit bool
 }
 
-// parseA2ARequest extracts trace_id, user query text, and context ID from an
-// A2A message/send JSON-RPC body.
+// resolvedPrincipal reconstructs the ResolvedPrincipal from A2A metadata fields.
+func (d a2aRequestData) resolvedPrincipal() identity.ResolvedPrincipal {
+	return identity.ResolvedPrincipal{
+		UserID:     d.userID,
+		Roles:      d.roles,
+		Service:    d.service,
+		AuthMethod: d.authMethod,
+	}
+}
+
+// parseA2ARequest extracts trace_id, user query text, context ID, and identity/purpose
+// fields from an A2A message/send JSON-RPC body.
 func parseA2ARequest(body []byte) a2aRequestData {
 	var req struct {
 		Params struct {
@@ -112,9 +148,40 @@ func parseA2ARequest(body []byte) a2aRequestData {
 		return out
 	}
 
-	if req.Params.Message.Metadata != nil {
-		if id, ok := req.Params.Message.Metadata["trace_id"].(string); ok {
+	if meta := req.Params.Message.Metadata; meta != nil {
+		if id, ok := meta["trace_id"].(string); ok {
 			out.traceID = id
+		}
+		if uid, ok := meta["user_id"].(string); ok {
+			out.userID = uid
+		}
+		if svc, ok := meta["service"].(string); ok {
+			out.service = svc
+		}
+		if am, ok := meta["auth_method"].(string); ok {
+			out.authMethod = am
+		}
+		if p, ok := meta["purpose"].(string); ok {
+			out.purpose = p
+		}
+		if pn, ok := meta["purpose_note"].(string); ok {
+			out.purposeNote = pn
+		}
+		if pe, ok := meta["purpose_explicit"].(bool); ok {
+			out.purposeExplicit = pe
+		}
+		// roles may arrive as []any (JSON array) or []string.
+		if rawRoles, ok := meta["roles"]; ok {
+			switch v := rawRoles.(type) {
+			case []any:
+				for _, r := range v {
+					if s, ok := r.(string); ok {
+						out.roles = append(out.roles, s)
+					}
+				}
+			case []string:
+				out.roles = v
+			}
 		}
 	}
 

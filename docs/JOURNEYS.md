@@ -159,7 +159,11 @@ Returns an array of journey summaries, newest first.
 | `user` | string | Filter to journeys initiated by this user ID |
 | `from` | RFC3339 | Only journeys whose delegation event is at or after this time |
 | `until` | RFC3339 | Only journeys whose delegation event is before this time |
+| `since` | duration | Shorthand for `from=now-duration` (e.g. `since=24h`, `since=7d`) |
 | `limit` | int | Maximum number of journeys to return (default: 50) |
+| `category` | string | Filter by request category (e.g. `database`, `kubernetes`) |
+| `outcome` | string | Filter by computed journey outcome (e.g. `outcome=unverified_claim`, `outcome=error`) |
+| `has_retries` | bool | When `true`, return only journeys where at least one mutation tool had to retry |
 
 All parameters are optional. With no parameters, the 50 most recent journeys
 are returned.
@@ -200,15 +204,37 @@ are returned.
 | Field | Description |
 |-------|-------------|
 | `trace_id` | Unique journey identifier; use this to fetch full event detail |
-| `started_at` | Timestamp of the first `delegation_decision` event |
+| `started_at` | Timestamp of the first `delegation_decision` or `gateway_request` event |
 | `ended_at` | Timestamp of the last event in the trace |
 | `duration_ms` | Wall-clock duration from first to last event |
 | `user_id` | User who initiated the request (from the delegation event) |
 | `user_query` | Original natural-language query text |
 | `agent` | Agent that handled the request |
+| `category` | Request category from the delegation event (`database`, `kubernetes`, etc.) |
 | `tools_used` | Unique tool names called during this journey, sorted alphabetically |
-| `outcome` | Worst outcome across all events: `error` > `success` |
-| `event_count` | Total audit events recorded under this trace_id |
+| `outcome` | Highest-priority outcome across all events (see [§5.6](#56-journey-outcomes)) |
+| `event_count` | Audit events recorded under this trace (excludes `delegation_verification` and `verification_outcome` plumbing events) |
+| `retry_count` | Number of mutation-tool re-poll attempts (non-zero means a tool had to wait for state to propagate but ultimately succeeded) |
+
+### 5.6 Journey outcomes
+
+Outcomes are computed by taking the highest-priority outcome across all events
+in the trace. The priority order (highest to lowest) is:
+
+| Outcome | Priority | Meaning |
+|---------|----------|---------|
+| `unverified_claim` | 9 | A destructive delegation completed but no destructive tool execution appears in the audit trail — strong indicator of LLM fabrication. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
+| `error` | 8 | At least one tool or delegation returned an error |
+| `denied` | 7 | A policy engine decision denied the action |
+| `escalation_required` | 6 | A mutation tool exhausted all retries and could not confirm the action; manual escalation needed |
+| `verified_failed` | 5 | Post-execution Level 2 verification confirmed the mutation did not take effect |
+| `verified_warning` | 4 | Post-execution Level 2 verification succeeded after retries; action completed but with delays |
+| `approved` | 3 | Human approval was granted for a `require_approval` policy decision |
+| `verified_ok` | 2 | Post-execution Level 2 verification confirmed the mutation succeeded on first check |
+| `success` | 1 | At least one tool or delegation completed successfully |
+| `verified` | 0.5 | Delegation was verified as clean (destructive tool confirmed); does not override any real outcome |
+
+The `outcome` field is absent when no outcome has been recorded for the trace yet.
 
 ---
 
@@ -241,15 +267,33 @@ curl "http://localhost:8080/api/v1/governance/journeys?from=2026-02-28T16:00:00Z
 
 ### 6.3 Journeys that ended in error
 
-The summary endpoint does not support an `outcome` filter directly. Use `jq`
-to filter client-side:
-
 ```bash
-curl -s "http://localhost:1199/v1/journeys" \
-  | jq '[.[] | select(.outcome == "error")]'
+curl -s "http://localhost:1199/v1/journeys?outcome=error"
 ```
 
-### 6.4 Journey count by user
+### 6.4 Unverified claims — possible LLM fabrication
+
+```bash
+# Find all journeys where the orchestrator claimed success but audit disagrees
+curl -s "http://localhost:1199/v1/journeys?outcome=unverified_claim"
+
+# Then drill into a specific trace to see the delegation_verification event
+curl -s "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=delegation_verification"
+```
+
+### 6.5 Journeys needing human escalation
+
+```bash
+curl -s "http://localhost:1199/v1/journeys?outcome=escalation_required"
+```
+
+### 6.6 Recent database journeys with retries
+
+```bash
+curl -s "http://localhost:1199/v1/journeys?category=database&has_retries=true&since=24h"
+```
+
+### 6.7 Journey count by user
 
 ```bash
 curl -s "http://localhost:1199/v1/journeys?limit=200" \
@@ -258,7 +302,7 @@ curl -s "http://localhost:1199/v1/journeys?limit=200" \
 
 ---
 
-### 6.5 Drilling Into a Journey
+### 6.8 Drilling Into a Journey
 
 Once you have a `trace_id`, fetch every event in that journey from the events
 endpoint:
@@ -286,6 +330,8 @@ See [GOVEXPLAIN.md](GOVEXPLAIN.md) for full govexplain reference.
 
 ## 7. Journey Coverage
 
+
+
 A journey appears in `GET /v1/journeys` when its trace has an **anchor event**
 with a non-empty `trace_id`. Two event types serve as anchors:
 
@@ -308,7 +354,67 @@ To see all events regardless of journey status, use `GET /v1/events` directly.
 
 ---
 
-## 8. Environment Variables
+---
+
+## 8. Unverified Claims and LLM Fabrication Detection
+
+The `unverified_claim` outcome is the highest-severity journey outcome and
+indicates a potential **LLM fabrication** incident: the orchestrator delegated
+a destructive action (e.g. terminate a connection) to a sub-agent, but the
+audit trail shows no destructive tool was actually executed.
+
+### How it works
+
+After every `delegate_to_agent` call, the orchestrator:
+
+1. Queries `GET /v1/events?event_type=tool_execution&trace_id=X&since=T` to
+   fetch all tool executions recorded by the sub-agent since the delegation started
+2. Classifies each tool against the known action map (`terminate_connection` →
+   `destructive`, `cancel_query` → `write`, etc.)
+3. Emits a `delegation_verification` event recording the result
+4. If the delegation was `destructive` and **no destructive tool execution**
+   appears in the trail, sets `mismatch=true`
+
+When `mismatch=true`:
+- The journey outcome is elevated to `unverified_claim`
+- The orchestrator's response includes an `[AUDIT VERIFICATION]` block
+  informing the LLM that the action could not be confirmed
+- The LLM's system prompt instructs it to report this to the user and **not**
+  claim success
+
+### Investigating an unverified claim
+
+```bash
+# 1. Find all unverified claim journeys
+curl -s "http://localhost:1199/v1/journeys?outcome=unverified_claim"
+
+# 2. Get the trace_id from the result, then fetch all events for that trace
+curl -s "http://localhost:1199/v1/events?trace_id=tr_abc123"
+
+# 3. Look specifically at the delegation_verification event
+curl -s "http://localhost:1199/v1/events?trace_id=tr_abc123&event_type=delegation_verification"
+```
+
+The `delegation_verification` event shows:
+- `tools_confirmed`: what the agent actually executed
+- `destructive_confirmed`: which of those were destructive
+- `mismatch`: whether there is a discrepancy
+
+### Root causes
+
+| Scenario | How to confirm | Action |
+|----------|---------------|--------|
+| Agent was never called (LLM fabricated the entire response) | No `gateway_request` event for the agent in the trace | Retry; report to the AI governance team |
+| Agent was called but couldn't connect | `gateway_request` event present, no `tool_execution` events | Check agent logs; retry |
+| Async propagation race (rare) | `delegation_verification` was emitted before the tool event reached auditd | Retry the same delegation |
+| Genuine policy block | `policy_decision` with `effect=deny` in the trace | Check policy configuration |
+
+The `unverified_claim` detection is generic — it works for any tool classified
+as `destructive` in the action map, both current and future ones.
+
+---
+
+## 9. Environment Variables
 
 | Variable | Description |
 |----------|-------------|
@@ -317,9 +423,9 @@ To see all events regardless of journey status, use `GET /v1/events` directly.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
-### 9.1 `curl: (7) Failed to connect to localhost port 1199` on Kubernetes
+### 10.1 `curl: (7) Failed to connect to localhost port 1199` on Kubernetes
 
 auditd is an in-cluster service and is not exposed outside the cluster. Use
 the Gateway port-forward instead (see [section 4.2](#42-kubernetes)):
@@ -329,7 +435,7 @@ kubectl port-forward -n helpdesk-system svc/helpdesk-gateway 8080:8080
 # then use http://localhost:8080/api/v1/governance/journeys
 ```
 
-### 9.2 Empty result despite active agents
+### 10.2 Empty result despite active agents
 
 Journeys are anchored to `delegation_decision` events. Confirm they exist:
 
@@ -345,15 +451,26 @@ If this returns `0`, either the orchestrator is not running with
 `HELPDESK_AUDIT_URL` set, or you are querying a fresh database. Run a
 natural-language query via `POST /api/v1/query` to produce the first journey.
 
-### 9.3 Events visible in `/v1/events` but not in `/v1/journeys`
+### 10.3 Events visible in `/v1/events` but not in `/v1/journeys`
 
-These are direct tool calls or raw A2A invocations — they produce `tool_call`
+These are direct tool calls or raw A2A invocations — they produce `tool_execution`
 events but no `delegation_decision` anchor. See [Journey Coverage](#7-journey-coverage)
 above.
 
-### 9.4 `started_at` / `ended_at` in unexpected order
+### 10.4 `started_at` / `ended_at` in unexpected order
 
-`started_at` is the timestamp of the `delegation_decision` event;
+`started_at` is the timestamp of the first anchor event (delegation or gateway);
 `ended_at` is the timestamp of the last event under that trace. If clocks are
 skewed between the Gateway host and the agent host, these may appear reversed.
 Ensure NTP is synchronised across all components.
+
+### 10.5 Journey shows `unverified_claim` but the action did succeed
+
+This can happen in a rare async race: the `delegation_verification` check ran
+before the sub-agent's `tool_execution` event was persisted to auditd. In this
+case:
+
+1. Verify by checking `GET /v1/events?trace_id=X&event_type=tool_execution` —
+   if the destructive tool appears, it was a timing issue
+2. The orchestrator will have told the user the action could not be verified;
+   the user should retry — the second attempt will produce a clean verification

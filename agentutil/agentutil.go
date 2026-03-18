@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/session"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
 	"helpdesk/internal/model"
 	"helpdesk/internal/policy"
@@ -207,26 +208,28 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 
 // PolicyEnforcer wraps a policy engine with convenience methods for agents.
 type PolicyEnforcer struct {
-	engine             *policy.Engine
-	policyCheckURL     string        // non-empty → remote check mode via auditd
-	policyCheckTimeout time.Duration // HTTP timeout for remote checks (default 5s)
-	traceStore         *audit.CurrentTraceStore
-	approvalClient     *audit.ApprovalClient
-	approvalTimeout    time.Duration
-	agentName          string
-	toolAuditor        *audit.ToolAuditor // records policy decisions to the audit trail
+	engine                     *policy.Engine
+	policyCheckURL             string        // non-empty → remote check mode via auditd
+	policyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
+	traceStore                 *audit.CurrentTraceStore
+	approvalClient             *audit.ApprovalClient
+	approvalTimeout            time.Duration
+	agentName                  string
+	toolAuditor                *audit.ToolAuditor // records policy decisions to the audit trail
+	requirePurposeForSensitive bool               // enforce explicit purpose for pii/critical resources
 }
 
 // PolicyEnforcerConfig configures the policy enforcer.
 type PolicyEnforcerConfig struct {
-	Engine             *policy.Engine
-	PolicyCheckURL     string        // auditd base URL for remote checks (set from cfg.PolicyCheckURL)
-	PolicyCheckTimeout time.Duration // HTTP timeout for remote checks (default 5s)
-	TraceStore         *audit.CurrentTraceStore
-	ApprovalClient     *audit.ApprovalClient
-	ApprovalTimeout    time.Duration
-	AgentName          string
-	ToolAuditor        *audit.ToolAuditor // optional; enables policy decision audit events
+	Engine                     *policy.Engine
+	PolicyCheckURL             string        // auditd base URL for remote checks (set from cfg.PolicyCheckURL)
+	PolicyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
+	TraceStore                 *audit.CurrentTraceStore
+	ApprovalClient             *audit.ApprovalClient
+	ApprovalTimeout            time.Duration
+	AgentName                  string
+	ToolAuditor                *audit.ToolAuditor // optional; enables policy decision audit events
+	RequirePurposeForSensitive bool               // deny access to pii/critical resources without explicit purpose
 }
 
 // NewPolicyEnforcer creates a policy enforcer. If engine is nil, enforcement is disabled.
@@ -249,14 +252,15 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 		checkTimeout = 5 * time.Second
 	}
 	return &PolicyEnforcer{
-		engine:             cfg.Engine,
-		policyCheckURL:     cfg.PolicyCheckURL,
-		policyCheckTimeout: checkTimeout,
-		traceStore:         cfg.TraceStore,
-		approvalClient:     cfg.ApprovalClient,
-		toolAuditor:        cfg.ToolAuditor,
-		approvalTimeout:    timeout,
-		agentName:          cfg.AgentName,
+		engine:                     cfg.Engine,
+		policyCheckURL:             cfg.PolicyCheckURL,
+		policyCheckTimeout:         checkTimeout,
+		traceStore:                 cfg.TraceStore,
+		approvalClient:             cfg.ApprovalClient,
+		toolAuditor:                cfg.ToolAuditor,
+		approvalTimeout:            timeout,
+		agentName:                  cfg.AgentName,
+		requirePurposeForSensitive: cfg.RequirePurposeForSensitive,
 	}
 }
 
@@ -264,12 +268,43 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 // Returns nil if allowed, error if denied.
 // If approval is required and an approval client is configured, it will request
 // approval and wait for resolution.
-func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
+// sensitivity is a list of sensitivity labels from the infra config (e.g., "pii", "critical").
+func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string, sensitivity []string) error {
 	// Emit unconditional tool_invoked event before any policy evaluation.
 	// Fires even when enforcement is disabled, so govbot can detect tool calls
 	// that were never policy-checked (tool_invoked with no matching policy_decision).
 	if e.toolAuditor != nil {
 		e.toolAuditor.RecordToolInvoked(ctx, resourceType, resourceName, string(action), tags)
+	}
+
+	// Pre-check: if HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE is set and this resource
+	// has pii or critical sensitivity, require an explicit purpose declaration.
+	if e.requirePurposeForSensitive && hasSensitiveSensitivity(sensitivity) {
+		if !audit.PurposeExplicitFromContext(ctx) {
+			purpose, _ := audit.PurposeFromContext(ctx)
+			denyMsg := fmt.Sprintf("access to %s/%s requires an explicit purpose declaration "+
+				"(sensitivity: %s, current purpose %q was derived from operating mode, not declared); "+
+				"add 'purpose' to your request body or X-Purpose header",
+				resourceType, resourceName, strings.Join(sensitivity, ","), purpose)
+			if e.toolAuditor != nil {
+				principal := audit.PrincipalFromContext(ctx)
+				e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+					ResourceType: resourceType,
+					ResourceName: resourceName,
+					Action:       string(action),
+					Tags:         tags,
+					Effect:       "deny",
+					PolicyName:   "require_purpose_for_sensitive",
+					Message:      denyMsg,
+					Note:         note,
+					UserID:       principal.UserID,
+					Roles:        principal.Roles,
+					Service:      principal.Service,
+					AuthMethod:   principal.AuthMethod,
+				})
+			}
+			return fmt.Errorf("%s", denyMsg)
+		}
 	}
 
 	if e.engine == nil && e.policyCheckURL == "" {
@@ -282,6 +317,8 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		if e.traceStore != nil {
 			traceID = e.traceStore.Get()
 		}
+		principal := audit.PrincipalFromContext(ctx)
+		purpose, purposeNote := audit.PurposeFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType: resourceType,
 			ResourceName: resourceName,
@@ -290,6 +327,10 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			TraceID:      traceID,
 			AgentName:    e.agentName,
 			Note:         note,
+			Principal:    principal,
+			Purpose:      purpose,
+			PurposeNote:  purposeNote,
+			Sensitivity:  sensitivity,
 		})
 		if err != nil {
 			return err
@@ -298,11 +339,19 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	}
 
 	// Local engine path.
+	principal := audit.PrincipalFromContext(ctx)
+	purpose, purposeNote := audit.PurposeFromContext(ctx)
 	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID:  principal.UserID,
+			Roles:   principal.Roles,
+			Service: principal.Service,
+		},
 		Resource: policy.RequestResource{
-			Type: resourceType,
-			Name: resourceName,
-			Tags: tags,
+			Type:        resourceType,
+			Name:        resourceName,
+			Tags:        tags,
+			Sensitivity: sensitivity,
 		},
 		Action: action,
 	}
@@ -313,6 +362,8 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		traceID = e.traceStore.Get()
 		req.Context.TraceID = traceID
 	}
+	req.Context.Purpose = purpose
+	req.Context.PurposeNote = purposeNote
 
 	trace := e.engine.Explain(req)
 	decision := trace.Decision
@@ -335,6 +386,12 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Note:         note,
 			Trace:        traceJSON,
 			Explanation:  trace.Explanation,
+			UserID:       principal.UserID,
+			Roles:        principal.Roles,
+			Service:      principal.Service,
+			AuthMethod:   principal.AuthMethod,
+			Purpose:      purpose,
+			PurposeNote:  purposeNote,
 		})
 	}
 
@@ -404,13 +461,25 @@ func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceT
 }
 
 // CheckDatabase is a convenience method for database operations.
-func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, action policy.ActionClass, tags []string, note string) error {
-	return e.CheckTool(ctx, "database", dbName, action, tags, note)
+// sensitivity is a list of sensitivity labels from the infra config (e.g., "pii", "critical").
+func (e *PolicyEnforcer) CheckDatabase(ctx context.Context, dbName string, action policy.ActionClass, tags []string, note string, sensitivity []string) error {
+	return e.CheckTool(ctx, "database", dbName, action, tags, note, sensitivity)
 }
 
 // CheckKubernetes is a convenience method for Kubernetes operations.
-func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string, note string) error {
-	return e.CheckTool(ctx, "kubernetes", namespace, action, tags, note)
+// sensitivity is a list of sensitivity labels from the infra config (e.g., "pii", "critical").
+func (e *PolicyEnforcer) CheckKubernetes(ctx context.Context, namespace string, action policy.ActionClass, tags []string, note string, sensitivity []string) error {
+	return e.CheckTool(ctx, "kubernetes", namespace, action, tags, note, sensitivity)
+}
+
+// hasSensitiveSensitivity returns true if any sensitivity label is "pii" or "critical".
+func hasSensitiveSensitivity(sensitivity []string) bool {
+	for _, s := range sensitivity {
+		if s == "pii" || s == "critical" {
+			return true
+		}
+	}
+	return false
 }
 
 // ToolOutcome carries the measured result of a tool execution for
@@ -454,6 +523,8 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 		if e.traceStore != nil {
 			traceID = e.traceStore.Get()
 		}
+		principal := audit.PrincipalFromContext(ctx)
+		purpose, purposeNote := audit.PurposeFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType:  resourceType,
 			ResourceName:  resourceName,
@@ -464,6 +535,9 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 			RowsAffected:  outcome.RowsAffected,
 			PodsAffected:  outcome.PodsAffected,
 			PostExecution: true,
+			Principal:     principal,
+			Purpose:       purpose,
+			PurposeNote:   purposeNote,
 		})
 		if err != nil {
 			return err
@@ -494,8 +568,15 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 	if e.traceStore != nil {
 		traceID = e.traceStore.Get()
 	}
+	principal2 := audit.PrincipalFromContext(ctx)
+	purpose2, purposeNote2 := audit.PurposeFromContext(ctx)
 
 	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID:  principal2.UserID,
+			Roles:   principal2.Roles,
+			Service: principal2.Service,
+		},
 		Resource: policy.RequestResource{
 			Type: resourceType,
 			Name: resourceName,
@@ -506,6 +587,8 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 			TraceID:      traceID,
 			RowsAffected: outcome.RowsAffected,
 			PodsAffected: outcome.PodsAffected,
+			Purpose:      purpose2,
+			PurposeNote:  purposeNote2,
 		},
 	}
 
@@ -531,6 +614,12 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 			PostExecution: true,
 			Trace:         traceJSON,
 			Explanation:   trace.Explanation,
+			UserID:        principal2.UserID,
+			Roles:         principal2.Roles,
+			Service:       principal2.Service,
+			AuthMethod:    principal2.AuthMethod,
+			Purpose:       purpose2,
+			PurposeNote:   purposeNote2,
 		})
 	}
 
@@ -577,6 +666,8 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 		if e.traceStore != nil {
 			traceID = e.traceStore.Get()
 		}
+		principal := audit.PrincipalFromContext(ctx)
+		purpose, purposeNote := audit.PurposeFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType: "database",
 			ResourceName: dbName,
@@ -585,6 +676,9 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 			TraceID:      traceID,
 			AgentName:    e.agentName,
 			XactAgeSecs:  xactAgeSecs,
+			Principal:    principal,
+			Purpose:      purpose,
+			PurposeNote:  purposeNote,
 		})
 		if err != nil {
 			return err
@@ -613,8 +707,15 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 	if e.traceStore != nil {
 		traceID = e.traceStore.Get()
 	}
+	principal3 := audit.PrincipalFromContext(ctx)
+	purpose3, purposeNote3 := audit.PurposeFromContext(ctx)
 
 	req := policy.Request{
+		Principal: policy.RequestPrincipal{
+			UserID:  principal3.UserID,
+			Roles:   principal3.Roles,
+			Service: principal3.Service,
+		},
 		Resource: policy.RequestResource{
 			Type: "database",
 			Name: dbName,
@@ -624,6 +725,8 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 		Context: policy.RequestContext{
 			TraceID:     traceID,
 			XactAgeSecs: xactAgeSecs,
+			Purpose:     purpose3,
+			PurposeNote: purposeNote3,
 		},
 	}
 
@@ -647,6 +750,12 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 			Message:      decision.Message,
 			Trace:        traceJSON,
 			Explanation:  trace.Explanation,
+			UserID:       principal3.UserID,
+			Roles:        principal3.Roles,
+			Service:      principal3.Service,
+			AuthMethod:   principal3.AuthMethod,
+			Purpose:      purpose3,
+			PurposeNote:  purposeNote3,
 		})
 	}
 
@@ -674,6 +783,11 @@ type policyCheckReq struct {
 	PodsAffected  int      `json:"pods_affected,omitempty"`
 	XactAgeSecs   int      `json:"xact_age_secs,omitempty"`
 	PostExecution bool     `json:"post_execution,omitempty"`
+	// Identity and purpose propagated from the originating user request.
+	Principal   identity.ResolvedPrincipal `json:"principal,omitempty"`
+	Purpose     string                     `json:"purpose,omitempty"`
+	PurposeNote string                     `json:"purpose_note,omitempty"`
+	Sensitivity []string                   `json:"sensitivity,omitempty"`
 }
 
 // policyCheckResp is the response from POST /v1/governance/check.

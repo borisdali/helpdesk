@@ -56,6 +56,10 @@ spec:
             - name: HELPDESK_APPROVAL_TIMEOUT
               value: "{{ .Values.governance.approvals.timeout }}"
             {{- end }}
+            {{- if .Values.governance.policy.requirePurposeForSensitive }}
+            - name: HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE
+              value: "true"
+            {{- end }}
             {{- if .Values.agents.database.verify.maxAttempts }}
             - name: HELPDESK_VERIFY_MAX_ATTEMPTS
               value: "{{ .Values.agents.database.verify.maxAttempts }}"
@@ -69,6 +73,7 @@ spec:
               value: "{{ .Values.agents.database.verify.maxDelayS }}"
             {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           volumeMounts:
             {{- if .Values.infrastructure }}
             - name: infra-config

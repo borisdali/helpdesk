@@ -185,8 +185,11 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		prev_hash TEXT,
 		event_hash TEXT,
 		session_id TEXT NOT NULL,
+		session_agent TEXT,
 		user_id TEXT,
 		user_query TEXT,
+		purpose TEXT,
+		purpose_note TEXT,
 		tool_name TEXT,
 		tool_json TEXT,
 		approval_status TEXT,
@@ -224,6 +227,9 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "tool_json TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_status TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "approval_json TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "session_agent TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose_note TEXT",
 	}
 	for _, m := range migrations {
 		db.Exec(m) //nolint:errcheck
@@ -293,6 +299,25 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		default:
 			outcomeStatus = event.PolicyDecision.Effect
 		}
+	} else if event.DelegationVerification != nil {
+		// Surface mismatch as "unverified_claim" so QueryJourneys can elevate the
+		// journey outcome. Clean verifications are recorded as "verified".
+		if event.DelegationVerification.Mismatch {
+			outcomeStatus = "unverified_claim"
+		} else {
+			outcomeStatus = "verified"
+		}
+	}
+
+	// Extract purpose at the top level for indexed querying.
+	// Top-level Event.Purpose is set on gateway_request anchor events.
+	// PolicyDecision.Purpose is set on policy_decision events.
+	// Both sources are consolidated into a single queryable column.
+	purposeVal := event.Purpose
+	purposeNoteVal := event.PurposeNote
+	if purposeVal == "" && event.PolicyDecision != nil {
+		purposeVal = event.PolicyDecision.Purpose
+		purposeNoteVal = event.PolicyDecision.PurposeNote
 	}
 
 	var toolName, toolAgent string
@@ -319,12 +344,13 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		INSERT INTO audit_events (
 			event_id, timestamp, event_type, trace_id, parent_id, action_class,
 			prev_hash, event_hash,
-			session_id, user_id, user_query,
+			session_id, session_agent, user_id, user_query,
+			purpose, purpose_note,
 			tool_name, tool_json,
 			approval_status, approval_json,
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		event.EventID,
 		event.Timestamp.Format(time.RFC3339Nano),
@@ -335,8 +361,11 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		event.PrevHash,
 		event.EventHash,
 		event.Session.ID,
+		event.Session.AgentName,
 		event.Session.UserID,
 		event.Input.UserQuery,
+		purposeVal,
+		purposeNoteVal,
 		toolName,
 		string(toolJSON),
 		approvalStatus,
@@ -431,6 +460,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		query += " AND approval_status = ?"
 		args = append(args, string(opts.ApprovalStatus))
 	}
+	if opts.OutcomeStatus != "" {
+		query += " AND outcome_status = ?"
+		args = append(args, opts.OutcomeStatus)
+	}
 
 	// Chronological order for trace/prefix queries, reverse chronological otherwise
 	if opts.TraceID != "" || opts.TraceIDPrefix != "" {
@@ -482,11 +515,13 @@ type QueryOptions struct {
 	ActionClass    ActionClass    // filter by action class (read, write, destructive)
 	ToolName       string         // filter by tool name
 	ApprovalStatus ApprovalStatus // filter by approval status
+	OutcomeStatus  string         // filter by outcome_status (e.g. "error", "denied", "allow")
 }
 
 // JourneyOptions specifies filters for QueryJourneys.
 type JourneyOptions struct {
 	UserID     string        // optional; empty = all users
+	Purpose    string        // optional; filter by declared purpose (e.g. "diagnostic")
 	From       time.Time     // inclusive lower bound on timestamp
 	Until      time.Time     // exclusive upper bound on timestamp
 	Limit      int           // max journeys returned; default 50
@@ -494,21 +529,32 @@ type JourneyOptions struct {
 	Category   string        // filter by decision_category (e.g. "database", "kubernetes")
 	Outcome    string        // filter by computed journey outcome (post-aggregation)
 	HasRetries bool          // only journeys with retry_count > 0 (post-aggregation)
+	TraceID    string        // filter by exact trace ID; returns at most one journey
+}
+
+// DelegationSummary captures one orchestrator-to-sub-agent delegation turn:
+// the intent that drove it and the tools the sub-agent actually called.
+type DelegationSummary struct {
+	Intent string   `json:"intent"`
+	Tools  []string `json:"tools"`
 }
 
 // JourneySummary summarises a single end-to-end user request (one trace_id).
 type JourneySummary struct {
-	TraceID    string   `json:"trace_id"`
-	StartedAt  string   `json:"started_at"`
-	EndedAt    string   `json:"ended_at"`
-	DurationMs int64    `json:"duration_ms"`
-	UserID     string   `json:"user_id,omitempty"`
-	UserQuery  string   `json:"user_query,omitempty"`
-	Agent      string   `json:"agent,omitempty"`
-	Category   string   `json:"category,omitempty"` // decision_category from delegation_decision event
-	ToolsUsed  []string `json:"tools_used"`
-	Outcome    string   `json:"outcome,omitempty"`
-	EventCount int      `json:"event_count"`
+	TraceID     string              `json:"trace_id"`
+	StartedAt   string              `json:"started_at"`
+	EndedAt     string              `json:"ended_at"`
+	DurationMs  int64               `json:"duration_ms"`
+	UserID      string              `json:"user_id,omitempty"`
+	UserQuery   string              `json:"user_query,omitempty"`
+	Purpose     string              `json:"purpose,omitempty"`
+	PurposeNote string              `json:"purpose_note,omitempty"`
+	Agent       string              `json:"agent,omitempty"`
+	Category    string              `json:"category,omitempty"` // decision_category from delegation_decision event
+	Delegations []DelegationSummary `json:"delegations,omitempty"`
+	ToolsUsed   []string            `json:"tools_used"`
+	Outcome     string              `json:"outcome,omitempty"`
+	EventCount  int                 `json:"event_count"`
 	// RetryCount is the number of post-mutation verification re-check attempts
 	// recorded for this journey (tool_retry events). Non-zero means a mutation
 	// tool had to wait for state to propagate but eventually confirmed success.
@@ -544,9 +590,17 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		    OR (event_type = 'gateway_request' AND (tool_name IS NULL OR tool_name = '')))
 		  AND trace_id != ''`
 	var args1 []any
+	if opts.TraceID != "" {
+		q1 += " AND trace_id = ?"
+		args1 = append(args1, opts.TraceID)
+	}
 	if opts.UserID != "" {
 		q1 += " AND user_id = ?"
 		args1 = append(args1, opts.UserID)
+	}
+	if opts.Purpose != "" {
+		q1 += " AND purpose = ?"
+		args1 = append(args1, opts.Purpose)
 	}
 	if !opts.From.IsZero() {
 		q1 += " AND timestamp >= ?"
@@ -584,8 +638,9 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	placeholders := strings.Repeat("?,", len(traceIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	q2 := fmt.Sprintf(
-		`SELECT trace_id, event_type, user_id, user_query, decision_agent,
-		        decision_category, tool_name, outcome_status, approval_status, timestamp
+		`SELECT trace_id, event_type, user_id, user_query, session_agent, decision_agent,
+		        decision_category, tool_name, outcome_status, approval_status, timestamp,
+		        purpose, purpose_note
 		 FROM audit_events
 		 WHERE trace_id IN (%s)
 		 ORDER BY trace_id, timestamp ASC`, placeholders)
@@ -605,9 +660,13 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		endedAt            string
 		userID             string
 		userQuery          string
-		agent              string
+		purpose            string
+		purposeNote        string
+		agent              string // name of the owning agent (orchestrator name when session_agent is set, else sub-agent)
 		category           string
 		tools              []string
+		delegations        []DelegationSummary
+		currentDelegIdx    int // index into delegations for the in-progress delegation; -1 = none
 		outcome            string
 		count              int
 		retryCount         int  // number of tool_retry events in this trace
@@ -617,18 +676,20 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	// Preserve the order returned by step 1.
 	byTrace := make(map[string]*traceData, len(traceIDs))
 	for _, id := range traceIDs {
-		byTrace[id] = &traceData{}
+		byTrace[id] = &traceData{currentDelegIdx: -1}
 	}
 
 	for rows2.Next() {
 		var (
-			traceID, eventType                                  string
-			userID, userQuery, agent, decisionCategory          sql.NullString
-			toolName, outcomeStatus, approvalStatus             sql.NullString
-			ts                                                  string
+			traceID, eventType                                           string
+			userID, userQuery, sessionAgent, agent, decisionCategory    sql.NullString
+			toolName, outcomeStatus, approvalStatus                     sql.NullString
+			ts                                                           string
+			purposeCol, purposeNoteCol                                  sql.NullString
 		)
-		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &agent,
-			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts); err != nil {
+		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &sessionAgent, &agent,
+			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts,
+			&purposeCol, &purposeNoteCol); err != nil {
 			return nil, fmt.Errorf("scan journey event: %w", err)
 		}
 		d := byTrace[traceID]
@@ -642,10 +703,10 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.endedAt = ts
 		}
 
-		// verification_outcome events are internal plumbing: they contribute to
-		// the outcome priority but are NOT counted in event_count and NOT added
-		// to tools_used.
-		if eventType == string(EventTypeVerificationOutcome) {
+		// verification_outcome and delegation_verification events are internal plumbing:
+		// they contribute to the outcome priority but are NOT counted in event_count
+		// and NOT added to tools_used.
+		if eventType == string(EventTypeVerificationOutcome) || eventType == string(EventTypeDelegationVerification) {
 			if outcomeStatus.Valid && outcomeStatus.String != "" {
 				if outcomePriority(outcomeStatus.String) > outcomePriority(d.outcome) {
 					d.outcome = outcomeStatus.String
@@ -665,12 +726,31 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			if userQuery.Valid && userQuery.String != "" {
 				d.userQuery = userQuery.String
 			}
-			if agent.Valid && agent.String != "" {
+			if purposeCol.Valid && purposeCol.String != "" {
+				d.purpose = purposeCol.String
+			}
+			if purposeNoteCol.Valid && purposeNoteCol.String != "" {
+				d.purposeNote = purposeNoteCol.String
+			}
+			// Prefer the session's owning agent name (e.g. "helpdesk_orchestrator")
+			// over the sub-agent being delegated to. This makes orchestrator-mediated
+			// journeys show the orchestrator as the top-level agent.
+			if sessionAgent.Valid && sessionAgent.String != "" {
+				d.agent = sessionAgent.String
+			} else if agent.Valid && agent.String != "" {
 				d.agent = agent.String
 			}
 			if d.category == "" && decisionCategory.Valid && decisionCategory.String != "" {
 				d.category = decisionCategory.String
 			}
+			// Start a new delegation entry. Tools recorded after this event and
+			// before the next delegation_decision will be attached to this entry.
+			intent := ""
+			if userQuery.Valid {
+				intent = userQuery.String
+			}
+			d.delegations = append(d.delegations, DelegationSummary{Intent: intent, Tools: []string{}})
+			d.currentDelegIdx = len(d.delegations) - 1
 		} else if eventType == string(EventTypeGatewayRequest) {
 			// gateway_request is the anchor in gateway NL-query mode.
 			// Only use it as a fallback — don't overwrite delegation_decision data.
@@ -680,6 +760,12 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			if userQuery.Valid && userQuery.String != "" && d.userQuery == "" {
 				d.userQuery = userQuery.String
 			}
+			if purposeCol.Valid && purposeCol.String != "" && d.purpose == "" {
+				d.purpose = purposeCol.String
+			}
+			if purposeNoteCol.Valid && purposeNoteCol.String != "" && d.purposeNote == "" {
+				d.purposeNote = purposeNoteCol.String
+			}
 			if agent.Valid && agent.String != "" && d.agent == "" {
 				d.agent = agent.String
 			}
@@ -688,6 +774,9 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		// Append every tool call in timestamp order, including repeats.
 		if toolName.Valid && toolName.String != "" {
 			d.tools = append(d.tools, toolName.String)
+			if d.currentDelegIdx >= 0 {
+				d.delegations[d.currentDelegIdx].Tools = append(d.delegations[d.currentDelegIdx].Tools, toolName.String)
+			}
 		}
 
 		// tool_retry events: count retries but never let their outcome_status
@@ -735,18 +824,21 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.outcome = "approved"
 		}
 		summaries = append(summaries, JourneySummary{
-			TraceID:    id,
-			StartedAt:  d.startedAt,
-			EndedAt:    d.endedAt,
-			DurationMs: durationMs,
-			UserID:     d.userID,
-			UserQuery:  d.userQuery,
-			Agent:      d.agent,
-			Category:   d.category,
-			ToolsUsed:  tools,
-			Outcome:    d.outcome,
-			EventCount: d.count,
-			RetryCount: d.retryCount,
+			TraceID:     id,
+			StartedAt:   d.startedAt,
+			EndedAt:     d.endedAt,
+			DurationMs:  durationMs,
+			UserID:      d.userID,
+			UserQuery:   d.userQuery,
+			Purpose:     d.purpose,
+			PurposeNote: d.purposeNote,
+			Agent:       d.agent,
+			Category:    d.category,
+			Delegations: d.delegations,
+			ToolsUsed:   tools,
+			Outcome:     d.outcome,
+			EventCount:  d.count,
+			RetryCount:  d.retryCount,
 		})
 	}
 
@@ -773,10 +865,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 // outcomePriority returns the severity rank for a journey outcome string.
 // Higher priority outcomes win when aggregating events within a trace.
 //
-//	error(8) > denied(7) > escalation_required(6) > verified_failed(5)
-//	> verified_warning(4) > approved(3) > verified_ok(2) > success(1) > unknown(0)
+//	unverified_claim(9) > error(8) > denied(7) > escalation_required(6) > verified_failed(5)
+//	> verified_warning(4) > approved(3) > verified_ok(2) > success(1) > verified(0.5) > unknown(0)
 func outcomePriority(o string) int {
 	switch o {
+	case "unverified_claim":    return 9
 	case "error":               return 8
 	case "denied":              return 7
 	case "escalation_required": return 6
@@ -785,6 +878,7 @@ func outcomePriority(o string) int {
 	case "approved":            return 3
 	case "verified_ok":         return 2
 	case "success":             return 1
+	case "verified":            return 0 // clean verification doesn't override a real outcome
 	default:                    return 0
 	}
 }
