@@ -145,6 +145,12 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/governance/verify", g.handleGovernanceVerify)
 	mux.HandleFunc("GET /api/v1/governance/journeys", g.handleGovernanceJourneys)
 	mux.HandleFunc("GET /api/v1/governance/govbot/runs", g.handleGovernanceGovbotRuns)
+
+	// Fleet runner job visibility endpoints
+	mux.HandleFunc("POST /api/v1/fleet/jobs", g.handleFleetCreateJob)
+	mux.HandleFunc("GET /api/v1/fleet/jobs", g.handleFleetListJobs)
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}", g.handleFleetGetJob)
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers", g.handleFleetGetJobServers)
 }
 
 // --- Handlers ---
@@ -343,6 +349,97 @@ func (g *Gateway) handleGovernanceJourneys(w http.ResponseWriter, r *http.Reques
 
 func (g *Gateway) handleGovernanceGovbotRuns(w http.ResponseWriter, r *http.Request) {
 	g.proxyGovernanceRequest(w, r, "/v1/govbot/runs")
+}
+
+func (g *Gateway) handleFleetCreateJob(w http.ResponseWriter, r *http.Request) {
+	if g.auditURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "fleet service not configured. Set HELPDESK_AUDIT_URL to enable.")
+		return
+	}
+
+	// Read the body so we can inject submitted_by.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+
+	// Inject submitted_by from resolved identity.
+	principal, _, _, _, err := g.resolveRequest(r, "", "")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
+		return
+	}
+	if _, hasSubmittedBy := body["submitted_by"]; !hasSubmittedBy {
+		body["submitted_by"] = principal.EffectiveID()
+	}
+
+	modified, err := json.Marshal(body)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode body")
+		return
+	}
+
+	g.proxyFleetRequest(w, r, "/v1/fleet/jobs", "POST", modified)
+}
+
+func (g *Gateway) handleFleetListJobs(w http.ResponseWriter, r *http.Request) {
+	g.proxyFleetRequest(w, r, "/v1/fleet/jobs", r.Method, nil)
+}
+
+func (g *Gateway) handleFleetGetJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobID")
+	g.proxyFleetRequest(w, r, "/v1/fleet/jobs/"+jobID, r.Method, nil)
+}
+
+func (g *Gateway) handleFleetGetJobServers(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobID")
+	g.proxyFleetRequest(w, r, "/v1/fleet/jobs/"+jobID+"/servers", r.Method, nil)
+}
+
+// proxyFleetRequest forwards a fleet request to the auditd service, preserving method and body.
+func (g *Gateway) proxyFleetRequest(w http.ResponseWriter, r *http.Request, path, method string, body []byte) {
+	if g.auditURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "fleet service not configured. Set HELPDESK_AUDIT_URL to enable.")
+		return
+	}
+
+	targetURL := g.auditURL + path
+	if q := r.URL.RawQuery; q != "" {
+		targetURL += "?" + q
+	}
+
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = strings.NewReader(string(body))
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), method, targetURL, bodyReader)
+	if err != nil {
+		slog.Error("failed to create fleet proxy request", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Error("failed to proxy fleet request", "err", err)
+		writeError(w, http.StatusBadGateway, "fleet service unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck
 }
 
 // proxyGovernanceRequest forwards a request to the auditd service, preserving query parameters.

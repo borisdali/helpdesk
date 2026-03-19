@@ -170,6 +170,35 @@ func (c *Client) Ping(ctx context.Context) error {
 	}
 }
 
+// Do sends a raw HTTP request to the gateway with all standard auth headers attached.
+// extraHeaders contains optional additional headers (e.g. X-Purpose-Note for per-call context).
+// The caller is responsible for closing the returned response body.
+func (c *Client) Do(ctx context.Context, method, path string, body []byte, extraHeaders ...map[string]string) (*http.Response, error) {
+	var bodyReader *bytes.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	} else {
+		bodyReader = bytes.NewReader(nil)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, method, c.cfg.GatewayURL+path, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.addHeaders(httpReq)
+	for _, hdrs := range extraHeaders {
+		for k, v := range hdrs {
+			httpReq.Header.Set(k, v)
+		}
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("gateway unreachable (%s): %w", c.cfg.GatewayURL, err)
+	}
+	return resp, nil
+}
+
 // addHeaders attaches authentication and session headers to every outgoing request.
 // Header precedence mirrors the gateway's identity resolution order:
 // Authorization: Bearer (api_key / service account) takes precedence over X-User.

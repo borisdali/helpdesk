@@ -272,6 +272,27 @@ services:
     depends_on:
       - gateway
 
+  # Fleet runner: applies a single change across infrastructure targets with staged rollout.
+  # Usage: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json
+  # Dry-run: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json --dry-run
+  fleet-runner:
+    image: helpdesk:latest
+    entrypoint: ["/usr/local/bin/fleet-runner"]
+    environment:
+      HELPDESK_GATEWAY_URL: http://gateway:8080
+      HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_CLIENT_API_KEY: ${FLEET_RUNNER_API_KEY:-}
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      HELPDESK_SESSION_PURPOSE: fleet_rollout
+    volumes:
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
+      - ${FLEET_JOBS_DIR:-./jobs}:/jobs:ro
+    profiles:
+      - fleet
+    depends_on:
+      - gateway
+      - auditd
+
   # AI Governance: Real-time audit monitoring and alerting
   # Enable with: docker compose --profile governance up -d
   auditor:

@@ -1,10 +1,10 @@
 # aiHelpDesk Client (`helpdesk-client`)
 
-`helpdesk-client` is an authenticated interactive CLI for the aiHelpDesk gateway. It replaces `kubectl exec` and `docker compose run orchestrator` sessions with a connection that carries a verified identity and declared purpose on every request — so every operator query appears in the audit trail with full attribution.
+`helpdesk-client` is an authenticated interactive CLI for the aiHelpDesk Gateway. It's a better alternative to the legacy's `kubectl exec` and `docker compose run orchestrator` sessions with a connection that carries a verified identity and declared purpose on every request — so every operator query appears in the audit trail with full attribution.
 
-Unlike the in-cluster Orchestrator REPL, `helpdesk-client` runs on your workstation and talks to the gateway over HTTP. The gateway enforces identity and purpose before forwarding requests to the agents.
+Unlike the in-cluster Orchestrator REPL, `helpdesk-client` runs on your workstation and talks to the Gateway over HTTP. The Gateway enforces identity and purpose before forwarding requests to the agents.
 
-For the gateway REST API it calls, see [API.md](API.md). For identity provider setup, see [IDENTITY.md](IDENTITY.md).
+For the Gateway REST API it calls, see [API.md](API.md). For identity provider setup, see [IDENTITY.md](IDENTITY.md).
 
 ---
 
@@ -45,7 +45,7 @@ Inside the compose network, `helpdesk-client` connects to `http://gateway:8080` 
 
 ### 1.3 Helm / Kubernetes
 
-`helpdesk-client` is not deployed as a pod — it runs on your workstation and connects to the gateway over the network.
+`helpdesk-client` is not deployed as a Pod — it runs on your workstation and connects to the Gateway over the network.
 
 **Option A: Extract from the release tarball**
 
@@ -59,14 +59,14 @@ docker run --rm --entrypoint cat ghcr.io/borisdali/helpdesk:latest \
 chmod +x helpdesk-client
 ```
 
-Then expose the gateway so your workstation can reach it (see Section 5).
+Then expose the Gateway so your workstation can reach it (see Section 5).
 
 ---
 
 ## 2. Quick Start
 
 ```bash
-# Interactive REPL against a local gateway
+# Interactive REPL against a local Gateway
 helpdesk-client --user alice@example.com --purpose diagnostic
 
 # One-shot query
@@ -75,7 +75,7 @@ helpdesk-client \
   --purpose diagnostic \
   --message "Show me the top 5 longest-running queries"
 
-# Service account (API key) against a remote gateway
+# Service account (API key) against a remote Gateway
 helpdesk-client \
   --gateway https://helpdesk.internal.example.com \
   --api-key "$HELPDESK_CLIENT_API_KEY" \
@@ -123,14 +123,15 @@ helpdesk-client
 
 ## 4. Session Purpose
 
-Every request must carry a declared purpose. The gateway can enforce this via the `requirePurposeForSensitive` policy setting (see [IDENTITY.md](IDENTITY.md)).
+Every request must carry a declared purpose. The Gateway can enforce this via the `requirePurposeForSensitive` policy setting (see [IDENTITY.md](IDENTITY.md)).
 
 | Value | When to use |
 |-------|-------------|
-| `diagnostic` | Routine investigation: checking metrics, query plans, pod status |
+| `diagnostic` | Routine investigation: checking metrics, query plans, Pod status |
 | `remediation` | Active intervention: cancelling queries, restarting deployments |
 | `compliance` | Audit, reporting, or policy review work |
 | `emergency` | Incident response where speed is critical and full audit trail is required |
+| `fleet_rollout` | Automated multi-target change applied by the fleet runner (see [FLEET.md](FLEET.md)) |
 
 Pair `--purpose` with `--purpose-note` to give auditors context, for example:
 
@@ -148,7 +149,7 @@ The purpose and note appear verbatim in every audit event generated during the s
 
 ### 5.1 Host deployment
 
-The gateway runs on `localhost:8080` by default. No extra configuration is needed:
+The Gateway runs on `localhost:8080` by default. No extra configuration is needed:
 
 ```bash
 helpdesk-client --user alice@example.com --purpose diagnostic
@@ -156,7 +157,7 @@ helpdesk-client --user alice@example.com --purpose diagnostic
 
 ### 5.2 Docker Compose deployment
 
-Inside the compose network the gateway is reachable at `http://gateway:8080`. This is the default when using `docker compose run` (see Section 1.2).
+Inside the compose network the Gateway is reachable at `http://gateway:8080`. This is the default when using `docker compose run` (see Section 1.2).
 
 From a workstation outside the compose network, use the published port (default `8080`):
 
@@ -213,13 +214,13 @@ helpdesk-client \
 
 ### 6.1 Interactive REPL
 
-Omit `--message` to enter the interactive REPL. `helpdesk-client` prints a prompt, sends each line to the gateway, shows a spinner while waiting, and prints the response followed by a trace footer:
+Omit `--message` to enter the interactive REPL. `helpdesk-client` prints a prompt, sends each line to the Gateway, shows a spinner while waiting, and prints the response followed by a trace footer:
 
 ```
 > show me all databases
 Checking agent availability... done
 
-The gateway is aware of 3 databases:
+The Gateway is aware of 3 databases:
   - prod-orders-db (Orders Production Database)
   - prod-users-db (Users Production Database)
   - legacy-analytics-db (Legacy Analytics)
@@ -254,7 +255,7 @@ The exit code is `0` on success and non-zero on error.
 
 `--user` sets the `X-User` header. With the `none` identity provider (development default), the header is accepted as-is and recorded in the audit trail without verification.
 
-For production, enable the `static` or `jwt` identity provider so the gateway verifies the caller's identity. See [IDENTITY.md](IDENTITY.md) for setup instructions.
+For production, enable the `static` or `jwt` identity provider so the Gateway verifies the caller's identity. See [IDENTITY.md](IDENTITY.md) for setup instructions.
 
 ### 7.2 Service accounts (`--api-key`)
 
@@ -311,7 +312,7 @@ helpdesk-client \
   --user alice@example.com \
   --agent k8s \
   --purpose diagnostic \
-  --message "List all pods in CrashLoopBackOff across all namespaces"
+  --message "List all Pods in CrashLoopBackOff across all namespaces"
 ```
 
 ```bash
@@ -319,7 +320,7 @@ helpdesk-client \
   --user alice@example.com \
   --agent k8s \
   --purpose remediation \
-  --purpose-note "INC-5102 payments pod OOMKilled" \
+  --purpose-note "INC-5102 payments Pod OOMKilled" \
   --message "Restart the payments deployment in the production namespace"
 ```
 

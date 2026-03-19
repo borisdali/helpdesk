@@ -465,6 +465,42 @@ Key flags:
 | `-dry-run` | `false` | Log alerts without creating incidents |
 | `-verbose` | `false` | Log every received audit event |
 
+### 7.10 Running the Fleet Runner (fleet-runner)
+
+`fleet-runner` applies a single change across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It is a one-shot CLI binary — run it from the directory where your `infrastructure.json` and `.env` reside while the stack is up.
+
+```bash
+# Dry-run first: see which servers will be targeted and in which stage
+./fleet-runner \
+  --job-file jobs/vacuum-prod.json \
+  --dry-run
+
+# Execute the job
+./fleet-runner \
+  --job-file jobs/vacuum-prod.json \
+  --gateway http://localhost:8080 \
+  --audit-url http://localhost:1199 \
+  --api-key $(cat .fleet-runner-key)
+
+# Override strategy from the command line
+./fleet-runner \
+  --job-file jobs/vacuum-prod.json \
+  --canary 2 \
+  --wave-size 5 \
+  --pause 60
+```
+
+Set defaults in `.env` to avoid repeating flags:
+
+```bash
+HELPDESK_GATEWAY_URL=http://localhost:8080
+HELPDESK_AUDIT_URL=http://localhost:1199
+HELPDESK_CLIENT_API_KEY=<fleet-runner-api-key>
+HELPDESK_INFRA_CONFIG=./infrastructure.json
+```
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, strategy options, policy configuration, and Kubernetes CronJob setup.
+
 ## 8. Troubleshooting
 
 ### Port already in use

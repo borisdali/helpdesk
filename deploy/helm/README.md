@@ -535,6 +535,7 @@ aiHelpDesk includes an AI Governance framework with policy-based access control,
 | **approvals** | Operator CLI for listing, approving, and denying approval requests (exec into auditd pod) | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions (exec into any pod) | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
+| **fleet-runner** | CronJob — applies a single change across infrastructure targets with staged rollout | Disabled |
 
 ### 9.2 Enable Governance
 
@@ -818,6 +819,63 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 ```
 
 > **Socket vs. HTTP polling:** When `governance.auditd.persistence.enabled=true`, `auditor` and `secbot` connect to `auditd` via a shared Unix socket on a PersistentVolumeClaim. If your storage class only supports `ReadWriteOnce`, all three pods must land on the same node — use a `ReadWriteMany` class or add a `podAffinity` rule to co-locate them. When persistence is **disabled** (the default), there is no shared volume; instead, the chart automatically switches `auditor` and `secbot` to **HTTP polling mode**, where they poll `auditd`'s `/v1/events` endpoint every 5 seconds. No manual configuration is needed — the correct mode is selected based on the `persistence.enabled` flag.
+
+### 9.9 Running the Fleet Runner (fleet-runner)
+
+`fleet-runner` is deployed as a Kubernetes CronJob (disabled by default). Enable it and configure the schedule in `values.yaml`:
+
+```yaml
+fleetRunner:
+  enabled: true
+  schedule: "0 2 * * *"    # 2 AM daily
+  jobFile: "/etc/helpdesk/fleet-job.json"
+  apiKeySecret: fleet-runner-key
+  apiKeyKey: api-key
+  extraVolumes:
+    - name: fleet-job
+      configMap:
+        name: fleet-job-config
+  extraVolumeMounts:
+    - name: fleet-job
+      mountPath: /etc/helpdesk/fleet-job.json
+      subPath: fleet-job.json
+      readOnly: true
+```
+
+Create the prerequisite resources and deploy:
+
+```bash
+# Create the job definition ConfigMap
+kubectl -n helpdesk-system create configmap fleet-job-config \
+  --from-file=fleet-job.json=jobs/vacuum-prod.json
+
+# Create the API key Secret
+kubectl -n helpdesk-system create secret generic fleet-runner-key \
+  --from-literal=api-key=$(cat .fleet-runner-key)
+
+# Deploy
+helm upgrade helpdesk ./deploy/helm/helpdesk -f values-fleet.yaml
+
+# Trigger immediately (without waiting for the schedule)
+kubectl -n helpdesk-system create job fleet-runner-now \
+  --from=cronjob/helpdesk-fleet-runner
+
+# Follow the output
+kubectl -n helpdesk-system logs -f job/fleet-runner-now
+```
+
+To dry-run from a pod:
+
+```bash
+kubectl -n helpdesk-system run fleet-runner-dry --rm -it --restart=Never \
+  --image=helpdesk:latest \
+  -- fleet-runner \
+    --job-file /etc/helpdesk/fleet-job.json \
+    --gateway http://helpdesk-gateway:8080 \
+    --dry-run
+```
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, strategy options, and policy configuration.
 
 ## 10. Troubleshooting
 

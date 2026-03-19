@@ -44,6 +44,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/secbot     
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/govbot          ./cmd/govbot/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/govexplain     ./cmd/govexplain/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/hashapikey    ./cmd/hashapikey/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/fleet-runner  ./cmd/fleet-runner/
 
 # Pre-create runtime directories here so the runtime stage needs no RUN mkdir.
 # This avoids QEMU emulation requirements for cross-platform runtime-stage builds.
@@ -94,6 +95,7 @@ COPY --from=builder /out/secbot          /usr/local/bin/secbot
 COPY --from=builder /out/govbot          /usr/local/bin/govbot
 COPY --from=builder /out/govexplain      /usr/local/bin/govexplain
 COPY --from=builder /out/hashapikey     /usr/local/bin/hashapikey
+COPY --from=builder /out/fleet-runner   /usr/local/bin/fleet-runner
 
 # Directories and sample policy file (pre-created in builder to avoid RUN in runtime stage).
 COPY --from=builder /out/data            /data

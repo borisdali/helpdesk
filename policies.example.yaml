@@ -135,6 +135,35 @@ policies:
         conditions:
           require_approval: false  # No approval needed in dev
 
+  # Fleet runner: staged rollout of changes across infrastructure targets.
+  # Reads are always allowed. Writes to production require approval.
+  # Destructive operations are denied regardless.
+  - name: fleet-runner-policy
+    description: Fleet runner staged rollout policy
+    priority: 65
+
+    principals:
+      - service: fleet-runner
+
+    resources:
+      - type: database
+        match:
+          tags: [production]
+
+    rules:
+      - action: read
+        effect: allow
+      - action: write
+        effect: allow
+        conditions:
+          require_approval: true
+          max_rows_affected: 10000  # Fleet changes bounded by row limit
+          allowed_purposes: [fleet_rollout, remediation]
+        message: "Fleet write to production requires approval."
+      - action: destructive
+        effect: deny
+        message: "Fleet runner cannot perform destructive operations on production databases."
+
   # Automated service accounts
   - name: automated-services
     description: Restrict automated service accounts

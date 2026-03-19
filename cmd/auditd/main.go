@@ -85,6 +85,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create fleet store (shares the same database connection)
+	fleetStore, err := audit.NewFleetStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create fleet store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create approval notifier if configured
 	// Default baseURL to the listen address if not specified
 	baseURL := *approvalBaseURL
@@ -112,6 +119,7 @@ func main() {
 	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier}
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
+	fleetSrv := &fleetServer{store: fleetStore}
 
 	mux := http.NewServeMux()
 
@@ -144,6 +152,15 @@ func main() {
 	// Govbot compliance history endpoints
 	mux.HandleFunc("POST /v1/govbot/runs", govbotSrv.handleSaveRun)
 	mux.HandleFunc("GET /v1/govbot/runs", govbotSrv.handleGetRuns)
+
+	// Fleet runner job tracking endpoints
+	mux.HandleFunc("POST /v1/fleet/jobs", fleetSrv.handleCreateJob)
+	mux.HandleFunc("GET /v1/fleet/jobs", fleetSrv.handleListJobs)
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}", fleetSrv.handleGetJob)
+	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/status", fleetSrv.handleUpdateStatus)
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleAddServer)
+	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}", fleetSrv.handleUpdateServer)
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleGetServers)
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", srv.handleHealth)

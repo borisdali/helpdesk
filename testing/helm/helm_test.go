@@ -495,3 +495,50 @@ func TestGatewayService(t *testing.T) {
 		t.Errorf("gateway Service port: want 9999, got %v", portNum)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fleet Runner
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestFleetRunnerDisabledByDefault verifies that no CronJob is rendered when
+// fleetRunner.enabled is false (the default).
+func TestFleetRunnerDisabledByDefault(t *testing.T) {
+	objects := render(t)
+	for key := range objects {
+		if strings.HasPrefix(key, "CronJob/") {
+			t.Errorf("unexpected CronJob %q with default values (fleetRunner should be disabled)", key)
+		}
+	}
+}
+
+// TestFleetRunnerCronJobEnabled verifies that the CronJob is rendered when
+// fleetRunner.enabled=true, with the correct schedule and container image.
+func TestFleetRunnerCronJobEnabled(t *testing.T) {
+	objects := render(t,
+		"fleetRunner.enabled=true",
+		"fleetRunner.schedule=0 3 * * *",
+	)
+
+	cj, ok := objects["CronJob/test-fleet-runner"]
+	if !ok {
+		t.Fatal("CronJob/test-fleet-runner not found")
+	}
+
+	spec, _ := cj["spec"].(map[string]any)
+	if schedule, _ := spec["schedule"].(string); schedule != "0 3 * * *" {
+		t.Errorf("schedule = %q, want \"0 3 * * *\"", schedule)
+	}
+
+	jobTemplate, _ := spec["jobTemplate"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	podTemplate, _ := jobSpec["template"].(map[string]any)
+	podSpec, _ := podTemplate["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("no containers in fleet-runner CronJob pod spec")
+	}
+	container, _ := containers[0].(map[string]any)
+	if name, _ := container["name"].(string); name != "fleet-runner" {
+		t.Errorf("container name = %q, want fleet-runner", name)
+	}
+}

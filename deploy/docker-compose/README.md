@@ -216,6 +216,7 @@ aiHelpDesk includes an [AI Governance framework](../../docs/AIGOVERNANCE.md) wit
 | **approvals** | Operator CLI for listing, approving, and denying approval requests | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
+| **fleet-runner** | Staged rollout tool — applies a single change across infrastructure targets (canary → waves) | - |
 | **helpdesk-client** | Authenticated operator CLI — interactive REPL or one-shot queries through the gateway | - |
 
 ### 3.1 Enabling Governance (Docker Compose)
@@ -353,7 +354,32 @@ GOVBOT_WEBHOOK=https://hooks.slack.com/services/... \
 GOVBOT_SINCE=7d docker compose --profile governance run --rm govbot
 ```
 
-### 3.8 Security Responder (secbot)
+### 3.8 Running the Fleet Runner (fleet-runner)
+
+`fleet-runner` applies a single change across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It runs under the `--profile fleet` and exits when done.
+
+```bash
+# Dry-run first: see which servers will be targeted and in which stage
+FLEET_JOBS_DIR=./jobs \
+  docker compose --profile fleet run --rm fleet-runner \
+  --job-file /jobs/vacuum-prod.json --dry-run
+
+# Execute the job
+FLEET_RUNNER_API_KEY=<key> FLEET_JOBS_DIR=./jobs \
+  docker compose --profile fleet run --rm fleet-runner \
+  --job-file /jobs/vacuum-prod.json
+
+# Override strategy from flags
+FLEET_RUNNER_API_KEY=<key> FLEET_JOBS_DIR=./jobs \
+  docker compose --profile fleet run --rm fleet-runner \
+  --job-file /jobs/vacuum-prod.json --canary 2 --wave-size 5 --pause 60
+```
+
+The `FLEET_JOBS_DIR` variable (default: `./jobs`) is mounted read-only at `/jobs` inside the container. Set `FLEET_RUNNER_API_KEY` in `.env` to the API key for the `fleet-runner` service account.
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema and strategy options.
+
+### 3.9 Security Responder (secbot)
 
 Unlike the CLI tools above, `secbot` is a **long-running daemon** — start it once and leave it running alongside the stack. It reads from the audit socket in real time and automatically creates incident bundles when it detects:
 

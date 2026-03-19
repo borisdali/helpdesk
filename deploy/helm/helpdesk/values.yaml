@@ -220,3 +220,26 @@ governance:
     smtpSecret: ""
     from: ""
     to: ""  # comma-separated
+
+
+# Fleet runner: applies a single change across infrastructure targets with staged rollout.
+# Runs as a Kubernetes CronJob (disabled by default).
+fleetRunner:
+  # Set to true to enable the CronJob.
+  enabled: false
+  # Cron schedule (e.g. "0 2 * * *" for 2 AM daily).
+  schedule: "0 2 * * *"
+  # Path to the job definition JSON file inside the container.
+  # Mount it via a ConfigMap or Secret in extraVolumes/extraVolumeMounts.
+  jobFile: "/etc/helpdesk/fleet-job.json"
+  # Override strategy flags (0/empty = use values from job file).
+  dryRun: false
+  canaryCount: 0
+  waveSize: 0
+  wavePauseSeconds: 0
+  # Name of a Secret containing the fleet-runner API key (key: api-key).
+  apiKeySecret: ""
+  apiKeyKey: "api-key"
+  # Extra volumes and mounts for job definition files.
+  extraVolumes: []
+  extraVolumeMounts: []
