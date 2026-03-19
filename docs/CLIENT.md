@@ -370,7 +370,234 @@ The audit event includes the full tool call log, the declared purpose, operator 
 
 ---
 
-## 10. Related Documentation
+## 10. Manual Testing Playbook
+
+This section covers step-by-step verification of all three identity provider modes against a local docker-compose stack unless noted otherwise.
+
+**Prerequisites:** stack up (`docker compose up -d`), `hashapikey` binary available.
+
+**How to invoke `helpdesk-client`** — the commands below use the bare binary name for brevity. Substitute for your deployment:
+
+| Deployment | Invocation |
+|---|---|
+| Host binary tarball | `./helpdesk-client` |
+| Docker Compose | `docker compose --profile interactive run --rm helpdesk-client` |
+| Kubernetes | `kubectl -n helpdesk-system run hc --rm -it --restart=Never --image=ghcr.io/borisdali/helpdesk:latest -- /usr/local/bin/helpdesk-client --gateway http://helpdesk-gateway:8080` |
+
+On docker-compose the `--gateway` flag can be omitted — `HELPDESK_GATEWAY_URL=http://gateway:8080` is already set in the service environment. On host and Kubernetes it defaults to `http://localhost:8080`; override with `--gateway` or `HELPDESK_GATEWAY_URL` as needed.
+
+### 10.1 `none` mode (default — no validation)
+
+**Setup:** default `.env` — `HELPDESK_IDENTITY_PROVIDER` unset or `none`.
+
+```bash
+# Any X-User value is accepted verbatim — no users.yaml lookup
+helpdesk-client \
+  --user alice@example.com \
+  --purpose diagnostic \
+  --message "What databases are you aware of?"
+
+# Unknown user passes too — header is trusted as-is
+helpdesk-client \
+  --user totally-fake-user \
+  --purpose diagnostic \
+  --message "What databases are you aware of?"
+```
+
+Expected: both succeed. Verify audit trail shows the `X-User` value as-is with `auth_method: "header"`:
+
+```bash
+curl -s "http://localhost:1199/v1/events?limit=5" | \
+  jq '.[] | {principal, purpose, auth_method: .principal.auth_method}'
+```
+
+### 10.2 `static` mode — human user authentication
+
+**Setup:** set in `.env`:
+
+```
+HELPDESK_IDENTITY_PROVIDER=static
+HELPDESK_USERS_FILE_HOST=./users.yaml
+```
+
+Add a test user to `users.yaml`:
+
+```yaml
+users:
+  - id: alice@example.com
+    roles: [dba, sre]
+```
+
+Restart the gateway: `docker compose restart gateway`
+
+```bash
+# Known user — succeeds
+helpdesk-client \
+  --user alice@example.com \
+  --purpose diagnostic \
+  --message "What databases are you aware of?"
+
+# Unknown user — expect 401
+helpdesk-client \
+  --user nobody@example.com \
+  --purpose diagnostic \
+  --message "What databases are you aware of?"
+```
+
+Expected: first succeeds with `auth_method: "static"`, second fails with `401 Unauthorized`. Verify the 401 was recorded:
+
+```bash
+curl -s "http://localhost:1199/v1/events?outcome_status=error&limit=5" | \
+  jq '.[] | {principal, error: .outcome.error_message}'
+```
+
+### 10.3 `static` mode — service account API key
+
+**Generate a key and hash it:**
+
+```bash
+# Generate
+export MY_KEY=$(openssl rand -hex 32)
+echo "Key: $MY_KEY"
+
+# Hash it (binary tarball)
+./hashapikey "$MY_KEY"
+
+# Hash it (docker compose)
+docker compose run --rm --entrypoint /usr/local/bin/hashapikey auditd "$MY_KEY"
+```
+
+Add the service account to `users.yaml`:
+
+```yaml
+service_accounts:
+  - id: test-bot
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$..."   # paste hash output
+```
+
+Restart gateway: `docker compose restart gateway`
+
+```bash
+# Valid key — succeeds with auth_method: "api_key"
+helpdesk-client \
+  --api-key "$MY_KEY" \
+  --purpose diagnostic \
+  --message "What databases are you aware of?"
+
+# Wrong key — expect 401
+helpdesk-client \
+  --api-key "wrong-key" \
+  --purpose diagnostic \
+  --message "What databases are you aware of?"
+```
+
+Verify identity in the audit trail:
+
+```bash
+curl -s "http://localhost:1199/v1/events?limit=3" | \
+  jq '.[] | {service: .principal.service, auth_method: .principal.auth_method, purpose}'
+```
+
+### 10.4 `jwt` mode — local test IdP
+
+`jwttest` is a development tool available only when building from source — it is not included in release tarballs or the container image. Run it on your workstation; the gateway fetches the JWKS endpoint over the network.
+
+**Terminal 1 — start the mock JWKS server (requires source checkout):**
+
+```bash
+go run ./cmd/jwttest \
+  -sub alice@example.com \
+  -groups dba,sre \
+  -port 9999 > /tmp/jwt.txt
+# stderr prints the exact HELPDESK_JWT_* env vars to set
+```
+
+**Terminal 2 — configure the gateway and test:**
+
+Set in `.env` (use the values printed by `jwttest` on stderr):
+
+```
+HELPDESK_IDENTITY_PROVIDER=jwt
+HELPDESK_JWT_ISSUER=http://localhost:9999
+HELPDESK_JWT_AUDIENCE=helpdesk
+```
+
+For `HELPDESK_JWT_JWKS_URL`, the value depends on how the gateway reaches your workstation:
+
+| Deployment | JWKS URL |
+|---|---|
+| Host | `http://localhost:9999/.well-known/jwks.json` |
+| Docker Compose (Mac/Windows) | `http://host.docker.internal:9999/.well-known/jwks.json` |
+| Docker Compose (Linux) | `http://172.17.0.1:9999/.well-known/jwks.json` (use `ip route` to confirm) |
+| Kubernetes | Expose `jwttest` via `kubectl port-forward` or a `NodePort` |
+
+Restart gateway: `docker compose restart gateway`
+
+```bash
+TOKEN=$(cat /tmp/jwt.txt | tr -d '\n')
+
+# Valid JWT — succeeds
+helpdesk-client \
+  --api-key "$TOKEN" \
+  --purpose diagnostic \
+  --message "What databases are you aware of?"
+```
+
+Verify roles were extracted:
+
+```bash
+curl -s "http://localhost:1199/v1/events?limit=3" | \
+  jq '.[] | {user_id: .principal.user_id, roles: .principal.roles, auth_method: .principal.auth_method}'
+```
+
+**Test expired token:**
+
+```bash
+go run ./cmd/jwttest -ttl 1s -sub alice@example.com > /tmp/jwt-expired.txt
+sleep 2
+TOKEN_EXP=$(cat /tmp/jwt-expired.txt | tr -d '\n')
+helpdesk-client --api-key "$TOKEN_EXP" --purpose diagnostic --message "ping"
+# Expected: 401 — token has expired
+```
+
+**Test wrong issuer:**
+
+```bash
+go run ./cmd/jwttest -iss https://evil.example.com > /tmp/jwt-bad-iss.txt
+TOKEN_BAD=$(cat /tmp/jwt-bad-iss.txt | tr -d '\n')
+helpdesk-client --api-key "$TOKEN_BAD" --purpose diagnostic --message "ping"
+# Expected: 401 — issuer mismatch
+```
+
+### 10.5 Policy enforcement across modes
+
+Once authentication is working, verify that the resolved identity flows correctly into policy decisions. Using `static` mode with `alice` (roles: `[dba, sre]`):
+
+```bash
+# Purpose not in allowed list for a pii-tagged database → expect 403
+helpdesk-client \
+  --user alice@example.com \
+  --purpose fleet_rollout \
+  --message "Check connection to pg-cluster-minkube"
+
+# Correct purpose → should pass
+helpdesk-client \
+  --user alice@example.com \
+  --purpose diagnostic \
+  --message "Check connection to pg-cluster-minkube"
+```
+
+Inspect the policy decision audit events:
+
+```bash
+curl -s "http://localhost:1199/v1/events?event_type=policy_decision&limit=10" | \
+  jq '.[] | {effect: .policy_decision.effect, purpose: .policy_decision.purpose, user: .policy_decision.user_id}'
+```
+
+---
+
+## 12. Related Documentation
 
 - [API.md](API.md) — Gateway REST API reference (all endpoints, request/response shapes)
 - [IDENTITY.md](IDENTITY.md) — Identity provider setup (static, JWT)

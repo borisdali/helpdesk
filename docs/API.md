@@ -32,9 +32,32 @@ Agent endpoints (`/api/v1/query`, `/api/v1/db/{tool}`, etc.) return:
 }
 ```
 
-Error responses: `{ "error": "agent \"foo\" not available" }`
+Error responses: `{ "error": "<reason>" }`
 
 The response header `X-Trace-ID` is set on every agent call. Pass it in the request to pin a specific trace ID for end-to-end correlation across gateway and agent audit logs.
+
+### HTTP status codes
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Agent task completed and the response text is the agent's output |
+| `400 Bad Request` | Malformed request (missing required fields, invalid JSON) |
+| `401 Unauthorized` | Authentication failed (bad or missing API key / JWT) |
+| `403 Forbidden` | A governance policy denied the operation. The response body contains the full policy denial detail. The audit record status is `denied`. |
+| `502 Bad Gateway` | The A2A task itself failed (agent runner error), or the agent service is unreachable |
+| `503 Service Unavailable` | A required service (e.g. fleet) is not configured |
+
+**Note on `403` vs `200` for policy denials:** For direct tool calls (`/api/v1/db/{tool}`, `/api/v1/k8s/{tool}`), policy denials are detected from the agent response text and returned as `403`. For natural-language queries (`/api/v1/query`), the agent decides how to present a denial in its prose response — the gateway cannot reliably distinguish a policy-blocked tool call from a successful but empty result in that path, so callers should inspect `text` for policy denial details.
+
+---
+
+### `GET /health`
+
+Liveness probe. Returns `{"status":"ok"}` when the gateway is up and all agents have been discovered. Useful for load balancer health checks and `docker compose up --wait`.
+
+```bash
+curl http://localhost:8080/health
+```
 
 ---
 
@@ -92,6 +115,8 @@ curl http://localhost:8080/api/v1/incidents
 ### `POST /api/v1/db/{tool}`
 
 Invoke a specific database agent tool directly by name. The body is a JSON object of tool parameters. Use `GET /api/v1/agents` to discover available tool names via the skills list.
+
+**Important:** `{tool}` must be a real tool name exposed by the database agent (e.g. `check_connection`, `get_server_info`). If the tool name does not exist, the agent will return a 200 with a refusal message — the gateway cannot distinguish this from a successful response at the HTTP level. Use `check_connection` to verify connectivity, not a hypothetical `run_sql`.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/db/check_replication_lag \

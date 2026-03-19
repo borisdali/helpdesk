@@ -268,8 +268,9 @@ services:
   # One-shot:  docker compose run --rm helpdesk-client --agent database --message "is prod-db healthy?"
   helpdesk-client:
     image: helpdesk:latest
-    command: ["/usr/local/bin/helpdesk-client", "--gateway=http://gateway:8080"]
+    entrypoint: ["/usr/local/bin/helpdesk-client"]
     environment:
+      HELPDESK_GATEWAY_URL: http://gateway:8080
       HELPDESK_CLIENT_USER: ${HELPDESK_CLIENT_USER:-}
       HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
       HELPDESK_SESSION_PURPOSE: ${HELPDESK_SESSION_PURPOSE:-}

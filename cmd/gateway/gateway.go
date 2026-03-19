@@ -605,6 +605,64 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	response := extractResponse(result)
 	response.AgentName = agentName
 
+	// If the A2A task itself failed (runner-level failure), return 502.
+	if response.State == string(a2a.TaskStateFailed) {
+		slog.Error("gateway: A2A task failed", "agent", agentName, "task_id", response.TaskID, "text", response.Text)
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    toolParams,
+			Message:           prompt,
+			Response:          response.Text,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "error",
+			Error:             "agent task failed: " + response.Text,
+			HTTPCode:          http.StatusBadGateway,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
+		})
+		w.Header().Set("X-Trace-ID", traceID)
+		writeError(w, http.StatusBadGateway, "agent task failed: "+response.Text)
+		return
+	}
+
+	// For direct tool calls, detect policy denial surfaced in the agent response.
+	// policy.DeniedError always produces "policy denied: ..." text, which the ADK
+	// framework feeds verbatim as the FunctionResponse error back to the LLM.
+	if toolName != "" && isPolicyDenial(response.Text) {
+		slog.Warn("gateway: policy denied", "agent", agentName, "tool", toolName, "trace_id", traceID)
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    toolParams,
+			Message:           prompt,
+			Response:          response.Text,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "denied",
+			Error:             "policy denied",
+			HTTPCode:          http.StatusForbidden,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
+		})
+		w.Header().Set("X-Trace-ID", traceID)
+		writeError(w, http.StatusForbidden, response.Text)
+		return
+	}
+
 	// Record successful request with response
 	g.recordAudit(r.Context(), &audit.GatewayRequest{
 		RequestID:         requestID,
@@ -706,6 +764,13 @@ func extractText(parts a2a.ContentParts) string {
 		}
 	}
 	return strings.Join(texts, "\n")
+}
+
+// isPolicyDenial reports whether the agent response text contains a policy denial.
+// policy.DeniedError always produces "policy denied: ..." text, which the ADK framework
+// feeds verbatim as the FunctionResponse error; the LLM typically reproduces it in its reply.
+func isPolicyDenial(text string) bool {
+	return strings.Contains(strings.ToLower(text), "policy denied")
 }
 
 // --- Prompt construction ---

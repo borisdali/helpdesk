@@ -156,6 +156,54 @@ func TestExtractResponse_Message(t *testing.T) {
 	}
 }
 
+// --- extractResponse: failed task state ---
+
+func TestExtractResponse_FailedTaskState(t *testing.T) {
+	task := &a2a.Task{
+		Status: a2a.TaskStatus{
+			State:   a2a.TaskStateFailed,
+			Message: &a2a.Message{Parts: a2a.ContentParts{a2a.TextPart{Text: "runner crashed"}}},
+		},
+	}
+	resp := extractResponse(task)
+	if resp.State != string(a2a.TaskStateFailed) {
+		t.Errorf("State = %q, want %q", resp.State, a2a.TaskStateFailed)
+	}
+	if resp.Text != "runner crashed" {
+		t.Errorf("Text = %q, want %q", resp.Text, "runner crashed")
+	}
+}
+
+// --- isPolicyDenial ---
+
+func TestIsPolicyDenial_Positive(t *testing.T) {
+	cases := []string{
+		"policy denied: purpose not allowed",
+		"Policy Denied: read access blocked",
+		"I cannot proceed: policy denied by pii-data-protection",
+		"Access to database foo: DENIED\npolicy denied: ...",
+	}
+	for _, c := range cases {
+		if !isPolicyDenial(c) {
+			t.Errorf("isPolicyDenial(%q) = false, want true", c)
+		}
+	}
+}
+
+func TestIsPolicyDenial_Negative(t *testing.T) {
+	cases := []string{
+		"VACUUM completed successfully",
+		"connected to postgres 16.1",
+		"I don't have a run_sql tool available",
+		"",
+	}
+	for _, c := range cases {
+		if isPolicyDenial(c) {
+			t.Errorf("isPolicyDenial(%q) = true, want false", c)
+		}
+	}
+}
+
 // --- Handler validation tests ---
 
 func TestHandleResearch_MissingQuery(t *testing.T) {
