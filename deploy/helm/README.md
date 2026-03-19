@@ -314,11 +314,86 @@ helm install helpdesk ./helm/helpdesk \
 
 ## 4. Interactive Session
 
-For a human operator to start an interactive troubleshooting session run the following command:
+`helpdesk-client` is the recommended operator CLI. It runs on your workstation and connects to the gateway over HTTP — no `kubectl exec` required. Every query carries a verified identity and declared purpose, which appear in the audit trail.
+
+### 4.1 Get the binary
+
+**Option A: From the release tarball**
+
+Download the tarball for your workstation platform from the [release page](https://github.com/borisdali/helpdesk/releases/) and extract it. The `helpdesk-client` binary is included.
+
+**Option B: Extract from the container image**
+
+```bash
+docker run --rm --entrypoint cat ghcr.io/borisdali/helpdesk:latest \
+  /usr/local/bin/helpdesk-client > helpdesk-client
+chmod +x helpdesk-client
+```
+
+### 4.2 Expose the gateway
+
+**ClusterIP (default) — port-forward for occasional access:**
+
+```bash
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
+```
+
+**LoadBalancer — recommended for team-wide access:**
+
+```bash
+helm upgrade helpdesk ./helm/helpdesk \
+  --namespace helpdesk-system \
+  --set gateway.service.type=LoadBalancer \
+  --reuse-values
+
+# Wait for the external IP
+kubectl -n helpdesk-system get svc helpdesk-gateway
+```
+
+### 4.3 Connect and query
+
+```bash
+# Interactive REPL (ClusterIP via port-forward)
+helpdesk-client \
+  --gateway http://localhost:8080 \
+  --user alice@example.com \
+  --purpose diagnostic
+
+# One-shot query
+helpdesk-client \
+  --gateway http://localhost:8080 \
+  --user alice@example.com \
+  --agent database \
+  --purpose diagnostic \
+  --message "Are there any long-running queries on prod-orders-db?"
+
+# Kubernetes agent with an incident purpose
+helpdesk-client \
+  --gateway http://localhost:8080 \
+  --user alice@example.com \
+  --agent k8s \
+  --purpose remediation \
+  --purpose-note "INC-5102 payments pod OOMKilled" \
+  --message "Restart the payments deployment in the production namespace"
+
+# LoadBalancer — point at the external IP instead
+helpdesk-client \
+  --gateway http://<EXTERNAL-IP>:8080 \
+  --user alice@example.com \
+  --purpose diagnostic
+```
+
+See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, authentication options, and per-agent examples.
+
+### 4.4 Fallback: kubectl exec (in-cluster REPL)
+
+If you cannot reach the gateway from your workstation, you can still open an interactive session inside the orchestrator pod:
 
 ```bash
 kubectl -n helpdesk-system exec -it deploy/helpdesk-orchestrator -- helpdesk
 ```
+
+Note that in-cluster sessions bypass `helpdesk-client` authentication and do not attach identity or purpose headers, so audit events will not carry operator attribution. Prefer `helpdesk-client` for production use.
 
 ## 5. Architecture Recap
 

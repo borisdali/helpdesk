@@ -136,9 +136,49 @@ tail -f /tmp/helpdesk-auditd.log
 tail -f /tmp/helpdesk-gateway.log
 ```
 
-## 6. Headless / API Mode
+## 6. Using helpdesk-client
 
-To use the REST Gateway API without the interactive REPL. See [API.md](../../docs/API.md) for the full endpoint reference.
+`helpdesk-client` is the recommended operator interface. It connects to the gateway over HTTP and provides both an interactive REPL and a one-shot query mode. Every query carries a verified identity and declared purpose in the audit trail — replacing ad-hoc interactive sessions with a traceable, authenticated connection.
+
+The binary is included in the tarball. Start the stack first:
+
+```bash
+./startall.sh --no-repl &
+```
+
+Then in another terminal:
+
+```bash
+# Interactive REPL (prompts for queries until you type "exit" or Ctrl-C)
+./helpdesk-client --purpose diagnostic
+
+# One-shot query
+./helpdesk-client --agent database --purpose diagnostic \
+  --message "Check replication lag on prod-db"
+
+# Target a different agent
+./helpdesk-client --agent k8s --purpose remediation \
+  --message "Are there any crashlooping pods in the payments namespace?"
+
+# With authentication (static identity provider)
+./helpdesk-client --user alice@example.com --api-key sk-... --purpose diagnostic
+```
+
+Set defaults in `.env` (sourced automatically by `startall.sh`) to avoid repeating flags:
+
+```bash
+HELPDESK_GATEWAY_URL=http://localhost:8080
+HELPDESK_CLIENT_USER=alice@example.com
+HELPDESK_CLIENT_API_KEY=sk-...
+HELPDESK_SESSION_PURPOSE=diagnostic
+HELPDESK_CLIENT_AGENT=database
+```
+
+See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, all purpose values, and per-agent examples.
+
+## 6.1 Headless / API Mode
+
+For programmatic access via raw HTTP. See [API.md](../../docs/API.md) for the full endpoint reference.
 
 ```bash
 ./startall.sh --no-repl &

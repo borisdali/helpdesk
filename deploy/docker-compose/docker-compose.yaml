@@ -253,6 +253,25 @@ services:
       - incident-agent
       - research-agent
 
+  # Authenticated gateway CLI — for operators and scripts.
+  # Run with: docker compose run --rm helpdesk-client
+  # One-shot:  docker compose run --rm helpdesk-client --agent database --message "is prod-db healthy?"
+  helpdesk-client:
+    image: helpdesk:latest
+    command: ["/usr/local/bin/helpdesk-client", "--gateway=http://gateway:8080"]
+    environment:
+      HELPDESK_CLIENT_USER: ${HELPDESK_CLIENT_USER:-}
+      HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
+      HELPDESK_SESSION_PURPOSE: ${HELPDESK_SESSION_PURPOSE:-}
+      HELPDESK_SESSION_PURPOSE_NOTE: ${HELPDESK_SESSION_PURPOSE_NOTE:-}
+      HELPDESK_CLIENT_AGENT: ${HELPDESK_CLIENT_AGENT:-database}
+    stdin_open: true
+    tty: true
+    profiles:
+      - interactive
+    depends_on:
+      - gateway
+
   # AI Governance: Real-time audit monitoring and alerting
   # Enable with: docker compose --profile governance up -d
   auditor:

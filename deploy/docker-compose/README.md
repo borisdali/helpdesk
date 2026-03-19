@@ -162,7 +162,37 @@ Next, as a human operator, run the interactive session by invoking the Orchestat
 See the [sample log](INSTALL_from_source_sample_interactive_log.md)  of running the above commands.
 
 
-  ### 2.4 SRE bot demo: Deployment from source (by cloning the repo)
+  ### 2.4 Using helpdesk-client
+
+`helpdesk-client` is an authenticated operator CLI that connects to the gateway over HTTP — every query carries a verified identity and declared purpose in the audit trail, replacing ad-hoc `docker compose run orchestrator` sessions.
+
+**Interactive REPL:**
+
+```bash
+docker compose -f deploy/docker-compose/docker-compose.yaml \
+  --profile interactive run --rm helpdesk-client
+```
+
+**One-shot query:**
+
+```bash
+docker compose -f deploy/docker-compose/docker-compose.yaml \
+  --profile interactive run --rm helpdesk-client \
+  --message "Show me the top 5 longest-running queries"
+```
+
+**Set agent and purpose via environment variables:**
+
+```bash
+HELPDESK_CLIENT_AGENT=k8s HELPDESK_SESSION_PURPOSE=diagnostic \
+  docker compose -f deploy/docker-compose/docker-compose.yaml \
+  --profile interactive run --rm helpdesk-client
+```
+
+See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, authentication options, and per-agent examples.
+
+
+  ### 2.5 SRE bot demo: Deployment from source (by cloning the repo)
 
 Here's an example of an SRE bot detecting that the `db.example.com` is going offline, which results in a failure to establish a connection. As a result, aiHelpDesk automatically records an incident and creates a troubelshooting bundle to investigate further either interally or by sending to a vendor:
 
@@ -186,6 +216,7 @@ aiHelpDesk includes an [AI Governance framework](../../docs/AIGOVERNANCE.md) wit
 | **approvals** | Operator CLI for listing, approving, and denying approval requests | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
+| **helpdesk-client** | Authenticated operator CLI — interactive REPL or one-shot queries through the gateway | - |
 
 ### 3.1 Enabling Governance (Docker Compose)
 
