@@ -18,7 +18,7 @@ func resolveTargets(cfg *infra.Config, targets Targets) ([]string, error) {
 		excludeSet[name] = true
 	}
 
-	// Build explicit-name set for fast lookup.
+	// Build explicit-name set for fast lookup (matched against map keys).
 	nameSet := make(map[string]bool, len(targets.Names))
 	for _, name := range targets.Names {
 		nameSet[name] = true
@@ -26,19 +26,13 @@ func resolveTargets(cfg *infra.Config, targets Targets) ([]string, error) {
 
 	var selected []string
 	for serverKey, server := range cfg.DBServers {
-		// Determine the display name: use server.Name if set, otherwise the map key.
-		name := server.Name
-		if name == "" {
-			name = serverKey
-		}
-
-		if excludeSet[name] || excludeSet[serverKey] {
+		if excludeSet[serverKey] {
 			continue
 		}
 
-		// Include if explicitly named.
-		if nameSet[name] || nameSet[serverKey] {
-			selected = append(selected, name)
+		// Include if explicitly named (by map key).
+		if nameSet[serverKey] {
+			selected = append(selected, serverKey)
 			continue
 		}
 
@@ -47,7 +41,7 @@ func resolveTargets(cfg *infra.Config, targets Targets) ([]string, error) {
 			for _, wantTag := range targets.Tags {
 				for _, serverTag := range server.Tags {
 					if serverTag == wantTag {
-						selected = append(selected, name)
+						selected = append(selected, serverKey)
 						goto nextServer
 					}
 				}
@@ -60,13 +54,9 @@ func resolveTargets(cfg *infra.Config, targets Targets) ([]string, error) {
 	// If neither tags nor names were specified, select all servers (minus excludes).
 	if len(targets.Tags) == 0 && len(targets.Names) == 0 {
 		selected = selected[:0]
-		for serverKey, server := range cfg.DBServers {
-			name := server.Name
-			if name == "" {
-				name = serverKey
-			}
-			if !excludeSet[name] && !excludeSet[serverKey] {
-				selected = append(selected, name)
+		for serverKey := range cfg.DBServers {
+			if !excludeSet[serverKey] {
+				selected = append(selected, serverKey)
 			}
 		}
 	}

@@ -36,7 +36,10 @@ BIN_PKGS := \
 	hashapikey:./cmd/hashapikey/ \
 	fleet-runner:./cmd/fleet-runner/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey fleet-runner
+
+fleet-runner:
+	go build -o fleet-runner ./cmd/fleet-runner/
 
 # ---------------------------------------------------------------------------
 # Tests and coverage

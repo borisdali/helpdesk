@@ -126,6 +126,10 @@ var agentAliases = map[string]string{
 
 // RegisterRoutes sets up the REST endpoint handlers.
 func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}` + "\n")) //nolint:errcheck
+	})
 	mux.HandleFunc("GET /api/v1/agents", g.handleListAgents)
 	mux.HandleFunc("POST /api/v1/query", g.handleQuery)
 	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)

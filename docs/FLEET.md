@@ -67,7 +67,7 @@ If neither `tags` nor `names` is specified, all servers in `infrastructure.json`
 | `wave_size` | `0` | Servers per parallel wave. `0` = all remaining in one wave. |
 | `wave_pause_seconds` | `0` | Pause between waves (seconds). |
 | `failure_threshold` | `0.5` | Fraction of failures that trips the circuit breaker (0.0–1.0). |
-| `dry_run` | `false` | Print the plan without contacting gateway or auditd. |
+| `dry_run` | `false` | Print the plan without contacting Gateway or auditd. |
 
 ---
 
@@ -106,7 +106,7 @@ Environment variables (take precedence over defaults, overridden by flags):
 
 ## Identity and authentication
 
-Fleet runner authenticates as the `fleet-runner` service account (defined in `users.yaml`). Every request to the gateway carries:
+Fleet runner authenticates as the `fleet-runner` service account (defined in `users.yaml`). Every request to the Gateway carries:
 
 ```
 Authorization: Bearer <HELPDESK_CLIENT_API_KEY>
@@ -155,7 +155,7 @@ policies:
 
 ## Viewing job status
 
-Fleet job records are stored in the auditd database. Query them via the gateway:
+Fleet job records are stored in the auditd database. Query them via the Gateway:
 
 ```bash
 # List recent jobs
@@ -193,7 +193,7 @@ Strategy:
   wave_pause_seconds:  30
   failure_threshold:   50%
 
-No gateway or auditd contact (dry run).
+No Gateway or auditd contact (dry run).
 ```
 
 ---

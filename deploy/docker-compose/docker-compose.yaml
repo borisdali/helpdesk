@@ -43,6 +43,11 @@ services:
     ports:
       - "1199:1199"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:1199/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   database-agent:
     build:
@@ -211,6 +216,11 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     depends_on:
       - auditd
       - database-agent
