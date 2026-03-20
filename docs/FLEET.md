@@ -1,6 +1,6 @@
 # aiHelpDesk Fleet Runner
 
-`fleet-runner` applies a single change across a subset of `infrastructure.json` targets with staged rollout. It is designed for operations that need to be repeated safely across many database servers — schema migrations, configuration changes, maintenance tasks (e.g. `VACUUM ANALYZE`) — without manual coordination.
+`fleet-runner` applies a single operation across a subset of `infrastructure.json` targets with staged rollout. It is designed for operations that need to be repeated safely across many database servers — diagnostic sweeps, configuration checks, table health reports, or targeted write operations (e.g. terminating idle connections) — without manual coordination.
 
 ---
 
@@ -20,12 +20,12 @@ Fleet runner reads a JSON file describing the job:
 
 ```json
 {
-  "name": "vacuum-analyze-prod-dbs",
+  "name": "vacuum-health-prod-dbs",
   "change": {
     "agent": "database",
-    "tool": "run_sql",
+    "tool": "get_table_stats",
     "args": {
-      "sql": "VACUUM ANALYZE;"
+      "schema_name": "public"
     }
   },
   "targets": {
@@ -35,18 +35,20 @@ Fleet runner reads a JSON file describing the job:
   "strategy": {
     "canary_count": 1,
     "wave_size": 3,
-    "wave_pause_seconds": 30,
+    "wave_pause_seconds": 10,
     "failure_threshold": 0.5
   }
 }
 ```
+
+This job collects table statistics (dead rows, bloat ratio, `last_vacuum`, `last_autovacuum`, `last_analyze`) across all production databases, letting you identify tables that need manual `VACUUM ANALYZE` attention.
 
 ### `change` object
 
 | Field | Description |
 |-------|-------------|
 | `agent` | `"database"` or `"k8s"` |
-| `tool` | Tool name, e.g. `run_sql`, `vacuum_analyze`, `check_connection` |
+| `tool` | Tool name. Database tools: `check_connection`, `get_server_info`, `get_database_info`, `get_active_connections`, `get_connection_stats`, `get_database_stats`, `get_config_parameter`, `get_replication_status`, `get_lock_info`, `get_table_stats`, `get_session_info`, `cancel_query`, `terminate_connection`, `terminate_idle_connections`. |
 | `args` | Tool arguments. The server identifier (`db_server`) is injected automatically per target. |
 
 ### `targets` object
@@ -178,8 +180,8 @@ curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/servers | jq .
 
 Output:
 ```
-DRY RUN — fleet job: vacuum-analyze-prod-dbs
-Change: database/run_sql
+DRY RUN — fleet job: vacuum-health-prod-dbs
+Change: database/get_table_stats
 Resolved servers (5):
   prod-db-1                                   [canary]
   prod-db-2                                   [wave-1]
@@ -190,7 +192,7 @@ Resolved servers (5):
 Strategy:
   canary_count:        1
   wave_size:           2
-  wave_pause_seconds:  30
+  wave_pause_seconds:  10
   failure_threshold:   50%
 
 No Gateway or auditd contact (dry run).
@@ -272,7 +274,7 @@ Every fleet-runner tool call generates an audit event linking back to the job:
 {
   "event_type": "tool_call",
   "agent": "postgres_database_agent",
-  "tool_name": "run_sql",
+  "tool_name": "get_table_stats",
   "purpose": "fleet_rollout",
   "purpose_note": "job_id=flj_abc123 server=prod-db-2 stage=wave-1",
   "principal": "fleet-runner"

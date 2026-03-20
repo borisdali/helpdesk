@@ -9,9 +9,10 @@
 A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and its derivative databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
 
 * aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
-* aiHelpDesk is designed for human operators as well as for the upstream agents.
+* aiHelpDesk is designed for human operators as well as for the upstream agents, which are treated as the first class citizens.
 * aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
-* aiHelpDesk is equipped with the comprehensive eight-module AI Governance system.
+* aiHelpDesk offers not only the reasoning layer specific to your database inventory, but it also features the actuation arm to optionally make the remediation changes to restore service or optimize its use.
+* aiHelpDesk includes a comprehensive eight-module AI Governance framework with the tamper-proof audit as the cornerstone of safe, responsible and transparent remedial adjustments.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
 * aiHelpDesk features a built-in fault injection framework. 
 * aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those shipped with aiHelpDesk out of the box.
@@ -19,7 +20,7 @@ A Go-based AI multi-agent intelligent self-service help and support system for t
 aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs. For the upstream agents, including agentic full-featured SRE systems, aiHelpDesk can be thought of as the database reasoning layer that aggregates the myriad of signals emitted by a database (statistics, metrics, wait events, logs, traces, etc.) into a coherent story and offers a way to repair any of the problems found.
 
 ## AI-Assisted Database Management
-While SaaS applications clearly have their market and cloud vendor DBaaS systems in particular are among the fastest growing and most profitable sectors on GCP, AWS and Azure, there are legitimate reasons for many customers to stay away from the black-box, vendor lock-in, cloud provider specific management systems. See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-8-182259e1720f) for extensive treatment of this topic and, in particular, see the 13 specific customer expectations of the cloud provider's DBaaS and how they mostly fall short of these expectations. 
+While SaaS applications clearly have their market and cloud vendor DBaaS systems in particular are among the fastest growing and most profitable sectors on GCP, AWS and Azure, there are legitimate reasons for many customers to stay away from the black-box, vendor lock-in, cloud provider specific management systems. See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-8-182259e1720f) for extensive treatment of this topic and, in particular, check out the 13 specific customer expectations of the cloud provider's DBaaS and how the actual cloud offerings mostly fall short of these expectations. 
 
 Enter the world of AI-Assisted Database Management products.
 

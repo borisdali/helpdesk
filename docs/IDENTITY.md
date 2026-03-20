@@ -172,6 +172,8 @@ curl -H "Authorization: Bearer $TOKEN" ...
 #   -kid ""                  omit kid from JWT header
 ```
 
+See sample log of testing authn via `jwttest` on K8s [here](IDENTITY_JWT_SAMPLE.md).
+
 ### 2.4 Authentication Failures
 
 On auth failure the Gateway returns HTTP 401 and records a `gateway_request`
