@@ -499,6 +499,9 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			traceID = audit.NewTraceID() // "tr_"
 		}
 	}
+	// Set the trace ID on the response immediately so it is present on all
+	// responses, including early-return error paths (401, 502, etc.).
+	w.Header().Set("X-Trace-ID", traceID)
 
 	// Resolve caller identity and purpose. Purpose fields may arrive via headers
 	// (set directly or bridged from the JSON body in handleQuery).
@@ -628,7 +631,6 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			Purpose:           purpose,
 			PurposeNote:       purposeNote,
 		})
-		w.Header().Set("X-Trace-ID", traceID)
 		writeError(w, http.StatusBadGateway, "agent task failed: "+response.Text)
 		return
 	}
@@ -658,7 +660,6 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			Purpose:           purpose,
 			PurposeNote:       purposeNote,
 		})
-		w.Header().Set("X-Trace-ID", traceID)
 		writeError(w, http.StatusForbidden, response.Text)
 		return
 	}
@@ -684,8 +685,6 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		PurposeNote:       purposeNote,
 	})
 
-	// Include trace ID in response for client correlation
-	w.Header().Set("X-Trace-ID", traceID)
 	writeJSON(w, http.StatusOK, response)
 }
 

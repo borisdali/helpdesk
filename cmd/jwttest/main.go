@@ -33,6 +33,7 @@ import (
 
 func main() {
 	port := flag.Int("port", 9999, "Port to serve JWKS on")
+	addr := flag.String("addr", "127.0.0.1", "Address to bind the JWKS server on (use 0.0.0.0 to accept connections from Docker containers)")
 	sub := flag.String("sub", "alice@example.com", "JWT sub claim (user identity)")
 	iss := flag.String("iss", "https://idp.example.com", "JWT iss claim")
 	aud := flag.String("aud", "helpdesk", "JWT aud claim")
@@ -96,8 +97,10 @@ func main() {
 	}
 	token := signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes)
 
-	addr := fmt.Sprintf("localhost:%d", *port)
-	jwksURL := fmt.Sprintf("http://%s/jwks.json", addr)
+	listenAddr := fmt.Sprintf("%s:%d", *addr, *port)
+	// For the printed JWKS URL, always use localhost regardless of bind address
+	// so the gateway env var example is correct for the host deployment.
+	jwksURL := fmt.Sprintf("http://localhost:%d/jwks.json", *port)
 
 	fmt.Fprintf(os.Stderr, "JWKS server:  %s\n", jwksURL)
 	fmt.Fprintf(os.Stderr, "Subject:      %s\n", *sub)
@@ -124,7 +127,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(jwksBody)
 	})
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}
 }

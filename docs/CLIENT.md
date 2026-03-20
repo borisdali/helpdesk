@@ -428,7 +428,7 @@ users:
     roles: [dba, sre]
 ```
 
-Restart the gateway: `docker compose restart gateway`
+Restart the Gateway: `docker compose restart gateway`
 
 ```bash
 # Known user — succeeds
@@ -476,7 +476,7 @@ service_accounts:
     api_key_hash: "$argon2id$..."   # paste hash output
 ```
 
-Restart gateway: `docker compose restart gateway`
+Restart Gateway: `docker compose restart gateway`
 
 ```bash
 # Valid key — succeeds with auth_method: "api_key"
@@ -501,7 +501,7 @@ curl -s "http://localhost:1199/v1/events?limit=3" | \
 
 ### 10.4 `jwt` mode — local test IdP
 
-`jwttest` is a development tool available only when building from source — it is not included in release tarballs or the container image. Run it on your workstation; the gateway fetches the JWKS endpoint over the network.
+`jwttest` is a development tool available only when building from source — it is not included in release tarballs or the container image. Run it on your workstation; the Gateway fetches the JWKS endpoint over the network.
 
 **Terminal 1 — start the mock JWKS server (requires source checkout):**
 
@@ -513,7 +513,7 @@ go run ./cmd/jwttest \
 # stderr prints the exact HELPDESK_JWT_* env vars to set
 ```
 
-**Terminal 2 — configure the gateway and test:**
+**Terminal 2 — configure the Gateway and test:**
 
 Set in `.env` (use the values printed by `jwttest` on stderr):
 
@@ -523,7 +523,7 @@ HELPDESK_JWT_ISSUER=http://localhost:9999
 HELPDESK_JWT_AUDIENCE=helpdesk
 ```
 
-For `HELPDESK_JWT_JWKS_URL`, the value depends on how the gateway reaches your workstation:
+For `HELPDESK_JWT_JWKS_URL`, the value depends on how the Gateway reaches your workstation:
 
 | Deployment | JWKS URL |
 |---|---|
@@ -532,7 +532,7 @@ For `HELPDESK_JWT_JWKS_URL`, the value depends on how the gateway reaches your w
 | Docker Compose (Linux) | `http://172.17.0.1:9999/.well-known/jwks.json` (use `ip route` to confirm) |
 | Kubernetes | Expose `jwttest` via `kubectl port-forward` or a `NodePort` |
 
-Restart gateway: `docker compose restart gateway`
+Restart Gateway: `docker compose restart gateway`
 
 ```bash
 TOKEN=$(cat /tmp/jwt.txt | tr -d '\n')

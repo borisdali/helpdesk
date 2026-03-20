@@ -254,6 +254,31 @@ policies:
           blocked_purposes: [diagnostic]
         message: "Destructive actions on critical resources are not allowed for diagnostic purposes."
 
+  # ── Identity & Access: authenticated user baseline ───────────────────────────
+  # Ensures standard-role users can perform read operations with a declared purpose
+  # regardless of auth mode (none vs jwt/static). Without this, switching to JWT
+  # auth causes emergency-break-glass (priority 200) to match sre/oncall roles first
+  # and deny any non-emergency request (condition failure → deny).
+  - name: authenticated-read
+    description: Authenticated users with standard roles can read with a declared purpose
+    priority: 210  # Evaluated before emergency-break-glass (200)
+
+    principals:
+      - role: dba
+      - role: sre
+      - role: developer
+      - role: oncall
+
+    resources:
+      - type: database
+      - type: kubernetes
+
+    rules:
+      - action: read
+        effect: allow
+        conditions:
+          allowed_purposes: [diagnostic, remediation, compliance, maintenance, fleet_rollout]
+
   # ── Identity & Access: purpose-based break-glass override ────────────────────
   # Emergency break-glass: SRE on-call can bypass approval with emergency purpose.
   # Audited at highest priority so it runs before any deny rule.
