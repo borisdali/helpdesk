@@ -49,7 +49,14 @@ func callGatewayTool(ctx context.Context, cfg runnerConfig, serverName, stage st
 	for k, v := range change.Args {
 		args[k] = v
 	}
-	args["db_server"] = serverName
+	// Database tools use "connection_string" to identify the target server;
+	// k8s tools use "cluster". Both resolve infrastructure IDs via the agent's
+	// resolveConnectionString / infrastructure config lookup.
+	if change.Agent == "k8s" {
+		args["context"] = serverName
+	} else {
+		args["connection_string"] = serverName
+	}
 
 	body, err := json.Marshal(args)
 	if err != nil {

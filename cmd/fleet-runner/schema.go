@@ -17,7 +17,7 @@ type Change struct {
 	// Tool is the tool name, e.g. "run_sql", "vacuum_analyze", "check_connection".
 	Tool string `json:"tool"`
 	// Args are the tool arguments. The per-target server identifier
-	// (db_server for database, cluster for k8s) is injected automatically.
+	// (connection_string for database, context for k8s) is injected automatically.
 	Args map[string]any `json:"args"`
 }
 

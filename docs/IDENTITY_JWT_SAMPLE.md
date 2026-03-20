@@ -5,9 +5,9 @@ on aiHelpDesk Identity & Access system, a sub-module of
 [AI Governance](AIGOVERNANCE.md).
 
 The sample log presented here is how JWT authn can be tested on K8s with
-no extenal dependencies (tested on Mac arm64 Apple C
+no extenal dependencies (tested on Mac Apple Silicon arm64 VM)
 . In reality you'd want to have a proper IdP
-setup (Okta, Auth0, Keycloak, etc), but for testing the built-in
+setup (e.g. Okta, Auth0, Keycloak, etc), but for testing the built-in
 `jwttest` mock is sufficient:
 
 
@@ -42,6 +42,9 @@ setup (Okta, Auth0, Keycloak, etc), but for testing the built-in
 [boris@ ~/helpdesk]$ docker images|head -2
 REPOSITORY                      TAG                        IMAGE ID       CREATED          SIZE
 jwttest                         local                      75cc5288270a   11 seconds ago   24.1MB
+
+[boris@ ~/helpdesk]$ kubectl -n helpdesk-system run jwttest --image=jwttest:local --image-pull-policy=Never --port=9999 -- -addr 0.0.0.0 -iss https://idp.example.com -aud helpdesk -groups dba,sre
+pod/jwttest created
 
 [boris@ ~/helpdesk]$ k -nhelpdesk-system get pod/jwttest -owide
 NAME      READY   STATUS    RESTARTS   AGE   IP             NODE       NOMINATED NODE   READINESS GATES
@@ -118,7 +121,11 @@ Yes, **pg-cluster-minkube is up and running**. Here are the details:
 
 The database is healthy and accepting connections.
 [trace: tr_e0c61426-ab6  2026-03-20 11:57:35]
+```
 
+Basic aiHelpDesk Journey and the audit trail summary:
+
+```
 [boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy/helm/helpdesk]$ curl -s "http://localhost:1199/v1/journeys?trace_id=tr_e0c61426-ab6"|jq
 Handling connection for 1199
 [
@@ -139,7 +146,13 @@ Handling connection for 1199
   }
 ]
 
-
-
-
+root@helpdesk-auditd-766bcc4c8c-69kht:/# sqlite3 --header --column /data/audit/audit.db "SELECT id, timestamp, event_id, event_type, trace_id, session_agent sagent, session_id, action_class, tool_name, user_id,          decision_agent,        decision_confidence confid, outcome_status outcome, purpose    pur, purpose_note purnote FROM audit_events WHERE trace_id='tr_5107d5fe-030' ORDER BY timestamp DESC"
+id  timestamp                       event_id       event_type       trace_id         sagent  session_id        action_class  tool_name         user_id            decision_agent           confid  outcome  pur         purnote
+--  ------------------------------  -------------  ---------------  ---------------  ------  ----------------  ------------  ----------------  -----------------  -----------------------  ------  -------  ----------  -------
+68  2026-03-20T15:42:33.934155171Z  tool_de959794  tool_execution   tr_5107d5fe-030          dbagent_3c4d4dbd  read          check_connection                     postgres_database_agent          success
+67  2026-03-20T15:42:33.827272421Z  pol_66ca30e4   policy_decision  tr_5107d5fe-030          tr_5107d5fe-030   read                                                                                allow    diagnostic
+66  2026-03-20T15:42:33.822876963Z  inv_1209013d   tool_invoked     tr_5107d5fe-030          dbagent_3c4d4dbd  read
+65  2026-03-20T15:42:33.80323413Z   rsn_3bb831f8   agent_reasoning  tr_5107d5fe-030          dbagent_3c4d4dbd
+64  2026-03-20T15:42:31.86574567Z   req_bb90d940   gateway_request  tr_5107d5fe-030          asess_4020291d                                    alice@example.com  postgres_database_agent                   diagnostic
+69  2026-03-20T15:42:31.862798837Z  gw_fa10d8bb    gateway_request  tr_5107d5fe-030          600e292d          unknown                         alice@example.com  postgres_database_agent  1.0     success  diagnostic
 ```

@@ -10,7 +10,7 @@
 2. **Preflight checks** — verifies each server is reachable before any stage executes
 3. **Canary phase** — applies the change to the first N servers sequentially; any failure aborts the job
 4. **Wave phase** — applies the change to remaining servers in parallel waves; a circuit breaker aborts the job if the failure rate exceeds the configured threshold
-5. **Audit trail** — every tool call carries `X-Purpose: fleet_rollout` and `X-Purpose-Note: job_id=<id> server=<name> stage=<stage>` so the full fleet job is traceable in the governance audit trail
+5. **Audit trail** — every tool call carries `X-Purpose: fleet_rollout` and `X-Purpose-Note: job_id=<id> server=<name> stage=<stage>` so the full fleet job is traceable in the Governance audit trail
 
 ---
 
@@ -215,7 +215,7 @@ No Gateway or auditd contact (dry run).
 ./fleet-runner --job-file jobs/vacuum-prod.json --dry-run
 ```
 
-`fleet-runner` is included in the release tarball alongside all other helpdesk binaries.
+`fleet-runner` is included in the release tarball alongside all other aiHelpDesk binaries.
 
 ### Docker Compose
 

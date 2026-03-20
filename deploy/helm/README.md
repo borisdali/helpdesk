@@ -276,7 +276,7 @@ gateway:
 ```
 
 Clients send `Authorization: Bearer <jwt-token>`. The Gateway validates the signature, issuer, and audience, then extracts roles from the configured claim.
-See sample log of testing JWT authn on K8s [here](IDENTITY_JWT_SAMPLE.md).
+See sample log of testing JWT authn on K8s [here](../../docs/IDENTITY_JWT_SAMPLE.md).
 
 #### Requiring explicit purpose for sensitive resources
 

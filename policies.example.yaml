@@ -140,7 +140,7 @@ policies:
   # Destructive operations are denied regardless.
   - name: fleet-runner-policy
     description: Fleet runner staged rollout policy
-    priority: 65
+    priority: 115  # Above pii-data-protection (110) so fleet-runner's explicit allow wins
 
     principals:
       - service: fleet-runner
@@ -268,6 +268,7 @@ policies:
       - role: sre
       - role: developer
       - role: oncall
+      - role: sre-automation
 
     resources:
       - type: database
