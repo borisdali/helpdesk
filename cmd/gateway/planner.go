@@ -67,8 +67,8 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 
 	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, req.Description, hints)
 
-	// Call LLM directly using Anthropic SDK.
-	rawJSON, err := callPlannerLLM(r.Context(), prompt)
+	// Call LLM (injectable for tests; defaults to Anthropic SDK).
+	rawJSON, err := g.plannerLLM(r.Context(), prompt)
 	if err != nil {
 		slog.Error("fleet planner: LLM call failed", "err", err)
 		writeError(w, http.StatusBadGateway, "planner LLM call failed: "+err.Error())

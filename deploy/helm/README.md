@@ -474,7 +474,7 @@ To include infrastructure config, create a `my-values.yaml` as shown above and a
 
 ## 7. Using the Gateway API
 
-While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full endpoint reference (request/response shapes, query parameters, and status codes).
 
 ```bash
 # Port-forward the Gateway
@@ -536,7 +536,7 @@ aiHelpDesk includes an AI Governance framework with policy-based access control,
 | **approvals** | Operator CLI for listing, approving, and denying approval requests (exec into auditd pod) | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions (exec into any pod) | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
-| **fleet-runner** | CronJob — applies a single change across infrastructure targets with staged rollout | Disabled |
+| **fleet-runner** | CronJob — applies multi-step sequences across infrastructure targets with staged rollout (canary → waves → circuit breaker) | Disabled |
 
 ### 9.2 Enable Governance
 
@@ -876,7 +876,23 @@ kubectl -n helpdesk-system run fleet-runner-dry --rm -it --restart=Never \
     --dry-run
 ```
 
-See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, strategy options, and policy configuration.
+**Generating a job definition from natural language:** Set `ANTHROPIC_API_KEY` on the gateway (via a Secret or environment variable) and use the planner endpoint from your workstation:
+
+```bash
+# Port-forward the gateway first
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
+
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "check connection health on all production databases"}' \
+  | jq -r '.job_def_raw' > jobs/health-check.json
+
+# Or with helpdesk-client
+helpdesk-client --gateway http://localhost:8080 \
+  --plan-fleet-job "check connection health on all production databases"
+```
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.
 
 ## 10. Troubleshooting
 

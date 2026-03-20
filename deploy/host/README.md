@@ -467,7 +467,7 @@ Key flags:
 
 ### 7.10 Running the Fleet Runner (fleet-runner)
 
-`fleet-runner` applies a single change across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It is a one-shot CLI binary — run it from the directory where your `infrastructure.json` and `.env` reside while the stack is up.
+`fleet-runner` applies a multi-step sequence across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It is a one-shot CLI binary — run it from the directory where your `infrastructure.json` and `.env` reside while the stack is up.
 
 ```bash
 # Dry-run first: see which servers will be targeted and in which stage
@@ -499,7 +499,19 @@ HELPDESK_CLIENT_API_KEY=<fleet-runner-api-key>
 HELPDESK_INFRA_CONFIG=./infrastructure.json
 ```
 
-See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, strategy options, policy configuration, and Kubernetes CronJob setup.
+**Generating a job definition from natural language:** Set `ANTHROPIC_API_KEY` in `.env` and use the gateway planner:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "check connection health on all production databases"}' \
+  | jq -r '.job_def_raw' > jobs/health-check.json
+
+# Or with helpdesk-client:
+./helpdesk-client --plan-fleet-job "check connection health on all production databases"
+```
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.
 
 ## 8. Troubleshooting
 

@@ -216,7 +216,7 @@ aiHelpDesk includes an [AI Governance framework](../../docs/AIGOVERNANCE.md) wit
 | **approvals** | Operator CLI for listing, approving, and denying approval requests | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
-| **fleet-runner** | Staged rollout tool — applies a single change across infrastructure targets (canary → waves) | - |
+| **fleet-runner** | Staged rollout tool — applies multi-step sequences across infrastructure targets (canary → waves → circuit breaker) | - |
 | **helpdesk-client** | Authenticated operator CLI — interactive REPL or one-shot queries through the gateway | - |
 
 ### 3.1 Enabling Governance (Docker Compose)
@@ -356,7 +356,7 @@ GOVBOT_SINCE=7d docker compose --profile governance run --rm govbot
 
 ### 3.8 Running the Fleet Runner (fleet-runner)
 
-`fleet-runner` applies a single change across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It runs under the `--profile fleet` and exits when done.
+`fleet-runner` applies a multi-step sequence across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It runs under the `--profile fleet` and exits when done.
 
 ```bash
 # Dry-run first: see which servers will be targeted and in which stage
@@ -377,7 +377,23 @@ FLEET_RUNNER_API_KEY=<key> FLEET_JOBS_DIR=./jobs \
 
 The `FLEET_JOBS_DIR` variable (default: `./jobs`) is mounted read-only at `/jobs` inside the container. Set `FLEET_RUNNER_API_KEY` in `.env` to the API key for the `fleet-runner` service account.
 
-See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema and strategy options.
+**Generating a job definition from natural language:** The gateway can generate a job file from a plain English description. Set `ANTHROPIC_API_KEY` in `.env`, then:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "check connection health on all production databases"}' \
+  | jq -r '.job_def_raw' > jobs/health-check.json
+```
+
+Or with `helpdesk-client`:
+
+```bash
+docker compose --profile interactive run --rm helpdesk-client \
+  --plan-fleet-job "check connection health on all production databases"
+```
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.
 
 ### 3.9 Security Responder (secbot)
 
@@ -508,7 +524,7 @@ This is an agent-level pre-check, independent of `allowed_purposes` policy condi
 
 ## 4. Using the Gateway API
 
-In addition to the interactive Orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+In addition to the interactive Orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../docs/API.md) for the full endpoint reference (request/response shapes, query parameters, and status codes).
 
 ```bash
 # Query the system

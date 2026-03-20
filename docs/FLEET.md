@@ -1,6 +1,6 @@
 # aiHelpDesk Fleet Runner
 
-`fleet-runner` applies a single operation across a subset of `infrastructure.json` targets with staged rollout. It is designed for operations that need to be repeated safely across many database servers — diagnostic sweeps, configuration checks, table health reports, or targeted write operations (e.g. terminating idle connections) — without manual coordination.
+`fleet-runner` applies a sequence of operations across a subset of `infrastructure.json` targets with staged rollout. It is designed for operations that need to be repeated safely across many database servers — diagnostic sweeps, configuration checks, table health reports, or targeted write operations (e.g. terminating idle connections) — without manual coordination.
 
 ---
 
@@ -8,9 +8,10 @@
 
 1. **Target resolution** — filters `infrastructure.json` by tags, explicit names, or both
 2. **Preflight checks** — verifies each server is reachable before any stage executes
-3. **Canary phase** — applies the change to the first N servers sequentially; any failure aborts the job
-4. **Wave phase** — applies the change to remaining servers in parallel waves; a circuit breaker aborts the job if the failure rate exceeds the configured threshold
-5. **Audit trail** — every tool call carries `X-Purpose: fleet_rollout` and `X-Purpose-Note: job_id=<id> server=<name> stage=<stage>` so the full fleet job is traceable in the Governance audit trail
+3. **Approval gate** — if any step is a write or destructive operation, pauses and waits for human approval before contacting any server
+4. **Canary phase** — applies all steps to the first N servers sequentially; any stop-failure aborts the job
+5. **Wave phase** — applies all steps to remaining servers in parallel waves; a circuit breaker aborts the job if the failure rate exceeds the configured threshold
+6. **Audit trail** — every tool call carries `X-Purpose: fleet_rollout` and `X-Purpose-Note: job_id=<id> server=<name> stage=<stage>` so the full fleet job is traceable in the Governance audit trail
 
 ---
 
@@ -57,9 +58,36 @@ Each step has the following fields:
 | Field | Description |
 |-------|-------------|
 | `agent` | `"database"` or `"k8s"` |
-| `tool` | Tool name. Database tools: `check_connection`, `get_server_info`, `get_database_info`, `get_active_connections`, `get_connection_stats`, `get_database_stats`, `get_config_parameter`, `get_replication_status`, `get_lock_info`, `get_table_stats`, `get_session_info`, `cancel_query`, `terminate_connection`, `terminate_idle_connections`. |
-| `args` | Tool arguments. The server identifier (`connection_string` or `context`) is injected automatically per target. |
+| `tool` | Tool name. Database tools: `check_connection`, `get_server_info`, `get_database_info`, `get_active_connections`, `get_connection_stats`, `get_database_stats`, `get_config_parameter`, `get_replication_status`, `get_lock_info`, `get_table_stats`, `get_session_info`, `cancel_query`, `terminate_connection`, `terminate_idle_connections`. Use `GET /api/v1/tools` to list all available tools with their action classes. |
+| `args` | Tool arguments. The server identifier (`connection_string` or `context`) is injected automatically per target — do not include it here. |
 | `on_failure` | `"stop"` (default) to abort the server on failure, or `"continue"` to log the error and proceed to the next step. |
+
+**Multi-step example** — check connections then collect table stats, continuing past step 1 failures:
+
+```json
+{
+  "name": "prod-health-sweep",
+  "change": {
+    "steps": [
+      {
+        "agent": "database",
+        "tool": "check_connection",
+        "on_failure": "continue"
+      },
+      {
+        "agent": "database",
+        "tool": "get_table_stats",
+        "args": {"schema_name": "public"},
+        "on_failure": "stop"
+      }
+    ]
+  },
+  "targets": {"tags": ["production"]},
+  "strategy": {"canary_count": 1, "wave_size": 5, "failure_threshold": 0.3}
+}
+```
+
+When `on_failure: "continue"` steps fail, the server's overall status is recorded as `partial` rather than `failed`. Whether `partial` counts as a circuit-breaker failure is controlled by `count_partial_as_success`.
 
 ### `targets` object
 
@@ -75,11 +103,47 @@ If neither `tags` nor `names` is specified, all servers in `infrastructure.json`
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `canary_count` | `1` | Number of canary servers (sequential, any failure aborts). |
+| `canary_count` | `1` | Number of canary servers (sequential, any stop-failure aborts). |
 | `wave_size` | `0` | Servers per parallel wave. `0` = all remaining in one wave. |
 | `wave_pause_seconds` | `0` | Pause between waves (seconds). |
 | `failure_threshold` | `0.5` | Fraction of failures that trips the circuit breaker (0.0–1.0). |
 | `dry_run` | `false` | Print the plan without contacting Gateway or auditd. |
+| `count_partial_as_success` | `false` | When `true`, servers with `partial` status (continue-on-failure steps) do not count toward the circuit-breaker failure rate. |
+| `approval_timeout_seconds` | `0` | How long to wait for human approval before aborting. `0` = wait indefinitely. |
+
+---
+
+## Approval gating
+
+When any step in the job has an action class of `write` or `destructive`, fleet runner pauses **before contacting any server** and submits an approval request to auditd. Execution only proceeds after a human explicitly approves.
+
+To approve or deny a pending fleet job approval:
+
+```bash
+# List pending approvals
+curl http://localhost:1199/v1/approvals/pending | jq .
+
+# Approve
+curl -X POST http://localhost:1199/v1/approvals/apr_abc123/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approved_by": "ops-lead", "reason": "Reviewed target list and step plan"}'
+
+# Deny
+curl -X POST http://localhost:1199/v1/approvals/apr_abc123/deny \
+  -H "Content-Type: application/json" \
+  -d '{"denied_by": "ops-lead", "reason": "Too broad — scope to staging first"}'
+```
+
+Or use the `approvals` CLI:
+
+```bash
+./approvals list
+./approvals approve apr_abc123
+```
+
+**Dry-run** prints `APPROVAL WOULD BE REQUIRED` without creating an approval request or contacting any server.
+
+**Timeout:** set `approval_timeout_seconds` in the strategy. If the approval is not resolved within the window, the job is aborted and the approval is cancelled. `0` (default) waits indefinitely.
 
 ---
 
@@ -113,6 +177,97 @@ Environment variables (take precedence over defaults, overridden by flags):
 | `HELPDESK_INFRA_CONFIG` | Path to infrastructure.json |
 | `HELPDESK_FLEET_JOB_FILE` | Path to job file |
 | `HELPDESK_CLIENT_USER` | Identity recorded as `submitted_by` (default: `fleet-runner`) |
+
+---
+
+## Natural language job planner
+
+The gateway can generate a fleet job definition from a plain English description. It builds context from the live infrastructure inventory and tool catalog, calls the LLM, then validates every generated tool name against the tool registry and checks that no restricted server (tagged with `sensitivity`) is targeted without explicit exclusion.
+
+**The planner never submits a job.** It returns a `job_def` for human review; you run it manually with `fleet-runner --job-file`.
+
+### Generate a plan
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "description": "Check connection health on all production databases",
+    "target_hints": ["production", "non-pii"]
+  }' | jq .
+```
+
+Response:
+
+```json
+{
+  "job_def": {
+    "name": "prod-connection-health",
+    "change": {
+      "steps": [
+        {"agent": "database", "tool": "check_connection", "on_failure": "stop"}
+      ]
+    },
+    "targets": {"tags": ["production"], "exclude": ["prod-users-db"]},
+    "strategy": {"canary_count": 1, "wave_size": 0, "failure_threshold": 0.5}
+  },
+  "job_def_raw": "{\n  \"name\": \"prod-connection-health\", ...\n}",
+  "planner_notes": "Runs check_connection on all production servers. prod-users-db excluded because it is tagged pii.",
+  "requires_approval": false,
+  "written_steps": [],
+  "excluded_servers": ["prod-users-db"],
+  "warning_messages": []
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `job_def` | Parsed JobDef object ready to save as JSON. |
+| `job_def_raw` | Pretty-printed JSON string (copy-paste ready). |
+| `planner_notes` | Plain English summary of what the job does and why. |
+| `requires_approval` | `true` if any step has action class `write` or `destructive`. |
+| `written_steps` | Tool names that triggered `requires_approval`. |
+| `excluded_servers` | Servers the planner excluded (usually restricted/PII servers). |
+| `warning_messages` | Non-fatal warnings from the planner (e.g. broad target scope). |
+
+### Save and run the plan
+
+```bash
+# Save the job definition
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Check connection health on all production databases"}' \
+  | jq -r '.job_def_raw' > jobs/prod-health.json
+
+# Review it
+cat jobs/prod-health.json
+
+# Run it (dry-run first)
+./fleet-runner --job-file jobs/prod-health.json --dry-run
+./fleet-runner --job-file jobs/prod-health.json
+```
+
+### Using the helpdesk client
+
+```bash
+./helpdesk-client --plan-fleet-job "terminate idle connections older than 30 minutes on staging" \
+  --target-hints "staging"
+```
+
+The client prints the plan with approval warnings and a ready-to-run command.
+
+### Planner safety guarantees
+
+- **Unknown tools are rejected** with `422`. The planner validates every generated tool name against the live tool registry before returning.
+- **Restricted servers are rejected** with `422`. Any server with a non-empty `sensitivity` field in `infrastructure.json` that appears in the resolved target set causes an error. Refine the description or add the server to `targets.exclude`.
+- **The planner never auto-submits.** A human must review and run the job.
+
+### Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Required for the planner. If not set, `POST /api/v1/fleet/plan` returns `503`. |
+| `HELPDESK_MODEL` | LLM model to use (default: `claude-3-5-haiku-20241022`). |
 
 ---
 
@@ -157,11 +312,18 @@ policies:
         match:
           tags: [production]
     rules:
-      - action: write
-        effect: require_approval
       - action: read
         effect: allow
+      - action: write
+        effect: allow
+        conditions:
+          require_approval: true
+          allowed_purposes: [fleet_rollout]
+      - action: destructive
+        effect: deny
 ```
+
+See `policies.example.yaml` for the full reference policy including the `fleet-runner-policy` entry with row limits and purpose restrictions.
 
 ---
 
@@ -178,7 +340,37 @@ curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123 | jq .
 
 # Get per-server status
 curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/servers | jq .
+
+# Get per-step status for one server
+curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/servers/prod-db-1/steps | jq .
 ```
+
+Per-step response:
+
+```json
+[
+  {
+    "step_index": 0,
+    "tool": "check_connection",
+    "status": "success",
+    "output": "Connection OK — PostgreSQL 16.2",
+    "started_at": "2024-01-15T02:00:01Z",
+    "finished_at": "2024-01-15T02:00:02Z"
+  },
+  {
+    "step_index": 1,
+    "tool": "get_table_stats",
+    "status": "success",
+    "output": "...",
+    "started_at": "2024-01-15T02:00:02Z",
+    "finished_at": "2024-01-15T02:00:04Z"
+  }
+]
+```
+
+Server `status` values: `pending`, `running`, `success`, `partial` (some `continue`-on-failure steps failed), `failed` (a `stop`-on-failure step failed).
+
+Step `status` values: `pending`, `success`, `failed`.
 
 ---
 
@@ -188,7 +380,7 @@ curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/servers | jq .
 ./fleet-runner --job-file jobs/vacuum-prod.json --dry-run
 ```
 
-Output:
+Output (read-only job):
 ```
 DRY RUN — fleet job: vacuum-health-prod-dbs
 Steps (1):
@@ -207,6 +399,11 @@ Strategy:
   failure_threshold:   50%
 
 No gateway or auditd contact (dry run).
+```
+
+For jobs with write or destructive steps:
+```
+APPROVAL WOULD BE REQUIRED: job contains write operations
 ```
 
 ---

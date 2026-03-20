@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -496,5 +499,255 @@ func TestStripMarkdownFences_EmptyString(t *testing.T) {
 	got := stripMarkdownFences("")
 	if got != "" {
 		t.Errorf("stripMarkdownFences(%q) = %q, want empty", "", got)
+	}
+}
+
+// --- handleFleetPlan handler tests ---
+
+// makePlannerGateway builds a Gateway wired for fleet plan tests.
+// reg may be nil (simulates missing tool registry).
+// llmFn may be nil (simulates missing LLM — the handler won't reach it when infra/registry are absent).
+func makePlannerGateway(cfg *infra.Config, reg *toolregistry.Registry, llmFn func(context.Context, string) (string, error)) *Gateway {
+	gw := &Gateway{
+		agents:       make(map[string]*discovery.Agent),
+		clients:      make(map[string]*a2aclient.Client),
+		infra:        cfg,
+		toolRegistry: reg,
+		plannerLLM:   llmFn,
+	}
+	return gw
+}
+
+func postFleetPlan(t *testing.T, gw *Gateway, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/plan", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleFleetPlan_MissingDescription(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{{Name: "check_connection", Agent: "database", ActionClass: "read"}})
+	gw := makePlannerGateway(cfg, reg, nil)
+
+	rec := postFleetPlan(t, gw, `{}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "description") {
+		t.Errorf("body = %q, want mention of description", rec.Body.String())
+	}
+}
+
+func TestHandleFleetPlan_MissingInfra(t *testing.T) {
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{{Name: "check_connection", Agent: "database", ActionClass: "read"}})
+	gw := makePlannerGateway(nil, reg, nil) // nil infra
+
+	rec := postFleetPlan(t, gw, `{"description":"vacuum all prod databases"}`)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(rec.Body.String(), "infrastructure") {
+		t.Errorf("body = %q, want mention of infrastructure", rec.Body.String())
+	}
+}
+
+func TestHandleFleetPlan_MissingRegistry(t *testing.T) {
+	cfg := makeTestInfra()
+	gw := makePlannerGateway(cfg, nil, nil) // nil registry
+
+	rec := postFleetPlan(t, gw, `{"description":"vacuum all prod databases"}`)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(rec.Body.String(), "tool registry") {
+		t.Errorf("body = %q, want mention of tool registry", rec.Body.String())
+	}
+}
+
+func TestHandleFleetPlan_LLMError(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{{Name: "check_connection", Agent: "database", ActionClass: "read"}})
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("upstream timeout")
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"check all prod databases"}`)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+}
+
+func TestHandleFleetPlan_MalformedLLMResponse(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{{Name: "check_connection", Agent: "database", ActionClass: "read"}})
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return "this is not json at all", nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"check all prod databases"}`)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+}
+
+func TestHandleFleetPlan_UnknownTool(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+	})
+	// LLM returns a job with a tool that is not in the registry.
+	llmResp := map[string]any{
+		"job_def": map[string]any{
+			"name": "test-job",
+			"change": map[string]any{
+				"steps": []any{
+					map[string]any{"agent": "database", "tool": "run_sql", "on_failure": "stop"},
+				},
+			},
+			"targets":  map[string]any{"tags": []string{"production"}},
+			"strategy": map[string]any{"canary_count": 1},
+		},
+		"planner_notes": "test",
+	}
+	raw, _ := json.Marshal(llmResp)
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return string(raw), nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"run sql on all dbs"}`)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+	if !strings.Contains(rec.Body.String(), "unknown tool") {
+		t.Errorf("body = %q, want mention of unknown tool", rec.Body.String())
+	}
+}
+
+func TestHandleFleetPlan_RestrictedServer(t *testing.T) {
+	// Infra with one restricted server.
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-users-db": {Tags: []string{"production"}, Sensitivity: []string{"pii"}},
+			"staging-db":    {Tags: []string{"staging"}},
+		},
+	}
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+	})
+	// LLM targets production (which includes the restricted server) without excluding it.
+	llmResp := map[string]any{
+		"job_def": map[string]any{
+			"name": "test-job",
+			"change": map[string]any{
+				"steps": []any{
+					map[string]any{"agent": "database", "tool": "check_connection", "on_failure": "stop"},
+				},
+			},
+			"targets":  map[string]any{"tags": []string{"production"}},
+			"strategy": map[string]any{"canary_count": 1},
+		},
+		"planner_notes": "test",
+	}
+	raw, _ := json.Marshal(llmResp)
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return string(raw), nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"check all production databases"}`)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+	if !strings.Contains(rec.Body.String(), "restricted") {
+		t.Errorf("body = %q, want mention of restricted", rec.Body.String())
+	}
+}
+
+func TestHandleFleetPlan_RequiresApproval(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+		{Name: "terminate_connection", Agent: "database", ActionClass: "destructive"},
+	})
+	llmResp := map[string]any{
+		"job_def": map[string]any{
+			"name": "terminate-job",
+			"change": map[string]any{
+				"steps": []any{
+					map[string]any{"agent": "database", "tool": "terminate_connection", "on_failure": "stop"},
+				},
+			},
+			"targets":  map[string]any{"tags": []string{"staging"}},
+			"strategy": map[string]any{"canary_count": 1},
+		},
+		"planner_notes": "test",
+	}
+	raw, _ := json.Marshal(llmResp)
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return string(raw), nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"terminate idle connections on staging"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp FleetPlanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !resp.RequiresApproval {
+		t.Error("RequiresApproval = false, want true for destructive step")
+	}
+	if len(resp.WrittenSteps) == 0 {
+		t.Error("WrittenSteps is empty, want terminate_connection")
+	}
+}
+
+func TestHandleFleetPlan_ReadOnlyNoApproval(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+	})
+	llmResp := map[string]any{
+		"job_def": map[string]any{
+			"name": "health-check-job",
+			"change": map[string]any{
+				"steps": []any{
+					map[string]any{"agent": "database", "tool": "check_connection", "on_failure": "stop"},
+				},
+			},
+			"targets":  map[string]any{"tags": []string{"staging"}},
+			"strategy": map[string]any{"canary_count": 1},
+		},
+		"planner_notes": "connectivity check",
+	}
+	raw, _ := json.Marshal(llmResp)
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return string(raw), nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"check connectivity on staging"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp FleetPlanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.RequiresApproval {
+		t.Error("RequiresApproval = true, want false for read-only steps")
 	}
 }

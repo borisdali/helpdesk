@@ -43,6 +43,7 @@ type Gateway struct {
 	identityProvider identity.Provider       // resolves caller identity on every request
 	operatingMode    string                  // "readonly" or "fix"
 	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
+	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -57,7 +58,7 @@ func NewGateway(agents map[string]*discovery.Agent) *Gateway {
 		clients[name] = client
 		slog.Info("A2A client ready", "agent", name)
 	}
-	return &Gateway{agents: agents, clients: clients}
+	return &Gateway{agents: agents, clients: clients, plannerLLM: callPlannerLLM}
 }
 
 // SetInfraConfig sets the infrastructure configuration for inventory queries.

@@ -41,11 +41,12 @@ The response header `X-Trace-ID` is set on every agent call. Pass it in the requ
 | Status | Meaning |
 |---|---|
 | `200 OK` | Agent task completed and the response text is the agent's output |
-| `400 Bad Request` | Malformed request (missing required fields, invalid JSON) |
+| `400 Bad Request` | Malformed request (missing required fields, invalid JSON, or unknown tool name) |
 | `401 Unauthorized` | Authentication failed (bad or missing API key / JWT) |
 | `403 Forbidden` | A governance policy denied the operation. The response body contains the full policy denial detail. The audit record status is `denied`. |
+| `422 Unprocessable Entity` | The request was well-formed but failed semantic validation (e.g. fleet planner returned an unknown tool or targeted a restricted server) |
 | `502 Bad Gateway` | The A2A task itself failed (agent runner error), or the agent service is unreachable |
-| `503 Service Unavailable` | A required service (e.g. fleet) is not configured |
+| `503 Service Unavailable` | A required service (e.g. fleet planner, auditd) is not configured |
 
 **Note on `403` vs `200` for policy denials:** For direct tool calls (`/api/v1/db/{tool}`, `/api/v1/k8s/{tool}`), policy denials are detected from the agent response text and returned as `403`. For natural-language queries (`/api/v1/query`), the agent decides how to present a denial in its prose response — the gateway cannot reliably distinguish a policy-blocked tool call from a successful but empty result in that path, so callers should inspect `text` for policy denial details.
 
@@ -70,6 +71,51 @@ curl http://localhost:8080/api/v1/agents
 ```
 
 Response: array of agent objects with `name`, `invoke_url`, `description`, `version`, `skills`.
+
+---
+
+### `GET /api/v1/tools`
+
+List all tools registered in the tool registry, built from the live agent cards. Includes the tool's action class (`read`, `write`, `destructive`) and parameter schema.
+
+```bash
+curl http://localhost:8080/api/v1/tools | jq .
+```
+
+Response: array of tool entries:
+
+```json
+[
+  {
+    "name":         "check_connection",
+    "agent":        "database",
+    "description":  "Test connectivity to a database server",
+    "action_class": "read",
+    "input_schema": { "type": "object", "properties": { ... } }
+  },
+  {
+    "name":         "terminate_connection",
+    "agent":        "database",
+    "description":  "Terminate a specific backend connection by PID",
+    "action_class": "destructive",
+    "input_schema": { ... }
+  }
+]
+```
+
+Use this to discover valid tool names before writing a fleet job definition. Unknown tool names passed to `/api/v1/db/{tool}` or `/api/v1/k8s/{tool}` are rejected with `400` — the list here is the authoritative source.
+
+---
+
+### `GET /api/v1/tools/{toolName}`
+
+Get a single tool by name.
+
+```bash
+curl http://localhost:8080/api/v1/tools/get_table_stats | jq .
+```
+
+Returns `404` if the tool is not registered.
 
 ---
 
@@ -114,9 +160,9 @@ curl http://localhost:8080/api/v1/incidents
 
 ### `POST /api/v1/db/{tool}`
 
-Invoke a specific database agent tool directly by name. The body is a JSON object of tool parameters. Use `GET /api/v1/agents` to discover available tool names via the skills list.
+Invoke a specific database agent tool directly by name. The body is a JSON object of tool parameters. Use `GET /api/v1/tools` to discover valid tool names and their parameter schemas.
 
-**Important:** `{tool}` must be a real tool name exposed by the database agent (e.g. `check_connection`, `get_server_info`). If the tool name does not exist, the agent will return a 200 with a refusal message — the gateway cannot distinguish this from a successful response at the HTTP level. Use `check_connection` to verify connectivity, not a hypothetical `run_sql`.
+**Important:** `{tool}` must be a registered tool name (e.g. `check_connection`, `get_server_info`). Unknown tool names are validated against the tool registry and rejected with `400 Bad Request` before the agent is contacted.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/db/check_replication_lag \
@@ -324,6 +370,86 @@ Single event by ID.
 #### `GET /v1/verify`
 
 Audit chain integrity check (same as gateway `/api/v1/governance/verify`).
+
+---
+
+### Fleet endpoints (gateway → auditd proxies)
+
+All `/api/v1/fleet/*` endpoints require `auditd` to be running and `HELPDESK_AUDIT_URL` set. They return `503` otherwise.
+
+#### `POST /api/v1/fleet/plan`
+
+Generate a fleet job definition from a natural language description. Requires `ANTHROPIC_API_KEY` to be set in the gateway's environment. Returns `503` if not configured.
+
+The planner validates every generated tool name against the tool registry and rejects jobs that target restricted servers (those with a non-empty `sensitivity` in `infrastructure.json`). **The planner never submits a job** — it returns a plan for human review.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `description` | string | yes | Plain English description of what the job should do |
+| `target_hints` | []string | no | Hints to guide target selection (e.g. `["production", "non-pii"]`) |
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "check connection health on all staging databases"}'
+```
+
+Response fields: `job_def`, `job_def_raw`, `planner_notes`, `requires_approval`, `written_steps`, `excluded_servers`, `warning_messages`. See [FLEET.md](FLEET.md#natural-language-job-planner) for full details.
+
+Status codes: `400` (missing description), `422` (unknown tool or restricted server in generated plan), `503` (infra config or tool registry not loaded, or `ANTHROPIC_API_KEY` not set).
+
+---
+
+#### `POST /api/v1/fleet/jobs`
+
+Register a new fleet job in the audit record (called automatically by `fleet-runner`).
+
+#### `GET /api/v1/fleet/jobs`
+
+List recent fleet jobs.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/jobs | jq .
+```
+
+#### `GET /api/v1/fleet/jobs/{jobID}`
+
+Get a specific fleet job, including its full `job_def`, status, and summary.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123 | jq .
+curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123 | jq '.job_def | fromjson'
+```
+
+#### `GET /api/v1/fleet/jobs/{jobID}/servers`
+
+Get per-server execution status for a fleet job.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/servers | jq .
+```
+
+Server `status` values: `pending`, `running`, `success`, `partial`, `failed`.
+
+#### `GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps`
+
+Get per-step execution status for one server within a fleet job.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/servers/prod-db-1/steps | jq .
+```
+
+Returns an array ordered by `step_index`. Each entry includes `tool`, `status`, `output`, `started_at`, `finished_at`. Step `status` values: `pending`, `success`, `failed`.
+
+#### `GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}`
+
+Get the approval status for a fleet job that is waiting for human sign-off. `approvalID` is returned by `fleet-runner` in its logs when it submits the approval request.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/approval/apr_xyz789 | jq .
+```
+
+To approve or deny, use the auditd approval endpoints directly (see below) — the gateway does not proxy write operations on approvals.
 
 ---
 
