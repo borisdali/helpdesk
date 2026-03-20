@@ -37,15 +37,17 @@ const version = "dev"
 
 func main() {
 	var (
-		gatewayURL  = flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway `URL`")
-		userID      = flag.String("user", os.Getenv("HELPDESK_CLIENT_USER"), "User ID (X-User header; static provider)")
-		apiKey      = flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "API key (Authorization: Bearer; service accounts)")
-		purpose     = flag.String("purpose", envOrDefault("HELPDESK_SESSION_PURPOSE", ""), "Session `purpose`: diagnostic, remediation, compliance, emergency")
-		purposeNote = flag.String("purpose-note", os.Getenv("HELPDESK_SESSION_PURPOSE_NOTE"), "Purpose note (e.g. incident ticket number)")
-		agentName   = flag.String("agent", envOrDefault("HELPDESK_CLIENT_AGENT", "database"), "Target `agent`: database, k8s, incident, research")
-		message     = flag.String("message", "", "One-shot `message` — runs a single query and exits")
-		timeout     = flag.Duration("timeout", 5*time.Minute, "Per-request `timeout`")
-		showVersion = flag.Bool("version", false, "Print version and exit")
+		gatewayURL   = flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway `URL`")
+		userID       = flag.String("user", os.Getenv("HELPDESK_CLIENT_USER"), "User ID (X-User header; static provider)")
+		apiKey       = flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "API key (Authorization: Bearer; service accounts)")
+		purpose      = flag.String("purpose", envOrDefault("HELPDESK_SESSION_PURPOSE", ""), "Session `purpose`: diagnostic, remediation, compliance, emergency")
+		purposeNote  = flag.String("purpose-note", os.Getenv("HELPDESK_SESSION_PURPOSE_NOTE"), "Purpose note (e.g. incident ticket number)")
+		agentName    = flag.String("agent", envOrDefault("HELPDESK_CLIENT_AGENT", "database"), "Target `agent`: database, k8s, incident, research")
+		message      = flag.String("message", "", "One-shot `message` — runs a single query and exits")
+		timeout      = flag.Duration("timeout", 5*time.Minute, "Per-request `timeout`")
+		showVersion  = flag.Bool("version", false, "Print version and exit")
+		planFleetJob = flag.String("plan-fleet-job", "", "Plan a fleet job from a natural language description")
+		targetHints  = flag.String("target-hints", "", "Comma-separated target hints for fleet job planning")
 	)
 	flag.Parse()
 
@@ -63,9 +65,19 @@ func main() {
 		Timeout:     *timeout,
 	}
 
-	c := client.New(cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// --plan-fleet-job: does not require a pre-ping (the fleet plan endpoint handles its own auth).
+	if *planFleetJob != "" {
+		if err := runFleetPlan(ctx, cfg, *planFleetJob, *targetHints); err != nil {
+			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	c := client.New(cfg)
 
 	// Verify gateway connectivity and credentials before entering the REPL.
 	if err := c.Ping(ctx); err != nil {

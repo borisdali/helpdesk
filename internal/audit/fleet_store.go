@@ -29,7 +29,20 @@ type FleetJobServer struct {
 	JobID      string    `json:"job_id"`
 	ServerName string    `json:"server_name"`
 	Stage      string    `json:"stage"`  // canary, wave-1, wave-2, ...
-	Status     string    `json:"status"` // pending, running, success, failed, skipped
+	Status     string    `json:"status"` // pending, running, success, partial, failed, skipped
+	Output     string    `json:"output,omitempty"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
+}
+
+// FleetJobServerStep tracks the execution of one step within a server's run.
+type FleetJobServerStep struct {
+	ID         int64     `json:"id,omitempty"`
+	JobID      string    `json:"job_id"`
+	ServerName string    `json:"server_name"`
+	StepIndex  int       `json:"step_index"`
+	Tool       string    `json:"tool"`
+	Status     string    `json:"status"` // pending, success, failed
 	Output     string    `json:"output,omitempty"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
@@ -85,6 +98,18 @@ func (s *FleetStore) createSchema() error {
 )`, pk),
 		`CREATE INDEX IF NOT EXISTS idx_fleet_servers_job_id ON fleet_job_servers(job_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_fleet_servers_status ON fleet_job_servers(status)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS fleet_job_server_steps (
+    id          %s,
+    job_id      TEXT NOT NULL REFERENCES fleet_jobs(job_id),
+    server_name TEXT NOT NULL,
+    step_index  INTEGER NOT NULL,
+    tool        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    output      TEXT,
+    started_at  TEXT,
+    finished_at TEXT
+)`, pk),
+		`CREATE INDEX IF NOT EXISTS idx_fleet_steps_job_server ON fleet_job_server_steps(job_id, server_name)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -238,6 +263,58 @@ func (s *FleetStore) GetJobServers(ctx context.Context, jobID string) ([]*FleetJ
 	return servers, rows.Err()
 }
 
+// AddServerStep inserts a pending step record for a server within a fleet job.
+func (s *FleetStore) AddServerStep(ctx context.Context, step *FleetJobServerStep) error {
+	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
+		INSERT INTO fleet_job_server_steps (job_id, server_name, step_index, tool, status)
+		VALUES (?, ?, ?, ?, ?)
+	`), step.JobID, step.ServerName, step.StepIndex, step.Tool, step.Status)
+	return err
+}
+
+// UpdateServerStep updates the status, output, and timing of a per-step record.
+func (s *FleetStore) UpdateServerStep(ctx context.Context, jobID, serverName string, stepIndex int, status, output string, startedAt, finishedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
+		UPDATE fleet_job_server_steps
+		SET status = ?, output = ?, started_at = ?, finished_at = ?
+		WHERE job_id = ? AND server_name = ? AND step_index = ?
+	`),
+		status,
+		nullableString(output),
+		formatTimeOrNull(startedAt),
+		formatTimeOrNull(finishedAt),
+		jobID,
+		serverName,
+		stepIndex,
+	)
+	return err
+}
+
+// GetServerSteps returns all step records for a given server within a fleet job,
+// ordered by step_index.
+func (s *FleetStore) GetServerSteps(ctx context.Context, jobID, serverName string) ([]*FleetJobServerStep, error) {
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+		SELECT id, job_id, server_name, step_index, tool, status, output, started_at, finished_at
+		FROM fleet_job_server_steps
+		WHERE job_id = ? AND server_name = ?
+		ORDER BY step_index
+	`), jobID, serverName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var steps []*FleetJobServerStep
+	for rows.Next() {
+		step, err := scanFleetJobServerStep(rows)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, step)
+	}
+	return steps, rows.Err()
+}
+
 // --- scan helpers ---
 
 func scanFleetJob(row *sql.Row) (*FleetJob, error) {
@@ -313,4 +390,27 @@ func nullableString(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+func scanFleetJobServerStep(rows *sql.Rows) (*FleetJobServerStep, error) {
+	var step FleetJobServerStep
+	var output sql.NullString
+	var startedAt, finishedAt sql.NullString
+
+	err := rows.Scan(
+		&step.ID, &step.JobID, &step.ServerName, &step.StepIndex, &step.Tool, &step.Status,
+		&output, &startedAt, &finishedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	step.Output = output.String
+	if startedAt.Valid {
+		step.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt.String)
+	}
+	if finishedAt.Valid {
+		step.FinishedAt, _ = time.Parse(time.RFC3339Nano, finishedAt.String)
+	}
+	return &step, nil
 }

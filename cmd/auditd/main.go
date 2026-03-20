@@ -119,7 +119,7 @@ func main() {
 	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier}
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
-	fleetSrv := &fleetServer{store: fleetStore}
+	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
 
@@ -161,6 +161,13 @@ func main() {
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleAddServer)
 	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}", fleetSrv.handleUpdateServer)
 	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleGetServers)
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleAddServerStep)
+	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", fleetSrv.handleUpdateServerStep)
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleGetServerSteps)
+
+	// Fleet job approval endpoints
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/approval", fleetSrv.handleCreateJobApproval)
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/approval/{approvalID}", fleetSrv.handleGetJobApproval)
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", srv.handleHealth)

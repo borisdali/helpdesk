@@ -116,6 +116,105 @@ func TestFleetStore_AddAndUpdateServer(t *testing.T) {
 	}
 }
 
+func TestAddServerStep(t *testing.T) {
+	fs := newFleetTestStore(t)
+	ctx := context.Background()
+
+	job := &FleetJob{Name: "step-test", SubmittedBy: "x", JobDef: "{}"}
+	if err := fs.CreateJob(ctx, job); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	step := &FleetJobServerStep{
+		JobID:      job.JobID,
+		ServerName: "db-1",
+		StepIndex:  0,
+		Tool:       "check_connection",
+		Status:     "pending",
+	}
+	if err := fs.AddServerStep(ctx, step); err != nil {
+		t.Fatalf("AddServerStep: %v", err)
+	}
+
+	// Update it.
+	now := time.Now().UTC()
+	if err := fs.UpdateServerStep(ctx, job.JobID, "db-1", 0, "success", "connected", now, now.Add(time.Second)); err != nil {
+		t.Fatalf("UpdateServerStep: %v", err)
+	}
+
+	steps, err := fs.GetServerSteps(ctx, job.JobID, "db-1")
+	if err != nil {
+		t.Fatalf("GetServerSteps: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(steps))
+	}
+	if steps[0].Status != "success" {
+		t.Errorf("step status = %q, want success", steps[0].Status)
+	}
+	if steps[0].Tool != "check_connection" {
+		t.Errorf("step tool = %q, want check_connection", steps[0].Tool)
+	}
+	if steps[0].Output != "connected" {
+		t.Errorf("step output = %q, want connected", steps[0].Output)
+	}
+}
+
+func TestGetServerSteps_Empty(t *testing.T) {
+	fs := newFleetTestStore(t)
+	ctx := context.Background()
+
+	job := &FleetJob{Name: "empty-steps", SubmittedBy: "x", JobDef: "{}"}
+	if err := fs.CreateJob(ctx, job); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	steps, err := fs.GetServerSteps(ctx, job.JobID, "no-such-server")
+	if err != nil {
+		t.Fatalf("GetServerSteps: %v", err)
+	}
+	if steps != nil {
+		t.Errorf("expected nil steps for unknown server, got %v", steps)
+	}
+}
+
+func TestGetServerSteps_MultipleSteps(t *testing.T) {
+	fs := newFleetTestStore(t)
+	ctx := context.Background()
+
+	job := &FleetJob{Name: "multi-step", SubmittedBy: "x", JobDef: "{}"}
+	if err := fs.CreateJob(ctx, job); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	for i, tool := range []string{"check_connection", "run_sql", "get_table_stats"} {
+		step := &FleetJobServerStep{
+			JobID:      job.JobID,
+			ServerName: "db-2",
+			StepIndex:  i,
+			Tool:       tool,
+			Status:     "pending",
+		}
+		if err := fs.AddServerStep(ctx, step); err != nil {
+			t.Fatalf("AddServerStep[%d]: %v", i, err)
+		}
+	}
+
+	steps, err := fs.GetServerSteps(ctx, job.JobID, "db-2")
+	if err != nil {
+		t.Fatalf("GetServerSteps: %v", err)
+	}
+	if len(steps) != 3 {
+		t.Fatalf("expected 3 steps, got %d", len(steps))
+	}
+	// Verify ordering.
+	for i, step := range steps {
+		if step.StepIndex != i {
+			t.Errorf("steps[%d].StepIndex = %d, want %d", i, step.StepIndex, i)
+		}
+	}
+}
+
 func TestFleetStore_ListJobs(t *testing.T) {
 	fs := newFleetTestStore(t)
 	ctx := context.Background()

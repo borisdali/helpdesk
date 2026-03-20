@@ -12,11 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a2aproject/a2a-go/a2a"
+
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/logging"
+	"helpdesk/internal/toolregistry"
 )
 
 func main() {
@@ -56,6 +59,15 @@ func main() {
 	}
 
 	gw := NewGateway(registry)
+
+	// Build tool registry from discovered agent cards.
+	agentCards := make(map[string]*a2a.AgentCard, len(registry))
+	for name, agent := range registry {
+		agentCards[name] = agent.Card
+	}
+	toolReg := toolregistry.Build(agentCards, audit.ToolClassification)
+	gw.SetToolRegistry(toolReg)
+	slog.Info("tool registry built", "tools", len(toolReg.List()))
 
 	// Initialize identity provider.
 	idProvider, err := identity.NewFromEnv()

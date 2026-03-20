@@ -18,6 +18,7 @@ import (
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
+	"helpdesk/internal/toolregistry"
 )
 
 // agentNameDB is the expected name for the database agent.
@@ -38,9 +39,10 @@ type Gateway struct {
 	clients          map[string]*a2aclient.Client
 	infra            *infra.Config
 	auditor          *audit.GatewayAuditor
-	auditURL         string            // URL to auditd service for governance queries
-	identityProvider identity.Provider // resolves caller identity on every request
-	operatingMode    string            // "readonly" or "fix"
+	auditURL         string                  // URL to auditd service for governance queries
+	identityProvider identity.Provider       // resolves caller identity on every request
+	operatingMode    string                  // "readonly" or "fix"
+	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -81,6 +83,11 @@ func (g *Gateway) SetIdentityProvider(p identity.Provider) {
 // SetOperatingMode sets the operating mode.
 func (g *Gateway) SetOperatingMode(mode string) {
 	g.operatingMode = mode
+}
+
+// SetToolRegistry sets the tool registry for direct tool call validation.
+func (g *Gateway) SetToolRegistry(r *toolregistry.Registry) {
+	g.toolRegistry = r
 }
 
 // resolveRequest extracts the verified principal and declared purpose from an
@@ -131,6 +138,8 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		w.Write([]byte(`{"status":"ok"}` + "\n")) //nolint:errcheck
 	})
 	mux.HandleFunc("GET /api/v1/agents", g.handleListAgents)
+	mux.HandleFunc("GET /api/v1/tools", g.handleListTools)
+	mux.HandleFunc("GET /api/v1/tools/{toolName}", g.handleGetTool)
 	mux.HandleFunc("POST /api/v1/query", g.handleQuery)
 	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
 	mux.HandleFunc("GET /api/v1/incidents", g.handleListIncidents)
@@ -150,11 +159,16 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/governance/journeys", g.handleGovernanceJourneys)
 	mux.HandleFunc("GET /api/v1/governance/govbot/runs", g.handleGovernanceGovbotRuns)
 
+	// Fleet job planner
+	mux.HandleFunc("POST /api/v1/fleet/plan", g.handleFleetPlan)
+
 	// Fleet runner job visibility endpoints
 	mux.HandleFunc("POST /api/v1/fleet/jobs", g.handleFleetCreateJob)
 	mux.HandleFunc("GET /api/v1/fleet/jobs", g.handleFleetListJobs)
 	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}", g.handleFleetGetJob)
 	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers", g.handleFleetGetJobServers)
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps", g.handleFleetGetServerSteps)
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}", g.handleFleetGetJobApproval)
 }
 
 // --- Handlers ---
@@ -203,6 +217,34 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	g.proxyToAgent(w, r, agentName, req.Message)
 }
 
+func (g *Gateway) handleListTools(w http.ResponseWriter, r *http.Request) {
+	if g.toolRegistry == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tools":   []any{},
+			"message": "Tool registry not available.",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tools": g.toolRegistry.List(),
+		"count": len(g.toolRegistry.List()),
+	})
+}
+
+func (g *Gateway) handleGetTool(w http.ResponseWriter, r *http.Request) {
+	toolName := r.PathValue("toolName")
+	if g.toolRegistry == nil {
+		writeError(w, http.StatusServiceUnavailable, "tool registry not available")
+		return
+	}
+	entry, ok := g.toolRegistry.Get(toolName)
+	if !ok {
+		writeError(w, http.StatusNotFound, "tool not found: "+toolName)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
 func (g *Gateway) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	type agentInfo struct {
 		Name        string          `json:"name"`
@@ -245,6 +287,13 @@ func (g *Gateway) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 	toolName := r.PathValue("tool")
+	// Validate tool exists in registry.
+	if g.toolRegistry != nil {
+		if _, ok := g.toolRegistry.Get(toolName); !ok {
+			writeError(w, http.StatusBadRequest, "unknown tool: "+toolName)
+			return
+		}
+	}
 	var args map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -256,6 +305,13 @@ func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
 	toolName := r.PathValue("tool")
+	// Validate tool exists in registry.
+	if g.toolRegistry != nil {
+		if _, ok := g.toolRegistry.Get(toolName); !ok {
+			writeError(w, http.StatusBadRequest, "unknown tool: "+toolName)
+			return
+		}
+	}
 	var args map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -405,6 +461,18 @@ func (g *Gateway) handleFleetGetJob(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleFleetGetJobServers(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("jobID")
 	g.proxyFleetRequest(w, r, "/v1/fleet/jobs/"+jobID+"/servers", r.Method, nil)
+}
+
+func (g *Gateway) handleFleetGetServerSteps(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobID")
+	serverName := r.PathValue("serverName")
+	g.proxyFleetRequest(w, r, "/v1/fleet/jobs/"+jobID+"/servers/"+serverName+"/steps", r.Method, nil)
+}
+
+func (g *Gateway) handleFleetGetJobApproval(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobID")
+	approvalID := r.PathValue("approvalID")
+	g.proxyFleetRequest(w, r, "/v1/fleet/jobs/"+jobID+"/approval/"+approvalID, r.Method, nil)
 }
 
 // proxyFleetRequest forwards a fleet request to the auditd service, preserving method and body.

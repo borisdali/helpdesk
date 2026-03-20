@@ -33,7 +33,7 @@ func TestChunk(t *testing.T) {
 func TestBuildStageAssignments(t *testing.T) {
 	servers := []string{"db-1", "db-2", "db-3", "db-4", "db-5"}
 	strategy := Strategy{CanaryCount: 1, WaveSize: 2, FailureThreshold: 0.5}
-	strategy.defaults()
+	strategy.Defaults()
 
 	assignments := buildStageAssignments(servers, strategy)
 	if len(assignments) != 5 {
@@ -85,4 +85,62 @@ func TestRunWave_CollectsAllResults(t *testing.T) {
 	_ = fmt.Sprintf // keep import
 	_ = errors.New  // keep import
 	_ = context.Background
+}
+
+// TestRunStages_ApprovalGate_ReadOnly verifies that read-only jobs skip the approval gate.
+// When auditURL is empty, the approval functions are never called, and a read-only job
+// proceeds directly to the (mocked) canary phase.
+func TestRunStages_ApprovalGate_ReadOnly(t *testing.T) {
+	// Build a read-only job definition (check_connection = ActionRead).
+	def := &JobDef{
+		Name: "test-read-only",
+		Change: Change{
+			Steps: []Step{
+				{Agent: "db", Tool: "check_connection"},
+			},
+		},
+		Strategy: Strategy{
+			CanaryCount:      1,
+			FailureThreshold: 0.5,
+			DryRun:           false,
+		},
+	}
+	def.Strategy.Defaults()
+
+	// Use empty auditURL so no HTTP calls are made.
+	rcfg := runnerConfig{
+		gatewayURL: "",
+		auditURL:   "",
+		apiKey:     "",
+		jobID:      "test-job-1",
+	}
+
+	// runStages will try to contact the gateway (empty URL) for the canary.
+	// That will fail, but we only care that no approval was attempted.
+	// Since actionClass is ActionRead, the approval block is skipped entirely.
+	// The error we get back is from the gateway call, not from approval logic.
+	err := runStages(context.Background(), rcfg, def, []string{"server-1"})
+
+	// We expect a gateway error (not an approval error).
+	if err == nil {
+		t.Fatal("expected error from gateway call, got nil")
+	}
+	// The error should NOT be approval-related.
+	errStr := err.Error()
+	if contains(errStr, "approval") {
+		t.Errorf("unexpected approval error for read-only job: %v", err)
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || containsStr(s, sub))
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

@@ -65,7 +65,45 @@ func submitJob(ctx context.Context, auditURL, submittedBy string, def *JobDef, s
 		}
 	}
 
+	// Register per-step records for all servers.
+	var serverNames []string
+	for _, sa := range stages {
+		serverNames = append(serverNames, sa.server)
+	}
+	if err := registerJobSteps(ctx, auditURL, created.JobID, serverNames, def.Change.Steps); err != nil {
+		// Non-fatal: step records are best-effort.
+		_ = err
+	}
+
 	return created.JobID, nil
+}
+
+// registerJobSteps registers a pending step record for every (server, step) combination.
+func registerJobSteps(ctx context.Context, auditURL, jobID string, servers []string, steps []Step) error {
+	for _, serverName := range servers {
+		for idx, step := range steps {
+			type stepReq struct {
+				StepIndex int    `json:"step_index"`
+				Tool      string `json:"tool"`
+				Status    string `json:"status"`
+			}
+			req := stepReq{
+				StepIndex: idx,
+				Tool:      step.Tool,
+				Status:    "pending",
+			}
+			body, err := json.Marshal(req)
+			if err != nil {
+				return err
+			}
+			url := fmt.Sprintf("%s/v1/fleet/jobs/%s/servers/%s/steps", auditURL, jobID, serverName)
+			if _, err := auditPost(ctx, url, body); err != nil {
+				// Non-fatal per server/step.
+				_ = err
+			}
+		}
+	}
+	return nil
 }
 
 // finalizeJob updates the job status to completed/failed/aborted with an optional summary.

@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
+	"helpdesk/internal/audit"
+	"helpdesk/internal/fleet"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/logging"
 )
@@ -17,15 +20,16 @@ func main() {
 	remaining := logging.InitLogging(os.Args[1:])
 
 	var (
-		jobFile          = flag.String("job-file", envOrDefault("HELPDESK_FLEET_JOB_FILE", ""), "Path to JSON job definition file")
-		gatewayURL       = flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway URL")
-		auditURL         = flag.String("audit-url", envOrDefault("HELPDESK_AUDIT_URL", "http://localhost:1199"), "Auditd URL for job tracking")
-		apiKey           = flag.String("api-key", envOrDefault("HELPDESK_CLIENT_API_KEY", ""), "Service account API key")
-		infraPath        = flag.String("infra", envOrDefault("HELPDESK_INFRA_CONFIG", "infrastructure.json"), "Path to infrastructure.json")
-		dryRun           = flag.Bool("dry-run", false, "Print plan without contacting gateway or auditd")
-		canaryOverride   = flag.Int("canary", 0, "Override strategy.canary_count")
-		waveSizeOverride = flag.Int("wave-size", 0, "Override strategy.wave_size")
-		pauseOverride    = flag.Int("pause", -1, "Override strategy.wave_pause_seconds")
+		jobFile              = flag.String("job-file", envOrDefault("HELPDESK_FLEET_JOB_FILE", ""), "Path to JSON job definition file")
+		gatewayURL           = flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway URL")
+		auditURL             = flag.String("audit-url", envOrDefault("HELPDESK_AUDIT_URL", "http://localhost:1199"), "Auditd URL for job tracking")
+		apiKey               = flag.String("api-key", envOrDefault("HELPDESK_CLIENT_API_KEY", ""), "Service account API key")
+		infraPath            = flag.String("infra", envOrDefault("HELPDESK_INFRA_CONFIG", "infrastructure.json"), "Path to infrastructure.json")
+		dryRun               = flag.Bool("dry-run", false, "Print plan without contacting gateway or auditd")
+		canaryOverride       = flag.Int("canary", 0, "Override strategy.canary_count")
+		waveSizeOverride     = flag.Int("wave-size", 0, "Override strategy.wave_size")
+		pauseOverride        = flag.Int("pause", -1, "Override strategy.wave_pause_seconds")
+		approvalPollInterval = flag.Duration("approval-poll-interval", 5*time.Second, "How often to poll for approval status")
 	)
 	flag.CommandLine.Parse(remaining) //nolint:errcheck
 
@@ -47,8 +51,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Normalize single-step (Phase 2) job files into multi-step representation.
+	if err := fleet.NormalizeChange(&def.Change); err != nil {
+		slog.Error("invalid change definition", "err", err)
+		os.Exit(1)
+	}
+
 	// Apply strategy overrides from flags.
-	def.Strategy.defaults()
+	def.Strategy.Defaults()
 	if *dryRun {
 		def.Strategy.DryRun = true
 	}
@@ -67,8 +77,8 @@ func main() {
 		slog.Error("job definition missing required field: name")
 		os.Exit(1)
 	}
-	if def.Change.Agent == "" || def.Change.Tool == "" {
-		slog.Error("job definition missing required change fields (agent, tool)")
+	if len(def.Change.Steps) == 0 {
+		slog.Error("job definition has no change steps (agent/tool or steps required)")
 		os.Exit(1)
 	}
 
@@ -131,17 +141,19 @@ func main() {
 
 	// Execute the staged rollout.
 	rcfg := runnerConfig{
-		gatewayURL: *gatewayURL,
-		auditURL:   *auditURL,
-		apiKey:     *apiKey,
-		jobID:      jobID,
+		gatewayURL:           *gatewayURL,
+		auditURL:             *auditURL,
+		apiKey:               *apiKey,
+		jobID:                jobID,
+		submittedBy:          submittedBy,
+		approvalPollInterval: *approvalPollInterval,
 	}
 
 	runErr := runStages(ctx, rcfg, &def, servers)
 
 	// Finalize job record.
 	status := "completed"
-	summary := fmt.Sprintf("Applied %s/%s to %d server(s).", def.Change.Agent, def.Change.Tool, len(servers))
+	summary := fmt.Sprintf("Applied %d step(s) to %d server(s).", len(def.Change.Steps), len(servers))
 	if runErr != nil {
 		status = "failed"
 		summary = fmt.Sprintf("Failed: %v", runErr)
@@ -163,7 +175,21 @@ func main() {
 // printDryRunPlan prints the resolved server list and stage plan without contacting any service.
 func printDryRunPlan(def *JobDef, servers []string) {
 	fmt.Printf("DRY RUN — fleet job: %s\n", def.Name)
-	fmt.Printf("Change: %s/%s\n", def.Change.Agent, def.Change.Tool)
+	fmt.Printf("Steps (%d):\n", len(def.Change.Steps))
+	for i, step := range def.Change.Steps {
+		onFail := step.OnFailure
+		if onFail == "" {
+			onFail = "stop"
+		}
+		fmt.Printf("  [%d] %s/%s  (on_failure=%s)\n", i+1, step.Agent, step.Tool, onFail)
+	}
+
+	// Show approval requirement if any step is write or destructive.
+	actionClass := jobActionClass(def.Change.Steps)
+	if actionClass == audit.ActionWrite || actionClass == audit.ActionDestructive {
+		fmt.Printf("\nAPPROVAL WOULD BE REQUIRED: job contains %s operations\n", actionClass)
+	}
+
 	fmt.Printf("Resolved servers (%d):\n", len(servers))
 
 	assignments := buildStageAssignments(servers, def.Strategy)

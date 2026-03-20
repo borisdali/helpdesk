@@ -10,6 +10,8 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/infra"
+	"helpdesk/internal/toolregistry"
 )
 
 // --- extractText tests ---
@@ -273,5 +275,126 @@ func TestHandleResearch_AgentNotAvailable(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "not available") {
 		t.Errorf("body = %q, want error about agent not available", rec.Body.String())
+	}
+}
+
+// --- Tool registry handler tests ---
+
+func makeRegistryWithTools(entries []toolregistry.ToolEntry) *toolregistry.Registry {
+	return toolregistry.New(entries)
+}
+
+func TestHandleDBTool_UnknownTool(t *testing.T) {
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+		{Name: "get_server_info", Agent: "database", ActionClass: "read"},
+	})
+	gw := &Gateway{
+		agents:       make(map[string]*discovery.Agent),
+		clients:      make(map[string]*a2aclient.Client),
+		toolRegistry: reg,
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/no_such_tool", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d (bad request for unknown tool)", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "unknown tool") {
+		t.Errorf("body = %q, want error mentioning unknown tool", rec.Body.String())
+	}
+}
+
+func TestHandleDBTool_KnownTool(t *testing.T) {
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+	})
+	gw := &Gateway{
+		agents:       make(map[string]*discovery.Agent),
+		clients:      make(map[string]*a2aclient.Client), // no actual agent — will get 502
+		toolRegistry: reg,
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/check_connection", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	// Registry validation passes — should reach the agent lookup (502 because no agent configured).
+	if rec.Code == http.StatusBadRequest {
+		t.Errorf("status = %d (BadRequest), want registry validation to pass for known tool", rec.Code)
+	}
+	// Expect 502 because the DB agent client is not set up.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d (agent not available after registry passes)", rec.Code, http.StatusBadGateway)
+	}
+}
+
+// --- Planner helper tests ---
+
+func TestBuildPlannerInfraContext_Restricted(t *testing.T) {
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-users-db": {
+				Name:        "Users Production Database",
+				Tags:        []string{"production"},
+				Sensitivity: []string{"pii"},
+			},
+			"staging-db": {
+				Name: "Staging Database",
+				Tags: []string{"staging"},
+			},
+		},
+	}
+
+	summary, restricted := buildPlannerInfraContext(cfg)
+
+	if !strings.Contains(summary, "[RESTRICTED]") {
+		t.Error("summary should contain [RESTRICTED] for pii server")
+	}
+	if !strings.Contains(summary, "prod-users-db") {
+		t.Error("summary should contain prod-users-db")
+	}
+	if len(restricted) != 1 {
+		t.Errorf("restricted len = %d, want 1", len(restricted))
+	}
+	if restricted[0] != "prod-users-db" {
+		t.Errorf("restricted[0] = %q, want %q", restricted[0], "prod-users-db")
+	}
+}
+
+func TestBuildPlannerToolCatalog(t *testing.T) {
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read", Description: "Test DB connectivity"},
+		{Name: "cancel_query", Agent: "database", ActionClass: "write", Description: "Cancel a running query"},
+	})
+
+	catalog := buildPlannerToolCatalog(reg)
+
+	if !strings.Contains(catalog, "check_connection") {
+		t.Error("catalog should contain check_connection")
+	}
+	if !strings.Contains(catalog, "cancel_query") {
+		t.Error("catalog should contain cancel_query")
+	}
+	if !strings.Contains(catalog, "agent=database") {
+		t.Error("catalog should contain agent=database")
+	}
+	if !strings.Contains(catalog, "class=read") {
+		t.Error("catalog should contain class=read")
+	}
+	if !strings.Contains(catalog, "class=write") {
+		t.Error("catalog should contain class=write")
 	}
 }
