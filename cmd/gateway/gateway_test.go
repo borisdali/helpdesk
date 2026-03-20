@@ -10,6 +10,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/fleet"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
 )
@@ -396,5 +397,104 @@ func TestBuildPlannerToolCatalog(t *testing.T) {
 	}
 	if !strings.Contains(catalog, "class=write") {
 		t.Error("catalog should contain class=write")
+	}
+}
+
+// --- resolveTargetsFromInfra tests ---
+
+func makeTestInfra() *infra.Config {
+	return &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db-1": {Tags: []string{"production"}},
+			"prod-db-2": {Tags: []string{"production"}},
+			"staging-db": {Tags: []string{"staging"}},
+			"dev-db":     {Tags: []string{"development"}},
+		},
+	}
+}
+
+func TestResolveTargetsFromInfra_TagMatch(t *testing.T) {
+	cfg := makeTestInfra()
+	targets := fleet.Targets{Tags: []string{"production"}}
+	got := resolveTargetsFromInfra(cfg, targets)
+	if len(got) != 2 {
+		t.Errorf("len = %d, want 2 production servers", len(got))
+	}
+	for _, s := range got {
+		if s != "prod-db-1" && s != "prod-db-2" {
+			t.Errorf("unexpected server %q in result", s)
+		}
+	}
+}
+
+func TestResolveTargetsFromInfra_NameMatch(t *testing.T) {
+	cfg := makeTestInfra()
+	targets := fleet.Targets{Names: []string{"staging-db", "dev-db"}}
+	got := resolveTargetsFromInfra(cfg, targets)
+	if len(got) != 2 {
+		t.Errorf("len = %d, want 2", len(got))
+	}
+}
+
+func TestResolveTargetsFromInfra_Exclude(t *testing.T) {
+	cfg := makeTestInfra()
+	targets := fleet.Targets{Tags: []string{"production"}, Exclude: []string{"prod-db-1"}}
+	got := resolveTargetsFromInfra(cfg, targets)
+	if len(got) != 1 {
+		t.Errorf("len = %d, want 1 (prod-db-1 excluded)", len(got))
+	}
+	if got[0] != "prod-db-2" {
+		t.Errorf("got[0] = %q, want prod-db-2", got[0])
+	}
+}
+
+func TestResolveTargetsFromInfra_AllServers(t *testing.T) {
+	cfg := makeTestInfra()
+	targets := fleet.Targets{} // no filters → all servers
+	got := resolveTargetsFromInfra(cfg, targets)
+	if len(got) != 4 {
+		t.Errorf("len = %d, want 4 (all servers)", len(got))
+	}
+}
+
+func TestResolveTargetsFromInfra_NilConfig(t *testing.T) {
+	got := resolveTargetsFromInfra(nil, fleet.Targets{Tags: []string{"production"}})
+	if got != nil {
+		t.Errorf("got %v, want nil for nil config", got)
+	}
+}
+
+// --- stripMarkdownFences tests ---
+
+func TestStripMarkdownFences_NoFences(t *testing.T) {
+	input := `{"key": "value"}`
+	got := stripMarkdownFences(input)
+	if got != input {
+		t.Errorf("stripMarkdownFences(%q) = %q, want unchanged", input, got)
+	}
+}
+
+func TestStripMarkdownFences_JSONFences(t *testing.T) {
+	input := "```json\n{\"key\": \"value\"}\n```"
+	got := stripMarkdownFences(input)
+	want := `{"key": "value"}`
+	if got != want {
+		t.Errorf("stripMarkdownFences = %q, want %q", got, want)
+	}
+}
+
+func TestStripMarkdownFences_PlainFences(t *testing.T) {
+	input := "```\n{\"key\": \"value\"}\n```"
+	got := stripMarkdownFences(input)
+	want := `{"key": "value"}`
+	if got != want {
+		t.Errorf("stripMarkdownFences = %q, want %q", got, want)
+	}
+}
+
+func TestStripMarkdownFences_EmptyString(t *testing.T) {
+	got := stripMarkdownFences("")
+	if got != "" {
+		t.Errorf("stripMarkdownFences(%q) = %q, want empty", "", got)
 	}
 }

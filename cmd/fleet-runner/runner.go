@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"helpdesk/internal/fleet"
 )
 
 // runnerConfig holds the connection info needed to execute a change against one server.
@@ -36,26 +38,9 @@ type serverResult struct {
 	err    error // set if server is overall "failed" (stop-on-failure triggered)
 }
 
-// executeChange is the Phase 2 compatibility wrapper: runs a single-step change.
-// Used by tests that pre-date Phase 3.
-func executeChange(ctx context.Context, cfg runnerConfig, serverName, stage string, change Change) (string, error) {
-	if len(change.Steps) == 0 {
-		return "", fmt.Errorf("executeChange: change has no steps")
-	}
-	res := executeSteps(ctx, cfg, serverName, stage, change.Steps)
-	// Collect combined output.
-	var output string
-	for _, sr := range res.steps {
-		if sr.output != "" {
-			output = sr.output
-		}
-	}
-	return output, res.err
-}
-
 // executeSteps applies all steps to a single server, updating per-server and
 // per-step status in auditd before and after each tool call.
-func executeSteps(ctx context.Context, cfg runnerConfig, serverName, stage string, steps []Step) serverResult {
+func executeSteps(ctx context.Context, cfg runnerConfig, serverName, stage string, steps []fleet.Step) serverResult {
 	res := serverResult{server: serverName}
 
 	// Mark server as running.
@@ -122,7 +107,7 @@ func executeSteps(ctx context.Context, cfg runnerConfig, serverName, stage strin
 }
 
 // callGatewayTool sends the tool call to the gateway with fleet_rollout purpose headers.
-func callGatewayTool(ctx context.Context, cfg runnerConfig, serverName, stage string, step Step) (string, error) {
+func callGatewayTool(ctx context.Context, cfg runnerConfig, serverName, stage string, step fleet.Step) (string, error) {
 	// Inject the target server name into a copy of the args.
 	args := make(map[string]any, len(step.Args)+1)
 	for k, v := range step.Args {

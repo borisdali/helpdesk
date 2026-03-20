@@ -3,12 +3,13 @@ package main
 import (
 	"fmt"
 
+	"helpdesk/internal/fleet"
 	"helpdesk/internal/infra"
 )
 
 // resolveTargets filters infra.DBServers according to the Targets spec and
 // returns the ordered list of server names to process.
-func resolveTargets(cfg *infra.Config, targets Targets) ([]string, error) {
+func resolveTargets(cfg *infra.Config, targets fleet.Targets) ([]string, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("no infrastructure configuration loaded (set HELPDESK_INFRA_CONFIG)")
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"helpdesk/internal/fleet"
 	"helpdesk/internal/infra"
 )
 
@@ -19,7 +20,7 @@ func makeInfra() *infra.Config {
 
 func TestResolveTargets_ByTag(t *testing.T) {
 	cfg := makeInfra()
-	targets := Targets{Tags: []string{"production"}}
+	targets := fleet.Targets{Tags: []string{"production"}}
 	servers, err := resolveTargets(cfg, targets)
 	if err != nil {
 		t.Fatalf("resolveTargets: %v", err)
@@ -31,7 +32,7 @@ func TestResolveTargets_ByTag(t *testing.T) {
 
 func TestResolveTargets_ByName(t *testing.T) {
 	cfg := makeInfra()
-	targets := Targets{Names: []string{"stage-db", "dev-db"}}
+	targets := fleet.Targets{Names: []string{"stage-db", "dev-db"}}
 	servers, err := resolveTargets(cfg, targets)
 	if err != nil {
 		t.Fatalf("resolveTargets: %v", err)
@@ -43,7 +44,7 @@ func TestResolveTargets_ByName(t *testing.T) {
 
 func TestResolveTargets_Exclude(t *testing.T) {
 	cfg := makeInfra()
-	targets := Targets{Tags: []string{"production"}, Exclude: []string{"prod-db-2"}}
+	targets := fleet.Targets{Tags: []string{"production"}, Exclude: []string{"prod-db-2"}}
 	servers, err := resolveTargets(cfg, targets)
 	if err != nil {
 		t.Fatalf("resolveTargets: %v", err)
@@ -58,7 +59,7 @@ func TestResolveTargets_Exclude(t *testing.T) {
 
 func TestResolveTargets_All(t *testing.T) {
 	cfg := makeInfra()
-	targets := Targets{} // no filters — selects all
+	targets := fleet.Targets{} // no filters — selects all
 	servers, err := resolveTargets(cfg, targets)
 	if err != nil {
 		t.Fatalf("resolveTargets: %v", err)
@@ -69,7 +70,7 @@ func TestResolveTargets_All(t *testing.T) {
 }
 
 func TestResolveTargets_NilInfra(t *testing.T) {
-	_, err := resolveTargets(nil, Targets{})
+	_, err := resolveTargets(nil, fleet.Targets{})
 	if err == nil {
 		t.Fatal("expected error for nil infra config")
 	}

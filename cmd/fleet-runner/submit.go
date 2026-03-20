@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/fleet"
 )
 
 // submitJob creates the fleet job record in auditd and registers all target
 // servers as pending. Returns the generated job ID.
-func submitJob(ctx context.Context, auditURL, submittedBy string, def *JobDef, servers []string, stages []stageAssignment) (string, error) {
+func submitJob(ctx context.Context, auditURL, submittedBy string, def *fleet.JobDef, servers []string, stages []stageAssignment) (string, error) {
 	if auditURL == "" {
 		return "", fmt.Errorf("auditd URL not configured (set HELPDESK_AUDIT_URL)")
 	}
@@ -79,7 +80,7 @@ func submitJob(ctx context.Context, auditURL, submittedBy string, def *JobDef, s
 }
 
 // registerJobSteps registers a pending step record for every (server, step) combination.
-func registerJobSteps(ctx context.Context, auditURL, jobID string, servers []string, steps []Step) error {
+func registerJobSteps(ctx context.Context, auditURL, jobID string, servers []string, steps []fleet.Step) error {
 	for _, serverName := range servers {
 		for idx, step := range steps {
 			type stepReq struct {
@@ -154,7 +155,7 @@ type stageAssignment struct {
 }
 
 // buildStageAssignments returns the stage name for each server given strategy.
-func buildStageAssignments(servers []string, strategy Strategy) []stageAssignment {
+func buildStageAssignments(servers []string, strategy fleet.Strategy) []stageAssignment {
 	canaryCount := strategy.CanaryCount
 	if canaryCount > len(servers) {
 		canaryCount = len(servers)

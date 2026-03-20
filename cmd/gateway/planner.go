@@ -95,14 +95,6 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 
 	// Validate: all step tool names must exist in the registry.
 	steps := jobDef.Change.Steps
-	if len(steps) == 0 && jobDef.Change.Tool != "" {
-		// Single-step legacy form.
-		steps = []fleet.Step{{
-			Agent: jobDef.Change.Agent,
-			Tool:  jobDef.Change.Tool,
-			Args:  jobDef.Change.Args,
-		}}
-	}
 	for _, step := range steps {
 		if _, ok := g.toolRegistry.Get(step.Tool); !ok {
 			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("planner returned unknown tool %q", step.Tool))

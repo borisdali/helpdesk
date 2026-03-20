@@ -4,10 +4,11 @@ import (
 	"testing"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/fleet"
 )
 
 func TestJobActionClass_ReadOnly(t *testing.T) {
-	steps := []Step{
+	steps := []fleet.Step{
 		{Tool: "check_connection"},
 		{Tool: "get_table_stats"},
 	}
@@ -18,7 +19,7 @@ func TestJobActionClass_ReadOnly(t *testing.T) {
 }
 
 func TestJobActionClass_WriteStep(t *testing.T) {
-	steps := []Step{
+	steps := []fleet.Step{
 		{Tool: "check_connection"},
 		{Tool: "cancel_query"},
 	}
@@ -29,7 +30,7 @@ func TestJobActionClass_WriteStep(t *testing.T) {
 }
 
 func TestJobActionClass_DestructiveStep(t *testing.T) {
-	steps := []Step{
+	steps := []fleet.Step{
 		{Tool: "get_running_queries"},
 		{Tool: "terminate_connection"},
 	}
@@ -40,7 +41,7 @@ func TestJobActionClass_DestructiveStep(t *testing.T) {
 }
 
 func TestJobActionClass_Mixed(t *testing.T) {
-	steps := []Step{
+	steps := []fleet.Step{
 		{Tool: "check_connection"},  // read
 		{Tool: "cancel_query"},      // write
 		{Tool: "delete_pod"},        // destructive

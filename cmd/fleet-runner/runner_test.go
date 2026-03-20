@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"helpdesk/internal/fleet"
 )
 
 // --- callGatewayTool ---
@@ -29,7 +31,7 @@ func TestCallGatewayTool_HeadersInjected(t *testing.T) {
 		gatewayURL: srv.URL,
 		jobID:      "flj_abc123",
 	}
-	step := Step{Agent: "database", Tool: "run_sql", Args: map[string]any{"sql": "SELECT 1"}}
+	step := fleet.Step{Agent: "database", Tool: "run_sql", Args: map[string]any{"sql": "SELECT 1"}}
 
 	_, err := callGatewayTool(context.Background(), cfg, "prod-db-1", "canary", step)
 	if err != nil {
@@ -60,7 +62,7 @@ func TestCallGatewayTool_ServerInjected(t *testing.T) {
 	defer srv.Close()
 
 	cfg := runnerConfig{gatewayURL: srv.URL, jobID: "flj_x"}
-	step := Step{Agent: "database", Tool: "vacuum_analyze", Args: map[string]any{}}
+	step := fleet.Step{Agent: "database", Tool: "vacuum_analyze", Args: map[string]any{}}
 
 	_, err := callGatewayTool(context.Background(), cfg, "my-db", "wave-1", step)
 	if err != nil {
@@ -83,7 +85,7 @@ func TestCallGatewayTool_K8sRoutesCorrectly(t *testing.T) {
 	defer srv.Close()
 
 	cfg := runnerConfig{gatewayURL: srv.URL, jobID: "flj_y"}
-	step := Step{Agent: "k8s", Tool: "get_pods", Args: map[string]any{}}
+	step := fleet.Step{Agent: "k8s", Tool: "get_pods", Args: map[string]any{}}
 
 	callGatewayTool(context.Background(), cfg, "cluster-1", "canary", step) //nolint:errcheck
 
@@ -100,7 +102,7 @@ func TestCallGatewayTool_Non200ReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	cfg := runnerConfig{gatewayURL: srv.URL, jobID: "flj_z"}
-	step := Step{Agent: "database", Tool: "run_sql", Args: map[string]any{}}
+	step := fleet.Step{Agent: "database", Tool: "run_sql", Args: map[string]any{}}
 
 	_, err := callGatewayTool(context.Background(), cfg, "db-1", "canary", step)
 	if err == nil {
@@ -122,7 +124,7 @@ func TestCallGatewayTool_APIKeyHeader(t *testing.T) {
 	defer srv.Close()
 
 	cfg := runnerConfig{gatewayURL: srv.URL, jobID: "flj_k", apiKey: "test-secret-key"}
-	step := Step{Agent: "database", Tool: "run_sql", Args: map[string]any{}}
+	step := fleet.Step{Agent: "database", Tool: "run_sql", Args: map[string]any{}}
 
 	callGatewayTool(context.Background(), cfg, "db-1", "canary", step) //nolint:errcheck
 
@@ -171,75 +173,6 @@ func TestPatchServerStatus_NoAuditURL(t *testing.T) {
 	}
 }
 
-// --- executeChange (Phase 2 compat wrapper) ---
-
-func TestExecuteChange_SuccessUpdatesStatus(t *testing.T) {
-	// Gateway returns success; auditd receives two PATCH calls (running → success).
-	patchCount := 0
-	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPatch {
-			patchCount++
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer auditSrv.Close()
-
-	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"text": "ok"}) //nolint:errcheck
-	}))
-	defer gatewaySrv.Close()
-
-	cfg := runnerConfig{gatewayURL: gatewaySrv.URL, auditURL: auditSrv.URL, jobID: "flj_e1"}
-	change := Change{Agent: "database", Tool: "run_sql", Args: map[string]any{}}
-	// NormalizeChange so executeChange has Steps.
-	change.Steps = []Step{{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"}}
-
-	output, err := executeChange(context.Background(), cfg, "db-1", "canary", change)
-	if err != nil {
-		t.Fatalf("executeChange: %v", err)
-	}
-	if output == "" {
-		t.Error("expected non-empty output")
-	}
-	if patchCount < 2 {
-		t.Errorf("expected at least 2 PATCH calls to auditd (running + success), got %d", patchCount)
-	}
-}
-
-func TestExecuteChange_FailureUpdatesStatusFailed(t *testing.T) {
-	var lastStatus string
-	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPatch {
-			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
-			if s, ok := body["status"].(string); ok {
-				lastStatus = s
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer auditSrv.Close()
-
-	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "tool failed", http.StatusInternalServerError)
-	}))
-	defer gatewaySrv.Close()
-
-	cfg := runnerConfig{gatewayURL: gatewaySrv.URL, auditURL: auditSrv.URL, jobID: "flj_e2"}
-	change := Change{
-		Steps: []Step{{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"}},
-	}
-
-	_, err := executeChange(context.Background(), cfg, "db-1", "canary", change)
-	if err == nil {
-		t.Fatal("expected error for failed tool call")
-	}
-	if lastStatus != "failed" {
-		t.Errorf("final auditd status = %q, want failed", lastStatus)
-	}
-}
-
 // --- runStages: canary abort ---
 
 func TestRunStages_CanaryFailureAbortsJob(t *testing.T) {
@@ -259,11 +192,11 @@ func TestRunStages_CanaryFailureAbortsJob(t *testing.T) {
 	cfg := runnerConfig{gatewayURL: gatewaySrv.URL, auditURL: auditSrv.URL, jobID: "flj_canary"}
 
 	servers := []string{"db-1", "db-2", "db-3", "db-4"}
-	def := &JobDef{
-		Change: Change{
-			Steps: []Step{{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"}},
+	def := &fleet.JobDef{
+		Change: fleet.Change{
+			Steps: []fleet.Step{{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"}},
 		},
-		Strategy: Strategy{CanaryCount: 1, WaveSize: 3, FailureThreshold: 0.5},
+		Strategy: fleet.Strategy{CanaryCount: 1, WaveSize: 3, FailureThreshold: 0.5},
 	}
 
 	gwCallCount := 0
@@ -312,11 +245,11 @@ func TestRunStages_CircuitBreakerAbortsWaves(t *testing.T) {
 
 	cfg := runnerConfig{gatewayURL: srv.URL, auditURL: auditSrv.URL, jobID: "flj_cb"}
 	servers := []string{"db-canary", "db-w1", "db-w2"}
-	def := &JobDef{
-		Change: Change{
-			Steps: []Step{{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"}},
+	def := &fleet.JobDef{
+		Change: fleet.Change{
+			Steps: []fleet.Step{{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"}},
 		},
-		Strategy: Strategy{CanaryCount: 1, WaveSize: 2, FailureThreshold: 0.5},
+		Strategy: fleet.Strategy{CanaryCount: 1, WaveSize: 2, FailureThreshold: 0.5},
 	}
 
 	err := runStages(context.Background(), cfg, def, servers)
@@ -353,7 +286,7 @@ func TestExecuteSteps_StopOnFailure(t *testing.T) {
 	defer auditSrv.Close()
 
 	cfg := runnerConfig{gatewayURL: gatewaySrv.URL, auditURL: auditSrv.URL, jobID: "flj_stop"}
-	steps := []Step{
+	steps := []fleet.Step{
 		{Agent: "database", Tool: "check_connection", Args: map[string]any{}, OnFailure: "stop"},
 		{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"},
 		{Agent: "database", Tool: "run_sql", Args: map[string]any{"sql": "SELECT 2"}, OnFailure: "stop"},
@@ -408,7 +341,7 @@ func TestExecuteSteps_ContinueOnFailure(t *testing.T) {
 	defer auditSrv.Close()
 
 	cfg := runnerConfig{gatewayURL: gatewaySrv.URL, auditURL: auditSrv.URL, jobID: "flj_cont"}
-	steps := []Step{
+	steps := []fleet.Step{
 		{Agent: "database", Tool: "check_connection", Args: map[string]any{}, OnFailure: "continue"},
 		{Agent: "database", Tool: "run_sql", Args: map[string]any{}, OnFailure: "stop"},
 	}

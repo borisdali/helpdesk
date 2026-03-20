@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"helpdesk/internal/fleet"
 )
 
 // TestChunk verifies the wave chunking logic.
@@ -32,7 +34,7 @@ func TestChunk(t *testing.T) {
 // TestBuildStageAssignments checks canary and wave labelling.
 func TestBuildStageAssignments(t *testing.T) {
 	servers := []string{"db-1", "db-2", "db-3", "db-4", "db-5"}
-	strategy := Strategy{CanaryCount: 1, WaveSize: 2, FailureThreshold: 0.5}
+	strategy := fleet.Strategy{CanaryCount: 1, WaveSize: 2, FailureThreshold: 0.5}
 	strategy.Defaults()
 
 	assignments := buildStageAssignments(servers, strategy)
@@ -92,14 +94,14 @@ func TestRunWave_CollectsAllResults(t *testing.T) {
 // proceeds directly to the (mocked) canary phase.
 func TestRunStages_ApprovalGate_ReadOnly(t *testing.T) {
 	// Build a read-only job definition (check_connection = ActionRead).
-	def := &JobDef{
+	def := &fleet.JobDef{
 		Name: "test-read-only",
-		Change: Change{
-			Steps: []Step{
+		Change: fleet.Change{
+			Steps: []fleet.Step{
 				{Agent: "db", Tool: "check_connection"},
 			},
 		},
-		Strategy: Strategy{
+		Strategy: fleet.Strategy{
 			CanaryCount:      1,
 			FailureThreshold: 0.5,
 			DryRun:           false,

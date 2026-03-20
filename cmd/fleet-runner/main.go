@@ -45,15 +45,9 @@ func main() {
 		slog.Error("failed to read job file", "path", *jobFile, "err", err)
 		os.Exit(1)
 	}
-	var def JobDef
+	var def fleet.JobDef
 	if err := json.Unmarshal(defData, &def); err != nil {
 		slog.Error("failed to parse job file", "err", err)
-		os.Exit(1)
-	}
-
-	// Normalize single-step (Phase 2) job files into multi-step representation.
-	if err := fleet.NormalizeChange(&def.Change); err != nil {
-		slog.Error("invalid change definition", "err", err)
 		os.Exit(1)
 	}
 
@@ -78,7 +72,7 @@ func main() {
 		os.Exit(1)
 	}
 	if len(def.Change.Steps) == 0 {
-		slog.Error("job definition has no change steps (agent/tool or steps required)")
+		slog.Error("job definition has no change steps (steps required)")
 		os.Exit(1)
 	}
 
@@ -173,7 +167,7 @@ func main() {
 }
 
 // printDryRunPlan prints the resolved server list and stage plan without contacting any service.
-func printDryRunPlan(def *JobDef, servers []string) {
+func printDryRunPlan(def *fleet.JobDef, servers []string) {
 	fmt.Printf("DRY RUN — fleet job: %s\n", def.Name)
 	fmt.Printf("Steps (%d):\n", len(def.Change.Steps))
 	for i, step := range def.Change.Steps {

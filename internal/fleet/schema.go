@@ -1,8 +1,6 @@
 // Package fleet defines the shared schema types for fleet-runner job definitions.
 package fleet
 
-import "fmt"
-
 // Step is one operation within a multi-step Change sequence.
 type Step struct {
 	Agent string         `json:"agent"`
@@ -24,12 +22,7 @@ type JobDef struct {
 
 // Change describes the operation(s) to execute on each target server.
 type Change struct {
-	// Single-step fields (Phase 2 compat). Ignored when Steps is non-empty.
-	Agent string         `json:"agent,omitempty"`
-	Tool  string         `json:"tool,omitempty"`
-	Args  map[string]any `json:"args,omitempty"`
-	// Steps is the Phase 3 multi-step sequence.
-	// If non-empty, Agent/Tool/Args above are ignored after NormalizeChange.
+	// Steps is the multi-step sequence of operations to run on each target.
 	Steps []Step `json:"steps,omitempty"`
 }
 
@@ -80,21 +73,3 @@ func (s *Strategy) Defaults() {
 	s.defaults()
 }
 
-// NormalizeChange converts a single-step Change into its Steps representation.
-// Phase 2 jobs with only Agent/Tool/Args are transparently upgraded.
-// Must be called once after loading a JobDef.
-func NormalizeChange(c *Change) error {
-	if len(c.Steps) > 0 {
-		return nil
-	}
-	if c.Tool == "" {
-		return fmt.Errorf("change must specify either 'tool' (single-step) or 'steps' (multi-step)")
-	}
-	c.Steps = []Step{{
-		Agent:     c.Agent,
-		Tool:      c.Tool,
-		Args:      c.Args,
-		OnFailure: "stop",
-	}}
-	return nil
-}

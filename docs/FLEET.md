@@ -22,11 +22,14 @@ Fleet runner reads a JSON file describing the job:
 {
   "name": "vacuum-health-prod-dbs",
   "change": {
-    "agent": "database",
-    "tool": "get_table_stats",
-    "args": {
-      "schema_name": "public"
-    }
+    "steps": [
+      {
+        "agent": "database",
+        "tool": "get_table_stats",
+        "args": {"schema_name": "public"},
+        "on_failure": "stop"
+      }
+    ]
   },
   "targets": {
     "tags": ["production"],
@@ -47,9 +50,16 @@ This job collects table statistics (dead rows, bloat ratio, `last_vacuum`, `last
 
 | Field | Description |
 |-------|-------------|
+| `steps` | Array of steps to execute on each target server. At least one step is required. |
+
+Each step has the following fields:
+
+| Field | Description |
+|-------|-------------|
 | `agent` | `"database"` or `"k8s"` |
 | `tool` | Tool name. Database tools: `check_connection`, `get_server_info`, `get_database_info`, `get_active_connections`, `get_connection_stats`, `get_database_stats`, `get_config_parameter`, `get_replication_status`, `get_lock_info`, `get_table_stats`, `get_session_info`, `cancel_query`, `terminate_connection`, `terminate_idle_connections`. |
-| `args` | Tool arguments. The server identifier (`db_server`) is injected automatically per target. |
+| `args` | Tool arguments. The server identifier (`connection_string` or `context`) is injected automatically per target. |
+| `on_failure` | `"stop"` (default) to abort the server on failure, or `"continue"` to log the error and proceed to the next step. |
 
 ### `targets` object
 
@@ -181,7 +191,8 @@ curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/servers | jq .
 Output:
 ```
 DRY RUN — fleet job: vacuum-health-prod-dbs
-Change: database/get_table_stats
+Steps (1):
+  [1] database/get_table_stats  (on_failure=stop)
 Resolved servers (5):
   prod-db-1                                   [canary]
   prod-db-2                                   [wave-1]
@@ -195,7 +206,7 @@ Strategy:
   wave_pause_seconds:  10
   failure_threshold:   50%
 
-No Gateway or auditd contact (dry run).
+No gateway or auditd contact (dry run).
 ```
 
 ---

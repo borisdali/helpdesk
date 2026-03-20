@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/fleet"
 )
 
 // jobActionClass returns the highest-risk ActionClass across all steps.
 // Uses audit.ClassifyTool for each step's tool name.
-func jobActionClass(steps []Step) audit.ActionClass {
+func jobActionClass(steps []fleet.Step) audit.ActionClass {
 	highest := audit.ActionRead
 	for _, step := range steps {
 		class := audit.ClassifyTool(step.Tool)
@@ -49,7 +50,7 @@ type approvalStatusResponse struct {
 
 // requestFleetJobApproval posts an approval request to auditd for the fleet job.
 // Returns the approval ID.
-func requestFleetJobApproval(ctx context.Context, rcfg runnerConfig, def *JobDef, serverCount int) (string, error) {
+func requestFleetJobApproval(ctx context.Context, rcfg runnerConfig, def *fleet.JobDef, serverCount int) (string, error) {
 	if rcfg.auditURL == "" {
 		return "", fmt.Errorf("auditd URL not configured")
 	}

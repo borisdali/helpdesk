@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/fleet"
 )
 
 // stageResult holds the outcome of executing a change against one server.
@@ -20,7 +21,7 @@ type stageResult struct {
 
 // runStages executes the full staged rollout: canary → waves.
 // It returns an error if the canary fails or if the circuit breaker trips.
-func runStages(ctx context.Context, rcfg runnerConfig, def *JobDef, servers []string) error {
+func runStages(ctx context.Context, rcfg runnerConfig, def *fleet.JobDef, servers []string) error {
 	if len(servers) == 0 {
 		return fmt.Errorf("no servers to process")
 	}
@@ -144,7 +145,7 @@ func isServerFailure(res serverResult, countPartialAsSuccess bool) bool {
 }
 
 // runWave executes steps against all servers in a wave concurrently.
-func runWave(ctx context.Context, rcfg runnerConfig, servers []string, waveName string, steps []Step) []serverResult {
+func runWave(ctx context.Context, rcfg runnerConfig, servers []string, waveName string, steps []fleet.Step) []serverResult {
 	results := make([]serverResult, len(servers))
 	var wg sync.WaitGroup
 
