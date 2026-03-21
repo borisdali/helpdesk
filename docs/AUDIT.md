@@ -66,7 +66,8 @@ essential for querying and correlating events.
 | Prefix | Origin |
 |--------|--------|
 | `tr_` | Natural-language query via `POST /api/v1/query` (orchestrator-routed) |
-| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` |
+| `tr_flj_` | Fleet job — `tr_` + job ID (e.g. `tr_flj_4dd009b7`); one trace per job |
+| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (not a journey) |
 
 ---
 

@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/fleet"
 	"helpdesk/internal/infra"
@@ -778,5 +780,102 @@ func TestHandleFleetPlan_ReadOnlyNoApproval(t *testing.T) {
 	}
 	if resp.RequiresApproval {
 		t.Error("RequiresApproval = true, want false for read-only steps")
+	}
+}
+
+// --- Fleet job journey anchor tests ---
+
+// testAuditor is a minimal in-memory Auditor used to capture recorded events.
+type testAuditor struct {
+	mu     sync.Mutex
+	events []*audit.Event
+}
+
+func (a *testAuditor) Record(_ context.Context, e *audit.Event) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events = append(a.events, e)
+	return nil
+}
+
+func (a *testAuditor) RecordOutcome(_ context.Context, _ string, _ *audit.Outcome) error {
+	return nil
+}
+
+func (a *testAuditor) Query(_ context.Context, _ audit.QueryOptions) ([]audit.Event, error) {
+	return nil, nil
+}
+
+func (a *testAuditor) Close() error { return nil }
+
+// TestHandleFleetCreateJob_AnchorEvent verifies that creating a fleet job sets
+// X-Trace-ID = "tr_" + jobID on the response and records a gateway_request
+// audit event with that trace ID and no tool (so it qualifies as a journey anchor).
+// Running with two different job IDs also confirms trace ID uniqueness.
+func TestHandleFleetCreateJob_AnchorEvent(t *testing.T) {
+	cases := []struct {
+		jobID   string
+		jobName string
+	}{
+		{"flj_test123", "my-job"},
+		{"flj_other456", "another-job"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.jobID, func(t *testing.T) {
+			// Mock auditd backend that returns the created job record.
+			auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+					"job_id": tc.jobID,
+					"name":   tc.jobName,
+				})
+			}))
+			defer auditdSrv.Close()
+
+			ta := &testAuditor{}
+			gw := &Gateway{
+				agents:   make(map[string]*discovery.Agent),
+				clients:  make(map[string]*a2aclient.Client),
+				auditURL: auditdSrv.URL,
+				auditor:  audit.NewGatewayAuditor(ta),
+			}
+			mux := http.NewServeMux()
+			gw.RegisterRoutes(mux)
+
+			body := `{"name":"` + tc.jobName + `"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/jobs", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201; body: %s", rec.Code, rec.Body.String())
+			}
+
+			wantTraceID := "tr_" + tc.jobID
+			if got := rec.Header().Get("X-Trace-ID"); got != wantTraceID {
+				t.Errorf("X-Trace-ID = %q, want %q", got, wantTraceID)
+			}
+
+			// Anchor event must have the correct trace ID and no tool execution
+			// so that QueryJourneys recognises it as a journey anchor.
+			ta.mu.Lock()
+			events := ta.events
+			ta.mu.Unlock()
+
+			if len(events) != 1 {
+				t.Fatalf("recorded %d audit events, want 1", len(events))
+			}
+			e := events[0]
+			if e.TraceID != wantTraceID {
+				t.Errorf("event.TraceID = %q, want %q", e.TraceID, wantTraceID)
+			}
+			if e.Tool != nil {
+				t.Errorf("event.Tool = %+v, want nil (anchor event must not have a tool)", e.Tool)
+			}
+		})
 	}
 }

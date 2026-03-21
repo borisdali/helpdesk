@@ -1,8 +1,8 @@
 # aiHelpDesk Fleet Management
 
-While resolving issues with a specific database without engaging an often lengthy vendor support protocol is useful, aiHelpDesk also offers the Fleet Management capabilities where a set of diagnostic or remediation operations can be safely repeated across multiple databases. Examples here could be diagnostic sweeps, configuration checks, table health reports, or specific targeted write operations (e.g. changing a flag, terminating idle connections, etc.) — all without manual coordination, but with optional human operator approval for the mission critical databases.
+While resolving issues with a specific database without engaging an often lengthy vendor support protocol is useful, aiHelpDesk also offers the Fleet Management capabilities where a set of diagnostic or remediation operations can be safely repeated across multiple databases. Examples here include the diagnostic sweeps, configuration checks, table health reports, or specific targeted write operations (e.g. changing a flag, terminating idle connections, etc.) — all without manual coordination, but with the optional human operator approval for the mission critical databases.
 
-To be sure, safety is the key here, especially for the mutations that target more than a single database and so multiple precaution, verification and approval mechanisms are part of aiHelpDesk Fleet Management module as described on this page.
+To be sure, safety is the key here, especially for the mutations that target more than a single database and so multiple precaution, verification and approval mechanisms are part of this aiHelpDesk Fleet Management module as described on this page.
 
 The core architectural element of this aiHelpDesk module is the `fleet-runner` that is designed to apply a sequence of operations across a subset of `infrastructure.json` targets via a staged progressive rollout with the optional canary and wave phases, preflight checks, circuit breaker, full mandatory [audit trail](AUDIT.md#65-fleet-jobs) while also adhering to the normal aiHelpDesk [identity & access](IDENTITY.md#24-fleet-runner-authentication) mechanisms.
 
@@ -21,7 +21,7 @@ The core architectural element of this aiHelpDesk module is the `fleet-runner` t
 
 ## Job definition file
 
-Fleet runner reads a JSON file describing the job:
+Here's an example of a JSON file describing a single-step job (in this case its `get_table_stats`) that is submitted to the `fleet-runner` for execution:
 
 ```json
 {
@@ -49,7 +49,7 @@ Fleet runner reads a JSON file describing the job:
 }
 ```
 
-This job collects table statistics (dead rows, bloat ratio, `last_vacuum`, `last_autovacuum`, `last_analyze`) across all production databases, letting you identify tables that need manual `VACUUM ANALYZE` attention.
+This particular job collects table statistics (dead rows, bloat ratio, `last_vacuum`, `last_autovacuum`, `last_analyze`) across all production databases, letting you identify tables that may need `VACUUM ANALYZE` attention.
 
 ### `change` object
 

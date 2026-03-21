@@ -139,6 +139,9 @@ func callGatewayTool(ctx context.Context, cfg runnerConfig, serverName, stage st
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Purpose", "fleet_rollout")
 	req.Header.Set("X-Purpose-Note", fmt.Sprintf("job_id=%s server=%s stage=%s", cfg.jobID, serverName, stage))
+	// All tool calls for a job share one trace ID so the job appears as a
+	// single journey in GET /api/v1/governance/journeys.
+	req.Header.Set("X-Trace-ID", "tr_"+cfg.jobID)
 	if cfg.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
 	}

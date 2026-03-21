@@ -62,7 +62,8 @@ curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=agent_reas
 | Prefix | Origin |
 |--------|--------|
 | `tr_` | Natural-language query via `POST /api/v1/query` (orchestrator-routed) |
-| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (Gateway direct) |
+| `tr_flj_` | Fleet job — `tr_` + job ID (e.g. `tr_flj_4dd009b7`); one trace per job |
+| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (not a journey) |
 
 Events without a `trace_id` are agent invocations that predate trace propagation
 or were made by scripts that bypassed the Gateway entirely.
@@ -347,12 +348,13 @@ with a non-empty `trace_id`. Two event types serve as anchors:
 - **Direct tool calls via `POST /api/v1/db/{tool}`** produce a Gateway-side
   `gateway_request` event with a `dt_` trace and a `tool_name` set. These
   appear in `GET /v1/events` but **not** in `GET /v1/journeys`.
-- **Fleet-runner tool calls** are direct tool calls — each step in a fleet job
-  is a `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` call with a `dt_`
-  trace. They appear in `/v1/events` but not in `/v1/journeys`. They are
-  correlatable by `purpose=fleet_rollout` and by `purpose_note` which encodes
-  `job_id=<id> server=<name> stage=<stage>`. Use the fleet job endpoints
-  (`GET /api/v1/fleet/jobs/{jobID}/servers`) for structured per-job views.
+- **Fleet jobs** appear as journeys. When a fleet job is created via
+  `POST /api/v1/fleet/jobs`, the gateway records a `gateway_request` anchor
+  event with trace ID `tr_<jobID>` and no tool name. All subsequent tool
+  calls for that job (across all servers and steps) carry the same
+  `X-Trace-ID: tr_<jobID>` header, so they are grouped under one journey.
+  The journey's `user_id` is the fleet-runner service account, `user_query` is
+  `"fleet job: <name>"`, and `purpose` is `fleet_rollout`.
 - **Raw A2A calls** to an agent endpoint with no `trace_id` in message metadata
   appear in `GET /v1/events` with an empty `trace_id` and are not surfaced by
   journeys at all.
@@ -360,13 +362,14 @@ with a non-empty `trace_id`. Two event types serve as anchors:
 To see all events regardless of journey status, use `GET /v1/events` directly.
 
 ```bash
-# All events from a specific fleet job
-curl "http://localhost:1199/v1/events?event_type=gateway_request" | \
-  jq '[.[] | select(.purpose_note | contains("job_id=flj_4dd009b7"))]'
+# All fleet job journeys
+curl "http://localhost:1199/v1/journeys?purpose=fleet_rollout"
 
-# All fleet_rollout journeys (these are dt_ traces — use /v1/events, not /v1/journeys)
-curl "http://localhost:1199/v1/events?event_type=gateway_request" | \
-  jq '[.[] | select(.purpose == "fleet_rollout")]'
+# A specific fleet job's journey
+curl "http://localhost:1199/v1/journeys?trace_id=tr_flj_4dd009b7"
+
+# All events for a fleet job (full detail)
+curl "http://localhost:1199/v1/events?trace_id=tr_flj_4dd009b7"
 ```
 
 ---

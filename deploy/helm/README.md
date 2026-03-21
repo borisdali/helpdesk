@@ -850,6 +850,15 @@ Create the prerequisite resources and deploy:
 kubectl -n helpdesk-system create configmap fleet-job-config \
   --from-file=fleet-job.json=jobs/vacuum-prod.json
 
+# Generate a unique API key for fleet-runner — do NOT reuse srebot's or secbot's key.
+# The identity provider matches on the first account whose hash verifies (non-deterministic
+# map order), so a shared key resolves to an unpredictable identity, breaking audit trails
+# and policy matching. Generate and hash a dedicated key:
+openssl rand -hex 32 > .fleet-runner-key
+kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:v0.7.0 -- hashapikey "$(cat .fleet-runner-key)"
+# Paste the printed hash into usersConfig.serviceAccounts[fleet-runner].api_key_hash in values.yaml
+
 # Create the API key Secret
 kubectl -n helpdesk-system create secret generic fleet-runner-key \
   --from-literal=api-key=$(cat .fleet-runner-key)

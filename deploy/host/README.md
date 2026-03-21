@@ -495,9 +495,20 @@ Set defaults in `.env` to avoid repeating flags:
 ```bash
 HELPDESK_GATEWAY_URL=http://localhost:8080
 HELPDESK_AUDIT_URL=http://localhost:1199
-HELPDESK_CLIENT_API_KEY=<fleet-runner-api-key>
+HELPDESK_CLIENT_API_KEY=<fleet-runner-api-key>   # see note below
 HELPDESK_INFRA_CONFIG=./infrastructure.json
 ```
+
+> **Each service account must have its own unique API key.** Generate a
+> dedicated key for fleet-runner — do not reuse srebot's or secbot's key.
+> The identity provider matches on the first account whose hash verifies
+> (non-deterministic map order), so a shared key resolves to whichever
+> account happens to come first, breaking the audit trail and policy matching.
+>
+> ```bash
+> openssl rand -hex 32 | tee .fleet-runner-key   # save this as HELPDESK_CLIENT_API_KEY
+> ./hashapikey < .fleet-runner-key               # paste hash into users.yaml fleet-runner entry
+> ```
 
 **Generating a job definition from natural language:** Set `ANTHROPIC_API_KEY` in `.env` and use the gateway planner:
 

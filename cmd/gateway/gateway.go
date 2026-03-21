@@ -459,7 +459,7 @@ func (g *Gateway) handleFleetCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject submitted_by from resolved identity.
-	principal, _, _, _, err := g.resolveRequest(r, "", "")
+	principal, purpose, _, _, err := g.resolveRequest(r, "", "")
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
 		return
@@ -474,7 +474,64 @@ func (g *Gateway) handleFleetCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.proxyFleetRequest(w, r, "/v1/fleet/jobs", "POST", modified)
+	// Forward to auditd and intercept the response to extract job_id.
+	// We need the job_id to record an audit anchor event that makes this
+	// fleet job visible as a journey in GET /v1/journeys.
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		g.auditURL+"/v1/fleet/jobs", strings.NewReader(string(modified)))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Error("fleet service unavailable", "err", err)
+		writeError(w, http.StatusBadGateway, "fleet service unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
+	respBytes, _ := io.ReadAll(resp.Body)
+	w.Header().Set("Content-Type", "application/json")
+
+	// On success, record a gateway_request anchor event so the fleet job
+	// appears as a single journey. The trace ID tr_<jobID> is shared
+	// by all subsequent tool calls for this job.
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+		var created struct {
+			JobID string `json:"job_id"`
+			Name  string `json:"name"`
+		}
+		if jsonErr := json.Unmarshal(respBytes, &created); jsonErr == nil && created.JobID != "" {
+			traceID := "tr_" + created.JobID
+			w.Header().Set("X-Trace-ID", traceID)
+
+			jobName := created.Name
+			if jobName == "" {
+				if n, ok := body["name"].(string); ok {
+					jobName = n
+				}
+			}
+			g.recordAudit(r.Context(), &audit.GatewayRequest{
+				TraceID:           traceID,
+				Endpoint:          r.URL.Path,
+				Method:            r.Method,
+				Message:           "fleet job: " + jobName,
+				StartTime:         time.Now(),
+				Status:            "success",
+				HTTPCode:          resp.StatusCode,
+				Principal:         principal.EffectiveID(),
+				ResolvedPrincipal: principal,
+				Purpose:           purpose,
+			})
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBytes) //nolint:errcheck
 }
 
 func (g *Gateway) handleFleetListJobs(w http.ResponseWriter, r *http.Request) {

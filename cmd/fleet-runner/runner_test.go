@@ -47,6 +47,11 @@ func TestCallGatewayTool_HeadersInjected(t *testing.T) {
 			t.Errorf("X-Purpose-Note = %q, missing %q", note, want)
 		}
 	}
+	// All tool calls for a job must share the same trace ID so the job appears
+	// as a single journey in GET /v1/journeys.
+	if got := gotHeaders.Get("X-Trace-ID"); got != "tr_flj_abc123" {
+		t.Errorf("X-Trace-ID = %q, want tr_flj_abc123", got)
+	}
 }
 
 // TestCallGatewayTool_ServerInjected verifies that connection_string is injected into
