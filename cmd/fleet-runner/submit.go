@@ -13,11 +13,12 @@ import (
 	"helpdesk/internal/fleet"
 )
 
-// submitJob creates the fleet job record in auditd and registers all target
-// servers as pending. Returns the generated job ID.
-func submitJob(ctx context.Context, auditURL, submittedBy string, def *fleet.JobDef, servers []string, stages []stageAssignment) (string, error) {
-	if auditURL == "" {
-		return "", fmt.Errorf("auditd URL not configured (set HELPDESK_AUDIT_URL)")
+// submitJob creates the fleet job record via the gateway (which proxies to
+// auditd and records a journey anchor event) then registers all target servers
+// as pending directly in auditd. Returns the generated job ID.
+func submitJob(ctx context.Context, gatewayURL, auditURL, apiKey, submittedBy string, def *fleet.JobDef, servers []string, stages []stageAssignment) (string, error) {
+	if gatewayURL == "" {
+		return "", fmt.Errorf("gateway URL not configured (set HELPDESK_GATEWAY_URL)")
 	}
 
 	defJSON, err := json.Marshal(def)
@@ -38,7 +39,11 @@ func submitJob(ctx context.Context, auditURL, submittedBy string, def *fleet.Job
 		return "", fmt.Errorf("marshal job: %w", err)
 	}
 
-	resp, err := auditPost(ctx, auditURL+"/v1/fleet/jobs", body)
+	// Create the job via the gateway so that handleFleetCreateJob records
+	// a journey anchor event (trace_id = "tr_" + job_id). All subsequent
+	// tool calls share that trace ID, making the job visible as a single
+	// journey in GET /v1/journeys.
+	resp, err := gatewayPost(ctx, gatewayURL+"/api/v1/fleet/jobs", apiKey, body)
 	if err != nil {
 		return "", fmt.Errorf("create job: %w", err)
 	}
@@ -48,7 +53,7 @@ func submitJob(ctx context.Context, auditURL, submittedBy string, def *fleet.Job
 		return "", fmt.Errorf("decode job response: %w", err)
 	}
 	if created.JobID == "" {
-		return "", fmt.Errorf("auditd returned empty job_id")
+		return "", fmt.Errorf("gateway returned empty job_id")
 	}
 
 	// Register each server.
@@ -107,7 +112,9 @@ func registerJobSteps(ctx context.Context, auditURL, jobID string, servers []str
 	return nil
 }
 
-// finalizeJob updates the job status to completed/failed/aborted with an optional summary.
+// finalizeJob updates the job status to completed/failed/aborted with an
+// optional summary, and records a terminal audit event when the job did not
+// complete successfully so that QueryJourneys reflects the real outcome.
 func finalizeJob(ctx context.Context, auditURL, jobID, status, summary string) error {
 	if auditURL == "" {
 		return nil
@@ -125,7 +132,60 @@ func finalizeJob(ctx context.Context, auditURL, jobID, status, summary string) e
 		return err
 	}
 	resp.Body.Close()
+
+	// When the job failed or was denied, append a gateway_request audit event
+	// with outcome_status="error" so QueryJourneys elevates the journey outcome
+	// from "success" (the anchor event) to "error".
+	if status != "completed" {
+		recordJobOutcome(ctx, auditURL, jobID, summary)
+	}
 	return nil
+}
+
+// recordJobOutcome posts a terminal gateway_request event to auditd so that
+// QueryJourneys computes the correct journey outcome for a failed job.
+// The event shares the job's trace ID (tr_<jobID>) and has no tool_name,
+// so it does not create a spurious tool entry in the journey.
+func recordJobOutcome(ctx context.Context, auditURL, jobID, errMsg string) {
+	if auditURL == "" {
+		return
+	}
+	traceID := "tr_" + jobID
+	event := map[string]any{
+		"event_id":   "gw_" + jobID[:min(8, len(jobID))] + "_end",
+		"event_type": "gateway_request",
+		"trace_id":   traceID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"outcome": map[string]any{
+			"status":        "error",
+			"error_message": errMsg,
+		},
+	}
+	body, _ := json.Marshal(event)
+	auditPost(ctx, auditURL+"/v1/events", body) //nolint:errcheck
+}
+
+// gatewayPost sends a JSON POST to the gateway with the optional API key.
+func gatewayPost(ctx context.Context, url, apiKey string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
 }
 
 // auditPost sends a JSON POST to auditd and returns the response body.

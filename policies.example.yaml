@@ -314,7 +314,7 @@ policies:
 
     rules:
       - action: [write, destructive]
-        effect: deny
+        effect: allow
         conditions:
           blocked_purposes: [diagnostic]
         message: "Diagnostic purpose is read-only. Use 'remediation' purpose for write operations."

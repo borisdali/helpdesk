@@ -123,8 +123,8 @@ func main() {
 	// Determine submittedBy: use the user from env or a default for service accounts.
 	submittedBy := envOrDefault("HELPDESK_CLIENT_USER", "fleet-runner")
 
-	// Create the job record in auditd.
-	jobID, err := submitJob(ctx, *auditURL, submittedBy, &def, servers, assignments)
+	// Create the job record via the gateway (records journey anchor event).
+	jobID, err := submitJob(ctx, *gatewayURL, *auditURL, *apiKey, submittedBy, &def, servers, assignments)
 	if err != nil {
 		slog.Error("failed to create fleet job record", "err", err)
 		// Non-fatal: continue without job tracking.
