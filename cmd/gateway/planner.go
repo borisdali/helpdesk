@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -98,6 +99,35 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	for _, step := range steps {
 		if _, ok := g.toolRegistry.Get(step.Tool); !ok {
 			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("planner returned unknown tool %q", step.Tool))
+			return
+		}
+	}
+
+	// Deterministic safety check: verify all requested tags exist in infrastructure.
+	// The LLM must not guess at tag names — unknown tags produce zero servers in
+	// fleet-runner (hard exit), so returning a plan with them is misleading.
+	if len(jobDef.Targets.Tags) > 0 {
+		knownTags := make(map[string]bool)
+		for _, server := range g.infra.DBServers {
+			for _, tag := range server.Tags {
+				knownTags[tag] = true
+			}
+		}
+		var unknownTags []string
+		for _, tag := range jobDef.Targets.Tags {
+			if !knownTags[tag] {
+				unknownTags = append(unknownTags, tag)
+			}
+		}
+		if len(unknownTags) > 0 {
+			available := make([]string, 0, len(knownTags))
+			for tag := range knownTags {
+				available = append(available, tag)
+			}
+			sort.Strings(available)
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"planner used unknown tag(s) %v; available tags: %v — refine the description",
+				unknownTags, available))
 			return
 		}
 	}
@@ -211,6 +241,7 @@ Notes:
 - wave_size 0 means all remaining servers in one wave
 - For read-only jobs, canary_count=1 and wave_size=0 is fine
 - For write/destructive jobs, use canary_count=1 and wave_size=3
+- targets.tags MUST only contain tags that appear verbatim in the infrastructure list above — do NOT invent, infer, or substitute tag names; if the requested tag does not exist, use an empty tags list and explain in warning_messages
 
 ## User Request
 
@@ -230,12 +261,15 @@ Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
 
 // callPlannerLLM sends the planner prompt to the Anthropic API and returns the raw response text.
 func callPlannerLLM(ctx context.Context, prompt string) (string, error) {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	apiKey := os.Getenv("HELPDESK_API_KEY")
 	if apiKey == "" {
-		return "", fmt.Errorf("ANTHROPIC_API_KEY is not set")
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	if apiKey == "" {
+		return "", fmt.Errorf("HELPDESK_API_KEY is not set")
 	}
 
-	modelName := os.Getenv("HELPDESK_MODEL")
+	modelName := os.Getenv("HELPDESK_MODEL_NAME")
 	if modelName == "" {
 		modelName = "claude-3-5-haiku-20241022"
 	}

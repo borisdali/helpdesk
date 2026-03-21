@@ -44,7 +44,7 @@ services:
       - "1199:1199"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:1199/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:1199/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -200,6 +200,7 @@ services:
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       # AI Governance - enables /api/v1/governance endpoints
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
@@ -213,11 +214,12 @@ services:
       HELPDESK_JWT_CACHE_TTL: ${HELPDESK_JWT_CACHE_TTL:-}
     volumes:
       - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     ports:
       - "8080:8080"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3

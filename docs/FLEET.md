@@ -262,16 +262,21 @@ The client prints the plan with approval warnings and a ready-to-run command.
 
 ### Planner safety guarantees
 
-- **Unknown tools are rejected** with `422`. The planner validates every generated tool name against the live tool registry before returning.
-- **Restricted servers are rejected** with `422`. Any server with a non-empty `sensitivity` field in `infrastructure.json` that appears in the resolved target set causes an error. Refine the description or add the server to `targets.exclude`.
+All three checks are deterministic and run after the LLM response — they cannot be bypassed by prompt content.
+
+- **Unknown tools are rejected** with `422`. Every generated tool name is validated against the live tool registry.
+- **Unknown tags are rejected** with `422`. Every tag in `targets.tags` must exist verbatim in `infrastructure.json`. The planner will not infer or substitute tag names (e.g. "staging" → "development"). The error response lists all available tags so you can correct the description.
+- **Restricted servers are rejected** with `422`. Any server with a non-empty `sensitivity` field that appears in the resolved target set causes an error. Refine the description or add the server to `targets.exclude`.
 - **The planner never auto-submits.** A human must review and run the job.
+
+`warning_messages` in the response are genuinely non-fatal notices (e.g. broad target scope, empty exclusion list). They do not indicate a validation failure.
 
 ### Configuration
 
 | Variable | Description |
 |----------|-------------|
-| `ANTHROPIC_API_KEY` | Required for the planner. If not set, `POST /api/v1/fleet/plan` returns `503`. |
-| `HELPDESK_MODEL` | LLM model to use (default: `claude-3-5-haiku-20241022`). |
+| `HELPDESK_API_KEY` | API key for the planner LLM (same key used by agents). `ANTHROPIC_API_KEY` is accepted as a fallback. If neither is set, `POST /api/v1/fleet/plan` returns `503`. |
+| `HELPDESK_MODEL_NAME` | LLM model to use (default: `claude-haiku-4-5-20251001`). Same variable used by all other components. |
 
 ---
 
