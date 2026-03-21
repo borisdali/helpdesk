@@ -224,6 +224,7 @@ type Event struct {
 	// Trace fields for end-to-end correlation
 	TraceID  string `json:"trace_id,omitempty"`  // correlates all events in a request chain
 	ParentID string `json:"parent_id,omitempty"` // immediate parent event (causality)
+	Origin   string `json:"origin,omitempty"`    // "direct_tool" | "agent" (A2A/LLM) | "gateway"
 
 	// Action classification for approval workflow
 	ActionClass ActionClass `json:"action_class,omitempty"` // read, write, destructive

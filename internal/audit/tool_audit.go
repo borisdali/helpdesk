@@ -74,11 +74,17 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 	actionClass := ClassifyTool(call.Name)
 	traceID := ta.getTraceID()
 
+	var origin string
+	if tc := TraceContextFromContext(ctx); tc != nil {
+		origin = tc.Origin
+	}
+
 	event := &Event{
 		EventID:     "tool_" + uuid.New().String()[:8],
 		Timestamp:   time.Now().UTC(),
 		EventType:   EventTypeToolExecution,
 		TraceID:     traceID,
+		Origin:      origin,
 		ActionClass: actionClass,
 		Session: Session{
 			ID: ta.sessionID,
@@ -142,11 +148,17 @@ func (ta *ToolAuditor) RecordToolInvoked(ctx context.Context, resourceType, reso
 		return
 	}
 
+	var invOrigin string
+	if tc := TraceContextFromContext(ctx); tc != nil {
+		invOrigin = tc.Origin
+	}
+
 	event := &Event{
 		EventID:     "inv_" + uuid.New().String()[:8],
 		Timestamp:   time.Now().UTC(),
 		EventType:   EventTypeToolInvoked,
 		TraceID:     ta.getTraceID(),
+		Origin:      invOrigin,
 		ActionClass: ActionClass(action),
 		Session:     Session{ID: ta.sessionID},
 		PolicyDecision: &PolicyDecision{

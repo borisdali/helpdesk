@@ -159,13 +159,15 @@ Returns an array of journey summaries, newest first.
 |-----------|------|-------------|
 | `user` | string | Filter to journeys initiated by this user ID |
 | `purpose` | string | Filter by declared purpose (e.g. `fleet_rollout`, `remediation`, `emergency`) |
-| `from` | RFC3339 | Only journeys whose delegation event is at or after this time |
-| `until` | RFC3339 | Only journeys whose delegation event is before this time |
+| `from` | RFC3339 | Only journeys whose anchor event is at or after this time |
+| `until` | RFC3339 | Only journeys whose anchor event is before this time |
 | `since` | duration | Shorthand for `from=now-duration` (e.g. `since=24h`, `since=7d`) |
 | `limit` | int | Maximum number of journeys to return (default: 50) |
 | `category` | string | Filter by request category (e.g. `database`, `kubernetes`) |
 | `outcome` | string | Filter by computed journey outcome (e.g. `outcome=unverified_claim`, `outcome=error`) |
 | `has_retries` | bool | When `true`, return only journeys where at least one mutation tool had to retry |
+| `trace_id` | string | Filter to a single journey by exact trace ID |
+| `origin` | string | Filter by dispatch path: `agent` (LLM-mediated) or `gateway`. See [§7.1](#71-origin-values-in-journeys). |
 
 All parameters are optional. With no parameters, the 50 most recent journeys
 are returned.
@@ -184,7 +186,8 @@ are returned.
     "agent":       "postgres_database_agent",
     "tools_used":  ["get_session_info", "run_sql"],
     "outcome":     "success",
-    "event_count": 5
+    "event_count": 5,
+    "origin":      "agent"
   },
   {
     "trace_id":    "tr_2e9f4d1a",
@@ -196,7 +199,8 @@ are returned.
     "agent":       "postgres_database_agent",
     "tools_used":  ["terminate_connection"],
     "outcome":     "error",
-    "event_count": 3
+    "event_count": 3,
+    "origin":      "agent"
   }
 ]
 ```
@@ -217,6 +221,7 @@ are returned.
 | `outcome` | Highest-priority outcome across all events (see [§5.6](#56-journey-outcomes)) |
 | `event_count` | Audit events recorded under this trace (excludes `delegation_verification` and `verification_outcome` plumbing events) |
 | `retry_count` | Number of mutation-tool re-poll attempts (non-zero means a tool had to wait for state to propagate but ultimately succeeded) |
+| `origin` | Dispatch path for this journey: `"agent"` for LLM-mediated interactions, `"gateway"` for gateway-originated NL queries. Taken from the first `tool_execution` event in the trace. See [§7.1](#71-origin-values-in-journeys). |
 
 ### 5.6 Journey outcomes
 
@@ -302,9 +307,23 @@ curl -s "http://localhost:1199/v1/journeys?limit=200" \
   | jq 'group_by(.user_id) | map({user: .[0].user_id, journeys: length}) | sort_by(-.journeys)'
 ```
 
+### 6.8 Filter by dispatch path
+
+```bash
+# Only LLM-mediated journeys (agent selected the tools)
+curl -s "http://localhost:1199/v1/journeys?origin=agent"
+
+# Direct-tool events for a specific fleet job trace (raw event view)
+curl -s "http://localhost:1199/v1/events?origin=direct_tool&trace_id=dt_abc12345"
+
+# Confirm that all recent tool calls came through the LLM path — none bypassed it
+DIRECT=$(curl -s "http://localhost:1199/v1/events?origin=direct_tool&since=2026-03-01T00:00:00Z" | jq length)
+echo "direct-dispatch events since midnight: $DIRECT"
+```
+
 ---
 
-### 6.8 Drilling Into a Journey
+### 6.9 Drilling Into a Journey
 
 Once you have a `trace_id`, fetch every event in that journey from the events
 endpoint:
@@ -332,12 +351,10 @@ See [GOVEXPLAIN.md](GOVEXPLAIN.md) for full govexplain reference.
 
 ## 7. Journey Coverage
 
-
-
 A journey appears in `GET /v1/journeys` when its trace has an **anchor event**
 with a non-empty `trace_id`. Two event types serve as anchors:
 
-| Origin | Anchor event | Trace prefix |
+| Source | Anchor event | Trace prefix |
 |--------|-------------|--------------|
 | Orchestrator REPL (`cmd/helpdesk`) | `delegation_decision` | `tr_` |
 | Gateway NL query (`POST /api/v1/query`) | `gateway_request` (no tool) | `tr_` |
@@ -370,6 +387,36 @@ curl "http://localhost:1199/v1/journeys?trace_id=tr_flj_4dd009b7"
 
 # All events for a fleet job (full detail)
 curl "http://localhost:1199/v1/events?trace_id=tr_flj_4dd009b7"
+```
+
+### 7.1 Origin values in journeys
+
+The `origin` field on a `JourneySummary` records the dispatch path used for
+the tool calls in that journey. It is taken from the **first `tool_execution`
+event** found in the trace.
+
+| Value | Meaning | Typical source |
+|-------|---------|----------------|
+| `"agent"` | Tools were selected and invoked by the LLM via the A2A protocol | Interactive `POST /api/v1/query` (orchestrator or gateway NL path) |
+| `"gateway"` | Tools were invoked by the gateway itself | Governance or policy evaluation endpoints |
+
+> **Why `direct_tool` never appears here:** Fleet-runner jobs use a `dt_` trace
+> prefix. The journey view excludes `dt_` traces (they have `tool_name` set on
+> the `gateway_request` anchor, which disqualifies them as journey anchors).
+> Fleet-runner tool calls are fully auditable via `GET /v1/events?trace_id=dt_...`
+> and their individual `origin` field is `"direct_tool"` — but the journey
+> aggregation view is intentionally restricted to human-initiated or
+> orchestrator-mediated sessions.
+
+```bash
+# Only LLM-mediated journeys (interactive operator sessions)
+curl "http://localhost:1199/v1/journeys?origin=agent"
+
+# Confirm no fleet-runner direct-tool journeys exist
+curl "http://localhost:1199/v1/journeys?origin=direct_tool"   # always []
+
+# All direct-tool events for a fleet job (raw event view)
+curl "http://localhost:1199/v1/events?origin=direct_tool&trace_id=dt_abc12345"
 ```
 
 ---

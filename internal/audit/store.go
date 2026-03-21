@@ -205,6 +205,7 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		user_query TEXT,
 		purpose TEXT,
 		purpose_note TEXT,
+		origin TEXT,
 		tool_name TEXT,
 		tool_json TEXT,
 		approval_status TEXT,
@@ -245,6 +246,7 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "session_agent TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose_note TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "origin TEXT",
 	}
 	for _, m := range migrations {
 		db.Exec(m) //nolint:errcheck
@@ -360,12 +362,12 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 			event_id, timestamp, event_type, trace_id, parent_id, action_class,
 			prev_hash, event_hash,
 			session_id, session_agent, user_id, user_query,
-			purpose, purpose_note,
+			purpose, purpose_note, origin,
 			tool_name, tool_json,
 			approval_status, approval_json,
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		event.EventID,
 		event.Timestamp.Format(time.RFC3339Nano),
@@ -381,6 +383,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		event.Input.UserQuery,
 		purposeVal,
 		purposeNoteVal,
+		event.Origin,
 		toolName,
 		string(toolJSON),
 		approvalStatus,
@@ -479,6 +482,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		query += " AND outcome_status = ?"
 		args = append(args, opts.OutcomeStatus)
 	}
+	if opts.Origin != "" {
+		query += " AND origin = ?"
+		args = append(args, opts.Origin)
+	}
 
 	// Chronological order for trace/prefix queries, reverse chronological otherwise
 	if opts.TraceID != "" || opts.TraceIDPrefix != "" {
@@ -531,6 +538,7 @@ type QueryOptions struct {
 	ToolName       string         // filter by tool name
 	ApprovalStatus ApprovalStatus // filter by approval status
 	OutcomeStatus  string         // filter by outcome_status (e.g. "error", "denied", "allow")
+	Origin         string         // filter by origin (e.g. "direct_tool", "agent", "gateway")
 }
 
 // JourneyOptions specifies filters for QueryJourneys.
@@ -545,6 +553,7 @@ type JourneyOptions struct {
 	Outcome    string        // filter by computed journey outcome (post-aggregation)
 	HasRetries bool          // only journeys with retry_count > 0 (post-aggregation)
 	TraceID    string        // filter by exact trace ID; returns at most one journey
+	Origin     string        // filter by dispatch origin (e.g. "agent", "gateway"); post-aggregation
 }
 
 // DelegationSummary captures one orchestrator-to-sub-agent delegation turn:
@@ -574,6 +583,10 @@ type JourneySummary struct {
 	// recorded for this journey (tool_retry events). Non-zero means a mutation
 	// tool had to wait for state to propagate but eventually confirmed success.
 	RetryCount int `json:"retry_count,omitempty"`
+	// Origin is the dispatch path for this journey: "direct_tool" for fleet-runner
+	// structured dispatch, "agent" for LLM-mediated A2A calls, "gateway" for
+	// gateway-originated NL queries. Taken from the first tool_execution event.
+	Origin string `json:"origin,omitempty"`
 }
 
 // QueryJourneys returns journey summaries for traces anchored by a
@@ -655,7 +668,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	q2 := fmt.Sprintf(
 		`SELECT trace_id, event_type, user_id, user_query, session_agent, decision_agent,
 		        decision_category, tool_name, outcome_status, approval_status, timestamp,
-		        purpose, purpose_note
+		        purpose, purpose_note, origin
 		 FROM audit_events
 		 WHERE trace_id IN (%s)
 		 ORDER BY trace_id, timestamp ASC`, placeholders)
@@ -683,6 +696,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		delegations        []DelegationSummary
 		currentDelegIdx    int // index into delegations for the in-progress delegation; -1 = none
 		outcome            string
+		origin             string // dispatch path; taken from first tool_execution event
 		count              int
 		retryCount         int  // number of tool_retry events in this trace
 		sawRequireApproval bool // true if a require_approval policy decision was seen
@@ -700,11 +714,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			userID, userQuery, sessionAgent, agent, decisionCategory    sql.NullString
 			toolName, outcomeStatus, approvalStatus                     sql.NullString
 			ts                                                           string
-			purposeCol, purposeNoteCol                                  sql.NullString
+			purposeCol, purposeNoteCol, originCol                       sql.NullString
 		)
 		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &sessionAgent, &agent,
 			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts,
-			&purposeCol, &purposeNoteCol); err != nil {
+			&purposeCol, &purposeNoteCol, &originCol); err != nil {
 			return nil, fmt.Errorf("scan journey event: %w", err)
 		}
 		d := byTrace[traceID]
@@ -786,6 +800,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			}
 		}
 
+		// Capture origin from the first tool_execution event seen for this trace.
+		if eventType == string(EventTypeToolExecution) && d.origin == "" && originCol.Valid && originCol.String != "" {
+			d.origin = originCol.String
+		}
+
 		// Append every tool call in timestamp order, including repeats.
 		if toolName.Valid && toolName.String != "" {
 			d.tools = append(d.tools, toolName.String)
@@ -854,6 +873,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			Outcome:     d.outcome,
 			EventCount:  d.count,
 			RetryCount:  d.retryCount,
+			Origin:      d.origin,
 		})
 	}
 
@@ -871,6 +891,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	if opts.HasRetries {
 		summaries = filterJourneys(summaries, func(j JourneySummary) bool {
 			return j.RetryCount > 0
+		})
+	}
+	if opts.Origin != "" {
+		summaries = filterJourneys(summaries, func(j JourneySummary) bool {
+			return j.Origin == opts.Origin
 		})
 	}
 
