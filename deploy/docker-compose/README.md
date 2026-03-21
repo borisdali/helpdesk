@@ -34,14 +34,13 @@ To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform a
   cd helpdesk-v0.1.0-deploy/docker-compose
   cp .env.example .env
   cp infrastructure.json.example infrastructure.json
-  # edit both files
+  cp policies.example.yaml policies.yaml
+  cp users.example.yaml. users.yaml
+  # edit the above files as needed
   docker compose up -d
-
-  source ./.env
-  docker compose --profile interactive run orchestrator
 ```
 
-The last two commands are optional and intended for the human operators as it starts an interactive aiHelpDesk session.
+For interactive aiHelpDesk session see [section 2.4 below](docker-compose#24-using-helpdesk-client)
 
 **Docker Networking Note:** When running in Docker containers, `localhost` in a connection string refers to the container itself, not the host machine. To connect to a database on the host:
 - **Docker Desktop (Mac/Windows):** Use `host.docker.internal` as the hostname

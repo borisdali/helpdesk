@@ -396,7 +396,34 @@ func (g *Gateway) handleGovernanceVerify(w http.ResponseWriter, r *http.Request)
 }
 
 func (g *Gateway) handleGovernanceExplain(w http.ResponseWriter, r *http.Request) {
-	g.proxyGovernanceRequest(w, r, "/v1/governance/explain")
+	// Resolve the caller's identity and inject it as query parameters so the
+	// explain endpoint can evaluate service-account and user-specific policies.
+	// The caller may have already supplied user_id/service/role explicitly —
+	// only inject when the field is absent, so explicit overrides are preserved.
+	principal, purpose, _, _, err := g.resolveRequest(r, "", "")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "identity resolution failed: "+err.Error())
+		return
+	}
+
+	q := r.URL.Query()
+	if q.Get("user_id") == "" && principal.UserID != "" {
+		q.Set("user_id", principal.UserID)
+	}
+	if q.Get("service") == "" && principal.Service != "" {
+		q.Set("service", principal.Service)
+	}
+	if q.Get("role") == "" && len(principal.Roles) > 0 {
+		q.Set("role", principal.Roles[0])
+	}
+	if q.Get("purpose") == "" && purpose != "" {
+		q.Set("purpose", purpose)
+	}
+
+	// Rebuild the request URL with the enriched query string.
+	r2 := r.Clone(r.Context())
+	r2.URL.RawQuery = q.Encode()
+	g.proxyGovernanceRequest(w, r2, "/v1/governance/explain")
 }
 
 func (g *Gateway) handleGovernanceEvent(w http.ResponseWriter, r *http.Request) {
@@ -733,6 +760,37 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
+	// For direct tool calls, detect tool-level execution failures that the agent
+	// surfaces as text output (not as Go errors or A2A task failures).
+	// The database agent's errorResult() always produces "---\nERROR — <tool> failed"
+	// so programmatic callers (fleet-runner) receive 422 instead of a false 200.
+	// NL queries (toolName == "") are excluded — the LLM response is always shown as-is.
+	if toolName != "" && isToolError(response.Text) {
+		slog.Warn("gateway: tool execution failed", "agent", agentName, "tool", toolName, "trace_id", traceID)
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    toolParams,
+			Message:           prompt,
+			Response:          response.Text,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "error",
+			Error:             "tool execution failed",
+			HTTPCode:          http.StatusUnprocessableEntity,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
+		})
+		writeError(w, http.StatusUnprocessableEntity, response.Text)
+		return
+	}
+
 	// Record successful request with response
 	g.recordAudit(r.Context(), &audit.GatewayRequest{
 		RequestID:         requestID,
@@ -839,6 +897,15 @@ func extractText(parts a2a.ContentParts) string {
 // feeds verbatim as the FunctionResponse error; the LLM typically reproduces it in its reply.
 func isPolicyDenial(text string) bool {
 	return strings.Contains(strings.ToLower(text), "policy denied")
+}
+
+// isToolError reports whether the agent response text signals a tool-level execution
+// failure. The database agent deliberately returns errors as text output (rather than
+// Go errors) using the errorResult() helper, which always produces the marker
+// "---\nERROR — <tool> failed". We detect this here so fleet-runner and other
+// programmatic callers receive a non-200 status instead of a false success.
+func isToolError(text string) bool {
+	return strings.Contains(text, "\nERROR —")
 }
 
 // --- Prompt construction ---

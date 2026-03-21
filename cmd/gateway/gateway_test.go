@@ -210,6 +210,35 @@ func TestIsPolicyDenial_Negative(t *testing.T) {
 	}
 }
 
+// --- isToolError ---
+
+func TestIsToolError_Positive(t *testing.T) {
+	cases := []string{
+		"---\nERROR — get_server_info failed for pg-cluster\n\npsql failed\n---",
+		"---\nERROR — check_connection failed for fault-test-db\n\nConnection refused\n---",
+		"---\nERROR — get_session_info failed for alloydb-on-vm\n\nsome error\n---\n\nThis means: ...",
+	}
+	for _, c := range cases {
+		if !isToolError(c) {
+			t.Errorf("isToolError(%q) = false, want true", c)
+		}
+	}
+}
+
+func TestIsToolError_Negative(t *testing.T) {
+	cases := []string{
+		"PostgreSQL 16.3 on aarch64",
+		"policy denied: purpose not allowed",
+		"ERROR: permission denied for table foo", // postgres error, not errorResult marker
+		"",
+	}
+	for _, c := range cases {
+		if isToolError(c) {
+			t.Errorf("isToolError(%q) = true, want false", c)
+		}
+	}
+}
+
 // --- Handler validation tests ---
 
 func TestHandleResearch_MissingQuery(t *testing.T) {

@@ -344,6 +344,7 @@ func (s *governanceServer) handleGetPolicySummary(w http.ResponseWriter, r *http
 //	action         required  "read" | "write" | "destructive"
 //	tags           optional  comma-separated tags, e.g. "production,critical"
 //	user_id        optional  evaluate as a specific user
+//	service        optional  evaluate as a service account (e.g. "fleet-runner")
 //	role           optional  evaluate with a specific role
 //	purpose        optional  declared purpose: diagnostic, remediation, maintenance, compliance, emergency
 //	sensitivity    optional  comma-separated sensitivity classes, e.g. "pii,critical"
@@ -403,7 +404,8 @@ func (s *governanceServer) handleExplain(w http.ResponseWriter, r *http.Request)
 
 	req := policy.Request{
 		Principal: policy.RequestPrincipal{
-			UserID: q.Get("user_id"),
+			UserID:  q.Get("user_id"),
+			Service: q.Get("service"),
 			Roles: func() []string {
 				if r := q.Get("role"); r != "" {
 					return []string{r}
