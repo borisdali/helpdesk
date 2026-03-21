@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -300,8 +301,7 @@ func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	prompt := buildToolPrompt(toolName, args)
-	g.proxyToAgentWithTool(w, r, agentNameDB, toolName, args, prompt)
+	g.dispatchDirectTool(w, r, agentNameDB, toolName, args)
 }
 
 func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
@@ -318,8 +318,7 @@ func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	prompt := buildToolPrompt(toolName, args)
-	g.proxyToAgentWithTool(w, r, agentNameK8s, toolName, args, prompt)
+	g.dispatchDirectTool(w, r, agentNameK8s, toolName, args)
 }
 
 func (g *Gateway) handleResearch(w http.ResponseWriter, r *http.Request) {
@@ -880,6 +879,238 @@ func (g *Gateway) recordAudit(ctx context.Context, req *audit.GatewayRequest) {
 	if err := g.auditor.RecordRequest(ctx, req); err != nil {
 		slog.Warn("failed to record audit", "error", err)
 	}
+}
+
+// directToolReq is the JSON body sent to POST /tool/{name} on an agent.
+type directToolReq struct {
+	TraceID         string                     `json:"trace_id,omitempty"`
+	Principal       identity.ResolvedPrincipal `json:"principal,omitempty"`
+	Purpose         string                     `json:"purpose,omitempty"`
+	PurposeNote     string                     `json:"purpose_note,omitempty"`
+	PurposeExplicit bool                       `json:"purpose_explicit,omitempty"`
+	Args            map[string]any             `json:"args"`
+}
+
+// directToolResp is the JSON body returned by POST /tool/{name}.
+type directToolResp struct {
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// dispatchDirectTool sends a structured tool call directly to the agent's
+// /tool/{name} HTTP endpoint, bypassing the ADK/LLM layer entirely.
+// This eliminates LLM narration and parameter misinterpretation for fleet jobs.
+func (g *Gateway) dispatchDirectTool(w http.ResponseWriter, r *http.Request, agentName, toolName string, args map[string]any) {
+	start := time.Now()
+	requestID := uuid.New().String()[:8]
+
+	// Generate or propagate trace ID.
+	traceID := r.Header.Get("X-Trace-ID")
+	if traceID == "" {
+		traceID = audit.NewTraceIDWithPrefix("dt_")
+	}
+	w.Header().Set("X-Trace-ID", traceID)
+
+	// Resolve caller identity and purpose.
+	resolvedPrincipal, purpose, purposeNote, purposeExplicit, err := g.resolveRequest(r, "", "")
+	if err != nil {
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID: requestID,
+			TraceID:   traceID,
+			Endpoint:  r.URL.Path,
+			Method:    r.Method,
+			Agent:     agentName,
+			ToolName:  toolName,
+			StartTime: start,
+			Duration:  time.Since(start),
+			Status:    "error",
+			Error:     "authentication failed: " + err.Error(),
+			HTTPCode:  http.StatusUnauthorized,
+		})
+		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
+		return
+	}
+	principalStr := resolvedPrincipal.EffectiveID()
+
+	// Resolve agent base URL (strip /invoke suffix from InvokeURL).
+	agentInfo, ok := g.agents[agentName]
+	if !ok {
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    args,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "error",
+			Error:             "agent not available",
+			HTTPCode:          http.StatusBadGateway,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
+		})
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("agent %q not available", agentName))
+		return
+	}
+	baseURL := strings.TrimSuffix(agentInfo.InvokeURL, "/invoke")
+
+	slog.Info("gateway: direct tool dispatch", "agent", agentName, "tool", toolName,
+		"principal", principalStr, "purpose", purpose)
+
+	// Build request body carrying trace context + args.
+	reqBody := directToolReq{
+		TraceID:         traceID,
+		Principal:       resolvedPrincipal,
+		Purpose:         purpose,
+		PurposeNote:     purposeNote,
+		PurposeExplicit: purposeExplicit,
+		Args:            args,
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to marshal tool request")
+		return
+	}
+
+	// Call the agent's direct tool endpoint.
+	toolURL := baseURL + "/tool/" + toolName
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, toolURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build tool request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	httpResp, err := client.Do(req)
+	if err != nil {
+		slog.Error("gateway: direct tool call failed", "agent", agentName, "tool", toolName, "err", err)
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    args,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "error",
+			Error:             err.Error(),
+			HTTPCode:          http.StatusBadGateway,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
+		})
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("direct tool call to %s failed: %v", agentName, err))
+		return
+	}
+	defer httpResp.Body.Close()
+	respBytes, _ := io.ReadAll(httpResp.Body)
+
+	var toolResp directToolResp
+	if jsonErr := json.Unmarshal(respBytes, &toolResp); jsonErr != nil {
+		// Treat unparseable response as raw text output.
+		toolResp.Output = string(respBytes)
+	}
+
+	text := toolResp.Output
+	if toolResp.Error != "" {
+		text = toolResp.Error
+	}
+
+	// Map agent-level errors to appropriate HTTP status codes.
+	if httpResp.StatusCode >= 400 || toolResp.Error != "" {
+		httpStatus := httpResp.StatusCode
+		if httpStatus < 400 {
+			httpStatus = http.StatusUnprocessableEntity
+		}
+
+		auditStatus := "error"
+		if isPolicyDenial(text) {
+			auditStatus = "denied"
+			httpStatus = http.StatusForbidden
+		}
+
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    args,
+			Response:          text,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            auditStatus,
+			Error:             text,
+			HTTPCode:          httpStatus,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
+		})
+		writeError(w, httpStatus, text)
+		return
+	}
+
+	// Success path — check for tool-level execution failures surfaced as text.
+	if isToolError(text) {
+		slog.Warn("gateway: tool execution failed", "agent", agentName, "tool", toolName, "trace_id", traceID)
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			RequestID:         requestID,
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			Agent:             agentName,
+			ToolName:          toolName,
+			ToolParameters:    args,
+			Response:          text,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "error",
+			Error:             "tool execution failed",
+			HTTPCode:          http.StatusUnprocessableEntity,
+			Principal:         principalStr,
+			ResolvedPrincipal: resolvedPrincipal,
+			Purpose:           purpose,
+			PurposeNote:       purposeNote,
+		})
+		writeError(w, http.StatusUnprocessableEntity, text)
+		return
+	}
+
+	g.recordAudit(r.Context(), &audit.GatewayRequest{
+		RequestID:         requestID,
+		TraceID:           traceID,
+		Endpoint:          r.URL.Path,
+		Method:            r.Method,
+		Agent:             agentName,
+		ToolName:          toolName,
+		ToolParameters:    args,
+		Response:          text,
+		StartTime:         start,
+		Duration:          time.Since(start),
+		Status:            "success",
+		HTTPCode:          http.StatusOK,
+		Principal:         principalStr,
+		ResolvedPrincipal: resolvedPrincipal,
+		Purpose:           purpose,
+		PurposeNote:       purposeNote,
+	})
+
+	// Return the same a2aResponse structure as the NL path for client compatibility.
+	writeJSON(w, http.StatusOK, a2aResponse{
+		AgentName: agentName,
+		State:     "completed",
+		Text:      text,
+	})
 }
 
 // --- Response extraction ---

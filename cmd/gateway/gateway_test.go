@@ -812,6 +812,183 @@ func (a *testAuditor) Close() error { return nil }
 // X-Trace-ID = "tr_" + jobID on the response and records a gateway_request
 // audit event with that trace ID and no tool (so it qualifies as a journey anchor).
 // Running with two different job IDs also confirms trace ID uniqueness.
+// --- dispatchDirectTool tests ---
+
+// mockDirectToolAgent starts an httptest server that handles POST /tool/{name}.
+// The handler runs handlerFn to produce the response body and HTTP status.
+func mockDirectToolAgent(t *testing.T, toolName string, handlerFn func(w http.ResponseWriter, r *http.Request)) (*httptest.Server, *discovery.Agent) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tool/"+toolName && r.Method == http.MethodPost {
+			handlerFn(w, r)
+			return
+		}
+		http.Error(w, "unexpected path: "+r.URL.Path, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	agent := &discovery.Agent{
+		Name:      agentNameDB,
+		InvokeURL: srv.URL + "/invoke", // dispatchDirectTool strips /invoke
+	}
+	return srv, agent
+}
+
+// makeDirectDispatchGateway wires the gateway with one registered agent.
+// Builds the struct directly to avoid NewGateway's a2aclient.NewFromCard call
+// which requires a non-nil agent card.
+func makeDirectDispatchGateway(agent *discovery.Agent) *Gateway {
+	return &Gateway{
+		agents:  map[string]*discovery.Agent{agent.Name: agent},
+		clients: make(map[string]*a2aclient.Client),
+		toolRegistry: makeRegistryWithTools([]toolregistry.ToolEntry{
+			{Name: "check_connection", Agent: "database", ActionClass: "read"},
+			{Name: "terminate_idle_connections", Agent: "database", ActionClass: "destructive"},
+		}),
+	}
+}
+
+func TestDispatchDirectTool_Success(t *testing.T) {
+	_, agent := mockDirectToolAgent(t, "check_connection", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"output": "PostgreSQL 16.1 — connected"}) //nolint:errcheck
+	})
+	gw := makeDirectDispatchGateway(agent)
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/check_connection",
+		strings.NewReader(`{"connection_string":"postgres://localhost/test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp a2aResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.State != "completed" {
+		t.Errorf("State = %q, want completed", resp.State)
+	}
+	if !strings.Contains(resp.Text, "PostgreSQL 16.1") {
+		t.Errorf("Text = %q, want mention of PostgreSQL 16.1", resp.Text)
+	}
+	if resp.AgentName != agentNameDB {
+		t.Errorf("AgentName = %q, want %q", resp.AgentName, agentNameDB)
+	}
+}
+
+func TestDispatchDirectTool_AgentReturnsError(t *testing.T) {
+	_, agent := mockDirectToolAgent(t, "terminate_idle_connections", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]string{"error": "policy denied: destructive action blocked"}) //nolint:errcheck
+	})
+	gw := makeDirectDispatchGateway(agent)
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/terminate_idle_connections",
+		strings.NewReader(`{"connection_string":"postgres://prod/db","idle_minutes":10}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	// 422 from agent → policy denial text → 403 from gateway
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (policy denial)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "policy denied") {
+		t.Errorf("body = %q, want policy denied message", rec.Body.String())
+	}
+}
+
+func TestDispatchDirectTool_AgentReturnsToolError(t *testing.T) {
+	_, agent := mockDirectToolAgent(t, "check_connection", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]string{"error": "connection refused"}) //nolint:errcheck
+	})
+	gw := makeDirectDispatchGateway(agent)
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/check_connection",
+		strings.NewReader(`{"connection_string":"postgres://bad-host/db"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", rec.Code)
+	}
+}
+
+func TestDispatchDirectTool_AgentNotRegistered(t *testing.T) {
+	// Gateway with no agents registered.
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+		toolRegistry: makeRegistryWithTools([]toolregistry.ToolEntry{
+			{Name: "check_connection", Agent: "database", ActionClass: "read"},
+		}),
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/check_connection",
+		strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (agent not available)", rec.Code)
+	}
+}
+
+func TestDispatchDirectTool_TraceIDPropagated(t *testing.T) {
+	var capturedTraceID string
+
+	_, agent := mockDirectToolAgent(t, "check_connection", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if id, ok := body["trace_id"].(string); ok {
+			capturedTraceID = id
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"output": "ok"}) //nolint:errcheck
+	})
+	gw := makeDirectDispatchGateway(agent)
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/check_connection",
+		strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Trace-ID", "tr_flj_test999")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if capturedTraceID != "tr_flj_test999" {
+		t.Errorf("agent received trace_id = %q, want tr_flj_test999", capturedTraceID)
+	}
+	// Gateway must also echo the trace ID back on the response.
+	if got := rec.Header().Get("X-Trace-ID"); got != "tr_flj_test999" {
+		t.Errorf("response X-Trace-ID = %q, want tr_flj_test999", got)
+	}
+}
+
 func TestHandleFleetCreateJob_AnchorEvent(t *testing.T) {
 	cases := []struct {
 		jobID   string

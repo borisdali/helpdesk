@@ -1150,3 +1150,66 @@ func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore
 
 	return http.Serve(listener, mux)
 }
+
+// ServeWithTracingAndDirectTools is like ServeWithTracing but also registers
+// a POST /tool/{name} endpoint for deterministic, LLM-bypassing tool dispatch.
+// The registry maps tool names to context.Context-based handler functions.
+// Fleet runner uses this path to execute structured tool calls without LLM narration.
+func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, auditor audit.Auditor, registry *DirectToolRegistry, opts ...CardOptions) error {
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
+	}
+
+	var baseURL *url.URL
+	if cfg.ExternalURL != "" {
+		baseURL, err = url.Parse(cfg.ExternalURL)
+		if err != nil {
+			return fmt.Errorf("invalid HELPDESK_AGENT_URL: %v", err)
+		}
+	} else {
+		baseURL = &url.URL{Scheme: "http", Host: listener.Addr().String()}
+	}
+
+	agentPath := "/invoke"
+	agentCard := &a2a.AgentCard{
+		Name:               a.Name(),
+		Description:        a.Description(),
+		Skills:             adka2a.BuildAgentSkills(a),
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+		URL:                baseURL.JoinPath(agentPath).String(),
+		Capabilities:       a2a.AgentCapabilities{Streaming: true},
+	}
+
+	if len(opts) > 0 {
+		applyCardOptions(agentCard, opts[0])
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName:        a.Name(),
+			Agent:          a,
+			SessionService: session.InMemoryService(),
+		},
+	})
+	requestHandler := a2asrv.NewHandler(executor)
+
+	tracedHandler := audit.TraceMiddlewareWithAudit(traceStore, auditor, a.Name(), a2asrv.NewJSONRPCHandler(requestHandler))
+	mux.Handle(agentPath, tracedHandler)
+
+	if registry != nil {
+		registerDirectToolRoutes(mux, registry, traceStore)
+		slog.Info("direct tool dispatch enabled", "agent", a.Name(), "tools", len(registry.tools))
+	}
+
+	slog.Info("starting A2A server with tracing",
+		"agent", a.Name(),
+		"url", baseURL.String(),
+		"card", baseURL.String()+"/.well-known/agent-card.json",
+	)
+
+	return http.Serve(listener, mux)
+}
