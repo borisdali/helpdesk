@@ -157,6 +157,7 @@ Returns an array of journey summaries, newest first.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `user` | string | Filter to journeys initiated by this user ID |
+| `purpose` | string | Filter by declared purpose (e.g. `fleet_rollout`, `remediation`, `emergency`) |
 | `from` | RFC3339 | Only journeys whose delegation event is at or after this time |
 | `until` | RFC3339 | Only journeys whose delegation event is before this time |
 | `since` | duration | Shorthand for `from=now-duration` (e.g. `since=24h`, `since=7d`) |
@@ -346,11 +347,27 @@ with a non-empty `trace_id`. Two event types serve as anchors:
 - **Direct tool calls via `POST /api/v1/db/{tool}`** produce a Gateway-side
   `gateway_request` event with a `dt_` trace and a `tool_name` set. These
   appear in `GET /v1/events` but **not** in `GET /v1/journeys`.
+- **Fleet-runner tool calls** are direct tool calls — each step in a fleet job
+  is a `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` call with a `dt_`
+  trace. They appear in `/v1/events` but not in `/v1/journeys`. They are
+  correlatable by `purpose=fleet_rollout` and by `purpose_note` which encodes
+  `job_id=<id> server=<name> stage=<stage>`. Use the fleet job endpoints
+  (`GET /api/v1/fleet/jobs/{jobID}/servers`) for structured per-job views.
 - **Raw A2A calls** to an agent endpoint with no `trace_id` in message metadata
   appear in `GET /v1/events` with an empty `trace_id` and are not surfaced by
   journeys at all.
 
 To see all events regardless of journey status, use `GET /v1/events` directly.
+
+```bash
+# All events from a specific fleet job
+curl "http://localhost:1199/v1/events?event_type=gateway_request" | \
+  jq '[.[] | select(.purpose_note | contains("job_id=flj_4dd009b7"))]'
+
+# All fleet_rollout journeys (these are dt_ traces — use /v1/events, not /v1/journeys)
+curl "http://localhost:1199/v1/events?event_type=gateway_request" | \
+  jq '[.[] | select(.purpose == "fleet_rollout")]'
+```
 
 ---
 

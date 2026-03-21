@@ -169,6 +169,7 @@ behavior of the components):
 | 8 | [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
 | 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
+| — | [Fleet Management](FLEET.md) | **Implemented** | Staged rollout (`fleet-runner`) with canary/wave strategy, approval gating, per-step audit trail, and NL fleet planner; governance-integrated throughout (policy enforcement, `fleet_rollout` purpose, service-account identity) |
 | ?? | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
@@ -1083,7 +1084,16 @@ decisions are as important to explain as denied ones.
 | `action` | yes | `read`, `write`, `destructive` |
 | `tags` | no | Comma-separated tags, e.g. `production,critical` |
 | `user_id` | no | Evaluate as a specific user |
+| `service` | no | Evaluate as a service account (e.g. `fleet-runner`) |
 | `role` | no | Evaluate with a specific role |
+| `purpose` | no | Declared purpose (e.g. `fleet_rollout`, `remediation`, `emergency`) |
+
+When called through the Gateway (`GET /api/v1/governance/explain`), the
+caller's own resolved identity and purpose are automatically injected as
+defaults for `user_id`, `service`, `role`, and `purpose` — any explicitly
+supplied values override them. This means a fleet-runner service account can
+call the explain endpoint with its own Bearer token and get an accurate policy
+evaluation without supplying identity parameters manually.
 
 #### 9.5.2 Response format (both endpoints)
 
@@ -1284,6 +1294,7 @@ date  # Check current local time
 
 ### 12.3 Phase 3: Operations (In Progress)
 - [x] **Identity & access** — three-dimension access control: verified identity (static/JWT providers), data sensitivity markings, and purpose-based conditions. See [§10](#10-identity--access) and [docs/IDENTITY.md](IDENTITY.md).
+- [x] **Fleet management** — `fleet-runner` CLI for staged rollouts across infrastructure fleets. Canary → wave strategy with circuit breaker, multi-step job sequences, approval gating for write/destructive jobs, NL fleet planner, Tool Registry, semantic tool error detection (HTTP 422 on `---\nERROR —` marker). Full governance integration: policy enforcement per tool call, `fleet_rollout` purpose, service-account identity, per-step audit trail. See [docs/FLEET.md](FLEET.md).
 - [ ] **Rollback & Undo** — recovery from agent-initiated mutations. Design pending.
 - [ ] Rate limits (write frequency per session)
 - [ ] Circuit breaker (auto-pause on consecutive errors)

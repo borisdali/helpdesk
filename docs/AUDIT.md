@@ -216,7 +216,51 @@ Base URL: `http://localhost:1199` (default). All paths are under `/v1/`.
 | `GET` | `/v1/governance/explain` | Hypothetical policy check (requires policy engine) |
 | `POST` | `/v1/governance/check` | Evaluate + record a policy decision atomically |
 
-### 6.5 Health
+### 6.5 Fleet jobs
+
+Fleet job records live in three additive tables alongside the main audit event
+chain. They are written by `fleet-runner` via the gateway; the audit event
+chain records the individual tool calls as normal `gateway_request` events.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/fleet/jobs` | Register a new fleet job |
+| `GET` | `/v1/fleet/jobs` | List fleet jobs (filterable by status, submitted_by) |
+| `GET` | `/v1/fleet/jobs/{jobID}` | Get a fleet job record |
+| `PATCH` | `/v1/fleet/jobs/{jobID}` | Update fleet job status |
+| `POST` | `/v1/fleet/jobs/{jobID}/servers` | Add a server record to a job |
+| `PATCH` | `/v1/fleet/jobs/{jobID}/servers/{serverName}` | Update per-server status and output |
+| `GET` | `/v1/fleet/jobs/{jobID}/servers` | List all per-server records for a job |
+| `POST` | `/v1/fleet/jobs/{jobID}/servers/{serverName}/steps` | Add a step record |
+| `PATCH` | `/v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}` | Update step status |
+| `GET` | `/v1/fleet/jobs/{jobID}/servers/{serverName}/steps` | List per-step records |
+| `POST` | `/v1/fleet/jobs/{jobID}/approval` | Create an approval request for a fleet job |
+| `GET` | `/v1/fleet/jobs/{jobID}/approval/{approvalID}` | Poll approval status |
+
+**Fleet job status values:** `pending` → `running` → `success` / `failed` / `cancelled`
+
+**Per-server status values:** `pending` → `running` → `success` / `failed` / `partial`
+(`partial` means some steps failed with `on_failure: continue` but no stop-failure occurred)
+
+**Per-step status values:** `pending` → `success` / `failed`
+
+Fleet job records are **not** part of the audit event hash chain — they are
+operational records managed separately. The tool calls themselves (the actual
+work) appear as `gateway_request` audit events with `purpose=fleet_rollout`,
+`purpose_note=job_id=<id> server=<name> stage=<stage>`, and the fleet-runner's
+service account as the principal. This lets you correlate fleet job activity in
+the standard audit trail:
+
+```bash
+# All tool calls from a specific fleet job
+curl -s 'http://localhost:1199/v1/events?event_type=gateway_request' | \
+  jq '[.[] | select(.purpose_note | contains("job_id=flj_4dd009b7"))]'
+
+# All fleet_rollout activity (any job)
+curl -s 'http://localhost:1199/v1/journeys?purpose=fleet_rollout' | jq .
+```
+
+### 6.6 Health
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
