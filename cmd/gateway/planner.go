@@ -9,9 +9,11 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/google/uuid"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/fleet"
@@ -38,6 +40,14 @@ type FleetPlanResponse struct {
 
 // handleFleetPlan is the POST /api/v1/fleet/plan handler.
 func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	requestID := uuid.New().String()[:8]
+	traceID := audit.NewTraceIDWithPrefix("plan_")
+	w.Header().Set("X-Trace-ID", traceID)
+
+	resolvedPrincipal, purpose, purposeNote, _, _ := g.resolveRequest(r, "", "")
+	principalStr := resolvedPrincipal.EffectiveID()
+
 	var req FleetPlanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -93,6 +103,9 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jobDef := llmResp.JobDef
+
+	// Stamp the plan trace ID so the job file can be linked back to this audit event.
+	jobDef.PlanTraceID = traceID
 
 	// Validate: all step tool names must exist in the registry.
 	steps := jobDef.Change.Steps
@@ -157,6 +170,23 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 
 	// Pretty-print job_def for the raw field.
 	rawJobDefBytes, _ := json.MarshalIndent(jobDef, "", "  ")
+
+	g.recordAudit(r.Context(), &audit.GatewayRequest{
+		RequestID:         requestID,
+		TraceID:           traceID,
+		Endpoint:          r.URL.Path,
+		Method:            r.Method,
+		Message:           req.Description,
+		Response:          string(rawJobDefBytes),
+		StartTime:         start,
+		Duration:          time.Since(start),
+		Status:            "success",
+		HTTPCode:          http.StatusOK,
+		Principal:         principalStr,
+		ResolvedPrincipal: resolvedPrincipal,
+		Purpose:           purpose,
+		PurposeNote:       purposeNote,
+	})
 
 	writeJSON(w, http.StatusOK, FleetPlanResponse{
 		JobDef:           jobDef,

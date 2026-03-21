@@ -32,6 +32,7 @@ func submitJob(ctx context.Context, gatewayURL, auditURL, apiKey, submittedBy st
 		SubmittedAt: time.Now().UTC(),
 		Status:      "running",
 		JobDef:      string(defJSON),
+		PlanTraceID: def.PlanTraceID,
 	}
 
 	body, err := json.Marshal(job)

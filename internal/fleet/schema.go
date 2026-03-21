@@ -14,10 +14,15 @@ type Step struct {
 
 // JobDef is the top-level fleet job definition, loaded from a JSON file.
 type JobDef struct {
-	Name     string   `json:"name"`
-	Change   Change   `json:"change"`
-	Targets  Targets  `json:"targets"`
-	Strategy Strategy `json:"strategy"`
+	Name         string   `json:"name"`
+	Change       Change   `json:"change"`
+	Targets      Targets  `json:"targets"`
+	Strategy     Strategy `json:"strategy"`
+	// PlanTraceID links this job to the NL planner audit event that generated it.
+	// Set by the planner when saving the job definition; carried through to the
+	// fleet_jobs audit record so the three auditability questions can be answered:
+	// who planned it, was the description changed, and how many plans were attempted.
+	PlanTraceID string `json:"plan_trace_id,omitempty"`
 }
 
 // Change describes the operation(s) to execute on each target server.

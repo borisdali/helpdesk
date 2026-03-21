@@ -62,6 +62,9 @@ func (s *fleetServer) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("submitted_by"); v != "" {
 		opts.SubmittedBy = v
 	}
+	if v := q.Get("plan_trace_id"); v != "" {
+		opts.PlanTraceID = v
+	}
 
 	jobs, err := s.store.ListJobs(r.Context(), opts)
 	if err != nil {

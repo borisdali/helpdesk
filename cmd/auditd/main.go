@@ -396,6 +396,9 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("trace_id"); v != "" {
 		opts.TraceID = v
 	}
+	if v := q.Get("trace_id_prefix"); v != "" {
+		opts.TraceIDPrefix = v
+	}
 	if v := q.Get("origin"); v != "" {
 		opts.Origin = v
 	}

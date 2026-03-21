@@ -543,17 +543,18 @@ type QueryOptions struct {
 
 // JourneyOptions specifies filters for QueryJourneys.
 type JourneyOptions struct {
-	UserID     string        // optional; empty = all users
-	Purpose    string        // optional; filter by declared purpose (e.g. "diagnostic")
-	From       time.Time     // inclusive lower bound on timestamp
-	Until      time.Time     // exclusive upper bound on timestamp
-	Limit      int           // max journeys returned; default 50
-	Since      time.Duration // if non-zero, overrides From = time.Now().Add(-Since)
-	Category   string        // filter by decision_category (e.g. "database", "kubernetes")
-	Outcome    string        // filter by computed journey outcome (post-aggregation)
-	HasRetries bool          // only journeys with retry_count > 0 (post-aggregation)
-	TraceID    string        // filter by exact trace ID; returns at most one journey
-	Origin     string        // filter by dispatch origin (e.g. "agent", "gateway"); post-aggregation
+	UserID          string        // optional; empty = all users
+	Purpose         string        // optional; filter by declared purpose (e.g. "diagnostic")
+	From            time.Time     // inclusive lower bound on timestamp
+	Until           time.Time     // exclusive upper bound on timestamp
+	Limit           int           // max journeys returned; default 50
+	Since           time.Duration // if non-zero, overrides From = time.Now().Add(-Since)
+	Category        string        // filter by decision_category (e.g. "database", "kubernetes")
+	Outcome         string        // filter by computed journey outcome (post-aggregation)
+	HasRetries      bool          // only journeys with retry_count > 0 (post-aggregation)
+	TraceID         string        // filter by exact trace ID; returns at most one journey
+	TraceIDPrefix   string        // filter by trace ID prefix (e.g. "plan_" for planner journeys)
+	Origin          string        // filter by dispatch origin (e.g. "agent", "gateway"); post-aggregation
 }
 
 // DelegationSummary captures one orchestrator-to-sub-agent delegation turn:
@@ -621,6 +622,10 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	if opts.TraceID != "" {
 		q1 += " AND trace_id = ?"
 		args1 = append(args1, opts.TraceID)
+	}
+	if opts.TraceIDPrefix != "" {
+		q1 += " AND trace_id LIKE ?"
+		args1 = append(args1, opts.TraceIDPrefix+"%")
 	}
 	if opts.UserID != "" {
 		q1 += " AND user_id = ?"

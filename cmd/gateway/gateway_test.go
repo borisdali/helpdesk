@@ -1056,3 +1056,84 @@ func TestHandleFleetCreateJob_AnchorEvent(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleFleetPlan_PlanTraceIDStamped verifies that a successful plan response
+// carries a plan_trace_id with the "plan_" prefix in the returned job definition.
+func TestHandleFleetPlan_PlanTraceIDStamped(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+	})
+	llmResp := map[string]any{
+		"job_def": map[string]any{
+			"name": "health-check",
+			"change": map[string]any{
+				"steps": []any{
+					map[string]any{"agent": "database", "tool": "check_connection", "on_failure": "stop"},
+				},
+			},
+			"targets":  map[string]any{"tags": []string{"staging"}},
+			"strategy": map[string]any{"canary_count": 1},
+		},
+		"planner_notes": "connectivity check",
+	}
+	raw, _ := json.Marshal(llmResp)
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return string(raw), nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"check all staging databases"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp FleetPlanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !strings.HasPrefix(resp.JobDef.PlanTraceID, "plan_") {
+		t.Errorf("JobDef.PlanTraceID = %q, want prefix plan_", resp.JobDef.PlanTraceID)
+	}
+}
+
+// TestHandleFleetPlan_UnknownTag verifies that when the LLM returns a tag that
+// does not exist in the infrastructure, the handler returns 422 with the available
+// tags listed, rather than producing a plan that would silently target zero servers.
+func TestHandleFleetPlan_UnknownTag(t *testing.T) {
+	cfg := makeTestInfra() // has tags: production, staging, development
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "check_connection", Agent: "database", ActionClass: "read"},
+	})
+	// LLM invents a tag that does not exist in the infra.
+	llmResp := map[string]any{
+		"job_def": map[string]any{
+			"name": "check-job",
+			"change": map[string]any{
+				"steps": []any{
+					map[string]any{"agent": "database", "tool": "check_connection", "on_failure": "stop"},
+				},
+			},
+			"targets":  map[string]any{"tags": []string{"nonexistent-env"}},
+			"strategy": map[string]any{"canary_count": 1},
+		},
+		"planner_notes": "test",
+	}
+	raw, _ := json.Marshal(llmResp)
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return string(raw), nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"check all nonexistent-env databases"}`)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "unknown tag") {
+		t.Errorf("body = %q, want mention of unknown tag", body)
+	}
+	// Available tags must be listed so the caller knows how to refine.
+	if !strings.Contains(body, "staging") {
+		t.Errorf("body = %q, want available tags listed (e.g. staging)", body)
+	}
+}

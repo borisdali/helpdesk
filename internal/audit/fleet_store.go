@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,15 +13,16 @@ import (
 // FleetJob represents a fleet runner job: a single change applied across
 // a set of infrastructure targets with staged rollout.
 type FleetJob struct {
-	JobID       string    `json:"job_id"`            // "flj_" + uuid[:8]
-	Name        string    `json:"name"`
-	SubmittedBy string    `json:"submitted_by"`
-	SubmittedAt time.Time `json:"submitted_at"`
-	Status      string    `json:"status"` // pending, running, completed, failed, aborted
-	JobDef      string    `json:"job_def"` // JSON blob of original job definition
-	Summary     string    `json:"summary,omitempty"` // filled on completion
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	JobID        string    `json:"job_id"`             // "flj_" + uuid[:8]
+	Name         string    `json:"name"`
+	SubmittedBy  string    `json:"submitted_by"`
+	SubmittedAt  time.Time `json:"submitted_at"`
+	Status       string    `json:"status"` // pending, running, completed, failed, aborted
+	JobDef       string    `json:"job_def"` // JSON blob of original job definition
+	Summary      string    `json:"summary,omitempty"` // filled on completion
+	PlanTraceID  string    `json:"plan_trace_id,omitempty"` // links to the NL planner audit event
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // FleetJobServer tracks the per-server execution status within a fleet job.
@@ -72,16 +74,17 @@ func (s *FleetStore) createSchema() error {
 	}
 	stmts := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS fleet_jobs (
-    id           %s,
-    job_id       TEXT UNIQUE NOT NULL,
-    name         TEXT NOT NULL,
-    submitted_by TEXT NOT NULL,
-    submitted_at TEXT NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'pending',
-    job_def      TEXT NOT NULL,
-    summary      TEXT,
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    id             %s,
+    job_id         TEXT UNIQUE NOT NULL,
+    name           TEXT NOT NULL,
+    submitted_by   TEXT NOT NULL,
+    submitted_at   TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending',
+    job_def        TEXT NOT NULL,
+    summary        TEXT,
+    plan_trace_id  TEXT,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
 )`, pk),
 		`CREATE INDEX IF NOT EXISTS idx_fleet_jobs_job_id      ON fleet_jobs(job_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_fleet_jobs_submitted_by ON fleet_jobs(submitted_by)`,
@@ -116,6 +119,20 @@ func (s *FleetStore) createSchema() error {
 			return err
 		}
 	}
+
+	// Additive column migrations — ignored when the column already exists
+	// (SQLite: "duplicate column name"; Postgres: "column already exists").
+	migrations := []string{
+		`ALTER TABLE fleet_jobs ADD COLUMN plan_trace_id TEXT`,
+	}
+	for _, stmt := range migrations {
+		if _, err := s.db.Exec(stmt); err != nil {
+			msg := err.Error()
+			if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "already exists") {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -136,8 +153,8 @@ func (s *FleetStore) CreateJob(ctx context.Context, job *FleetJob) error {
 
 	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		INSERT INTO fleet_jobs
-			(job_id, name, submitted_by, submitted_at, status, job_def, summary, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(job_id, name, submitted_by, submitted_at, status, job_def, summary, plan_trace_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		job.JobID,
 		job.Name,
@@ -146,6 +163,7 @@ func (s *FleetStore) CreateJob(ctx context.Context, job *FleetJob) error {
 		job.Status,
 		job.JobDef,
 		nullableString(job.Summary),
+		nullableString(job.PlanTraceID),
 		job.CreatedAt.Format(time.RFC3339Nano),
 		job.UpdatedAt.Format(time.RFC3339Nano),
 	)
@@ -155,7 +173,7 @@ func (s *FleetStore) CreateJob(ctx context.Context, job *FleetJob) error {
 // GetJob retrieves a fleet job by ID.
 func (s *FleetStore) GetJob(ctx context.Context, jobID string) (*FleetJob, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-		SELECT job_id, name, submitted_by, submitted_at, status, job_def, summary, created_at, updated_at
+		SELECT job_id, name, submitted_by, submitted_at, status, job_def, summary, plan_trace_id, created_at, updated_at
 		FROM fleet_jobs WHERE job_id = ?
 	`), jobID)
 
@@ -164,14 +182,15 @@ func (s *FleetStore) GetJob(ctx context.Context, jobID string) (*FleetJob, error
 
 // FleetJobQueryOptions specifies filters for listing fleet jobs.
 type FleetJobQueryOptions struct {
-	Status      string
-	SubmittedBy string
-	Limit       int
+	Status       string
+	SubmittedBy  string
+	PlanTraceID  string // filter by the planner audit event that generated this job
+	Limit        int
 }
 
 // ListJobs returns fleet jobs matching the filters, newest first.
 func (s *FleetStore) ListJobs(ctx context.Context, opts FleetJobQueryOptions) ([]*FleetJob, error) {
-	query := `SELECT job_id, name, submitted_by, submitted_at, status, job_def, summary, created_at, updated_at
+	query := `SELECT job_id, name, submitted_by, submitted_at, status, job_def, summary, plan_trace_id, created_at, updated_at
 		FROM fleet_jobs WHERE 1=1`
 	var args []any
 
@@ -182,6 +201,10 @@ func (s *FleetStore) ListJobs(ctx context.Context, opts FleetJobQueryOptions) ([
 	if opts.SubmittedBy != "" {
 		query += " AND submitted_by = ?"
 		args = append(args, opts.SubmittedBy)
+	}
+	if opts.PlanTraceID != "" {
+		query += " AND plan_trace_id = ?"
+		args = append(args, opts.PlanTraceID)
 	}
 	query += " ORDER BY created_at DESC"
 	if opts.Limit > 0 {
@@ -320,11 +343,11 @@ func (s *FleetStore) GetServerSteps(ctx context.Context, jobID, serverName strin
 func scanFleetJob(row *sql.Row) (*FleetJob, error) {
 	var j FleetJob
 	var submittedAt, createdAt, updatedAt string
-	var summary sql.NullString
+	var summary, planTraceID sql.NullString
 
 	err := row.Scan(
 		&j.JobID, &j.Name, &j.SubmittedBy, &submittedAt,
-		&j.Status, &j.JobDef, &summary,
+		&j.Status, &j.JobDef, &summary, &planTraceID,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -335,6 +358,7 @@ func scanFleetJob(row *sql.Row) (*FleetJob, error) {
 	}
 
 	j.Summary = summary.String
+	j.PlanTraceID = planTraceID.String
 	j.SubmittedAt, _ = time.Parse(time.RFC3339Nano, submittedAt)
 	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	j.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
@@ -344,11 +368,11 @@ func scanFleetJob(row *sql.Row) (*FleetJob, error) {
 func scanFleetJobFromRows(rows *sql.Rows) (*FleetJob, error) {
 	var j FleetJob
 	var submittedAt, createdAt, updatedAt string
-	var summary sql.NullString
+	var summary, planTraceID sql.NullString
 
 	err := rows.Scan(
 		&j.JobID, &j.Name, &j.SubmittedBy, &submittedAt,
-		&j.Status, &j.JobDef, &summary,
+		&j.Status, &j.JobDef, &summary, &planTraceID,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -356,6 +380,7 @@ func scanFleetJobFromRows(rows *sql.Rows) (*FleetJob, error) {
 	}
 
 	j.Summary = summary.String
+	j.PlanTraceID = planTraceID.String
 	j.SubmittedAt, _ = time.Parse(time.RFC3339Nano, submittedAt)
 	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	j.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)

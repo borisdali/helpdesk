@@ -2028,3 +2028,54 @@ func TestQueryJourneys_DelegationsPartitioned(t *testing.T) {
 		}
 	}
 }
+
+// TestQueryJourneys_FilterByTraceIDPrefix verifies that opts.TraceIDPrefix
+// narrows the result to journeys whose trace ID starts with the given prefix.
+// The primary use case is filtering NL-planner journeys (prefix "plan_").
+func TestQueryJourneys_FilterByTraceIDPrefix(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC()
+
+	recordAll(t, store, []*Event{
+		// Planner-originated journey.
+		{
+			EventID:   "gw_plan_journey",
+			Timestamp: base,
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "plan_abc12345",
+			Session:   Session{ID: "sess_p", UserID: "alice"},
+			Input:     Input{UserQuery: "check all staging databases"},
+		},
+		// Regular NL-query journey.
+		{
+			EventID:   "gw_tr_journey",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_xyz99",
+			Session:   Session{ID: "sess_q", UserID: "alice"},
+			Input:     Input{UserQuery: "what is the load on prod"},
+		},
+	})
+
+	// Filter to planner journeys only.
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{TraceIDPrefix: "plan_"})
+	if err != nil {
+		t.Fatalf("QueryJourneys(TraceIDPrefix=plan_): %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys(TraceIDPrefix=plan_) = %d, want 1", len(journeys))
+	}
+	if journeys[0].TraceID != "plan_abc12345" {
+		t.Errorf("TraceID = %q, want plan_abc12345", journeys[0].TraceID)
+	}
+
+	// Filter with no prefix returns both.
+	all, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys(all): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("QueryJourneys() = %d, want 2", len(all))
+	}
+}
