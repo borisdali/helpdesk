@@ -377,6 +377,112 @@ func TestCheckTool_NilEnforcer_NoRemoteURL(t *testing.T) {
 	}
 }
 
+// --- readonly-governed mode mutation blocking ---
+
+func TestCheckTool_ReadonlyGoverned_BlocksWrite(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	e := &PolicyEnforcer{} // no engine or remote URL needed — mode check fires first
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "test", nil)
+	if err == nil {
+		t.Fatal("write action in readonly-governed mode: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "readonly-governed") {
+		t.Errorf("error message should mention readonly-governed, got: %v", err)
+	}
+}
+
+func TestCheckTool_ReadonlyGoverned_BlocksDestructive(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	e := &PolicyEnforcer{}
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, "test", nil)
+	if err == nil {
+		t.Fatal("destructive action in readonly-governed mode: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "readonly-governed") {
+		t.Errorf("error message should mention readonly-governed, got: %v", err)
+	}
+}
+
+func TestCheckTool_ReadonlyGoverned_AllowsRead(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	// No engine, no remote URL — read passes the mode check and then hits the
+	// "no enforcement" fast path, returning nil.
+	e := &PolicyEnforcer{}
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionRead, nil, "test", nil)
+	if err != nil {
+		t.Errorf("read action in readonly-governed mode: expected nil, got: %v", err)
+	}
+}
+
+func TestCheckTool_Fix_WriteNotBlockedByModeGuard(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "fix")
+	// In fix mode the mode guard must NOT block writes — enforcement is handled
+	// by the policy engine or remote check. With no engine configured the call
+	// passes through (no-op enforcement).
+	e := &PolicyEnforcer{}
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "test", nil)
+	if err != nil {
+		t.Errorf("write action in fix mode with no enforcement configured: expected nil, got: %v", err)
+	}
+}
+
+// TestCheckTool_ReadonlyGoverned_AuditsDenial verifies that blocking a write in
+// readonly-governed mode records a policy_decision event with effect=deny and
+// PolicyName=readonly_governed_mode, so the audit trail reflects the block.
+func TestCheckTool_ReadonlyGoverned_AuditsDenial(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-rg", "trace-rg")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{ToolAuditor: ta})
+
+	err = e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, []string{"env:prod"}, "test note", nil)
+	if err == nil {
+		t.Fatal("expected error for write in readonly-governed mode, got nil")
+	}
+
+	// tool_invoked must have been recorded before the mode check returned.
+	invokedEvents, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query tool_invoked: %v", err)
+	}
+	if len(invokedEvents) != 1 {
+		t.Fatalf("expected 1 tool_invoked event, got %d", len(invokedEvents))
+	}
+
+	// policy_decision must have been recorded with deny + correct policy name.
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event, got %d", len(polEvents))
+	}
+	pd := polEvents[0].PolicyDecision
+	if pd == nil {
+		t.Fatal("PolicyDecision field is nil")
+	}
+	if pd.Effect != "deny" {
+		t.Errorf("Effect = %q, want \"deny\"", pd.Effect)
+	}
+	if pd.PolicyName != "readonly_governed_mode" {
+		t.Errorf("PolicyName = %q, want \"readonly_governed_mode\"", pd.PolicyName)
+	}
+	if pd.ResourceName != "prod-db" {
+		t.Errorf("ResourceName = %q, want \"prod-db\"", pd.ResourceName)
+	}
+	if pd.Action != string(policy.ActionWrite) {
+		t.Errorf("Action = %q, want %q", pd.Action, policy.ActionWrite)
+	}
+}
+
 // TestCheckTool_EmitsToolInvokedWhenPolicyDisabled verifies that a tool_invoked
 // event is recorded unconditionally even when policy enforcement is disabled
 // (engine=nil, policyCheckURL=""). This is the core guarantee of the coverage

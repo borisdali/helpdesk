@@ -8,8 +8,12 @@
 #   - Optionally: HELPDESK_INFRA_CONFIG pointing to an infrastructure.json
 #
 # Usage:
-#   ./startall.sh              # start agents + gateway, then launch orchestrator
-#   ./startall.sh --no-repl    # start agents + gateway only (headless)
+#   ./startall.sh                                   # start agents + gateway, then launch orchestrator
+#   ./startall.sh --services-only                   # start agents + gateway only (headless/enterprise)
+#   ./startall.sh --services-only --governance      # headless + auditor + secbot
+#   ./startall.sh --readonly-governed               # governed read-only: audit+policy required, no mutations
+#   ./startall.sh --readonly-governed --governance  # same + auditor + secbot
+#   ./startall.sh --cli                             # attach orchestrator CLI to already-running services
 #
 # Logs go to /tmp/helpdesk-*.log. Stop everything with: ./startall.sh --stop
 
@@ -72,14 +76,53 @@ start_bg() {
 }
 
 # ---------------------------------------------------------------------------
-# --stop: kill any running helpdesk processes
+# Parse flags (order-independent)
 # ---------------------------------------------------------------------------
-if [[ "${1:-}" == "--stop" ]]; then
-    for name in auditd database-agent k8s-agent incident-agent research-agent gateway auditor secbot; do
-        pkill -f "helpdesk.*${name}\|${SCRIPT_DIR}/${name}" 2>/dev/null || true
-    done
-    echo "Sent stop signal to helpdesk services."
-    exit 0
+SERVICES_ONLY=false
+GOVERNANCE=false
+CLI_ONLY=false
+READONLY_GOVERNED=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --stop)
+            for name in auditd database-agent k8s-agent incident-agent research-agent gateway auditor secbot; do
+                pkill -f "helpdesk.*${name}\|${SCRIPT_DIR}/${name}" 2>/dev/null || true
+            done
+            echo "Sent stop signal to helpdesk services."
+            exit 0
+            ;;
+        --services-only)     SERVICES_ONLY=true ;;
+        --governance)        GOVERNANCE=true ;;
+        --cli)               CLI_ONLY=true ;;
+        --readonly-governed) READONLY_GOVERNED=true ;;
+        *)
+            echo "ERROR: unknown argument: $arg" >&2
+            echo "Usage: $0 [--services-only] [--readonly-governed] [--governance] [--cli] [--stop]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# --readonly-governed: set operating mode and default governance env vars
+# ---------------------------------------------------------------------------
+if [[ "$READONLY_GOVERNED" == "true" ]]; then
+    export HELPDESK_OPERATING_MODE=readonly-governed
+    # Governance stack is required in this mode — default these if not already
+    # set in the shell or .env.
+    : "${HELPDESK_AUDIT_ENABLED:=true}"
+    : "${HELPDESK_POLICY_ENABLED:=true}"
+fi
+
+# ---------------------------------------------------------------------------
+# --cli: attach orchestrator to already-running services, do not start anything
+# ---------------------------------------------------------------------------
+if [[ "$CLI_ONLY" == "true" ]]; then
+    if [[ -z "${HELPDESK_AGENT_URLS:-}" ]]; then
+        export HELPDESK_AGENT_URLS="$AGENT_URLS"
+    fi
+    exec "$SCRIPT_DIR/helpdesk"
 fi
 
 trap cleanup EXIT INT TERM
@@ -180,7 +223,7 @@ else
 fi
 
 # Start optional governance components if --governance flag is set
-if [[ "${1:-}" == "--governance" || "${2:-}" == "--governance" ]]; then
+if [[ "$GOVERNANCE" == "true" ]]; then
     echo ""
     echo "Starting governance components..."
     if [[ -x "$SCRIPT_DIR/auditor" ]]; then
@@ -199,8 +242,8 @@ echo ""
 # ---------------------------------------------------------------------------
 # Orchestrator (interactive REPL) or headless mode
 # ---------------------------------------------------------------------------
-if [[ "${1:-}" == "--no-repl" ]]; then
-    echo "Running headless (--no-repl). Press Ctrl-C to stop all services."
+if [[ "$SERVICES_ONLY" == "true" ]]; then
+    echo "Running headless (--services-only). Press Ctrl-C to stop all services."
     wait
 else
     echo "Launching interactive orchestrator (type 'exit' to quit)..."

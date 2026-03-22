@@ -1,6 +1,8 @@
 # aiHelpDesk: Host Deployment (Binary Tarball)
 
-This guide covers running aiHelpDesk directly on a host — a Linux or macOS machine — without Docker or Kubernetes. All binaries are statically compiled and have no external runtime dependencies beyond `psql` and `kubectl` (only needed by the database and K8s agents at query time).
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+
+This guide covers running aiHelpDesk directly on a host — a Linux or macOS machine — without Docker or Kubernetes. All binaries are statically compiled and have no external runtime dependencies beyond `psql` and `kubectl` (only needed by the database and K8s agents at query time). This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host inside Docker containers (via Docker Compose) or on K8s.
 
 ## 1. What's in the Tarball
 
@@ -44,7 +46,15 @@ cp .env.example .env
 cp infrastructure.json.example infrastructure.json
 # Edit infrastructure.json with your database servers, K8s clusters, and VMs
 
-# 4. Start everything
+# 4. (Optional) Configure authn (users.yaml or JWT)
+cp users.example.yaml. users.yaml
+
+# 5. (Optional) Configure policies
+cp policies.example.yaml policies.yaml
+
+# 6. (Optional) Prepare/Copy .pgpass
+
+# 7. Start everything
 ./startall.sh
 ```
 
@@ -118,11 +128,20 @@ HELPDESK_INFRA_CONFIG=./infrastructure.json
 # Start agents + gateway, then open the interactive REPL
 ./startall.sh
 
-# Start agents + gateway only (headless — no REPL)
-./startall.sh --no-repl
+# Enterprise: governed read-only (audit + policy required, mutations blocked)
+./startall.sh --readonly-governed --services-only
+
+# Enterprise: governed read-only + real-time monitoring (auditor + secbot)
+./startall.sh --readonly-governed --services-only --governance
+
+# Enterprise: full governed mode (mutations enabled, requires fix mode config)
+./startall.sh --services-only
 
 # Start with real-time governance monitoring (auditor + secbot)
 ./startall.sh --governance
+
+# Attach the CLI to already-running services (enterprise headless deployments)
+./startall.sh --cli
 
 # Stop all running helpdesk processes
 ./startall.sh --stop
@@ -143,7 +162,7 @@ tail -f /tmp/helpdesk-gateway.log
 The binary is included in the tarball. Start the stack first:
 
 ```bash
-./startall.sh --no-repl &
+./startall.sh --services-only &
 ```
 
 Then in another terminal:
@@ -181,7 +200,7 @@ See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, all purp
 For programmatic access via raw HTTP. See [API.md](../../docs/API.md) for the full endpoint reference.
 
 ```bash
-./startall.sh --no-repl &
+./startall.sh --services-only &
 
 # Query via the Gateway
 curl -s http://localhost:8080/api/v1/agents | jq .
@@ -210,11 +229,20 @@ HELPDESK_POLICY_ENABLED=true
 HELPDESK_POLICY_FILE=./policies.yaml   # copy and edit policies.example.yaml
 ```
 
-To require all governance modules (audit, policy, approvals, guardrails) to be active before agents will start, set:
+To require all governance modules (audit, policy, guardrails) to be active before agents will start, choose one of the governed modes:
 
 ```bash
+# Governed read-only — audit + policy required, mutations unconditionally blocked.
+# Recommended for initial enterprise deployments: observe before you act.
+HELPDESK_OPERATING_MODE=readonly-governed
+
+# Full governed mode — same governance requirements as above, plus mutations are
+# permitted (subject to policy + approval workflows).
 HELPDESK_OPERATING_MODE=fix
 ```
+
+`startall.sh --readonly-governed` sets `HELPDESK_OPERATING_MODE=readonly-governed` and
+defaults `HELPDESK_AUDIT_ENABLED=true` and `HELPDESK_POLICY_ENABLED=true` automatically.
 
 ### 7.2 Policy Configuration
 
@@ -544,7 +572,7 @@ Check the log:
 cat /tmp/helpdesk-database-agent.log
 ```
 
-Common causes: missing `HELPDESK_MODEL_VENDOR`/`HELPDESK_API_KEY`, `HELPDESK_OPERATING_MODE=fix` with governance not fully configured, or `psql`/`kubectl` not on `PATH`.
+Common causes: missing `HELPDESK_MODEL_VENDOR`/`HELPDESK_API_KEY`, a governed operating mode (`readonly-governed` or `fix`) with governance not fully configured, or `psql`/`kubectl` not on `PATH`.
 
 ### approvals / govexplain: "audit service URL required"
 

@@ -1,5 +1,9 @@
 # aiHelpDesk: Deployment for VM-based (non-K8s) databases
 
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+
+This guide covers running aiHelpDesk on a host inside the Docker containers (orchestrated via Docker Compose). This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM (no Docker) or on K8s.
+
 ## 1. Deployment from binary
 
 There are two ways to deploy and run aiHelpDesk on non-K8s environments, i.e. VMs or bare metal. In both cases the first step is downloading the right tarball for your platform. There are five tarballs available for every aiHelpDesk release. The first one that ends with "-deploy.tar.gz" is intended for section 1.1 below (run aiHelpDesk agents in Docker containers). The other four tarballs are binaries specific to a platform and are intended for section 1.2
@@ -30,8 +34,8 @@ Here's the aiHelpDesk release [download page](https://github.com/borisdali/helpd
 To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform agnostic tarball and run the following commands:
 
 ```
-  tar xzf helpdesk-v.0.1.0-deploy.tar.gz
-  cd helpdesk-v0.1.0-deploy/docker-compose
+  tar xzf helpdesk-v.X.Y.Z-deploy.tar.gz
+  cd helpdesk-vX.Y.Z-deploy/docker-compose
   cp .env.example .env
   cp infrastructure.json.example infrastructure.json
   cp policies.example.yaml policies.yaml
@@ -102,7 +106,9 @@ EOF
   - Starts all 3 agents + Gateway in the background (logs go to `/tmp/helpdesk-*.log`)
   - Launches the interactive Orchestrator in the foreground
   - Cleans up all background processes on exit/`Ctrl-C`
-  - `--no-repl` runs headless (Gateway only, no Orchestrator)
+  - `--services-only` runs headless (Gateway only, no Orchestrator)
+  - `--readonly-governed` enables governed read-only mode (audit + policy required, mutations blocked)
+  - `--cli` attaches the orchestrator CLI to already-running services
   - `--stop` kills any running helpdesk processes
 
 N.B: Please note that the binary tarballs expect `psql` and `kubectl` already installed on the host — those are baked into the Docker image (see option 1.1), but not into the Go binaries (this option 1.2).
@@ -233,11 +239,31 @@ docker compose up -d
 ### 3.2 Enabling Governance (Binary Deployment)
 
 ```bash
-# Start with governance monitoring
-./startall.sh --governance
+# Governed read-only: audit + policy required, mutations blocked
+./startall.sh --readonly-governed --services-only
 
-# Or start without governance monitoring
-./startall.sh
+# Governed read-only + real-time monitoring
+./startall.sh --readonly-governed --services-only --governance
+
+# Full governed mode (fix) with monitoring
+./startall.sh --services-only --governance
+
+# Personal mode with monitoring only
+./startall.sh --governance
+```
+
+To set the operating mode directly in `.env` for Docker Compose deployments:
+
+```bash
+# Governed read-only
+HELPDESK_OPERATING_MODE=readonly-governed
+HELPDESK_AUDIT_ENABLED=true
+HELPDESK_POLICY_ENABLED=true
+
+# Full governed (fix) mode
+HELPDESK_OPERATING_MODE=fix
+HELPDESK_AUDIT_ENABLED=true
+HELPDESK_POLICY_ENABLED=true
 ```
 
 ### 3.3 Policy Configuration

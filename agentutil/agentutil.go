@@ -277,6 +277,35 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		e.toolAuditor.RecordToolInvoked(ctx, resourceType, resourceName, string(action), tags)
 	}
 
+	// Block write and destructive tools unconditionally in readonly-governed mode.
+	// This is enforced in code, not by policy, so a misconfigured policy file
+	// cannot accidentally permit a mutation.
+	if strings.ToLower(os.Getenv("HELPDESK_OPERATING_MODE")) == "readonly-governed" &&
+		(action == policy.ActionWrite || action == policy.ActionDestructive) {
+		msg := fmt.Sprintf(
+			"tool %q is a %s operation and is not permitted in readonly-governed mode; "+
+				"set HELPDESK_OPERATING_MODE=fix to enable mutations",
+			resourceType, string(action))
+		if e.toolAuditor != nil {
+			principal := audit.PrincipalFromContext(ctx)
+			e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+				ResourceType: resourceType,
+				ResourceName: resourceName,
+				Action:       string(action),
+				Tags:         tags,
+				Effect:       "deny",
+				PolicyName:   "readonly_governed_mode",
+				Message:      msg,
+				Note:         note,
+				UserID:       principal.UserID,
+				Roles:        principal.Roles,
+				Service:      principal.Service,
+				AuthMethod:   principal.AuthMethod,
+			})
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
 	// Pre-check: if HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE is set and this resource
 	// has pii or critical sensitivity, require an explicit purpose declaration.
 	if e.requirePurposeForSensitive && hasSensitiveSensitivity(sensitivity) {

@@ -357,6 +357,80 @@ func TestMixedViolationHelper(t *testing.T) {
 	}, "test-component", "")
 }
 
+// --- readonly-governed mode ---
+
+func TestIsGovernedMode_Fix(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "fix")
+	if !isGovernedMode() {
+		t.Error("expected isGovernedMode()=true for 'fix'")
+	}
+}
+
+func TestIsGovernedMode_ReadonlyGoverned(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	if !isGovernedMode() {
+		t.Error("expected isGovernedMode()=true for 'readonly-governed'")
+	}
+}
+
+func TestIsGovernedMode_Readonly(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly")
+	if isGovernedMode() {
+		t.Error("expected isGovernedMode()=false for 'readonly'")
+	}
+}
+
+func TestIsGovernedMode_Unset(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "")
+	if isGovernedMode() {
+		t.Error("expected isGovernedMode()=false when unset")
+	}
+}
+
+func TestCheckFixModeViolations_ReadonlyGoverned_FatalViolations(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	// Bare config — should produce the same fatal violations as fix mode.
+	violations := CheckFixModeViolations(Config{})
+	requireViolation(t, violations, "audit", "fatal")
+	requireViolation(t, violations, "policy_engine", "fatal")
+}
+
+func TestCheckFixModeViolations_ReadonlyGoverned_NoApprovalWarning(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	cfg := fullFixModeConfig(t)
+	cfg.ApprovalEnabled = false // deliberately off
+
+	violations := CheckFixModeViolations(cfg)
+	// approval_workflows warning must be suppressed in readonly-governed mode.
+	requireNoViolation(t, violations, "approval_workflows")
+}
+
+func TestCheckFixModeViolations_ReadonlyGoverned_DryRunFatal(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	cfg := fullFixModeConfig(t)
+	cfg.PolicyDryRun = true
+
+	violations := CheckFixModeViolations(cfg)
+	requireViolation(t, violations, "guardrails", "fatal")
+}
+
+func TestCheckFixModeViolations_ReadonlyGoverned_FullyCompliant(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	cfg := fullFixModeConfig(t)
+	cfg.ApprovalEnabled = false // approvals are not applicable in this mode
+
+	violations := CheckFixModeViolations(cfg)
+	if len(violations) != 0 {
+		t.Errorf("expected no violations in readonly-governed with governance stack configured, got %d: %v", len(violations), violations)
+	}
+}
+
+func TestCheckFixModeAuditViolations_ReadonlyGoverned(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	violations := CheckFixModeAuditViolations(false, "")
+	requireViolation(t, violations, "audit", "fatal")
+}
+
 // --- helpers ---
 
 // requireViolation asserts that violations contains an entry with the given module and severity.

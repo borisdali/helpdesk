@@ -1,5 +1,9 @@
 # aiHelpDesk: Deployment on Kubernetes
 
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+
+This guide covers running aiHelpDesk on K8s, deployed via Helm Charts. This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM or inside Docker containers.
+
 ## 1. Prerequisites
 
 - Kubernetes cluster (1.24+)
@@ -563,13 +567,35 @@ governance:
     maxEventsPerMinute: 100
 ```
 
-### 9.3 Fix Operating Mode
+### 9.3 Governed Operating Modes
 
-Fix mode requires all governance modules (audit, policy, approvals) to be active before any agent will start. An agent that detects a missing or misconfigured module logs the violation and exits — it cannot be used until the gap is resolved.
+Both governed modes (`readonly-governed` and `fix`) require audit and policy to be active before any agent will start. An agent that detects a missing or misconfigured module logs the violation and exits — it cannot be used until the gap is resolved.
 
-To enable fix mode, set `governance.operatingMode` in `values.yaml` alongside the required governance config:
+**`readonly-governed`** — recommended for initial enterprise deployments. The full governance stack is enforced at startup, but write and destructive tool invocations are unconditionally blocked in code. There is nothing to approve, so approval workflows are not required.
+
+**`fix`** — full governed mode. Same startup requirements as `readonly-governed`, plus mutations are permitted subject to policy and approval workflows.
+
+Set `governance.operatingMode` in `values.yaml` alongside the required governance config:
 
 ```yaml
+# Governed read-only — observe before you act
+governance:
+  operatingMode: readonly-governed
+
+  auditd:
+    enabled: true
+    port: 1199
+    persistence:
+      enabled: true
+      size: 5Gi
+
+  policy:
+    enabled: true
+    configMap: helpdesk-policies   # must exist — see §9.4
+```
+
+```yaml
+# Full governed mode — mutations enabled
 governance:
   operatingMode: fix
 
@@ -596,7 +622,7 @@ helm upgrade helpdesk . -f values.yaml
 
 Because `operatingMode` is rendered directly into every agent's Deployment spec, `helm upgrade` alone triggers a full rollout — no manual `kubectl rollout restart` needed.
 
-If an agent exits immediately after enabling fix mode, check its logs for the specific violation:
+If an agent exits immediately after enabling a governed mode, check its logs for the specific violation:
 
 ```bash
 kubectl -n helpdesk-system logs deploy/helpdesk-database-agent | grep "governance violation"
@@ -609,7 +635,7 @@ Common causes and remediations:
 | `audit: fatal` | `governance.auditd.enabled` is false | Set `governance.auditd.enabled: true` |
 | `policy_engine: fatal` | `governance.policy.enabled` is false or `configMap` not set | Set `governance.policy.enabled: true` and create the ConfigMap |
 | `guardrails: fatal` | `HELPDESK_POLICY_DRY_RUN=true` is set | Remove or unset `HELPDESK_POLICY_DRY_RUN` |
-| `approval_workflows: warning` | Approval timeout not configured | Set `governance.approvals.timeout` |
+| `approval_workflows: warning` | Approval timeout not configured (`fix` mode only) | Set `governance.approvals.timeout` (not required in `readonly-governed`) |
 
 ### 9.4 Policy Configuration
 
