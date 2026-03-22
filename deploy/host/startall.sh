@@ -105,6 +105,20 @@ for arg in "$@"; do
 done
 
 # ---------------------------------------------------------------------------
+# Map _HOST variables → their binary equivalents for host deployments.
+# Docker Compose uses *_HOST variables as bind-mount sources and sets the
+# in-container path (e.g. /etc/helpdesk/policies.yaml) separately. When
+# running binaries directly on the host there is no bind-mount, so map the
+# host-side paths straight through if the target variable is not already set.
+# ---------------------------------------------------------------------------
+if [[ -z "${HELPDESK_USERS_FILE:-}" && -n "${HELPDESK_USERS_FILE_HOST:-}" ]]; then
+    export HELPDESK_USERS_FILE="$HELPDESK_USERS_FILE_HOST"
+fi
+if [[ -z "${HELPDESK_POLICY_FILE:-}" && -n "${HELPDESK_POLICY_FILE_HOST:-}" ]]; then
+    export HELPDESK_POLICY_FILE="$HELPDESK_POLICY_FILE_HOST"
+fi
+
+# ---------------------------------------------------------------------------
 # --readonly-governed: set operating mode and default governance env vars
 # ---------------------------------------------------------------------------
 if [[ "$READONLY_GOVERNED" == "true" ]]; then

@@ -307,8 +307,23 @@ func TestPing_AuthFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected auth error")
 	}
-	if !contains(err.Error(), "authentication failed") {
+	if !contains(err.Error(), "authentication") {
 		t.Errorf("error should mention authentication: %v", err)
+	}
+}
+
+func TestPing_AuthFailure_IncludesGatewayReason(t *testing.T) {
+	stub := newGatewayStub(t)
+	stub.statusCode = http.StatusUnauthorized
+	stub.respBody = map[string]any{"error": "authentication failed: identity: no credentials provided"}
+
+	c := stub.newClient(client.Config{})
+	err := c.Ping(context.Background())
+	if err == nil {
+		t.Fatal("expected auth error")
+	}
+	if !contains(err.Error(), "no credentials provided") {
+		t.Errorf("error should include gateway reason: %v", err)
 	}
 }
 

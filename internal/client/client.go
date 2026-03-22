@@ -117,7 +117,14 @@ func (c *Client) Query(ctx context.Context, req QueryRequest) (*QueryResponse, e
 	case http.StatusOK:
 		// handled below
 	case http.StatusUnauthorized:
-		return nil, fmt.Errorf("authentication failed: check --user / --api-key credentials")
+		var e struct {
+			Error string `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&e) //nolint:errcheck
+		if e.Error != "" {
+			return nil, fmt.Errorf("%s — set --user / --api-key or check your .env credentials", e.Error)
+		}
+		return nil, fmt.Errorf("authentication required — set --user / --api-key or check your .env credentials")
 	default:
 		var e struct {
 			Error string `json:"error"`
@@ -164,7 +171,14 @@ func (c *Client) Ping(ctx context.Context) error {
 	case http.StatusOK:
 		return nil
 	case http.StatusUnauthorized:
-		return fmt.Errorf("authentication failed: check --user / --api-key credentials")
+		var e struct {
+			Error string `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&e) //nolint:errcheck
+		if e.Error != "" {
+			return fmt.Errorf("%s — set --user / --api-key or check your .env credentials", e.Error)
+		}
+		return fmt.Errorf("authentication required — set --user / --api-key or check your .env credentials")
 	default:
 		return fmt.Errorf("gateway health check returned status %d", resp.StatusCode)
 	}
