@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,12 +12,49 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/identity"
 )
 
 // approvalServer handles approval-related HTTP endpoints.
 type approvalServer struct {
-	store    *audit.ApprovalStore
-	notifier *ApprovalNotifier
+	store            *audit.ApprovalStore
+	notifier         *ApprovalNotifier
+	identityProvider identity.Provider // optional; nil = legacy unauthenticated mode
+}
+
+// errForbidden is a sentinel that distinguishes role failures (403) from
+// credential failures (401) when wrapped into resolveApprover's error return.
+var errForbidden = errors.New("forbidden")
+
+// isFleetApproval returns true when the approval record belongs to a fleet job.
+func isFleetApproval(a *audit.StoredApproval) bool {
+	return a.AgentName == "fleet-runner" || a.ResourceType == "fleet_job"
+}
+
+// resolveApprover authenticates the caller and verifies they hold the role
+// required to resolve the given approval.
+//
+// Returns:
+//   - the verified principal (valid only when error is nil)
+//   - an error wrapping errForbidden for role mismatches (→ 403)
+//   - a plain error for authentication failures (→ 401)
+func (s *approvalServer) resolveApprover(r *http.Request, a *audit.StoredApproval) (identity.ResolvedPrincipal, error) {
+	p, err := s.identityProvider.Resolve(r)
+	if err != nil {
+		return identity.ResolvedPrincipal{}, fmt.Errorf("authentication required: %w", err)
+	}
+
+	// Determine which role is needed based on approval type.
+	required := "dba"
+	if isFleetApproval(a) {
+		required = "fleet-approver"
+	}
+
+	if !p.HasRole(required) && !p.HasRole("admin") {
+		return identity.ResolvedPrincipal{}, fmt.Errorf("%w: role %q or %q required", errForbidden, required, "admin")
+	}
+
+	return p, nil
 }
 
 // CreateApprovalRequest is the JSON body for creating an approval request.
@@ -190,7 +229,32 @@ func (s *approvalServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ApprovedBy == "" {
+	// Fetch the existing record to determine required role and enforce four-eyes.
+	existing, err := s.store.GetRequest(r.Context(), approvalID)
+	if err != nil {
+		http.Error(w, "approval not found", http.StatusNotFound)
+		return
+	}
+
+	if s.identityProvider != nil {
+		// Authenticated mode: verify caller, check role, override approved_by.
+		principal, authErr := s.resolveApprover(r, existing)
+		if authErr != nil {
+			if errors.Is(authErr, errForbidden) {
+				http.Error(w, authErr.Error(), http.StatusForbidden)
+			} else {
+				http.Error(w, authErr.Error(), http.StatusUnauthorized)
+			}
+			return
+		}
+		req.ApprovedBy = principal.EffectiveID()
+		// Four-eyes: fleet job approver must differ from submitter.
+		if isFleetApproval(existing) && req.ApprovedBy == existing.RequestedBy {
+			http.Error(w, "four-eyes constraint: approver and submitter must be different people", http.StatusForbidden)
+			return
+		}
+	} else if req.ApprovedBy == "" {
+		// Legacy unauthenticated mode: approved_by from body is required.
 		http.Error(w, "approved_by is required", http.StatusBadRequest)
 		return
 	}
@@ -242,7 +306,27 @@ func (s *approvalServer) handleDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.DeniedBy == "" {
+	// Fetch the existing record to determine required role.
+	existing, err := s.store.GetRequest(r.Context(), approvalID)
+	if err != nil {
+		http.Error(w, "approval not found", http.StatusNotFound)
+		return
+	}
+
+	if s.identityProvider != nil {
+		// Authenticated mode: verify caller, check role, override denied_by.
+		principal, authErr := s.resolveApprover(r, existing)
+		if authErr != nil {
+			if errors.Is(authErr, errForbidden) {
+				http.Error(w, authErr.Error(), http.StatusForbidden)
+			} else {
+				http.Error(w, authErr.Error(), http.StatusUnauthorized)
+			}
+			return
+		}
+		req.DeniedBy = principal.EffectiveID()
+	} else if req.DeniedBy == "" {
+		// Legacy unauthenticated mode: denied_by from body is required.
 		http.Error(w, "denied_by is required", http.StatusBadRequest)
 		return
 	}

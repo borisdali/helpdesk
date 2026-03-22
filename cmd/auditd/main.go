@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
 )
 
@@ -24,6 +25,7 @@ type config struct {
 	listenAddr string
 	dbPath     string
 	socketPath string
+	usersFile  string // optional; enables role-based auth on approve/deny/cancel
 
 	// Approval notification configuration
 	approvalWebhook  string
@@ -40,6 +42,7 @@ func main() {
 	flag.StringVar(&cfg.listenAddr, "listen", envOrDefault("HELPDESK_AUDIT_ADDR", ":1199"), "HTTP listen address")
 	flag.StringVar(&cfg.dbPath, "db", envOrDefault("HELPDESK_AUDIT_DB", "audit.db"), "Path to SQLite database")
 	flag.StringVar(&cfg.socketPath, "socket", envOrDefault("HELPDESK_AUDIT_SOCKET", "/tmp/helpdesk-audit.sock"), "Unix socket for real-time notifications")
+	flag.StringVar(&cfg.usersFile, "users-file", envOrDefault("HELPDESK_USERS_FILE", ""), "Path to users.yaml for role-based auth on approve/deny endpoints (optional)")
 
 	// Approval notification flags
 	flag.StringVar(&cfg.approvalWebhook, "approval-webhook", envOrDefault("HELPDESK_APPROVAL_WEBHOOK", ""), "Webhook URL for approval notifications (Slack, etc.)")
@@ -115,8 +118,20 @@ func main() {
 			"email", cfg.smtpHost != "" && cfg.emailTo != "")
 	}
 
+	// Build optional identity provider for role-based auth on approve/deny/cancel.
+	var idProvider identity.Provider
+	if cfg.usersFile != "" {
+		p, err := identity.NewStaticProvider(cfg.usersFile)
+		if err != nil {
+			slog.Error("failed to load users file", "path", cfg.usersFile, "err", err)
+			os.Exit(1)
+		}
+		idProvider = p
+		slog.Info("role-based authorization enabled for approval endpoints", "users_file", cfg.usersFile)
+	}
+
 	srv := &server{store: store}
-	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier}
+	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier, identityProvider: idProvider}
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}

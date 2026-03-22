@@ -463,6 +463,11 @@ func (g *Gateway) handleFleetCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
 		return
 	}
+	// Role check: fleet job submission requires fleet-operator or admin.
+	if g.identityProvider != nil && !principal.HasRole("fleet-operator") && !principal.HasRole("admin") {
+		writeError(w, http.StatusForbidden, "role \"fleet-operator\" or \"admin\" required to submit fleet jobs")
+		return
+	}
 	if _, hasSubmittedBy := body["submitted_by"]; !hasSubmittedBy {
 		body["submitted_by"] = principal.EffectiveID()
 	}

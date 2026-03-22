@@ -361,11 +361,12 @@ func (s *fleetServer) handleCreateJobApproval(w http.ResponseWriter, r *http.Req
 
 	approval := &audit.StoredApproval{
 		ActionClass:    req.ActionClass,
-		ResourceType:   req.ResourceType,
+		ResourceType:   "fleet_job",
 		ResourceName:   req.ResourceName,
 		RequestedBy:    req.RequestedBy,
 		RequestContext: req.Context,
 		AgentName:      "fleet-runner",
+		ApproverRole:   "fleet-approver",
 		TraceID:        jobID,
 	}
 

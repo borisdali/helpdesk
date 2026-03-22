@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/fleet"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
 )
@@ -1135,5 +1138,105 @@ func TestHandleFleetPlan_UnknownTag(t *testing.T) {
 	// Available tags must be listed so the caller knows how to refine.
 	if !strings.Contains(body, "staging") {
 		t.Errorf("body = %q, want available tags listed (e.g. staging)", body)
+	}
+}
+
+// ── Fleet job submission role checks ─────────────────────────────────────────
+
+// makeGatewayWithIdentity returns a Gateway with a StaticProvider built from
+// the given inline YAML and a mock auditd that returns the provided status code.
+func makeGatewayWithIdentity(t *testing.T, usersYAML string, auditdStatus int) (*Gateway, *httptest.Server) {
+	t.Helper()
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(auditdStatus)
+		json.NewEncoder(w).Encode(map[string]string{"job_id": "flj_test", "name": "test-job"}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	path := filepath.Join(t.TempDir(), "users.yaml")
+	if err := os.WriteFile(path, []byte(usersYAML), 0600); err != nil {
+		t.Fatalf("write users.yaml: %v", err)
+	}
+	p, err := identity.NewStaticProvider(path)
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
+	}
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:           make(map[string]*discovery.Agent),
+		clients:          make(map[string]*a2aclient.Client),
+		auditURL:         auditdSrv.URL,
+		auditor:          audit.NewGatewayAuditor(ta),
+		identityProvider: p,
+	}
+	return gw, auditdSrv
+}
+
+func TestHandleFleetCreateJob_FleetOperatorRequired(t *testing.T) {
+	// charlie has role [operator] — not allowed to submit fleet jobs.
+	usersYAML := `
+users:
+  - id: charlie@example.com
+    roles: [operator]
+`
+	gw, _ := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/jobs", strings.NewReader(`{"name":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User", "charlie@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestHandleFleetCreateJob_FleetOperator_Allowed(t *testing.T) {
+	// dave has role [fleet-operator] — allowed to submit fleet jobs.
+	usersYAML := `
+users:
+  - id: dave@example.com
+    roles: [fleet-operator]
+`
+	gw, _ := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/jobs", strings.NewReader(`{"name":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User", "dave@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201", rec.Code)
+	}
+}
+
+func TestHandleFleetCreateJob_Admin_Allowed(t *testing.T) {
+	// admin role passes the fleet-operator check.
+	usersYAML := `
+users:
+  - id: admin@example.com
+    roles: [admin]
+`
+	gw, _ := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/jobs", strings.NewReader(`{"name":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User", "admin@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201", rec.Code)
 	}
 }
