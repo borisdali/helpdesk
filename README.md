@@ -26,6 +26,9 @@ Enter the world of AI-Assisted Database Management products.
 
 aiHelpDesk is the first product from the DDS Group that starts on the path of implementing the AI-Assisted vision of this new breed of the database management products.
 
+## Principles and FAQ
+Before diving into aiHelpDesk we recommend reviewing our [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) that may address some of the questions about the product.
+
 ## Deployment and Supported Platforms
 aiHelpDesk can be deployed on K8s or VMs / bare metal. The binary packages are provided for Linux x86-64 and ARM (Graviton, Ampere), as well as for macOS (Intel and Apple Silicon).
 
