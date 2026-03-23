@@ -5,6 +5,11 @@ When a feature or a proposed change conflicts with one of these, the principle w
 
 ---
 
+## 0. Quality beats Velocity
+
+This is our Principle#0 - we move fast, but when we can't quailfy a release
+we stop and don't ship until we do.
+
 ## 1. Tools, not prompts
 
 aiHelpDesk does not let the LLM compose and run free-form SQL statements,
@@ -12,7 +17,7 @@ arbitrary shell commands, or ad-hoc `kubectl` invocations.
 
 Every action the system can take is a named, code-reviewed, pre-approved tool:
 `get_active_connections`, `describe_pod`, `cancel_query`, etc. The full list
-is always visible in the formal repository that we refer to as thei Tool
+is always visible in the formal repository that we refer to as the Tool
 Registry (`GET /api/v1/tools`). Nothing outside that list can execute.
 
 This is not a limitation — it is a deliberate design choice. A system that can
@@ -102,8 +107,8 @@ is clearly partitioned.
 aiHelpDesk is a shift-left support tool, not a replacement for human
 judgment or accountability. The system is designed to dramatically reduce the time it takes to
 diagnose a problem and to surface the right information for a decision — but
-the decision itself, especially for write and destructive operations, rests
-with a human.
+the decision itself, especially for write and destructive operations for
+production databases, rests with a human.
 
 The approval workflow, the review-and-confirm step, the fleet-runner plan
 review, and the dry-run mode are all expressions of this principle. The goal
