@@ -70,13 +70,18 @@ type QueryRequest struct {
 	// PurposeNote overrides the config-level purpose note for this request only
 	// (e.g. to attach a per-query incident ticket number).
 	PurposeNote string
+	// ContextID resumes an existing agent session from a prior query.
+	// Leave empty on the first turn; pass the value returned in QueryResponse.ContextID
+	// on all subsequent turns to maintain conversation history.
+	ContextID string
 }
 
 // QueryResponse holds the parsed response from a query.
 type QueryResponse struct {
-	Text    string // Response text from the agent.
-	TraceID string // X-Trace-ID response header value.
-	Agent   string // Resolved agent name as reported by the gateway.
+	Text      string // Response text from the agent.
+	TraceID   string // X-Trace-ID response header value.
+	Agent     string // Resolved agent name as reported by the gateway.
+	ContextID string // Agent session context ID — pass back on the next turn to continue the conversation.
 }
 
 // Query sends a natural language query to the gateway and returns the response.
@@ -93,6 +98,9 @@ func (c *Client) Query(ctx context.Context, req QueryRequest) (*QueryResponse, e
 	}
 	if note != "" {
 		body["purpose_note"] = note
+	}
+	if req.ContextID != "" {
+		body["context_id"] = req.ContextID
 	}
 
 	data, err := json.Marshal(body)
@@ -137,17 +145,19 @@ func (c *Client) Query(ctx context.Context, req QueryRequest) (*QueryResponse, e
 	}
 
 	var result struct {
-		Agent string `json:"agent"`
-		Text  string `json:"text"`
+		Agent     string `json:"agent"`
+		Text      string `json:"text"`
+		ContextID string `json:"context_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
 	return &QueryResponse{
-		Text:    result.Text,
-		TraceID: resp.Header.Get("X-Trace-ID"),
-		Agent:   result.Agent,
+		Text:      result.Text,
+		TraceID:   resp.Header.Get("X-Trace-ID"),
+		Agent:     result.Agent,
+		ContextID: result.ContextID,
 	}, nil
 }
 

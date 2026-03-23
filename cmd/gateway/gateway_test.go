@@ -167,6 +167,34 @@ func TestExtractResponse_Message(t *testing.T) {
 	}
 }
 
+func TestExtractResponse_ContextID(t *testing.T) {
+	task := &a2a.Task{
+		ID:        "task-ctx",
+		ContextID: "ctx_abc123",
+		Status: a2a.TaskStatus{
+			State:   a2a.TaskStateCompleted,
+			Message: &a2a.Message{Parts: a2a.ContentParts{a2a.TextPart{Text: "done"}}},
+		},
+	}
+
+	resp := extractResponse(task)
+	if resp.ContextID != "ctx_abc123" {
+		t.Errorf("ContextID = %q, want %q", resp.ContextID, "ctx_abc123")
+	}
+}
+
+func TestExtractResponse_ContextID_EmptyWhenMessage(t *testing.T) {
+	// *a2a.Message responses have no ContextID — only Tasks do.
+	msg := &a2a.Message{
+		Role:  a2a.MessageRoleAgent,
+		Parts: a2a.ContentParts{a2a.TextPart{Text: "hi"}},
+	}
+	resp := extractResponse(msg)
+	if resp.ContextID != "" {
+		t.Errorf("ContextID = %q, want empty for Message type", resp.ContextID)
+	}
+}
+
 // --- extractResponse: failed task state ---
 
 func TestExtractResponse_FailedTaskState(t *testing.T) {

@@ -24,13 +24,16 @@ Agent endpoints (`/api/v1/query`, `/api/v1/db/{tool}`, etc.) return:
 
 ```json
 {
-  "agent":     "postgres_database_agent",
-  "task_id":   "task-abc123",
-  "state":     "completed",
-  "text":      "Replication lag is 0 ms on all replicas.",
-  "artifacts": []
+  "agent":      "postgres_database_agent",
+  "task_id":    "task-abc123",
+  "state":      "completed",
+  "text":       "Replication lag is 0 ms on all replicas.",
+  "context_id": "ctx_7f3a9b2e",
+  "artifacts":  []
 }
 ```
+
+`context_id` is present on all agent responses. Pass it back in `POST /api/v1/query` to continue the conversation in the same agent session (see [`POST /api/v1/query`](#post-apiv1query)).
 
 Error responses: `{ "error": "<reason>" }`
 
@@ -127,12 +130,36 @@ Send a natural-language question to an agent.
 |---|---|---|---|
 | `agent` | string | yes | `database`, `db`, `k8s`, or `incident` |
 | `message` | string | yes | The question or instruction (`query` is accepted as an alias) |
+| `context_id` | string | no | Resume an existing agent session. Pass the `context_id` returned by a previous response to continue a multi-turn conversation. Omit (or pass `""`) to start a new session. |
+
+The response includes `context_id` alongside the agent's reply:
+
+```json
+{
+  "agent":      "postgres_database_agent",
+  "task_id":    "task-abc123",
+  "state":      "completed",
+  "text":       "I found 3 idle connections. Shall I terminate them?",
+  "context_id": "ctx_7f3a9b2e"
+}
+```
+
+Pass `context_id` back on the next request to continue the conversation:
 
 ```bash
+# Turn 1 — start a new session
 curl -s -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"agent": "database", "message": "Check replication lag on prod-db"}'
+  -d '{"agent": "database", "message": "Are there idle connections on prod-db?"}'
+# → response includes "context_id": "ctx_7f3a9b2e"
+
+# Turn 2 — continue the same session
+curl -s -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "database", "message": "yes, terminate them", "context_id": "ctx_7f3a9b2e"}'
 ```
+
+**Session lifetime:** sessions live in agent process memory. An agent restart clears all sessions — the next request with a stale `context_id` starts a fresh session silently.
 
 ---
 

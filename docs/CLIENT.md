@@ -214,27 +214,37 @@ helpdesk-client \
 
 ### 6.1 Interactive REPL
 
-Omit `--message` to enter the interactive REPL. `helpdesk-client` prints a prompt, sends each line to the Gateway, shows a spinner while waiting, and prints the response followed by a trace footer:
+Omit `--message` to enter the interactive REPL. `helpdesk-client` prints a prompt, sends each line to the Gateway, shows a spinner while waiting, and prints the response followed by a trace footer.
+
+**Conversation context is maintained across turns.** The REPL carries the agent session forward automatically — the agent remembers everything said earlier in the session, so follow-up replies like "yes", "proceed", or "use threshold 30 minutes" work as expected:
 
 ```
-> show me all databases
-Checking agent availability... done
+> are there idle connections on prod-orders-db?
+I found 2 connections idle for more than 30 minutes:
+  - PID 14201: user=app, idle 47m, no open transaction
+  - PID 14338: user=reports, idle 1h 12m, no open transaction
 
-The Gateway is aware of 3 databases:
-  - prod-orders-db (Orders Production Database)
-  - prod-users-db (Users Production Database)
-  - legacy-analytics-db (Legacy Analytics)
+Shall I terminate them?
 
-[trace: task-a1b2c3d4  2026-03-18T14:22:05Z]
+[trace: tr_a1b2c3d4  2026-03-18T14:22:05Z]
+
+> yes, proceed
+Terminated 2 idle connections on prod-orders-db.
+  - PID 14201: terminated ✓
+  - PID 14338: terminated ✓
+
+[trace: tr_a1b2c3d4  2026-03-18T14:22:18Z]
 
 >
 ```
 
 Type `exit` or press `Ctrl-D` to quit.
 
+**Note:** Session context lives in agent process memory. If the agent restarts mid-session, the next turn starts a fresh conversation — the client reconnects automatically but prior context is lost.
+
 ### 6.2 One-Shot Mode
 
-Pass `--message` to send a single query and exit. Useful for scripts and CI pipelines:
+Pass `--message` to send a single query and exit. Useful for scripts and CI pipelines. Each one-shot invocation is stateless — no session context is carried between separate `--message` calls.
 
 ```bash
 helpdesk-client \

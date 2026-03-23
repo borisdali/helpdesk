@@ -86,8 +86,8 @@ func main() {
 	}
 
 	if *message != "" {
-		// One-shot mode.
-		if err := runQuery(ctx, c, *agentName, *message); err != nil {
+		// One-shot mode — no session continuity needed.
+		if _, err := runQuery(ctx, c, *agentName, "", *message); err != nil {
 			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
 			os.Exit(1)
 		}
@@ -99,6 +99,7 @@ func main() {
 }
 
 // runREPL runs an interactive read-query-print loop until EOF or "exit".
+// It maintains a contextID across turns so the agent retains conversation history.
 func runREPL(ctx context.Context, c *client.Client, agentName string) {
 	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
 
@@ -106,6 +107,8 @@ func runREPL(ctx context.Context, c *client.Client, agentName string) {
 		fmt.Printf("aiHelpDesk  (%s)\n", c.GatewayURL())
 		fmt.Printf("Agent: %s  |  Type \"exit\" or Ctrl-C to quit.\n\n", agentName)
 	}
+
+	var contextID string // grows from "" → agent-assigned UUID after first turn
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -123,8 +126,11 @@ func runREPL(ctx context.Context, c *client.Client, agentName string) {
 			break
 		}
 
-		if err := runQuery(ctx, c, agentName, line); err != nil {
+		newContextID, err := runQuery(ctx, c, agentName, contextID, line)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		} else if newContextID != "" {
+			contextID = newContextID
 		}
 
 		if isTTY {
@@ -135,7 +141,9 @@ func runREPL(ctx context.Context, c *client.Client, agentName string) {
 
 // runQuery sends a single query to the gateway, displays a spinner while waiting,
 // then prints the response followed by the trace ID.
-func runQuery(ctx context.Context, c *client.Client, agentName, message string) error {
+// contextID passes an existing agent session; "" starts a new session.
+// Returns the context ID from the response (for the caller to pass on the next turn).
+func runQuery(ctx context.Context, c *client.Client, agentName, contextID, message string) (string, error) {
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
 	// Spinner — only shown on interactive terminals.
@@ -158,20 +166,21 @@ func runQuery(ctx context.Context, c *client.Client, agentName, message string) 
 	}
 
 	resp, err := c.Query(ctx, client.QueryRequest{
-		Agent:   agentName,
-		Message: message,
+		Agent:     agentName,
+		Message:   message,
+		ContextID: contextID,
 	})
 
 	close(spinDone)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	fmt.Println(resp.Text)
 	if isTTY && resp.TraceID != "" {
 		fmt.Printf("[trace: %s  %s]\n", resp.TraceID, time.Now().Format("2006-01-02 15:04:05"))
 	}
-	return nil
+	return resp.ContextID, nil
 }
 
 func envOrDefault(key, def string) string {

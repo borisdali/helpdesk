@@ -133,6 +133,7 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 type GatewayRequest struct {
 	RequestID         string
 	TraceID           string                    // end-to-end trace ID
+	ContextID         string                    // agent session context ID (multi-turn continuity)
 	ParentID          string                    // parent event ID (if this is a child event)
 	Principal         string                    // authenticated user or API key (legacy; EffectiveID)
 	ResolvedPrincipal identity.ResolvedPrincipal // full verified identity

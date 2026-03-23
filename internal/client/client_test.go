@@ -216,6 +216,59 @@ func TestQuery_ResponseParsed(t *testing.T) {
 	}
 }
 
+// ── Session continuity ─────────────────────────────────────────────────────
+
+func TestQuery_ContextID_SentInBody(t *testing.T) {
+	stub := newGatewayStub(t)
+	c := stub.newClient(client.Config{})
+
+	_, err := c.Query(context.Background(), client.QueryRequest{
+		Agent:     "database",
+		Message:   "yes, proceed",
+		ContextID: "ctx_abc123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stub.lastBody["context_id"] != "ctx_abc123" {
+		t.Errorf("context_id not sent in body: got %v", stub.lastBody["context_id"])
+	}
+}
+
+func TestQuery_ContextID_OmittedWhenEmpty(t *testing.T) {
+	stub := newGatewayStub(t)
+	c := stub.newClient(client.Config{})
+
+	_, err := c.Query(context.Background(), client.QueryRequest{
+		Agent:   "database",
+		Message: "first turn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := stub.lastBody["context_id"]; present {
+		t.Errorf("context_id should be absent for first turn, got %v", stub.lastBody["context_id"])
+	}
+}
+
+func TestQuery_ContextID_ReturnedFromResponse(t *testing.T) {
+	stub := newGatewayStub(t)
+	stub.respBody = map[string]any{
+		"agent":      "postgres_database_agent",
+		"text":       "I found 3 idle connections. Shall I terminate them?",
+		"context_id": "ctx_xyz789",
+	}
+
+	c := stub.newClient(client.Config{})
+	resp, err := c.Query(context.Background(), client.QueryRequest{Agent: "database", Message: "check idle connections"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ContextID != "ctx_xyz789" {
+		t.Errorf("ContextID: got %q, want %q", resp.ContextID, "ctx_xyz789")
+	}
+}
+
 // ── Error handling ─────────────────────────────────────────────────────────
 
 func TestQuery_401_ReturnsAuthError(t *testing.T) {

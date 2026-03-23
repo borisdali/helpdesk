@@ -183,6 +183,7 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 		User        string `json:"user"`         // caller identity recorded in the audit trail
 		Purpose     string `json:"purpose"`      // why this request is being made
 		PurposeNote string `json:"purpose_note"` // optional free-text (e.g. incident number)
+		ContextID   string `json:"context_id"`   // agent session context for multi-turn continuity
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
@@ -216,7 +217,7 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("X-Purpose-Note", req.PurposeNote)
 	}
 
-	g.proxyToAgent(w, r, agentName, req.Message)
+	g.proxyToAgent(w, r, agentName, req.ContextID, req.Message)
 }
 
 func (g *Gateway) handleListTools(w http.ResponseWriter, r *http.Request) {
@@ -280,11 +281,11 @@ func (g *Gateway) handleCreateIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt := buildToolPrompt("create_incident_bundle", args)
-	g.proxyToAgent(w, r, agentNameIncident, prompt)
+	g.proxyToAgent(w, r, agentNameIncident, "", prompt)
 }
 
 func (g *Gateway) handleListIncidents(w http.ResponseWriter, r *http.Request) {
-	g.proxyToAgent(w, r, agentNameIncident, "List all previously created incident bundles.")
+	g.proxyToAgent(w, r, agentNameIncident, "", "List all previously created incident bundles.")
 }
 
 func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
@@ -333,7 +334,7 @@ func (g *Gateway) handleResearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	g.proxyToAgent(w, r, agentNameResearch, req.Query)
+	g.proxyToAgent(w, r, agentNameResearch, "", req.Query)
 }
 
 func (g *Gateway) handleListInfrastructure(w http.ResponseWriter, r *http.Request) {
@@ -635,12 +636,14 @@ func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request,
 // --- A2A call ---
 
 // proxyToAgent sends a text message to an agent and returns the response.
-func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName, prompt string) {
-	g.proxyToAgentWithTool(w, r, agentName, "", nil, prompt)
+// contextID resumes an existing agent session; pass "" to start a new session.
+func (g *Gateway) proxyToAgent(w http.ResponseWriter, r *http.Request, agentName, contextID, prompt string) {
+	g.proxyToAgentWithTool(w, r, agentName, "", nil, contextID, prompt)
 }
 
 // proxyToAgentWithTool sends a text message to an agent with tool name for classification.
-func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, agentName, toolName string, toolParams map[string]any, prompt string) {
+// contextID resumes an existing agent session; pass "" to start a new session.
+func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, agentName, toolName string, toolParams map[string]any, contextID, prompt string) {
 	start := time.Now()
 	requestID := uuid.New().String()[:8]
 
@@ -736,6 +739,9 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
 	msg.Metadata = meta
+	if contextID != "" {
+		msg.ContextID = contextID
+	}
 	result, err := client.SendMessage(r.Context(), &a2a.MessageSendParams{Message: msg})
 	if err != nil {
 		slog.Error("gateway: A2A call failed", "agent", agentName, "err", err)
@@ -856,6 +862,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	g.recordAudit(r.Context(), &audit.GatewayRequest{
 		RequestID:         requestID,
 		TraceID:           traceID,
+		ContextID:         response.ContextID,
 		Endpoint:          r.URL.Path,
 		Method:            r.Method,
 		Agent:             agentName,
@@ -1127,6 +1134,7 @@ type a2aResponse struct {
 	State     string `json:"state,omitempty"`
 	Text      string `json:"text,omitempty"`
 	Artifacts []any  `json:"artifacts,omitempty"`
+	ContextID string `json:"context_id,omitempty"` // agent session context — echo back to continue the conversation
 }
 
 // extractResponse pulls text and artifacts from a SendMessageResult.
@@ -1137,6 +1145,7 @@ func extractResponse(result a2a.SendMessageResult) a2aResponse {
 	case *a2a.Task:
 		resp.TaskID = string(v.ID)
 		resp.State = string(v.Status.State)
+		resp.ContextID = string(v.ContextID)
 
 		// Extract text from status message.
 		if v.Status.Message != nil {
