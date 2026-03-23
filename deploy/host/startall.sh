@@ -235,6 +235,7 @@ if [[ "$POLICY_ENABLED" == "true" ]]; then
 else
     echo "Policy:   disabled"
 fi
+echo "Mode:     ${HELPDESK_OPERATING_MODE:-readonly}"
 
 # Start optional governance components if --governance flag is set
 if [[ "$GOVERNANCE" == "true" ]]; then

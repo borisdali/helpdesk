@@ -172,6 +172,7 @@ func CheckFixModeAuditViolations(auditEnabled bool, auditURL string) []FixModeVi
 //
 // componentName identifies the process in reports (e.g. "postgres_database_agent").
 func EnforceFixMode(ctx context.Context, violations []FixModeViolation, componentName, auditURL string) {
+	slog.Info("agent starting", "component", componentName, "operating_mode", currentOperatingMode())
 	if len(violations) == 0 {
 		return
 	}
