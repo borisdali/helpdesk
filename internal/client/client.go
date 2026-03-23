@@ -10,14 +10,36 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
+
+// ConfirmedTool is a single tool execution confirmed in the audit trail.
+type ConfirmedTool struct {
+	Name        string // tool name, e.g. "cancel_query"
+	ActionClass string // "read", "write", or "destructive"
+}
+
+// TraceVerification is the audit-trail evidence for a single gateway round-trip.
+// It records every tool_execution event found for a given trace ID.
+type TraceVerification struct {
+	TraceID              string
+	ToolsConfirmed       []ConfirmedTool
+	WriteConfirmed       []string // tool names whose ActionClass is "write"
+	DestructiveConfirmed []string // tool names whose ActionClass is "destructive"
+}
+
+// HasMutations returns true when any write or destructive tool was confirmed.
+func (v *TraceVerification) HasMutations() bool {
+	return len(v.WriteConfirmed) > 0 || len(v.DestructiveConfirmed) > 0
+}
 
 // Config holds the configuration for the gateway client.
 // Flags take precedence over environment variables; callers merge them before
 // calling New().
 type Config struct {
 	GatewayURL  string
+	AuditURL    string        // base URL for auditd; "" disables VerifyTrace
 	UserID      string        // X-User header (human users, static provider)
 	APIKey      string        // Authorization: Bearer <key> (service accounts or api_key users)
 	Purpose     string        // X-Purpose header (diagnostic, remediation, compliance, emergency)
@@ -30,6 +52,7 @@ type Config struct {
 func NewConfigFromEnv() Config {
 	return Config{
 		GatewayURL:  envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"),
+		AuditURL:    os.Getenv("HELPDESK_AUDIT_URL"),
 		UserID:      os.Getenv("HELPDESK_CLIENT_USER"),
 		APIKey:      os.Getenv("HELPDESK_CLIENT_API_KEY"),
 		Purpose:     os.Getenv("HELPDESK_SESSION_PURPOSE"),
@@ -237,6 +260,88 @@ func (c *Client) addHeaders(req *http.Request) {
 	if c.cfg.Purpose != "" {
 		req.Header.Set("X-Purpose", c.cfg.Purpose)
 	}
+}
+
+// VerifyTrace queries auditd for tool_execution events belonging to traceID
+// that occurred at or after since. It retries once after 200 ms to absorb
+// async write propagation (same strategy as buildDelegationVerification in
+// internal/audit/delegate_tool.go).
+//
+// Returns nil, nil when AuditURL is not configured — verification is optional
+// and callers should treat a nil result as "not available".
+func (c *Client) VerifyTrace(ctx context.Context, traceID string, since time.Time) (*TraceVerification, error) {
+	if c.cfg.AuditURL == "" {
+		return nil, nil
+	}
+
+	reqURL := strings.TrimRight(c.cfg.AuditURL, "/") +
+		"/v1/events?event_type=tool_execution&trace_id=" + traceID +
+		"&since=" + since.UTC().Format(time.RFC3339)
+
+	type rawEvent struct {
+		ActionClass string `json:"action_class"`
+		Tool        *struct {
+			Name string `json:"name"`
+		} `json:"tool"`
+	}
+
+	var events []rawEvent
+	var lastErr error
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("verify trace: build request: %w", err)
+		}
+		c.addHeaders(httpReq)
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = fmt.Errorf("verify trace: %w", err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("verify trace: auditd returned status %d", resp.StatusCode)
+			continue
+		}
+		decErr := json.NewDecoder(resp.Body).Decode(&events)
+		resp.Body.Close()
+		if decErr != nil {
+			lastErr = fmt.Errorf("verify trace: decode: %w", decErr)
+			continue
+		}
+		if len(events) == 0 && attempt == 0 {
+			// Empty on first attempt — retry once for async propagation.
+			continue
+		}
+		lastErr = nil
+		break
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	v := &TraceVerification{TraceID: traceID}
+	for _, ev := range events {
+		if ev.Tool == nil || ev.Tool.Name == "" {
+			continue
+		}
+		name := ev.Tool.Name
+		v.ToolsConfirmed = append(v.ToolsConfirmed, ConfirmedTool{Name: name, ActionClass: ev.ActionClass})
+		switch ev.ActionClass {
+		case "write":
+			v.WriteConfirmed = append(v.WriteConfirmed, name)
+		case "destructive":
+			v.DestructiveConfirmed = append(v.DestructiveConfirmed, name)
+		}
+	}
+	return v, nil
 }
 
 func envOrDefault(key, def string) string {

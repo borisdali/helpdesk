@@ -132,17 +132,38 @@ See [here](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) for de
 | **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
 | **Non-invasive** | Read delegations are verified but never flagged as mismatch |
 
-**Coverage and gaps:**
+**Coverage:**
 
 | Session path | Layer 1 | Layer 2 |
 |---|---|---|
 | Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify |
-| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ⚠️ no inter-agent verification (Gateway callers are not Orchestrators) |
+| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ✅ `client.VerifyTrace` (see below) |
 | Read-only tool output content | — | ⚠️ content fabrication not detected (structural gap) |
 
-The Layer 2 gap for Gateway-direct calls is a known limitation. A future SDK
-giving upstream callers access to the audit trail (trace_id → confirmed tools)
-could provide equivalent structural verification at the Gateway boundary.
+**`client.VerifyTrace` — Layer 2 at the Gateway boundary:**
+
+`internal/client` exposes `Client.VerifyTrace(ctx, traceID, since)`, which gives
+any upstream caller (helpdesk-client, fleet-runner, or a custom integration)
+independent access to the same audit trail the Orchestrator uses:
+
+```go
+verif, err := c.VerifyTrace(ctx, resp.TraceID, queryStart)
+// verif.ToolsConfirmed       — every tool confirmed in the audit trail
+// verif.WriteConfirmed       — write-class tools
+// verif.DestructiveConfirmed — destructive-class tools
+// verif.HasMutations()       — true when any write or destructive tool ran
+```
+
+The method queries `GET /v1/events?event_type=tool_execution&trace_id=X&since=T`
+directly on auditd, retries once after 200 ms for async propagation, and returns
+`nil, nil` when `AuditURL` is not configured (verification is opt-in).
+
+**Configuration:** set `HELPDESK_AUDIT_URL` (or `Config.AuditURL` / `--audit-url` flag).
+
+**helpdesk-client** prints an `[audit: ...]` confirmation line after every query
+when connected to auditd. **fleet-runner** calls `VerifyTrace` after each step
+and logs `mismatch=true` when a write or destructive tool was expected but not
+confirmed in the trail.
 
 For full implementation details, unit test coverage, and the investigation
 workflow when a mismatch is detected, see:

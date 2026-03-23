@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"helpdesk/internal/audit"
+	"helpdesk/internal/client"
 	"helpdesk/internal/fleet"
 )
 
@@ -25,10 +27,11 @@ type runnerConfig struct {
 
 // stepResult holds the outcome of one step for a single server.
 type stepResult struct {
-	stepIdx int
-	tool    string
-	output  string
-	err     error
+	stepIdx  int
+	tool     string
+	output   string
+	err      error
+	verified *client.TraceVerification // nil when auditURL not set or verification failed
 }
 
 // serverResult holds the overall outcome for one server across all steps.
@@ -51,12 +54,16 @@ func executeSteps(ctx context.Context, cfg runnerConfig, serverName, stage strin
 	anyPartialFailure := false
 
 	for idx, step := range steps {
+		stepStart := time.Now()
 		output, err := callGatewayTool(ctx, cfg, serverName, stage, step)
 		sr := stepResult{
 			stepIdx: idx,
 			tool:    step.Tool,
 			output:  output,
 			err:     err,
+		}
+		if err == nil {
+			sr.verified = verifyStep(ctx, cfg, step.Tool, stepStart)
 		}
 		res.steps = append(res.steps, sr)
 
@@ -104,6 +111,65 @@ func executeSteps(ctx context.Context, cfg runnerConfig, serverName, stage strin
 	}
 
 	return res
+}
+
+// verifyStep queries auditd to confirm the tool execution for a single step.
+// Uses the job-level trace ID with stepStart as the lower bound so that only
+// events from this step are matched (not earlier steps in the same job).
+func verifyStep(ctx context.Context, cfg runnerConfig, toolName string, stepStart time.Time) *client.TraceVerification {
+	if cfg.auditURL == "" {
+		return nil
+	}
+	vc := client.New(client.Config{AuditURL: cfg.auditURL})
+	verif, err := vc.VerifyTrace(ctx, "tr_"+cfg.jobID, stepStart)
+	if err != nil {
+		slog.Debug("fleet: step verification failed", "tool", toolName, "err", err)
+		return nil
+	}
+	if verif != nil {
+		logStepVerification(cfg.jobID, toolName, verif)
+	}
+	return verif
+}
+
+// logStepVerification logs the audit result for a fleet step. It warns when a
+// write or destructive tool is not confirmed in the audit trail.
+func logStepVerification(jobID, toolName string, v *client.TraceVerification) {
+	expected := audit.ClassifyTool(toolName)
+	confirmed := len(v.ToolsConfirmed)
+
+	if confirmed == 0 {
+		if expected == audit.ActionWrite || expected == audit.ActionDestructive {
+			slog.Warn("fleet: step verification mismatch — tool not confirmed in audit trail",
+				"job_id", jobID,
+				"tool", toolName,
+				"expected_action", expected,
+				"mismatch", true)
+		}
+		return
+	}
+
+	mismatch := false
+	switch expected {
+	case audit.ActionDestructive:
+		mismatch = len(v.DestructiveConfirmed) == 0
+	case audit.ActionWrite:
+		mismatch = len(v.WriteConfirmed) == 0 && len(v.DestructiveConfirmed) == 0
+	}
+
+	if mismatch {
+		slog.Warn("fleet: step verification mismatch — expected action not confirmed",
+			"job_id", jobID,
+			"tool", toolName,
+			"expected_action", expected,
+			"confirmed_tools", v.ToolsConfirmed,
+			"mismatch", true)
+	} else {
+		slog.Debug("fleet: step verification clean",
+			"job_id", jobID,
+			"tool", toolName,
+			"confirmed_tools", confirmed)
+	}
 }
 
 // callGatewayTool sends the tool call to the gateway with fleet_rollout purpose headers.

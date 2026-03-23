@@ -38,6 +38,7 @@ const version = "dev"
 func main() {
 	var (
 		gatewayURL   = flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway `URL`")
+		auditURL     = flag.String("audit-url", os.Getenv("HELPDESK_AUDIT_URL"), "Auditd base `URL` for trace verification (optional)")
 		userID       = flag.String("user", os.Getenv("HELPDESK_CLIENT_USER"), "User ID (X-User header; static provider)")
 		apiKey       = flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "API key (Authorization: Bearer; service accounts)")
 		purpose      = flag.String("purpose", envOrDefault("HELPDESK_SESSION_PURPOSE", ""), "Session `purpose`: diagnostic, remediation, compliance, emergency")
@@ -58,6 +59,7 @@ func main() {
 
 	cfg := client.Config{
 		GatewayURL:  *gatewayURL,
+		AuditURL:    *auditURL,
 		UserID:      *userID,
 		APIKey:      *apiKey,
 		Purpose:     *purpose,
@@ -165,6 +167,7 @@ func runQuery(ctx context.Context, c *client.Client, agentName, contextID, messa
 		}()
 	}
 
+	queryStart := time.Now()
 	resp, err := c.Query(ctx, client.QueryRequest{
 		Agent:     agentName,
 		Message:   message,
@@ -179,8 +182,32 @@ func runQuery(ctx context.Context, c *client.Client, agentName, contextID, messa
 	fmt.Println(resp.Text)
 	if isTTY && resp.TraceID != "" {
 		fmt.Printf("[trace: %s  %s]\n", resp.TraceID, time.Now().Format("2006-01-02 15:04:05"))
+		// Layer 2 fabrication detection: verify which tools the sub-agent actually executed.
+		if verif, vErr := c.VerifyTrace(ctx, resp.TraceID, queryStart); vErr == nil && verif != nil {
+			fmt.Printf("[audit: %s]\n", formatVerification(verif))
+		}
 	}
 	return resp.ContextID, nil
+}
+
+// formatVerification builds the short audit summary line printed after each query.
+func formatVerification(v *client.TraceVerification) string {
+	if len(v.ToolsConfirmed) == 0 {
+		return "no tool executions confirmed — response unverified ⚠"
+	}
+	parts := make([]string, len(v.ToolsConfirmed))
+	for i, t := range v.ToolsConfirmed {
+		parts[i] = t.Name + " (" + t.ActionClass + ")"
+	}
+	summary := strings.Join(parts, ", ")
+	if v.HasMutations() {
+		if len(v.DestructiveConfirmed) > 0 {
+			summary += " — destructive confirmed ✓"
+		} else {
+			summary += " — write confirmed ✓"
+		}
+	}
+	return summary
 }
 
 func envOrDefault(key, def string) string {

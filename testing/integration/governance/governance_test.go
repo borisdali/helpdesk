@@ -1049,6 +1049,117 @@ func TestIntegration_DelegationVerification_MismatchSurfacesInJourneys(t *testin
 	}
 }
 
+// TestIntegration_VerifyTrace_QueryContract validates the server-side contract
+// that client.VerifyTrace depends on: tool_execution events must be queryable
+// by trace_id + since, with action_class at the top level and tool.name nested.
+//
+// If this contract drifts (e.g. action_class moves inside the tool object, or
+// the since filter stops working), VerifyTrace will silently return empty
+// results instead of the confirmed tools — which is exactly the fabrication
+// gap we are trying to close.
+func TestIntegration_VerifyTrace_QueryContract(t *testing.T) {
+	sessionID := fmt.Sprintf("vt-%d", time.Now().UnixNano())
+	traceID := "tr_vt_" + sessionID
+	since := time.Now().UTC()
+
+	// Post two tool_execution events for our trace: one write, one read.
+	writeEvt := newEvent(sessionID, "tool_execution")
+	writeEvt["trace_id"] = traceID
+	writeEvt["action_class"] = "write"
+	writeEvt["tool"] = map[string]any{"name": "cancel_query", "agent": "postgres_database_agent"}
+	post(t, auditdAddr, "/v1/events", writeEvt)
+
+	readEvt := newEvent(sessionID, "tool_execution")
+	readEvt["trace_id"] = traceID
+	readEvt["action_class"] = "read"
+	readEvt["tool"] = map[string]any{"name": "get_session_info", "agent": "postgres_database_agent"}
+	post(t, auditdAddr, "/v1/events", readEvt)
+
+	// Post an event for a different trace — must NOT appear in results.
+	other := newEvent(sessionID, "tool_execution")
+	other["trace_id"] = "tr_other_" + sessionID
+	other["action_class"] = "destructive"
+	other["tool"] = map[string]any{"name": "terminate_connection"}
+	post(t, auditdAddr, "/v1/events", other)
+
+	// Query exactly as client.VerifyTrace does.
+	url := fmt.Sprintf("/v1/events?event_type=tool_execution&trace_id=%s&since=%s",
+		traceID, since.Format(time.RFC3339))
+	events := getList(t, auditdAddr, url)
+
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events for trace %s, got %d", traceID, len(events))
+	}
+
+	// Verify the shape VerifyTrace parses: top-level action_class + nested tool.name.
+	byTool := make(map[string]string) // tool name → action_class
+	for _, ev := range events {
+		ac, _ := ev["action_class"].(string)
+		toolObj, _ := ev["tool"].(map[string]any)
+		if toolObj == nil {
+			t.Errorf("event missing top-level 'tool' object: %v", ev)
+			continue
+		}
+		name, _ := toolObj["name"].(string)
+		if name == "" {
+			t.Errorf("event tool.name is empty: %v", ev)
+			continue
+		}
+		if ac == "" {
+			t.Errorf("event action_class is empty (must be top-level, not nested): %v", ev)
+		}
+		byTool[name] = ac
+	}
+
+	if got := byTool["cancel_query"]; got != "write" {
+		t.Errorf("cancel_query action_class = %q, want write", got)
+	}
+	if got := byTool["get_session_info"]; got != "read" {
+		t.Errorf("get_session_info action_class = %q, want read", got)
+	}
+	// terminate_connection belongs to a different trace — must be absent.
+	if _, present := byTool["terminate_connection"]; present {
+		t.Error("terminate_connection from a different trace must not appear in results")
+	}
+}
+
+// TestIntegration_VerifyTrace_SinceFilter verifies that the since parameter
+// excludes events that were recorded before the query window. VerifyTrace
+// passes stepStart as the lower bound so that prior steps in the same job
+// do not contaminate the current step's verification.
+func TestIntegration_VerifyTrace_SinceFilter(t *testing.T) {
+	sessionID := fmt.Sprintf("vtsince-%d", time.Now().UnixNano())
+	traceID := "tr_vtsince_" + sessionID
+
+	// Post an event before the since boundary — should be excluded.
+	before := newEvent(sessionID, "tool_execution")
+	before["trace_id"] = traceID
+	before["action_class"] = "read"
+	before["tool"] = map[string]any{"name": "check_connection"}
+	post(t, auditdAddr, "/v1/events", before)
+
+	since := time.Now().UTC()
+
+	// Post an event after the since boundary — should be included.
+	after := newEvent(sessionID, "tool_execution")
+	after["trace_id"] = traceID
+	after["action_class"] = "write"
+	after["tool"] = map[string]any{"name": "cancel_query"}
+	post(t, auditdAddr, "/v1/events", after)
+
+	url := fmt.Sprintf("/v1/events?event_type=tool_execution&trace_id=%s&since=%s",
+		traceID, since.Format(time.RFC3339))
+	events := getList(t, auditdAddr, url)
+
+	if len(events) != 1 {
+		t.Fatalf("since filter: expected 1 event after boundary, got %d", len(events))
+	}
+	toolObj, _ := events[0]["tool"].(map[string]any)
+	if name, _ := toolObj["name"].(string); name != "cancel_query" {
+		t.Errorf("expected cancel_query after since boundary, got %q", name)
+	}
+}
+
 // TestIntegration_DelegationVerification_CleanVerification verifies that a
 // delegation_verification event with Mismatch=false records outcome "verified"
 // and does NOT elevate the journey to "unverified_claim".

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"helpdesk/internal/client"
 	"helpdesk/internal/fleet"
 )
 
@@ -243,9 +244,7 @@ func TestRunStages_CircuitBreakerAbortsWaves(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	auditSrv := httptest.NewServer(stubAuditHandler())
 	defer auditSrv.Close()
 
 	cfg := runnerConfig{gatewayURL: srv.URL, auditURL: auditSrv.URL, jobID: "flj_cb"}
@@ -285,9 +284,7 @@ func TestExecuteSteps_StopOnFailure(t *testing.T) {
 	}))
 	defer gatewaySrv.Close()
 
-	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	auditSrv := httptest.NewServer(stubAuditHandler())
 	defer auditSrv.Close()
 
 	cfg := runnerConfig{gatewayURL: gatewaySrv.URL, auditURL: auditSrv.URL, jobID: "flj_stop"}
@@ -334,6 +331,11 @@ func TestExecuteSteps_ContinueOnFailure(t *testing.T) {
 	defer gatewaySrv.Close()
 
 	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]")) //nolint:errcheck
+			return
+		}
 		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/servers/db-2") && !strings.Contains(r.URL.Path, "/steps/") {
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
@@ -433,5 +435,116 @@ func TestPreflightServer_HeadersInjected(t *testing.T) {
 	}
 	if !strings.Contains(gotNote, "flj_hdr") || !strings.Contains(gotNote, "prod-db-1") {
 		t.Errorf("X-Purpose-Note = %q, missing job_id or server name", gotNote)
+	}
+}
+
+// --- helpers ---
+
+// stubAuditHandler returns an http.Handler suitable for use as a fake auditd in tests.
+// It returns "[]" for GET /v1/events (used by verifyStep) so the 200ms retry in
+// VerifyTrace is not triggered, and 200 OK for all other requests (PATCH status updates).
+func stubAuditHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]")) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// --- verifyStep ---
+
+func TestVerifyStep_NoAuditURL(t *testing.T) {
+	cfg := runnerConfig{auditURL: "", jobID: "flj_v1"}
+	result := verifyStep(context.Background(), cfg, "cancel_query", time.Now())
+	if result != nil {
+		t.Errorf("expected nil when auditURL unset, got %+v", result)
+	}
+}
+
+func TestVerifyStep_PopulatesVerified(t *testing.T) {
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		events := []map[string]any{
+			{"action_class": "write", "tool": map[string]any{"name": "cancel_query"}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(events) //nolint:errcheck
+	}))
+	defer auditSrv.Close()
+
+	cfg := runnerConfig{auditURL: auditSrv.URL, jobID: "flj_v2"}
+	result := verifyStep(context.Background(), cfg, "cancel_query", time.Now().Add(-time.Minute))
+	if result == nil {
+		t.Fatal("expected TraceVerification, got nil")
+	}
+	if len(result.WriteConfirmed) != 1 || result.WriteConfirmed[0] != "cancel_query" {
+		t.Errorf("WriteConfirmed = %v, want [cancel_query]", result.WriteConfirmed)
+	}
+}
+
+func TestExecuteSteps_VerifiedFieldPopulated(t *testing.T) {
+	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"text": "ok"}) //nolint:errcheck
+	}))
+	defer gatewaySrv.Close()
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			events := []map[string]any{
+				{"action_class": "read", "tool": map[string]any{"name": "check_connection"}},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(events) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer auditSrv.Close()
+
+	cfg := runnerConfig{gatewayURL: gatewaySrv.URL, auditURL: auditSrv.URL, jobID: "flj_v3"}
+	steps := []fleet.Step{
+		{Agent: "database", Tool: "check_connection", Args: map[string]any{}},
+	}
+
+	res := executeSteps(context.Background(), cfg, "db-1", "canary", steps)
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if len(res.steps) != 1 {
+		t.Fatalf("expected 1 step result, got %d", len(res.steps))
+	}
+	if res.steps[0].verified == nil {
+		t.Fatal("expected verified to be populated, got nil")
+	}
+	if len(res.steps[0].verified.ToolsConfirmed) != 1 {
+		t.Errorf("ToolsConfirmed = %v, want 1 entry", res.steps[0].verified.ToolsConfirmed)
+	}
+}
+
+// --- logStepVerification ---
+
+func TestLogStepVerification_NoPanic(t *testing.T) {
+	// logStepVerification logs to slog; verify it doesn't panic under any input.
+	cases := []struct {
+		tool  string
+		write []string
+		destr []string
+	}{
+		{"cancel_query", []string{"cancel_query"}, nil},         // write confirmed
+		{"terminate_connection", nil, []string{"terminate_connection"}}, // destructive confirmed
+		{"cancel_query", nil, nil},                              // write expected, nothing confirmed → mismatch
+		{"terminate_connection", nil, nil},                      // destructive expected, nothing confirmed → mismatch
+		{"check_connection", nil, nil},                          // read expected, nothing confirmed → no mismatch
+		{"check_connection", []string{"cancel_query"}, nil},     // read expected, write confirmed → clean
+	}
+	for _, tc := range cases {
+		v := &client.TraceVerification{
+			WriteConfirmed:       tc.write,
+			DestructiveConfirmed: tc.destr,
+		}
+		logStepVerification("flj_test", tc.tool, v) // must not panic
 	}
 }
