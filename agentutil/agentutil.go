@@ -492,6 +492,15 @@ func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceT
 	}
 
 	// Create a new approval request and return immediately with the pending ID.
+	// Identify the human principal so the approval record carries the actual user,
+	// not the agent process name. The four-eyes check at approval time compares
+	// this value against the approver's identity.
+	principal := audit.PrincipalFromContext(ctx)
+	requestedBy := principal.UserID
+	if requestedBy == "" {
+		requestedBy = e.agentName // fallback for unauthenticated / service-account callers
+	}
+
 	reqCtx := map[string]any{"tags": tags}
 	if note != "" {
 		reqCtx["session_info"] = note
@@ -503,7 +512,7 @@ func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceT
 		AgentName:    e.agentName,
 		ResourceType: resourceType,
 		ResourceName: resourceName,
-		RequestedBy:  e.agentName,
+		RequestedBy:  requestedBy,
 		Context:      reqCtx,
 	})
 	if err != nil {

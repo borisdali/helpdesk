@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -354,16 +355,18 @@ func TestHandleApprove_Auth_FourEyes_OK(t *testing.T) {
 	}
 }
 
-func TestHandleApprove_Auth_FourEyes_MutationNotEnforced(t *testing.T) {
-	// Four-eyes is only enforced for fleet jobs; individual mutations by the
-	// same person as requester are allowed (alice both requested and approves).
+func TestHandleApprove_Auth_FourEyes_MutationEnforced(t *testing.T) {
+	// Four-eyes applies to ALL approval types: alice cannot approve her own mutation request.
 	s := newApprovalSrv(t, testUsersYAML)
 	id := seedApproval(t, s, mutationApproval("alice@example.com"))
 
 	w := doApprove(t, s, id, map[string]any{}, map[string]string{"X-User": "alice@example.com"})
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (self-approval must be rejected); body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "four-eyes") {
+		t.Errorf("body should mention four-eyes constraint; got: %s", w.Body.String())
 	}
 }
 

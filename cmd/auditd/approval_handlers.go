@@ -251,9 +251,9 @@ func (s *approvalServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ApprovedBy = principal.EffectiveID()
-		// Four-eyes: fleet job approver must differ from submitter.
-		if isFleetApproval(existing) && req.ApprovedBy == existing.RequestedBy {
-			http.Error(w, "four-eyes constraint: approver and submitter must be different people", http.StatusForbidden)
+		// Four-eyes: approver must differ from the requester for all approval types.
+		if req.ApprovedBy == existing.RequestedBy {
+			http.Error(w, "four-eyes constraint: approver and requester must be different people", http.StatusForbidden)
 			return
 		}
 	} else if req.ApprovedBy == "" {

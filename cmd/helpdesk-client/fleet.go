@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"helpdesk/internal/client"
@@ -64,12 +65,12 @@ func runFleetPlan(ctx context.Context, cfg client.Config, description, targetHin
 		return fmt.Errorf("decode fleet plan response: %w", err)
 	}
 
-	printFleetPlan(plan)
-	return nil
+	return printFleetPlan(plan)
 }
 
-// printFleetPlan formats and prints a FleetPlanResponse to stdout.
-func printFleetPlan(plan fleetPlanResponse) {
+// printFleetPlan formats and prints a FleetPlanResponse to stdout, then writes
+// the job definition to <job-name>.json in the current directory.
+func printFleetPlan(plan fleetPlanResponse) error {
 	fmt.Println("=== Fleet Job Plan ===")
 	fmt.Println()
 	fmt.Println("Planner notes:")
@@ -92,21 +93,33 @@ func printFleetPlan(plan fleetPlanResponse) {
 		fmt.Println()
 	}
 
-	fmt.Println("Generated job definition (save to a .json file and run with fleet-runner):")
-	fmt.Println()
-
-	// Use JobDefRaw if available (pre-formatted), otherwise marshal JobDef.
+	// Determine the JSON bytes to write.
+	var jobJSON []byte
 	if plan.JobDefRaw != "" {
-		fmt.Println(plan.JobDefRaw)
+		jobJSON = []byte(plan.JobDefRaw)
 	} else {
-		pretty, err := json.MarshalIndent(plan.JobDef, "", "  ")
+		var err error
+		jobJSON, err = json.MarshalIndent(plan.JobDef, "", "  ")
 		if err != nil {
-			fmt.Printf("(could not format job definition: %v)\n", err)
-		} else {
-			fmt.Println(string(pretty))
+			return fmt.Errorf("format job definition: %w", err)
 		}
 	}
 
+	// Write the job file so the user can run fleet-runner immediately.
+	filename := plan.JobDef.Name + ".json"
+	if err := os.WriteFile(filename, append(jobJSON, '\n'), 0o644); err != nil {
+		// Non-fatal: fall back to printing and letting the user save manually.
+		fmt.Println("Generated job definition (save to a .json file and run with fleet-runner):")
+		fmt.Println()
+		fmt.Println(string(jobJSON))
+		fmt.Println()
+		fmt.Printf("(could not write %s: %v)\n", filename, err)
+		fmt.Printf("To submit: fleet-runner --job-file %s\n", filename)
+		return nil
+	}
+
+	fmt.Printf("Job file written: %s\n", filename)
 	fmt.Println()
-	fmt.Printf("To submit: fleet-runner --job-file %s.json\n", plan.JobDef.Name)
+	fmt.Printf("To submit: fleet-runner --job-file %s\n", filename)
+	return nil
 }
