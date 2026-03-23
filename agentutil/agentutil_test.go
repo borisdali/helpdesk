@@ -554,9 +554,10 @@ policies:
 `
 
 // mockApprovalServer starts an httptest server implementing the auditd approval
-// API (POST /v1/approvals and GET /v1/approvals/{id}/wait). The POST handler
-// captures each request body and sends it to the returned channel; all requests
-// are immediately approved.
+// API. The POST /v1/approvals handler captures each request body and sends it to
+// the returned channel; GET /v1/approvals list queries return an empty list (no
+// existing approvals found) so requestApproval always creates a fresh request and
+// returns ApprovalPendingError.
 func mockApprovalServer(t *testing.T) (*httptest.Server, <-chan audit.ApprovalCreateRequest) {
 	t.Helper()
 	ch := make(chan audit.ApprovalCreateRequest, 4)
@@ -575,20 +576,38 @@ func mockApprovalServer(t *testing.T) (*httptest.Server, <-chan audit.ApprovalCr
 				ApprovalID: "test-approval-1",
 				Status:     "pending",
 			})
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/wait"):
-			// WaitForApproval — immediately return approved.
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/approvals":
+			// List approvals — return empty list (no existing approvals).
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(audit.StoredApproval{
-				ApprovalID: "test-approval-1",
-				Status:     "approved",
-				ResolvedBy: "test-approver",
-			})
+			json.NewEncoder(w).Encode([]audit.StoredApproval{})
 		default:
 			http.Error(w, "unexpected: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv, ch
+}
+
+// mockApprovalServerWithExistingApproval returns a server that always reports an
+// already-approved approval for any list query (simulates the cross-turn retry
+// scenario where a previous turn created an approval that has since been granted).
+func mockApprovalServerWithExistingApproval(t *testing.T, approvalID, toolName string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/approvals" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]audit.StoredApproval{{
+				ApprovalID: approvalID,
+				Status:     "approved",
+				ToolName:   toolName,
+				ResolvedBy: "test-approver",
+			}})
+			return
+		}
+		http.Error(w, "unexpected: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // newRequireApprovalEnforcer creates a PolicyEnforcer backed by
@@ -612,8 +631,13 @@ func TestRequestApproval_SessionInfoInContext(t *testing.T) {
 
 	note := "Session PID 1234\n  User:     app\n  Database: prod\n  State:    active"
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, note, nil)
-	if err != nil {
-		t.Fatalf("CheckTool (require_approval → approved): %v", err)
+	// requestApproval now returns immediately with ApprovalPendingError instead of blocking.
+	var pending *ApprovalPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("CheckTool (require_approval): expected *ApprovalPendingError, got %T: %v", err, err)
+	}
+	if pending.ApprovalID == "" {
+		t.Error("ApprovalPendingError.ApprovalID must not be empty")
 	}
 
 	select {
@@ -639,8 +663,9 @@ func TestRequestApproval_NoSessionInfoWhenNoteEmpty(t *testing.T) {
 
 	// Empty note → session_info must NOT appear in the approval context.
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "", nil)
-	if err != nil {
-		t.Fatalf("CheckTool: %v", err)
+	var pending *ApprovalPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("CheckTool: expected *ApprovalPendingError, got %T: %v", err, err)
 	}
 
 	select {
@@ -667,8 +692,9 @@ func TestCheckTool_RequireApproval_RemoteCheck_NoteForwarded(t *testing.T) {
 
 	note := "Session PID 9999\n  User:     slow_client\n  State:    active (5m 10s)"
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, note, nil)
-	if err != nil {
-		t.Fatalf("CheckTool (remote require_approval → approved): %v", err)
+	var pending *ApprovalPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("CheckTool (remote require_approval): expected *ApprovalPendingError, got %T: %v", err, err)
 	}
 
 	select {
@@ -685,6 +711,19 @@ func TestCheckTool_RequireApproval_RemoteCheck_NoteForwarded(t *testing.T) {
 		}
 	default:
 		t.Fatal("no approval request captured via remote check path")
+	}
+}
+
+func TestRequestApproval_CrossTurnRetry_UsesExistingApproval(t *testing.T) {
+	// Simulate the second turn: a prior turn already created an approval that has
+	// since been granted. The list endpoint returns it as approved, so requestApproval
+	// should allow the operation without creating a new request.
+	appSrv := mockApprovalServerWithExistingApproval(t, "apr_existing", "database:prod-db")
+	e := newRequireApprovalEnforcer(t, appSrv.URL)
+
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "", nil)
+	if err != nil {
+		t.Fatalf("CheckTool (cross-turn retry with approved approval): expected nil, got: %v", err)
 	}
 }
 

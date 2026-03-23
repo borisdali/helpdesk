@@ -193,6 +193,9 @@ func (s *approvalServer) handleListApprovals(w http.ResponseWriter, r *http.Requ
 	if v := r.URL.Query().Get("requested_by"); v != "" {
 		opts.RequestedBy = v
 	}
+	if v := r.URL.Query().Get("tool_name"); v != "" {
+		opts.ToolName = v
+	}
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if limit, err := strconv.Atoi(v); err == nil && limit > 0 {
 			opts.Limit = limit

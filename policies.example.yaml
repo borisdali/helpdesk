@@ -255,10 +255,14 @@ policies:
         message: "Destructive actions on critical resources are not allowed for diagnostic purposes."
 
   # ── Identity & Access: authenticated user baseline ───────────────────────────
-  # Ensures standard-role users can perform read operations with a declared purpose
-  # regardless of auth mode (none vs jwt/static). Without this, switching to JWT
-  # auth causes emergency-break-glass (priority 200) to match sre/oncall roles first
-  # and deny any non-emergency request (condition failure → deny).
+  # Ensures standard-role users can perform operations with a declared purpose
+  # regardless of auth mode (none vs jwt/static).
+  #
+  # IMPORTANT: This policy must run BEFORE emergency-break-glass (priority 200).
+  # The policy engine treats a failed `allowed_purposes` condition on an allow rule
+  # as an active DENY — not a skip. Without these explicit allows, emergency-break-glass
+  # would match sre/oncall users and deny all non-emergency requests (because
+  # purpose="diagnostic" ≠ allowed=[emergency] → deny).
   - name: authenticated-read
     description: Authenticated users with standard roles can read with a declared purpose
     priority: 210  # Evaluated before emergency-break-glass (200)
@@ -278,11 +282,43 @@ policies:
       - action: read
         effect: allow
         conditions:
-          allowed_purposes: [diagnostic, remediation, compliance, maintenance, fleet_rollout]
+          allowed_purposes: [diagnostic, remediation, compliance, maintenance, fleet_rollout, emergency]
+
+  # Counterpart to authenticated-read for write/destructive operations.
+  # Same priority — evaluated before emergency-break-glass to prevent its
+  # condition failure from blocking standard-purpose mutations.
+  - name: authenticated-write
+    description: Authenticated users with mutation roles can write/destroy with standard purposes
+    priority: 210
+
+    principals:
+      - role: dba
+      - role: sre
+      - role: oncall
+
+    resources:
+      - type: database
+      - type: kubernetes
+
+    rules:
+      - action: write
+        effect: allow
+        conditions:
+          allowed_purposes: [remediation, compliance, maintenance, fleet_rollout, emergency]
+      - action: destructive
+        effect: allow
+        conditions:
+          allowed_purposes: [remediation, maintenance, emergency]
+          require_approval: true
 
   # ── Identity & Access: purpose-based break-glass override ────────────────────
   # Emergency break-glass: SRE on-call can bypass approval with emergency purpose.
   # Audited at highest priority so it runs before any deny rule.
+  #
+  # Two tiers:
+  #   oncall / sre  — act immediately, no approval required (on-call response speed).
+  #   dba           — require approval even in emergencies (DBAs are not primary on-call
+  #                   responders; human sign-off is appropriate before destructive actions).
   - name: emergency-break-glass
     description: SRE on-call can perform any action with emergency purpose (fully audited)
     priority: 200  # Highest priority — evaluated before any other policy
@@ -301,6 +337,30 @@ policies:
         conditions:
           allowed_purposes: [emergency]
         message: "Emergency break-glass: action allowed and fully audited."
+
+  - name: emergency-dba-break-glass
+    description: DBAs can perform any action with emergency purpose, with mandatory approval
+    priority: 199  # Just below oncall/sre break-glass
+
+    principals:
+      - role: dba
+
+    resources:
+      - type: database
+      - type: kubernetes
+
+    rules:
+      - action: [read, write]
+        effect: allow
+        conditions:
+          allowed_purposes: [emergency]
+        message: "Emergency DBA access: action allowed and fully audited."
+      - action: destructive
+        effect: allow
+        conditions:
+          allowed_purposes: [emergency]
+          require_approval: true
+        message: "Emergency DBA destructive action requires approval before execution."
 
   # ── Identity & Access: purpose-based diagnostic restriction ──────────────────
   # Diagnostic-purpose requests should never perform writes.

@@ -437,56 +437,83 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	return nil
 }
 
-// requestApproval creates an approval request and waits for resolution.
-// note carries optional free-text context for the approver (e.g. session plan from get_session_info).
+// ApprovalPendingError is returned when an approval request has been created but
+// not yet granted. The caller should surface the ApprovalID to the user so they
+// can direct an approver to resolve it, then retry the operation.
+type ApprovalPendingError struct {
+	ApprovalID string
+}
+
+func (e *ApprovalPendingError) Error() string {
+	return fmt.Sprintf(
+		"approval required (ID: %s) — this operation needs human authorization before it can execute. "+
+			"Ask an approver to run: ./approvals approve %s — then reply here to retry.",
+		e.ApprovalID, e.ApprovalID)
+}
+
+// requestApproval creates or reuses an approval request and returns immediately.
+// On first call it creates the request and returns ApprovalPendingError so the
+// LLM can surface the approval ID to the user. On retry (next turn) it first
+// checks for an approved approval by tool name (cross-turn lookup — trace IDs
+// differ between turns), then falls through to the existing trace-based check.
+// note carries optional free-text context for the approver.
 func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
-	// First check if there's an existing valid approval for this trace
-	if traceID != "" {
-		existing, err := e.approvalClient.CheckExistingApproval(ctx, traceID, resourceType+":"+resourceName)
-		if err == nil && existing != nil {
-			slog.Info("using existing approval",
+	toolKey := resourceType + ":" + resourceName
+
+	// Cross-turn lookup: check for an approved or pending approval by tool name.
+	// The trace ID changes each request, so this is the reliable cross-turn path.
+	// agentName scopes the lookup when set; empty agentName matches any agent.
+	existing, err := e.approvalClient.FindApprovalByTool(ctx, toolKey, e.agentName)
+	if err == nil && existing != nil {
+		switch existing.Status {
+		case "approved":
+			slog.Info("using existing approval (cross-turn lookup)",
 				"approval_id", existing.ApprovalID,
-				"trace_id", traceID,
-				"resource", resourceType+":"+resourceName)
-			return nil // Already approved
+				"resource", toolKey)
+			return nil
+		case "pending":
+			slog.Info("pending approval found (cross-turn lookup)",
+				"approval_id", existing.ApprovalID,
+				"resource", toolKey)
+			return &ApprovalPendingError{ApprovalID: existing.ApprovalID}
 		}
 	}
 
-	// Create approval request
+	// Same-turn fallback: check for an existing valid approval by trace ID.
+	if traceID != "" {
+		existing, err := e.approvalClient.CheckExistingApproval(ctx, traceID, toolKey)
+		if err == nil && existing != nil {
+			slog.Info("using existing approval (trace-based lookup)",
+				"approval_id", existing.ApprovalID,
+				"trace_id", traceID,
+				"resource", toolKey)
+			return nil
+		}
+	}
+
+	// Create a new approval request and return immediately with the pending ID.
 	reqCtx := map[string]any{"tags": tags}
 	if note != "" {
 		reqCtx["session_info"] = note
 	}
-	approval, err := e.approvalClient.RequestApprovalAndWait(ctx, audit.ApprovalCreateRequest{
+	createResp, err := e.approvalClient.CreateApproval(ctx, audit.ApprovalCreateRequest{
 		TraceID:      traceID,
 		ActionClass:  string(action),
-		ToolName:     resourceType + ":" + resourceName,
+		ToolName:     toolKey,
 		AgentName:    e.agentName,
 		ResourceType: resourceType,
 		ResourceName: resourceName,
 		RequestedBy:  e.agentName,
 		Context:      reqCtx,
-	}, e.approvalTimeout)
+	})
 	if err != nil {
 		return fmt.Errorf("approval request failed: %w", err)
 	}
 
-	switch approval.Status {
-	case "approved":
-		slog.Info("approval granted",
-			"approval_id", approval.ApprovalID,
-			"approved_by", approval.ResolvedBy,
-			"resource", resourceType+":"+resourceName)
-		return nil
-	case "denied":
-		return fmt.Errorf("approval denied by %s: %s", approval.ResolvedBy, approval.ResolutionReason)
-	case "expired":
-		return fmt.Errorf("approval request expired")
-	case "cancelled":
-		return fmt.Errorf("approval request cancelled")
-	default:
-		return fmt.Errorf("approval still pending (status: %s)", approval.Status)
-	}
+	slog.Info("approval request created",
+		"approval_id", createResp.ApprovalID,
+		"resource", toolKey)
+	return &ApprovalPendingError{ApprovalID: createResp.ApprovalID}
 }
 
 // CheckDatabase is a convenience method for database operations.
