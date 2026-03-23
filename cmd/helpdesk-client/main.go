@@ -87,6 +87,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.AuditURL == "" && term.IsTerminal(int(os.Stderr.Fd())) {
+		fmt.Fprintln(os.Stderr, "warning: HELPDESK_AUDIT_URL is not set — LLM fabrication detection disabled (set --audit-url to enable)")
+	}
+
 	if *message != "" {
 		// One-shot mode — no session continuity needed.
 		if _, err := runQuery(ctx, c, *agentName, "", *message); err != nil {

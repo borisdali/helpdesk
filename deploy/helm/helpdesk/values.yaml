@@ -193,10 +193,16 @@ governance:
     # policy conditions — this is an agent-level pre-check.
     requirePurposeForSensitive: false
 
-  # Operating mode: set to "fix" to require all governance modules (audit, policy,
-  # approvals) to be active before agents will start. Agents refuse to start if any
-  # required module is missing or misconfigured.
-  # Leave empty (default) for normal operation.
+  # Operating mode controls governance requirements at startup and which tools
+  # agents are permitted to execute. Valid values:
+  #   ""                 — default read-only; no governance modules required.
+  #   "readonly-governed"— full governance stack required (audit + policy); write
+  #                        and destructive tools are unconditionally blocked.
+  #                        Use this to observe before enabling mutations.
+  #   "fix"              — full governance stack required; mutations permitted
+  #                        subject to policy and approval workflows.
+  # Agents refuse to start if a governed mode is set but required modules are
+  # missing or misconfigured.
   operatingMode: ""
 
   # Approval workflow settings

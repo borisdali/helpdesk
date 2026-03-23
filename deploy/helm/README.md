@@ -327,12 +327,24 @@ helm install helpdesk ./helm/helpdesk \
 
 Download the tarball for your workstation platform from the [release page](https://github.com/borisdali/helpdesk/releases/) and extract it. The `helpdesk-client` binary is included.
 
-**Option B: Extract from the container image**
+**Option B: Extract from the container image (Linux only)**
+
+The image is built for Linux. On macOS the extracted binary is ELF and cannot
+run natively — use Option A or build from source instead.
 
 ```bash
+# Linux hosts only
 docker run --rm --entrypoint cat ghcr.io/borisdali/helpdesk:latest \
   /usr/local/bin/helpdesk-client > helpdesk-client
 chmod +x helpdesk-client
+```
+
+**Option C: Build from source (macOS / any platform)**
+
+```bash
+git clone https://github.com/borisdali/helpdesk
+cd helpdesk
+go build -o helpdesk-client ./cmd/helpdesk-client/
 ```
 
 ### 4.2 Expose the gateway

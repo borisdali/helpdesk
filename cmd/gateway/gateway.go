@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
@@ -137,7 +138,7 @@ var agentAliases = map[string]string{
 func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}` + "\n")) //nolint:errcheck
+		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q}\n", buildinfo.Version) //nolint:errcheck
 	})
 	mux.HandleFunc("GET /api/v1/agents", g.handleListAgents)
 	mux.HandleFunc("GET /api/v1/tools", g.handleListTools)

@@ -15,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
@@ -24,6 +25,7 @@ import (
 
 func main() {
 	logging.InitLogging(os.Args[1:])
+	slog.Info("helpdesk gateway", "version", buildinfo.Version)
 
 	listenAddr := os.Getenv("HELPDESK_GATEWAY_ADDR")
 	if listenAddr == "" {

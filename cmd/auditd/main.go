@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
 )
@@ -215,6 +216,7 @@ func main() {
 		backend = "postgres"
 	}
 	slog.Info("audit service starting",
+		"version", buildinfo.Version,
 		"listen", cfg.listenAddr,
 		"db", cfg.dbPath,
 		"backend", backend,
@@ -443,7 +445,7 @@ func (s *server) handleVerifyChain(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": buildinfo.Version})
 }
 
 // envOrDefault returns the value of the environment variable named by key,

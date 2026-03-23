@@ -12,10 +12,16 @@
 #   make clean                  Remove dist/
 
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_SHA   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# IMAGE_TAG is the immutable tag baked into deploy bundles and Helm charts.
+# It embeds the git SHA so the same semver can be rebuilt without Kubernetes
+# serving a stale cached image (imagePullPolicy: IfNotPresent won't skip a
+# tag it has never seen before).
+IMAGE_TAG := $(VERSION)-$(GIT_SHA)
 IMAGE     ?= ghcr.io/borisdali/helpdesk
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 DIST      := dist
-LDFLAGS   := -s -w
+LDFLAGS   := -s -w -X helpdesk/internal/buildinfo.Version=$(IMAGE_TAG)
 
 # binary:package pairs
 BIN_PKGS := \
@@ -194,6 +200,7 @@ push:
 	docker buildx build \
 		--platform linux/amd64,linux/arm64 \
 		--provenance=false \
+		-t $(IMAGE):$(IMAGE_TAG) \
 		-t $(IMAGE):$(VERSION) \
 		-t $(IMAGE):latest \
 		-f Dockerfile --push ..
@@ -251,7 +258,7 @@ bundle:
 	cp users.example.yaml $$bundledir/helm/; \
 	sed -i.bak \
 	    -e 's|^  repository: helpdesk|  repository: $(IMAGE)|' \
-	    -e 's|^  tag: latest|  tag: $(VERSION)|' \
+	    -e 's|^  tag: latest|  tag: $(IMAGE_TAG)|' \
 	    $$bundledir/helm/helpdesk/values.yaml; \
 	rm -f $$bundledir/helm/helpdesk/values.yaml.bak; \
 	\
