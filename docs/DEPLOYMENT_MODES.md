@@ -184,7 +184,6 @@ CLI. The platform team controls who can do what via `users.yaml` and `policies.y
 | Govbot / compliance reports | ❌ | ✅ | ✅ |
 | Secbot / alert monitoring | ❌ | ✅ | ✅ |
 | Startup validation (fail-fast) | ❌ | ✅ | ✅ |
-
 ---
 
 ## Mixing Modes Is Not Supported
