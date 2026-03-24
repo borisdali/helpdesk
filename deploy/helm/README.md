@@ -528,6 +528,7 @@ The deploy bundle includes helper scripts in the `scripts/` directory:
 |--------|-------------|
 | `gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
 | `k8s-local-repl.sh` | Run Orchestrator locally with K8s agents port-forwarded |
+| `run-fleet-job.sh` | Run a fleet job ad-hoc in the cluster — no local binary needed |
 
 See [scripts/README.md](../../scripts/README.md) for detailed usage.
 
@@ -861,69 +862,110 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 
 ### 9.9 Running the Fleet Runner (fleet-runner)
 
-`fleet-runner` is deployed as a Kubernetes CronJob (disabled by default). Enable it and configure the schedule in `values.yaml`:
+`fleet-runner` applies a multi-step sequence across infrastructure targets with canary → wave → circuit-breaker rollout logic. There are two usage patterns:
+
+| Pattern | When to use | How |
+|---------|-------------|-----|
+| **Scheduled** | Recurring maintenance, regular sweeps | `fleetRunner.scheduledJobs` in `values.yaml` |
+| **Ad-hoc** | One-off rollouts, testing a new job definition | `scripts/run-fleet-job.sh` |
+
+#### Prerequisite: dedicated fleet-runner API key
+
+Generate a unique API key for fleet-runner — do NOT reuse srebot's or secbot's key. A shared key resolves to an unpredictable identity, breaking audit trails and policy matching.
+
+```bash
+openssl rand -hex 32 > .helpdesk-fleet-api-key
+
+# Hash it using the binary baked into the image
+kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey "$(cat .helpdesk-fleet-api-key)"
+# Paste the printed hash into users.yaml under service_accounts[fleet-runner].api_key_hash
+
+# Store the plaintext key as a K8s Secret
+kubectl -n helpdesk-system create secret generic helpdesk-fleet-api-key \
+  --from-literal=api-key=$(cat .helpdesk-fleet-api-key)
+```
+
+Then reference it in both usage patterns via `fleetRunner.apiKeySecret: helpdesk-fleet-api-key`.
+
+#### Scheduled jobs
+
+Add one entry per recurring job to `fleetRunner.scheduledJobs`. Each entry generates a ConfigMap (with the inline job definition as `job.json`) and a CronJob — no manual `kubectl create configmap` step required.
 
 ```yaml
 fleetRunner:
-  enabled: true
-  schedule: "0 2 * * *"    # 2 AM daily
-  jobFile: "/etc/helpdesk/fleet-job.json"
-  apiKeySecret: fleet-runner-key
-  apiKeyKey: api-key
-  extraVolumes:
-    - name: fleet-job
-      configMap:
-        name: fleet-job-config
-  extraVolumeMounts:
-    - name: fleet-job
-      mountPath: /etc/helpdesk/fleet-job.json
-      subPath: fleet-job.json
-      readOnly: true
+  apiKeySecret: helpdesk-fleet-api-key
+
+  scheduledJobs:
+    - name: vacuum-prod          # used in resource names; must be DNS-label-safe
+      schedule: "0 3 * * 0"     # Sundays 03:00 UTC
+      definition:
+        name: vacuum-prod
+        targets:
+          tags: [production]
+        change:
+          steps:
+            - agent: database
+              tool: run_maintenance
+              args: {operation: vacuum_analyze}
+        strategy:
+          wave_size: 2
+          wave_pause_seconds: 300
+
+    - name: conn-health-check
+      schedule: "*/30 * * * *"  # every 30 minutes
+      dryRun: false
+      definition:
+        name: conn-health-check
+        targets:
+          tags: [prod, staging]
+        change:
+          steps:
+            - agent: database
+              tool: check_connection
 ```
 
-Create the prerequisite resources and deploy:
+Apply with:
 
 ```bash
-# Create the job definition ConfigMap
-kubectl -n helpdesk-system create configmap fleet-job-config \
-  --from-file=fleet-job.json=jobs/vacuum-prod.json
-
-# Generate a unique API key for fleet-runner — do NOT reuse srebot's or secbot's key.
-# The identity provider matches on the first account whose hash verifies (non-deterministic
-# map order), so a shared key resolves to an unpredictable identity, breaking audit trails
-# and policy matching. Generate and hash a dedicated key:
-openssl rand -hex 32 > .fleet-runner-key
-kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
-  --image=ghcr.io/borisdali/helpdesk:v0.7.0 -- hashapikey "$(cat .fleet-runner-key)"
-# Paste the printed hash into usersConfig.serviceAccounts[fleet-runner].api_key_hash in values.yaml
-
-# Create the API key Secret
-kubectl -n helpdesk-system create secret generic fleet-runner-key \
-  --from-literal=api-key=$(cat .fleet-runner-key)
-
-# Deploy
-helm upgrade helpdesk ./deploy/helm/helpdesk -f values-fleet.yaml
-
-# Trigger immediately (without waiting for the schedule)
-kubectl -n helpdesk-system create job fleet-runner-now \
-  --from=cronjob/helpdesk-fleet-runner
-
-# Follow the output
-kubectl -n helpdesk-system logs -f job/fleet-runner-now
+helm upgrade helpdesk ./deploy/helm/helpdesk -f my-values.yaml
 ```
 
-To dry-run from a pod:
+Each job creates resources named `helpdesk-fleet-job-<name>` (ConfigMap) and `helpdesk-fleet-<name>` (CronJob).
+
+To trigger a scheduled job immediately without waiting for the next cron tick:
 
 ```bash
-kubectl -n helpdesk-system run fleet-runner-dry --rm -it --restart=Never \
-  --image=helpdesk:latest \
-  -- fleet-runner \
-    --job-file /etc/helpdesk/fleet-job.json \
-    --gateway http://helpdesk-gateway:8080 \
-    --dry-run
+kubectl -n helpdesk-system create job fleet-vacuum-now \
+  --from=cronjob/helpdesk-fleet-vacuum-prod
+
+kubectl -n helpdesk-system logs -f job/fleet-vacuum-now
 ```
 
-**Generating a job definition from natural language:** Set `ANTHROPIC_API_KEY` on the gateway (via a Secret or environment variable) and use the planner endpoint from your workstation:
+#### Ad-hoc jobs
+
+`scripts/run-fleet-job.sh` runs a single fleet job from a local JSON file. It auto-detects the image and service endpoints from the running Helm release, creates a temporary ConfigMap + Job, streams the logs, and cleans up on exit — no cluster-side setup required.
+
+```bash
+# Dry run first (no execution, prints plan)
+./scripts/run-fleet-job.sh --dry-run jobs/vacuum-prod.json
+
+# Live run using the fleet-runner API key secret already in the cluster
+./scripts/run-fleet-job.sh \
+  --namespace helpdesk-system \
+  --api-key-secret helpdesk-fleet-api-key \
+  jobs/vacuum-prod.json
+
+# Override rollout strategy flags
+./scripts/run-fleet-job.sh \
+  --api-key-secret helpdesk-fleet-api-key \
+  --canary 1 --wave-size 2 --pause 60 \
+  jobs/vacuum-prod.json
+```
+
+See `scripts/README.md` for the full flag reference.
+
+**Generating a job definition from natural language:** use the planner endpoint from your workstation:
 
 ```bash
 # Port-forward the gateway first
@@ -934,9 +976,8 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
   -d '{"description": "check connection health on all production databases"}' \
   | jq -r '.job_def_raw' > jobs/health-check.json
 
-# Or with helpdesk-client
-helpdesk-client --gateway http://localhost:8080 \
-  --plan-fleet-job "check connection health on all production databases"
+# Then run it
+./scripts/run-fleet-job.sh --dry-run jobs/health-check.json
 ```
 
 See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.

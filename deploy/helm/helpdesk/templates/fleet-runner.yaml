@@ -1,68 +1,79 @@
-{{- if .Values.fleetRunner.enabled }}
+{{- range .Values.fleetRunner.scheduledJobs }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "helpdesk.fullname" $ }}-fleet-job-{{ .name }}
+  labels:
+    {{- include "helpdesk.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: fleet-runner
+data:
+  job.json: {{ .definition | toJson }}
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ include "helpdesk.fullname" . }}-fleet-runner
+  name: {{ include "helpdesk.fullname" $ }}-fleet-{{ .name }}
   labels:
-    {{- include "helpdesk.labels" . | nindent 4 }}
+    {{- include "helpdesk.labels" $ | nindent 4 }}
     app.kubernetes.io/component: fleet-runner
 spec:
-  schedule: {{ .Values.fleetRunner.schedule | quote }}
+  schedule: {{ .schedule | quote }}
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:
       template:
         metadata:
           labels:
-            {{- include "helpdesk.labels" . | nindent 12 }}
+            {{- include "helpdesk.labels" $ | nindent 12 }}
             app.kubernetes.io/component: fleet-runner
         spec:
           restartPolicy: OnFailure
           containers:
             - name: fleet-runner
-              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+              imagePullPolicy: {{ $.Values.image.pullPolicy }}
               command:
                 - /usr/local/bin/fleet-runner
-                - --job-file={{ .Values.fleetRunner.jobFile }}
-                - --gateway=http://{{ include "helpdesk.fullname" . }}-gateway:{{ .Values.gateway.port }}
-                - --audit-url=http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}
+                - --job-file=/etc/helpdesk/fleet-jobs/job.json
+                - --gateway=http://{{ include "helpdesk.fullname" $ }}-gateway:{{ $.Values.gateway.port }}
+                - --audit-url=http://{{ include "helpdesk.fullname" $ }}-auditd:{{ $.Values.governance.auditd.port }}
                 - --infra=/etc/helpdesk/infrastructure.json
-                {{- if .Values.fleetRunner.dryRun }}
+                {{- if .dryRun }}
                 - --dry-run
                 {{- end }}
-                {{- if gt (int .Values.fleetRunner.canaryCount) 0 }}
-                - --canary={{ .Values.fleetRunner.canaryCount }}
+                {{- if gt (int ((.canaryCount | default 0) | toString | atoi)) 0 }}
+                - --canary={{ .canaryCount }}
                 {{- end }}
-                {{- if gt (int .Values.fleetRunner.waveSize) 0 }}
-                - --wave-size={{ .Values.fleetRunner.waveSize }}
+                {{- if gt (int ((.waveSize | default 0) | toString | atoi)) 0 }}
+                - --wave-size={{ .waveSize }}
                 {{- end }}
-                {{- if gt (int .Values.fleetRunner.wavePauseSeconds) 0 }}
-                - --pause={{ .Values.fleetRunner.wavePauseSeconds }}
+                {{- if gt (int ((.wavePauseSeconds | default 0) | toString | atoi)) 0 }}
+                - --pause={{ .wavePauseSeconds }}
                 {{- end }}
               env:
                 - name: HELPDESK_SESSION_PURPOSE
                   value: fleet_rollout
-                {{- if .Values.fleetRunner.apiKeySecret }}
+                {{- if $.Values.fleetRunner.apiKeySecret }}
                 - name: HELPDESK_CLIENT_API_KEY
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .Values.fleetRunner.apiKeySecret }}
-                      key: {{ .Values.fleetRunner.apiKeyKey }}
+                      name: {{ $.Values.fleetRunner.apiKeySecret }}
+                      key: {{ $.Values.fleetRunner.apiKeyKey }}
                 {{- end }}
               volumeMounts:
                 - name: infra-config
                   mountPath: /etc/helpdesk/infrastructure.json
                   subPath: infrastructure.json
                   readOnly: true
-                {{- with .Values.fleetRunner.extraVolumeMounts }}
-                {{- toYaml . | nindent 16 }}
-                {{- end }}
+                - name: job-definition
+                  mountPath: /etc/helpdesk/fleet-jobs
+                  readOnly: true
           volumes:
             - name: infra-config
               configMap:
-                name: {{ include "helpdesk.fullname" . }}-config
-            {{- with .Values.fleetRunner.extraVolumes }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
+                name: {{ include "helpdesk.fullname" $ }}-config
+            - name: job-definition
+              configMap:
+                name: {{ include "helpdesk.fullname" $ }}-fleet-job-{{ .name }}
 {{- end }}

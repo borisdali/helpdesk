@@ -22,7 +22,7 @@ type preflightConfig struct {
 // gateway before any stage execution begins. It calls POST /api/v1/db/check_connection.
 func preflightServer(ctx context.Context, cfg preflightConfig, serverName string) error {
 	args := map[string]any{
-		"db_server": serverName,
+		"connection_string": serverName,
 	}
 	body, err := json.Marshal(args)
 	if err != nil {

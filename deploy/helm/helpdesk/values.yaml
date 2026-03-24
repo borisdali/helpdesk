@@ -229,23 +229,46 @@ governance:
 
 
 # Fleet runner: applies a single change across infrastructure targets with staged rollout.
-# Runs as a Kubernetes CronJob (disabled by default).
+#
+# Each entry in scheduledJobs creates:
+#   - a ConfigMap   helpdesk-fleet-job-<name>   (embeds the inline job definition)
+#   - a CronJob     helpdesk-fleet-<name>        (runs fleet-runner on the given schedule)
+#
+# For ad-hoc / one-off fleet jobs from a local machine use scripts/run-fleet-job.sh —
+# it creates a temporary Job in the cluster, streams the logs, and cleans up on exit.
+#
+# Example:
+#   fleetRunner:
+#     apiKeySecret: helpdesk-fleet-runner-key
+#     scheduledJobs:
+#       - name: vacuum-all
+#         schedule: "0 3 * * 0"   # Sundays 03:00 UTC
+#         dryRun: false
+#         definition:
+#           name: vacuum-all
+#           targets:
+#             tags: [prod]
+#           change:
+#             steps:
+#               - agent: database
+#                 tool: run_maintenance
+#                 args: {operation: vacuum_analyze}
+#           strategy:
+#             wave_size: 2
+#             wave_pause_seconds: 60
 fleetRunner:
-  # Set to true to enable the CronJob.
-  enabled: false
-  # Cron schedule (e.g. "0 2 * * *" for 2 AM daily).
-  schedule: "0 2 * * *"
-  # Path to the job definition JSON file inside the container.
-  # Mount it via a ConfigMap or Secret in extraVolumes/extraVolumeMounts.
-  jobFile: "/etc/helpdesk/fleet-job.json"
-  # Override strategy flags (0/empty = use values from job file).
-  dryRun: false
-  canaryCount: 0
-  waveSize: 0
-  wavePauseSeconds: 0
-  # Name of a Secret containing the fleet-runner API key (key: api-key).
+  # Name of a pre-existing Secret containing the fleet-runner API key.
+  # The Secret must have a key matching apiKeyKey (default: api-key).
+  # Leave empty to run without authentication.
   apiKeySecret: ""
   apiKeyKey: "api-key"
-  # Extra volumes and mounts for job definition files.
-  extraVolumes: []
-  extraVolumeMounts: []
+  # List of scheduled fleet jobs. Each entry generates a ConfigMap + CronJob pair.
+  # See example above for the full schema.
+  scheduledJobs: []
+  # - name: my-job           # used in resource names; must be DNS-label-safe
+  #   schedule: "0 2 * * *"  # standard cron expression (UTC)
+  #   dryRun: false           # if true, plan only — no gateway/auditd contact
+  #   canaryCount: 0          # 0 = use value from job definition
+  #   waveSize: 0             # 0 = use value from job definition
+  #   wavePauseSeconds: 0     # 0 = use value from job definition
+  #   definition: {}          # inline fleet.JobDef (serialised to job.json in the ConfigMap)

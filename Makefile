@@ -197,6 +197,8 @@ image:
 # Docker image (multi-arch, push to GHCR)
 # ---------------------------------------------------------------------------
 push:
+	@if [ -n "$$(git status --porcelain Dockerfile)" ]; then \
+		echo "ERROR: Dockerfile has uncommitted changes — commit before releasing"; exit 1; fi
 	docker buildx build \
 		--platform linux/amd64,linux/arm64 \
 		--provenance=false \
