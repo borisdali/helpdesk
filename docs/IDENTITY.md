@@ -160,6 +160,12 @@ RS256, RS384, RS512, ES256, ES384, ES512. HMAC algorithms (HS256 etc.) are
 not supported — they require the gateway to hold the secret key, which defeats
 the purpose of JWKS.
 
+**Role names in JWT mode:** Role values from the claim are used verbatim — the
+`role_aliases` field in `users.yaml` has no effect in JWT mode. Ensure your IdP
+emits the canonical role names (`dba`, `sre`, `fleet-operator`, etc.) in the
+configured claim, or use `HELPDESK_JWT_ROLES_CLAIM` to point at a dedicated
+claim that already uses canonical names. See [AUTHZ.md §6.2](AUTHZ.md#62-jwt-provider-helpdesk_identity_providerjwt) for details.
+
 JWKS keys are cached with TTL to avoid per-request round-trips to the IdP.
 When a JWT carries no `kid` and the JWKS has exactly one key, that key is used
 automatically (common for dev/internal IdPs that omit `kid`).

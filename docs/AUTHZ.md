@@ -1,6 +1,6 @@
 # aiHelpDesk HTTP Authorization
 
-This document covers HTTP-level authorization — who can call which endpoint and with which role. This is distinct from [policy-based governance](AIGOVERNANCE.md), which governs what an agent is allowed to do once a request is admitted.
+This document covers HTTP-level authorization — who can call which endpoint and with which role. This is distinct from [policy-based governance](AIGOVERNANCE.md3-policy-engine), which governs what an agent is allowed to do once a request is admitted.
 
 **Quick reference:** To find out what role you need to call a specific endpoint, use `GET /api/v1/roles` — the live authorization table the system is currently enforcing. See [§4. Finding Your Role](#4-finding-your-role).
 
@@ -8,7 +8,7 @@ This document covers HTTP-level authorization — who can call which endpoint an
 
 ## 1. Authorization vs Governance
 
-aiHelpDesk has two enforcement layers that are sometimes confused:
+aiHelpDesk features two complementary enforcement layers:
 
 | Layer | What it controls | Where it lives | When it acts |
 |---|---|---|---|
@@ -17,7 +17,7 @@ aiHelpDesk has two enforcement layers that are sometimes confused:
 
 A request rejected at the HTTP layer never reaches the agent. A request admitted at the HTTP layer may still be denied by a governance policy — for example, a DBA calling `POST /api/v1/db/cancel_query` is admitted (has the role), but the policy engine may still block the operation if the target database is out of maintenance window or the blast radius cap is exceeded.
 
-Both layers are required in Mode 2 and Mode 3 deployments. See [DEPLOYMENT_MODES.md](DEPLOYMENT_MODES.md).
+Both layers are required in Mode 2 and Mode 3 deployments, see [here](DEPLOYMENT_MODES.md) for details.
 
 ---
 
@@ -25,18 +25,18 @@ Both layers are required in Mode 2 and Mode 3 deployments. See [DEPLOYMENT_MODES
 
 ### 2.1 Activation
 
-HTTP authorization enforcement is activated by setting `HELPDESK_IDENTITY_PROVIDER` to a value other than `none` (or leaving it unset). When the identity provider is `static` or `jwt`, the authorizer runs in enforcing mode on every request.
+HTTP authorization enforcement is activated by setting `HELPDESK_IDENTITY_PROVIDER` to a value other than `none` (or leaving it unset). When the identity provider is `static` or `jwt`, the authorizer runs in enforcing mode on every request. While the `none` mode is technically permitted, we encourage customers to avoid using it beyond simple testing for the Enterprise [Deployment Modes](DEPLOYMENT_MODES.md).
 
 ```bash
 # Enforcing: every request must carry a valid identity
 export HELPDESK_IDENTITY_PROVIDER=static
 export HELPDESK_USERS_FILE=/etc/helpdesk/users.yaml
 
-# Non-enforcing (default): no enforcement; backwards-compatible
+# Non-enforcing (default): no enforcement; backwards-compatible; suitable for testing
 export HELPDESK_IDENTITY_PROVIDER=none
 ```
 
-When enforcement is off, the authorizer accepts all requests regardless of role. This preserves backward compatibility with existing deployments that have no `users.yaml`. See [IDENTITY.md](IDENTITY.md) for identity provider configuration.
+When enforcement is off, the authorizer accepts all requests regardless of role. This preserves backward compatibility with existing deployments that have no `users.yaml`. See [here](IDENTITY.md) for identity provider configuration.
 
 ### 2.2 Per-Request Flow
 
@@ -143,7 +143,7 @@ auditd enforces the same model. Human-readable (GET) endpoints are open to any a
 
 | Route | Caller |
 |---|---|
-| `POST /v1/events` and `POST /v1/events/{eventID}/outcome` | gateway auditor, agents |
+| `POST /v1/events` and `POST /v1/events/{eventID}/outcome` | Gateway auditor, agents |
 | `POST /v1/approvals` | agents (on policy-required approval) |
 | `POST /v1/governance/check` | agents (pre-flight governance) |
 | `POST /v1/govbot/runs` | govbot service account |
@@ -169,7 +169,7 @@ The middleware gate for approve/deny allows either `dba` or `fleet-approver` thr
 curl http://localhost:8080/api/v1/roles | jq .
 ```
 
-This endpoint returns the live authorization table the running gateway is enforcing, including any custom role aliases your deployment has configured. It is always up-to-date — the table is compiled directly from `DefaultGatewayPermissions` at startup.
+This endpoint returns the live authorization table the running Gateway is enforcing, including any custom role aliases your deployment has configured. It is always up-to-date — the table is compiled directly from `DefaultGatewayPermissions` at startup.
 
 **Sample response:**
 
@@ -219,7 +219,7 @@ This endpoint returns the live authorization table the running gateway is enforc
 
 ## 5. Admin Role
 
-The `admin` role bypasses all authorization checks on every route in both the gateway and auditd. It is the escape hatch for operators who need unrestricted access for maintenance or onboarding.
+The `admin` role bypasses authorization checks on every route in both the Gateway and auditd. It is the escape hatch for operators who need unrestricted access for maintenance or onboarding.
 
 The admin role name defaults to `"admin"` but can be changed at startup via `SetAdminRole` (see `internal/authz/authz.go`). The current configured name is always visible in `GET /api/v1/roles` under the `admin_role` key.
 
@@ -230,21 +230,23 @@ users:
     roles: [admin]
 ```
 
-**Use sparingly.** The admin role makes it impossible for auditd to enforce service-only write restrictions on that principal. If an admin user is compromised, they can write arbitrary audit events. Prefer granting the minimum role (`dba`, `fleet-operator`, etc.) for day-to-day operations and reserve `admin` for break-glass scenarios.
+**Use sparingly.** The admin role makes it impossible for auditd to enforce service-only write restrictions on that principal. aiHelpDesk recommends to the standard security best practices and in particular adhering to the principle of least privilege and granting the minimum role (e.g. `dba`, `fleet-operator` if elevated privileges are needed) for day-to-day operations and reserve `admin` for break-glass scenarios.
 
 ---
 
 ## 6. Role Aliases
 
-Your organization's IdP may use group names that differ from aiHelpDesk's canonical role names. Role aliases let you map IdP group names to canonical roles without requiring your IdP configuration to change.
+### 6.1 Static provider (`HELPDESK_IDENTITY_PROVIDER=static`)
+
+Your organization may use group names in `users.yaml` that differ from aiHelpDesk's canonical role names. Role aliases let you map those names to canonical roles without renaming every user entry.
 
 Declare aliases in `users.yaml`:
 
 ```yaml
 # /etc/helpdesk/users.yaml
 role_aliases:
-  database-admin: dba          # IdP group "database-admin" → canonical role "dba"
-  platform-sre: sre            # IdP group "platform-sre" → canonical role "sre"
+  database-admin: dba          # "database-admin" → canonical role "dba"
+  platform-sre: sre            # "platform-sre" → canonical role "sre"
   sre-ops: sre                 # multiple aliases can map to the same canonical role
   k8s-platform: k8s-admin
   deploy-engineer: fleet-operator
@@ -267,11 +269,25 @@ The alias map from the currently loaded `users.yaml` is surfaced via `GET /api/v
 - A role name that is not a canonical name and has no alias entry is passed through unchanged (it can still be used by policy rules; it just won't match any HTTP authorization table entry).
 - Aliases apply to both `users` and `service_accounts` entries.
 
+### 6.2 JWT provider (`HELPDESK_IDENTITY_PROVIDER=jwt`)
+
+Role aliases in `users.yaml` have no effect when using the JWT provider. The JWT provider extracts roles directly from the token claim (configured via `HELPDESK_JWT_ROLES_CLAIM`, default: `groups`) and passes them to the authorizer verbatim — there is no alias expansion step.
+
+The recommended approach for JWT deployments is to emit canonical role names from the IdP:
+
+- **Okta / Auth0 / Azure AD:** use group-to-claim transformation rules to map your internal group names to canonical names (`dba`, `sre`, etc.) in the `groups` claim, or add a dedicated `helpdesk_roles` claim and point `HELPDESK_JWT_ROLES_CLAIM` at it.
+- **Keycloak:** use client-scope mappers to rename or filter roles before they reach the token.
+- **Kubernetes workload identity:** configure the projected claim to include the correct role strings.
+
+If changing the IdP is not feasible in the short term, the cleanest workaround is to set `HELPDESK_JWT_ROLES_CLAIM` to a claim that already uses canonical names, and populate that claim via an IdP transformation rule.
+
+> **Note:** The `aliases` field in `GET /api/v1/roles` will be empty when the JWT provider is active, because the alias map lives in `users.yaml` which is not loaded in JWT mode. The authorizer enforces canonical names only.
+
 ---
 
 ## 7. Operating Mode and Authorization
 
-`HELPDESK_OPERATING_MODE` is a second, independent enforcement layer that sits inside the gateway handlers (not in `internal/authz/`). It blocks write and destructive tool invocations regardless of the caller's role.
+`HELPDESK_OPERATING_MODE` is a second, independent enforcement layer that sits inside the Gateway handlers (not in `internal/authz/`). It blocks write and destructive tool invocations regardless of the caller's role.
 
 | Mode | DB/K8s write tools | DB/K8s destructive tools |
 |---|---|---|
@@ -293,7 +309,7 @@ Certain auditd write endpoints are marked `ServiceOnly`. A human caller — even
 - Service accounts (authenticated via `Authorization: Bearer <api-key>`) have `Service != ""`.
 - Human users (authenticated via `X-User` header) have `Service == ""`.
 
-This prevents human operators from accidentally writing audit events directly to auditd, which would undermine the tamper-proof audit chain. The only legitimate callers for these endpoints are the gateway's internal auditor and agent service accounts.
+This prevents human operators from accidentally writing audit events directly to auditd, which would undermine the tamper-proof audit chain. The only legitimate callers for these endpoints are the Gateway's internal auditor and agent service accounts.
 
 Service account configuration is covered in [IDENTITY.md §2.2](IDENTITY.md#22-static-identity-provider).
 
@@ -314,6 +330,6 @@ For engineers working on the authorization code:
 | Approval fine-grained check | `cmd/auditd/approval_handlers.go` | `authzr.Require(principal, required)` after middleware gate |
 | Role alias expansion | `internal/identity/static.go` `expandRoles` | applied at resolve time in `StaticProvider` |
 
-**Completeness tests** in `internal/authz/authz_test.go` verify that every route registered in `RegisterRoutes` (gateway) and `main.go` (auditd) has a corresponding entry in the permission table, and vice versa. These tests run as part of `go test ./...` and will fail if a new route is added without a permission table entry.
+**Completeness tests** in `internal/authz/authz_test.go` verify that every route registered in `RegisterRoutes` (Gateway) and `main.go` (auditd) has a corresponding entry in the permission table, and vice versa. These tests run as part of `go test ./...` and will fail if a new route is added without a permission table entry.
 
 **Important architectural note:** `r.Pattern` in Go 1.22 `http.ServeMux` is only set after the mux has dispatched to the matched handler — it is empty in any outer middleware wrapper. For this reason, authorization uses per-route closures (capturing the pattern string at registration time) rather than a single outer middleware wrapping the mux. See the `IMPORTANT` note in `internal/authz/middleware.go` for details.
