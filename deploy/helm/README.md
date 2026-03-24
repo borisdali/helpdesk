@@ -860,7 +860,7 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 
 > **Socket vs. HTTP polling:** When `governance.auditd.persistence.enabled=true`, `auditor` and `secbot` connect to `auditd` via a shared Unix socket on a PersistentVolumeClaim. If your storage class only supports `ReadWriteOnce`, all three pods must land on the same node — use a `ReadWriteMany` class or add a `podAffinity` rule to co-locate them. When persistence is **disabled** (the default), there is no shared volume; instead, the chart automatically switches `auditor` and `secbot` to **HTTP polling mode**, where they poll `auditd`'s `/v1/events` endpoint every 5 seconds. No manual configuration is needed — the correct mode is selected based on the `persistence.enabled` flag.
 
-### 9.9 Running the Fleet Runner (fleet-runner)
+### 9.9 Running the jobs on multiple databases (via Fleet Management's fleet-runner)
 
 `fleet-runner` applies a multi-step sequence across infrastructure targets with canary → wave → circuit-breaker rollout logic. There are two usage patterns:
 
@@ -980,7 +980,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
 ./scripts/run-fleet-job.sh --dry-run jobs/health-check.json
 ```
 
-See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.
+See [here](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details. Also, the full `run-fleet-job.sh` script reference is available [here](../../scripts/README.md#run-fleet-jobsh).
 
 ## 10. Troubleshooting
 
