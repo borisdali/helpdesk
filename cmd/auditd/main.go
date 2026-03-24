@@ -211,6 +211,7 @@ func main() {
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers", auth("POST /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleAddServer))
 	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}", auth("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}", fleetSrv.handleUpdateServer))
 	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers", auth("GET /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleGetServers))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers/{serverName}", auth("GET /v1/fleet/jobs/{jobID}/servers/{serverName}", fleetSrv.handleGetServer))
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleAddServerStep))
 	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", auth("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", fleetSrv.handleUpdateServerStep))
 	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleGetServerSteps))

@@ -228,6 +228,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/fleet/jobs", auth("GET /api/v1/fleet/jobs", g.handleFleetListJobs))
 	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}", auth("GET /api/v1/fleet/jobs/{jobID}", g.handleFleetGetJob))
 	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers", auth("GET /api/v1/fleet/jobs/{jobID}/servers", g.handleFleetGetJobServers))
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}", auth("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}", g.handleFleetGetServer))
 	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps", g.handleFleetGetServerSteps))
 	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}", auth("GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}", g.handleFleetGetJobApproval))
 }
@@ -687,6 +688,12 @@ func (g *Gateway) handleFleetGetJob(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleFleetGetJobServers(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("jobID")
 	g.proxyFleetRequest(w, r, "/v1/fleet/jobs/"+jobID+"/servers", r.Method, nil)
+}
+
+func (g *Gateway) handleFleetGetServer(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobID")
+	serverName := r.PathValue("serverName")
+	g.proxyFleetRequest(w, r, "/v1/fleet/jobs/"+jobID+"/servers/"+serverName, r.Method, nil)
 }
 
 func (g *Gateway) handleFleetGetServerSteps(w http.ResponseWriter, r *http.Request) {

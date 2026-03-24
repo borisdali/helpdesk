@@ -817,7 +817,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		}
 
 		// Append every tool call in timestamp order, including repeats.
-		if toolName.Valid && toolName.String != "" {
+		// Only tool_execution events are counted — gateway_request events on the
+		// direct-tool path also carry a tool_name (gateway-level bookkeeping) and
+		// tool_retry events carry a tool_name for re-check loops; neither should
+		// inflate tools_used.
+		if toolName.Valid && toolName.String != "" && eventType == string(EventTypeToolExecution) {
 			d.tools = append(d.tools, toolName.String)
 			if d.currentDelegIdx >= 0 {
 				d.delegations[d.currentDelegIdx].Tools = append(d.delegations[d.currentDelegIdx].Tools, toolName.String)

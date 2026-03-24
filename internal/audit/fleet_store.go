@@ -286,6 +286,33 @@ func (s *FleetStore) GetJobServers(ctx context.Context, jobID string) ([]*FleetJ
 	return servers, rows.Err()
 }
 
+// GetServer retrieves a single server record for a fleet job by server name.
+func (s *FleetStore) GetServer(ctx context.Context, jobID, serverName string) (*FleetJobServer, error) {
+	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
+		SELECT id, job_id, server_name, stage, status, output, started_at, finished_at
+		FROM fleet_job_servers WHERE job_id = ? AND server_name = ?
+	`), jobID, serverName)
+
+	var srv FleetJobServer
+	var output sql.NullString
+	var startedAt, finishedAt sql.NullString
+
+	if err := row.Scan(
+		&srv.ID, &srv.JobID, &srv.ServerName, &srv.Stage, &srv.Status,
+		&output, &startedAt, &finishedAt,
+	); err != nil {
+		return nil, err
+	}
+	srv.Output = output.String
+	if startedAt.Valid {
+		srv.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt.String)
+	}
+	if finishedAt.Valid {
+		srv.FinishedAt, _ = time.Parse(time.RFC3339Nano, finishedAt.String)
+	}
+	return &srv, nil
+}
+
 // AddServerStep inserts a pending step record for a server within a fleet job.
 func (s *FleetStore) AddServerStep(ctx context.Context, step *FleetJobServerStep) error {
 	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `

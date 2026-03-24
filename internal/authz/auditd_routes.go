@@ -23,6 +23,7 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /v1/fleet/jobs":                                    {AdminBypass: true},
 	"GET /v1/fleet/jobs/{jobID}":                            {AdminBypass: true},
 	"GET /v1/fleet/jobs/{jobID}/servers":                    {AdminBypass: true},
+	"GET /v1/fleet/jobs/{jobID}/servers/{serverName}":       {AdminBypass: true},
 	"GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
 

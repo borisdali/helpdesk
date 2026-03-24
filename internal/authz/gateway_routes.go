@@ -36,6 +36,7 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/fleet/jobs":                                    {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}":                            {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/servers":                    {AdminBypass: true},
+	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}":       {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
 

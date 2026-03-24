@@ -223,6 +223,24 @@ func (s *fleetServer) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(servers) //nolint:errcheck
 }
 
+func (s *fleetServer) handleGetServer(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobID")
+	serverName := r.PathValue("serverName")
+	if jobID == "" || serverName == "" {
+		http.Error(w, "missing job ID or server name", http.StatusBadRequest)
+		return
+	}
+
+	srv, err := s.store.GetServer(r.Context(), jobID, serverName)
+	if err != nil {
+		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(srv) //nolint:errcheck
+}
+
 func (s *fleetServer) handleAddServerStep(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("jobID")
 	serverName := r.PathValue("serverName")

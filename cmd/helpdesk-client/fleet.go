@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"helpdesk/internal/client"
 	"helpdesk/internal/fleet"
 )
+
+var slugNonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
 // fleetPlanResponse mirrors the gateway's FleetPlanResponse for JSON decoding.
 type fleetPlanResponse struct {
@@ -106,7 +109,7 @@ func printFleetPlan(plan fleetPlanResponse) error {
 	}
 
 	// Write the job file so the user can run fleet-runner immediately.
-	filename := plan.JobDef.Name + ".json"
+	filename := slugify(plan.JobDef.Name) + ".json"
 	if err := os.WriteFile(filename, append(jobJSON, '\n'), 0o644); err != nil {
 		// Non-fatal: fall back to printing and letting the user save manually.
 		fmt.Println("Generated job definition (save to a .json file and run with fleet-runner):")
@@ -122,4 +125,11 @@ func printFleetPlan(plan fleetPlanResponse) error {
 	fmt.Println()
 	fmt.Printf("To submit: fleet-runner --job-file %s\n", filename)
 	return nil
+}
+
+// slugify converts a job name to a safe filename: lowercase, runs of
+// non-alphanumeric characters replaced by a single hyphen, trimmed.
+func slugify(name string) string {
+	s := slugNonAlnum.ReplaceAllString(strings.ToLower(name), "-")
+	return strings.Trim(s, "-")
 }
