@@ -219,10 +219,15 @@ users:
 		t.Fatalf("NewStaticProvider: %v", err)
 	}
 
+	// No credentials at all → anonymous principal, no error.
+	// The authorizer decides whether the route permits anonymous access.
 	r := httptest.NewRequest(http.MethodGet, "/", nil) // no X-User, no Bearer
-	_, err = p.Resolve(r)
-	if err == nil {
-		t.Fatal("expected error when no credentials provided")
+	principal, err := p.Resolve(r)
+	if err != nil {
+		t.Fatalf("expected no error for missing credentials, got: %v", err)
+	}
+	if !principal.IsAnonymous() {
+		t.Errorf("expected anonymous principal, got AuthMethod=%q UserID=%q", principal.AuthMethod, principal.UserID)
 	}
 }
 

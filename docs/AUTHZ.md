@@ -230,7 +230,7 @@ users:
     roles: [admin]
 ```
 
-**Use sparingly.** The admin role makes it impossible for auditd to enforce service-only write restrictions on that principal. aiHelpDesk recommends to the standard security best practices and in particular adhering to the principle of least privilege and granting the minimum role (e.g. `dba`, `fleet-operator` if elevated privileges are needed) for day-to-day operations and reserve `admin` for break-glass scenarios.
+**Use sparingly.** The admin role makes it impossible for auditd to enforce service-only write restrictions on that principal. aiHelpDesk recommends following the standard security best practices, in particular adhering to the principle of least privilege and granting the minimum role (e.g. `dba`, `fleet-operator` if elevated privileges are needed) for day-to-day operations and reserve `admin` for break-glass scenarios.
 
 ---
 

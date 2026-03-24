@@ -95,7 +95,9 @@ func (p *StaticProvider) Resolve(r *http.Request) (ResolvedPrincipal, error) {
 	// Fall through to human user via X-User header.
 	userID := r.Header.Get("X-User")
 	if userID == "" {
-		return ResolvedPrincipal{}, fmt.Errorf("identity: no credentials provided (X-User header or Bearer token required)")
+		// No credentials at all — return an anonymous principal and let the
+		// authorizer decide whether the route permits anonymous access.
+		return ResolvedPrincipal{AuthMethod: "header"}, nil
 	}
 
 	roles, ok := p.users[userID]

@@ -137,11 +137,27 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	// The pattern is captured at registration time so r.Pattern need not be set.
 	auth := func(pattern string, h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			traceID := r.Header.Get("X-Trace-ID")
+			if traceID == "" {
+				traceID = audit.NewTraceIDWithPrefix("authz_")
+			}
+
 			var principal identity.ResolvedPrincipal
 			if g.identityProvider != nil {
 				var err error
 				principal, err = g.identityProvider.Resolve(r)
 				if err != nil {
+					g.recordAudit(r.Context(), &audit.GatewayRequest{
+						TraceID:   traceID,
+						Endpoint:  r.URL.Path,
+						Method:    r.Method,
+						StartTime: start,
+						Duration:  time.Since(start),
+						Status:    "error",
+						Error:     "authentication failed: " + err.Error(),
+						HTTPCode:  http.StatusUnauthorized,
+					})
 					writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
 					return
 				}
@@ -157,6 +173,18 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 						"principal", principal.EffectiveID(),
 						"anonymous", principal.IsAnonymous(),
 						"err", authErr)
+					g.recordAudit(r.Context(), &audit.GatewayRequest{
+						TraceID:           traceID,
+						Endpoint:          r.URL.Path,
+						Method:            r.Method,
+						StartTime:         start,
+						Duration:          time.Since(start),
+						Status:            "denied",
+						Error:             authErr.Error(),
+						HTTPCode:          status,
+						Principal:         principal.EffectiveID(),
+						ResolvedPrincipal: principal,
+					})
 					writeError(w, status, authErr.Error())
 					return
 				}
@@ -362,14 +390,33 @@ func (g *Gateway) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 // checkOperatingMode returns false and writes a 403 if the current operating
 // mode blocks the action class of toolName. Call this at the start of direct
 // tool handlers before dispatching to an agent.
-func (g *Gateway) checkOperatingMode(w http.ResponseWriter, toolName string) bool {
+func (g *Gateway) checkOperatingMode(w http.ResponseWriter, r *http.Request, toolName string) bool {
 	if g.operatingMode != "readonly-governed" {
 		return true
 	}
 	class := audit.ClassifyTool(toolName)
 	if class == audit.ActionWrite || class == audit.ActionDestructive {
-		writeError(w, http.StatusForbidden,
-			fmt.Sprintf("operating mode %q: write and destructive operations are blocked", g.operatingMode))
+		start := time.Now()
+		traceID := r.Header.Get("X-Trace-ID")
+		if traceID == "" {
+			traceID = audit.NewTraceIDWithPrefix("mode_")
+		}
+		errMsg := fmt.Sprintf("operating mode %q: write and destructive operations are blocked", g.operatingMode)
+		principal := authz.PrincipalFromContext(r.Context())
+		g.recordAudit(r.Context(), &audit.GatewayRequest{
+			TraceID:           traceID,
+			Endpoint:          r.URL.Path,
+			Method:            r.Method,
+			ToolName:          toolName,
+			StartTime:         start,
+			Duration:          time.Since(start),
+			Status:            "denied",
+			Error:             errMsg,
+			HTTPCode:          http.StatusForbidden,
+			Principal:         principal.EffectiveID(),
+			ResolvedPrincipal: principal,
+		})
+		writeError(w, http.StatusForbidden, errMsg)
 		return false
 	}
 	return true
@@ -377,7 +424,7 @@ func (g *Gateway) checkOperatingMode(w http.ResponseWriter, toolName string) boo
 
 func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 	toolName := r.PathValue("tool")
-	if !g.checkOperatingMode(w, toolName) {
+	if !g.checkOperatingMode(w, r, toolName) {
 		return
 	}
 	// Validate tool exists in registry.
@@ -397,7 +444,7 @@ func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
 	toolName := r.PathValue("tool")
-	if !g.checkOperatingMode(w, toolName) {
+	if !g.checkOperatingMode(w, r, toolName) {
 		return
 	}
 	// Validate tool exists in registry.

@@ -1320,7 +1320,8 @@ func TestCheckOperatingMode(t *testing.T) {
 		t.Run(tc.mode+"/"+tc.tool, func(t *testing.T) {
 			g := &Gateway{operatingMode: tc.mode}
 			w := httptest.NewRecorder()
-			allowed := g.checkOperatingMode(w, tc.tool)
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/db/"+tc.tool, nil)
+			allowed := g.checkOperatingMode(w, r, tc.tool)
 			if allowed == tc.wantBlock {
 				t.Errorf("checkOperatingMode = %v, want allowed=%v", allowed, !tc.wantBlock)
 			}
