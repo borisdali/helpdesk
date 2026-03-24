@@ -1,7 +1,7 @@
 # aiHelpDesk Fleet Management: Ad-Hoc job run sample
 
 Fleet Management module is documented [here](FLEET.md).
-Platform specific instructions are also available for running aiHelpDesk jobs directly on a [host/V](../deploy/host#710-running-the-fleet-runner-fleet-runner), in [Docker containers](../deploy/docker-compose#38-running-the-fleet-runner-fleet-runner) and on [K8s](../deploy/helm#99-running-the-jobs-on-multiple-databases-via-fleet-managements-fleet-runner).
+Platform specific instructions are also available for running aiHelpDesk jobs directly on a [host/VM](../deploy/host/README.md#710-running-the-fleet-runner-fleet-runner), in [Docker containers](../deploy/docker-compose/README.md#38-running-the-fleet-runner-fleet-runner) and on [K8s](../deploy/helm/README.md#99-running-the-jobs-on-multiple-databases-via-fleet-managements-fleet-runner).
 
 aiHelpDesk supports both scheduled as well as the ad-hoc jobs. The sample of creating and running the latter is presented below. In this example the job is created via a NL request through the aiHelpDesk client tool. It can be used as is for testing, but for production use we recommend taking it as a template, customizing it as you see fit, testing it on the lower tier environments, going through the normal peer review process and checking into a version control system before running it access your database fleet.
 
@@ -68,7 +68,7 @@ The generated JSON file can be inspected, adapted to your needs and checked in. 
 }
 ```
 
-Since the generated JSON file resides locally, it needs to be uploaded to a ConfigMap, a one-off Job needs to be created with the job definition file mounted for the fleet-runner to pick it up. That's the job of the [`run-fleet-job.sh`](../scripts#run-fleet-jobsh) helper script:
+Since the generated JSON file resides locally, it needs to be uploaded to a ConfigMap, a one-off Job needs to be created with the job definition file mounted for the fleet-runner to pick it up. That's the job of the [`run-fleet-job.sh`](../scripts/README.md#run-fleet-jobsh) helper script:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy]$ ./scripts/run-fleet-job.sh --api-key $(cat helm/helpdesk/.helpdesk-fleet-api-key) check-status-uptime-and-load-on-development-databases.json

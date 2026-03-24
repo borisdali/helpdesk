@@ -977,7 +977,7 @@ kubectl -n helpdesk-system logs -f job/fleet-vacuum-now
   jobs/vacuum-prod.json
 ```
 
-See `scripts/README.md` for the full flag reference.
+See [this sample run](../../docs/FLEET_SAMPLE.md) (where a job is created via a NL in the `helpdesk-client`) and the [`run-fleet-job.sh`](../../scripts/README.md#run-fleet-jobsh) helper script for the full flag reference.
 
 **Generating a job definition from natural language:** use the planner endpoint from your workstation (all commands run locally; `run-fleet-job.sh` uses `kubectl` to create resources in the cluster):
 

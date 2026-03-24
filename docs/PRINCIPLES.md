@@ -7,10 +7,21 @@ When a feature or a proposed change conflicts with one of these, the principle w
 
 ## 0. Quality beats Velocity
 
-This is our Principle#0 - we move fast, but when we can't quailfy a release
+This is our Principle#0 - we move fast, but when we can't confidently quailfy a release
 we stop and don't ship until we do.
 
-## 1. Tools, not prompts
+## 1. aiHelpDesk is OSS
+
+We believe in open source.
+We don't like black boxes that we need to take somebody else's word for what's
+(hidden) inside. We don't think our customers should do that either. They deserve
+better than just running vulnerability scanning on our images and testing our
+software in the hope that they are thorough enough to cover all the edge cases.
+We prefer aiHelpDesk to be open for customers and anybody else to review,
+comment, send suggestions and PRs.
+aiHelpDesk is OSS.
+
+## 2. Tools, not prompts
 
 aiHelpDesk does not let the LLM compose and run free-form SQL statements,
 arbitrary shell commands, or ad-hoc `kubectl` invocations.
@@ -27,7 +38,7 @@ trust of the operators who have to explain its actions to their organization.
 Narrow tools with known inputs and known effects are the only foundation on
 which safe automation can be built.
 
-## 2. Mutations are a different category of problem
+## 3. Mutations are in a category of their own
 
 Read-only operations (checking connectivity, reading stats, listing pods)
 and write/destructive operations (cancelling a query, terminating a session,
@@ -59,7 +70,7 @@ oversight. An AI system that cannot account for its own actions cannot be
 trusted. aiHelpDesk starts from the assumption that the audit log must exist
 before anything else, not as an afterthought.
 
-## 4. The LLM is a reasoning layer, not an execution layer
+## 5. The LLM is a reasoning layer, not an execution layer
 
 The LLM in aiHelpDesk makes a proposal on *what* to do: which tool to call, in what order
 and for which target. It has no authority to make decisions, only proposals that
@@ -76,7 +87,7 @@ reasoning, but they are also capable of hallucination, implicit assumption, and
 inconsistent behaviour across runs. The system is engineered to tolerate those
 failure modes rather than depend on the absence of them.
 
-## 5. Context isolation through sub-agents
+## 6. Context isolation through sub-agents
 
 Each sub-agent (e.g. database, Kubernetes, incident) operates in its own context
 window. When the Orchestrator delegates a task, the details of that task are
@@ -90,7 +101,7 @@ not need access to database credentials, and the Orchestrator's context does
 not accumulate verbose low-level output that could distract the model or lead
 to unexpected cross-domain reasoning.
 
-## 6. Stateless sub-agents, stateful Orchestrator
+## 7. Stateless sub-agents, stateful Orchestrator
 
 Sub-agents receive everything they need per request: connection strings,
 Kubernetes contexts, target server names. They store nothing between requests.
@@ -102,7 +113,7 @@ The Orchestrator owns the infrastructure inventory. Sub-agents own their tool
 implementations. The audit daemon owns the persistent record. Responsibility
 is clearly partitioned.
 
-## 7. Human in the loop is not optional
+## 8. Human in the loop is not optional
 
 aiHelpDesk is a shift-left support tool, not a replacement for human
 judgment or accountability. The system is designed to dramatically reduce the time it takes to
@@ -115,7 +126,7 @@ review, and the dry-run mode are all expressions of this principle. The goal
 is not to remove humans from the loop; it is to give humans much better
 information when they are in the loop.
 
-## 8. Extensibility without forking
+## 9. Extensibility without forking
 
 A third-party provider with deep domain expertise can replace aiHelpDesk's
 K8s agent with their own implementation, as long as it serves an agent card
