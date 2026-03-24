@@ -191,7 +191,7 @@ e2e-identity: image
 # Docker image (local, current arch)
 # ---------------------------------------------------------------------------
 image:
-	docker build --load -t $(IMAGE):$(VERSION) -t helpdesk:latest -f Dockerfile ..
+	docker build --load --build-arg VERSION=$(IMAGE_TAG) -t $(IMAGE):$(VERSION) -t helpdesk:latest -f Dockerfile ..
 
 # ---------------------------------------------------------------------------
 # Docker image (multi-arch, push to GHCR)
@@ -200,6 +200,7 @@ push:
 	docker buildx build \
 		--platform linux/amd64,linux/arm64 \
 		--provenance=false \
+		--build-arg VERSION=$(IMAGE_TAG) \
 		-t $(IMAGE):$(IMAGE_TAG) \
 		-t $(IMAGE):$(VERSION) \
 		-t $(IMAGE):latest \

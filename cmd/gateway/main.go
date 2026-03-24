@@ -15,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
@@ -81,6 +82,13 @@ func main() {
 	gw.SetOperatingMode(os.Getenv("HELPDESK_OPERATING_MODE"))
 	slog.Info("identity provider initialized", "mode", os.Getenv("HELPDESK_IDENTITY_PROVIDER"))
 
+	// Build central authorizer. Enforcement is active when a real identity
+	// provider is configured (anything other than "none" or empty).
+	idMode := os.Getenv("HELPDESK_IDENTITY_PROVIDER")
+	enforcing := idMode != "" && idMode != "none"
+	authzr := authz.NewAuthorizer(authz.DefaultGatewayPermissions, enforcing)
+	slog.Info("authorization configured", "enforcing", enforcing)
+
 	// Initialize audit store if enabled.
 	auditURL := os.Getenv("HELPDESK_AUDIT_URL")
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED") == "true" || os.Getenv("HELPDESK_AUDIT_ENABLED") == "1"
@@ -144,6 +152,8 @@ func main() {
 				"vms", len(infraConfig.VMs))
 		}
 	}
+
+	gw.SetAuthorizer(authzr)
 
 	mux := http.NewServeMux()
 	gw.RegisterRoutes(mux)

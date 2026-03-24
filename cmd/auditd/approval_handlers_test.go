@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 	"helpdesk/internal/identity"
 )
 
@@ -33,9 +34,17 @@ users:
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// newApprovalSrv creates an approvalServer backed by a fresh temp-dir SQLite
+// testApprovalSrv wraps approvalServer with its full authz middleware chain
+// for testing. Routing through the handler stack ensures that identity
+// resolution and authorization are exercised exactly as in production.
+type testApprovalSrv struct {
+	*approvalServer
+	handler http.Handler
+}
+
+// newApprovalSrv creates a testApprovalSrv backed by a fresh temp-dir SQLite
 // store. Pass usersYAML to enable role-based auth; pass "" for legacy mode.
-func newApprovalSrv(t *testing.T, usersYAML string) *approvalServer {
+func newApprovalSrv(t *testing.T, usersYAML string) *testApprovalSrv {
 	t.Helper()
 	store, err := audit.NewStore(audit.StoreConfig{
 		DBPath: filepath.Join(t.TempDir(), "test.db"),
@@ -50,7 +59,8 @@ func newApprovalSrv(t *testing.T, usersYAML string) *approvalServer {
 		t.Fatalf("NewApprovalStore: %v", err)
 	}
 
-	var provider identity.Provider
+	var provider identity.Provider = &identity.NoAuthProvider{}
+	enforcing := usersYAML != ""
 	if usersYAML != "" {
 		path := filepath.Join(t.TempDir(), "users.yaml")
 		if err := os.WriteFile(path, []byte(usersYAML), 0600); err != nil {
@@ -63,12 +73,26 @@ func newApprovalSrv(t *testing.T, usersYAML string) *approvalServer {
 		provider = p
 	}
 
-	return &approvalServer{store: as, identityProvider: provider}
+	authzr := authz.NewAuthorizer(authz.DefaultAuditdPermissions, enforcing)
+	srv := &approvalServer{store: as, authorizer: authzr}
+
+	// Build a minimal mux with approve/deny/cancel patterns so that the
+	// middleware can resolve r.Pattern for permission lookups, and ServeMux
+	// sets path values (r.PathValue("approvalID")) automatically.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/approve", srv.handleApprove)
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/deny", srv.handleDeny)
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/cancel", srv.handleCancel)
+
+	return &testApprovalSrv{
+		approvalServer: srv,
+		handler:        authzr.Middleware(provider)(mux),
+	}
 }
 
 // seedApproval inserts an approval record directly into the store and returns
 // the assigned ApprovalID.
-func seedApproval(t *testing.T, s *approvalServer, a *audit.StoredApproval) string {
+func seedApproval(t *testing.T, s *testApprovalSrv, a *audit.StoredApproval) string {
 	t.Helper()
 	if a.ExpiresAt.IsZero() {
 		a.ExpiresAt = time.Now().UTC().Add(time.Hour)
@@ -79,35 +103,33 @@ func seedApproval(t *testing.T, s *approvalServer, a *audit.StoredApproval) stri
 	return a.ApprovalID
 }
 
-// doApprove sends POST /v1/approvals/{id}/approve with the given JSON body and
-// optional extra headers; returns the response recorder.
-func doApprove(t *testing.T, s *approvalServer, approvalID string, body map[string]any, headers map[string]string) *httptest.ResponseRecorder {
+// doApprove sends POST /v1/approvals/{id}/approve through the full middleware
+// + handler stack. Headers (e.g. X-User) are used for identity resolution.
+func doApprove(t *testing.T, s *testApprovalSrv, approvalID string, body map[string]any, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+approvalID+"/approve", bytes.NewReader(data))
-	req.SetPathValue("approvalID", approvalID)
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	w := httptest.NewRecorder()
-	s.handleApprove(w, req)
+	s.handler.ServeHTTP(w, req)
 	return w
 }
 
-// doDeny sends POST /v1/approvals/{id}/deny with the given JSON body and
-// optional extra headers; returns the response recorder.
-func doDeny(t *testing.T, s *approvalServer, approvalID string, body map[string]any, headers map[string]string) *httptest.ResponseRecorder {
+// doDeny sends POST /v1/approvals/{id}/deny through the full middleware
+// + handler stack. Headers (e.g. X-User) are used for identity resolution.
+func doDeny(t *testing.T, s *testApprovalSrv, approvalID string, body map[string]any, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+approvalID+"/deny", bytes.NewReader(data))
-	req.SetPathValue("approvalID", approvalID)
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	w := httptest.NewRecorder()
-	s.handleDeny(w, req)
+	s.handler.ServeHTTP(w, req)
 	return w
 }
 

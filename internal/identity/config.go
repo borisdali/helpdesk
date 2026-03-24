@@ -2,9 +2,10 @@ package identity
 
 // UsersConfig is the top-level type for the users.yaml file used by StaticProvider.
 type UsersConfig struct {
-	Version         string           `yaml:"version"`
-	Users           []UserEntry      `yaml:"users"`
-	ServiceAccounts []ServiceAccount `yaml:"service_accounts"`
+	Version         string            `yaml:"version"`
+	Users           []UserEntry       `yaml:"users"`
+	ServiceAccounts []ServiceAccount  `yaml:"service_accounts"`
+	RoleAliases     map[string]string `yaml:"role_aliases,omitempty"`
 }
 
 // UserEntry defines a human user and their roles.

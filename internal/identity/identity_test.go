@@ -987,3 +987,115 @@ func TestHashAPIKey_UniqueHashes(t *testing.T) {
 		}
 	}
 }
+
+// ── Role alias tests ──────────────────────────────────────────────────────────
+
+func TestStaticProvider_RoleAlias_Expanded(t *testing.T) {
+	yaml := `
+role_aliases:
+  db-admin: dba
+users:
+  - id: alice@example.com
+    roles: [db-admin]
+`
+	path := writeTempUsersYAML(t, yaml)
+	p, err := NewStaticProvider(path)
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-User", "alice@example.com")
+
+	principal, err := p.Resolve(r)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !principal.HasRole("dba") {
+		t.Errorf("expected aliased role 'dba', got roles: %v", principal.Roles)
+	}
+	if principal.HasRole("db-admin") {
+		t.Errorf("aliased role 'db-admin' should not appear in resolved roles, got: %v", principal.Roles)
+	}
+}
+
+func TestStaticProvider_RoleAlias_UnknownRolePassthrough(t *testing.T) {
+	yaml := `
+role_aliases:
+  db-admin: dba
+users:
+  - id: alice@example.com
+    roles: [sre]
+`
+	path := writeTempUsersYAML(t, yaml)
+	p, err := NewStaticProvider(path)
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-User", "alice@example.com")
+
+	principal, err := p.Resolve(r)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !principal.HasRole("sre") {
+		t.Errorf("role 'sre' not in alias map should pass through, got: %v", principal.Roles)
+	}
+}
+
+func TestStaticProvider_RoleAliases_NoAliases(t *testing.T) {
+	yaml := `
+users:
+  - id: alice@example.com
+    roles: [dba]
+`
+	path := writeTempUsersYAML(t, yaml)
+	p, err := NewStaticProvider(path)
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
+	}
+
+	aliases := p.RoleAliases()
+	if aliases == nil {
+		t.Error("RoleAliases() should never return nil")
+	}
+	if len(aliases) != 0 {
+		t.Errorf("RoleAliases() with no aliases section = %v, want empty map", aliases)
+	}
+}
+
+func TestStaticProvider_RoleAlias_ServiceAccount(t *testing.T) {
+	apiKey := "svc-alias-test-key"
+	hash := makeArgon2idHash(t, apiKey)
+
+	yaml := fmt.Sprintf(`
+role_aliases:
+  sre-bot: sre-automation
+service_accounts:
+  - id: mybot
+    roles: [sre-bot]
+    api_key_hash: "%s"
+`, hash)
+
+	path := writeTempUsersYAML(t, yaml)
+	p, err := NewStaticProvider(path)
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("Authorization", "Bearer "+apiKey)
+
+	principal, err := p.Resolve(r)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !principal.HasRole("sre-automation") {
+		t.Errorf("expected aliased role 'sre-automation', got roles: %v", principal.Roles)
+	}
+	if principal.HasRole("sre-bot") {
+		t.Errorf("aliased role 'sre-bot' should not appear in resolved roles, got: %v", principal.Roles)
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/fleet"
 	"helpdesk/internal/identity"
@@ -1169,11 +1170,37 @@ func TestHandleFleetPlan_UnknownTag(t *testing.T) {
 	}
 }
 
+// ── Auth closure: ErrUnauthorized path ───────────────────────────────────────
+
+func TestGatewayAuth_Anonymous_Rejected(t *testing.T) {
+	// Any registered user is fine; we just need an enforcing identity provider.
+	usersYAML := `
+users:
+  - id: alice@example.com
+    roles: [dba]
+`
+	_, _, handler := makeGatewayWithIdentity(t, usersYAML, http.StatusOK)
+
+	// POST /api/v1/query requires authentication. No X-User header → anonymous
+	// principal → Authorize returns ErrUnauthorized → 401.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/query",
+		strings.NewReader(`{"agent":"database","message":"show tables"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous on authenticated endpoint: status = %d, want 401", rec.Code)
+	}
+}
+
 // ── Fleet job submission role checks ─────────────────────────────────────────
 
 // makeGatewayWithIdentity returns a Gateway with a StaticProvider built from
 // the given inline YAML and a mock auditd that returns the provided status code.
-func makeGatewayWithIdentity(t *testing.T, usersYAML string, auditdStatus int) (*Gateway, *httptest.Server) {
+// Returns the Gateway, the mock auditd server, and the full middleware-wrapped
+// HTTP handler to use for requests (identity + authz middleware applied).
+func makeGatewayWithIdentity(t *testing.T, usersYAML string, auditdStatus int) (*Gateway, *httptest.Server, http.Handler) {
 	t.Helper()
 
 	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1200,7 +1227,14 @@ func makeGatewayWithIdentity(t *testing.T, usersYAML string, auditdStatus int) (
 		auditor:          audit.NewGatewayAuditor(ta),
 		identityProvider: p,
 	}
-	return gw, auditdSrv
+
+	// Set the authorizer before RegisterRoutes so per-pattern auth wrappers fire.
+	authzr := authz.NewAuthorizer(authz.DefaultGatewayPermissions, true)
+	gw.SetAuthorizer(authzr)
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	return gw, auditdSrv, mux
 }
 
 func TestHandleFleetCreateJob_FleetOperatorRequired(t *testing.T) {
@@ -1210,15 +1244,13 @@ users:
   - id: charlie@example.com
     roles: [operator]
 `
-	gw, _ := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
-	mux := http.NewServeMux()
-	gw.RegisterRoutes(mux)
+	_, _, handler := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/jobs", strings.NewReader(`{"name":"test"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-User", "charlie@example.com")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
@@ -1232,15 +1264,13 @@ users:
   - id: dave@example.com
     roles: [fleet-operator]
 `
-	gw, _ := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
-	mux := http.NewServeMux()
-	gw.RegisterRoutes(mux)
+	_, _, handler := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/jobs", strings.NewReader(`{"name":"test"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-User", "dave@example.com")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Errorf("status = %d, want 201", rec.Code)
@@ -1254,17 +1284,127 @@ users:
   - id: admin@example.com
     roles: [admin]
 `
-	gw, _ := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
-	mux := http.NewServeMux()
-	gw.RegisterRoutes(mux)
+	_, _, handler := makeGatewayWithIdentity(t, usersYAML, http.StatusCreated)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/jobs", strings.NewReader(`{"name":"test"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-User", "admin@example.com")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Errorf("status = %d, want 201", rec.Code)
+	}
+}
+
+// ── Operating-mode enforcement ────────────────────────────────────────────────
+
+func TestCheckOperatingMode(t *testing.T) {
+	cases := []struct {
+		mode      string
+		tool      string
+		wantBlock bool
+	}{
+		// Default mode: nothing blocked.
+		{"", "cancel_query", false},
+		{"", "terminate_connection", false},
+		// "fix" mode: same as default.
+		{"fix", "cancel_query", false},
+		// "readonly-governed": read tools pass.
+		{"readonly-governed", "get_session_info", false},
+		// "readonly-governed": write and destructive tools are blocked.
+		{"readonly-governed", "cancel_query", true},
+		{"readonly-governed", "terminate_connection", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode+"/"+tc.tool, func(t *testing.T) {
+			g := &Gateway{operatingMode: tc.mode}
+			w := httptest.NewRecorder()
+			allowed := g.checkOperatingMode(w, tc.tool)
+			if allowed == tc.wantBlock {
+				t.Errorf("checkOperatingMode = %v, want allowed=%v", allowed, !tc.wantBlock)
+			}
+			if tc.wantBlock {
+				if w.Code != http.StatusForbidden {
+					t.Errorf("status = %d, want 403", w.Code)
+				}
+				if !strings.Contains(w.Body.String(), "readonly-governed") {
+					t.Errorf("body = %q, want mention of operating mode", w.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// ── TestHandleListRoles ───────────────────────────────────────────────────────
+
+// mockAliasProvider is an identity.Provider that also exposes RoleAliases.
+type mockAliasProvider struct {
+	identity.Provider
+	aliases map[string]string
+}
+
+func (m *mockAliasProvider) RoleAliases() map[string]string { return m.aliases }
+func (m *mockAliasProvider) Resolve(r *http.Request) (identity.ResolvedPrincipal, error) {
+	return identity.ResolvedPrincipal{UserID: "test", AuthMethod: "static"}, nil
+}
+
+func TestHandleListRoles(t *testing.T) {
+	g := &Gateway{
+		identityProvider: &mockAliasProvider{
+			aliases: map[string]string{"db-admin": "dba"},
+		},
+		authzr: authz.NewAuthorizer(authz.DefaultGatewayPermissions, true),
+	}
+
+	mux := http.NewServeMux()
+	g.RegisterRoutes(mux)
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	// Check enforcing field
+	if enforcing, _ := resp["enforcing"].(bool); !enforcing {
+		t.Error("enforcing should be true")
+	}
+
+	// Check admin_role
+	if adminRole, _ := resp["admin_role"].(string); adminRole != "admin" {
+		t.Errorf("admin_role = %q, want 'admin'", adminRole)
+	}
+
+	// Check aliases contains db-admin → dba
+	aliases, ok := resp["aliases"].(map[string]any)
+	if !ok {
+		t.Fatalf("aliases field missing or wrong type: %T", resp["aliases"])
+	}
+	if aliases["db-admin"] != "dba" {
+		t.Errorf("aliases[db-admin] = %v, want 'dba'", aliases["db-admin"])
+	}
+
+	// Check roles contains "dba"
+	rolesRaw, ok := resp["roles"].([]any)
+	if !ok {
+		t.Fatalf("roles field missing or wrong type: %T", resp["roles"])
+	}
+	foundDBA := false
+	for _, entry := range rolesRaw {
+		obj, _ := entry.(map[string]any)
+		if obj["name"] == "dba" {
+			foundDBA = true
+		}
+	}
+	if !foundDBA {
+		t.Errorf("roles response does not contain 'dba'; got: %v", rolesRaw)
 	}
 }

@@ -79,9 +79,16 @@ Configured via `HELPDESK_USERS_FILE` (default: `/etc/helpdesk/users.yaml`).
 
 ```yaml
 # /etc/helpdesk/users.yaml
+
+# Optional: map your IdP group names to aiHelpDesk canonical role names.
+# See docs/AUTHZ.md §6 for details.
+role_aliases:
+  database-admin: dba
+  platform-sre: sre
+
 users:
   - id: alice@example.com
-    roles: [dba, sre]
+    roles: [dba, sre]           # canonical names, or alias names (expanded at resolve time)
 
   - id: bob@example.com
     roles: [developer]
@@ -273,6 +280,16 @@ This means every failed authentication attempt is visible in the audit trail:
 curl -s 'http://localhost:1199/v1/events?outcome_status=error' | \
   jq '.[] | {event_id, timestamp, error: .outcome.error_message}'
 ```
+
+### 2.6 HTTP Authorization (Role Checks)
+
+Authentication (section 2 above) answers "who is this caller?" Authorization answers "is this caller allowed to use this endpoint?"
+
+Authorization is covered in [AUTHZ.md](AUTHZ.md), including:
+- The full role reference table (what each role grants)
+- How to discover the required role for a given operation (`GET /api/v1/roles`)
+- Role aliases (`role_aliases` in `users.yaml`)
+- Operating mode blocking (`readonly-governed`)
 
 ---
 

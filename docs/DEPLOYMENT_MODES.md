@@ -67,7 +67,7 @@ for read-only diagnostics but mutation tools are blocked regardless.
 
 **What is enabled:** Everything in Personal mode, plus:
 - Policy engine — per-tool rules, blast-radius caps, schedule gates (for read tools)
-- Role-based authorization — same roles as Mode 3
+- Role-based authorization — same roles as Mode 3 (see [AUTHZ.md](AUTHZ.md))
 - Audit log — tamper-proof, hash-chained record of every action
 - Fleet management — read-only visibility (job status, server steps, approval records)
 - Govbot — periodic compliance snapshots and policy summaries
@@ -122,7 +122,7 @@ The set of targets is known, tagged, and auditable.
 - Write and destructive mutation tools (behind policy + approval gate)
 - Policy engine — per-tool rules, blast-radius caps, schedule gates
 - Approval workflows — human review before any write or destructive action executes
-- Role-based authorization — `dba`, `fleet-operator`, `fleet-approver`, `admin`, `operator` roles
+- Role-based authorization — `dba`, `fleet-operator`, `fleet-approver`, `admin`, and related roles (see [AUTHZ.md](AUTHZ.md))
 - Audit log — tamper-proof, hash-chained record of every action
 - Fleet management — staged rollout of operations across many targets (canary → waves → circuit breaker)
 - Govbot — periodic compliance snapshots and policy summaries
@@ -155,7 +155,8 @@ HELPDESK_USERS_FILE=/etc/helpdesk/users.yaml
 ```
 
 See [IDENTITY.md](IDENTITY.md) for JWT provider configuration and the `hashapikey`
-utility for generating service account credentials.
+utility for generating service account credentials. See [AUTHZ.md](AUTHZ.md) for
+the full role reference, role aliases, and how to query the live authorization table.
 
 **Deployment targets:** Host/VM (`deploy/host/`), Docker Compose (`deploy/docker-compose/`),
 or Kubernetes Helm chart (`deploy/helm/`). The Helm chart defaults to governance-enabled

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
@@ -43,6 +46,7 @@ type Gateway struct {
 	auditor          *audit.GatewayAuditor
 	auditURL         string                  // URL to auditd service for governance queries
 	identityProvider identity.Provider       // resolves caller identity on every request
+	authzr           *authz.Authorizer       // central per-route authorizer (nil = no authz)
 	operatingMode    string                  // "readonly" or "fix"
 	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
@@ -88,6 +92,11 @@ func (g *Gateway) SetOperatingMode(mode string) {
 	g.operatingMode = mode
 }
 
+// SetAuthorizer sets the central authorizer for per-route access control.
+func (g *Gateway) SetAuthorizer(a *authz.Authorizer) {
+	g.authzr = a
+}
+
 // SetToolRegistry sets the tool registry for direct tool call validation.
 func (g *Gateway) SetToolRegistry(r *toolregistry.Registry) {
 	g.toolRegistry = r
@@ -97,21 +106,9 @@ func (g *Gateway) SetToolRegistry(r *toolregistry.Registry) {
 // HTTP request. Falls back to NoAuthProvider behaviour when no provider is set.
 // The returned bool is true only when the caller explicitly declared a purpose.
 func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFromBody string) (identity.ResolvedPrincipal, string, string, bool, error) {
-	var principal identity.ResolvedPrincipal
-	if g.identityProvider != nil {
-		var err error
-		principal, err = g.identityProvider.Resolve(r)
-		if err != nil {
-			slog.Warn("gateway: identity resolution failed", "err", err)
-			return identity.ResolvedPrincipal{}, "", "", false, err
-		}
-	} else {
-		// No provider configured — legacy no-auth behaviour.
-		principal = identity.ResolvedPrincipal{
-			UserID:     r.Header.Get("X-User"),
-			AuthMethod: "header",
-		}
-	}
+	// The authz middleware has already resolved and stored the principal in the
+	// request context. Use it directly to avoid a second identity resolution.
+	principal := authz.PrincipalFromContext(r.Context())
 
 	purpose, purposeExplicit := identity.PurposeFromRequest(
 		r.Header.Get("X-Purpose"),
@@ -136,42 +133,75 @@ var agentAliases = map[string]string{
 
 // RegisterRoutes sets up the REST endpoint handlers.
 func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	// auth wraps a handler with per-pattern identity resolution and authorization.
+	// The pattern is captured at registration time so r.Pattern need not be set.
+	auth := func(pattern string, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var principal identity.ResolvedPrincipal
+			if g.identityProvider != nil {
+				var err error
+				principal, err = g.identityProvider.Resolve(r)
+				if err != nil {
+					writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
+					return
+				}
+			}
+			if g.authzr != nil {
+				if authErr := g.authzr.Authorize(pattern, principal); authErr != nil {
+					status := http.StatusForbidden
+					if errors.Is(authErr, authz.ErrUnauthorized) {
+						status = http.StatusUnauthorized
+					}
+					slog.Info("authz: request denied",
+						"pattern", pattern,
+						"principal", principal.EffectiveID(),
+						"anonymous", principal.IsAnonymous(),
+						"err", authErr)
+					writeError(w, status, authErr.Error())
+					return
+				}
+			}
+			h(w, r.WithContext(authz.WithPrincipal(r.Context(), principal)))
+		}
+	}
+
+	mux.HandleFunc("GET /health", auth("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q}\n", buildinfo.Version) //nolint:errcheck
-	})
-	mux.HandleFunc("GET /api/v1/agents", g.handleListAgents)
-	mux.HandleFunc("GET /api/v1/tools", g.handleListTools)
-	mux.HandleFunc("GET /api/v1/tools/{toolName}", g.handleGetTool)
-	mux.HandleFunc("POST /api/v1/query", g.handleQuery)
-	mux.HandleFunc("POST /api/v1/incidents", g.handleCreateIncident)
-	mux.HandleFunc("GET /api/v1/incidents", g.handleListIncidents)
-	mux.HandleFunc("POST /api/v1/db/{tool}", g.handleDBTool)
-	mux.HandleFunc("POST /api/v1/k8s/{tool}", g.handleK8sTool)
-	mux.HandleFunc("POST /api/v1/research", g.handleResearch)
-	mux.HandleFunc("GET /api/v1/infrastructure", g.handleListInfrastructure)
-	mux.HandleFunc("GET /api/v1/databases", g.handleListDatabases)
-	mux.HandleFunc("GET /api/v1/governance", g.handleGovernance)
-	mux.HandleFunc("GET /api/v1/governance/policies", g.handleGovernancePolicies)
-	mux.HandleFunc("GET /api/v1/governance/explain", g.handleGovernanceExplain)
-	mux.HandleFunc("GET /api/v1/governance/events", g.handleGovernanceEvents)
-	mux.HandleFunc("GET /api/v1/governance/events/{eventID}", g.handleGovernanceEvent)
-	mux.HandleFunc("GET /api/v1/governance/approvals/pending", g.handleGovernanceApprovalsPending)
-	mux.HandleFunc("GET /api/v1/governance/approvals", g.handleGovernanceApprovals)
-	mux.HandleFunc("GET /api/v1/governance/verify", g.handleGovernanceVerify)
-	mux.HandleFunc("GET /api/v1/governance/journeys", g.handleGovernanceJourneys)
-	mux.HandleFunc("GET /api/v1/governance/govbot/runs", g.handleGovernanceGovbotRuns)
+	}))
+	mux.HandleFunc("GET /api/v1/agents", auth("GET /api/v1/agents", g.handleListAgents))
+	mux.HandleFunc("GET /api/v1/tools", auth("GET /api/v1/tools", g.handleListTools))
+	mux.HandleFunc("GET /api/v1/tools/{toolName}", auth("GET /api/v1/tools/{toolName}", g.handleGetTool))
+	mux.HandleFunc("GET /api/v1/roles", auth("GET /api/v1/roles", g.handleListRoles))
+	mux.HandleFunc("POST /api/v1/query", auth("POST /api/v1/query", g.handleQuery))
+	mux.HandleFunc("POST /api/v1/incidents", auth("POST /api/v1/incidents", g.handleCreateIncident))
+	mux.HandleFunc("GET /api/v1/incidents", auth("GET /api/v1/incidents", g.handleListIncidents))
+	mux.HandleFunc("POST /api/v1/db/{tool}", auth("POST /api/v1/db/{tool}", g.handleDBTool))
+	mux.HandleFunc("POST /api/v1/k8s/{tool}", auth("POST /api/v1/k8s/{tool}", g.handleK8sTool))
+	mux.HandleFunc("POST /api/v1/research", auth("POST /api/v1/research", g.handleResearch))
+	mux.HandleFunc("GET /api/v1/infrastructure", auth("GET /api/v1/infrastructure", g.handleListInfrastructure))
+	mux.HandleFunc("GET /api/v1/databases", auth("GET /api/v1/databases", g.handleListDatabases))
+	mux.HandleFunc("GET /api/v1/governance", auth("GET /api/v1/governance", g.handleGovernance))
+	mux.HandleFunc("GET /api/v1/governance/policies", auth("GET /api/v1/governance/policies", g.handleGovernancePolicies))
+	mux.HandleFunc("GET /api/v1/governance/explain", auth("GET /api/v1/governance/explain", g.handleGovernanceExplain))
+	mux.HandleFunc("GET /api/v1/governance/events", auth("GET /api/v1/governance/events", g.handleGovernanceEvents))
+	mux.HandleFunc("GET /api/v1/governance/events/{eventID}", auth("GET /api/v1/governance/events/{eventID}", g.handleGovernanceEvent))
+	mux.HandleFunc("GET /api/v1/governance/approvals/pending", auth("GET /api/v1/governance/approvals/pending", g.handleGovernanceApprovalsPending))
+	mux.HandleFunc("GET /api/v1/governance/approvals", auth("GET /api/v1/governance/approvals", g.handleGovernanceApprovals))
+	mux.HandleFunc("GET /api/v1/governance/verify", auth("GET /api/v1/governance/verify", g.handleGovernanceVerify))
+	mux.HandleFunc("GET /api/v1/governance/journeys", auth("GET /api/v1/governance/journeys", g.handleGovernanceJourneys))
+	mux.HandleFunc("GET /api/v1/governance/govbot/runs", auth("GET /api/v1/governance/govbot/runs", g.handleGovernanceGovbotRuns))
 
 	// Fleet job planner
-	mux.HandleFunc("POST /api/v1/fleet/plan", g.handleFleetPlan)
+	mux.HandleFunc("POST /api/v1/fleet/plan", auth("POST /api/v1/fleet/plan", g.handleFleetPlan))
 
 	// Fleet runner job visibility endpoints
-	mux.HandleFunc("POST /api/v1/fleet/jobs", g.handleFleetCreateJob)
-	mux.HandleFunc("GET /api/v1/fleet/jobs", g.handleFleetListJobs)
-	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}", g.handleFleetGetJob)
-	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers", g.handleFleetGetJobServers)
-	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps", g.handleFleetGetServerSteps)
-	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}", g.handleFleetGetJobApproval)
+	mux.HandleFunc("POST /api/v1/fleet/jobs", auth("POST /api/v1/fleet/jobs", g.handleFleetCreateJob))
+	mux.HandleFunc("GET /api/v1/fleet/jobs", auth("GET /api/v1/fleet/jobs", g.handleFleetListJobs))
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}", auth("GET /api/v1/fleet/jobs/{jobID}", g.handleFleetGetJob))
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers", auth("GET /api/v1/fleet/jobs/{jobID}/servers", g.handleFleetGetJobServers))
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps", g.handleFleetGetServerSteps))
+	mux.HandleFunc("GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}", auth("GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}", g.handleFleetGetJobApproval))
 }
 
 // --- Handlers ---
@@ -249,6 +279,46 @@ func (g *Gateway) handleGetTool(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entry)
 }
 
+func (g *Gateway) handleListRoles(w http.ResponseWriter, r *http.Request) {
+	type roleEntry struct {
+		Name   string   `json:"name"`
+		Grants []string `json:"grants"`
+	}
+
+	var roles []roleEntry
+	adminRole := "admin"
+	enforcing := false
+
+	if g.authzr != nil {
+		adminRole = g.authzr.AdminRole()
+		enforcing = g.authzr.IsEnforcing()
+		grants := g.authzr.RoleGrants()
+		roleNames := make([]string, 0, len(grants))
+		for name := range grants {
+			roleNames = append(roleNames, name)
+		}
+		sort.Strings(roleNames)
+		for _, name := range roleNames {
+			roles = append(roles, roleEntry{Name: name, Grants: grants[name]})
+		}
+	}
+	if roles == nil {
+		roles = []roleEntry{}
+	}
+
+	aliases := map[string]string{}
+	if ap, ok := g.identityProvider.(interface{ RoleAliases() map[string]string }); ok {
+		aliases = ap.RoleAliases()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"roles":      roles,
+		"admin_role": adminRole,
+		"aliases":    aliases,
+		"enforcing":  enforcing,
+	})
+}
+
 func (g *Gateway) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	type agentInfo struct {
 		Name        string          `json:"name"`
@@ -289,8 +359,27 @@ func (g *Gateway) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 	g.proxyToAgent(w, r, agentNameIncident, "", "List all previously created incident bundles.")
 }
 
+// checkOperatingMode returns false and writes a 403 if the current operating
+// mode blocks the action class of toolName. Call this at the start of direct
+// tool handlers before dispatching to an agent.
+func (g *Gateway) checkOperatingMode(w http.ResponseWriter, toolName string) bool {
+	if g.operatingMode != "readonly-governed" {
+		return true
+	}
+	class := audit.ClassifyTool(toolName)
+	if class == audit.ActionWrite || class == audit.ActionDestructive {
+		writeError(w, http.StatusForbidden,
+			fmt.Sprintf("operating mode %q: write and destructive operations are blocked", g.operatingMode))
+		return false
+	}
+	return true
+}
+
 func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 	toolName := r.PathValue("tool")
+	if !g.checkOperatingMode(w, toolName) {
+		return
+	}
 	// Validate tool exists in registry.
 	if g.toolRegistry != nil {
 		if _, ok := g.toolRegistry.Get(toolName); !ok {
@@ -308,6 +397,9 @@ func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) handleK8sTool(w http.ResponseWriter, r *http.Request) {
 	toolName := r.PathValue("tool")
+	if !g.checkOperatingMode(w, toolName) {
+		return
+	}
 	// Validate tool exists in registry.
 	if g.toolRegistry != nil {
 		if _, ok := g.toolRegistry.Get(toolName); !ok {
@@ -460,14 +552,10 @@ func (g *Gateway) handleFleetCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inject submitted_by from resolved identity.
+	// Role check is enforced by the authz middleware (fleet-operator required).
 	principal, purpose, _, _, err := g.resolveRequest(r, "", "")
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
-		return
-	}
-	// Role check: fleet job submission requires fleet-operator or admin.
-	if g.identityProvider != nil && !principal.HasRole("fleet-operator") && !principal.HasRole("admin") {
-		writeError(w, http.StatusForbidden, "role \"fleet-operator\" or \"admin\" required to submit fleet jobs")
 		return
 	}
 	if _, hasSubmittedBy := body["submitted_by"]; !hasSubmittedBy {

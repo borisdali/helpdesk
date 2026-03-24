@@ -45,8 +45,8 @@ The response header `X-Trace-ID` is set on every agent call. Pass it in the requ
 |---|---|
 | `200 OK` | Agent task completed and the response text is the agent's output |
 | `400 Bad Request` | Malformed request (missing required fields, invalid JSON, or unknown tool name) |
-| `401 Unauthorized` | Authentication failed (bad or missing API key / JWT) |
-| `403 Forbidden` | A governance policy denied the operation. The response body contains the full policy denial detail. The audit record status is `denied`. |
+| `401 Unauthorized` | Authentication failed (bad or missing API key / JWT) or caller is anonymous on an endpoint that requires identity |
+| `403 Forbidden` | Role-based authorization denied the request (wrong or missing role), a governance policy denied the operation, or the operating mode blocks the action. The response body identifies which layer rejected the request. |
 | `422 Unprocessable Entity` | The request was well-formed but failed semantic validation (e.g. fleet planner returned an unknown tool or targeted a restricted server) |
 | `502 Bad Gateway` | The A2A task itself failed (agent runner error), or the agent service is unreachable |
 | `503 Service Unavailable` | A required service (e.g. fleet planner, auditd) is not configured |
@@ -119,6 +119,59 @@ curl http://localhost:8080/api/v1/tools/get_table_stats | jq .
 ```
 
 Returns `404` if the tool is not registered.
+
+---
+
+### `GET /api/v1/roles`
+
+Returns the live HTTP authorization table the gateway is currently enforcing. Use this to discover what role a caller needs for a given endpoint.
+
+```bash
+curl http://localhost:8080/api/v1/roles | jq .
+```
+
+Response:
+
+```json
+{
+  "roles": [
+    {
+      "name": "dba",
+      "grants": [
+        "POST /api/v1/db/{tool}",
+        "POST /v1/approvals/{approvalID}/approve",
+        "POST /v1/approvals/{approvalID}/deny"
+      ]
+    },
+    {
+      "name": "fleet-operator",
+      "grants": ["POST /api/v1/fleet/jobs"]
+    },
+    {
+      "name": "sre",
+      "grants": [
+        "POST /api/v1/db/{tool}",
+        "POST /api/v1/k8s/{tool}"
+      ]
+    }
+  ],
+  "admin_role": "admin",
+  "aliases": {
+    "database-admin": "dba"
+  },
+  "enforcing": true
+}
+```
+
+| Field | Description |
+|---|---|
+| `roles[].name` | Canonical role name |
+| `roles[].grants` | Routes unlocked by this role. Routes not listed here are open to any authenticated user (or public). |
+| `admin_role` | Role name that bypasses all checks. Default: `"admin"`. |
+| `aliases` | Map of IdP group names → canonical role names (from `role_aliases` in `users.yaml`). |
+| `enforcing` | `true` when authorization is active; `false` in non-enforcing (development) mode. |
+
+This endpoint is always public — no authentication required. See [AUTHZ.md](AUTHZ.md) for the full authorization reference.
 
 ---
 

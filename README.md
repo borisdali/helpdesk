@@ -76,6 +76,11 @@ and security posture assessment — is documented separately in
 [aiHelpDesk Journeys](docs/JOURNEYS.md), etc.
 Please see [here](docs/AIGOVERNANCE.md) for details.
 
+HTTP-level authorization (who can call which endpoint, role definitions, role
+aliases) is documented in [AUTHZ.md](docs/AUTHZ.md). Identity provider
+configuration (static users file, JWT/OIDC, service accounts) is in
+[IDENTITY.md](docs/IDENTITY.md).
+
 ## Testing
 aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework, see [here](testing/FAULT_INJECTION_TESTING.md).
 

@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,49 +10,19 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
-	"helpdesk/internal/identity"
+	"helpdesk/internal/authz"
 )
 
 // approvalServer handles approval-related HTTP endpoints.
 type approvalServer struct {
-	store            *audit.ApprovalStore
-	notifier         *ApprovalNotifier
-	identityProvider identity.Provider // optional; nil = legacy unauthenticated mode
+	store     *audit.ApprovalStore
+	notifier  *ApprovalNotifier
+	authorizer *authz.Authorizer
 }
-
-// errForbidden is a sentinel that distinguishes role failures (403) from
-// credential failures (401) when wrapped into resolveApprover's error return.
-var errForbidden = errors.New("forbidden")
 
 // isFleetApproval returns true when the approval record belongs to a fleet job.
 func isFleetApproval(a *audit.StoredApproval) bool {
 	return a.AgentName == "fleet-runner" || a.ResourceType == "fleet_job"
-}
-
-// resolveApprover authenticates the caller and verifies they hold the role
-// required to resolve the given approval.
-//
-// Returns:
-//   - the verified principal (valid only when error is nil)
-//   - an error wrapping errForbidden for role mismatches (→ 403)
-//   - a plain error for authentication failures (→ 401)
-func (s *approvalServer) resolveApprover(r *http.Request, a *audit.StoredApproval) (identity.ResolvedPrincipal, error) {
-	p, err := s.identityProvider.Resolve(r)
-	if err != nil {
-		return identity.ResolvedPrincipal{}, fmt.Errorf("authentication required: %w", err)
-	}
-
-	// Determine which role is needed based on approval type.
-	required := "dba"
-	if isFleetApproval(a) {
-		required = "fleet-approver"
-	}
-
-	if !p.HasRole(required) && !p.HasRole("admin") {
-		return identity.ResolvedPrincipal{}, fmt.Errorf("%w: role %q or %q required", errForbidden, required, "admin")
-	}
-
-	return p, nil
 }
 
 // CreateApprovalRequest is the JSON body for creating an approval request.
@@ -239,15 +207,18 @@ func (s *approvalServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.identityProvider != nil {
-		// Authenticated mode: verify caller, check role, override approved_by.
-		principal, authErr := s.resolveApprover(r, existing)
-		if authErr != nil {
-			if errors.Is(authErr, errForbidden) {
-				http.Error(w, authErr.Error(), http.StatusForbidden)
-			} else {
-				http.Error(w, authErr.Error(), http.StatusUnauthorized)
-			}
+	principal := authz.PrincipalFromContext(r.Context())
+
+	if !principal.IsAnonymous() {
+		// Enforcing mode: fine-grained role check narrowed to this approval type.
+		// The middleware already verified dba|fleet-approver|admin; this narrows
+		// to the specific role required for the approval type.
+		required := "dba"
+		if isFleetApproval(existing) {
+			required = "fleet-approver"
+		}
+		if err := s.authorizer.Require(principal, required); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
 		req.ApprovedBy = principal.EffectiveID()
@@ -316,15 +287,16 @@ func (s *approvalServer) handleDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.identityProvider != nil {
-		// Authenticated mode: verify caller, check role, override denied_by.
-		principal, authErr := s.resolveApprover(r, existing)
-		if authErr != nil {
-			if errors.Is(authErr, errForbidden) {
-				http.Error(w, authErr.Error(), http.StatusForbidden)
-			} else {
-				http.Error(w, authErr.Error(), http.StatusUnauthorized)
-			}
+	principal := authz.PrincipalFromContext(r.Context())
+
+	if !principal.IsAnonymous() {
+		// Enforcing mode: fine-grained role check narrowed to this approval type.
+		required := "dba"
+		if isFleetApproval(existing) {
+			required = "fleet-approver"
+		}
+		if err := s.authorizer.Require(principal, required); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
 		req.DeniedBy = principal.EffectiveID()
