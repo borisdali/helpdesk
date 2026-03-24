@@ -19,6 +19,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// sqliteTimeFormat is a fixed-width UTC timestamp format used for all SQLite
+// timestamp columns. Using zero-padded nanoseconds ensures that lexicographic
+// string ordering equals chronological ordering (unlike RFC3339Nano which omits
+// trailing zeros and produces variable-length strings where "27Z" > "27.001Z").
+const sqliteTimeFormat = "2006-01-02T15:04:05.000000000Z"
+
 // Store persists audit events to SQLite or PostgreSQL and notifies listeners.
 type Store struct {
 	db         *sql.DB
@@ -370,7 +376,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		event.EventID,
-		event.Timestamp.Format(time.RFC3339Nano),
+		event.Timestamp.UTC().Format(sqliteTimeFormat),
 		string(event.EventType),
 		event.TraceID,
 		event.ParentID,
@@ -448,7 +454,7 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 	}
 	if !opts.Since.IsZero() {
 		query += " AND timestamp >= ?"
-		args = append(args, opts.Since.Format(time.RFC3339Nano))
+		args = append(args, opts.Since.UTC().Format(sqliteTimeFormat))
 	}
 	if opts.MinConfidence > 0 {
 		query += " AND decision_confidence >= ?"
@@ -637,11 +643,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	}
 	if !opts.From.IsZero() {
 		q1 += " AND timestamp >= ?"
-		args1 = append(args1, opts.From.Format(time.RFC3339Nano))
+		args1 = append(args1, opts.From.UTC().Format(sqliteTimeFormat))
 	}
 	if !opts.Until.IsZero() {
 		q1 += " AND timestamp < ?"
-		args1 = append(args1, opts.Until.Format(time.RFC3339Nano))
+		args1 = append(args1, opts.Until.UTC().Format(sqliteTimeFormat))
 	}
 	q1 += " GROUP BY trace_id ORDER BY first_event DESC LIMIT ?"
 	args1 = append(args1, opts.Limit)

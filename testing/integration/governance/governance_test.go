@@ -213,7 +213,7 @@ func getList(t *testing.T, base, path string) []map[string]any {
 func newEvent(sessionID, eventType string) map[string]any {
 	return map[string]any{
 		"event_id":   fmt.Sprintf("evt-%d", time.Now().UnixNano()),
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": eventType,
 		"session":    map[string]any{"id": sessionID},
 		"input":      map[string]any{"user_query": "integration test"},
@@ -635,7 +635,7 @@ func TestIntegration_AgentReasoningRoundTrip(t *testing.T) {
 
 	payload := map[string]any{
 		"event_id":   eventID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "agent_reasoning",
 		"trace_id":   "integ-trace-rsn",
 		"session":    map[string]any{"id": "integ-rsn-session"},
@@ -830,7 +830,7 @@ func TestGovernance_Explain_DefaultConfig(t *testing.T) {
 func newToolEvent(sessionID, toolName, actionClass string) map[string]any {
 	return map[string]any{
 		"event_id":   fmt.Sprintf("evt-%d", time.Now().UnixNano()),
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "tool_execution",
 		"session":    map[string]any{"id": sessionID},
 		"input":      map[string]any{"user_query": "integration test"},
@@ -988,7 +988,7 @@ func newDelegationVerificationEvent(sessionID, traceID, delegationEventID string
 	}
 	return map[string]any{
 		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "delegation_verification",
 		"trace_id":   traceID,
 		"session":    map[string]any{"id": sessionID},

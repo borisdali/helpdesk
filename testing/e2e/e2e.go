@@ -74,6 +74,18 @@ func getEnvDefault(key, def string) string {
 	return def
 }
 
+// SkipIfLLMKeyInvalid skips the test when errMsg indicates the LLM API key is
+// set but not valid. Provides a clean skip instead of a failure when
+// HELPDESK_API_KEY has expired or belongs to a different vendor.
+func SkipIfLLMKeyInvalid(t *testing.T, errMsg string) {
+	t.Helper()
+	if strings.Contains(errMsg, "API_KEY_INVALID") ||
+		strings.Contains(errMsg, "API key not valid") ||
+		strings.Contains(errMsg, "api_key_invalid") {
+		t.Skip("LLM API key is set but rejected by the provider — update HELPDESK_API_KEY")
+	}
+}
+
 // RequireAPIKey skips the test if HELPDESK_API_KEY is not set.
 //
 // HELPDESK_API_KEY is the key injected into every agent container via
@@ -224,6 +236,17 @@ func (c *GatewayClient) post(ctx context.Context, path string, payload map[strin
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
+		// 422 Unprocessable Entity means the tool ran but returned an error
+		// (e.g. DB unreachable, connection refused). Return the error text as
+		// the response so tests can inspect errorKeywords without fataling.
+		if resp.StatusCode == http.StatusUnprocessableEntity {
+			var errBody struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(body, &errBody) == nil && errBody.Error != "" {
+				return &A2AResponse{Text: errBody.Error}, nil
+			}
+		}
 		return nil, fmt.Errorf("POST %s: HTTP %d: %s", path, resp.StatusCode, string(body))
 	}
 

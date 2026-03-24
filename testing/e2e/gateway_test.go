@@ -112,6 +112,7 @@ func TestGatewayAIDiagnosis(t *testing.T) {
 
 	resp, err := client.Query(ctx, "database", prompt)
 	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
 		t.Fatalf("Query failed: %v", err)
 	}
 
@@ -202,6 +203,7 @@ func TestGatewayIncidentBundle(t *testing.T) {
 		"callback_url":      callbackURL,
 	})
 	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
 		t.Fatalf("CreateIncident failed: %v", err)
 	}
 
@@ -242,6 +244,7 @@ func TestGatewayResearch(t *testing.T) {
 
 	resp, err := client.Research(ctx, query)
 	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
 		t.Fatalf("Research failed: %v", err)
 	}
 
@@ -347,6 +350,7 @@ func TestSREBotWorkflow(t *testing.T) {
 
 		resp, err := client.Query(ctx, "database", prompt)
 		if err != nil {
+			SkipIfLLMKeyInvalid(t, err.Error())
 			t.Fatalf("AI diagnosis failed: %v", err)
 		}
 

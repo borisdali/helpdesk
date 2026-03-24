@@ -149,18 +149,18 @@ faulttest:
 # ---------------------------------------------------------------------------
 e2e: image
 	@echo "Starting full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Running E2E tests..."
 	-go test -tags e2e -timeout 300s -v ./testing/e2e/...
 	@echo "Stopping full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # AI Governance E2E tests (requires full stack; API key only for audit-trail tests)
 # ---------------------------------------------------------------------------
 e2e-governance: image
 	@echo "Starting full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Waiting for gateway to be ready..."
 	@for i in $$(seq 1 30); do \
 		curl -sf http://localhost:8080/api/v1/agents >/dev/null 2>&1 && echo "Gateway ready." && break; \
@@ -169,14 +169,14 @@ e2e-governance: image
 	@echo "Running governance E2E tests..."
 	-go test -tags e2e -timeout 300s -v -run TestGovernance ./testing/e2e/...
 	@echo "Stopping full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Identity & Access E2E tests (requires full stack; API key only for gateway tests)
 # ---------------------------------------------------------------------------
 e2e-identity: image
 	@echo "Starting full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Waiting for gateway to be ready..."
 	@for i in $$(seq 1 30); do \
 		curl -sf http://localhost:8080/api/v1/agents >/dev/null 2>&1 && echo "Gateway ready." && break; \
@@ -185,7 +185,7 @@ e2e-identity: image
 	@echo "Running Identity & Access E2E tests..."
 	-go test -tags e2e -timeout 300s -v -run TestIdentityE2E ./testing/e2e/...
 	@echo "Stopping full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Docker image (local, current arch)
