@@ -26,17 +26,35 @@ type FixModeViolation struct {
 	Remediation string
 }
 
+// isGovernedMode returns true for any operating mode that requires the full
+// governance stack at startup (audit, policy, guardrails).
+func isGovernedMode() bool {
+	m := strings.ToLower(os.Getenv("HELPDESK_OPERATING_MODE"))
+	return m == "fix" || m == "readonly-governed"
+}
+
+// currentOperatingMode returns the current mode string for use in log and audit
+// messages. Returns "readonly" when HELPDESK_OPERATING_MODE is unset.
+func currentOperatingMode() string {
+	m := strings.ToLower(os.Getenv("HELPDESK_OPERATING_MODE"))
+	if m == "" {
+		return "readonly"
+	}
+	return m
+}
+
 // CheckFixModeViolations validates that all required governance modules are active
-// for fix mode operation. Returns nil if not in fix mode or if fully compliant.
+// for governed mode operation (fix or readonly-governed). Returns nil if not in a
+// governed mode or if fully compliant.
 //
 // Checked modules:
 //   - audit:              HELPDESK_AUDIT_ENABLED=true and HELPDESK_AUDIT_URL set
 //   - policy_engine:      HELPDESK_POLICY_ENABLED=true and HELPDESK_POLICY_FILE set
 //   - guardrails:         HELPDESK_POLICY_DRY_RUN must not be true
-//   - approval_workflows: HELPDESK_APPROVAL_ENABLED=true (warning only)
+//   - approval_workflows: HELPDESK_APPROVAL_ENABLED=true (warning only, fix mode only)
 //   - explainability:     HELPDESK_INFRA_CONFIG set (warning only)
 func CheckFixModeViolations(cfg Config) []FixModeViolation {
-	if strings.ToLower(os.Getenv("HELPDESK_OPERATING_MODE")) != "fix" {
+	if !isGovernedMode() {
 		return nil
 	}
 
@@ -89,7 +107,9 @@ func CheckFixModeViolations(cfg Config) []FixModeViolation {
 	}
 
 	// 4. Approval workflows — human-in-the-loop for write/destructive operations.
-	if !cfg.ApprovalEnabled {
+	// Not applicable in readonly-governed mode: mutations are unconditionally blocked
+	// so there is nothing to approve.
+	if !cfg.ApprovalEnabled && currentOperatingMode() != "readonly-governed" {
 		v = append(v, FixModeViolation{
 			Module:      "approval_workflows",
 			Severity:    "warning",
@@ -115,7 +135,7 @@ func CheckFixModeViolations(cfg Config) []FixModeViolation {
 // policy enforcement to sub-agents (e.g. the helpdesk orchestrator). Only the audit
 // system is checked — policy, approvals, and guardrails are enforced by each sub-agent.
 func CheckFixModeAuditViolations(auditEnabled bool, auditURL string) []FixModeViolation {
-	if strings.ToLower(os.Getenv("HELPDESK_OPERATING_MODE")) != "fix" {
+	if !isGovernedMode() {
 		return nil
 	}
 
@@ -152,12 +172,14 @@ func CheckFixModeAuditViolations(auditEnabled bool, auditURL string) []FixModeVi
 //
 // componentName identifies the process in reports (e.g. "postgres_database_agent").
 func EnforceFixMode(ctx context.Context, violations []FixModeViolation, componentName, auditURL string) {
+	slog.Info("agent starting", "component", componentName, "operating_mode", currentOperatingMode())
 	if len(violations) == 0 {
 		return
 	}
 
-	slog.Warn("fix mode governance violations detected",
+	slog.Warn("governed mode governance violations detected",
 		"component", componentName,
+		"mode", currentOperatingMode(),
 		"count", len(violations),
 	)
 
@@ -197,8 +219,9 @@ func EnforceFixMode(ctx context.Context, violations []FixModeViolation, componen
 	}
 
 	if hasFatal {
-		slog.Error("fix mode governance check failed — process will not start",
+		slog.Error("governed mode governance check failed — process will not start",
 			"component", componentName,
+			"mode", currentOperatingMode(),
 		)
 		os.Exit(1)
 	}
@@ -212,7 +235,7 @@ func recordGovernanceViolationEvent(ctx context.Context, auditURL, componentName
 		EventType: audit.EventTypeGovernanceViolation,
 		Session:   audit.Session{ID: componentName},
 		GovernanceViolation: &audit.GovernanceViolation{
-			OperatingMode: "fix",
+			OperatingMode: currentOperatingMode(),
 			Module:        v.Module,
 			Severity:      v.Severity,
 			Description:   v.Description,

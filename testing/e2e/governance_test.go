@@ -141,7 +141,7 @@ func auditdSupportsDelegationVerification(t *testing.T, auditdURL string) bool {
 	probeID := fmt.Sprintf("e2e-dvprobe-%d", time.Now().UnixNano())
 	probe := map[string]any{
 		"event_id":   probeID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "delegation_verification",
 		"session":    map[string]any{"id": "e2e-dvprobe-session"},
 		"delegation_verification": map[string]any{
@@ -670,7 +670,7 @@ func TestGovernance_GetEvent_HasTrace(t *testing.T) {
 	// POST an event that carries the explainability fields as agentutil would.
 	payload := map[string]any{
 		"event_id":   eventID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "policy_decision",
 		"session":    map[string]any{"id": "e2e-test-session"},
 		"policy_decision": map[string]any{
@@ -754,7 +754,7 @@ func TestGovernance_GetEvent_AgentReasoning(t *testing.T) {
 
 	payload := map[string]any{
 		"event_id":   eventID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "agent_reasoning",
 		"trace_id":   "e2e-trace-reasoning",
 		"session":    map[string]any{"id": "e2e-rsn-session"},
@@ -914,7 +914,7 @@ func TestGovernance_GetEvent_DelegationVerification(t *testing.T) {
 	anchorEventID := fmt.Sprintf("e2e-anchor-%d", time.Now().UnixNano())
 	anchor := map[string]any{
 		"event_id":   anchorEventID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "delegation_decision",
 		"trace_id":   traceID,
 		"session":    map[string]any{"id": sessionID, "user_id": "e2e-dv-user"},
@@ -926,7 +926,7 @@ func TestGovernance_GetEvent_DelegationVerification(t *testing.T) {
 	dvEventID := fmt.Sprintf("e2e-dv-%d", time.Now().UnixNano())
 	dvPayload := map[string]any{
 		"event_id":   dvEventID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
 		"event_type": "delegation_verification",
 		"trace_id":   traceID,
 		"session":    map[string]any{"id": sessionID},

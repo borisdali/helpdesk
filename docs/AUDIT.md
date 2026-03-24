@@ -66,7 +66,8 @@ essential for querying and correlating events.
 | Prefix | Origin |
 |--------|--------|
 | `tr_` | Natural-language query via `POST /api/v1/query` (orchestrator-routed) |
-| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` |
+| `tr_flj_` | Fleet job — `tr_` + job ID (e.g. `tr_flj_4dd009b7`); one trace per job |
+| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (not a journey) |
 
 ---
 
@@ -103,6 +104,7 @@ Core fields present on every event:
 | `event_type` | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation` |
 | `session_id` | Session identifier of the recording component |
 | `trace_id` | End-to-end correlation ID; empty when no orchestrator context |
+| `origin` | Dispatch path that produced the event: `"direct_tool"` (fleet-runner structured dispatch via `POST /tool/{name}`), `"agent"` (LLM/A2A path), or `"gateway"` (gateway-originated request). Set on `tool_execution` and `tool_invoked` events; absent on delegation and reasoning events. See [§4.5](#45-origin-values). |
 | `agent` | Name of the agent that recorded the event |
 | `prev_hash` | SHA-256 of the previous event in the chain |
 | `event_hash` | SHA-256 of this event's canonical JSON |
@@ -162,6 +164,34 @@ The orchestrator prompt instructs the LLM to report mismatches to the user and
 `delegation_verification` events do **not** contribute to `tools_used` or
 `event_count` in journey summaries — they are internal governance plumbing.
 
+### 4.5 origin values
+
+The `origin` field records *how* a tool was invoked. It is set on
+`tool_execution` and `tool_invoked` events and is absent on delegation,
+reasoning, and policy events.
+
+| Value | When set | Trace prefix |
+|-------|----------|--------------|
+| `"direct_tool"` | Fleet-runner dispatched the tool via `POST /tool/{name}` on the agent — no LLM involvement | `dt_` |
+| `"agent"` | Gateway routed an NL query to the agent via A2A; the agent's LLM selected and invoked the tool | `tr_` |
+| `"gateway"` | Gateway itself generated the event (e.g. `gateway_request` anchor events) | `tr_`, `dt_` |
+
+**Why it matters:** filtering by `origin` lets you isolate structured,
+deterministic fleet operations (`direct_tool`) from LLM-mediated interactions
+(`agent`) — useful for compliance reporting, anomaly detection, and auditing
+the LLM's decision-making independently of automated jobs.
+
+```bash
+# All tool executions that went through the LLM
+curl "http://localhost:1199/v1/events?event_type=tool_execution&origin=agent"
+
+# All tool executions from fleet-runner structured dispatch
+curl "http://localhost:1199/v1/events?event_type=tool_execution&origin=direct_tool"
+
+# Direct-tool events for a specific trace
+curl "http://localhost:1199/v1/events?trace_id=dt_abc12345&origin=direct_tool"
+```
+
 ---
 
 ## 5. Action Classification
@@ -216,7 +246,51 @@ Base URL: `http://localhost:1199` (default). All paths are under `/v1/`.
 | `GET` | `/v1/governance/explain` | Hypothetical policy check (requires policy engine) |
 | `POST` | `/v1/governance/check` | Evaluate + record a policy decision atomically |
 
-### 6.5 Health
+### 6.5 Fleet jobs
+
+Fleet job records live in three additive tables alongside the main audit event
+chain. They are written by `fleet-runner` via the gateway; the audit event
+chain records the individual tool calls as normal `gateway_request` events.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/fleet/jobs` | Register a new fleet job |
+| `GET` | `/v1/fleet/jobs` | List fleet jobs (filterable by status, submitted_by) |
+| `GET` | `/v1/fleet/jobs/{jobID}` | Get a fleet job record |
+| `PATCH` | `/v1/fleet/jobs/{jobID}` | Update fleet job status |
+| `POST` | `/v1/fleet/jobs/{jobID}/servers` | Add a server record to a job |
+| `PATCH` | `/v1/fleet/jobs/{jobID}/servers/{serverName}` | Update per-server status and output |
+| `GET` | `/v1/fleet/jobs/{jobID}/servers` | List all per-server records for a job |
+| `POST` | `/v1/fleet/jobs/{jobID}/servers/{serverName}/steps` | Add a step record |
+| `PATCH` | `/v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}` | Update step status |
+| `GET` | `/v1/fleet/jobs/{jobID}/servers/{serverName}/steps` | List per-step records |
+| `POST` | `/v1/fleet/jobs/{jobID}/approval` | Create an approval request for a fleet job |
+| `GET` | `/v1/fleet/jobs/{jobID}/approval/{approvalID}` | Poll approval status |
+
+**Fleet job status values:** `pending` → `running` → `success` / `failed` / `cancelled`
+
+**Per-server status values:** `pending` → `running` → `success` / `failed` / `partial`
+(`partial` means some steps failed with `on_failure: continue` but no stop-failure occurred)
+
+**Per-step status values:** `pending` → `success` / `failed`
+
+Fleet job records are **not** part of the audit event hash chain — they are
+operational records managed separately. The tool calls themselves (the actual
+work) appear as `gateway_request` audit events with `purpose=fleet_rollout`,
+`purpose_note=job_id=<id> server=<name> stage=<stage>`, and the fleet-runner's
+service account as the principal. This lets you correlate fleet job activity in
+the standard audit trail:
+
+```bash
+# All tool calls from a specific fleet job
+curl -s 'http://localhost:1199/v1/events?event_type=gateway_request' | \
+  jq '[.[] | select(.purpose_note | contains("job_id=flj_4dd009b7"))]'
+
+# All fleet_rollout activity (any job)
+curl -s 'http://localhost:1199/v1/journeys?purpose=fleet_rollout' | jq .
+```
+
+### 6.6 Health
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -232,10 +306,13 @@ Base URL: `http://localhost:1199` (default). All paths are under `/v1/`.
 |-----------|------|-------------|
 | `session_id` | string | Filter by agent session ID |
 | `trace_id` | string | Filter by exact trace ID |
-| `trace_id_prefix` | string | Filter by trace ID prefix (e.g. `tr_`) |
+| `trace_id_prefix` | string | Filter by trace ID prefix (e.g. `tr_`, `dt_`) |
 | `event_type` | string | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation` |
 | `agent` | string | Filter by agent name |
 | `action_class` | string | `read`, `write`, or `destructive` |
+| `tool_name` | string | Filter by tool name (e.g. `terminate_connection`) |
+| `outcome_status` | string | Filter by outcome (e.g. `success`, `error`, `denied`) |
+| `origin` | string | Filter by dispatch path: `direct_tool`, `agent`, or `gateway` (see [§4.5](#45-origin-values)) |
 | `since` | RFC3339 | Only events at or after this timestamp |
 | `limit` | int | Maximum events to return (default: 100) |
 

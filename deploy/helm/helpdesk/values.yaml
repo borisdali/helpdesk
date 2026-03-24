@@ -193,10 +193,16 @@ governance:
     # policy conditions — this is an agent-level pre-check.
     requirePurposeForSensitive: false
 
-  # Operating mode: set to "fix" to require all governance modules (audit, policy,
-  # approvals) to be active before agents will start. Agents refuse to start if any
-  # required module is missing or misconfigured.
-  # Leave empty (default) for normal operation.
+  # Operating mode controls governance requirements at startup and which tools
+  # agents are permitted to execute. Valid values:
+  #   ""                 — default read-only; no governance modules required.
+  #   "readonly-governed"— full governance stack required (audit + policy); write
+  #                        and destructive tools are unconditionally blocked.
+  #                        Use this to observe before enabling mutations.
+  #   "fix"              — full governance stack required; mutations permitted
+  #                        subject to policy and approval workflows.
+  # Agents refuse to start if a governed mode is set but required modules are
+  # missing or misconfigured.
   operatingMode: ""
 
   # Approval workflow settings
@@ -220,3 +226,49 @@ governance:
     smtpSecret: ""
     from: ""
     to: ""  # comma-separated
+
+
+# Fleet runner: applies a single change across infrastructure targets with staged rollout.
+#
+# Each entry in scheduledJobs creates:
+#   - a ConfigMap   helpdesk-fleet-job-<name>   (embeds the inline job definition)
+#   - a CronJob     helpdesk-fleet-<name>        (runs fleet-runner on the given schedule)
+#
+# For ad-hoc / one-off fleet jobs from a local machine use scripts/run-fleet-job.sh —
+# it creates a temporary Job in the cluster, streams the logs, and cleans up on exit.
+#
+# Example:
+#   fleetRunner:
+#     apiKeySecret: helpdesk-fleet-runner-key
+#     scheduledJobs:
+#       - name: vacuum-all
+#         schedule: "0 3 * * 0"   # Sundays 03:00 UTC
+#         dryRun: false
+#         definition:
+#           name: vacuum-all
+#           targets:
+#             tags: [prod]
+#           change:
+#             steps:
+#               - agent: database
+#                 tool: run_maintenance
+#                 args: {operation: vacuum_analyze}
+#           strategy:
+#             wave_size: 2
+#             wave_pause_seconds: 60
+fleetRunner:
+  # Name of a pre-existing Secret containing the fleet-runner API key.
+  # The Secret must have a key matching apiKeyKey (default: api-key).
+  # Leave empty to run without authentication.
+  apiKeySecret: ""
+  apiKeyKey: "api-key"
+  # List of scheduled fleet jobs. Each entry generates a ConfigMap + CronJob pair.
+  # See example above for the full schema.
+  scheduledJobs: []
+  # - name: my-job           # used in resource names; must be DNS-label-safe
+  #   schedule: "0 2 * * *"  # standard cron expression (UTC)
+  #   dryRun: false           # if true, plan only — no gateway/auditd contact
+  #   canaryCount: 0          # 0 = use value from job definition
+  #   waveSize: 0             # 0 = use value from job definition
+  #   wavePauseSeconds: 0     # 0 = use value from job definition
+  #   definition: {}          # inline fleet.JobDef (serialised to job.json in the ConfigMap)

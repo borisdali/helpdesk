@@ -22,6 +22,8 @@ type StaticProvider struct {
 	users map[string][]string
 	// serviceAccounts maps service ID → ServiceAccount
 	serviceAccounts map[string]ServiceAccount
+	// aliases maps alias role names to their canonical equivalents
+	aliases map[string]string
 }
 
 // NewStaticProvider loads the users config from the given YAML file path.
@@ -39,6 +41,7 @@ func NewStaticProvider(path string) (*StaticProvider, error) {
 	p := &StaticProvider{
 		users:           make(map[string][]string, len(cfg.Users)),
 		serviceAccounts: make(map[string]ServiceAccount, len(cfg.ServiceAccounts)),
+		aliases:         make(map[string]string, len(cfg.RoleAliases)),
 	}
 	for _, u := range cfg.Users {
 		p.users[u.ID] = u.Roles
@@ -46,7 +49,37 @@ func NewStaticProvider(path string) (*StaticProvider, error) {
 	for _, sa := range cfg.ServiceAccounts {
 		p.serviceAccounts[sa.ID] = sa
 	}
+	for k, v := range cfg.RoleAliases {
+		p.aliases[k] = v
+	}
 	return p, nil
+}
+
+// expandRoles replaces any role name that is a key in p.aliases with the
+// corresponding canonical value. Roles not present in the alias map pass through
+// unchanged. Returns the original slice when no aliases are defined.
+func (p *StaticProvider) expandRoles(roles []string) []string {
+	if len(p.aliases) == 0 {
+		return roles
+	}
+	expanded := make([]string, len(roles))
+	for i, r := range roles {
+		if canonical, ok := p.aliases[r]; ok {
+			expanded[i] = canonical
+		} else {
+			expanded[i] = r
+		}
+	}
+	return expanded
+}
+
+// RoleAliases returns a copy of the alias map. Never returns nil.
+func (p *StaticProvider) RoleAliases() map[string]string {
+	result := make(map[string]string, len(p.aliases))
+	for k, v := range p.aliases {
+		result[k] = v
+	}
+	return result
 }
 
 // Resolve authenticates the request.
@@ -62,7 +95,9 @@ func (p *StaticProvider) Resolve(r *http.Request) (ResolvedPrincipal, error) {
 	// Fall through to human user via X-User header.
 	userID := r.Header.Get("X-User")
 	if userID == "" {
-		return ResolvedPrincipal{}, fmt.Errorf("identity: no credentials provided (X-User header or Bearer token required)")
+		// No credentials at all — return an anonymous principal and let the
+		// authorizer decide whether the route permits anonymous access.
+		return ResolvedPrincipal{AuthMethod: "header"}, nil
 	}
 
 	roles, ok := p.users[userID]
@@ -72,7 +107,7 @@ func (p *StaticProvider) Resolve(r *http.Request) (ResolvedPrincipal, error) {
 
 	return ResolvedPrincipal{
 		UserID:     userID,
-		Roles:      roles,
+		Roles:      p.expandRoles(roles),
 		AuthMethod: "static",
 	}, nil
 }
@@ -88,7 +123,7 @@ func (p *StaticProvider) resolveServiceAccount(apiKey string) (ResolvedPrincipal
 		if ok {
 			return ResolvedPrincipal{
 				Service:    id,
-				Roles:      sa.Roles,
+				Roles:      p.expandRoles(sa.Roles),
 				AuthMethod: "api_key",
 			}, nil
 		}

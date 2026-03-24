@@ -44,21 +44,14 @@ func NewFromEnv() (Provider, error) {
 
 // PurposeFromRequest extracts the purpose from request headers and body fields.
 // Headers take precedence over body-parsed values (passed as purposeFromBody).
-// Falls back to the mode-derived default when neither is set.
-// Returns the purpose and a bool indicating whether the purpose was explicitly
-// declared by the caller (true) or derived from the operating mode (false).
-func PurposeFromRequest(headerPurpose, bodyPurpose, operatingMode string) (string, bool) {
+// Returns ("", false) when neither source provides a purpose — callers should
+// treat an empty purpose as undeclared rather than substituting a default.
+func PurposeFromRequest(headerPurpose, bodyPurpose string) (string, bool) {
 	if headerPurpose != "" {
 		return headerPurpose, true
 	}
 	if bodyPurpose != "" {
 		return bodyPurpose, true
 	}
-	// Derive from operating mode.
-	switch operatingMode {
-	case "fix":
-		return "remediation", false
-	default:
-		return "diagnostic", false
-	}
+	return "", false
 }

@@ -160,7 +160,7 @@ func main() {
 		},
 	}
 
-	if err := agentutil.ServeWithTracing(ctx, k8sAgent, cfg, traceStore, auditStore, cardOpts); err != nil {
+	if err := agentutil.ServeWithTracingAndDirectTools(ctx, k8sAgent, cfg, traceStore, auditStore, NewK8sDirectRegistry(), cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

@@ -277,6 +277,35 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		e.toolAuditor.RecordToolInvoked(ctx, resourceType, resourceName, string(action), tags)
 	}
 
+	// Block write and destructive tools unconditionally in readonly-governed mode.
+	// This is enforced in code, not by policy, so a misconfigured policy file
+	// cannot accidentally permit a mutation.
+	if strings.ToLower(os.Getenv("HELPDESK_OPERATING_MODE")) == "readonly-governed" &&
+		(action == policy.ActionWrite || action == policy.ActionDestructive) {
+		msg := fmt.Sprintf(
+			"tool %q is a %s operation and is not permitted in readonly-governed mode; "+
+				"set HELPDESK_OPERATING_MODE=fix to enable mutations",
+			resourceType, string(action))
+		if e.toolAuditor != nil {
+			principal := audit.PrincipalFromContext(ctx)
+			e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+				ResourceType: resourceType,
+				ResourceName: resourceName,
+				Action:       string(action),
+				Tags:         tags,
+				Effect:       "deny",
+				PolicyName:   "readonly_governed_mode",
+				Message:      msg,
+				Note:         note,
+				UserID:       principal.UserID,
+				Roles:        principal.Roles,
+				Service:      principal.Service,
+				AuthMethod:   principal.AuthMethod,
+			})
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
 	// Pre-check: if HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE is set and this resource
 	// has pii or critical sensitivity, require an explicit purpose declaration.
 	if e.requirePurposeForSensitive && hasSensitiveSensitivity(sensitivity) {
@@ -408,56 +437,92 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	return nil
 }
 
-// requestApproval creates an approval request and waits for resolution.
-// note carries optional free-text context for the approver (e.g. session plan from get_session_info).
+// ApprovalPendingError is returned when an approval request has been created but
+// not yet granted. The caller should surface the ApprovalID to the user so they
+// can direct an approver to resolve it, then retry the operation.
+type ApprovalPendingError struct {
+	ApprovalID string
+}
+
+func (e *ApprovalPendingError) Error() string {
+	return fmt.Sprintf(
+		"approval required (ID: %s) — this operation needs human authorization before it can execute. "+
+			"Ask an approver to run: ./approvals approve %s — then reply here to retry.",
+		e.ApprovalID, e.ApprovalID)
+}
+
+// requestApproval creates or reuses an approval request and returns immediately.
+// On first call it creates the request and returns ApprovalPendingError so the
+// LLM can surface the approval ID to the user. On retry (next turn) it first
+// checks for an approved approval by tool name (cross-turn lookup — trace IDs
+// differ between turns), then falls through to the existing trace-based check.
+// note carries optional free-text context for the approver.
 func (e *PolicyEnforcer) requestApproval(ctx context.Context, traceID, resourceType, resourceName string, action policy.ActionClass, tags []string, note string) error {
-	// First check if there's an existing valid approval for this trace
-	if traceID != "" {
-		existing, err := e.approvalClient.CheckExistingApproval(ctx, traceID, resourceType+":"+resourceName)
-		if err == nil && existing != nil {
-			slog.Info("using existing approval",
+	toolKey := resourceType + ":" + resourceName
+
+	// Cross-turn lookup: check for an approved or pending approval by tool name.
+	// The trace ID changes each request, so this is the reliable cross-turn path.
+	// agentName scopes the lookup when set; empty agentName matches any agent.
+	existing, err := e.approvalClient.FindApprovalByTool(ctx, toolKey, e.agentName)
+	if err == nil && existing != nil {
+		switch existing.Status {
+		case "approved":
+			slog.Info("using existing approval (cross-turn lookup)",
 				"approval_id", existing.ApprovalID,
-				"trace_id", traceID,
-				"resource", resourceType+":"+resourceName)
-			return nil // Already approved
+				"resource", toolKey)
+			return nil
+		case "pending":
+			slog.Info("pending approval found (cross-turn lookup)",
+				"approval_id", existing.ApprovalID,
+				"resource", toolKey)
+			return &ApprovalPendingError{ApprovalID: existing.ApprovalID}
 		}
 	}
 
-	// Create approval request
+	// Same-turn fallback: check for an existing valid approval by trace ID.
+	if traceID != "" {
+		existing, err := e.approvalClient.CheckExistingApproval(ctx, traceID, toolKey)
+		if err == nil && existing != nil {
+			slog.Info("using existing approval (trace-based lookup)",
+				"approval_id", existing.ApprovalID,
+				"trace_id", traceID,
+				"resource", toolKey)
+			return nil
+		}
+	}
+
+	// Create a new approval request and return immediately with the pending ID.
+	// Identify the human principal so the approval record carries the actual user,
+	// not the agent process name. The four-eyes check at approval time compares
+	// this value against the approver's identity.
+	principal := audit.PrincipalFromContext(ctx)
+	requestedBy := principal.UserID
+	if requestedBy == "" {
+		requestedBy = e.agentName // fallback for unauthenticated / service-account callers
+	}
+
 	reqCtx := map[string]any{"tags": tags}
 	if note != "" {
 		reqCtx["session_info"] = note
 	}
-	approval, err := e.approvalClient.RequestApprovalAndWait(ctx, audit.ApprovalCreateRequest{
+	createResp, err := e.approvalClient.CreateApproval(ctx, audit.ApprovalCreateRequest{
 		TraceID:      traceID,
 		ActionClass:  string(action),
-		ToolName:     resourceType + ":" + resourceName,
+		ToolName:     toolKey,
 		AgentName:    e.agentName,
 		ResourceType: resourceType,
 		ResourceName: resourceName,
-		RequestedBy:  e.agentName,
+		RequestedBy:  requestedBy,
 		Context:      reqCtx,
-	}, e.approvalTimeout)
+	})
 	if err != nil {
 		return fmt.Errorf("approval request failed: %w", err)
 	}
 
-	switch approval.Status {
-	case "approved":
-		slog.Info("approval granted",
-			"approval_id", approval.ApprovalID,
-			"approved_by", approval.ResolvedBy,
-			"resource", resourceType+":"+resourceName)
-		return nil
-	case "denied":
-		return fmt.Errorf("approval denied by %s: %s", approval.ResolvedBy, approval.ResolutionReason)
-	case "expired":
-		return fmt.Errorf("approval request expired")
-	case "cancelled":
-		return fmt.Errorf("approval request cancelled")
-	default:
-		return fmt.Errorf("approval still pending (status: %s)", approval.Status)
-	}
+	slog.Info("approval request created",
+		"approval_id", createResp.ApprovalID,
+		"resource", toolKey)
+	return &ApprovalPendingError{ApprovalID: createResp.ApprovalID}
 }
 
 // CheckDatabase is a convenience method for database operations.
@@ -1141,6 +1206,69 @@ func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore
 	// are visible as journeys even when bypassing the orchestrator/gateway.
 	tracedHandler := audit.TraceMiddlewareWithAudit(traceStore, auditor, a.Name(), a2asrv.NewJSONRPCHandler(requestHandler))
 	mux.Handle(agentPath, tracedHandler)
+
+	slog.Info("starting A2A server with tracing",
+		"agent", a.Name(),
+		"url", baseURL.String(),
+		"card", baseURL.String()+"/.well-known/agent-card.json",
+	)
+
+	return http.Serve(listener, mux)
+}
+
+// ServeWithTracingAndDirectTools is like ServeWithTracing but also registers
+// a POST /tool/{name} endpoint for deterministic, LLM-bypassing tool dispatch.
+// The registry maps tool names to context.Context-based handler functions.
+// Fleet runner uses this path to execute structured tool calls without LLM narration.
+func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, auditor audit.Auditor, registry *DirectToolRegistry, opts ...CardOptions) error {
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
+	}
+
+	var baseURL *url.URL
+	if cfg.ExternalURL != "" {
+		baseURL, err = url.Parse(cfg.ExternalURL)
+		if err != nil {
+			return fmt.Errorf("invalid HELPDESK_AGENT_URL: %v", err)
+		}
+	} else {
+		baseURL = &url.URL{Scheme: "http", Host: listener.Addr().String()}
+	}
+
+	agentPath := "/invoke"
+	agentCard := &a2a.AgentCard{
+		Name:               a.Name(),
+		Description:        a.Description(),
+		Skills:             adka2a.BuildAgentSkills(a),
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+		URL:                baseURL.JoinPath(agentPath).String(),
+		Capabilities:       a2a.AgentCapabilities{Streaming: true},
+	}
+
+	if len(opts) > 0 {
+		applyCardOptions(agentCard, opts[0])
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName:        a.Name(),
+			Agent:          a,
+			SessionService: session.InMemoryService(),
+		},
+	})
+	requestHandler := a2asrv.NewHandler(executor)
+
+	tracedHandler := audit.TraceMiddlewareWithAudit(traceStore, auditor, a.Name(), a2asrv.NewJSONRPCHandler(requestHandler))
+	mux.Handle(agentPath, tracedHandler)
+
+	if registry != nil {
+		registerDirectToolRoutes(mux, registry, traceStore)
+		slog.Info("direct tool dispatch enabled", "agent", a.Name(), "tools", len(registry.tools))
+	}
 
 	slog.Info("starting A2A server with tracing",
 		"agent", a.Name(),

@@ -2,7 +2,7 @@
 
 Before reviewing the frequently asked questions below
 we recommend getting familiar with aiHelpDesk eight
-[design principles](PRINCIPLES.md)
+[design principles](PRINCIPLES.md).
 
 ---
 

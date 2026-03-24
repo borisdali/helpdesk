@@ -10,12 +10,19 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 )
 
 // approvalServer handles approval-related HTTP endpoints.
 type approvalServer struct {
-	store    *audit.ApprovalStore
-	notifier *ApprovalNotifier
+	store     *audit.ApprovalStore
+	notifier  *ApprovalNotifier
+	authorizer *authz.Authorizer
+}
+
+// isFleetApproval returns true when the approval record belongs to a fleet job.
+func isFleetApproval(a *audit.StoredApproval) bool {
+	return a.AgentName == "fleet-runner" || a.ResourceType == "fleet_job"
 }
 
 // CreateApprovalRequest is the JSON body for creating an approval request.
@@ -154,6 +161,9 @@ func (s *approvalServer) handleListApprovals(w http.ResponseWriter, r *http.Requ
 	if v := r.URL.Query().Get("requested_by"); v != "" {
 		opts.RequestedBy = v
 	}
+	if v := r.URL.Query().Get("tool_name"); v != "" {
+		opts.ToolName = v
+	}
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if limit, err := strconv.Atoi(v); err == nil && limit > 0 {
 			opts.Limit = limit
@@ -190,7 +200,35 @@ func (s *approvalServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ApprovedBy == "" {
+	// Fetch the existing record to determine required role and enforce four-eyes.
+	existing, err := s.store.GetRequest(r.Context(), approvalID)
+	if err != nil {
+		http.Error(w, "approval not found", http.StatusNotFound)
+		return
+	}
+
+	principal := authz.PrincipalFromContext(r.Context())
+
+	if !principal.IsAnonymous() {
+		// Enforcing mode: fine-grained role check narrowed to this approval type.
+		// The middleware already verified dba|fleet-approver|admin; this narrows
+		// to the specific role required for the approval type.
+		required := "dba"
+		if isFleetApproval(existing) {
+			required = "fleet-approver"
+		}
+		if err := s.authorizer.Require(principal, required); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		req.ApprovedBy = principal.EffectiveID()
+		// Four-eyes: approver must differ from the requester for all approval types.
+		if req.ApprovedBy == existing.RequestedBy {
+			http.Error(w, "four-eyes constraint: approver and requester must be different people", http.StatusForbidden)
+			return
+		}
+	} else if req.ApprovedBy == "" {
+		// Legacy unauthenticated mode: approved_by from body is required.
 		http.Error(w, "approved_by is required", http.StatusBadRequest)
 		return
 	}
@@ -242,7 +280,28 @@ func (s *approvalServer) handleDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.DeniedBy == "" {
+	// Fetch the existing record to determine required role.
+	existing, err := s.store.GetRequest(r.Context(), approvalID)
+	if err != nil {
+		http.Error(w, "approval not found", http.StatusNotFound)
+		return
+	}
+
+	principal := authz.PrincipalFromContext(r.Context())
+
+	if !principal.IsAnonymous() {
+		// Enforcing mode: fine-grained role check narrowed to this approval type.
+		required := "dba"
+		if isFleetApproval(existing) {
+			required = "fleet-approver"
+		}
+		if err := s.authorizer.Require(principal, required); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		req.DeniedBy = principal.EffectiveID()
+	} else if req.DeniedBy == "" {
+		// Legacy unauthenticated mode: denied_by from body is required.
 		http.Error(w, "denied_by is required", http.StatusBadRequest)
 		return
 	}

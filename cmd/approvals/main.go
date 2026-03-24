@@ -28,9 +28,15 @@ func main() {
 	// Get audit service URL from environment or flag
 	auditURL := os.Getenv("HELPDESK_AUDIT_URL")
 
+	// Get credentials from environment.
+	apiKey := os.Getenv("HELPDESK_APPROVAL_KEY")
+	approvalUser := os.Getenv("HELPDESK_APPROVAL_USER")
+
 	// Parse global flags
 	fs := flag.NewFlagSet("approvals", flag.ExitOnError)
 	fs.StringVar(&auditURL, "url", auditURL, "URL of the audit service (or set HELPDESK_AUDIT_URL)")
+	fs.StringVar(&apiKey, "api-key", apiKey, "API key for authenticated requests (or set HELPDESK_APPROVAL_KEY)")
+	fs.StringVar(&approvalUser, "user", approvalUser, "User ID for X-User header auth (or set HELPDESK_APPROVAL_USER)")
 	outputJSON := fs.Bool("json", false, "Output in JSON format")
 
 	fs.Usage = func() {
@@ -50,7 +56,9 @@ Options:
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, `
 Environment Variables:
-  HELPDESK_AUDIT_URL   URL of the audit service (e.g., http://localhost:1199)
+  HELPDESK_AUDIT_URL      URL of the audit service (e.g., http://localhost:1199)
+  HELPDESK_APPROVAL_KEY   API key for service-account authentication (Bearer token)
+  HELPDESK_APPROVAL_USER  User ID for human-operator authentication (X-User header)
 
 Examples:
   approvals pending                         # List pending approvals
@@ -68,6 +76,8 @@ Examples:
 		fmt.Fprintln(os.Stderr, "Error: audit service URL required (use --url or set HELPDESK_AUDIT_URL)")
 		os.Exit(1)
 	}
+
+	creds := authCreds{apiKey: apiKey, user: approvalUser}
 
 	remainingArgs := fs.Args()
 	if len(remainingArgs) == 0 {
@@ -90,13 +100,13 @@ Examples:
 	case "show":
 		err = cmdShow(ctx, client, cmdArgs, *outputJSON)
 	case "approve":
-		err = cmdApprove(ctx, cmdArgs, auditURL)
+		err = cmdApprove(ctx, cmdArgs, auditURL, creds)
 	case "deny":
-		err = cmdDeny(ctx, cmdArgs, auditURL)
+		err = cmdDeny(ctx, cmdArgs, auditURL, creds)
 	case "cancel":
 		err = cmdCancel(ctx, client, cmdArgs)
 	case "watch":
-		err = cmdWatch(ctx, client, auditURL)
+		err = cmdWatch(ctx, client, auditURL, creds)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		fs.Usage()
@@ -233,7 +243,7 @@ func cmdShow(ctx context.Context, client *audit.ApprovalClient, args []string, o
 	return nil
 }
 
-func cmdApprove(ctx context.Context, args []string, auditURL string) error {
+func cmdApprove(ctx context.Context, args []string, auditURL string, creds authCreds) error {
 	fs := flag.NewFlagSet("approve", flag.ExitOnError)
 	reason := fs.String("reason", "", "Reason for approval")
 	validFor := fs.Int("valid-for", 0, "Approval valid for N minutes (0 = no expiration)")
@@ -246,10 +256,10 @@ func cmdApprove(ctx context.Context, args []string, auditURL string) error {
 	}
 
 	approvalID := fs.Args()[0]
-	approvedBy := os.Getenv("USER")
-	if approvedBy == "" {
-		approvedBy = "operator"
-	}
+
+	// In unauthenticated mode, approved_by comes from $USER.
+	// In authenticated mode (api-key/user set), the server derives it from credentials.
+	approvedBy := creds.effectiveUser()
 
 	// Build request body
 	body := map[string]any{
@@ -263,7 +273,7 @@ func cmdApprove(ctx context.Context, args []string, auditURL string) error {
 	}
 
 	jsonBody, _ := json.Marshal(body)
-	resp, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+approvalID+"/approve", jsonBody)
+	resp, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+approvalID+"/approve", jsonBody, creds)
 	if err != nil {
 		return fmt.Errorf("approve: %w", err)
 	}
@@ -283,7 +293,7 @@ func cmdApprove(ctx context.Context, args []string, auditURL string) error {
 	return nil
 }
 
-func cmdDeny(ctx context.Context, args []string, auditURL string) error {
+func cmdDeny(ctx context.Context, args []string, auditURL string, creds authCreds) error {
 	fs := flag.NewFlagSet("deny", flag.ExitOnError)
 	reason := fs.String("reason", "", "Reason for denial (required)")
 	if err := fs.Parse(args); err != nil {
@@ -298,10 +308,7 @@ func cmdDeny(ctx context.Context, args []string, auditURL string) error {
 	}
 
 	approvalID := fs.Args()[0]
-	deniedBy := os.Getenv("USER")
-	if deniedBy == "" {
-		deniedBy = "operator"
-	}
+	deniedBy := creds.effectiveUser()
 
 	body := map[string]any{
 		"denied_by": deniedBy,
@@ -309,7 +316,7 @@ func cmdDeny(ctx context.Context, args []string, auditURL string) error {
 	}
 
 	jsonBody, _ := json.Marshal(body)
-	resp, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+approvalID+"/deny", jsonBody)
+	resp, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+approvalID+"/deny", jsonBody, creds)
 	if err != nil {
 		return fmt.Errorf("deny: %w", err)
 	}
@@ -346,7 +353,7 @@ func cmdCancel(ctx context.Context, client *audit.ApprovalClient, args []string)
 	return nil
 }
 
-func cmdWatch(ctx context.Context, client *audit.ApprovalClient, auditURL string) error {
+func cmdWatch(ctx context.Context, client *audit.ApprovalClient, auditURL string, creds authCreds) error {
 	fmt.Println("Watching for pending approvals... (press Ctrl+C to exit)")
 	fmt.Println("Enter: <ID> [reason]  to approve, or  !<ID> <reason>  to deny")
 	fmt.Println("Example: apr_abc123 looks good")
@@ -396,7 +403,7 @@ func cmdWatch(ctx context.Context, client *audit.ApprovalClient, auditURL string
 					fmt.Println("Denial requires a reason. Use: !<ID> <reason>")
 					continue
 				}
-				if err := denyApproval(ctx, id, reason, auditURL); err != nil {
+				if err := denyApproval(ctx, id, reason, auditURL, creds); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				}
 			} else {
@@ -407,7 +414,7 @@ func cmdWatch(ctx context.Context, client *audit.ApprovalClient, auditURL string
 				if len(parts) > 1 {
 					reason = strings.TrimSpace(parts[1])
 				}
-				if err := approveApproval(ctx, id, reason, auditURL); err != nil {
+				if err := approveApproval(ctx, id, reason, auditURL, creds); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				}
 			}
@@ -447,21 +454,16 @@ func showPending(ctx context.Context, client *audit.ApprovalClient, seen map[str
 	}
 }
 
-func approveApproval(ctx context.Context, id, reason, auditURL string) error {
-	approvedBy := os.Getenv("USER")
-	if approvedBy == "" {
-		approvedBy = "operator"
-	}
-
+func approveApproval(ctx context.Context, id, reason, auditURL string, creds authCreds) error {
 	body := map[string]any{
-		"approved_by": approvedBy,
+		"approved_by": creds.effectiveUser(),
 	}
 	if reason != "" {
 		body["reason"] = reason
 	}
 
 	jsonBody, _ := json.Marshal(body)
-	_, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+id+"/approve", jsonBody)
+	_, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+id+"/approve", jsonBody, creds)
 	if err != nil {
 		return err
 	}
@@ -470,19 +472,14 @@ func approveApproval(ctx context.Context, id, reason, auditURL string) error {
 	return nil
 }
 
-func denyApproval(ctx context.Context, id, reason, auditURL string) error {
-	deniedBy := os.Getenv("USER")
-	if deniedBy == "" {
-		deniedBy = "operator"
-	}
-
+func denyApproval(ctx context.Context, id, reason, auditURL string, creds authCreds) error {
 	body := map[string]any{
-		"denied_by": deniedBy,
+		"denied_by": creds.effectiveUser(),
 		"reason":    reason,
 	}
 
 	jsonBody, _ := json.Marshal(body)
-	_, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+id+"/deny", jsonBody)
+	_, err := doHTTPRequest(ctx, "POST", auditURL+"/v1/approvals/"+id+"/deny", jsonBody, creds)
 	if err != nil {
 		return err
 	}
@@ -527,12 +524,39 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-func doHTTPRequest(ctx context.Context, method, url string, body []byte) ([]byte, error) {
+// authCreds holds the credentials used to authenticate requests to auditd.
+// Exactly one of apiKey or user should be set when auth is enabled.
+type authCreds struct {
+	apiKey string // Bearer token for service-account auth
+	user   string // X-User header value for human-operator auth
+}
+
+// effectiveUser returns the best available identity string for self-reporting
+// in request bodies (used in legacy/unauthenticated mode; overridden by server
+// when auth is enabled).
+func (c authCreds) effectiveUser() string {
+	if c.user != "" {
+		return c.user
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return "operator"
+}
+
+func doHTTPRequest(ctx context.Context, method, url string, body []byte, creds authCreds) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	// Attach credentials when configured.
+	if creds.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+creds.apiKey)
+	} else if creds.user != "" {
+		req.Header.Set("X-User", creds.user)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

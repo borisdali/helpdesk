@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"log/slog"
@@ -17,6 +18,9 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
+	"helpdesk/internal/buildinfo"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
 )
 
@@ -24,6 +28,7 @@ type config struct {
 	listenAddr string
 	dbPath     string
 	socketPath string
+	usersFile  string // optional; enables role-based auth on approve/deny/cancel
 
 	// Approval notification configuration
 	approvalWebhook  string
@@ -40,6 +45,7 @@ func main() {
 	flag.StringVar(&cfg.listenAddr, "listen", envOrDefault("HELPDESK_AUDIT_ADDR", ":1199"), "HTTP listen address")
 	flag.StringVar(&cfg.dbPath, "db", envOrDefault("HELPDESK_AUDIT_DB", "audit.db"), "Path to SQLite database")
 	flag.StringVar(&cfg.socketPath, "socket", envOrDefault("HELPDESK_AUDIT_SOCKET", "/tmp/helpdesk-audit.sock"), "Unix socket for real-time notifications")
+	flag.StringVar(&cfg.usersFile, "users-file", envOrDefault("HELPDESK_USERS_FILE", ""), "Path to users.yaml for role-based auth on approve/deny endpoints (optional)")
 
 	// Approval notification flags
 	flag.StringVar(&cfg.approvalWebhook, "approval-webhook", envOrDefault("HELPDESK_APPROVAL_WEBHOOK", ""), "Webhook URL for approval notifications (Slack, etc.)")
@@ -85,6 +91,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create fleet store (shares the same database connection)
+	fleetStore, err := audit.NewFleetStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create fleet store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create approval notifier if configured
 	// Default baseURL to the listen address if not specified
 	baseURL := *approvalBaseURL
@@ -108,45 +121,107 @@ func main() {
 			"email", cfg.smtpHost != "" && cfg.emailTo != "")
 	}
 
+	// Build identity provider. Defaults to NoAuthProvider (dev mode) when no
+	// users file is configured. StaticProvider enables role-based auth.
+	var idProvider identity.Provider = &identity.NoAuthProvider{}
+	enforcing := cfg.usersFile != ""
+	if cfg.usersFile != "" {
+		p, err := identity.NewStaticProvider(cfg.usersFile)
+		if err != nil {
+			slog.Error("failed to load users file", "path", cfg.usersFile, "err", err)
+			os.Exit(1)
+		}
+		idProvider = p
+		slog.Info("role-based authorization enabled", "users_file", cfg.usersFile)
+	}
+
+	// Build central authorizer.
+	authzr := authz.NewAuthorizer(authz.DefaultAuditdPermissions, enforcing)
+	slog.Info("authorization configured", "enforcing", enforcing)
+
+	// auth wraps a handler with per-pattern identity resolution and authorization.
+	// The pattern is captured at registration time so r.Pattern need not be set.
+	auth := func(pattern string, h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			principal, err := idProvider.Resolve(r)
+			if err != nil {
+				http.Error(w, "authentication failed: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+			if authErr := authzr.Authorize(pattern, principal); authErr != nil {
+				status := http.StatusForbidden
+				if errors.Is(authErr, authz.ErrUnauthorized) {
+					status = http.StatusUnauthorized
+				}
+				slog.Info("authz: request denied",
+					"pattern", pattern,
+					"principal", principal.EffectiveID(),
+					"anonymous", principal.IsAnonymous(),
+					"err", authErr)
+				http.Error(w, authErr.Error(), status)
+				return
+			}
+			h(w, r.WithContext(authz.WithPrincipal(r.Context(), principal)))
+		}
+	}
+
 	srv := &server{store: store}
-	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier}
+	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier, authorizer: authzr}
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
+	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
 
 	// Audit event endpoints
-	mux.HandleFunc("POST /v1/events", srv.handleRecordEvent)
-	mux.HandleFunc("POST /v1/events/{eventID}/outcome", srv.handleRecordOutcome)
-	mux.HandleFunc("GET /v1/events", srv.handleQueryEvents)
-	mux.HandleFunc("GET /v1/verify", srv.handleVerifyChain)
+	mux.HandleFunc("POST /v1/events", auth("POST /v1/events", srv.handleRecordEvent))
+	mux.HandleFunc("POST /v1/events/{eventID}/outcome", auth("POST /v1/events/{eventID}/outcome", srv.handleRecordOutcome))
+	mux.HandleFunc("GET /v1/events", auth("GET /v1/events", srv.handleQueryEvents))
+	mux.HandleFunc("GET /v1/verify", auth("GET /v1/verify", srv.handleVerifyChain))
 
 	// Approval endpoints
-	mux.HandleFunc("POST /v1/approvals", approvalSrv.handleCreateApproval)
-	mux.HandleFunc("GET /v1/approvals", approvalSrv.handleListApprovals)
-	mux.HandleFunc("GET /v1/approvals/pending", approvalSrv.handlePendingApprovals)
-	mux.HandleFunc("GET /v1/approvals/{approvalID}", approvalSrv.handleGetApproval)
-	mux.HandleFunc("GET /v1/approvals/{approvalID}/wait", approvalSrv.handleWaitForApproval)
-	mux.HandleFunc("POST /v1/approvals/{approvalID}/approve", approvalSrv.handleApprove)
-	mux.HandleFunc("POST /v1/approvals/{approvalID}/deny", approvalSrv.handleDeny)
-	mux.HandleFunc("POST /v1/approvals/{approvalID}/cancel", approvalSrv.handleCancel)
+	mux.HandleFunc("POST /v1/approvals", auth("POST /v1/approvals", approvalSrv.handleCreateApproval))
+	mux.HandleFunc("GET /v1/approvals", auth("GET /v1/approvals", approvalSrv.handleListApprovals))
+	mux.HandleFunc("GET /v1/approvals/pending", auth("GET /v1/approvals/pending", approvalSrv.handlePendingApprovals))
+	mux.HandleFunc("GET /v1/approvals/{approvalID}", auth("GET /v1/approvals/{approvalID}", approvalSrv.handleGetApproval))
+	mux.HandleFunc("GET /v1/approvals/{approvalID}/wait", auth("GET /v1/approvals/{approvalID}/wait", approvalSrv.handleWaitForApproval))
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/approve", auth("POST /v1/approvals/{approvalID}/approve", approvalSrv.handleApprove))
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/deny", auth("POST /v1/approvals/{approvalID}/deny", approvalSrv.handleDeny))
+	mux.HandleFunc("POST /v1/approvals/{approvalID}/cancel", auth("POST /v1/approvals/{approvalID}/cancel", approvalSrv.handleCancel))
 
 	// Governance endpoints
-	mux.HandleFunc("GET /v1/governance/info", govSrv.handleGetInfo)
-	mux.HandleFunc("GET /v1/governance/policies", govSrv.handleGetPolicySummary)
-	mux.HandleFunc("GET /v1/governance/explain", govSrv.handleExplain)
-	mux.HandleFunc("POST /v1/governance/check", govSrv.handlePolicyCheck)
-	mux.HandleFunc("GET /v1/events/{eventID}", govSrv.handleGetEvent)
+	mux.HandleFunc("GET /v1/governance/info", auth("GET /v1/governance/info", govSrv.handleGetInfo))
+	mux.HandleFunc("GET /v1/governance/policies", auth("GET /v1/governance/policies", govSrv.handleGetPolicySummary))
+	mux.HandleFunc("GET /v1/governance/explain", auth("GET /v1/governance/explain", govSrv.handleExplain))
+	mux.HandleFunc("POST /v1/governance/check", auth("POST /v1/governance/check", govSrv.handlePolicyCheck))
+	mux.HandleFunc("GET /v1/events/{eventID}", auth("GET /v1/events/{eventID}", govSrv.handleGetEvent))
 
 	// Journey endpoint
-	mux.HandleFunc("GET /v1/journeys", srv.handleQueryJourneys)
+	mux.HandleFunc("GET /v1/journeys", auth("GET /v1/journeys", srv.handleQueryJourneys))
 
 	// Govbot compliance history endpoints
-	mux.HandleFunc("POST /v1/govbot/runs", govbotSrv.handleSaveRun)
-	mux.HandleFunc("GET /v1/govbot/runs", govbotSrv.handleGetRuns)
+	mux.HandleFunc("POST /v1/govbot/runs", auth("POST /v1/govbot/runs", govbotSrv.handleSaveRun))
+	mux.HandleFunc("GET /v1/govbot/runs", auth("GET /v1/govbot/runs", govbotSrv.handleGetRuns))
+
+	// Fleet runner job tracking endpoints
+	mux.HandleFunc("POST /v1/fleet/jobs", auth("POST /v1/fleet/jobs", fleetSrv.handleCreateJob))
+	mux.HandleFunc("GET /v1/fleet/jobs", auth("GET /v1/fleet/jobs", fleetSrv.handleListJobs))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}", auth("GET /v1/fleet/jobs/{jobID}", fleetSrv.handleGetJob))
+	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/status", auth("PATCH /v1/fleet/jobs/{jobID}/status", fleetSrv.handleUpdateStatus))
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers", auth("POST /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleAddServer))
+	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}", auth("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}", fleetSrv.handleUpdateServer))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers", auth("GET /v1/fleet/jobs/{jobID}/servers", fleetSrv.handleGetServers))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers/{serverName}", auth("GET /v1/fleet/jobs/{jobID}/servers/{serverName}", fleetSrv.handleGetServer))
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleAddServerStep))
+	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", auth("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", fleetSrv.handleUpdateServerStep))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleGetServerSteps))
+
+	// Fleet job approval endpoints
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/approval", auth("POST /v1/fleet/jobs/{jobID}/approval", fleetSrv.handleCreateJobApproval))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/approval/{approvalID}", auth("GET /v1/fleet/jobs/{jobID}/approval/{approvalID}", fleetSrv.handleGetJobApproval))
 
 	// Health endpoint
-	mux.HandleFunc("GET /health", srv.handleHealth)
+	mux.HandleFunc("GET /health", auth("GET /health", srv.handleHealth))
 
 	httpServer := &http.Server{
 		Addr:         cfg.listenAddr,
@@ -176,6 +251,7 @@ func main() {
 		backend = "postgres"
 	}
 	slog.Info("audit service starting",
+		"version", buildinfo.Version,
 		"listen", cfg.listenAddr,
 		"db", cfg.dbPath,
 		"backend", backend,
@@ -305,12 +381,17 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 		opts.ActionClass = audit.ActionClass(v)
 	}
 	if v := r.URL.Query().Get("since"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			opts.Since = t
+		} else if t, err := time.Parse(time.RFC3339, v); err == nil {
 			opts.Since = t
 		}
 	}
 	if v := r.URL.Query().Get("outcome_status"); v != "" {
 		opts.OutcomeStatus = v
+	}
+	if v := r.URL.Query().Get("origin"); v != "" {
+		opts.Origin = v
 	}
 
 	events, err := s.store.Query(r.Context(), opts)
@@ -369,6 +450,12 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("trace_id"); v != "" {
 		opts.TraceID = v
 	}
+	if v := q.Get("trace_id_prefix"); v != "" {
+		opts.TraceIDPrefix = v
+	}
+	if v := q.Get("origin"); v != "" {
+		opts.Origin = v
+	}
 
 	journeys, err := s.store.QueryJourneys(r.Context(), opts)
 	if err != nil {
@@ -395,7 +482,7 @@ func (s *server) handleVerifyChain(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": buildinfo.Version})
 }
 
 // envOrDefault returns the value of the environment variable named by key,

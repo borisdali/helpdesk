@@ -41,7 +41,12 @@ func render(t *testing.T, setFlags ...string) map[string]map[string]any {
 
 	args := []string{"template", "test", chartPath(t)}
 	for _, f := range setFlags {
-		args = append(args, "--set", f)
+		// Entries prefixed with "setjson:" are passed as --set-json instead of --set.
+		if strings.HasPrefix(f, "setjson:") {
+			args = append(args, "--set-json", strings.TrimPrefix(f, "setjson:"))
+		} else {
+			args = append(args, "--set", f)
+		}
 	}
 	out, err := exec.Command("helm", args...).CombinedOutput()
 	if err != nil {
@@ -493,5 +498,84 @@ func TestGatewayService(t *testing.T) {
 	portNum, _ := port["port"].(int)
 	if portNum != 9999 {
 		t.Errorf("gateway Service port: want 9999, got %v", portNum)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fleet Runner
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestFleetRunnerDisabledByDefault verifies that no CronJob is rendered when
+// fleetRunner.scheduledJobs is empty (the default).
+func TestFleetRunnerDisabledByDefault(t *testing.T) {
+	objects := render(t)
+	for key := range objects {
+		if strings.HasPrefix(key, "CronJob/") && strings.Contains(key, "fleet") {
+			t.Errorf("unexpected fleet CronJob %q with default values (scheduledJobs is empty)", key)
+		}
+	}
+}
+
+// TestFleetRunnerScheduledJob verifies that a scheduledJobs entry generates
+// both a ConfigMap (job definition) and a CronJob with the correct schedule
+// and container wiring.
+func TestFleetRunnerScheduledJob(t *testing.T) {
+	objects := render(t,
+		"fleetRunner.scheduledJobs[0].name=vacuum-all",
+		"fleetRunner.scheduledJobs[0].schedule=0 3 * * *",
+		`setjson:fleetRunner.scheduledJobs[0].definition={"name":"vacuum-all","targets":{"tags":["prod"]},"change":{"steps":[{"agent":"database","tool":"get_status_summary"}]}}`,
+	)
+
+	// ConfigMap must exist with the job definition embedded.
+	cm, ok := objects["ConfigMap/test-fleet-job-vacuum-all"]
+	if !ok {
+		t.Fatal("ConfigMap/test-fleet-job-vacuum-all not found")
+	}
+	data, _ := cm["data"].(map[string]any)
+	if _, ok := data["job.json"]; !ok {
+		t.Error("ConfigMap missing job.json key")
+	}
+
+	// CronJob must exist with correct schedule and container.
+	cj, ok := objects["CronJob/test-fleet-vacuum-all"]
+	if !ok {
+		t.Fatal("CronJob/test-fleet-vacuum-all not found")
+	}
+
+	spec, _ := cj["spec"].(map[string]any)
+	if schedule, _ := spec["schedule"].(string); schedule != "0 3 * * *" {
+		t.Errorf("schedule = %q, want \"0 3 * * *\"", schedule)
+	}
+
+	// CronJob must mount the per-job ConfigMap as the job-definition volume.
+	jobTemplate, _ := spec["jobTemplate"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	podTemplate, _ := jobSpec["template"].(map[string]any)
+	podSpec, _ := podTemplate["spec"].(map[string]any)
+
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("no containers in fleet-runner CronJob pod spec")
+	}
+	container, _ := containers[0].(map[string]any)
+	if name, _ := container["name"].(string); name != "fleet-runner" {
+		t.Errorf("container name = %q, want fleet-runner", name)
+	}
+
+	// job-definition volume must reference the per-job ConfigMap, not a shared one.
+	volumes, _ := podSpec["volumes"].([]any)
+	var jobDefVolume map[string]any
+	for _, v := range volumes {
+		vol, _ := v.(map[string]any)
+		if vol["name"] == "job-definition" {
+			jobDefVolume = vol
+		}
+	}
+	if jobDefVolume == nil {
+		t.Fatal("job-definition volume not found in pod spec")
+	}
+	cmRef, _ := jobDefVolume["configMap"].(map[string]any)
+	if cmName, _ := cmRef["name"].(string); cmName != "test-fleet-job-vacuum-all" {
+		t.Errorf("job-definition volume configMap name = %q, want test-fleet-job-vacuum-all", cmName)
 	}
 }

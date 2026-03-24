@@ -10,32 +10,41 @@ func TestClassifyTool(t *testing.T) {
 		// Database read operations
 		{"check_connection", ActionRead},
 		{"get_server_info", ActionRead},
-		{"list_databases", ActionRead},
-		{"get_running_queries", ActionRead},
-		{"explain_query", ActionRead},
+		{"get_database_info", ActionRead},
+		{"get_active_connections", ActionRead},
+		{"get_connection_stats", ActionRead},
+		{"get_database_stats", ActionRead},
+		{"get_config_parameter", ActionRead},
+		{"get_replication_status", ActionRead},
+		{"get_lock_info", ActionRead},
+		{"get_table_stats", ActionRead},
+		{"get_session_info", ActionRead},
 
 		// Database write operations
-		{"run_query", ActionWrite},
-		{"vacuum_table", ActionWrite},
-		{"reindex_table", ActionWrite},
 		{"cancel_query", ActionWrite},
 
 		// Database destructive operations
-		{"kill_query", ActionDestructive},
-		{"alter_config", ActionDestructive},
 		{"terminate_connection", ActionDestructive},
 		{"terminate_idle_connections", ActionDestructive},
 
 		// Kubernetes read operations
 		{"get_pods", ActionRead},
 		{"get_pod_logs", ActionRead},
+		{"get_service", ActionRead},
+		{"describe_service", ActionRead},
+		{"get_endpoints", ActionRead},
+		{"get_nodes", ActionRead},
+		{"get_events", ActionRead},
 		{"describe_pod", ActionRead},
 
 		// Kubernetes destructive operations
 		{"scale_deployment", ActionDestructive},
 		{"restart_deployment", ActionDestructive},
 		{"delete_pod", ActionDestructive},
-		{"drain_node", ActionDestructive},
+
+		// Incident agent
+		{"create_incident_bundle", ActionRead},
+		{"list_incidents", ActionRead},
 
 		// Unknown
 		{"unknown_tool", ActionUnknown},

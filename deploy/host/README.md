@@ -1,6 +1,8 @@
 # aiHelpDesk: Host Deployment (Binary Tarball)
 
-This guide covers running aiHelpDesk directly on a host — a Linux or macOS machine — without Docker or Kubernetes. All binaries are statically compiled and have no external runtime dependencies beyond `psql` and `kubectl` (only needed by the database and K8s agents at query time).
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+
+This guide covers running aiHelpDesk directly on a host — a Linux or macOS machine — without Docker or Kubernetes. All binaries are statically compiled and have no external runtime dependencies beyond `psql` and `kubectl` (only needed by the database and K8s agents at query time). This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host inside Docker containers (via Docker Compose) or on K8s.
 
 ## 1. What's in the Tarball
 
@@ -13,6 +15,7 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── users.example.yaml          # Identity & access template (static provider)
 │
 ├── helpdesk                    # Interactive Orchestrator (multi-agent REPL)
+├── helpdesk-client             # Authenticated gateway CLI (operators, scripts, CI)
 ├── gateway                     # REST API Gateway
 ├── database-agent              # PostgreSQL diagnostics agent
 ├── k8s-agent                   # Kubernetes diagnostics agent
@@ -43,7 +46,15 @@ cp .env.example .env
 cp infrastructure.json.example infrastructure.json
 # Edit infrastructure.json with your database servers, K8s clusters, and VMs
 
-# 4. Start everything
+# 4. (Optional) Configure authn (users.yaml or JWT)
+cp users.example.yaml. users.yaml
+
+# 5. (Optional) Configure policies
+cp policies.example.yaml policies.yaml
+
+# 6. (Optional) Prepare/Copy .pgpass
+
+# 7. Start everything
 ./startall.sh
 ```
 
@@ -117,11 +128,20 @@ HELPDESK_INFRA_CONFIG=./infrastructure.json
 # Start agents + gateway, then open the interactive REPL
 ./startall.sh
 
-# Start agents + gateway only (headless — no REPL)
-./startall.sh --no-repl
+# Enterprise: governed read-only (audit + policy required, mutations blocked)
+./startall.sh --readonly-governed --services-only
+
+# Enterprise: governed read-only + real-time monitoring (auditor + secbot)
+./startall.sh --readonly-governed --services-only --governance
+
+# Enterprise: full governed mode (mutations enabled, requires fix mode config)
+./startall.sh --services-only
 
 # Start with real-time governance monitoring (auditor + secbot)
 ./startall.sh --governance
+
+# Attach the CLI to already-running services (enterprise headless deployments)
+./startall.sh --cli
 
 # Stop all running helpdesk processes
 ./startall.sh --stop
@@ -135,12 +155,52 @@ tail -f /tmp/helpdesk-auditd.log
 tail -f /tmp/helpdesk-gateway.log
 ```
 
-## 6. Headless / API Mode
+## 6. Using helpdesk-client
 
-To use the REST Gateway API without the interactive REPL. See [API.md](../../docs/API.md) for the full endpoint reference.
+`helpdesk-client` is the recommended operator interface. It connects to the gateway over HTTP and provides both an interactive REPL and a one-shot query mode. Every query carries a verified identity and declared purpose in the audit trail — replacing ad-hoc interactive sessions with a traceable, authenticated connection.
+
+The binary is included in the tarball. Start the stack first:
 
 ```bash
-./startall.sh --no-repl &
+./startall.sh --services-only &
+```
+
+Then in another terminal:
+
+```bash
+# Interactive REPL (prompts for queries until you type "exit" or Ctrl-C)
+./helpdesk-client --purpose diagnostic
+
+# One-shot query
+./helpdesk-client --agent database --purpose diagnostic \
+  --message "Check replication lag on prod-db"
+
+# Target a different agent
+./helpdesk-client --agent k8s --purpose remediation \
+  --message "Are there any crashlooping pods in the payments namespace?"
+
+# With authentication (static identity provider)
+./helpdesk-client --user alice@example.com --api-key sk-... --purpose diagnostic
+```
+
+Set defaults in `.env` (sourced automatically by `startall.sh`) to avoid repeating flags:
+
+```bash
+HELPDESK_GATEWAY_URL=http://localhost:8080
+HELPDESK_CLIENT_USER=alice@example.com
+HELPDESK_CLIENT_API_KEY=sk-...
+HELPDESK_SESSION_PURPOSE=diagnostic
+HELPDESK_CLIENT_AGENT=database
+```
+
+See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, all purpose values, and per-agent examples.
+
+## 6.1 Headless / API Mode
+
+For programmatic access via raw HTTP. See [API.md](../../docs/API.md) for the full endpoint reference.
+
+```bash
+./startall.sh --services-only &
 
 # Query via the Gateway
 curl -s http://localhost:8080/api/v1/agents | jq .
@@ -169,11 +229,20 @@ HELPDESK_POLICY_ENABLED=true
 HELPDESK_POLICY_FILE=./policies.yaml   # copy and edit policies.example.yaml
 ```
 
-To require all governance modules (audit, policy, approvals, guardrails) to be active before agents will start, set:
+To require all governance modules (audit, policy, guardrails) to be active before agents will start, choose one of the governed modes:
 
 ```bash
+# Governed read-only — audit + policy required, mutations unconditionally blocked.
+# Recommended for initial enterprise deployments: observe before you act.
+HELPDESK_OPERATING_MODE=readonly-governed
+
+# Full governed mode — same governance requirements as above, plus mutations are
+# permitted (subject to policy + approval workflows).
 HELPDESK_OPERATING_MODE=fix
 ```
+
+`startall.sh --readonly-governed` sets `HELPDESK_OPERATING_MODE=readonly-governed` and
+defaults `HELPDESK_AUDIT_ENABLED=true` and `HELPDESK_POLICY_ENABLED=true` automatically.
 
 ### 7.2 Policy Configuration
 
@@ -424,6 +493,65 @@ Key flags:
 | `-dry-run` | `false` | Log alerts without creating incidents |
 | `-verbose` | `false` | Log every received audit event |
 
+### 7.10 Running the Fleet Runner (fleet-runner)
+
+`fleet-runner` applies a multi-step sequence across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It is a one-shot CLI binary — run it from the directory where your `infrastructure.json` and `.env` reside while the stack is up.
+
+```bash
+# Dry-run first: see which servers will be targeted and in which stage
+./fleet-runner \
+  --job-file jobs/vacuum-prod.json \
+  --dry-run
+
+# Execute the job
+./fleet-runner \
+  --job-file jobs/vacuum-prod.json \
+  --gateway http://localhost:8080 \
+  --audit-url http://localhost:1199 \
+  --api-key $(cat .fleet-runner-key)
+
+# Override strategy from the command line
+./fleet-runner \
+  --job-file jobs/vacuum-prod.json \
+  --canary 2 \
+  --wave-size 5 \
+  --pause 60
+```
+
+Set defaults in `.env` to avoid repeating flags:
+
+```bash
+HELPDESK_GATEWAY_URL=http://localhost:8080
+HELPDESK_AUDIT_URL=http://localhost:1199
+HELPDESK_CLIENT_API_KEY=<fleet-runner-api-key>   # see note below
+HELPDESK_INFRA_CONFIG=./infrastructure.json
+```
+
+> **Each service account must have its own unique API key.** Generate a
+> dedicated key for fleet-runner — do not reuse srebot's or secbot's key.
+> The identity provider matches on the first account whose hash verifies
+> (non-deterministic map order), so a shared key resolves to whichever
+> account happens to come first, breaking the audit trail and policy matching.
+>
+> ```bash
+> openssl rand -hex 32 | tee .fleet-runner-key   # save this as HELPDESK_CLIENT_API_KEY
+> ./hashapikey < .fleet-runner-key               # paste hash into users.yaml fleet-runner entry
+> ```
+
+**Generating a job definition from natural language:** Set `ANTHROPIC_API_KEY` in `.env` and use the gateway planner:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "check connection health on all production databases"}' \
+  | jq -r '.job_def_raw' > jobs/health-check.json
+
+# Or with helpdesk-client:
+./helpdesk-client --plan-fleet-job "check connection health on all production databases"
+```
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.
+
 ## 8. Troubleshooting
 
 ### Port already in use
@@ -444,7 +572,7 @@ Check the log:
 cat /tmp/helpdesk-database-agent.log
 ```
 
-Common causes: missing `HELPDESK_MODEL_VENDOR`/`HELPDESK_API_KEY`, `HELPDESK_OPERATING_MODE=fix` with governance not fully configured, or `psql`/`kubectl` not on `PATH`.
+Common causes: missing `HELPDESK_MODEL_VENDOR`/`HELPDESK_API_KEY`, a governed operating mode (`readonly-governed` or `fix`) with governance not fully configured, or `psql`/`kubectl` not on `PATH`.
 
 ### approvals / govexplain: "audit service URL required"
 

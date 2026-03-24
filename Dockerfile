@@ -11,6 +11,7 @@ FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
 
 WORKDIR /src
 
@@ -27,22 +28,24 @@ RUN go mod edit -replace google.golang.org/adk=/src/adk-go
 
 # Download dependencies and build all binaries.
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/database-agent  ./agents/database/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/k8s-agent       ./agents/k8s/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/incident-agent  ./agents/incident/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/research-agent  ./agents/research/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/gateway         ./cmd/gateway/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/helpdesk        ./cmd/helpdesk/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/srebot          ./cmd/srebot/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/database-agent  ./agents/database/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/k8s-agent       ./agents/k8s/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/incident-agent  ./agents/incident/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/research-agent  ./agents/research/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/gateway         ./cmd/gateway/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/helpdesk        ./cmd/helpdesk/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/helpdesk-client ./cmd/helpdesk-client/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/srebot          ./cmd/srebot/
 
 # AI Governance tools
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/auditd          ./cmd/auditd/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/auditor         ./cmd/auditor/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/approvals       ./cmd/approvals/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/secbot          ./cmd/secbot/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/govbot          ./cmd/govbot/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/govexplain     ./cmd/govexplain/
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/hashapikey    ./cmd/hashapikey/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/auditd          ./cmd/auditd/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/auditor         ./cmd/auditor/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/approvals       ./cmd/approvals/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/secbot          ./cmd/secbot/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/govbot          ./cmd/govbot/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/govexplain     ./cmd/govexplain/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/hashapikey    ./cmd/hashapikey/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/fleet-runner  ./cmd/fleet-runner/
 
 # Pre-create runtime directories here so the runtime stage needs no RUN mkdir.
 # This avoids QEMU emulation requirements for cross-platform runtime-stage builds.
@@ -82,6 +85,7 @@ COPY --from=builder /out/incident-agent  /usr/local/bin/incident-agent
 COPY --from=builder /out/research-agent  /usr/local/bin/research-agent
 COPY --from=builder /out/gateway         /usr/local/bin/gateway
 COPY --from=builder /out/helpdesk        /usr/local/bin/helpdesk
+COPY --from=builder /out/helpdesk-client /usr/local/bin/helpdesk-client
 COPY --from=builder /out/srebot          /usr/local/bin/srebot
 
 # AI Governance tools
@@ -92,6 +96,7 @@ COPY --from=builder /out/secbot          /usr/local/bin/secbot
 COPY --from=builder /out/govbot          /usr/local/bin/govbot
 COPY --from=builder /out/govexplain      /usr/local/bin/govexplain
 COPY --from=builder /out/hashapikey     /usr/local/bin/hashapikey
+COPY --from=builder /out/fleet-runner   /usr/local/bin/fleet-runner
 
 # Directories and sample policy file (pre-created in builder to avoid RUN in runtime stage).
 COPY --from=builder /out/data            /data

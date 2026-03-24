@@ -167,6 +167,7 @@ type ApprovalListOptions struct {
 	AgentName   string
 	TraceID     string
 	RequestedBy string
+	ToolName    string
 	Limit       int
 }
 
@@ -184,6 +185,9 @@ func (c *ApprovalClient) ListApprovals(ctx context.Context, opts ApprovalListOpt
 	}
 	if opts.RequestedBy != "" {
 		q.Set("requested_by", opts.RequestedBy)
+	}
+	if opts.ToolName != "" {
+		q.Set("tool_name", opts.ToolName)
 	}
 	if opts.Limit > 0 {
 		q.Set("limit", fmt.Sprintf("%d", opts.Limit))
@@ -250,6 +254,48 @@ func (c *ApprovalClient) CheckExistingApproval(ctx context.Context, traceID, too
 	}
 
 	return nil, nil // No valid approval found
+}
+
+// FindApprovalByTool looks for a recent approval (approved or pending) for the given
+// tool+agent combination, independent of trace ID. Used for cross-turn continuity:
+// the trace ID changes each request, so tool-based lookup is needed to reuse or
+// surface an existing approval when the user retries on a new turn.
+//
+// Returns the first matching approved approval (not expired), OR the first pending
+// approval if no approved one is found. Returns nil when nothing is found.
+func (c *ApprovalClient) FindApprovalByTool(ctx context.Context, toolName, agentName string) (*StoredApproval, error) {
+	// Check for an approved, still-valid approval first.
+	approved, err := c.ListApprovals(ctx, ApprovalListOptions{
+		Status:    "approved",
+		AgentName: agentName,
+		ToolName:  toolName,
+		Limit:     5,
+	})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	for _, a := range approved {
+		if a.ApprovalValidUntil.IsZero() || a.ApprovalValidUntil.After(now) {
+			return &a, nil
+		}
+	}
+
+	// Fall back to a pending approval (so we can surface its ID instead of creating a duplicate).
+	pending, err := c.ListApprovals(ctx, ApprovalListOptions{
+		Status:    "pending",
+		AgentName: agentName,
+		ToolName:  toolName,
+		Limit:     1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) > 0 {
+		return &pending[0], nil
+	}
+
+	return nil, nil
 }
 
 // RequestApprovalAndWait creates an approval request and waits for resolution.

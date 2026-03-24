@@ -151,6 +151,49 @@ User -> What databases do you manage?
 
 ---
 
+## run-fleet-job.sh
+
+Runs a fleet job ad-hoc in the cluster — no local `fleet-runner` binary required. The script auto-detects the image and service endpoints from the running Helm release, creates a temporary ConfigMap + Job, streams the logs, and cleans up on exit.
+
+Use this for one-off rollouts, manual re-runs, or testing a job definition before scheduling it as a CronJob via `fleetRunner.scheduledJobs` in `values.yaml`.
+
+### Usage
+
+```bash
+./scripts/run-fleet-job.sh [OPTIONS] <job-file.json>
+
+Options:
+  -n, --namespace   NS       Kubernetes namespace    (default: helpdesk-system)
+  -r, --release     NAME     Helm release name       (default: helpdesk)
+  --dry-run                  Plan only — no execution
+  --api-key         KEY      API key (plaintext)
+  --api-key-secret  SECRET   Name of K8s Secret with an "api-key" key
+  --canary          N        Override strategy.canary_count
+  --wave-size       N        Override strategy.wave_size
+  --pause           N        Override strategy.wave_pause_seconds (seconds)
+```
+
+### Example
+
+```bash
+# Dry run first
+./scripts/run-fleet-job.sh --dry-run my-job.json
+
+# Live run with API key from an existing K8s secret
+./scripts/run-fleet-job.sh \
+  --namespace helpdesk-system \
+  --api-key-secret helpdesk-fleet-runner-key \
+  my-job.json
+```
+
+### Prerequisites
+
+- `kubectl` and `jq` installed and `kubectl` configured with cluster access
+- The Helm release must be running in the target namespace (the script reads the image and service ports from it)
+- The `infrastructure.json` ConfigMap (`<release>-config`) must be present
+
+---
+
 ## When to Use Which Script
 
 | Scenario | Recommended Script |
@@ -161,6 +204,8 @@ User -> What databases do you manage?
 | Complex troubleshooting sessions | `k8s-local-repl.sh` |
 | Container environment (Docker/K8s) | `gateway-repl.sh` |
 | Full orchestrator features | `k8s-local-repl.sh` |
+| Ad-hoc fleet rollout in K8s | `run-fleet-job.sh` |
+| Recurring scheduled fleet rollout | Helm `fleetRunner.scheduledJobs` |
 
 ---
 

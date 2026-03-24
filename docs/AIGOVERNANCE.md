@@ -132,17 +132,38 @@ See [here](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) for de
 | **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
 | **Non-invasive** | Read delegations are verified but never flagged as mismatch |
 
-**Coverage and gaps:**
+**Coverage:**
 
 | Session path | Layer 1 | Layer 2 |
 |---|---|---|
 | Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify |
-| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ⚠️ no inter-agent verification (Gateway callers are not Orchestrators) |
+| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ✅ `client.VerifyTrace` (see below) |
 | Read-only tool output content | — | ⚠️ content fabrication not detected (structural gap) |
 
-The Layer 2 gap for Gateway-direct calls is a known limitation. A future SDK
-giving upstream callers access to the audit trail (trace_id → confirmed tools)
-could provide equivalent structural verification at the Gateway boundary.
+**`client.VerifyTrace` — Layer 2 at the Gateway boundary:**
+
+`internal/client` exposes `Client.VerifyTrace(ctx, traceID, since)`, which gives
+any upstream caller (helpdesk-client, fleet-runner, or a custom integration)
+independent access to the same audit trail the Orchestrator uses:
+
+```go
+verif, err := c.VerifyTrace(ctx, resp.TraceID, queryStart)
+// verif.ToolsConfirmed       — every tool confirmed in the audit trail
+// verif.WriteConfirmed       — write-class tools
+// verif.DestructiveConfirmed — destructive-class tools
+// verif.HasMutations()       — true when any write or destructive tool ran
+```
+
+The method queries `GET /v1/events?event_type=tool_execution&trace_id=X&since=T`
+directly on auditd, retries once after 200 ms for async propagation, and returns
+`nil, nil` when `AuditURL` is not configured (verification is opt-in).
+
+**Configuration:** set `HELPDESK_AUDIT_URL` (or `Config.AuditURL` / `--audit-url` flag).
+
+**helpdesk-client** prints an `[audit: ...]` confirmation line after every query
+when connected to auditd. **fleet-runner** calls `VerifyTrace` after each step
+and logs `mismatch=true` when a write or destructive tool was expected but not
+confirmed in the trail.
 
 For full implementation details, unit test coverage, and the investigation
 workflow when a mismatch is detected, see:
@@ -169,6 +190,7 @@ behavior of the components):
 | 8 | [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
 | 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
+| — | [Fleet Management](FLEET.md) | **Implemented** | Staged rollout (`fleet-runner`) with canary/wave strategy, approval gating, per-step audit trail, and NL fleet planner; governance-integrated throughout (policy enforcement, `fleet_rollout` purpose, service-account identity) |
 | ?? | Rollback & Undo | Planned | Recovery from mistakes |
 
 ---
@@ -1083,7 +1105,16 @@ decisions are as important to explain as denied ones.
 | `action` | yes | `read`, `write`, `destructive` |
 | `tags` | no | Comma-separated tags, e.g. `production,critical` |
 | `user_id` | no | Evaluate as a specific user |
+| `service` | no | Evaluate as a service account (e.g. `fleet-runner`) |
 | `role` | no | Evaluate with a specific role |
+| `purpose` | no | Declared purpose (e.g. `fleet_rollout`, `remediation`, `emergency`) |
+
+When called through the Gateway (`GET /api/v1/governance/explain`), the
+caller's own resolved identity and purpose are automatically injected as
+defaults for `user_id`, `service`, `role`, and `purpose` — any explicitly
+supplied values override them. This means a fleet-runner service account can
+call the explain endpoint with its own Bearer token and get an accurate policy
+evaluation without supplying identity parameters manually.
 
 #### 9.5.2 Response format (both endpoints)
 
@@ -1284,6 +1315,7 @@ date  # Check current local time
 
 ### 12.3 Phase 3: Operations (In Progress)
 - [x] **Identity & access** — three-dimension access control: verified identity (static/JWT providers), data sensitivity markings, and purpose-based conditions. See [§10](#10-identity--access) and [docs/IDENTITY.md](IDENTITY.md).
+- [x] **Fleet management** — `fleet-runner` CLI for staged rollouts across infrastructure fleets. Canary → wave strategy with circuit breaker, multi-step job sequences, approval gating for write/destructive jobs, NL fleet planner, Tool Registry, semantic tool error detection (HTTP 422 on `---\nERROR —` marker). Full governance integration: policy enforcement per tool call, `fleet_rollout` purpose, service-account identity, per-step audit trail. See [docs/FLEET.md](FLEET.md).
 - [ ] **Rollback & Undo** — recovery from agent-initiated mutations. Design pending.
 - [ ] Rate limits (write frequency per session)
 - [ ] Circuit breaker (auto-pause on consecutive errors)

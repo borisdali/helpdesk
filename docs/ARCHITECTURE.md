@@ -575,25 +575,34 @@ failures are logged but do not affect the tool result.
 For consumers that prefer plain REST API over JSON-RPC, the optional REST Gateway
 (`cmd/gateway/`) provides HTTP endpoints that proxy to the A2A sub-agents:
 
-| Method | Endpoint                                  | Description                              |
-|--------|-------------------------------------------|------------------------------------------|
-| GET    | `/api/v1/agents`                          | List discovered agents + cards           |
-| POST   | `/api/v1/query`                           | Send natural language message to an agent |
-| POST   | `/api/v1/incidents`                       | Create incident bundle                   |
-| GET    | `/api/v1/incidents`                       | List incident bundles                    |
-| POST   | `/api/v1/db/{tool}`                       | Call database agent tool                 |
-| POST   | `/api/v1/k8s/{tool}`                      | Call K8s agent tool                      |
-| POST   | `/api/v1/research`                        | Web research query                       |
-| GET    | `/api/v1/infrastructure`                  | Infrastructure inventory summary         |
-| GET    | `/api/v1/databases`                       | List configured databases                |
-| GET    | `/api/v1/governance`                      | Governance status (audit + policy)       |
-| GET    | `/api/v1/governance/policies`             | Active policy rules                      |
-| GET    | `/api/v1/governance/explain`              | Hypothetical policy check                |
-| GET    | `/api/v1/governance/events`               | Audit event trail (filterable)           |
-| GET    | `/api/v1/governance/events/{eventID}`     | Single audit event by ID                 |
-| GET    | `/api/v1/governance/approvals/pending`    | Pending approvals queue                  |
-| GET    | `/api/v1/governance/approvals`            | All approvals (filterable)               |
-| GET    | `/api/v1/governance/verify`               | Audit chain integrity check              |
+| Method | Endpoint                                               | Description                              |
+|--------|--------------------------------------------------------|------------------------------------------|
+| GET    | `/api/v1/agents`                                       | List discovered agents + cards           |
+| POST   | `/api/v1/query`                                        | Send natural language message to an agent |
+| POST   | `/api/v1/incidents`                                    | Create incident bundle                   |
+| GET    | `/api/v1/incidents`                                    | List incident bundles                    |
+| POST   | `/api/v1/db/{tool}`                                    | Call database agent tool directly        |
+| POST   | `/api/v1/k8s/{tool}`                                   | Call K8s agent tool directly             |
+| POST   | `/api/v1/research`                                     | Web research query                       |
+| GET    | `/api/v1/infrastructure`                               | Infrastructure inventory summary         |
+| GET    | `/api/v1/databases`                                    | List configured databases                |
+| GET    | `/api/v1/tools`                                        | List all registered tools with action classes |
+| GET    | `/api/v1/tools/{toolName}`                             | Get a single tool's metadata             |
+| GET    | `/api/v1/governance`                                   | Governance status (audit + policy)       |
+| GET    | `/api/v1/governance/policies`                          | Active policy rules                      |
+| GET    | `/api/v1/governance/explain`                           | Hypothetical policy check                |
+| GET    | `/api/v1/governance/events`                            | Audit event trail (filterable)           |
+| GET    | `/api/v1/governance/events/{eventID}`                  | Single audit event by ID                 |
+| GET    | `/api/v1/governance/approvals/pending`                 | Pending approvals queue                  |
+| GET    | `/api/v1/governance/approvals`                         | All approvals (filterable)               |
+| GET    | `/api/v1/governance/verify`                            | Audit chain integrity check              |
+| POST   | `/api/v1/fleet/plan`                                   | Generate a fleet job plan from NL description |
+| POST   | `/api/v1/fleet/jobs`                                   | Submit a fleet job for execution         |
+| GET    | `/api/v1/fleet/jobs`                                   | List fleet jobs                          |
+| GET    | `/api/v1/fleet/jobs/{jobID}`                           | Get a fleet job                          |
+| GET    | `/api/v1/fleet/jobs/{jobID}/servers`                   | Per-server execution status              |
+| GET    | `/api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps`| Per-step execution status                |
+| GET    | `/api/v1/fleet/jobs/{jobID}/approval/{approvalID}`     | Fleet job approval status                |
 
 See [API.md](API.md) for the complete reference including request/response shapes, query parameters, and examples.
 
@@ -633,6 +642,92 @@ A2A natively.
 aiHelpDesk is proud to feature a sophisticated AI Governanance system,
 which relies on comprehensive real-time and after the fact persistant
 auditing. Please see [here](AIGOVERNANCE.md) for details.
+
+## 12.1 Fleet Management
+
+The `fleet-runner` CLI executes a structured **fleet job** — a change applied
+in a staged rollout across a set of infrastructure targets. It is the automation
+counterpart to the interactive Orchestrator: where the Orchestrator helps humans
+diagnose and fix individual systems one at a time, `fleet-runner` applies the
+same tools at scale with safety mechanisms built in.
+
+```
+┌─────────────────┐
+│  fleet-runner   │   reads job definition from JSON file
+│  (CLI / CronJob)│   submits to gateway, polls for approval if needed
+└────────┬────────┘
+         │  POST /api/v1/fleet/jobs/{jobID}/servers/{server}
+         │  POST /api/v1/db/{tool}  (per server, in waves)
+         ▼
+┌─────────────────┐      ┌─────────────────┐
+│    Gateway      │─────►│  auditd         │
+│  • tool registry│      │  fleet_jobs     │
+│  • tool error   │      │  fleet_job_     │
+│    detection    │      │    servers      │
+│  • approval     │      │  fleet_job_     │
+│    gating       │      │    server_steps │
+└────────┬────────┘      └─────────────────┘
+         │  A2A
+         ▼
+┌─────────────────┐
+│  database /     │
+│  k8s agents     │
+└─────────────────┘
+```
+
+**Key fleet-runner properties:**
+
+- **Canary → wave rollout**: executes the change on a small canary first; if the
+  canary succeeds it fans out across waves. A circuit breaker halts the job when
+  the failure rate exceeds the configured threshold.
+- **Multi-step sequences**: each job defines `Steps []Step` — the change can
+  span multiple tools per server (e.g. check connection, then get stats).
+  `on_failure: continue` allows partial failures to be tolerated.
+- **Approval gating**: jobs whose steps include write or destructive tools pause
+  before the canary wave and wait for human approval. Dry-run mode skips the
+  gate and prints `APPROVAL WOULD BE REQUIRED`.
+- **Semantic tool error detection**: the gateway returns HTTP 422 when a tool
+  call produces an `---\nERROR —` marker (the database agent's error format),
+  so fleet-runner correctly marks the server as failed rather than recording a
+  false success.
+- **NL fleet planner** (`POST /api/v1/fleet/plan`): the gateway can generate a
+  `JobDef` JSON from a natural-language description. It uses the Tool Registry
+  to resolve tool names deterministically and excludes restricted servers from
+  the target list before returning the plan for human review.
+
+See [FLEET.md](FLEET.md) for the full job definition schema, strategy options,
+per-step status tracking, and the NL planner.
+
+### 12.1.1 Tool Registry
+
+The gateway builds a **Tool Registry** at startup from loaded agent cards and
+the `ToolClassification` map (`internal/audit/action.go`). The registry:
+
+- maps tool name → agent, description, input schema, action class
+- powers `GET /api/v1/tools` for operators and automation
+- is used by the NL fleet planner to validate generated tool names
+- enables `fleet-runner --preflight` to verify every tool in a job exists
+  before submitting
+
+### 12.1.2 File Structure (fleet additions)
+
+```
+cmd/
+├── fleet-runner/        # fleet job execution CLI
+│   ├── main.go          # flags, config, job submission
+│   ├── runner.go        # executeSteps, callGatewayTool
+│   ├── stages.go        # canary/wave logic, circuit breaker, approval gate
+│   ├── submit.go        # register job + server + step records in auditd
+│   ├── preflight.go     # tool existence check before submission
+│   ├── approve.go       # approval polling
+│   └── targets.go       # server selection from infra config
+│
+internal/
+├── fleet/
+│   └── schema.go        # JobDef, Change, Step, NormalizeChange
+├── toolregistry/
+│   └── registry.go      # ToolEntry, Registry, Build, Validate
+```
 
 ## 13 Troubleshooting
 

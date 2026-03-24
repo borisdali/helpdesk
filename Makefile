@@ -12,10 +12,16 @@
 #   make clean                  Remove dist/
 
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_SHA   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# IMAGE_TAG is the immutable tag baked into deploy bundles and Helm charts.
+# It embeds the git SHA so the same semver can be rebuilt without Kubernetes
+# serving a stale cached image (imagePullPolicy: IfNotPresent won't skip a
+# tag it has never seen before).
+IMAGE_TAG := $(VERSION)-$(GIT_SHA)
 IMAGE     ?= ghcr.io/borisdali/helpdesk
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 DIST      := dist
-LDFLAGS   := -s -w
+LDFLAGS   := -s -w -X helpdesk/internal/buildinfo.Version=$(IMAGE_TAG)
 
 # binary:package pairs
 BIN_PKGS := \
@@ -25,6 +31,7 @@ BIN_PKGS := \
 	research-agent:./agents/research/ \
 	gateway:./cmd/gateway/ \
 	helpdesk:./cmd/helpdesk/ \
+	helpdesk-client:./cmd/helpdesk-client/ \
 	srebot:./cmd/srebot/ \
 	auditd:./cmd/auditd/ \
 	auditor:./cmd/auditor/ \
@@ -32,9 +39,13 @@ BIN_PKGS := \
 	secbot:./cmd/secbot/ \
 	govbot:./cmd/govbot/ \
 	govexplain:./cmd/govexplain/ \
-	hashapikey:./cmd/hashapikey/
+	hashapikey:./cmd/hashapikey/ \
+	fleet-runner:./cmd/fleet-runner/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey fleet-runner
+
+fleet-runner:
+	go build -o fleet-runner ./cmd/fleet-runner/
 
 # ---------------------------------------------------------------------------
 # Tests and coverage
@@ -138,18 +149,18 @@ faulttest:
 # ---------------------------------------------------------------------------
 e2e: image
 	@echo "Starting full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Running E2E tests..."
 	-go test -tags e2e -timeout 300s -v ./testing/e2e/...
 	@echo "Stopping full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # AI Governance E2E tests (requires full stack; API key only for audit-trail tests)
 # ---------------------------------------------------------------------------
 e2e-governance: image
 	@echo "Starting full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Waiting for gateway to be ready..."
 	@for i in $$(seq 1 30); do \
 		curl -sf http://localhost:8080/api/v1/agents >/dev/null 2>&1 && echo "Gateway ready." && break; \
@@ -158,14 +169,14 @@ e2e-governance: image
 	@echo "Running governance E2E tests..."
 	-go test -tags e2e -timeout 300s -v -run TestGovernance ./testing/e2e/...
 	@echo "Stopping full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Identity & Access E2E tests (requires full stack; API key only for gateway tests)
 # ---------------------------------------------------------------------------
 e2e-identity: image
 	@echo "Starting full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Waiting for gateway to be ready..."
 	@for i in $$(seq 1 30); do \
 		curl -sf http://localhost:8080/api/v1/agents >/dev/null 2>&1 && echo "Gateway ready." && break; \
@@ -174,21 +185,25 @@ e2e-identity: image
 	@echo "Running Identity & Access E2E tests..."
 	-go test -tags e2e -timeout 300s -v -run TestIdentityE2E ./testing/e2e/...
 	@echo "Stopping full stack..."
-	docker compose -f deploy/docker-compose/docker-compose.yaml down -v
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Docker image (local, current arch)
 # ---------------------------------------------------------------------------
 image:
-	docker build --load -t $(IMAGE):$(VERSION) -t helpdesk:latest -f Dockerfile ..
+	docker build --load --build-arg VERSION=$(IMAGE_TAG) -t $(IMAGE):$(VERSION) -t helpdesk:latest -f Dockerfile ..
 
 # ---------------------------------------------------------------------------
 # Docker image (multi-arch, push to GHCR)
 # ---------------------------------------------------------------------------
 push:
+	@if [ -n "$$(git status --porcelain Dockerfile)" ]; then \
+		echo "ERROR: Dockerfile has uncommitted changes — commit before releasing"; exit 1; fi
 	docker buildx build \
 		--platform linux/amd64,linux/arm64 \
 		--provenance=false \
+		--build-arg VERSION=$(IMAGE_TAG) \
+		-t $(IMAGE):$(IMAGE_TAG) \
 		-t $(IMAGE):$(VERSION) \
 		-t $(IMAGE):latest \
 		-f Dockerfile --push ..
@@ -246,7 +261,7 @@ bundle:
 	cp users.example.yaml $$bundledir/helm/; \
 	sed -i.bak \
 	    -e 's|^  repository: helpdesk|  repository: $(IMAGE)|' \
-	    -e 's|^  tag: latest|  tag: $(VERSION)|' \
+	    -e 's|^  tag: latest|  tag: $(IMAGE_TAG)|' \
 	    $$bundledir/helm/helpdesk/values.yaml; \
 	rm -f $$bundledir/helm/helpdesk/values.yaml.bak; \
 	\
@@ -261,6 +276,7 @@ bundle:
 	echo "==> helper scripts"; \
 	cp scripts/gateway-repl.sh $$bundledir/scripts/; \
 	cp scripts/k8s-local-repl.sh $$bundledir/scripts/; \
+	cp scripts/run-fleet-job.sh $$bundledir/scripts/; \
 	cp scripts/README.md $$bundledir/scripts/; \
 	chmod +x $$bundledir/scripts/*.sh; \
 	\

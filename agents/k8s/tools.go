@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -373,7 +374,7 @@ type GetPodsArgs struct {
 	Labels    string `json:"labels,omitempty" jsonschema:"Optional label selector to filter pods (e.g., 'app=postgres')."`
 }
 
-func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
+func getPodsImpl(ctx context.Context, args GetPodsArgs) (GetPodsResult, error) {
 	// Resolve database name to namespace/context if applicable
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
@@ -405,6 +406,10 @@ func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
 	return result, err
 }
 
+func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
+	return getPodsImpl(ctx, args)
+}
+
 // GetServiceArgs defines arguments for the get_service tool.
 type GetServiceArgs struct {
 	Context     string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -413,7 +418,7 @@ type GetServiceArgs struct {
 	ServiceType string `json:"service_type,omitempty" jsonschema:"Optional filter by service type: ClusterIP, NodePort, LoadBalancer."`
 }
 
-func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
+func getServiceImpl(ctx context.Context, args GetServiceArgs) (GetServiceResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return GetServiceResult{}, fmt.Errorf("access denied: %w", err)
@@ -440,6 +445,10 @@ func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, er
 	return result, err
 }
 
+func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
+	return getServiceImpl(ctx, args)
+}
+
 // DescribeServiceArgs defines arguments for the describe_service tool.
 type DescribeServiceArgs struct {
 	Context     string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -447,7 +456,7 @@ type DescribeServiceArgs struct {
 	ServiceName string `json:"service_name" jsonschema:"The name of the service to describe."`
 }
 
-func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
+func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (KubectlResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
@@ -473,6 +482,10 @@ func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlRes
 	return KubectlResult{Output: output}, nil
 }
 
+func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
+	return describeServiceImpl(ctx, args)
+}
+
 // GetEndpointsArgs defines arguments for the get_endpoints tool.
 type GetEndpointsArgs struct {
 	Context      string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -480,7 +493,7 @@ type GetEndpointsArgs struct {
 	EndpointName string `json:"endpoint_name,omitempty" jsonschema:"Optional specific endpoint name (usually matches service name)."`
 }
 
-func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
+func getEndpointsImpl(ctx context.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return GetEndpointsResult{}, fmt.Errorf("access denied: %w", err)
@@ -506,6 +519,10 @@ func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResu
 	return result, err
 }
 
+func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
+	return getEndpointsImpl(ctx, args)
+}
+
 // GetEventsArgs defines arguments for the get_events tool.
 type GetEventsArgs struct {
 	Context      string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -514,7 +531,7 @@ type GetEventsArgs struct {
 	EventType    string `json:"event_type,omitempty" jsonschema:"Optional filter by event type: Normal or Warning."`
 }
 
-func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
+func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return GetEventsResult{}, fmt.Errorf("access denied: %w", err)
@@ -541,6 +558,10 @@ func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error
 	return result, err
 }
 
+func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
+	return getEventsImpl(ctx, args)
+}
+
 // GetPodLogsArgs defines arguments for the get_pod_logs tool.
 type GetPodLogsArgs struct {
 	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -551,7 +572,7 @@ type GetPodLogsArgs struct {
 	Previous  bool   `json:"previous,omitempty" jsonschema:"If true, get logs from the previous container instance (useful for crash loops)."`
 }
 
-func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
+func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
@@ -594,6 +615,10 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 	return KubectlResult{Output: output}, nil
 }
 
+func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
+	return getPodLogsImpl(ctx, args)
+}
+
 // DescribePodArgs defines arguments for the describe_pod tool.
 type DescribePodArgs struct {
 	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -601,7 +626,7 @@ type DescribePodArgs struct {
 	PodName   string `json:"pod_name" jsonschema:"required,The exact pod name to describe."`
 }
 
-func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
+func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
@@ -627,13 +652,17 @@ func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, err
 	return KubectlResult{Output: output}, nil
 }
 
+func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
+	return describePodImpl(ctx, args)
+}
+
 // GetNodesArgs defines arguments for the get_nodes tool.
 type GetNodesArgs struct {
 	Context    string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
 	ShowLabels bool   `json:"show_labels,omitempty" jsonschema:"If true, show node labels in output."`
 }
 
-func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
+func getNodesImpl(ctx context.Context, args GetNodesArgs) (GetNodesResult, error) {
 	kubeContext := resolveContext(args.Context)
 
 	// Check policy for cluster-level access (no namespace)
@@ -653,6 +682,10 @@ func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
 	return result, err
 }
 
+func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
+	return getNodesImpl(ctx, args)
+}
+
 // DeletePodArgs defines arguments for the delete_pod tool.
 type DeletePodArgs struct {
 	Context          string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -661,7 +694,7 @@ type DeletePodArgs struct {
 	GracePeriodSeconds int  `json:"grace_period_seconds,omitempty" jsonschema:"Seconds for graceful termination (default: pod's terminationGracePeriodSeconds). Use 0 for immediate deletion."`
 }
 
-func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) {
+func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
@@ -724,6 +757,10 @@ func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) 
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
+func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) {
+	return deletePodImpl(ctx, args)
+}
+
 // RestartDeploymentArgs defines arguments for the restart_deployment tool.
 type RestartDeploymentArgs struct {
 	Context        string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -731,7 +768,7 @@ type RestartDeploymentArgs struct {
 	DeploymentName string `json:"deployment" jsonschema:"required,The name of the deployment to restart. Use get_pods or kubectl get deployments to find the name."`
 }
 
-func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (KubectlResult, error) {
+func restartDeploymentImpl(ctx context.Context, args RestartDeploymentArgs) (KubectlResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
@@ -789,6 +826,10 @@ func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (Kubect
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
+func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (KubectlResult, error) {
+	return restartDeploymentImpl(ctx, args)
+}
+
 // ScaleDeploymentArgs defines arguments for the scale_deployment tool.
 type ScaleDeploymentArgs struct {
 	Context        string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -797,7 +838,7 @@ type ScaleDeploymentArgs struct {
 	Replicas       int    `json:"replicas" jsonschema:"required,Target replica count. Use 0 to scale down completely."`
 }
 
-func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlResult, error) {
+func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (KubectlResult, error) {
 	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
@@ -873,4 +914,171 @@ func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlRes
 		}, nil
 	}
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
+}
+
+func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlResult, error) {
+	return scaleDeploymentImpl(ctx, args)
+}
+
+// k8sArgsToStruct converts a map[string]any to a typed struct via JSON round-trip.
+func k8sArgsToStruct[T any](args map[string]any) (T, error) {
+	var zero T
+	b, err := json.Marshal(args)
+	if err != nil {
+		return zero, fmt.Errorf("marshal args: %w", err)
+	}
+	var out T
+	if err := json.Unmarshal(b, &out); err != nil {
+		return zero, fmt.Errorf("unmarshal args: %w", err)
+	}
+	return out, nil
+}
+
+// k8sJSONOutput JSON-marshals a structured result into a string for the direct tool registry.
+func k8sJSONOutput(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("marshal result: %w", err)
+	}
+	return string(b), nil
+}
+
+// NewK8sDirectRegistry returns a DirectToolRegistry with all k8s tools registered
+// as directly-callable functions that bypass the LLM dispatch layer.
+func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
+	r := agentutil.NewDirectToolRegistry()
+
+	r.Register("get_pods", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetPodsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getPodsImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return k8sJSONOutput(result)
+	})
+
+	r.Register("get_service", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetServiceArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getServiceImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return k8sJSONOutput(result)
+	})
+
+	r.Register("describe_service", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[DescribeServiceArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := describeServiceImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("get_endpoints", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetEndpointsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getEndpointsImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return k8sJSONOutput(result)
+	})
+
+	r.Register("get_events", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetEventsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getEventsImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return k8sJSONOutput(result)
+	})
+
+	r.Register("get_pod_logs", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetPodLogsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getPodLogsImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("describe_pod", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[DescribePodArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := describePodImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("get_nodes", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetNodesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getNodesImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return k8sJSONOutput(result)
+	})
+
+	r.Register("delete_pod", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[DeletePodArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := deletePodImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("restart_deployment", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[RestartDeploymentArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := restartDeploymentImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("scale_deployment", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[ScaleDeploymentArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := scaleDeploymentImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	return r
 }

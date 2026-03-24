@@ -1,5 +1,9 @@
 # aiHelpDesk: Deployment for VM-based (non-K8s) databases
 
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+
+This guide covers running aiHelpDesk on a host inside the Docker containers (orchestrated via Docker Compose). This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM (no Docker) or on K8s.
+
 ## 1. Deployment from binary
 
 There are two ways to deploy and run aiHelpDesk on non-K8s environments, i.e. VMs or bare metal. In both cases the first step is downloading the right tarball for your platform. There are five tarballs available for every aiHelpDesk release. The first one that ends with "-deploy.tar.gz" is intended for section 1.1 below (run aiHelpDesk agents in Docker containers). The other four tarballs are binaries specific to a platform and are intended for section 1.2
@@ -30,18 +34,17 @@ Here's the aiHelpDesk release [download page](https://github.com/borisdali/helpd
 To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform agnostic tarball and run the following commands:
 
 ```
-  tar xzf helpdesk-v.0.1.0-deploy.tar.gz
-  cd helpdesk-v0.1.0-deploy/docker-compose
+  tar xzf helpdesk-v.X.Y.Z-deploy.tar.gz
+  cd helpdesk-vX.Y.Z-deploy/docker-compose
   cp .env.example .env
   cp infrastructure.json.example infrastructure.json
-  # edit both files
+  cp policies.example.yaml policies.yaml
+  cp users.example.yaml. users.yaml
+  # edit the above files as needed
   docker compose up -d
-
-  source ./.env
-  docker compose --profile interactive run orchestrator
 ```
 
-The last two commands are optional and intended for the human operators as it starts an interactive aiHelpDesk session.
+For interactive aiHelpDesk session see [section 2.4 below](docker-compose#24-using-helpdesk-client)
 
 **Docker Networking Note:** When running in Docker containers, `localhost` in a connection string refers to the container itself, not the host machine. To connect to a database on the host:
 - **Docker Desktop (Mac/Windows):** Use `host.docker.internal` as the hostname
@@ -103,7 +106,9 @@ EOF
   - Starts all 3 agents + Gateway in the background (logs go to `/tmp/helpdesk-*.log`)
   - Launches the interactive Orchestrator in the foreground
   - Cleans up all background processes on exit/`Ctrl-C`
-  - `--no-repl` runs headless (Gateway only, no Orchestrator)
+  - `--services-only` runs headless (Gateway only, no Orchestrator)
+  - `--readonly-governed` enables governed read-only mode (audit + policy required, mutations blocked)
+  - `--cli` attaches the orchestrator CLI to already-running services
   - `--stop` kills any running helpdesk processes
 
 N.B: Please note that the binary tarballs expect `psql` and `kubectl` already installed on the host — those are baked into the Docker image (see option 1.1), but not into the Go binaries (this option 1.2).
@@ -162,7 +167,37 @@ Next, as a human operator, run the interactive session by invoking the Orchestat
 See the [sample log](INSTALL_from_source_sample_interactive_log.md)  of running the above commands.
 
 
-  ### 2.4 SRE bot demo: Deployment from source (by cloning the repo)
+  ### 2.4 Using helpdesk-client
+
+`helpdesk-client` is an authenticated operator CLI that connects to the gateway over HTTP — every query carries a verified identity and declared purpose in the audit trail, replacing ad-hoc `docker compose run orchestrator` sessions.
+
+**Interactive REPL:**
+
+```bash
+docker compose -f deploy/docker-compose/docker-compose.yaml \
+  --profile interactive run --rm helpdesk-client
+```
+
+**One-shot query:**
+
+```bash
+docker compose -f deploy/docker-compose/docker-compose.yaml \
+  --profile interactive run --rm helpdesk-client \
+  --message "Show me the top 5 longest-running queries"
+```
+
+**Set agent and purpose via environment variables:**
+
+```bash
+HELPDESK_CLIENT_AGENT=k8s HELPDESK_SESSION_PURPOSE=diagnostic \
+  docker compose -f deploy/docker-compose/docker-compose.yaml \
+  --profile interactive run --rm helpdesk-client
+```
+
+See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, authentication options, and per-agent examples.
+
+
+  ### 2.5 SRE bot demo: Deployment from source (by cloning the repo)
 
 Here's an example of an SRE bot detecting that the `db.example.com` is going offline, which results in a failure to establish a connection. As a result, aiHelpDesk automatically records an incident and creates a troubelshooting bundle to investigate further either interally or by sending to a vendor:
 
@@ -186,6 +221,8 @@ aiHelpDesk includes an [AI Governance framework](../../docs/AIGOVERNANCE.md) wit
 | **approvals** | Operator CLI for listing, approving, and denying approval requests | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
+| **fleet-runner** | Staged rollout tool — applies multi-step sequences across infrastructure targets (canary → waves → circuit breaker) | - |
+| **helpdesk-client** | Authenticated operator CLI — interactive REPL or one-shot queries through the gateway | - |
 
 ### 3.1 Enabling Governance (Docker Compose)
 
@@ -202,11 +239,31 @@ docker compose up -d
 ### 3.2 Enabling Governance (Binary Deployment)
 
 ```bash
-# Start with governance monitoring
-./startall.sh --governance
+# Governed read-only: audit + policy required, mutations blocked
+./startall.sh --readonly-governed --services-only
 
-# Or start without governance monitoring
-./startall.sh
+# Governed read-only + real-time monitoring
+./startall.sh --readonly-governed --services-only --governance
+
+# Full governed mode (fix) with monitoring
+./startall.sh --services-only --governance
+
+# Personal mode with monitoring only
+./startall.sh --governance
+```
+
+To set the operating mode directly in `.env` for Docker Compose deployments:
+
+```bash
+# Governed read-only
+HELPDESK_OPERATING_MODE=readonly-governed
+HELPDESK_AUDIT_ENABLED=true
+HELPDESK_POLICY_ENABLED=true
+
+# Full governed (fix) mode
+HELPDESK_OPERATING_MODE=fix
+HELPDESK_AUDIT_ENABLED=true
+HELPDESK_POLICY_ENABLED=true
 ```
 
 ### 3.3 Policy Configuration
@@ -322,7 +379,48 @@ GOVBOT_WEBHOOK=https://hooks.slack.com/services/... \
 GOVBOT_SINCE=7d docker compose --profile governance run --rm govbot
 ```
 
-### 3.8 Security Responder (secbot)
+### 3.8 Running the Fleet Runner (fleet-runner)
+
+`fleet-runner` applies a multi-step sequence across a subset of `infrastructure.json` targets with staged rollout (canary → waves → circuit breaker). It runs under the `--profile fleet` and exits when done.
+
+```bash
+# Dry-run first: see which servers will be targeted and in which stage
+FLEET_JOBS_DIR=./jobs \
+  docker compose --profile fleet run --rm fleet-runner \
+  --job-file /jobs/vacuum-prod.json --dry-run
+
+# Execute the job
+FLEET_RUNNER_API_KEY=<key> FLEET_JOBS_DIR=./jobs \
+  docker compose --profile fleet run --rm fleet-runner \
+  --job-file /jobs/vacuum-prod.json
+
+# Override strategy from flags
+FLEET_RUNNER_API_KEY=<key> FLEET_JOBS_DIR=./jobs \
+  docker compose --profile fleet run --rm fleet-runner \
+  --job-file /jobs/vacuum-prod.json --canary 2 --wave-size 5 --pause 60
+```
+
+The `FLEET_JOBS_DIR` variable (default: `./jobs`) is mounted read-only at `/jobs` inside the container. Set `FLEET_RUNNER_API_KEY` in `.env` to the API key for the `fleet-runner` service account.
+
+**Generating a job definition from natural language:** The gateway can generate a job file from a plain English description. Set `ANTHROPIC_API_KEY` in `.env`, then:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "check connection health on all production databases"}' \
+  | jq -r '.job_def_raw' > jobs/health-check.json
+```
+
+Or with `helpdesk-client`:
+
+```bash
+docker compose --profile interactive run --rm helpdesk-client \
+  --plan-fleet-job "check connection health on all production databases"
+```
+
+See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.
+
+### 3.9 Security Responder (secbot)
 
 Unlike the CLI tools above, `secbot` is a **long-running daemon** — start it once and leave it running alongside the stack. It reads from the audit socket in real time and automatically creates incident bundles when it detects:
 
@@ -451,7 +549,7 @@ This is an agent-level pre-check, independent of `allowed_purposes` policy condi
 
 ## 4. Using the Gateway API
 
-In addition to the interactive Orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+In addition to the interactive Orchestrator REPL and the governance APIs, the Gateway provides a REST API for programmatic access. See [API.md](../../docs/API.md) for the full endpoint reference (request/response shapes, query parameters, and status codes).
 
 ```bash
 # Query the system

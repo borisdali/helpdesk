@@ -1,5 +1,9 @@
 # aiHelpDesk: Deployment on Kubernetes
 
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+
+This guide covers running aiHelpDesk on K8s, deployed via Helm Charts. This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM or inside Docker containers.
+
 ## 1. Prerequisites
 
 - Kubernetes cluster (1.24+)
@@ -252,14 +256,18 @@ gateway:
 ```bash
 # Interactive prompt (no echo — recommended)
 kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
-  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey
+  --image=ghcr.io/borisdali/helpdesk -- hashapikey
 
 # Or pass the key as an argument
 kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
-  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey my-secret-api-key
+  --image=ghcr.io/borisdali/helpdesk -- hashapikey my-secret-api-key
 ```
 
-Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`.
+Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`, then run `helm upgrade` — the chart's checksum annotation will automatically restart the gateway pod so the new hash takes effect. If you manage the users file via `usersSecret` (out-of-band), restart manually after updating the Secret:
+
+```bash
+kubectl -n helpdesk-system rollout restart deploy/helpdesk-gateway
+```
 
 #### JWT identity provider
 
@@ -276,6 +284,7 @@ gateway:
 ```
 
 Clients send `Authorization: Bearer <jwt-token>`. The Gateway validates the signature, issuer, and audience, then extracts roles from the configured claim.
+See sample log of testing JWT authn on K8s [here](../../docs/IDENTITY_JWT_SAMPLE.md).
 
 #### Requiring explicit purpose for sensitive resources
 
@@ -314,11 +323,98 @@ helm install helpdesk ./helm/helpdesk \
 
 ## 4. Interactive Session
 
-For a human operator to start an interactive troubleshooting session run the following command:
+`helpdesk-client` is the recommended operator CLI. It runs on your workstation and connects to the gateway over HTTP — no `kubectl exec` required. Every query carries a verified identity and declared purpose, which appear in the audit trail.
+
+### 4.1 Get the binary
+
+**Option A: From the release tarball**
+
+Download the tarball for your workstation platform from the [release page](https://github.com/borisdali/helpdesk/releases/) and extract it. The `helpdesk-client` binary is included.
+
+**Option B: Extract from the container image (Linux only)**
+
+The image is built for Linux. On macOS the extracted binary is ELF and cannot
+run natively — use Option A or build from source instead.
+
+```bash
+# Linux hosts only
+docker run --rm --entrypoint cat ghcr.io/borisdali/helpdesk:latest \
+  /usr/local/bin/helpdesk-client > helpdesk-client
+chmod +x helpdesk-client
+```
+
+**Option C: Build from source (macOS / any platform)**
+
+```bash
+git clone https://github.com/borisdali/helpdesk
+cd helpdesk
+go build -o helpdesk-client ./cmd/helpdesk-client/
+```
+
+### 4.2 Expose the gateway
+
+**ClusterIP (default) — port-forward for occasional access:**
+
+```bash
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
+```
+
+**LoadBalancer — recommended for team-wide access:**
+
+```bash
+helm upgrade helpdesk ./helm/helpdesk \
+  --namespace helpdesk-system \
+  --set gateway.service.type=LoadBalancer \
+  --reuse-values
+
+# Wait for the external IP
+kubectl -n helpdesk-system get svc helpdesk-gateway
+```
+
+### 4.3 Connect and query
+
+```bash
+# Interactive REPL (ClusterIP via port-forward)
+helpdesk-client \
+  --gateway http://localhost:8080 \
+  --user alice@example.com \
+  --purpose diagnostic
+
+# One-shot query
+helpdesk-client \
+  --gateway http://localhost:8080 \
+  --user alice@example.com \
+  --agent database \
+  --purpose diagnostic \
+  --message "Are there any long-running queries on prod-orders-db?"
+
+# Kubernetes agent with an incident purpose
+helpdesk-client \
+  --gateway http://localhost:8080 \
+  --user alice@example.com \
+  --agent k8s \
+  --purpose remediation \
+  --purpose-note "INC-5102 payments pod OOMKilled" \
+  --message "Restart the payments deployment in the production namespace"
+
+# LoadBalancer — point at the external IP instead
+helpdesk-client \
+  --gateway http://<EXTERNAL-IP>:8080 \
+  --user alice@example.com \
+  --purpose diagnostic
+```
+
+See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, authentication options, and per-agent examples.
+
+### 4.4 Fallback: kubectl exec (in-cluster REPL)
+
+If you cannot reach the gateway from your workstation, you can still open an interactive session inside the orchestrator pod:
 
 ```bash
 kubectl -n helpdesk-system exec -it deploy/helpdesk-orchestrator -- helpdesk
 ```
+
+Note that in-cluster sessions bypass `helpdesk-client` authentication and do not attach identity or purpose headers, so audit events will not carry operator attribution. Prefer `helpdesk-client` for production use.
 
 ## 5. Architecture Recap
 
@@ -398,7 +494,7 @@ To include infrastructure config, create a `my-values.yaml` as shown above and a
 
 ## 7. Using the Gateway API
 
-While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full reference (all 17 endpoints with request/response shapes and query parameters).
+While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full endpoint reference (request/response shapes, query parameters, and status codes).
 
 ```bash
 # Port-forward the Gateway
@@ -436,6 +532,7 @@ The deploy bundle includes helper scripts in the `scripts/` directory:
 |--------|-------------|
 | `gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
 | `k8s-local-repl.sh` | Run Orchestrator locally with K8s agents port-forwarded |
+| `run-fleet-job.sh` | Run a fleet job ad-hoc in the cluster — no local binary needed |
 
 See [scripts/README.md](../../scripts/README.md) for detailed usage.
 
@@ -460,6 +557,7 @@ aiHelpDesk includes an AI Governance framework with policy-based access control,
 | **approvals** | Operator CLI for listing, approving, and denying approval requests (exec into auditd pod) | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions (exec into any pod) | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
+| **fleet-runner** | CronJob — applies multi-step sequences across infrastructure targets with staged rollout (canary → waves → circuit breaker) | Disabled |
 
 ### 9.2 Enable Governance
 
@@ -486,13 +584,35 @@ governance:
     maxEventsPerMinute: 100
 ```
 
-### 9.3 Fix Operating Mode
+### 9.3 Governed Operating Modes
 
-Fix mode requires all governance modules (audit, policy, approvals) to be active before any agent will start. An agent that detects a missing or misconfigured module logs the violation and exits — it cannot be used until the gap is resolved.
+Both governed modes (`readonly-governed` and `fix`) require audit and policy to be active before any agent will start. An agent that detects a missing or misconfigured module logs the violation and exits — it cannot be used until the gap is resolved.
 
-To enable fix mode, set `governance.operatingMode` in `values.yaml` alongside the required governance config:
+**`readonly-governed`** — recommended for initial enterprise deployments. The full governance stack is enforced at startup, but write and destructive tool invocations are unconditionally blocked in code. There is nothing to approve, so approval workflows are not required.
+
+**`fix`** — full governed mode. Same startup requirements as `readonly-governed`, plus mutations are permitted subject to policy and approval workflows.
+
+Set `governance.operatingMode` in `values.yaml` alongside the required governance config:
 
 ```yaml
+# Governed read-only — observe before you act
+governance:
+  operatingMode: readonly-governed
+
+  auditd:
+    enabled: true
+    port: 1199
+    persistence:
+      enabled: true
+      size: 5Gi
+
+  policy:
+    enabled: true
+    configMap: helpdesk-policies   # must exist — see §9.4
+```
+
+```yaml
+# Full governed mode — mutations enabled
 governance:
   operatingMode: fix
 
@@ -519,7 +639,7 @@ helm upgrade helpdesk . -f values.yaml
 
 Because `operatingMode` is rendered directly into every agent's Deployment spec, `helm upgrade` alone triggers a full rollout — no manual `kubectl rollout restart` needed.
 
-If an agent exits immediately after enabling fix mode, check its logs for the specific violation:
+If an agent exits immediately after enabling a governed mode, check its logs for the specific violation:
 
 ```bash
 kubectl -n helpdesk-system logs deploy/helpdesk-database-agent | grep "governance violation"
@@ -532,7 +652,7 @@ Common causes and remediations:
 | `audit: fatal` | `governance.auditd.enabled` is false | Set `governance.auditd.enabled: true` |
 | `policy_engine: fatal` | `governance.policy.enabled` is false or `configMap` not set | Set `governance.policy.enabled: true` and create the ConfigMap |
 | `guardrails: fatal` | `HELPDESK_POLICY_DRY_RUN=true` is set | Remove or unset `HELPDESK_POLICY_DRY_RUN` |
-| `approval_workflows: warning` | Approval timeout not configured | Set `governance.approvals.timeout` |
+| `approval_workflows: warning` | Approval timeout not configured (`fix` mode only) | Set `governance.approvals.timeout` (not required in `readonly-governed`) |
 
 ### 9.4 Policy Configuration
 
@@ -743,6 +863,139 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 ```
 
 > **Socket vs. HTTP polling:** When `governance.auditd.persistence.enabled=true`, `auditor` and `secbot` connect to `auditd` via a shared Unix socket on a PersistentVolumeClaim. If your storage class only supports `ReadWriteOnce`, all three pods must land on the same node — use a `ReadWriteMany` class or add a `podAffinity` rule to co-locate them. When persistence is **disabled** (the default), there is no shared volume; instead, the chart automatically switches `auditor` and `secbot` to **HTTP polling mode**, where they poll `auditd`'s `/v1/events` endpoint every 5 seconds. No manual configuration is needed — the correct mode is selected based on the `persistence.enabled` flag.
+
+### 9.9 Running the jobs on multiple databases (via Fleet Management's fleet-runner)
+
+`fleet-runner` applies a multi-step sequence across infrastructure targets with canary → wave → circuit-breaker rollout logic. There are two usage patterns:
+
+| Pattern | When to use | How |
+|---------|-------------|-----|
+| **Scheduled** | Recurring maintenance, regular sweeps | `fleetRunner.scheduledJobs` in `values.yaml` |
+| **Ad-hoc** | One-off rollouts, testing a new job definition | `scripts/run-fleet-job.sh` |
+
+#### Prerequisite: dedicated fleet-runner API key
+
+Generate a unique API key for fleet-runner — do NOT reuse srebot's or secbot's key. A shared key resolves to an unpredictable identity, breaking audit trails and policy matching.
+
+```bash
+openssl rand -hex 32 > .helpdesk-fleet-api-key
+
+# Hash it using the binary baked into the image
+kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk -- hashapikey "$(cat .helpdesk-fleet-api-key)"
+# Copy the printed hash into your values.yaml under:
+#   gateway.identity.usersConfig → service_accounts → fleet-runner → api_key_hash
+
+# Store the plaintext key as a K8s Secret
+kubectl -n helpdesk-system create secret generic helpdesk-fleet-api-key \
+  --from-literal=api-key=$(cat .helpdesk-fleet-api-key)
+
+# Deploy with the updated usersConfig — the chart checksum annotation automatically
+# triggers a gateway rollout so the new hash is loaded without a manual restart.
+helm upgrade helpdesk ./helm/helpdesk -f my-values.yaml
+```
+
+> **If using `usersSecret` (out-of-band Secret):** update the Secret content and then restart the gateway manually — the checksum annotation only covers `usersConfig`:
+> ```bash
+> kubectl -n helpdesk-system rollout restart deploy/helpdesk-gateway
+> ```
+
+Then reference it in both usage patterns via `fleetRunner.apiKeySecret: helpdesk-fleet-api-key`.
+
+#### Scheduled jobs
+
+Add one entry per recurring job to `fleetRunner.scheduledJobs`. Each entry generates a ConfigMap (with the inline job definition as `job.json`) and a CronJob — no manual `kubectl create configmap` step required.
+
+```yaml
+fleetRunner:
+  apiKeySecret: helpdesk-fleet-api-key
+
+  scheduledJobs:
+    - name: vacuum-prod          # used in resource names; must be DNS-label-safe
+      schedule: "0 3 * * 0"     # Sundays 03:00 UTC
+      definition:
+        name: vacuum-prod
+        targets:
+          tags: [production]
+        change:
+          steps:
+            - agent: database
+              tool: run_maintenance
+              args: {operation: vacuum_analyze}
+        strategy:
+          wave_size: 2
+          wave_pause_seconds: 300
+
+    - name: conn-health-check
+      schedule: "*/30 * * * *"  # every 30 minutes
+      dryRun: false
+      definition:
+        name: conn-health-check
+        targets:
+          tags: [prod, staging]
+        change:
+          steps:
+            - agent: database
+              tool: check_connection
+```
+
+Apply with:
+
+```bash
+helm upgrade helpdesk ./deploy/helm/helpdesk -f my-values.yaml
+```
+
+Each job creates resources named `helpdesk-fleet-job-<name>` (ConfigMap) and `helpdesk-fleet-<name>` (CronJob).
+
+To trigger a scheduled job immediately without waiting for the next cron tick:
+
+```bash
+kubectl -n helpdesk-system create job fleet-vacuum-now \
+  --from=cronjob/helpdesk-fleet-vacuum-prod
+
+kubectl -n helpdesk-system logs -f job/fleet-vacuum-now
+```
+
+#### Ad-hoc jobs
+
+`scripts/run-fleet-job.sh` runs a single fleet job from a local JSON file. It auto-detects the image and service endpoints from the running Helm release, creates a temporary ConfigMap + Job, streams the logs, and cleans up on exit — no cluster-side setup required.
+
+```bash
+# Dry run first (no execution, prints plan)
+./scripts/run-fleet-job.sh --dry-run jobs/vacuum-prod.json
+
+# Live run using the fleet-runner API key secret already in the cluster
+./scripts/run-fleet-job.sh \
+  --namespace helpdesk-system \
+  --api-key-secret helpdesk-fleet-api-key \
+  jobs/vacuum-prod.json
+
+# Override rollout strategy flags
+./scripts/run-fleet-job.sh \
+  --api-key-secret helpdesk-fleet-api-key \
+  --canary 1 --wave-size 2 --pause 60 \
+  jobs/vacuum-prod.json
+```
+
+See `scripts/README.md` for the full flag reference.
+
+**Generating a job definition from natural language:** use the planner endpoint from your workstation (all commands run locally; `run-fleet-job.sh` uses `kubectl` to create resources in the cluster):
+
+```bash
+# Port-forward the gateway to your workstation
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
+
+# Generate a job definition via the planner (saves to a local file)
+curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
+  -H "Content-Type: application/json" \
+  -d '{"description": "check connection health on all production databases"}' \
+  | jq -r '.job_def_raw' > jobs/health-check.json
+
+# Dry-run it in the cluster (script runs locally, creates a temporary K8s Job via kubectl)
+./scripts/run-fleet-job.sh --dry-run jobs/health-check.json
+```
+
+See [here](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details. Also, the full `run-fleet-job.sh` script reference is available [here](../../scripts/README.md#run-fleet-jobsh).
 
 ## 10. Troubleshooting
 

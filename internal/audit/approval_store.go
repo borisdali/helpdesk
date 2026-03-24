@@ -222,6 +222,7 @@ type ApprovalQueryOptions struct {
 	AgentName   string
 	TraceID     string
 	RequestedBy string
+	ToolName    string
 	Since       time.Time
 	Limit       int
 }
@@ -254,6 +255,10 @@ func (s *ApprovalStore) ListRequests(ctx context.Context, opts ApprovalQueryOpti
 	if opts.RequestedBy != "" {
 		query += " AND requested_by = ?"
 		args = append(args, opts.RequestedBy)
+	}
+	if opts.ToolName != "" {
+		query += " AND tool_name = ?"
+		args = append(args, opts.ToolName)
 	}
 	if !opts.Since.IsZero() {
 		query += " AND created_at >= ?"

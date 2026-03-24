@@ -377,6 +377,112 @@ func TestCheckTool_NilEnforcer_NoRemoteURL(t *testing.T) {
 	}
 }
 
+// --- readonly-governed mode mutation blocking ---
+
+func TestCheckTool_ReadonlyGoverned_BlocksWrite(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	e := &PolicyEnforcer{} // no engine or remote URL needed — mode check fires first
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "test", nil)
+	if err == nil {
+		t.Fatal("write action in readonly-governed mode: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "readonly-governed") {
+		t.Errorf("error message should mention readonly-governed, got: %v", err)
+	}
+}
+
+func TestCheckTool_ReadonlyGoverned_BlocksDestructive(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	e := &PolicyEnforcer{}
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, "test", nil)
+	if err == nil {
+		t.Fatal("destructive action in readonly-governed mode: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "readonly-governed") {
+		t.Errorf("error message should mention readonly-governed, got: %v", err)
+	}
+}
+
+func TestCheckTool_ReadonlyGoverned_AllowsRead(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+	// No engine, no remote URL — read passes the mode check and then hits the
+	// "no enforcement" fast path, returning nil.
+	e := &PolicyEnforcer{}
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionRead, nil, "test", nil)
+	if err != nil {
+		t.Errorf("read action in readonly-governed mode: expected nil, got: %v", err)
+	}
+}
+
+func TestCheckTool_Fix_WriteNotBlockedByModeGuard(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "fix")
+	// In fix mode the mode guard must NOT block writes — enforcement is handled
+	// by the policy engine or remote check. With no engine configured the call
+	// passes through (no-op enforcement).
+	e := &PolicyEnforcer{}
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "test", nil)
+	if err != nil {
+		t.Errorf("write action in fix mode with no enforcement configured: expected nil, got: %v", err)
+	}
+}
+
+// TestCheckTool_ReadonlyGoverned_AuditsDenial verifies that blocking a write in
+// readonly-governed mode records a policy_decision event with effect=deny and
+// PolicyName=readonly_governed_mode, so the audit trail reflects the block.
+func TestCheckTool_ReadonlyGoverned_AuditsDenial(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-rg", "trace-rg")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{ToolAuditor: ta})
+
+	err = e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, []string{"env:prod"}, "test note", nil)
+	if err == nil {
+		t.Fatal("expected error for write in readonly-governed mode, got nil")
+	}
+
+	// tool_invoked must have been recorded before the mode check returned.
+	invokedEvents, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query tool_invoked: %v", err)
+	}
+	if len(invokedEvents) != 1 {
+		t.Fatalf("expected 1 tool_invoked event, got %d", len(invokedEvents))
+	}
+
+	// policy_decision must have been recorded with deny + correct policy name.
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event, got %d", len(polEvents))
+	}
+	pd := polEvents[0].PolicyDecision
+	if pd == nil {
+		t.Fatal("PolicyDecision field is nil")
+	}
+	if pd.Effect != "deny" {
+		t.Errorf("Effect = %q, want \"deny\"", pd.Effect)
+	}
+	if pd.PolicyName != "readonly_governed_mode" {
+		t.Errorf("PolicyName = %q, want \"readonly_governed_mode\"", pd.PolicyName)
+	}
+	if pd.ResourceName != "prod-db" {
+		t.Errorf("ResourceName = %q, want \"prod-db\"", pd.ResourceName)
+	}
+	if pd.Action != string(policy.ActionWrite) {
+		t.Errorf("Action = %q, want %q", pd.Action, policy.ActionWrite)
+	}
+}
+
 // TestCheckTool_EmitsToolInvokedWhenPolicyDisabled verifies that a tool_invoked
 // event is recorded unconditionally even when policy enforcement is disabled
 // (engine=nil, policyCheckURL=""). This is the core guarantee of the coverage
@@ -448,9 +554,10 @@ policies:
 `
 
 // mockApprovalServer starts an httptest server implementing the auditd approval
-// API (POST /v1/approvals and GET /v1/approvals/{id}/wait). The POST handler
-// captures each request body and sends it to the returned channel; all requests
-// are immediately approved.
+// API. The POST /v1/approvals handler captures each request body and sends it to
+// the returned channel; GET /v1/approvals list queries return an empty list (no
+// existing approvals found) so requestApproval always creates a fresh request and
+// returns ApprovalPendingError.
 func mockApprovalServer(t *testing.T) (*httptest.Server, <-chan audit.ApprovalCreateRequest) {
 	t.Helper()
 	ch := make(chan audit.ApprovalCreateRequest, 4)
@@ -469,20 +576,38 @@ func mockApprovalServer(t *testing.T) (*httptest.Server, <-chan audit.ApprovalCr
 				ApprovalID: "test-approval-1",
 				Status:     "pending",
 			})
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/wait"):
-			// WaitForApproval — immediately return approved.
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/approvals":
+			// List approvals — return empty list (no existing approvals).
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(audit.StoredApproval{
-				ApprovalID: "test-approval-1",
-				Status:     "approved",
-				ResolvedBy: "test-approver",
-			})
+			json.NewEncoder(w).Encode([]audit.StoredApproval{})
 		default:
 			http.Error(w, "unexpected: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv, ch
+}
+
+// mockApprovalServerWithExistingApproval returns a server that always reports an
+// already-approved approval for any list query (simulates the cross-turn retry
+// scenario where a previous turn created an approval that has since been granted).
+func mockApprovalServerWithExistingApproval(t *testing.T, approvalID, toolName string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/approvals" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]audit.StoredApproval{{
+				ApprovalID: approvalID,
+				Status:     "approved",
+				ToolName:   toolName,
+				ResolvedBy: "test-approver",
+			}})
+			return
+		}
+		http.Error(w, "unexpected: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // newRequireApprovalEnforcer creates a PolicyEnforcer backed by
@@ -506,8 +631,13 @@ func TestRequestApproval_SessionInfoInContext(t *testing.T) {
 
 	note := "Session PID 1234\n  User:     app\n  Database: prod\n  State:    active"
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, note, nil)
-	if err != nil {
-		t.Fatalf("CheckTool (require_approval → approved): %v", err)
+	// requestApproval now returns immediately with ApprovalPendingError instead of blocking.
+	var pending *ApprovalPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("CheckTool (require_approval): expected *ApprovalPendingError, got %T: %v", err, err)
+	}
+	if pending.ApprovalID == "" {
+		t.Error("ApprovalPendingError.ApprovalID must not be empty")
 	}
 
 	select {
@@ -533,8 +663,9 @@ func TestRequestApproval_NoSessionInfoWhenNoteEmpty(t *testing.T) {
 
 	// Empty note → session_info must NOT appear in the approval context.
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "", nil)
-	if err != nil {
-		t.Fatalf("CheckTool: %v", err)
+	var pending *ApprovalPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("CheckTool: expected *ApprovalPendingError, got %T: %v", err, err)
 	}
 
 	select {
@@ -561,8 +692,9 @@ func TestCheckTool_RequireApproval_RemoteCheck_NoteForwarded(t *testing.T) {
 
 	note := "Session PID 9999\n  User:     slow_client\n  State:    active (5m 10s)"
 	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionDestructive, nil, note, nil)
-	if err != nil {
-		t.Fatalf("CheckTool (remote require_approval → approved): %v", err)
+	var pending *ApprovalPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("CheckTool (remote require_approval): expected *ApprovalPendingError, got %T: %v", err, err)
 	}
 
 	select {
@@ -579,6 +711,19 @@ func TestCheckTool_RequireApproval_RemoteCheck_NoteForwarded(t *testing.T) {
 		}
 	default:
 		t.Fatal("no approval request captured via remote check path")
+	}
+}
+
+func TestRequestApproval_CrossTurnRetry_UsesExistingApproval(t *testing.T) {
+	// Simulate the second turn: a prior turn already created an approval that has
+	// since been granted. The list endpoint returns it as approved, so requestApproval
+	// should allow the operation without creating a new request.
+	appSrv := mockApprovalServerWithExistingApproval(t, "apr_existing", "database:prod-db")
+	e := newRequireApprovalEnforcer(t, appSrv.URL)
+
+	err := e.CheckTool(context.Background(), "database", "prod-db", policy.ActionWrite, nil, "", nil)
+	if err != nil {
+		t.Fatalf("CheckTool (cross-turn retry with approved approval): expected nil, got: %v", err)
 	}
 }
 

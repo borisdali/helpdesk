@@ -78,8 +78,10 @@ func TestResearchAgentDirectQuery(t *testing.T) {
 	t.Logf("Sending query to research agent...")
 	resp := testutil.SendPrompt(ctx, cfg.ResearchAgentURL, prompt)
 	if resp.Error != nil {
+		SkipIfLLMKeyInvalid(t, resp.Error.Error())
 		t.Fatalf("Query failed: %v", resp.Error)
 	}
+	SkipIfLLMKeyInvalid(t, resp.Text)
 
 	t.Logf("Response (%d chars, %s)", len(resp.Text), resp.Duration)
 
@@ -122,6 +124,7 @@ func TestResearchAgentWebSearch(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("Query failed: %v", resp.Error)
 	}
+	SkipIfLLMKeyInvalid(t, resp.Text)
 
 	t.Logf("Response (%d chars, %s)", len(resp.Text), resp.Duration)
 

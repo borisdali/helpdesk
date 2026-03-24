@@ -43,6 +43,11 @@ services:
     ports:
       - "1199:1199"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:1199/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   database-agent:
     build:
@@ -195,6 +200,7 @@ services:
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       # AI Governance - enables /api/v1/governance endpoints
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
@@ -208,9 +214,15 @@ services:
       HELPDESK_JWT_CACHE_TTL: ${HELPDESK_JWT_CACHE_TTL:-}
     volumes:
       - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     ports:
       - "8080:8080"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     depends_on:
       - auditd
       - database-agent
@@ -252,6 +264,47 @@ services:
       - k8s-agent
       - incident-agent
       - research-agent
+
+  # Authenticated gateway CLI — for operators and scripts.
+  # Run with: docker compose run --rm helpdesk-client
+  # One-shot:  docker compose run --rm helpdesk-client --agent database --message "is prod-db healthy?"
+  helpdesk-client:
+    image: helpdesk:latest
+    entrypoint: ["/usr/local/bin/helpdesk-client"]
+    environment:
+      HELPDESK_GATEWAY_URL: http://gateway:8080
+      HELPDESK_CLIENT_USER: ${HELPDESK_CLIENT_USER:-}
+      HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
+      HELPDESK_SESSION_PURPOSE: ${HELPDESK_SESSION_PURPOSE:-}
+      HELPDESK_SESSION_PURPOSE_NOTE: ${HELPDESK_SESSION_PURPOSE_NOTE:-}
+      HELPDESK_CLIENT_AGENT: ${HELPDESK_CLIENT_AGENT:-database}
+    stdin_open: true
+    tty: true
+    profiles:
+      - interactive
+    depends_on:
+      - gateway
+
+  # Fleet runner: applies a single change across infrastructure targets with staged rollout.
+  # Usage: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json
+  # Dry-run: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json --dry-run
+  fleet-runner:
+    image: helpdesk:latest
+    entrypoint: ["/usr/local/bin/fleet-runner"]
+    environment:
+      HELPDESK_GATEWAY_URL: http://gateway:8080
+      HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_CLIENT_API_KEY: ${FLEET_RUNNER_API_KEY:-}
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      HELPDESK_SESSION_PURPOSE: fleet_rollout
+    volumes:
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
+      - ${FLEET_JOBS_DIR:-./jobs}:/jobs:ro
+    profiles:
+      - fleet
+    depends_on:
+      - gateway
+      - auditd
 
   # AI Governance: Real-time audit monitoring and alerting
   # Enable with: docker compose --profile governance up -d

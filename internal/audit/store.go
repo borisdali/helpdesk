@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,6 +18,12 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
+
+// sqliteTimeFormat is a fixed-width UTC timestamp format used for all SQLite
+// timestamp columns. Using zero-padded nanoseconds ensures that lexicographic
+// string ordering equals chronological ordering (unlike RFC3339Nano which omits
+// trailing zeros and produces variable-length strings where "27Z" > "27.001Z").
+const sqliteTimeFormat = "2006-01-02T15:04:05.000000000Z"
 
 // Store persists audit events to SQLite or PostgreSQL and notifies listeners.
 type Store struct {
@@ -99,14 +106,28 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 				return nil, fmt.Errorf("create audit directory: %w", err)
 			}
 		}
-		db, err = sql.Open("sqlite", dsn)
+		// Set journal_mode=DELETE and synchronous=FULL via DSN pragmas so
+		// the driver applies them at connection-open time.  Post-open PRAGMA
+		// statements via modernc.org/sqlite do not reliably persist writes to
+		// disk (WAL pages stay in process memory), so the DSN approach is
+		// required.  DELETE mode ensures every committed transaction is flushed
+		// to the main .db file immediately; FULL sync prevents data loss on
+		// power failure.
+		sqliteDSN := "file:" + dsn + "?_pragma=journal_mode(delete)&_pragma=synchronous(full)"
+		db, err = sql.Open("sqlite", sqliteDSN)
 		if err != nil {
 			return nil, fmt.Errorf("open audit database: %w", err)
 		}
-		// Enable WAL mode for better concurrent read performance (SQLite only).
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("enable WAL mode: %w", err)
+		// Limit to one open connection so writes are serialised.
+		db.SetMaxOpenConns(1)
+
+		// Verify the journal mode and confirm writes reach disk.
+		var journalMode string
+		if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err == nil {
+			slog.Info("sqlite journal mode", "mode", journalMode, "path", dsn)
+			if journalMode != "delete" {
+				slog.Warn("sqlite NOT in delete mode — writes may not persist to disk", "mode", journalMode)
+			}
 		}
 	}
 
@@ -190,6 +211,7 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		user_query TEXT,
 		purpose TEXT,
 		purpose_note TEXT,
+		origin TEXT,
 		tool_name TEXT,
 		tool_json TEXT,
 		approval_status TEXT,
@@ -230,6 +252,7 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "session_agent TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose_note TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "origin TEXT",
 	}
 	for _, m := range migrations {
 		db.Exec(m) //nolint:errcheck
@@ -345,15 +368,15 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 			event_id, timestamp, event_type, trace_id, parent_id, action_class,
 			prev_hash, event_hash,
 			session_id, session_agent, user_id, user_query,
-			purpose, purpose_note,
+			purpose, purpose_note, origin,
 			tool_name, tool_json,
 			approval_status, approval_json,
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		event.EventID,
-		event.Timestamp.Format(time.RFC3339Nano),
+		event.Timestamp.UTC().Format(sqliteTimeFormat),
 		string(event.EventType),
 		event.TraceID,
 		event.ParentID,
@@ -366,6 +389,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		event.Input.UserQuery,
 		purposeVal,
 		purposeNoteVal,
+		event.Origin,
 		toolName,
 		string(toolJSON),
 		approvalStatus,
@@ -430,7 +454,7 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 	}
 	if !opts.Since.IsZero() {
 		query += " AND timestamp >= ?"
-		args = append(args, opts.Since.Format(time.RFC3339Nano))
+		args = append(args, opts.Since.UTC().Format(sqliteTimeFormat))
 	}
 	if opts.MinConfidence > 0 {
 		query += " AND decision_confidence >= ?"
@@ -463,6 +487,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 	if opts.OutcomeStatus != "" {
 		query += " AND outcome_status = ?"
 		args = append(args, opts.OutcomeStatus)
+	}
+	if opts.Origin != "" {
+		query += " AND origin = ?"
+		args = append(args, opts.Origin)
 	}
 
 	// Chronological order for trace/prefix queries, reverse chronological otherwise
@@ -516,20 +544,23 @@ type QueryOptions struct {
 	ToolName       string         // filter by tool name
 	ApprovalStatus ApprovalStatus // filter by approval status
 	OutcomeStatus  string         // filter by outcome_status (e.g. "error", "denied", "allow")
+	Origin         string         // filter by origin (e.g. "direct_tool", "agent", "gateway")
 }
 
 // JourneyOptions specifies filters for QueryJourneys.
 type JourneyOptions struct {
-	UserID     string        // optional; empty = all users
-	Purpose    string        // optional; filter by declared purpose (e.g. "diagnostic")
-	From       time.Time     // inclusive lower bound on timestamp
-	Until      time.Time     // exclusive upper bound on timestamp
-	Limit      int           // max journeys returned; default 50
-	Since      time.Duration // if non-zero, overrides From = time.Now().Add(-Since)
-	Category   string        // filter by decision_category (e.g. "database", "kubernetes")
-	Outcome    string        // filter by computed journey outcome (post-aggregation)
-	HasRetries bool          // only journeys with retry_count > 0 (post-aggregation)
-	TraceID    string        // filter by exact trace ID; returns at most one journey
+	UserID          string        // optional; empty = all users
+	Purpose         string        // optional; filter by declared purpose (e.g. "diagnostic")
+	From            time.Time     // inclusive lower bound on timestamp
+	Until           time.Time     // exclusive upper bound on timestamp
+	Limit           int           // max journeys returned; default 50
+	Since           time.Duration // if non-zero, overrides From = time.Now().Add(-Since)
+	Category        string        // filter by decision_category (e.g. "database", "kubernetes")
+	Outcome         string        // filter by computed journey outcome (post-aggregation)
+	HasRetries      bool          // only journeys with retry_count > 0 (post-aggregation)
+	TraceID         string        // filter by exact trace ID; returns at most one journey
+	TraceIDPrefix   string        // filter by trace ID prefix (e.g. "plan_" for planner journeys)
+	Origin          string        // filter by dispatch origin (e.g. "agent", "gateway"); post-aggregation
 }
 
 // DelegationSummary captures one orchestrator-to-sub-agent delegation turn:
@@ -559,6 +590,10 @@ type JourneySummary struct {
 	// recorded for this journey (tool_retry events). Non-zero means a mutation
 	// tool had to wait for state to propagate but eventually confirmed success.
 	RetryCount int `json:"retry_count,omitempty"`
+	// Origin is the dispatch path for this journey: "direct_tool" for fleet-runner
+	// structured dispatch, "agent" for LLM-mediated A2A calls, "gateway" for
+	// gateway-originated NL queries. Taken from the first tool_execution event.
+	Origin string `json:"origin,omitempty"`
 }
 
 // QueryJourneys returns journey summaries for traces anchored by a
@@ -594,6 +629,10 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		q1 += " AND trace_id = ?"
 		args1 = append(args1, opts.TraceID)
 	}
+	if opts.TraceIDPrefix != "" {
+		q1 += " AND trace_id LIKE ?"
+		args1 = append(args1, opts.TraceIDPrefix+"%")
+	}
 	if opts.UserID != "" {
 		q1 += " AND user_id = ?"
 		args1 = append(args1, opts.UserID)
@@ -604,11 +643,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	}
 	if !opts.From.IsZero() {
 		q1 += " AND timestamp >= ?"
-		args1 = append(args1, opts.From.Format(time.RFC3339Nano))
+		args1 = append(args1, opts.From.UTC().Format(sqliteTimeFormat))
 	}
 	if !opts.Until.IsZero() {
 		q1 += " AND timestamp < ?"
-		args1 = append(args1, opts.Until.Format(time.RFC3339Nano))
+		args1 = append(args1, opts.Until.UTC().Format(sqliteTimeFormat))
 	}
 	q1 += " GROUP BY trace_id ORDER BY first_event DESC LIMIT ?"
 	args1 = append(args1, opts.Limit)
@@ -640,7 +679,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	q2 := fmt.Sprintf(
 		`SELECT trace_id, event_type, user_id, user_query, session_agent, decision_agent,
 		        decision_category, tool_name, outcome_status, approval_status, timestamp,
-		        purpose, purpose_note
+		        purpose, purpose_note, origin
 		 FROM audit_events
 		 WHERE trace_id IN (%s)
 		 ORDER BY trace_id, timestamp ASC`, placeholders)
@@ -668,6 +707,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		delegations        []DelegationSummary
 		currentDelegIdx    int // index into delegations for the in-progress delegation; -1 = none
 		outcome            string
+		origin             string // dispatch path; taken from first tool_execution event
 		count              int
 		retryCount         int  // number of tool_retry events in this trace
 		sawRequireApproval bool // true if a require_approval policy decision was seen
@@ -685,11 +725,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			userID, userQuery, sessionAgent, agent, decisionCategory    sql.NullString
 			toolName, outcomeStatus, approvalStatus                     sql.NullString
 			ts                                                           string
-			purposeCol, purposeNoteCol                                  sql.NullString
+			purposeCol, purposeNoteCol, originCol                       sql.NullString
 		)
 		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &sessionAgent, &agent,
 			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts,
-			&purposeCol, &purposeNoteCol); err != nil {
+			&purposeCol, &purposeNoteCol, &originCol); err != nil {
 			return nil, fmt.Errorf("scan journey event: %w", err)
 		}
 		d := byTrace[traceID]
@@ -771,8 +811,17 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			}
 		}
 
+		// Capture origin from the first tool_execution event seen for this trace.
+		if eventType == string(EventTypeToolExecution) && d.origin == "" && originCol.Valid && originCol.String != "" {
+			d.origin = originCol.String
+		}
+
 		// Append every tool call in timestamp order, including repeats.
-		if toolName.Valid && toolName.String != "" {
+		// Only tool_execution events are counted — gateway_request events on the
+		// direct-tool path also carry a tool_name (gateway-level bookkeeping) and
+		// tool_retry events carry a tool_name for re-check loops; neither should
+		// inflate tools_used.
+		if toolName.Valid && toolName.String != "" && eventType == string(EventTypeToolExecution) {
 			d.tools = append(d.tools, toolName.String)
 			if d.currentDelegIdx >= 0 {
 				d.delegations[d.currentDelegIdx].Tools = append(d.delegations[d.currentDelegIdx].Tools, toolName.String)
@@ -839,6 +888,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			Outcome:     d.outcome,
 			EventCount:  d.count,
 			RetryCount:  d.retryCount,
+			Origin:      d.origin,
 		})
 	}
 
@@ -856,6 +906,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	if opts.HasRetries {
 		summaries = filterJourneys(summaries, func(j JourneySummary) bool {
 			return j.RetryCount > 0
+		})
+	}
+	if opts.Origin != "" {
+		summaries = filterJourneys(summaries, func(j JourneySummary) bool {
+			return j.Origin == opts.Origin
 		})
 	}
 

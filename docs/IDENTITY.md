@@ -79,9 +79,16 @@ Configured via `HELPDESK_USERS_FILE` (default: `/etc/helpdesk/users.yaml`).
 
 ```yaml
 # /etc/helpdesk/users.yaml
+
+# Optional: map your IdP group names to aiHelpDesk canonical role names.
+# See docs/AUTHZ.md §6 for details.
+role_aliases:
+  database-admin: dba
+  platform-sre: sre
+
 users:
   - id: alice@example.com
-    roles: [dba, sre]
+    roles: [dba, sre]           # canonical names, or alias names (expanded at resolve time)
 
   - id: bob@example.com
     roles: [developer]
@@ -89,11 +96,15 @@ users:
 service_accounts:
   - id: srebot
     roles: [sre-automation]
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash-A>"
 
   - id: secbot
     roles: [security-scanner]
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash-B>"
+
+  - id: fleet-runner
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash-C>"
 ```
 
 Human users authenticate via `X-User: alice@example.com`. In `static` mode the
@@ -102,6 +113,19 @@ header value is looked up in `users.yaml` — users not in the file receive a
 
 Service accounts authenticate via `Authorization: Bearer <api-key>`. The key
 is hashed with Argon2id and compared against `api_key_hash`.
+
+> **Critical: each service account must have a unique API key.**
+> The identity provider iterates service accounts in map order (non-deterministic
+> in Go) and returns the first account whose hash matches. If two accounts share
+> the same hash — a mistake easy to make when copy-pasting from an example —
+> the resolved identity is whichever account happens to come first. The other
+> account's audit trail, policy rules, and `principal_mismatch` diagnosis will
+> all be wrong. Generate an independent key for every service account:
+>
+> ```bash
+> openssl rand -hex 32          # plaintext key → goes to FLEET_RUNNER_API_KEY
+> go run ./cmd/hashapikey       # hash → goes to fleet-runner.api_key_hash
+> ```
 
 **Generating an API key hash:**
 
@@ -135,6 +159,12 @@ configured claim (default: `groups`) as `Roles`. Supported algorithms:
 RS256, RS384, RS512, ES256, ES384, ES512. HMAC algorithms (HS256 etc.) are
 not supported — they require the gateway to hold the secret key, which defeats
 the purpose of JWKS.
+
+**Role names in JWT mode:** Role values from the claim are used verbatim — the
+`role_aliases` field in `users.yaml` has no effect in JWT mode. Ensure your IdP
+emits the canonical role names (`dba`, `sre`, `fleet-operator`, etc.) in the
+configured claim, or use `HELPDESK_JWT_ROLES_CLAIM` to point at a dedicated
+claim that already uses canonical names. See [AUTHZ.md §6.2](AUTHZ.md#62-jwt-provider-helpdesk_identity_providerjwt) for details.
 
 JWKS keys are cached with TTL to avoid per-request round-trips to the IdP.
 When a JWT carries no `kid` and the JWKS has exactly one key, that key is used
@@ -172,7 +202,80 @@ curl -H "Authorization: Bearer $TOKEN" ...
 #   -kid ""                  omit kid from JWT header
 ```
 
-### 2.4 Authentication Failures
+See sample log of testing authn via `jwttest` on K8s [here](IDENTITY_JWT_SAMPLE.md).
+
+### 2.4 Fleet-Runner Authentication
+
+`fleet-runner` is a service account, not a human. It authenticates via
+`Authorization: Bearer <api-key>` in all provider modes.
+
+**Static provider (recommended for self-hosted):**
+
+```bash
+# Generate and register the key
+openssl rand -hex 32 | tee /tmp/fleet-runner-key.txt
+go run ./cmd/hashapikey < /tmp/fleet-runner-key.txt  # paste hash into users.yaml
+
+# Configure fleet-runner
+FLEET_RUNNER_API_KEY=$(cat /tmp/fleet-runner-key.txt)
+```
+
+`users.yaml` entry:
+```yaml
+service_accounts:
+  - id: fleet-runner
+    roles: [sre-automation]
+    api_key_hash: "<output of hashapikey>"
+```
+
+**JWT provider (for organisations with SSO):**
+
+If `HELPDESK_IDENTITY_PROVIDER=jwt`, the gateway validates Bearer tokens as
+JWTs. Fleet-runner can use a machine identity issued by your IdP rather than a
+static API key. Typical setup with Kubernetes workload identity or a service
+account token:
+
+```bash
+# Fleet-runner reads a projected service account token
+FLEET_RUNNER_API_KEY=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+```
+
+The JWT must contain:
+- `sub`: the service account name (e.g. `fleet-runner@your-domain.com` or the
+  K8s service account format `system:serviceaccount:ops:fleet-runner`)
+- Your configured `HELPDESK_JWT_ROLES_CLAIM` must include `sre-automation` (or
+  whichever role your fleet-runner policy matches on)
+
+Policy rules that target fleet-runner by service account name work with static
+provider (`service: fleet-runner` matches `Principal.Service`). With JWT
+provider, the identity resolves as a user (`Principal.UserID`), not a service
+account, so policies should match by role instead:
+
+```yaml
+# Static provider: match by service account name
+principals:
+  - service: fleet-runner
+
+# JWT provider: match by role
+principals:
+  - role: sre-automation
+```
+
+The gateway's `GET /api/v1/governance/explain` endpoint automatically injects
+the caller's resolved identity (including `service` for service accounts) as
+query parameters before forwarding to auditd, so explain results reflect the
+actual principal. You can also pass identity explicitly:
+
+```bash
+# Explain as fleet-runner service account (static provider)
+curl "http://localhost:8080/api/v1/governance/explain?resource_type=database&resource_name=prod-db&action=read&purpose=fleet_rollout" \
+  -H "Authorization: Bearer $FLEET_RUNNER_API_KEY"
+
+# Explain hypothetically without a token
+curl "http://localhost:8080/api/v1/governance/explain?resource_type=database&resource_name=prod-db&action=read&purpose=fleet_rollout&service=fleet-runner"
+```
+
+### 2.5 Authentication Failures
 
 On auth failure the Gateway returns HTTP 401 and records a `gateway_request`
 audit event with `outcome_status = "error"` before rejecting the request.
@@ -183,6 +286,16 @@ This means every failed authentication attempt is visible in the audit trail:
 curl -s 'http://localhost:1199/v1/events?outcome_status=error' | \
   jq '.[] | {event_id, timestamp, error: .outcome.error_message}'
 ```
+
+### 2.6 HTTP Authorization (Role Checks)
+
+Authentication (section 2 above) answers "who is this caller?" Authorization answers "is this caller allowed to use this endpoint?"
+
+Authorization is covered in [AUTHZ.md](AUTHZ.md), including:
+- The full role reference table (what each role grants)
+- How to discover the required role for a given operation (`GET /api/v1/roles`)
+- Role aliases (`role_aliases` in `users.yaml`)
+- Operating mode blocking (`readonly-governed`)
 
 ---
 
@@ -291,6 +404,17 @@ role + resource combinations distinguishable by intent.
 | `maintenance` | Planned change during a maintenance window | Any write or destructive operation |
 | `compliance` | Compliance or audit-driven read of sensitive data | Sensitive reads needing extra traceability |
 | `emergency` | Break-glass override for on-call response | Any operation — subject to post-hoc review |
+| `fleet_rollout` | Automated change applied by fleet-runner across a fleet | Any tool call executed as part of a fleet job |
+
+`fleet_rollout` is set automatically by fleet-runner via the
+`HELPDESK_SESSION_PURPOSE=fleet_rollout` environment variable. Policy rules
+governing fleet activity should match on this purpose. Note that
+`fleet_rollout` is a non-interactive purpose — there is no human operator
+present to respond to a policy denial in real time; fleet-runner will record
+the failure and move to the next server. PII/critical databases that require
+`[diagnostic, remediation, compliance]` will block fleet jobs unless
+`fleet_rollout` is added to their `allowed_purposes`, which is a deliberate
+policy decision.
 
 ### 4.2 How Purpose Is Declared
 
@@ -465,6 +589,23 @@ Requests carry two distinct identities simultaneously:
 Policy rules can target either. Most rules target the human caller. The agent's
 service account (`Principal.Service`) is used for service-level restrictions
 (e.g. caps on automated writes).
+
+**Fleet-runner is the caller.** When `fleet-runner` submits a job step, there
+is no human in the loop — the `Principal` is fleet-runner's service account
+(`Principal.Service = "fleet-runner"`), not a human user. The audit trail for
+every tool call within a fleet job carries:
+
+```json
+{
+  "principal": { "service": "fleet-runner", "roles": ["sre-automation"], "auth_method": "api_key" },
+  "purpose": "fleet_rollout",
+  "purpose_note": "job_id=flj_4dd009b7 server=prod-db-1 stage=wave-1"
+}
+```
+
+Policy rules intended to govern fleet automation should explicitly include
+`fleet_rollout` in `allowed_purposes` — it is not in the standard purpose
+vocabulary that most existing rules allow. See §4.1 for the full purpose table.
 
 ---
 
@@ -710,7 +851,11 @@ their policies to ensure role-restricted rules have the intended scope.
 | `databaseInfo.Sensitivity` populated from infra config | `agents/database/tools.go` |
 | `HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE` env var | `agents/database/main.go`, `agents/k8s/main.go` |
 | Gateway: identity provider init, principal resolution, 401 on failure, audit on failure | `cmd/gateway/gateway.go`, `cmd/gateway/main.go` |
+| Gateway: `handleGovernanceExplain` injects resolved principal into explain query | `cmd/gateway/gateway.go` |
 | auditd: `?outcome_status=` query param, purpose param in journeys | `cmd/auditd/main.go` |
+| auditd: `?service=` query param on `handleExplain`; `RequestPrincipal.Service` | `cmd/auditd/governance_handlers.go` |
 | auditd: governance check with principal + sensitivity | `cmd/auditd/governance_handlers.go` |
+| fleet-runner: `HELPDESK_SESSION_PURPOSE=fleet_rollout`; Bearer token auth via `FLEET_RUNNER_API_KEY` | `cmd/fleet-runner/runner.go`, `deploy/docker-compose/docker-compose.yaml` |
+| fleet-runner: `fleet-runner` service account in `users.yaml` | `users.example.yaml` |
 | govexplain: `--user`, `--role`, `--purpose`, `--sensitivity`, `--effect` flags | `cmd/govexplain/main.go` |
 | govbot: Phase 10 (identity coverage), Phase 11 (purpose coverage) | `cmd/govbot/main.go` |

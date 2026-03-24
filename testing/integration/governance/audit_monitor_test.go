@@ -63,7 +63,7 @@ func postDestructiveEvent(t *testing.T, auditdURL string) {
 		"event_id":     fmt.Sprintf("evt_test_%d", time.Now().UnixNano()),
 		"event_type":   "tool_call",
 		"action_class": "destructive",
-		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		"timestamp":    time.Now().UTC().Format(time.RFC3339Nano),
 		"session":      map[string]any{"id": "sess_monitor_test", "user_id": "testuser"},
 		"tool":         map[string]any{"name": "delete_database", "agent": "database-agent"},
 		"input":        map[string]any{"user_query": "drop all tables"},

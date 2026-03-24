@@ -745,6 +745,89 @@ func TestToolsErrorHandling(t *testing.T) {
 }
 
 // =============================================================================
+// get_status_summary
+// =============================================================================
+
+func TestGetStatusSummaryTool_Success(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+---
+status_summary | {"status":"ok","version":"PG 16.3","uptime":"15d 17h","connections":10,"max_connections":100,"cache_hit_ratio":99.98}
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getStatusSummaryTool(ctx, GetStatusSummaryArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getStatusSummaryTool() error = %v, want nil", err)
+	}
+
+	var summary struct {
+		Status        string  `json:"status"`
+		Version       string  `json:"version"`
+		Uptime        string  `json:"uptime"`
+		Connections   int     `json:"connections"`
+		MaxConns      int     `json:"max_connections"`
+		CacheHitRatio float64 `json:"cache_hit_ratio"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, result.Output)
+	}
+	if summary.Status != "ok" {
+		t.Errorf("status = %q, want ok", summary.Status)
+	}
+	if summary.Version != "PG 16.3" {
+		t.Errorf("version = %q, want PG 16.3", summary.Version)
+	}
+	if summary.Connections != 10 {
+		t.Errorf("connections = %d, want 10", summary.Connections)
+	}
+	if summary.MaxConns != 100 {
+		t.Errorf("max_connections = %d, want 100", summary.MaxConns)
+	}
+}
+
+func TestGetStatusSummaryTool_PsqlError(t *testing.T) {
+	defer withMockRunner("", errors.New("exit status 1"))()
+
+	ctx := newTestContext()
+	result, err := getStatusSummaryTool(ctx, GetStatusSummaryArgs{})
+	if err != nil {
+		t.Fatalf("getStatusSummaryTool() unexpected Go error: %v", err)
+	}
+
+	// Error is encoded in JSON, not returned as a Go error.
+	var summary struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
+		t.Fatalf("error output is not valid JSON: %v\noutput: %s", err, result.Output)
+	}
+	if summary.Status != "error" {
+		t.Errorf("status = %q, want error", summary.Status)
+	}
+}
+
+func TestGetStatusSummaryTool_MalformedOutput(t *testing.T) {
+	// psql returns output that doesn't contain the expected field name.
+	defer withMockRunner("unexpected output with no status_summary field", nil)()
+
+	ctx := newTestContext()
+	result, err := getStatusSummaryTool(ctx, GetStatusSummaryArgs{})
+	if err != nil {
+		t.Fatalf("getStatusSummaryTool() unexpected Go error: %v", err)
+	}
+
+	var summary struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
+		t.Fatalf("malformed-output result is not valid JSON: %v\noutput: %s", err, result.Output)
+	}
+	if summary.Status != "error" {
+		t.Errorf("status = %q, want error", summary.Status)
+	}
+}
+
+// =============================================================================
 // parseTerminatedCount
 // =============================================================================
 
@@ -2138,7 +2221,12 @@ func withMultiRunner(outputs ...string) func() {
 }
 
 // mockApprovalServerForTools starts a minimal approval API mock.
-// It captures POST /v1/approvals bodies and immediately approves all requests.
+// It captures POST /v1/approvals bodies and records them; list queries return an
+// empty list (no pre-existing approvals). The POST handler returns a pending
+// response — callers receive ApprovalPendingError and must retry.
+//
+// To test the full success path (simulating a pre-approved cross-turn retry), use
+// mockApprovalServerForToolsPreApproved instead.
 func mockApprovalServerForTools(t *testing.T) (string, <-chan audit.ApprovalCreateRequest) {
 	t.Helper()
 	ch := make(chan audit.ApprovalCreateRequest, 4)
@@ -2154,19 +2242,38 @@ func mockApprovalServerForTools(t *testing.T) (string, <-chan audit.ApprovalCrea
 				ApprovalID: "tool-approval-1",
 				Status:     "pending",
 			})
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/wait"):
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/approvals":
+			// List query — return empty (no existing approvals).
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(audit.StoredApproval{
-				ApprovalID: "tool-approval-1",
-				Status:     "approved",
-				ResolvedBy: "auto-approver",
-			})
+			json.NewEncoder(w).Encode([]audit.StoredApproval{})
 		default:
 			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL, ch
+}
+
+// mockApprovalServerForToolsPreApproved simulates the cross-turn retry scenario:
+// a prior turn already created an approval that has since been granted. The list
+// endpoint returns it as approved so the tool can proceed without a new request.
+func mockApprovalServerForToolsPreApproved(t *testing.T, toolName string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/approvals" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]audit.StoredApproval{{
+				ApprovalID: "tool-approval-pre",
+				Status:     "approved",
+				ToolName:   toolName,
+				ResolvedBy: "auto-approver",
+			}})
+			return
+		}
+		http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
 
 const requireApprovalPolicy = `
@@ -2228,18 +2335,13 @@ locked_tables   |
 current_query   | SELECT * FROM orders LIMIT 10`
 
 func TestCancelQueryTool_SessionPlanSentToPolicy(t *testing.T) {
+	// On first call requestApproval creates the request and returns immediately with
+	// ApprovalPendingError (embedded in result.Output — tools never return Go errors).
+	// We verify that the create request carries the session plan.
 	appURL, captured := mockApprovalServerForTools(t)
 	defer withPolicyEnforcer(newToolTestEnforcer(t, appURL))()
 
-	cancelOutput := `-[ RECORD 1 ]---+------------------------------
-cancelled       | t
-pid             | 5678
-usename         | app_user
-datname         | appdb
-state           | active
-query_preview   | SELECT * FROM orders LIMIT 10
-`
-	defer withMultiRunner(sessionInfoMockOutput, cancelOutput)()
+	defer withMultiRunner(sessionInfoMockOutput, "")() // cancel output never reached (pending)
 
 	ctx := newTestContext()
 	result, err := cancelQueryTool(ctx, CancelQueryArgs{
@@ -2249,11 +2351,11 @@ query_preview   | SELECT * FROM orders LIMIT 10
 	if err != nil {
 		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
 	}
-	if strings.Contains(result.Output, "ERROR") {
-		t.Fatalf("cancelQueryTool() returned error output: %s", result.Output)
+	if !strings.Contains(result.Output, "approval required") {
+		t.Fatalf("cancelQueryTool(): expected output to contain 'approval required', got: %s", result.Output)
 	}
 
-	// The pre-execution approval request must carry the session plan.
+	// The approval create request must carry the session plan.
 	select {
 	case req := <-captured:
 		if req.Context == nil {
@@ -2275,18 +2377,13 @@ query_preview   | SELECT * FROM orders LIMIT 10
 }
 
 func TestTerminateConnectionTool_SessionPlanSentToPolicy(t *testing.T) {
+	// On first call requestApproval creates the request and returns immediately with
+	// ApprovalPendingError (embedded in result.Output — tools never return Go errors).
+	// We verify that the create request carries the session plan.
 	appURL, captured := mockApprovalServerForTools(t)
 	defer withPolicyEnforcer(newToolTestEnforcer(t, appURL))()
 
-	terminateOutput := `-[ RECORD 1 ]---+------------------------------
-terminated      | t
-pid             | 7890
-usename         | app_user
-datname         | appdb
-state           | active
-query_preview   | UPDATE accounts SET balance = 0
-`
-	defer withMultiRunner(sessionInfoMockOutput, terminateOutput)()
+	defer withMultiRunner(sessionInfoMockOutput, "")() // terminate output never reached (pending)
 
 	ctx := newTestContext()
 	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
@@ -2296,11 +2393,11 @@ query_preview   | UPDATE accounts SET balance = 0
 	if err != nil {
 		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
 	}
-	if strings.Contains(result.Output, "ERROR") {
-		t.Fatalf("terminateConnectionTool() returned error output: %s", result.Output)
+	if !strings.Contains(result.Output, "approval required") {
+		t.Fatalf("terminateConnectionTool(): expected output to contain 'approval required', got: %s", result.Output)
 	}
 
-	// The pre-execution approval request must carry the session plan.
+	// The approval create request must carry the session plan.
 	select {
 	case req := <-captured:
 		if req.Context == nil {

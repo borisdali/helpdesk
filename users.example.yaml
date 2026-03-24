@@ -40,3 +40,15 @@ service_accounts:
   - id: ci-pipeline
     roles: [ci-readonly]
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$Y2lwaXBlbGluZQ$placeholder-replace-with-real-hash"
+
+  # fleet-runner: scheduled automation that runs helpdesk-client queries across
+  # a fleet of databases or clusters (e.g. nightly health checks, capacity reports).
+  - id: fleet-runner
+    roles: [sre-automation, fleet-operator]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$Zmxlc3RydW5uZXI$placeholder-replace-with-real-hash"
+
+  # prevention-monitor: proactive monitoring agent that polls for early warning
+  # signals and triggers helpdesk-client queries when anomalies are detected.
+  - id: prevention-monitor
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$cHJldm1vbml0b3I$placeholder-replace-with-real-hash"

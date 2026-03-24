@@ -1,0 +1,50 @@
+aiHelpDesk has been deployed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Connecting with helpdesk-client
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+helpdesk-client is the authenticated CLI for operators.
+Install it from the release tarball, or extract it from the image:
+
+  docker run --rm --entrypoint cat \
+    {{ .Values.image.repository }}:{{ .Values.image.tag }} \
+    /usr/local/bin/helpdesk-client > helpdesk-client && chmod +x helpdesk-client
+
+{{- if eq .Values.gateway.service.type "LoadBalancer" }}
+
+Get the gateway's external address:
+
+  kubectl get svc {{ include "helpdesk.fullname" . }}-gateway \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+
+Then connect:
+
+  helpdesk-client --gateway http://<EXTERNAL-IP>:{{ .Values.gateway.port }} \
+    --purpose diagnostic
+
+{{- else }}
+
+The gateway Service is type {{ .Values.gateway.service.type }}. Forward it locally:
+
+  kubectl port-forward svc/{{ include "helpdesk.fullname" . }}-gateway \
+    {{ .Values.gateway.port }}:{{ .Values.gateway.port }}
+
+Then in another terminal:
+
+  helpdesk-client --gateway http://localhost:{{ .Values.gateway.port }} \
+    --purpose diagnostic
+
+To expose the gateway externally instead, upgrade with:
+
+  helm upgrade {{ .Release.Name }} <chart> --set gateway.service.type=LoadBalancer
+
+{{- end }}
+
+{{- if ne .Values.gateway.identity.provider "none" }}
+
+Authentication is enabled (provider: {{ .Values.gateway.identity.provider }}).
+Pass your API key:
+
+  helpdesk-client --gateway <URL> --api-key <your-key> --purpose diagnostic
+{{- end }}

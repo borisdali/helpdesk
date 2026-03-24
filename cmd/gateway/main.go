@@ -4,21 +4,29 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/a2aproject/a2a-go/a2a"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
+	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/logging"
+	"helpdesk/internal/toolregistry"
 )
 
 func main() {
 	logging.InitLogging(os.Args[1:])
+	slog.Info("helpdesk gateway", "version", buildinfo.Version)
 
 	listenAddr := os.Getenv("HELPDESK_GATEWAY_ADDR")
 	if listenAddr == "" {
@@ -36,13 +44,33 @@ func main() {
 		urls[i] = strings.TrimSpace(urls[i])
 	}
 
-	registry, err := discovery.Discover(urls)
+	discoveryTimeout := 60 * time.Second
+	if v := os.Getenv("HELPDESK_DISCOVERY_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			discoveryTimeout = d
+		} else {
+			slog.Warn("invalid HELPDESK_DISCOVERY_TIMEOUT, using default", "value", v, "default", discoveryTimeout)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+	defer cancel()
+
+	registry, err := discovery.DiscoverWithRetry(ctx, urls, 3*time.Second)
 	if err != nil {
 		slog.Error("failed to discover agents", "err", err)
 		os.Exit(1)
 	}
 
 	gw := NewGateway(registry)
+
+	// Build tool registry from discovered agent cards.
+	agentCards := make(map[string]*a2a.AgentCard, len(registry))
+	for name, agent := range registry {
+		agentCards[name] = agent.Card
+	}
+	toolReg := toolregistry.Build(agentCards, audit.ToolClassification)
+	gw.SetToolRegistry(toolReg)
+	slog.Info("tool registry built", "tools", len(toolReg.List()))
 
 	// Initialize identity provider.
 	idProvider, err := identity.NewFromEnv()
@@ -53,6 +81,13 @@ func main() {
 	gw.SetIdentityProvider(idProvider)
 	gw.SetOperatingMode(os.Getenv("HELPDESK_OPERATING_MODE"))
 	slog.Info("identity provider initialized", "mode", os.Getenv("HELPDESK_IDENTITY_PROVIDER"))
+
+	// Build central authorizer. Enforcement is active when a real identity
+	// provider is configured (anything other than "none" or empty).
+	idMode := os.Getenv("HELPDESK_IDENTITY_PROVIDER")
+	enforcing := idMode != "" && idMode != "none"
+	authzr := authz.NewAuthorizer(authz.DefaultGatewayPermissions, enforcing)
+	slog.Info("authorization configured", "enforcing", enforcing)
 
 	// Initialize audit store if enabled.
 	auditURL := os.Getenv("HELPDESK_AUDIT_URL")
@@ -117,6 +152,8 @@ func main() {
 				"vms", len(infraConfig.VMs))
 		}
 	}
+
+	gw.SetAuthorizer(authzr)
 
 	mux := http.NewServeMux()
 	gw.RegisterRoutes(mux)

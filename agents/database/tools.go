@@ -690,7 +690,7 @@ type CheckConnectionArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string (e.g., 'host=localhost port=5432 dbname=postgres user=postgres'). If empty, uses environment defaults."`
 }
 
-func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult, error) {
+func checkConnectionImpl(ctx context.Context, args CheckConnectionArgs) (PsqlResult, error) {
 	query := "SELECT version(), current_database(), current_user, inet_server_addr(), inet_server_port();"
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "check_connection")
 	if err != nil {
@@ -699,12 +699,16 @@ func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult
 	return PsqlResult{Output: fmt.Sprintf("Connection successful!\n%s", output)}, nil
 }
 
+func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult, error) {
+	return checkConnectionImpl(ctx, args)
+}
+
 // GetServerInfoArgs defines arguments for the get_server_info tool.
 type GetServerInfoArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, error) {
+func getServerInfoImpl(ctx context.Context, args GetServerInfoArgs) (PsqlResult, error) {
 	query := `SELECT
 		version() as version,
 		pg_postmaster_start_time() as server_started,
@@ -724,12 +728,16 @@ func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, er
 	return PsqlResult{Output: output}, nil
 }
 
+func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, error) {
+	return getServerInfoImpl(ctx, args)
+}
+
 // GetDatabaseInfoArgs defines arguments for the get_database_info tool.
 type GetDatabaseInfoArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult, error) {
+func getDatabaseInfoImpl(ctx context.Context, args GetDatabaseInfoArgs) (PsqlResult, error) {
 	query := `SELECT
 		d.datname as database,
 		pg_size_pretty(pg_database_size(d.datname)) as size,
@@ -749,13 +757,17 @@ func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult
 	return PsqlResult{Output: output}, nil
 }
 
+func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult, error) {
+	return getDatabaseInfoImpl(ctx, args)
+}
+
 // GetActiveConnectionsArgs defines arguments for the get_active_connections tool.
 type GetActiveConnectionsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 	ActiveOnly       bool   `json:"active_only,omitempty" jsonschema:"If true, show only connections currently executing a query (state=active). Default shows all connected sessions including idle ones."`
 }
 
-func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
+func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
 	// Default: show all user connections including idle sessions (connected but not running a query).
 	// Autovacuum workers and background processes have state IS NULL and are excluded automatically.
 	stateFilter := "AND state IS NOT NULL"
@@ -789,12 +801,16 @@ func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (
 	return PsqlResult{Output: output}, nil
 }
 
+func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
+	return getActiveConnectionsImpl(ctx, args)
+}
+
 // GetConnectionStatsArgs defines arguments for the get_connection_stats tool.
 type GetConnectionStatsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (PsqlResult, error) {
+func getConnectionStatsImpl(ctx context.Context, args GetConnectionStatsArgs) (PsqlResult, error) {
 	query := `SELECT
 		datname as database,
 		COUNT(*) as total_connections,
@@ -814,12 +830,57 @@ func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (Psql
 	return PsqlResult{Output: output}, nil
 }
 
+func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (PsqlResult, error) {
+	return getConnectionStatsImpl(ctx, args)
+}
+
+// GetStatusSummaryArgs defines arguments for the get_status_summary tool.
+type GetStatusSummaryArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+// getStatusSummaryImpl returns a compact JSON object with status, version, uptime,
+// connection counts, and cache hit ratio — designed for fleet-wide tabular display.
+// Unlike get_server_info / get_database_stats, the Output field contains JSON, not
+// psql expanded text, so callers can parse individual fields programmatically.
+func getStatusSummaryImpl(ctx context.Context, args GetStatusSummaryArgs) (PsqlResult, error) {
+	query := `SELECT json_build_object(
+		'status',          'ok',
+		'version',         regexp_replace(version(), '^PostgreSQL ([0-9]+\.[0-9]+).*', 'PG \1'),
+		'uptime',          extract(day  FROM (now() - pg_postmaster_start_time()))::int::text || 'd '
+		                || extract(hour FROM (now() - pg_postmaster_start_time()))::int::text || 'h',
+		'connections',     (SELECT count(*)::int FROM pg_stat_activity),
+		'max_connections', current_setting('max_connections')::int,
+		'cache_hit_ratio', COALESCE(
+		                     (SELECT ROUND(100.0 * sum(blks_hit) / NULLIF(sum(blks_read + blks_hit), 0), 2)
+		                      FROM pg_stat_database WHERE datname NOT LIKE 'template%'),
+		                     0)
+	) AS status_summary`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_status_summary")
+	if err != nil {
+		return PsqlResult{Output: `{"status":"error"}`}, nil
+	}
+
+	// Extract the JSON value from the psql -x expanded output.
+	row := parseExpandedRow(output)
+	jsonStr, ok := row["status_summary"]
+	if !ok || jsonStr == "" {
+		return PsqlResult{Output: `{"status":"error"}`}, nil
+	}
+	return PsqlResult{Output: jsonStr}, nil
+}
+
+func getStatusSummaryTool(ctx tool.Context, args GetStatusSummaryArgs) (PsqlResult, error) {
+	return getStatusSummaryImpl(ctx, args)
+}
+
 // GetDatabaseStatsArgs defines arguments for the get_database_stats tool.
 type GetDatabaseStatsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResult, error) {
+func getDatabaseStatsImpl(ctx context.Context, args GetDatabaseStatsArgs) (PsqlResult, error) {
 	query := `SELECT
 		datname as database,
 		numbackends as connections,
@@ -846,13 +907,17 @@ func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResu
 	return PsqlResult{Output: output}, nil
 }
 
+func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResult, error) {
+	return getDatabaseStatsImpl(ctx, args)
+}
+
 // GetConfigParameterArgs defines arguments for the get_config_parameter tool.
 type GetConfigParameterArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 	ParameterName    string `json:"parameter_name,omitempty" jsonschema:"Specific parameter name to retrieve (e.g., 'max_connections'). If empty, shows common important parameters."`
 }
 
-func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (PsqlResult, error) {
+func getConfigParameterImpl(ctx context.Context, args GetConfigParameterArgs) (PsqlResult, error) {
 	var query string
 	if args.ParameterName != "" {
 		query = fmt.Sprintf(`SELECT name, setting, unit, short_desc
@@ -879,12 +944,16 @@ func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (Psql
 	return PsqlResult{Output: output}, nil
 }
 
+func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (PsqlResult, error) {
+	return getConfigParameterImpl(ctx, args)
+}
+
 // GetReplicationStatusArgs defines arguments for the get_replication_status tool.
 type GetReplicationStatusArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (PsqlResult, error) {
+func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs) (PsqlResult, error) {
 	query := `SELECT
 		CASE WHEN pg_is_in_recovery() THEN 'Replica' ELSE 'Primary' END as role,
 		pg_is_in_recovery() as is_in_recovery;
@@ -914,12 +983,16 @@ func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (
 	return PsqlResult{Output: output}, nil
 }
 
+func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (PsqlResult, error) {
+	return getReplicationStatusImpl(ctx, args)
+}
+
 // GetLockInfoArgs defines arguments for the get_lock_info tool.
 type GetLockInfoArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error) {
+func getLockInfoImpl(ctx context.Context, args GetLockInfoArgs) (PsqlResult, error) {
 	query := `SELECT
 		blocked_locks.pid AS blocked_pid,
 		blocked_activity.usename AS blocked_user,
@@ -954,6 +1027,10 @@ func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error)
 	return PsqlResult{Output: output}, nil
 }
 
+func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error) {
+	return getLockInfoImpl(ctx, args)
+}
+
 // GetTableStatsArgs defines arguments for the get_table_stats tool.
 type GetTableStatsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
@@ -961,7 +1038,7 @@ type GetTableStatsArgs struct {
 	TableName        string `json:"table_name,omitempty" jsonschema:"Specific table name to get stats for."`
 }
 
-func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, error) {
+func getTableStatsImpl(ctx context.Context, args GetTableStatsArgs) (PsqlResult, error) {
 	schemaFilter := "public"
 	if args.SchemaName != "" {
 		schemaFilter = args.SchemaName
@@ -1005,21 +1082,29 @@ func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, er
 	return PsqlResult{Output: output}, nil
 }
 
+func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, error) {
+	return getTableStatsImpl(ctx, args)
+}
+
 // GetSessionInfoArgs defines arguments for the get_session_info tool.
 type GetSessionInfoArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 	PID              int    `json:"pid" jsonschema:"required,The process ID of the session to inspect."`
 }
 
-// getSessionInfoTool inspects a specific backend PID and returns its current
+// getSessionInfoImpl inspects a specific backend PID and returns its current
 // state, transaction status, uncommitted-work signals, and a rollback time
 // estimate. Safe to call at any time — read-only, no side effects.
-func getSessionInfoTool(ctx tool.Context, args GetSessionInfoArgs) (PsqlResult, error) {
+func getSessionInfoImpl(ctx context.Context, args GetSessionInfoArgs) (PsqlResult, error) {
 	plan, err := inspectConnection(ctx, args.ConnectionString, args.PID)
 	if err != nil {
 		return errorResult("get_session_info", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: formatConnectionPlan(plan)}, nil
+}
+
+func getSessionInfoTool(ctx tool.Context, args GetSessionInfoArgs) (PsqlResult, error) {
+	return getSessionInfoImpl(ctx, args)
 }
 
 // CancelQueryArgs defines arguments for the cancel_query tool.
@@ -1028,7 +1113,7 @@ type CancelQueryArgs struct {
 	PID              int    `json:"pid" jsonschema:"required,The process ID (pid) of the backend to cancel. Use get_active_connections to find pids."`
 }
 
-func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error) {
+func cancelQueryImpl(ctx context.Context, args CancelQueryArgs) (PsqlResult, error) {
 	// Step 1: inspect the session — establishes plan context in the audit trail
 	// before any destructive action is taken.
 	plan, err := inspectConnection(ctx, args.ConnectionString, args.PID)
@@ -1126,13 +1211,17 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}, nil
 }
 
+func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error) {
+	return cancelQueryImpl(ctx, args)
+}
+
 // TerminateConnectionArgs defines arguments for the terminate_connection tool.
 type TerminateConnectionArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 	PID              int    `json:"pid" jsonschema:"required,The process ID (pid) of the backend to terminate. Use get_active_connections to find pids."`
 }
 
-func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (PsqlResult, error) {
+func terminateConnectionImpl(ctx context.Context, args TerminateConnectionArgs) (PsqlResult, error) {
 	// Step 1: inspect the session — establishes plan context in the audit trail
 	// before any destructive action is taken.
 	plan, err := inspectConnection(ctx, args.ConnectionString, args.PID)
@@ -1231,6 +1320,10 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}, nil
 }
 
+func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (PsqlResult, error) {
+	return terminateConnectionImpl(ctx, args)
+}
+
 // TerminateIdleConnectionsArgs defines arguments for the terminate_idle_connections tool.
 type TerminateIdleConnectionsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
@@ -1239,7 +1332,7 @@ type TerminateIdleConnectionsArgs struct {
 	DryRun           bool   `json:"dry_run,omitempty" jsonschema:"If true, only list connections that would be terminated without actually terminating them. Defaults to false."`
 }
 
-func terminateIdleConnectionsTool(ctx tool.Context, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
+func terminateIdleConnectionsImpl(ctx context.Context, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
 	if args.IdleMinutes < 5 {
 		return PsqlResult{Output: "ERROR: idle_minutes must be at least 5 to avoid terminating legitimately short-lived connections."}, nil
 	}
@@ -1306,4 +1399,147 @@ WHERE terminated IS TRUE;`, args.IdleMinutes, dbFilter)
 	}
 
 	return PsqlResult{Output: output}, nil
+}
+
+func terminateIdleConnectionsTool(ctx tool.Context, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
+	return terminateIdleConnectionsImpl(ctx, args)
+}
+
+// argsToStruct converts a map[string]any to a typed struct via JSON round-trip.
+// Used by the direct tool registry to adapt gateway requests to typed tool args.
+func argsToStruct[T any](args map[string]any) (T, error) {
+	var result T
+	data, err := json.Marshal(args)
+	if err != nil {
+		return result, err
+	}
+	return result, json.Unmarshal(data, &result)
+}
+
+// NewDatabaseDirectRegistry builds a DirectToolRegistry for all database tools.
+// These handlers are invoked via POST /tool/{name} on the agent HTTP server,
+// bypassing the LLM layer for deterministic fleet job execution.
+func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
+	r := agentutil.NewDirectToolRegistry()
+	r.Register("check_connection", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[CheckConnectionArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := checkConnectionImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_server_info", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetServerInfoArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getServerInfoImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_database_info", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetDatabaseInfoArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getDatabaseInfoImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_active_connections", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetActiveConnectionsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getActiveConnectionsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_connection_stats", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetConnectionStatsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getConnectionStatsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_database_stats", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetDatabaseStatsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getDatabaseStatsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_config_parameter", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetConfigParameterArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getConfigParameterImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_replication_status", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetReplicationStatusArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getReplicationStatusImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_lock_info", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetLockInfoArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getLockInfoImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_table_stats", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetTableStatsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getTableStatsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_session_info", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetSessionInfoArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getSessionInfoImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("cancel_query", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[CancelQueryArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := cancelQueryImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("terminate_connection", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[TerminateConnectionArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := terminateConnectionImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("terminate_idle_connections", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[TerminateIdleConnectionsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := terminateIdleConnectionsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_status_summary", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetStatusSummaryArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getStatusSummaryImpl(ctx, a)
+		return result.Output, nil
+	})
+	return r
 }
