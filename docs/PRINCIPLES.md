@@ -13,12 +13,14 @@ we stop and don't ship until we do.
 ## 1. aiHelpDesk is OSS
 
 We believe in open source.
-We don't like black boxes that we need to take somebody else's word for what's
+
+We don't like black boxes where we need to take somebody else's word for what's
 (hidden) inside. We don't think our customers should do that either. They deserve
 better than just running vulnerability scanning on our images and testing our
 software in the hope that they are thorough enough to cover all the edge cases.
-We prefer aiHelpDesk to be open for customers and anybody else to review,
+We prefer aiHelpDesk to be open to customers and to anybody else to review,
 comment, send suggestions and PRs.
+
 aiHelpDesk is OSS.
 
 ## 2. Tools, not prompts
@@ -58,7 +60,7 @@ differently at every layer:
   explicitly marked as not yet production-ready. We will not relax that
   designation until we are satisfied with the Governance module that wraps them.
 
-## 3. Audit is non-negotiable
+## 4. Audit is non-negotiable
 
 Every action — read or write, successful or failed, approved or denied — is
 recorded in a tamper-proof, hash-chained audit log. The hash chain means
