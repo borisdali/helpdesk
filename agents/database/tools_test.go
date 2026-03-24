@@ -745,6 +745,89 @@ func TestToolsErrorHandling(t *testing.T) {
 }
 
 // =============================================================================
+// get_status_summary
+// =============================================================================
+
+func TestGetStatusSummaryTool_Success(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+---
+status_summary | {"status":"ok","version":"PG 16.3","uptime":"15d 17h","connections":10,"max_connections":100,"cache_hit_ratio":99.98}
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getStatusSummaryTool(ctx, GetStatusSummaryArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getStatusSummaryTool() error = %v, want nil", err)
+	}
+
+	var summary struct {
+		Status        string  `json:"status"`
+		Version       string  `json:"version"`
+		Uptime        string  `json:"uptime"`
+		Connections   int     `json:"connections"`
+		MaxConns      int     `json:"max_connections"`
+		CacheHitRatio float64 `json:"cache_hit_ratio"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, result.Output)
+	}
+	if summary.Status != "ok" {
+		t.Errorf("status = %q, want ok", summary.Status)
+	}
+	if summary.Version != "PG 16.3" {
+		t.Errorf("version = %q, want PG 16.3", summary.Version)
+	}
+	if summary.Connections != 10 {
+		t.Errorf("connections = %d, want 10", summary.Connections)
+	}
+	if summary.MaxConns != 100 {
+		t.Errorf("max_connections = %d, want 100", summary.MaxConns)
+	}
+}
+
+func TestGetStatusSummaryTool_PsqlError(t *testing.T) {
+	defer withMockRunner("", errors.New("exit status 1"))()
+
+	ctx := newTestContext()
+	result, err := getStatusSummaryTool(ctx, GetStatusSummaryArgs{})
+	if err != nil {
+		t.Fatalf("getStatusSummaryTool() unexpected Go error: %v", err)
+	}
+
+	// Error is encoded in JSON, not returned as a Go error.
+	var summary struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
+		t.Fatalf("error output is not valid JSON: %v\noutput: %s", err, result.Output)
+	}
+	if summary.Status != "error" {
+		t.Errorf("status = %q, want error", summary.Status)
+	}
+}
+
+func TestGetStatusSummaryTool_MalformedOutput(t *testing.T) {
+	// psql returns output that doesn't contain the expected field name.
+	defer withMockRunner("unexpected output with no status_summary field", nil)()
+
+	ctx := newTestContext()
+	result, err := getStatusSummaryTool(ctx, GetStatusSummaryArgs{})
+	if err != nil {
+		t.Fatalf("getStatusSummaryTool() unexpected Go error: %v", err)
+	}
+
+	var summary struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
+		t.Fatalf("malformed-output result is not valid JSON: %v\noutput: %s", err, result.Output)
+	}
+	if summary.Status != "error" {
+		t.Errorf("status = %q, want error", summary.Status)
+	}
+}
+
+// =============================================================================
 // parseTerminatedCount
 // =============================================================================
 

@@ -380,7 +380,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 		opts.ActionClass = audit.ActionClass(v)
 	}
 	if v := r.URL.Query().Get("since"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			opts.Since = t
+		} else if t, err := time.Parse(time.RFC3339, v); err == nil {
 			opts.Since = t
 		}
 	}

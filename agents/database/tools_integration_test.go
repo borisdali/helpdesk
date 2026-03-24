@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -276,5 +277,57 @@ func TestGetSessionInfoTool_Integration(t *testing.T) {
 	}
 	if !strings.Contains(out, "Rollback estimate") {
 		t.Errorf("output missing rollback estimate section: %q", out)
+	}
+}
+
+func TestGetStatusSummaryTool_Integration(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := getStatusSummaryTool(newTestContext(), GetStatusSummaryArgs{
+		ConnectionString: integrationConnStr,
+	})
+	if err != nil {
+		t.Fatalf("getStatusSummaryTool: %v", err)
+	}
+
+	// Output must be valid JSON.
+	var summary struct {
+		Status        string  `json:"status"`
+		Version       string  `json:"version"`
+		Uptime        string  `json:"uptime"`
+		Connections   int     `json:"connections"`
+		MaxConns      int     `json:"max_connections"`
+		CacheHitRatio float64 `json:"cache_hit_ratio"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, result.Output)
+	}
+	if summary.Status != "ok" {
+		t.Errorf("status = %q, want ok", summary.Status)
+	}
+	if !strings.HasPrefix(summary.Version, "PG ") {
+		t.Errorf("version = %q, want PG <major>.<minor>", summary.Version)
+	}
+	if summary.Uptime == "" {
+		t.Error("uptime is empty")
+	}
+	if summary.MaxConns <= 0 {
+		t.Errorf("max_connections = %d, want > 0", summary.MaxConns)
+	}
+	if summary.CacheHitRatio < 0 || summary.CacheHitRatio > 100 {
+		t.Errorf("cache_hit_ratio = %v, want 0-100", summary.CacheHitRatio)
+	}
+
+	// Cross-check max_connections against pg_settings.
+	want, err := runIntegrationSQLOutput(ctx, "SELECT current_setting('max_connections')")
+	if err != nil {
+		t.Fatalf("read max_connections: %v", err)
+	}
+	if wantInt, err := strconv.Atoi(strings.TrimSpace(want)); err == nil {
+		if summary.MaxConns != wantInt {
+			t.Errorf("max_connections = %d, pg_settings says %d", summary.MaxConns, wantInt)
+		}
 	}
 }

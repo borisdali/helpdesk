@@ -834,6 +834,47 @@ func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (Psql
 	return getConnectionStatsImpl(ctx, args)
 }
 
+// GetStatusSummaryArgs defines arguments for the get_status_summary tool.
+type GetStatusSummaryArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+// getStatusSummaryImpl returns a compact JSON object with status, version, uptime,
+// connection counts, and cache hit ratio — designed for fleet-wide tabular display.
+// Unlike get_server_info / get_database_stats, the Output field contains JSON, not
+// psql expanded text, so callers can parse individual fields programmatically.
+func getStatusSummaryImpl(ctx context.Context, args GetStatusSummaryArgs) (PsqlResult, error) {
+	query := `SELECT json_build_object(
+		'status',          'ok',
+		'version',         regexp_replace(version(), '^PostgreSQL ([0-9]+\.[0-9]+).*', 'PG \1'),
+		'uptime',          extract(day  FROM (now() - pg_postmaster_start_time()))::int::text || 'd '
+		                || extract(hour FROM (now() - pg_postmaster_start_time()))::int::text || 'h',
+		'connections',     (SELECT count(*)::int FROM pg_stat_activity),
+		'max_connections', current_setting('max_connections')::int,
+		'cache_hit_ratio', COALESCE(
+		                     (SELECT ROUND(100.0 * sum(blks_hit) / NULLIF(sum(blks_read + blks_hit), 0), 2)
+		                      FROM pg_stat_database WHERE datname NOT LIKE 'template%'),
+		                     0)
+	) AS status_summary`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_status_summary")
+	if err != nil {
+		return PsqlResult{Output: `{"status":"error"}`}, nil
+	}
+
+	// Extract the JSON value from the psql -x expanded output.
+	row := parseExpandedRow(output)
+	jsonStr, ok := row["status_summary"]
+	if !ok || jsonStr == "" {
+		return PsqlResult{Output: `{"status":"error"}`}, nil
+	}
+	return PsqlResult{Output: jsonStr}, nil
+}
+
+func getStatusSummaryTool(ctx tool.Context, args GetStatusSummaryArgs) (PsqlResult, error) {
+	return getStatusSummaryImpl(ctx, args)
+}
+
 // GetDatabaseStatsArgs defines arguments for the get_database_stats tool.
 type GetDatabaseStatsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
@@ -1490,6 +1531,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := terminateIdleConnectionsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_status_summary", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetStatusSummaryArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getStatusSummaryImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r

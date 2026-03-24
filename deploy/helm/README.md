@@ -256,14 +256,18 @@ gateway:
 ```bash
 # Interactive prompt (no echo — recommended)
 kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
-  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey
+  --image=ghcr.io/borisdali/helpdesk -- hashapikey
 
 # Or pass the key as an argument
 kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
-  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey my-secret-api-key
+  --image=ghcr.io/borisdali/helpdesk -- hashapikey my-secret-api-key
 ```
 
-Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`.
+Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`, then run `helm upgrade` — the chart's checksum annotation will automatically restart the gateway pod so the new hash takes effect. If you manage the users file via `usersSecret` (out-of-band), restart manually after updating the Secret:
+
+```bash
+kubectl -n helpdesk-system rollout restart deploy/helpdesk-gateway
+```
 
 #### JWT identity provider
 
@@ -878,13 +882,23 @@ openssl rand -hex 32 > .helpdesk-fleet-api-key
 
 # Hash it using the binary baked into the image
 kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
-  --image=ghcr.io/borisdali/helpdesk:v0.6.0 -- hashapikey "$(cat .helpdesk-fleet-api-key)"
-# Paste the printed hash into users.yaml under service_accounts[fleet-runner].api_key_hash
+  --image=ghcr.io/borisdali/helpdesk -- hashapikey "$(cat .helpdesk-fleet-api-key)"
+# Copy the printed hash into your values.yaml under:
+#   gateway.identity.usersConfig → service_accounts → fleet-runner → api_key_hash
 
 # Store the plaintext key as a K8s Secret
 kubectl -n helpdesk-system create secret generic helpdesk-fleet-api-key \
   --from-literal=api-key=$(cat .helpdesk-fleet-api-key)
+
+# Deploy with the updated usersConfig — the chart checksum annotation automatically
+# triggers a gateway rollout so the new hash is loaded without a manual restart.
+helm upgrade helpdesk ./helm/helpdesk -f my-values.yaml
 ```
+
+> **If using `usersSecret` (out-of-band Secret):** update the Secret content and then restart the gateway manually — the checksum annotation only covers `usersConfig`:
+> ```bash
+> kubectl -n helpdesk-system rollout restart deploy/helpdesk-gateway
+> ```
 
 Then reference it in both usage patterns via `fleetRunner.apiKeySecret: helpdesk-fleet-api-key`.
 
@@ -965,18 +979,19 @@ kubectl -n helpdesk-system logs -f job/fleet-vacuum-now
 
 See `scripts/README.md` for the full flag reference.
 
-**Generating a job definition from natural language:** use the planner endpoint from your workstation:
+**Generating a job definition from natural language:** use the planner endpoint from your workstation (all commands run locally; `run-fleet-job.sh` uses `kubectl` to create resources in the cluster):
 
 ```bash
-# Port-forward the gateway first
+# Port-forward the gateway to your workstation
 kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
 
+# Generate a job definition via the planner (saves to a local file)
 curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
   -H "Content-Type: application/json" \
   -d '{"description": "check connection health on all production databases"}' \
   | jq -r '.job_def_raw' > jobs/health-check.json
 
-# Then run it
+# Dry-run it in the cluster (script runs locally, creates a temporary K8s Job via kubectl)
 ./scripts/run-fleet-job.sh --dry-run jobs/health-check.json
 ```
 

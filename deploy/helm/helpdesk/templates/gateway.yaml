@@ -16,6 +16,12 @@ spec:
       labels:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: gateway
+      {{- if or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret }}
+      annotations:
+        # Force a rollout whenever the users Secret content changes so the
+        # gateway picks up new API key hashes without a manual restart.
+        checksum/users-secret: {{ include (print $.Template.BasePath "/users-secret.yaml") . | sha256sum }}
+      {{- end }}
     spec:
       containers:
         - name: gateway

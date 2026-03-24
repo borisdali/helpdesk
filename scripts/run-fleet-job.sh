@@ -129,8 +129,6 @@ elif [[ -n "$API_KEY_SECRET" ]]; then
 fi
 
 # Convert FLEET_CMD array to JSON array.
-CMD_JSON=$(printf '%s\n' "${FLEET_CMD[@]}" | jq -Rc '[.,inputs]' | head -1)
-# The above uses inputs; use a simpler approach:
 CMD_JSON="["
 for elem in "${FLEET_CMD[@]}"; do
   CMD_JSON+=$(jq -cn --arg v "$elem" '$v')","
@@ -209,13 +207,95 @@ echo "────────────────────────�
 
 # ── report exit status ────────────────────────────────────────────────────────
 
-EXIT_CODE=$(kubectl -n "$NAMESPACE" get pod "$POD" \
-  -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null) || EXIT_CODE=0
+# Check the Job condition — more reliable than reading the pod's terminated exit
+# code, which may not be written yet when kubectl logs -f returns.
+kubectl -n "$NAMESPACE" wait job/"$JOB_NAME" \
+  --for=condition=Complete --timeout=10s &>/dev/null && JOB_OK=true || JOB_OK=false
 
-if [[ "$EXIT_CODE" == "0" ]]; then
-  info "Fleet job completed successfully."
-else
-  info "Fleet job FAILED (exit code $EXIT_CODE)."
+# ── print per-step output from auditd ─────────────────────────────────────────
+# The fleet-runner logs only show orchestration events; actual tool output is
+# stored in auditd's step records. Fetch and print them if we have a job ID.
+#
+# JOB_ID is parsed from the fleet-runner logs (line: "fleet job created job_id=...").
+JOB_ID=$(kubectl -n "$NAMESPACE" logs "$POD" 2>/dev/null \
+  | grep 'fleet job created' | grep -o 'job_id=[^ ]*' | cut -d= -f2)
+
+if [[ -n "$JOB_ID" ]]; then
+  # Port-forward auditd on a random local port, fetch results, then kill it.
+  AUDITD_SVC="${RELEASE}-auditd"
+  AUDITD_PORT=$(kubectl -n "$NAMESPACE" get svc "$AUDITD_SVC" \
+    -o jsonpath='{.spec.ports[0].port}' 2>/dev/null) || AUDITD_PORT=1199
+  LOCAL_PORT=$(( RANDOM % 10000 + 40000 ))
+
+  kubectl -n "$NAMESPACE" port-forward \
+    "svc/${AUDITD_SVC}" "${LOCAL_PORT}:${AUDITD_PORT}" &>/dev/null &
+  PF_PID=$!
+  sleep 1  # give port-forward a moment to connect
+
+  SERVERS=$(curl -sf "http://localhost:${LOCAL_PORT}/v1/fleet/jobs/${JOB_ID}/servers" 2>/dev/null \
+    | jq -r '.[].server_name' 2>/dev/null) || SERVERS=""
+
+  if [[ -n "$SERVERS" ]]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════════════════════"
+    echo "  Fleet job results: $JOB_ID"
+    echo "════════════════════════════════════════════════════════════════════════════"
+
+    # Collect all steps into a single JSON array: [{server, steps:[...]}, ...]
+    ALL_RESULTS="[]"
+    while IFS= read -r server; do
+      STEPS=$(curl -sf \
+        "http://localhost:${LOCAL_PORT}/v1/fleet/jobs/${JOB_ID}/servers/${server}/steps" \
+        2>/dev/null) || STEPS="[]"
+      ALL_RESULTS=$(echo "$ALL_RESULTS" \
+        | jq --arg s "$server" --argjson st "$STEPS" '. + [{server:$s, steps:$st}]')
+    done <<<"$SERVERS"
+
+    # If any step is get_status_summary, render as a table; otherwise per-step text.
+    HAS_SUMMARY=$(echo "$ALL_RESULTS" \
+      | jq '[.[].steps[] | select(.tool=="get_status_summary")] | length > 0')
+
+    if [[ "$HAS_SUMMARY" == "true" ]]; then
+      echo ""
+      echo "$ALL_RESULTS" | jq -r '
+        ["SERVER", "STATUS", "VERSION", "UPTIME", "CONN", "CACHE HIT%"],
+        ["──────", "──────", "───────", "──────", "────", "──────────"],
+        (.[] |
+          .server as $srv |
+          .steps[] |
+          select(.tool == "get_status_summary") |
+          .output as $out |
+          ($out | try fromjson catch {status:"error",version:"-",uptime:"-",connections:0,max_connections:0,cache_hit_ratio:0}) as $s |
+          [$srv,
+           $s.status,
+           ($s.version // "-"),
+           ($s.uptime  // "-"),
+           (($s.connections // 0 | tostring) + "/" + ($s.max_connections // 0 | tostring)),
+           ($s.cache_hit_ratio // 0 | tostring)]
+        ) | @tsv' | column -t -s $'\t'
+      echo ""
+    else
+      while IFS= read -r server; do
+        echo ""
+        echo "  Server: $server"
+        echo "  ──────────────────────────────────────────────────────────────────────"
+        STEPS=$(echo "$ALL_RESULTS" \
+          | jq -r --arg s "$server" '.[] | select(.server==$s) | .steps')
+        echo "$STEPS" | jq -r '.[] | "  [step \(.step_index)] \(.tool)", (.output // "  (no output)")'
+      done <<<"$SERVERS"
+      echo ""
+    fi
+  fi
+
+  kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null || true
 fi
 
-exit "${EXIT_CODE:-0}"
+if $JOB_OK; then
+  info "Fleet job completed successfully."
+  exit 0
+else
+  EXIT_CODE=$(kubectl -n "$NAMESPACE" get pod "$POD" \
+    -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)
+  info "Fleet job FAILED (exit code ${EXIT_CODE:-unknown})."
+  exit 1
+fi

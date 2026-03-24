@@ -44,7 +44,7 @@ service_accounts:
   # fleet-runner: scheduled automation that runs helpdesk-client queries across
   # a fleet of databases or clusters (e.g. nightly health checks, capacity reports).
   - id: fleet-runner
-    roles: [sre-automation]
+    roles: [sre-automation, fleet-operator]
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$Zmxlc3RydW5uZXI$placeholder-replace-with-real-hash"
 
   # prevention-monitor: proactive monitoring agent that polls for early warning

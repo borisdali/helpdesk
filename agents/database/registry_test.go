@@ -22,6 +22,7 @@ var expectedDBTools = []string{
 	"cancel_query",
 	"terminate_connection",
 	"terminate_idle_connections",
+	"get_status_summary",
 }
 
 func TestDatabaseDirectRegistry_AllToolsRegistered(t *testing.T) {

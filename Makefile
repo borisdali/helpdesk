@@ -276,6 +276,7 @@ bundle:
 	echo "==> helper scripts"; \
 	cp scripts/gateway-repl.sh $$bundledir/scripts/; \
 	cp scripts/k8s-local-repl.sh $$bundledir/scripts/; \
+	cp scripts/run-fleet-job.sh $$bundledir/scripts/; \
 	cp scripts/README.md $$bundledir/scripts/; \
 	chmod +x $$bundledir/scripts/*.sh; \
 	\

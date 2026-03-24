@@ -1148,7 +1148,7 @@ func TestIntegration_VerifyTrace_SinceFilter(t *testing.T) {
 	post(t, auditdAddr, "/v1/events", after)
 
 	url := fmt.Sprintf("/v1/events?event_type=tool_execution&trace_id=%s&since=%s",
-		traceID, since.Format(time.RFC3339))
+		traceID, since.Format(time.RFC3339Nano))
 	events := getList(t, auditdAddr, url)
 
 	if len(events) != 1 {

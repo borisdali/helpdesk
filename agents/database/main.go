@@ -149,6 +149,7 @@ func main() {
 			"postgres_database_agent-get_active_connections":     {"postgresql", "performance", "connections"},
 			"postgres_database_agent-get_connection_stats":       {"postgresql", "performance", "connections"},
 			"postgres_database_agent-get_database_stats":         {"postgresql", "performance", "statistics"},
+		"postgres_database_agent-get_status_summary":         {"postgresql", "status", "fleet"},
 			"postgres_database_agent-get_config_parameter":       {"postgresql", "configuration"},
 			"postgres_database_agent-get_replication_status":     {"postgresql", "replication", "ha"},
 			"postgres_database_agent-get_lock_info":              {"postgresql", "locks", "contention"},
@@ -286,6 +287,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getStatusSummaryToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_status_summary",
+		Description: "Return a compact JSON summary of server status, version, uptime, connection counts, and cache hit ratio. Designed for fleet-wide health checks where results from many servers need to be compared in a table.",
+	}, getStatusSummaryTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -301,6 +310,7 @@ func createTools() ([]tool.Tool, error) {
 		cancelQueryToolDef,
 		terminateConnectionToolDef,
 		terminateIdleConnectionsToolDef,
+		getStatusSummaryToolDef,
 	}, nil
 }
 
