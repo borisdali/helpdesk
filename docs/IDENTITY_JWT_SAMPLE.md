@@ -8,7 +8,17 @@ The sample log presented here is how JWT authn can be tested on K8s with
 no extenal dependencies (tested on Mac Apple Silicon arm64 VM)
 . In reality you'd want to have a proper IdP
 setup (e.g. Okta, Auth0, Keycloak, etc), but for testing the built-in
-`jwttest` mock is sufficient:
+`jwttest` mock is sufficient.
+
+
+[`jwttest`] is a ~130 lines of pure stdlib Go. There's no external JWT
+library, no third-party tool. It generates an in-memory RSA-2048 key
+pair, serves the public key as a JWKS endpoint, and prints a signed
+RS256 JWT, all in one process. The intent is to make local JWT provider
+testing self-contained: one command gives you a live JWKS URL and a
+valid token without any external dependency.
+
+Here's how it works on K8s:
 
 
 ```

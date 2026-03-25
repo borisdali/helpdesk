@@ -3,7 +3,7 @@
 Fleet Management module is documented [here](FLEET.md).
 Platform specific instructions are also available for running aiHelpDesk jobs directly on a [host/VM](../deploy/host/README.md#710-running-the-fleet-runner-fleet-runner), in [Docker containers](../deploy/docker-compose/README.md#38-running-the-fleet-runner-fleet-runner) and on [K8s](../deploy/helm/README.md#99-running-the-jobs-on-multiple-databases-via-fleet-managements-fleet-runner).
 
-aiHelpDesk supports both scheduled as well as the ad-hoc jobs. The sample of creating and running the latter is presented below. In this example the job is created via a NL request through the aiHelpDesk client tool. It can be used as is for testing, but for production use we recommend taking it as a template, customizing it as you see fit, testing it on the lower tier environments, going through the normal peer review process and checking into a version control system before running it access your database fleet.
+aiHelpDesk supports both scheduled as well as the ad-hoc jobs. The sample of creating and running the latter is presented below. In this example the job is created via a NL request through the aiHelpDesk client tool. It can be used as is for testing, but for production use we recommend taking it as a template, customizing it as you see fit, testing it on the lower tier environments, going through the normal peer review process and checking into a version control system before running it across your database fleet.
 
 Sample run:
 
@@ -184,7 +184,7 @@ A single ad-hoc job with two "servers":
 ... and the "steps" for the first server:
 
 ```
-[boris@cassiopeia ~/cassiopeia/minikube]$ curl -s http://localhost:8080/api/v1/fleet/jobs/flj_74ced056/servers/alloydb-on-vm/steps -H "X-User: alice@example.com" |jq .
+[boris@cassiopeia /tmp/helpdesk/helpdesk-v0.7.0-deploy/]$ curl -s http://localhost:8080/api/v1/fleet/jobs/flj_74ced056/servers/alloydb-on-vm/steps -H "X-User: alice@example.com" |jq .
 [
   {
     "id": 8,
