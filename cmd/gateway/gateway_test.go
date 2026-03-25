@@ -1409,3 +1409,61 @@ func TestHandleListRoles(t *testing.T) {
 		t.Errorf("roles response does not contain 'dba'; got: %v", rolesRaw)
 	}
 }
+
+// TestHandleFleetPlan_ResolveSuperseded verifies that when the mock LLM returns a plan
+// containing both get_status_summary and the tools it supersedes, the handler strips
+// the subordinate tools before returning the response.
+func TestHandleFleetPlan_ResolveSuperseded(t *testing.T) {
+	cfg := makeTestInfra()
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{
+			Name:          "get_status_summary",
+			Agent:         "database",
+			ActionClass:   "read",
+			FleetEligible: true,
+			Supersedes:    []string{"get_server_info", "get_connection_stats"},
+		},
+		{Name: "get_server_info", Agent: "database", ActionClass: "read", FleetEligible: true},
+		{Name: "get_connection_stats", Agent: "database", ActionClass: "read", FleetEligible: true},
+	})
+
+	// LLM returns all three tools — simulating the pre-taxonomy behaviour.
+	llmResp := map[string]any{
+		"job_def": map[string]any{
+			"name": "check-status",
+			"change": map[string]any{
+				"steps": []any{
+					map[string]any{"agent": "database", "tool": "get_server_info", "on_failure": "stop"},
+					map[string]any{"agent": "database", "tool": "get_connection_stats", "on_failure": "stop"},
+					map[string]any{"agent": "database", "tool": "get_status_summary", "on_failure": "stop"},
+				},
+			},
+			"targets":  map[string]any{"tags": []string{"development"}},
+			"strategy": map[string]any{"canary_count": 1},
+		},
+		"planner_notes": "checking status",
+	}
+	raw, _ := json.Marshal(llmResp)
+	gw := makePlannerGateway(cfg, reg, func(_ context.Context, _ string) (string, error) {
+		return string(raw), nil
+	})
+
+	rec := postFleetPlan(t, gw, `{"description":"check status, uptime and load on development databases"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp FleetPlanResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	steps := resp.JobDef.Change.Steps
+	if len(steps) != 1 {
+		t.Fatalf("steps len = %d, want 1; got %v", len(steps), steps)
+	}
+	if steps[0].Tool != "get_status_summary" {
+		t.Errorf("steps[0].Tool = %q, want get_status_summary", steps[0].Tool)
+	}
+}

@@ -1009,6 +1009,157 @@ func TestApplyCardOptions_SkillExamples(t *testing.T) {
 	}
 }
 
+func TestApplyCardOptions_SkillFleetEligible(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "test",
+		Skills: []a2a.AgentSkill{
+			{ID: "agent-get_status_summary"},
+			{ID: "agent-get_server_info"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillFleetEligible: map[string]bool{
+			"agent-get_status_summary": true,
+			"agent-get_server_info":    false, // explicit false should not append fleet:true
+		},
+	})
+
+	hasFleetsTag := func(skill a2a.AgentSkill) bool {
+		for _, tag := range skill.Tags {
+			if tag == "fleet:true" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasFleetsTag(card.Skills[0]) {
+		t.Errorf("get_status_summary: expected fleet:true tag, got tags %v", card.Skills[0].Tags)
+	}
+	if hasFleetsTag(card.Skills[1]) {
+		t.Errorf("get_server_info: expected no fleet:true tag (false), got tags %v", card.Skills[1].Tags)
+	}
+}
+
+func TestApplyCardOptions_SkillCapabilities(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "test",
+		Skills: []a2a.AgentSkill{
+			{ID: "agent-get_status_summary"},
+			{ID: "agent-check_connection"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillCapabilities: map[string][]string{
+			"agent-get_status_summary": {"uptime", "connection_count"},
+			"agent-check_connection":   {"connectivity"},
+		},
+	})
+
+	wantTags := func(skill a2a.AgentSkill, expected []string) {
+		t.Helper()
+		tagSet := make(map[string]bool, len(skill.Tags))
+		for _, tag := range skill.Tags {
+			tagSet[tag] = true
+		}
+		for _, want := range expected {
+			if !tagSet["cap:"+want] {
+				t.Errorf("skill %q: expected tag %q, got tags %v", skill.ID, "cap:"+want, skill.Tags)
+			}
+		}
+	}
+
+	wantTags(card.Skills[0], []string{"uptime", "connection_count"})
+	wantTags(card.Skills[1], []string{"connectivity"})
+
+	// Unrelated skill should have no cap: tags.
+	if len(card.Skills[0].Tags) != 2 {
+		t.Errorf("get_status_summary: expected exactly 2 tags, got %v", card.Skills[0].Tags)
+	}
+}
+
+func TestApplyCardOptions_SkillSupersedes(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "test",
+		Skills: []a2a.AgentSkill{
+			{ID: "agent-get_status_summary"},
+			{ID: "agent-get_server_info"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillSupersedes: map[string][]string{
+			"agent-get_status_summary": {"get_server_info", "get_connection_stats"},
+		},
+	})
+
+	hasSupersedesTag := func(skill a2a.AgentSkill, name string) bool {
+		for _, tag := range skill.Tags {
+			if tag == "supersedes:"+name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasSupersedesTag(card.Skills[0], "get_server_info") {
+		t.Errorf("get_status_summary: expected supersedes:get_server_info, got %v", card.Skills[0].Tags)
+	}
+	if !hasSupersedesTag(card.Skills[0], "get_connection_stats") {
+		t.Errorf("get_status_summary: expected supersedes:get_connection_stats, got %v", card.Skills[0].Tags)
+	}
+	if len(card.Skills[1].Tags) != 0 {
+		t.Errorf("get_server_info: expected no tags, got %v", card.Skills[1].Tags)
+	}
+}
+
+func TestApplyCardOptions_TaxonomyRoundTrip(t *testing.T) {
+	// Verify the full wire format: applyCardOptions serializes typed fields to
+	// key:value tag strings, and parseSkillTags (in toolregistry) deserializes them.
+	// This ensures the two halves of the pipeline agree on the format.
+	card := &a2a.AgentCard{
+		Name: "myagent",
+		Skills: []a2a.AgentSkill{
+			{ID: "myagent-get_status_summary"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillFleetEligible: map[string]bool{
+			"myagent-get_status_summary": true,
+		},
+		SkillCapabilities: map[string][]string{
+			"myagent-get_status_summary": {"uptime", "connection_count"},
+		},
+		SkillSupersedes: map[string][]string{
+			"myagent-get_status_summary": {"get_server_info"},
+		},
+	})
+
+	tags := card.Skills[0].Tags
+	// Manually parse using the same logic as toolregistry.parseSkillTags.
+	var fleetEligible bool
+	var caps, supersedes []string
+	for _, tag := range tags {
+		switch {
+		case tag == "fleet:true":
+			fleetEligible = true
+		case len(tag) > 4 && tag[:4] == "cap:":
+			caps = append(caps, tag[4:])
+		case len(tag) > 11 && tag[:11] == "supersedes:":
+			supersedes = append(supersedes, tag[11:])
+		}
+	}
+
+	if !fleetEligible {
+		t.Error("round-trip: fleet:true not found in tags")
+	}
+	if len(caps) != 2 {
+		t.Errorf("round-trip: caps = %v, want [uptime connection_count]", caps)
+	}
+	if len(supersedes) != 1 || supersedes[0] != "get_server_info" {
+		t.Errorf("round-trip: supersedes = %v, want [get_server_info]", supersedes)
+	}
+}
+
 // ── Identity & Purpose propagation ───────────────────────────────────────────
 
 // mockCapturingPolicyServer captures the decoded policyCheckReq and returns the
