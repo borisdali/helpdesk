@@ -76,7 +76,8 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		hints = strings.Join(req.TargetHints, ", ")
 	}
 
-	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, req.Description, hints)
+	intentSection := buildIntentSection()
+	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, req.Description, hints)
 
 	// Call LLM (injectable for tests; defaults to Anthropic SDK).
 	rawJSON, err := g.plannerLLM(r.Context(), prompt)
@@ -106,6 +107,13 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 
 	// Stamp the plan trace ID so the job file can be linked back to this audit event.
 	jobDef.PlanTraceID = traceID
+
+	// Deterministic deduplication: remove tools superseded by another tool already
+	// in the plan. Safety net: even if the LLM ignores the intent mapping, redundant
+	// tools are stripped here before validation.
+	rawNames := toolNamesFromSteps(jobDef.Change.Steps)
+	resolvedNames := g.toolRegistry.ResolveSuperseded(rawNames)
+	jobDef.Change.Steps = filterStepsByName(jobDef.Change.Steps, resolvedNames)
 
 	// Validate: all step tool names must exist in the registry.
 	steps := jobDef.Change.Steps
@@ -226,18 +234,36 @@ func buildPlannerInfraContext(cfg *infra.Config) (summary string, restricted []s
 	return sb.String(), restricted
 }
 
-// buildPlannerToolCatalog formats all registered tools for the planner prompt.
+// buildPlannerToolCatalog formats fleet-eligible tools for the planner prompt.
+// Only tools marked FleetEligible are shown; non-fleet tools are invisible to the LLM.
 func buildPlannerToolCatalog(r *toolregistry.Registry) string {
 	var sb strings.Builder
-	for _, entry := range r.List() {
-		sb.WriteString(fmt.Sprintf("  %s  agent=%s  class=%s  — %s\n",
-			entry.Name, entry.Agent, entry.ActionClass, entry.Description))
+	for _, entry := range r.ListFleetEligible() {
+		caps := strings.Join(entry.Capabilities, ", ")
+		sb.WriteString(fmt.Sprintf("  %s  agent=%s  class=%s  caps=[%s]  — %s\n",
+			entry.Name, entry.Agent, entry.ActionClass, caps, entry.Description))
+	}
+	return sb.String()
+}
+
+// buildIntentSection formats the IntentMap as sorted directive lines for the prompt.
+func buildIntentSection() string {
+	intents := make([]string, 0, len(toolregistry.IntentMap))
+	for intent := range toolregistry.IntentMap {
+		intents = append(intents, intent)
+	}
+	sort.Strings(intents)
+
+	var sb strings.Builder
+	for _, intent := range intents {
+		tools := toolregistry.IntentMap[intent]
+		sb.WriteString(fmt.Sprintf("  %s → %s\n", intent, strings.Join(tools, ", ")))
 	}
 	return sb.String()
 }
 
 // assemblePlannerPrompt builds the full LLM prompt for the fleet job planner.
-func assemblePlannerPrompt(infraSummary, toolCatalog, description, hints string) string {
+func assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, description, hints string) string {
 	return fmt.Sprintf(`You are a fleet job planner for an AI database operations platform.
 Generate a valid fleet job definition as JSON based on the user's request.
 
@@ -251,6 +277,9 @@ Always add excluded server names to the excluded_servers list in your response.
 
 ## Available Tools
 
+%s
+## Intent-to-Tool Mapping
+When the request matches a known intent, use EXACTLY the listed tools — do not add others:
 %s
 ## JobDef Schema
 
@@ -286,7 +315,7 @@ Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
   "planner_notes": "<plain English: what this job does, why these tools, which servers targeted>",
   "excluded_servers": ["server1", ...],
   "warning_messages": ["..."]
-}`, infraSummary, toolCatalog, description, hints)
+}`, infraSummary, toolCatalog, intentSection, description, hints)
 }
 
 // callPlannerLLM sends the planner prompt to the Anthropic API and returns the raw response text.
@@ -376,6 +405,35 @@ func resolveTargetsFromInfra(cfg *infra.Config, targets fleet.Targets) []string 
 		}
 	}
 
+	return result
+}
+
+// toolNamesFromSteps returns a deduplicated, ordered list of tool names from steps.
+func toolNamesFromSteps(steps []fleet.Step) []string {
+	seen := make(map[string]bool, len(steps))
+	var result []string
+	for _, s := range steps {
+		if !seen[s.Tool] {
+			seen[s.Tool] = true
+			result = append(result, s.Tool)
+		}
+	}
+	return result
+}
+
+// filterStepsByName returns only the steps whose Tool is in the allowed set.
+// Preserves order; drops steps with tool names not in names.
+func filterStepsByName(steps []fleet.Step, names []string) []fleet.Step {
+	allowed := make(map[string]bool, len(names))
+	for _, n := range names {
+		allowed[n] = true
+	}
+	result := make([]fleet.Step, 0, len(steps))
+	for _, s := range steps {
+		if allowed[s.Tool] {
+			result = append(result, s)
+		}
+	}
 	return result
 }
 

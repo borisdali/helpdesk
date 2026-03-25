@@ -14,11 +14,14 @@ import (
 
 // ToolEntry describes one registered tool.
 type ToolEntry struct {
-	Name        string         `json:"name"`
-	Agent       string         `json:"agent"`        // "database" or "k8s"
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"input_schema,omitempty"` // JSON Schema properties
-	ActionClass string         `json:"action_class"` // "read", "write", "destructive"
+	Name          string         `json:"name"`
+	Agent         string         `json:"agent"`                  // "database" or "k8s"
+	Description   string         `json:"description"`
+	InputSchema   map[string]any `json:"input_schema,omitempty"` // JSON Schema properties
+	ActionClass   string         `json:"action_class"`           // "read", "write", "destructive"
+	FleetEligible bool           `json:"fleet_eligible"`         // hard gate: planner only sees these
+	Capabilities  []string       `json:"capabilities,omitempty"` // controlled vocabulary (Cap* constants)
+	Supersedes    []string       `json:"supersedes,omitempty"`   // tool names this one makes redundant
 }
 
 // Registry is an immutable catalog of tools built from agent cards.
@@ -56,6 +59,72 @@ func (r *Registry) ListByAgent(agent string) []ToolEntry {
 	for _, e := range r.tools {
 		if e.Agent == agent {
 			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// ListFleetEligible returns only the tools marked as fleet-eligible.
+// The fleet planner calls this instead of List so non-fleet tools are invisible.
+func (r *Registry) ListFleetEligible() []ToolEntry {
+	var result []ToolEntry
+	for _, e := range r.tools {
+		if e.FleetEligible {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// ListByCapability returns all tools that declare the given capability.
+func (r *Registry) ListByCapability(cap string) []ToolEntry {
+	var result []ToolEntry
+	for _, e := range r.tools {
+		for _, c := range e.Capabilities {
+			if c == cap {
+				result = append(result, e)
+				break
+			}
+		}
+	}
+	return result
+}
+
+// ResolveSuperseded removes from names any tool that is superseded by another
+// tool already present in names. This is deterministic post-processing: even if
+// the LLM selects redundant tools, the dominant one wins.
+//
+// Example: if get_status_summary declares Supersedes=["get_server_info","get_connection_stats"]
+// and all three are in names, the result will contain only get_status_summary.
+func (r *Registry) ResolveSuperseded(names []string) []string {
+	// Index the input names for O(1) lookup.
+	inSet := make(map[string]bool, len(names))
+	for _, n := range names {
+		inSet[n] = true
+	}
+
+	// For each tool in the input that declares Supersedes, mark dominated names.
+	dominated := make(map[string]bool)
+	for _, n := range names {
+		e, ok := r.byName[n]
+		if !ok {
+			continue
+		}
+		for _, sup := range e.Supersedes {
+			if inSet[sup] {
+				dominated[sup] = true
+			}
+		}
+	}
+
+	if len(dominated) == 0 {
+		return names
+	}
+
+	result := make([]string, 0, len(names))
+	for _, n := range names {
+		if !dominated[n] {
+			result = append(result, n)
 		}
 	}
 	return result
@@ -154,11 +223,16 @@ func Build(agentCards map[string]*a2a.AgentCard, classification map[string]audit
 				desc = skill.Name
 			}
 
+			fleetEligible, caps, supersedes := parseSkillTags(skill.Tags)
+
 			entries = append(entries, ToolEntry{
-				Name:        toolName,
-				Agent:       shortName,
-				Description: desc,
-				ActionClass: actionClass,
+				Name:          toolName,
+				Agent:         shortName,
+				Description:   desc,
+				ActionClass:   actionClass,
+				FleetEligible: fleetEligible,
+				Capabilities:  caps,
+				Supersedes:    supersedes,
 			})
 		}
 	}
@@ -176,4 +250,20 @@ func extractToolName(agentName, skillID string) string {
 	}
 	// Also handle cases where the agent name uses underscores and skill ID uses the same.
 	return ""
+}
+
+// parseSkillTags extracts typed taxonomy metadata from the key:value tag strings
+// that applyCardOptions serializes from the typed CardOptions fields.
+func parseSkillTags(tags []string) (fleetEligible bool, caps, supersedes []string) {
+	for _, tag := range tags {
+		switch {
+		case tag == "fleet:true":
+			fleetEligible = true
+		case strings.HasPrefix(tag, "cap:"):
+			caps = append(caps, strings.TrimPrefix(tag, "cap:"))
+		case strings.HasPrefix(tag, "supersedes:"):
+			supersedes = append(supersedes, strings.TrimPrefix(tag, "supersedes:"))
+		}
+	}
+	return fleetEligible, caps, supersedes
 }

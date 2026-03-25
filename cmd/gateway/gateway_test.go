@@ -443,8 +443,8 @@ func TestBuildPlannerInfraContext_Restricted(t *testing.T) {
 
 func TestBuildPlannerToolCatalog(t *testing.T) {
 	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
-		{Name: "check_connection", Agent: "database", ActionClass: "read", Description: "Test DB connectivity"},
-		{Name: "cancel_query", Agent: "database", ActionClass: "write", Description: "Cancel a running query"},
+		{Name: "check_connection", Agent: "database", ActionClass: "read", Description: "Test DB connectivity", FleetEligible: true},
+		{Name: "cancel_query", Agent: "database", ActionClass: "write", Description: "Cancel a running query", FleetEligible: true},
 	})
 
 	catalog := buildPlannerToolCatalog(reg)

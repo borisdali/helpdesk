@@ -226,6 +226,17 @@ func (e *Engine) matchesResource(policy Policy, resource RequestResource) bool {
 			}
 		}
 
+		// Tool name matching (exact or glob).
+		if r.Match.Tool != "" && r.Match.Tool != resource.ToolName {
+			continue
+		}
+		if r.Match.ToolPattern != "" {
+			matched, _ := filepath.Match(r.Match.ToolPattern, resource.ToolName)
+			if !matched {
+				continue
+			}
+		}
+
 		// All criteria matched
 		return true
 	}

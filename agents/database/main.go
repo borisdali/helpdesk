@@ -19,6 +19,7 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
+	"helpdesk/internal/toolregistry"
 	"helpdesk/prompts"
 )
 
@@ -166,6 +167,54 @@ func main() {
 			"postgres_database_agent-get_lock_info":          {"Are there any blocking locks on the database?"},
 			"postgres_database_agent-get_replication_status": {"What is the replication lag?"},
 		},
+		SkillFleetEligible: map[string]bool{
+			"postgres_database_agent-get_status_summary": true,
+		},
+		SkillCapabilities: map[string][]string{
+			"postgres_database_agent-get_status_summary": {
+				toolregistry.CapUptime,
+				toolregistry.CapVersion,
+				toolregistry.CapConnectionCount,
+				toolregistry.CapCacheHitRatio,
+			},
+			"postgres_database_agent-get_server_info": {
+				toolregistry.CapUptime,
+				toolregistry.CapVersion,
+			},
+			"postgres_database_agent-get_connection_stats": {
+				toolregistry.CapConnectionCount,
+			},
+			"postgres_database_agent-check_connection": {
+				toolregistry.CapConnectivity,
+			},
+			"postgres_database_agent-get_replication_status": {
+				toolregistry.CapReplication,
+			},
+			"postgres_database_agent-get_lock_info": {
+				toolregistry.CapLockInfo,
+			},
+			"postgres_database_agent-get_table_stats": {
+				toolregistry.CapTableStats,
+			},
+			"postgres_database_agent-get_database_info": {
+				toolregistry.CapDatabaseList,
+			},
+			"postgres_database_agent-get_config_parameter": {
+				toolregistry.CapConfig,
+			},
+			"postgres_database_agent-get_active_connections": {
+				toolregistry.CapActiveQueries,
+			},
+			"postgres_database_agent-get_session_info": {
+				toolregistry.CapSessionInspect,
+			},
+		},
+		SkillSupersedes: map[string][]string{
+			"postgres_database_agent-get_status_summary": {
+				"get_server_info",
+				"get_connection_stats",
+			},
+		},
 	}
 
 	if err := agentutil.ServeWithTracingAndDirectTools(ctx, dbAgent, cfg, traceStore, auditStore, NewDatabaseDirectRegistry(), cardOpts); err != nil {
@@ -185,7 +234,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getServerInfoToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_server_info",
-		Description: "Get PostgreSQL server information including uptime, start time, version, data directory, role (primary/replica), and connection counts. Use for interactive diagnosis. For fleet-wide status checks use get_status_summary instead.",
+		Description: "Get PostgreSQL server information including uptime, start time, version, data directory, role (primary/replica), and connection counts.",
 	}, getServerInfoTool)
 	if err != nil {
 		return nil, err
@@ -209,7 +258,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getConnectionStatsToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_connection_stats",
-		Description: "Get connection statistics summary: total connections, active, idle, waiting on locks per database. Use for interactive diagnosis. For fleet-wide status checks use get_status_summary instead.",
+		Description: "Get connection statistics summary: total connections, active, idle, waiting on locks per database.",
 	}, getConnectionStatsTool)
 	if err != nil {
 		return nil, err
@@ -289,7 +338,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getStatusSummaryToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_status_summary",
-		Description: "Return a compact JSON summary of server status, version, uptime, connection counts, and cache hit ratio. Use this as the single tool for any fleet job that checks status, uptime, or load — it covers everything get_server_info and get_connection_stats provide in one call.",
+		Description: "Return a compact JSON summary of server status, version, uptime, connection counts, and cache hit ratio.",
 	}, getStatusSummaryTool)
 	if err != nil {
 		return nil, err

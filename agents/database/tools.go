@@ -245,7 +245,9 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 			}
 			note += "connection string not found in infraConfig; no tags available for policy matching"
 		}
-		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags, note, dbInfo.Sensitivity); err != nil {
+		// Carry the tool name in context for policy matching on ResourceMatch.Tool/ToolPattern.
+		policyCtx := agentutil.WithToolName(ctx, toolName)
+		if err := policyEnforcer.CheckDatabase(policyCtx, dbInfo.Name, action, dbInfo.Tags, note, dbInfo.Sensitivity); err != nil {
 			slog.Warn("policy denied database access",
 				"tool", toolName,
 				"database", dbInfo.Name,

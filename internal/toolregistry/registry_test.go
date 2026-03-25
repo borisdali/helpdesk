@@ -150,3 +150,117 @@ func TestValidate_UnknownTool(t *testing.T) {
 		t.Error("Validate(unknown tool) returned nil, want error")
 	}
 }
+
+func TestListFleetEligible(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Agent: "database", FleetEligible: true},
+		{Name: "check_connection", Agent: "database", FleetEligible: false},
+		{Name: "get_server_info", Agent: "database"},
+	}
+	r := New(entries)
+	fleet := r.ListFleetEligible()
+	if len(fleet) != 1 {
+		t.Fatalf("ListFleetEligible() len = %d, want 1", len(fleet))
+	}
+	if fleet[0].Name != "get_status_summary" {
+		t.Errorf("ListFleetEligible()[0].Name = %q, want %q", fleet[0].Name, "get_status_summary")
+	}
+}
+
+func TestListByCapability(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Capabilities: []string{CapUptime, CapConnectionCount}},
+		{Name: "get_server_info", Capabilities: []string{CapUptime, CapVersion}},
+		{Name: "check_connection", Capabilities: []string{CapConnectivity}},
+	}
+	r := New(entries)
+
+	uptimeTools := r.ListByCapability(CapUptime)
+	if len(uptimeTools) != 2 {
+		t.Fatalf("ListByCapability(uptime) len = %d, want 2", len(uptimeTools))
+	}
+
+	connTools := r.ListByCapability(CapConnectivity)
+	if len(connTools) != 1 || connTools[0].Name != "check_connection" {
+		t.Errorf("ListByCapability(connectivity) = %v, want [check_connection]", connTools)
+	}
+
+	none := r.ListByCapability(CapLogs)
+	if len(none) != 0 {
+		t.Errorf("ListByCapability(logs) len = %d, want 0", len(none))
+	}
+}
+
+func TestResolveSuperseded_BasicCase(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Supersedes: []string{"get_server_info", "get_connection_stats"}},
+		{Name: "get_server_info"},
+		{Name: "get_connection_stats"},
+	}
+	r := New(entries)
+
+	input := []string{"get_server_info", "get_connection_stats", "get_status_summary"}
+	got := r.ResolveSuperseded(input)
+	if len(got) != 1 || got[0] != "get_status_summary" {
+		t.Errorf("ResolveSuperseded = %v, want [get_status_summary]", got)
+	}
+}
+
+func TestResolveSuperseded_NoSuperior(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_server_info"},
+		{Name: "get_connection_stats"},
+	}
+	r := New(entries)
+
+	input := []string{"get_server_info", "get_connection_stats"}
+	got := r.ResolveSuperseded(input)
+	if len(got) != 2 {
+		t.Errorf("ResolveSuperseded = %v, want unchanged [get_server_info, get_connection_stats]", got)
+	}
+}
+
+func TestResolveSuperseded_DisjointSet(t *testing.T) {
+	// Superior is in the registry but NOT in the input — subordinates should stay.
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Supersedes: []string{"get_server_info", "get_connection_stats"}},
+		{Name: "get_server_info"},
+		{Name: "get_connection_stats"},
+	}
+	r := New(entries)
+
+	// get_status_summary not in input → subordinates not removed
+	input := []string{"get_server_info", "get_connection_stats"}
+	got := r.ResolveSuperseded(input)
+	if len(got) != 2 {
+		t.Errorf("ResolveSuperseded = %v, want unchanged [get_server_info, get_connection_stats]", got)
+	}
+}
+
+func TestParseSkillTags(t *testing.T) {
+	tags := []string{
+		"postgresql",
+		"fleet:true",
+		"cap:uptime",
+		"cap:connection_count",
+		"supersedes:get_server_info",
+		"supersedes:get_connection_stats",
+	}
+	fleet, caps, supersedes := parseSkillTags(tags)
+	if !fleet {
+		t.Error("fleet = false, want true")
+	}
+	if len(caps) != 2 || caps[0] != "uptime" || caps[1] != "connection_count" {
+		t.Errorf("caps = %v, want [uptime connection_count]", caps)
+	}
+	if len(supersedes) != 2 || supersedes[0] != "get_server_info" || supersedes[1] != "get_connection_stats" {
+		t.Errorf("supersedes = %v, want [get_server_info get_connection_stats]", supersedes)
+	}
+}
+
+func TestParseSkillTags_Empty(t *testing.T) {
+	fleet, caps, supersedes := parseSkillTags([]string{"postgresql", "database"})
+	if fleet || len(caps) != 0 || len(supersedes) != 0 {
+		t.Errorf("parseSkillTags with no taxonomy tags: fleet=%v caps=%v supersedes=%v", fleet, caps, supersedes)
+	}
+}

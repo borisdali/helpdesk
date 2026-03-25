@@ -348,6 +348,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		}
 		principal := audit.PrincipalFromContext(ctx)
 		purpose, purposeNote := audit.PurposeFromContext(ctx)
+		toolName := toolNameFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType: resourceType,
 			ResourceName: resourceName,
@@ -360,6 +361,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Purpose:      purpose,
 			PurposeNote:  purposeNote,
 			Sensitivity:  sensitivity,
+			ToolName:     toolName,
 		})
 		if err != nil {
 			return err
@@ -381,6 +383,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Name:        resourceName,
 			Tags:        tags,
 			Sensitivity: sensitivity,
+			ToolName:    toolNameFromContext(ctx),
 		},
 		Action: action,
 	}
@@ -834,6 +837,23 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 	return &policy.DeniedError{Decision: decision, Explanation: trace.Explanation}
 }
 
+// toolNameContextKey is an unexported type to prevent context key collisions.
+type toolNameContextKey struct{}
+
+// WithToolName returns a new context carrying the tool name for policy matching.
+// Call this at the start of each tool function: ctx = agentutil.WithToolName(ctx, "terminate_connection")
+func WithToolName(ctx context.Context, toolName string) context.Context {
+	return context.WithValue(ctx, toolNameContextKey{}, toolName)
+}
+
+// toolNameFromContext extracts the tool name set by WithToolName, or "" if not set.
+func toolNameFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(toolNameContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // policyCheckReq is the body sent to POST /v1/governance/check.
 // Field names match PolicyCheckRequest in cmd/auditd/governance_handlers.go.
 type policyCheckReq struct {
@@ -853,6 +873,7 @@ type policyCheckReq struct {
 	Purpose     string                     `json:"purpose,omitempty"`
 	PurposeNote string                     `json:"purpose_note,omitempty"`
 	Sensitivity []string                   `json:"sensitivity,omitempty"`
+	ToolName    string                     `json:"tool_name,omitempty"` // specific tool for policy matching
 }
 
 // policyCheckResp is the response from POST /v1/governance/check.
@@ -1042,6 +1063,19 @@ type CardOptions struct {
 
 	// SkillExamples maps a skill ID to example prompts/scenarios.
 	SkillExamples map[string][]string
+
+	// SkillFleetEligible declares which skills are eligible for fleet jobs.
+	// Only fleet-eligible tools are shown to the fleet planner.
+	// Skill IDs that are absent or false are invisible to the planner.
+	SkillFleetEligible map[string]bool
+
+	// SkillCapabilities maps a skill ID to capability constants (see toolregistry.Cap*).
+	// Capabilities describe what data a tool provides in a closed vocabulary.
+	SkillCapabilities map[string][]string
+
+	// SkillSupersedes maps a skill ID to the tool names it makes redundant.
+	// When a superseding tool is selected, the planner removes the superseded ones.
+	SkillSupersedes map[string][]string
 }
 
 // applyCardOptions merges optional metadata onto an AgentCard.
@@ -1062,6 +1096,18 @@ func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
 		}
 		if examples, ok := opts.SkillExamples[skill.ID]; ok {
 			skill.Examples = examples
+		}
+		// Serialize typed taxonomy fields as key:value tag strings.
+		// This keeps the A2A card transport unchanged while providing
+		// compile-time type safety to agent authors.
+		if v, ok := opts.SkillFleetEligible[skill.ID]; ok && v {
+			skill.Tags = append(skill.Tags, "fleet:true")
+		}
+		for _, cap := range opts.SkillCapabilities[skill.ID] {
+			skill.Tags = append(skill.Tags, "cap:"+cap)
+		}
+		for _, sup := range opts.SkillSupersedes[skill.ID] {
+			skill.Tags = append(skill.Tags, "supersedes:"+sup)
 		}
 	}
 }

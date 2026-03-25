@@ -791,3 +791,117 @@ policies:
 		t.Errorf("developer should be denied on PII resource, got %q", decision.Effect)
 	}
 }
+
+func TestToolNameMatching_ExactTool(t *testing.T) {
+	yaml := `
+version: "1"
+policies:
+  - name: deny-terminate
+    resources:
+      - type: database
+        match:
+          tool: terminate_connection
+    rules:
+      - action: destructive
+        effect: deny
+        message: "terminate_connection is disabled by policy"
+`
+	cfg, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	// terminate_connection should be denied.
+	denied := engine.Evaluate(Request{
+		Resource: RequestResource{Type: "database", ToolName: "terminate_connection"},
+		Action:   ActionDestructive,
+	})
+	if denied.Effect != EffectDeny {
+		t.Errorf("terminate_connection should be denied, got %q", denied.Effect)
+	}
+	if denied.Message != "terminate_connection is disabled by policy" {
+		t.Errorf("unexpected message: %q", denied.Message)
+	}
+
+	// cancel_query has the same action class but different tool — policy should not match.
+	notDenied := engine.Evaluate(Request{
+		Resource: RequestResource{Type: "database", ToolName: "cancel_query"},
+		Action:   ActionDestructive,
+	})
+	// Default engine deny applies (no policy matches), but NOT from the tool policy.
+	_ = notDenied // no policy matches → default deny, that's fine; what matters is no message from the tool policy
+	if notDenied.Message == "terminate_connection is disabled by policy" {
+		t.Error("cancel_query should not match the terminate_connection tool policy")
+	}
+}
+
+func TestToolNameMatching_GlobPattern(t *testing.T) {
+	yaml := `
+version: "1"
+policies:
+  - name: deny-all-terminate
+    resources:
+      - type: database
+        match:
+          tool_pattern: "terminate_*"
+    rules:
+      - action: destructive
+        effect: deny
+        message: "all terminate tools disabled"
+`
+	cfg, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	for _, toolName := range []string{"terminate_connection", "terminate_idle_connections"} {
+		d := engine.Evaluate(Request{
+			Resource: RequestResource{Type: "database", ToolName: toolName},
+			Action:   ActionDestructive,
+		})
+		if d.Effect != EffectDeny {
+			t.Errorf("%s: expected deny, got %q", toolName, d.Effect)
+		}
+	}
+
+	// cancel_query does not match "terminate_*".
+	d := engine.Evaluate(Request{
+		Resource: RequestResource{Type: "database", ToolName: "cancel_query"},
+		Action:   ActionWrite,
+	})
+	if d.Message == "all terminate tools disabled" {
+		t.Error("cancel_query should not match terminate_* pattern")
+	}
+}
+
+func TestToolNameMatching_NoToolName_PolicySkipped(t *testing.T) {
+	// When request has no ToolName set, a policy with tool: X should NOT match.
+	yaml := `
+version: "1"
+policies:
+  - name: deny-terminate
+    resources:
+      - type: database
+        match:
+          tool: terminate_connection
+    rules:
+      - action: destructive
+        effect: deny
+`
+	cfg, err := Load([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	engine := NewEngine(EngineConfig{PolicyConfig: cfg})
+
+	// No ToolName in request → policy should not match → default deny (not from this policy).
+	d := engine.Evaluate(Request{
+		Resource: RequestResource{Type: "database"}, // no ToolName
+		Action:   ActionDestructive,
+	})
+	if d.PolicyName == "deny-terminate" {
+		t.Errorf("policy with tool: should not match request with no ToolName, but got policy %q", d.PolicyName)
+	}
+}

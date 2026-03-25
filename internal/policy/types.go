@@ -67,7 +67,9 @@ type ResourceMatch struct {
 	NamePattern string   `yaml:"name_pattern,omitempty"` // Glob pattern (e.g., "prod-*")
 	Tags        []string `yaml:"tags,omitempty"`         // Must have all tags
 	Namespace   string   `yaml:"namespace,omitempty"`    // K8s namespace
-	Sensitivity []string `yaml:"sensitivity,omitempty"` // match resources by sensitivity class
+	Sensitivity []string `yaml:"sensitivity,omitempty"`  // match resources by sensitivity class
+	Tool        string   `yaml:"tool,omitempty"`         // Exact tool name (e.g., "terminate_connection")
+	ToolPattern string   `yaml:"tool_pattern,omitempty"` // Glob pattern (e.g., "terminate_*")
 }
 
 // Rule defines an access control rule within a policy.
@@ -240,6 +242,7 @@ type RequestResource struct {
 	Namespace   string            // K8s namespace (if applicable)
 	Extra       map[string]string // Additional attributes
 	Sensitivity []string          // sensitivity classes of this resource (from infra config)
+	ToolName    string            // specific tool being invoked (e.g. "terminate_connection")
 }
 
 // RequestContext provides additional context for evaluation.
