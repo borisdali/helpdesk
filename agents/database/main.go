@@ -185,7 +185,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getServerInfoToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_server_info",
-		Description: "Get PostgreSQL server information including uptime, start time, version, data directory, role (primary/replica), and connection counts.",
+		Description: "Get PostgreSQL server information including uptime, start time, version, data directory, role (primary/replica), and connection counts. Use for interactive diagnosis. For fleet-wide status checks use get_status_summary instead.",
 	}, getServerInfoTool)
 	if err != nil {
 		return nil, err
@@ -209,7 +209,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getConnectionStatsToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_connection_stats",
-		Description: "Get connection statistics summary: total connections, active, idle, waiting on locks per database.",
+		Description: "Get connection statistics summary: total connections, active, idle, waiting on locks per database. Use for interactive diagnosis. For fleet-wide status checks use get_status_summary instead.",
 	}, getConnectionStatsTool)
 	if err != nil {
 		return nil, err
@@ -289,7 +289,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getStatusSummaryToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_status_summary",
-		Description: "Return a compact JSON summary of server status, version, uptime, connection counts, and cache hit ratio. Designed for fleet-wide health checks where results from many servers need to be compared in a table.",
+		Description: "Return a compact JSON summary of server status, version, uptime, connection counts, and cache hit ratio. Use this as the single tool for any fleet job that checks status, uptime, or load — it covers everything get_server_info and get_connection_stats provide in one call.",
 	}, getStatusSummaryTool)
 	if err != nil {
 		return nil, err
