@@ -276,7 +276,7 @@ Each tool's parameter schema is fingerprinted at agent startup and carried throu
 
 ### How the fingerprint is computed
 
-The fingerprint is the first 12 hex characters of the SHA-256 of the tool's parameter schema JSON (the `parameters` field of the ADK `Declaration()`). The JSON is produced by `encoding/json.Marshal` on the `genai.Schema` struct, so the fingerprint is deterministic: the same schema always produces the same fingerprint regardless of the running instance.
+The fingerprint is the first 12 hex characters of the SHA-256 of the tool's parameter schema JSON. ADK `functiontool.New()` tools store the schema in `Declaration().ParametersJsonSchema`; the fingerprint is computed by marshaling that value with `encoding/json.Marshal`. The fingerprint is deterministic: the same schema always produces the same fingerprint regardless of the running instance.
 
 Tools without a `Declaration()` or with no declared parameters produce an empty fingerprint and are skipped by drift detection.
 

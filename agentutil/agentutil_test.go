@@ -1364,24 +1364,27 @@ func (m *mockSchemaTool) Description() string                                 { 
 func (m *mockSchemaTool) IsLongRunning() bool                                 { return false }
 func (m *mockSchemaTool) Declaration() *genai.FunctionDeclaration             { return m.decl }
 
-func makeMockSchemaTool(name string, params *genai.Schema) *mockSchemaTool {
-	return &mockSchemaTool{
-		name: name,
-		decl: &genai.FunctionDeclaration{
-			Name:        name,
-			Description: "mock " + name,
-			Parameters:  params,
-		},
+// makeMockSchemaTool creates a mock tool whose Declaration uses ParametersJsonSchema
+// (type any), matching what functiontool.New produces in production.
+// A nil params argument produces a declaration with no schema (tool will be omitted).
+func makeMockSchemaTool(name string, params map[string]any) *mockSchemaTool {
+	decl := &genai.FunctionDeclaration{
+		Name:        name,
+		Description: "mock " + name,
 	}
+	if params != nil {
+		decl.ParametersJsonSchema = params
+	}
+	return &mockSchemaTool{name: name, decl: decl}
 }
 
 func TestComputeSchemaFingerprints_Basic(t *testing.T) {
-	params := &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			"connection_string": {Type: genai.TypeString},
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"connection_string": map[string]any{"type": "string"},
 		},
-		Required: []string{"connection_string"},
+		"required": []any{"connection_string"},
 	}
 	tool1 := makeMockSchemaTool("check_connection", params)
 	tool2 := makeMockSchemaTool("no_params_tool", nil) // no parameters → omitted
@@ -1400,12 +1403,12 @@ func TestComputeSchemaFingerprints_Basic(t *testing.T) {
 }
 
 func TestComputeSchemaFingerprints_Deterministic(t *testing.T) {
-	params := &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			"pid": {Type: genai.TypeInteger},
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"pid": map[string]any{"type": "integer"},
 		},
-		Required: []string{"pid"},
+		"required": []any{"pid"},
 	}
 	tool := makeMockSchemaTool("terminate_connection", params)
 	fps1 := ComputeSchemaFingerprints("db", []adktool.Tool{tool})
@@ -1416,12 +1419,12 @@ func TestComputeSchemaFingerprints_Deterministic(t *testing.T) {
 }
 
 func TestComputeInputSchemas_Basic(t *testing.T) {
-	params := &genai.Schema{
-		Type: genai.TypeObject,
-		Properties: map[string]*genai.Schema{
-			"connection_string": {Type: genai.TypeString, Description: "PostgreSQL DSN"},
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"connection_string": map[string]any{"type": "string", "description": "PostgreSQL DSN"},
 		},
-		Required: []string{"connection_string"},
+		"required": []any{"connection_string"},
 	}
 	tool := makeMockSchemaTool("check_connection", params)
 	schemas := ComputeInputSchemas([]adktool.Tool{tool})
