@@ -67,6 +67,7 @@ const (
 	CategoryKubernetes RequestCategory = "kubernetes"
 	CategoryIncident   RequestCategory = "incident"
 	CategoryResearch   RequestCategory = "research"
+	CategoryFleet      RequestCategory = "fleet"
 	CategoryUnknown    RequestCategory = "unknown"
 )
 

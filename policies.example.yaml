@@ -362,6 +362,52 @@ policies:
           require_approval: true
         message: "Emergency DBA destructive action requires approval before execution."
 
+  # ── Tool-level allow/disallow ─────────────────────────────────────────────────
+  # match.tool and match.tool_pattern let you allow or deny specific tools
+  # independently of their action class. Useful when a tool is too risky for
+  # general use but the action class (destructive) would be too broad to deny.
+
+  # Example: redirect terminate_connection to the safer bulk alternative.
+  # Operators who need to terminate a specific PID should use get_session_info
+  # first to inspect the session, then use kill_idle_connections with a filter.
+  - name: restrict-terminate-connection
+    description: Direct connection termination by PID is reserved for DBAs only
+    priority: 85
+
+    resources:
+      - type: database
+        match:
+          tool: terminate_connection
+
+    # No principals: block applies to everyone. DBAs are unblocked by the
+    # higher-priority dba-privileges policy (priority: 80) which explicitly
+    # allows destructive actions for the dba role.
+    rules:
+      - action: destructive
+        effect: deny
+        message: "terminate_connection is restricted. Use kill_idle_connections or contact a DBA."
+
+  # Example: block all terminate_* tools for automated service accounts.
+  # Automated services should not terminate connections; use kill_idle_connections
+  # only with an explicit approval workflow.
+  - name: no-terminate-for-automation
+    description: Automated services may not use terminate_* tools
+    priority: 75
+
+    principals:
+      - service: srebot
+      - service: secbot
+
+    resources:
+      - type: database
+        match:
+          tool_pattern: "terminate_*"
+
+    rules:
+      - action: destructive
+        effect: deny
+        message: "Automated services may not terminate connections. Raise a human-approved remediation."
+
   # ── Identity & Access: purpose-based diagnostic restriction ──────────────────
   # Diagnostic-purpose requests should never perform writes.
   - name: diagnostic-readonly-enforcement

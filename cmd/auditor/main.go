@@ -970,6 +970,7 @@ func (a *Auditor) checkCategoryMismatch(event *audit.Event) {
 		"k8s_agent":               {"kubernetes"},
 		"incident_agent":          {"incident"},
 		"research_agent":          {"research"},
+		"gateway":                 {"fleet"},
 	}
 
 	expected, ok := expectedCategories[agent]

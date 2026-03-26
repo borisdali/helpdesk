@@ -174,6 +174,8 @@ func categorizeAgent(agent string) RequestCategory {
 		return CategoryIncident
 	case "research_agent":
 		return CategoryResearch
+	case "gateway":
+		return CategoryFleet // gateway-generated events (e.g. fleet planner)
 	default:
 		return CategoryUnknown
 	}
