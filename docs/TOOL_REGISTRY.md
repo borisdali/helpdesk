@@ -1,10 +1,10 @@
 # aiHelpDesk Tool Registry
 
-The tool registry is a live, queryable catalogue of every tool exposed by connected agents. Beyond simple name-and-description listing, each tool carries structured taxonomy metadata — fleet eligibility, capability labels, and supersedes relationships — that the fleet planner uses deterministically to select the right tools and strip redundant ones, without relying solely on LLM reasoning over free-form descriptions.
+The Tool Registry is a live, queryable catalogue of every tool exposed by connected agents. Beyond simple name-and-description listing, each tool carries structured taxonomy metadata — fleet eligibility, capability labels, and supersedes relationships — that the fleet planner uses deterministically to select the right tools and strip redundant ones, without relying solely on LLM reasoning over free-form descriptions.
 
 This page covers:
 
-- [Browsing the registry](#1-browsing-the-registry)
+- [Browsing the Registry](#1-browsing-the-registry)
 - [Tool taxonomy fields](#2-tool-taxonomy-fields)
 - [Capability vocabulary](#3-capability-vocabulary)
 - [How the fleet planner uses taxonomy](#4-how-the-fleet-planner-uses-taxonomy)
@@ -13,14 +13,14 @@ This page covers:
 
 ---
 
-## 1. Browsing the registry
+## 1. Browsing the Registry
 
 ```bash
 # List all registered tools
 curl http://localhost:8080/api/v1/tools | jq .
 ```
 
-Each entry in the response:
+The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
 
 ```json
 {
@@ -254,7 +254,7 @@ The skill ID key format is `<agent-name>-<skill-id>`, matching the A2A card's sk
 | `SkillCapabilities[id] = ["uptime", ...]` | `cap:uptime`, `cap:...` |
 | `SkillSupersedes[id] = ["tool_a"]` | `supersedes:tool_a` |
 
-The registry's `Build()` step parses these tag strings back into `ToolEntry` typed fields via `parseSkillTags`. Agent authors never write tag strings by hand.
+The Registry's `Build()` step parses these tag strings back into `ToolEntry` typed fields via `parseSkillTags`. Agent authors never write tag strings by hand.
 
 ---
 

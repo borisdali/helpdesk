@@ -1,18 +1,14 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 
 	"helpdesk/internal/audit"
@@ -58,6 +54,10 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if g.plannerLLM == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet planner LLM not configured (HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY)")
+		return
+	}
 	if g.infra == nil {
 		writeError(w, http.StatusServiceUnavailable, "fleet planner requires infrastructure config (HELPDESK_INFRA_CONFIG)")
 		return
@@ -196,6 +196,15 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		PurposeNote:       purposeNote,
 	})
 
+	slog.Info("fleet plan generated",
+		"trace_id", traceID,
+		"principal", principalStr,
+		"steps", len(jobDef.Change.Steps),
+		"targets_tags", jobDef.Targets.Tags,
+		"requires_approval", requiresApproval,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+
 	writeJSON(w, http.StatusOK, FleetPlanResponse{
 		JobDef:           jobDef,
 		JobDefRaw:        string(rawJobDefBytes),
@@ -318,42 +327,6 @@ Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
 }`, infraSummary, toolCatalog, intentSection, description, hints)
 }
 
-// callPlannerLLM sends the planner prompt to the Anthropic API and returns the raw response text.
-func callPlannerLLM(ctx context.Context, prompt string) (string, error) {
-	apiKey := os.Getenv("HELPDESK_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-	}
-	if apiKey == "" {
-		return "", fmt.Errorf("HELPDESK_API_KEY is not set")
-	}
-
-	modelName := os.Getenv("HELPDESK_MODEL_NAME")
-	if modelName == "" {
-		modelName = "claude-3-5-haiku-20241022"
-	}
-
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
-
-	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     anthropic.Model(modelName),
-		MaxTokens: 4096,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("anthropic API error: %w", err)
-	}
-
-	var parts []string
-	for _, block := range msg.Content {
-		if block.Type == "text" {
-			parts = append(parts, block.Text)
-		}
-	}
-	return strings.Join(parts, ""), nil
-}
 
 // resolveTargetsFromInfra resolves fleet job Targets against the infra config,
 // returning the list of matched server keys. This is the gateway-side equivalent

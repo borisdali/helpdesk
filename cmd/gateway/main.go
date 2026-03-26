@@ -1,6 +1,7 @@
 // Package main implements the REST gateway — a thin HTTP layer that translates
 // REST requests into A2A JSON-RPC calls to the helpdesk sub-agents.
-// No LLM is needed in the gateway itself; sub-agents handle AI reasoning.
+// The gateway itself uses an LLM only for the fleet job planner (POST /api/v1/fleet/plan);
+// all other AI reasoning is delegated to the sub-agents.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/buildinfo"
@@ -150,6 +152,33 @@ func main() {
 				"db_servers", len(infraConfig.DBServers),
 				"k8s_clusters", len(infraConfig.K8sClusters),
 				"vms", len(infraConfig.VMs))
+		}
+	} else {
+		slog.Warn("HELPDESK_INFRA_CONFIG not set — fleet planner (POST /api/v1/fleet/plan) will return 503")
+	}
+
+	// Initialize fleet planner LLM (vendor-agnostic via agentutil).
+	plannerAPIKey := os.Getenv("HELPDESK_API_KEY")
+	if plannerAPIKey == "" {
+		plannerAPIKey = os.Getenv("ANTHROPIC_API_KEY") // convenience fallback
+	}
+	plannerCfg := agentutil.Config{
+		ModelVendor: os.Getenv("HELPDESK_MODEL_VENDOR"),
+		ModelName:   os.Getenv("HELPDESK_MODEL_NAME"),
+		APIKey:      plannerAPIKey,
+	}
+	if plannerCfg.ModelName == "" {
+		plannerCfg.ModelName = "claude-haiku-4-5-20251001"
+	}
+	if plannerCfg.ModelVendor == "" || plannerCfg.APIKey == "" {
+		slog.Warn("fleet planner LLM not configured (HELPDESK_MODEL_VENDOR or HELPDESK_API_KEY not set) — POST /api/v1/fleet/plan will return 503")
+	} else {
+		completer, err := agentutil.NewTextCompleter(context.Background(), plannerCfg)
+		if err != nil {
+			slog.Warn("fleet planner LLM initialization failed — POST /api/v1/fleet/plan will return 503", "err", err)
+		} else {
+			gw.SetPlannerLLM(completer)
+			slog.Info("fleet planner LLM configured", "vendor", plannerCfg.ModelVendor, "model", plannerCfg.ModelName)
 		}
 	}
 

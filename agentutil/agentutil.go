@@ -130,6 +130,43 @@ func MustLoadConfig(defaultAddr string) Config {
 	return cfg
 }
 
+// TextCompleter is a function that sends a single-turn text prompt to an LLM
+// and returns the response text. Suitable for one-shot generation tasks like
+// the fleet job planner that do not need a full agentic loop.
+type TextCompleter func(ctx context.Context, prompt string) (string, error)
+
+// NewTextCompleter creates a vendor-agnostic one-shot text completion function
+// backed by whichever LLM vendor is configured in cfg.ModelVendor.
+// The returned function is safe for concurrent use.
+func NewTextCompleter(ctx context.Context, cfg Config) (TextCompleter, error) {
+	llm, err := NewLLM(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, prompt string) (string, error) {
+		req := &adkmodel.LLMRequest{
+			Contents: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: prompt}},
+				},
+			},
+		}
+		var sb strings.Builder
+		for resp, err := range llm.GenerateContent(ctx, req, false) {
+			if err != nil {
+				return "", err
+			}
+			if resp != nil && resp.Content != nil {
+				for _, part := range resp.Content.Parts {
+					sb.WriteString(part.Text)
+				}
+			}
+		}
+		return sb.String(), nil
+	}, nil
+}
+
 // NewLLM creates an LLM model based on Config.ModelVendor (gemini or anthropic).
 func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 	switch strings.ToLower(cfg.ModelVendor) {

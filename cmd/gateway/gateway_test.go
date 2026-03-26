@@ -609,7 +609,8 @@ func TestHandleFleetPlan_MissingDescription(t *testing.T) {
 
 func TestHandleFleetPlan_MissingInfra(t *testing.T) {
 	reg := makeRegistryWithTools([]toolregistry.ToolEntry{{Name: "check_connection", Agent: "database", ActionClass: "read"}})
-	gw := makePlannerGateway(nil, reg, nil) // nil infra
+	stub := func(_ context.Context, _ string) (string, error) { return "", nil }
+	gw := makePlannerGateway(nil, reg, stub) // nil infra
 
 	rec := postFleetPlan(t, gw, `{"description":"vacuum all prod databases"}`)
 
@@ -623,7 +624,8 @@ func TestHandleFleetPlan_MissingInfra(t *testing.T) {
 
 func TestHandleFleetPlan_MissingRegistry(t *testing.T) {
 	cfg := makeTestInfra()
-	gw := makePlannerGateway(cfg, nil, nil) // nil registry
+	stub := func(_ context.Context, _ string) (string, error) { return "", nil }
+	gw := makePlannerGateway(cfg, nil, stub) // nil registry
 
 	rec := postFleetPlan(t, gw, `{"description":"vacuum all prod databases"}`)
 

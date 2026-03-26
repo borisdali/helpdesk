@@ -64,7 +64,12 @@ func NewGateway(agents map[string]*discovery.Agent) *Gateway {
 		clients[name] = client
 		slog.Info("A2A client ready", "agent", name)
 	}
-	return &Gateway{agents: agents, clients: clients, plannerLLM: callPlannerLLM}
+	return &Gateway{agents: agents, clients: clients}
+}
+
+// SetPlannerLLM sets the LLM text completion function used by the fleet planner.
+func (g *Gateway) SetPlannerLLM(fn func(ctx context.Context, prompt string) (string, error)) {
+	g.plannerLLM = fn
 }
 
 // SetInfraConfig sets the infrastructure configuration for inventory queries.
