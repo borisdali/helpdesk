@@ -225,8 +225,9 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/governance/journeys", auth("GET /api/v1/governance/journeys", g.handleGovernanceJourneys))
 	mux.HandleFunc("GET /api/v1/governance/govbot/runs", auth("GET /api/v1/governance/govbot/runs", g.handleGovernanceGovbotRuns))
 
-	// Fleet job planner
+	// Fleet job planner and snapshot refresh
 	mux.HandleFunc("POST /api/v1/fleet/plan", auth("POST /api/v1/fleet/plan", g.handleFleetPlan))
+	mux.HandleFunc("POST /api/v1/fleet/snapshot", auth("POST /api/v1/fleet/snapshot", g.handleFleetSnapshot))
 
 	// Fleet runner job visibility endpoints
 	mux.HandleFunc("POST /api/v1/fleet/jobs", auth("POST /api/v1/fleet/jobs", g.handleFleetCreateJob))

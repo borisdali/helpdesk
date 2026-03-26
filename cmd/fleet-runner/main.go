@@ -31,6 +31,7 @@ func main() {
 		pauseOverride        = flag.Int("pause", -1, "Override strategy.wave_pause_seconds")
 		approvalPollInterval = flag.Duration("approval-poll-interval", 5*time.Second, "How often to poll for approval status")
 		schemaDriftFlag      = flag.String("schema-drift", envOrDefault("HELPDESK_SCHEMA_DRIFT", ""), `Schema drift policy: "abort" (default), "warn", or "ignore"`)
+		refreshSnapshots     = flag.Bool("refresh-snapshots", false, "Refresh tool_snapshots from live registry, write back to job file, and exit")
 	)
 	flag.CommandLine.Parse(remaining) //nolint:errcheck
 
@@ -50,6 +51,26 @@ func main() {
 	if err := json.Unmarshal(defData, &def); err != nil {
 		slog.Error("failed to parse job file", "err", err)
 		os.Exit(1)
+	}
+
+	// Refresh tool_snapshots from the live registry and write back to the job file.
+	if *refreshSnapshots {
+		updated, err := callFleetSnapshot(*gatewayURL, *apiKey, &def)
+		if err != nil {
+			slog.Error("--refresh-snapshots failed", "err", err)
+			os.Exit(1)
+		}
+		out, err := json.MarshalIndent(updated, "", "  ")
+		if err != nil {
+			slog.Error("--refresh-snapshots: marshal failed", "err", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(*jobFile, out, 0o644); err != nil {
+			slog.Error("--refresh-snapshots: write failed", "path", *jobFile, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("snapshots refreshed", "path", *jobFile, "tools", len(updated.ToolSnapshots))
+		return
 	}
 
 	// Apply strategy overrides from flags.

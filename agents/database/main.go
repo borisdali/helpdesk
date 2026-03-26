@@ -18,6 +18,7 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
 	"helpdesk/prompts"
@@ -141,7 +142,7 @@ func main() {
 	}
 
 	cardOpts := agentutil.CardOptions{
-		Version:  "1.0.0",
+		Version:  buildinfo.Version,
 		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
 		SkillTags: map[string][]string{
 			"postgres_database_agent":                            {"postgresql", "database", "diagnostics"},

@@ -34,6 +34,66 @@ type FleetPlanResponse struct {
 	WarningMessages  []string     `json:"warning_messages,omitempty"`
 }
 
+// FleetSnapshotRequest is the input to the snapshot refresh endpoint.
+type FleetSnapshotRequest struct {
+	JobDef fleet.JobDef `json:"job_def"`
+}
+
+// FleetSnapshotResponse is returned by POST /api/v1/fleet/snapshot.
+type FleetSnapshotResponse struct {
+	JobDef    fleet.JobDef `json:"job_def"`
+	JobDefRaw string       `json:"job_def_raw"`
+}
+
+// handleFleetSnapshot handles POST /api/v1/fleet/snapshot.
+// It accepts a job def, refreshes tool_snapshots from the live registry, and
+// returns the updated job def. No LLM call is made.
+func (g *Gateway) handleFleetSnapshot(w http.ResponseWriter, r *http.Request) {
+	if g.toolRegistry == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet snapshot requires tool registry")
+		return
+	}
+
+	var req FleetSnapshotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	def := req.JobDef
+	steps := def.Change.Steps
+	if len(steps) == 0 {
+		writeError(w, http.StatusBadRequest, "job_def has no steps")
+		return
+	}
+
+	// Validate all tool names exist in the registry.
+	for _, step := range steps {
+		if _, ok := g.toolRegistry.Get(step.Tool); !ok {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("unknown tool %q", step.Tool))
+			return
+		}
+	}
+
+	// Rebuild tool_snapshots from the live registry.
+	capturedAt := time.Now().UTC()
+	snapshots := make(map[string]fleet.ToolSnapshot, len(steps))
+	for _, step := range steps {
+		if entry, ok := g.toolRegistry.Get(step.Tool); ok {
+			snapshots[step.Tool] = fleet.ToolSnapshot{
+				AgentVersion:      entry.AgentVersion,
+				SchemaFingerprint: entry.SchemaFingerprint,
+				CapturedAt:        capturedAt,
+			}
+		}
+	}
+	def.ToolSnapshots = snapshots
+
+	rawBytes, _ := json.MarshalIndent(def, "", "  ")
+	slog.Info("fleet snapshot refreshed", "steps", len(steps), "tools", len(snapshots))
+	writeJSON(w, http.StatusOK, FleetSnapshotResponse{JobDef: def, JobDefRaw: string(rawBytes)})
+}
+
 // handleFleetPlan is the POST /api/v1/fleet/plan handler.
 func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
