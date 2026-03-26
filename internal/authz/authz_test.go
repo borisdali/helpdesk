@@ -425,6 +425,8 @@ var gatewayRoutes = []string{
 	"GET /api/v1/governance/journeys",
 	"GET /api/v1/governance/govbot/runs",
 	"POST /api/v1/fleet/plan",
+	"POST /api/v1/fleet/snapshot",
+	"POST /api/v1/fleet/review",
 	"POST /api/v1/fleet/jobs",
 	"GET /api/v1/fleet/jobs",
 	"GET /api/v1/fleet/jobs/{jobID}",
@@ -432,6 +434,11 @@ var gatewayRoutes = []string{
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}",
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps",
 	"GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}",
+	"POST /api/v1/fleet/playbooks",
+	"GET /api/v1/fleet/playbooks",
+	"GET /api/v1/fleet/playbooks/{playbookID}",
+	"DELETE /api/v1/fleet/playbooks/{playbookID}",
+	"POST /api/v1/fleet/playbooks/{playbookID}/run",
 	"GET /api/v1/roles",
 }
 
@@ -471,6 +478,10 @@ var auditdRoutes = []string{
 	"GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps",
 	"POST /v1/fleet/jobs/{jobID}/approval",
 	"GET /v1/fleet/jobs/{jobID}/approval/{approvalID}",
+	"POST /v1/fleet/playbooks",
+	"GET /v1/fleet/playbooks",
+	"GET /v1/fleet/playbooks/{playbookID}",
+	"DELETE /v1/fleet/playbooks/{playbookID}",
 	"GET /health",
 }
 
@@ -620,12 +631,23 @@ func TestAuthorizer_RoleGrants(t *testing.T) {
 		t.Errorf("dba grants = %v, want [POST /api/v1/db/{tool}]", dbaGrants)
 	}
 
-	// "fleet-operator" should only grant POST /api/v1/fleet/jobs
+	// "fleet-operator" grants fleet job submission + playbook create/delete
 	foGrants, ok := grants["fleet-operator"]
 	if !ok {
 		t.Fatal("RoleGrants missing 'fleet-operator' key")
 	}
-	if len(foGrants) != 1 || foGrants[0] != "POST /api/v1/fleet/jobs" {
-		t.Errorf("fleet-operator grants = %v, want [POST /api/v1/fleet/jobs]", foGrants)
+	wantFOGrants := []string{
+		"DELETE /api/v1/fleet/playbooks/{playbookID}",
+		"POST /api/v1/fleet/jobs",
+		"POST /api/v1/fleet/playbooks",
+	}
+	if len(foGrants) != len(wantFOGrants) {
+		t.Errorf("fleet-operator grants = %v, want %v", foGrants, wantFOGrants)
+	} else {
+		for i, g := range foGrants {
+			if g != wantFOGrants[i] {
+				t.Errorf("fleet-operator grants[%d] = %q, want %q", i, g, wantFOGrants[i])
+			}
+		}
 	}
 }

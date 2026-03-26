@@ -27,6 +27,10 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
 
+	// Playbook reads
+	"GET /v1/fleet/playbooks":              {AdminBypass: true},
+	"GET /v1/fleet/playbooks/{playbookID}": {AdminBypass: true},
+
 	// ── Service-only writes: machine-to-machine paths ─────────────────────────
 	// These endpoints are called by agents and fleet-runner service accounts,
 	// not by human users. ServiceOnly rejects human callers even in enforcing mode.
@@ -43,6 +47,10 @@ var DefaultAuditdPermissions = map[string]Permission{
 
 	// Govbot compliance history write
 	"POST /v1/govbot/runs": {ServiceOnly: true, AdminBypass: true},
+
+	// Playbook writes (fleet-operator service accounts or admin)
+	"POST /v1/fleet/playbooks":              {ServiceOnly: true, AdminBypass: true},
+	"DELETE /v1/fleet/playbooks/{playbookID}": {ServiceOnly: true, AdminBypass: true},
 
 	// Fleet-runner lifecycle writes
 	"POST /v1/fleet/jobs":                                                   {ServiceOnly: true, AdminBypass: true},

@@ -98,6 +98,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create playbook store (shares the same database connection)
+	playbookStore, err := audit.NewPlaybookStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create playbook store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create approval notifier if configured
 	// Default baseURL to the listen address if not specified
 	baseURL := *approvalBaseURL
@@ -170,6 +177,7 @@ func main() {
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
+	playbookSrv := &playbookServer{store: playbookStore}
 
 	mux := http.NewServeMux()
 
@@ -215,6 +223,12 @@ func main() {
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleAddServerStep))
 	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", auth("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", fleetSrv.handleUpdateServerStep))
 	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleGetServerSteps))
+
+	// Fleet playbook endpoints
+	mux.HandleFunc("POST /v1/fleet/playbooks", auth("POST /v1/fleet/playbooks", playbookSrv.handleCreate))
+	mux.HandleFunc("GET /v1/fleet/playbooks", auth("GET /v1/fleet/playbooks", playbookSrv.handleList))
+	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}", auth("GET /v1/fleet/playbooks/{playbookID}", playbookSrv.handleGet))
+	mux.HandleFunc("DELETE /v1/fleet/playbooks/{playbookID}", auth("DELETE /v1/fleet/playbooks/{playbookID}", playbookSrv.handleDelete))
 
 	// Fleet job approval endpoints
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/approval", auth("POST /v1/fleet/jobs/{jobID}/approval", fleetSrv.handleCreateJobApproval))

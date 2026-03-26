@@ -32,25 +32,55 @@ func main() {
 		approvalPollInterval = flag.Duration("approval-poll-interval", 5*time.Second, "How often to poll for approval status")
 		schemaDriftFlag      = flag.String("schema-drift", envOrDefault("HELPDESK_SCHEMA_DRIFT", ""), `Schema drift policy: "abort" (default), "warn", or "ignore"`)
 		refreshSnapshots     = flag.Bool("refresh-snapshots", false, "Refresh tool_snapshots from live registry, write back to job file, and exit")
+		replan               = flag.Bool("replan", false, "On schema drift, replan using the job's stored plan_description and re-execute")
+		planDescription      = flag.String("plan-description", "", "Call the fleet planner with this description instead of loading --job-file")
+		planTargetHints      = flag.String("plan-target-hints", "", "Comma-separated target hints passed to the planner with --plan-description")
 	)
 	flag.CommandLine.Parse(remaining) //nolint:errcheck
 
-	if *jobFile == "" {
-		slog.Error("--job-file is required")
+	if *jobFile == "" && *planDescription == "" {
+		slog.Error("--job-file or --plan-description is required")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	// Load job definition.
-	defData, err := os.ReadFile(*jobFile)
-	if err != nil {
-		slog.Error("failed to read job file", "path", *jobFile, "err", err)
-		os.Exit(1)
-	}
+	// Load or generate the job definition.
 	var def fleet.JobDef
-	if err := json.Unmarshal(defData, &def); err != nil {
-		slog.Error("failed to parse job file", "err", err)
-		os.Exit(1)
+	if *planDescription != "" {
+		var hints []string
+		if *planTargetHints != "" {
+			for _, h := range strings.Split(*planTargetHints, ",") {
+				if h = strings.TrimSpace(h); h != "" {
+					hints = append(hints, h)
+				}
+			}
+		}
+		planned, err := callFleetPlan(*gatewayURL, *apiKey, *planDescription, hints)
+		if err != nil {
+			slog.Error("--plan-description: planner call failed", "err", err)
+			os.Exit(1)
+		}
+		def = *planned
+		slog.Info("plan generated from description", "name", def.Name, "steps", len(def.Change.Steps))
+		if *jobFile != "" {
+			if out, err := json.MarshalIndent(def, "", "  "); err == nil {
+				if werr := os.WriteFile(*jobFile, out, 0o644); werr != nil {
+					slog.Warn("--plan-description: could not save plan to job file", "path", *jobFile, "err", werr)
+				} else {
+					slog.Info("plan saved", "path", *jobFile)
+				}
+			}
+		}
+	} else {
+		defData, err := os.ReadFile(*jobFile)
+		if err != nil {
+			slog.Error("failed to read job file", "path", *jobFile, "err", err)
+			os.Exit(1)
+		}
+		if err := json.Unmarshal(defData, &def); err != nil {
+			slog.Error("failed to parse job file", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	// Refresh tool_snapshots from the live registry and write back to the job file.
@@ -149,9 +179,51 @@ func main() {
 			slog.Error("schema drift: failed to fetch live tool registry — aborting", "err", err)
 			os.Exit(1)
 		}
-		if _, err := CheckSchemaDrift(def.ToolSnapshots, liveTools, driftPolicy); err != nil {
-			slog.Error("schema drift check failed", "err", err)
-			os.Exit(1)
+		_, driftErr := CheckSchemaDrift(def.ToolSnapshots, liveTools, driftPolicy)
+		if driftErr != nil {
+			if *replan && def.PlanDescription != "" {
+				slog.Warn("schema drift detected; replanning", "description", def.PlanDescription)
+				planned, perr := callFleetPlan(*gatewayURL, *apiKey, def.PlanDescription, def.PlanTargetHints)
+				if perr != nil {
+					slog.Error("--replan: planner call failed", "err", perr)
+					os.Exit(1)
+				}
+				def = *planned
+				// Re-apply strategy overrides on the new plan.
+				def.Strategy.Defaults()
+				if *dryRun {
+					def.Strategy.DryRun = true
+				}
+				if *canaryOverride > 0 {
+					def.Strategy.CanaryCount = *canaryOverride
+				}
+				if *waveSizeOverride > 0 {
+					def.Strategy.WaveSize = *waveSizeOverride
+				}
+				if *pauseOverride >= 0 {
+					def.Strategy.WavePauseSeconds = *pauseOverride
+				}
+				// Re-resolve servers from new plan targets.
+				servers, err = resolveTargets(infraCfg, def.Targets)
+				if err != nil {
+					slog.Error("--replan: failed to resolve targets", "err", err)
+					os.Exit(1)
+				}
+				if len(servers) == 0 {
+					slog.Error("--replan: no servers matched new plan targets",
+						"tags", def.Targets.Tags, "names", def.Targets.Names)
+					os.Exit(1)
+				}
+				// Verify the fresh plan itself has no drift.
+				if _, err2 := CheckSchemaDrift(def.ToolSnapshots, liveTools, driftPolicy); err2 != nil {
+					slog.Error("schema drift check failed after replan", "err", err2)
+					os.Exit(1)
+				}
+				slog.Info("replan succeeded", "name", def.Name, "steps", len(def.Change.Steps))
+			} else {
+				slog.Error("schema drift check failed", "err", driftErr)
+				os.Exit(1)
+			}
 		}
 	}
 

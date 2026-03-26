@@ -228,6 +228,12 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	// Fleet job planner and snapshot refresh
 	mux.HandleFunc("POST /api/v1/fleet/plan", auth("POST /api/v1/fleet/plan", g.handleFleetPlan))
 	mux.HandleFunc("POST /api/v1/fleet/snapshot", auth("POST /api/v1/fleet/snapshot", g.handleFleetSnapshot))
+	mux.HandleFunc("POST /api/v1/fleet/review", auth("POST /api/v1/fleet/review", g.handleFleetReview))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks", auth("POST /api/v1/fleet/playbooks", g.handlePlaybookCreate))
+	mux.HandleFunc("GET /api/v1/fleet/playbooks", auth("GET /api/v1/fleet/playbooks", g.handlePlaybookList))
+	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}", auth("GET /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookGet))
+	mux.HandleFunc("DELETE /api/v1/fleet/playbooks/{playbookID}", auth("DELETE /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookDelete))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/run", auth("POST /api/v1/fleet/playbooks/{playbookID}/run", g.handlePlaybookRun))
 
 	// Fleet runner job visibility endpoints
 	mux.HandleFunc("POST /api/v1/fleet/jobs", auth("POST /api/v1/fleet/jobs", g.handleFleetCreateJob))

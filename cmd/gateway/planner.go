@@ -263,6 +263,12 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	jobDef.ToolSnapshots = snapshots
 
+	// Stamp intent fields so the job can be replayed or reviewed later.
+	jobDef.PlanDescription = req.Description
+	jobDef.PlanTargetHints = req.TargetHints
+	sort.Strings(resolved)
+	jobDef.PlanServers = resolved
+
 	// Pretty-print job_def for the raw field.
 	rawJobDefBytes, _ := json.MarshalIndent(jobDef, "", "  ")
 

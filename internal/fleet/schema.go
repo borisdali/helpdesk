@@ -40,6 +40,14 @@ type JobDef struct {
 	// ToolSnapshots maps tool name → snapshot of its schema at plan time.
 	// Used by fleet-runner to detect schema drift before execution.
 	ToolSnapshots map[string]ToolSnapshot `json:"tool_snapshots,omitempty"`
+	// PlanDescription is the natural-language description given to the planner.
+	// Stored so fleet-runner can replan automatically on drift or on demand.
+	PlanDescription string `json:"plan_description,omitempty"`
+	// PlanTargetHints is the list of target hints given to the planner.
+	PlanTargetHints []string `json:"plan_target_hints,omitempty"`
+	// PlanServers is the list of server names resolved at plan time.
+	// Used by the review endpoint to detect servers added since the plan was created.
+	PlanServers []string `json:"plan_servers,omitempty"`
 }
 
 // Change describes the operation(s) to execute on each target server.
