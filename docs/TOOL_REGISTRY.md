@@ -10,6 +10,7 @@ This page covers:
 - [How the fleet planner uses taxonomy](#4-how-the-fleet-planner-uses-taxonomy)
 - [Policy-level tool allow/disallow](#5-policy-level-tool-allowdisallow)
 - [Adding taxonomy to an agent](#6-adding-taxonomy-to-an-agent)
+- [Schema fingerprinting](#7-schema-fingerprinting)
 
 ---
 
@@ -30,7 +31,9 @@ The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
   "action_class": "read",
   "fleet_eligible": true,
   "capabilities": ["uptime", "version", "connection_count", "cache_hit_ratio"],
-  "supersedes": ["get_server_info", "get_connection_stats"]
+  "supersedes": ["get_server_info", "get_connection_stats"],
+  "agent_version": "1.2.0",
+  "schema_fingerprint": "a3f9c2b17e84"
 }
 ```
 
@@ -42,6 +45,8 @@ The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
 | `fleet_eligible` | Whether the fleet planner may include this tool in generated job plans. |
 | `capabilities` | Closed-vocabulary labels describing what the tool provides. |
 | `supersedes` | Other tools whose output is fully covered by this tool. |
+| `agent_version` | Semver of the agent binary that registered this tool. |
+| `schema_fingerprint` | 12-character hex prefix of the SHA-256 of the tool's parameter schema JSON. Empty if the tool has no declared parameters. |
 
 ---
 
@@ -253,14 +258,82 @@ The skill ID key format is `<agent-name>-<skill-id>`, matching the A2A card's sk
 | `SkillFleetEligible[id] = true` | `fleet:true` |
 | `SkillCapabilities[id] = ["uptime", ...]` | `cap:uptime`, `cap:...` |
 | `SkillSupersedes[id] = ["tool_a"]` | `supersedes:tool_a` |
+| `SkillSchemaHash[id] = "a3f9c2..."` | `schema_hash:a3f9c2...` |
 
-The Registry's `Build()` step parses these tag strings back into `ToolEntry` typed fields via `parseSkillTags`. Agent authors never write tag strings by hand.
+Full parameter schemas (`ToolSchemas`) are **not** serialized into tags — they are too large. Instead, agents serve them at `GET /schemas` and discovery fetches this endpoint separately after the agent card.
+
+The Registry's `Build()` step parses tag strings back into `ToolEntry` typed fields via `parseSkillTags`. Agent authors never write tag strings by hand.
+
+---
+
+## 7. Schema fingerprinting
+
+Each tool's parameter schema is fingerprinted at agent startup and carried through the system. This fingerprint serves three purposes:
+
+1. **Drift detection** — fleet-runner compares the fingerprint at execution time against the snapshot taken at plan time. If the schema changed (renamed argument, new required field), the job is aborted before any server is contacted.
+2. **Planner accuracy** — the fleet planner's tool catalog includes parameter names, types, and required flags when a tool has a declared schema. The LLM generates correct args rather than hallucinating parameter names.
+3. **Plan-time validation** — the planner validates each generated step's args against the live schema before returning the job definition. Unknown parameters or missing required fields are rejected with `422`.
+
+### How the fingerprint is computed
+
+The fingerprint is the first 12 hex characters of the SHA-256 of the tool's parameter schema JSON (the `parameters` field of the ADK `Declaration()`). The JSON is produced by `encoding/json.Marshal` on the `genai.Schema` struct, so the fingerprint is deterministic: the same schema always produces the same fingerprint regardless of the running instance.
+
+Tools without a `Declaration()` or with no declared parameters produce an empty fingerprint and are skipped by drift detection.
+
+### `/schemas` endpoint
+
+Every agent exposes `GET /schemas` returning a JSON object mapping tool name to its full JSON Schema:
+
+```bash
+curl http://localhost:8081/schemas | jq 'keys'
+# ["check_connection", "get_status_summary", ...]
+
+curl http://localhost:8081/schemas | jq '.get_status_summary'
+# {
+#   "properties": {
+#     "connection_string": {"type": "string", "description": "PostgreSQL connection string"},
+#     "verbose": {"type": "boolean"}
+#   },
+#   "required": ["connection_string"]
+# }
+```
+
+Discovery fetches this endpoint after the agent card. If `/schemas` is unreachable or returns a non-200 response, the agent is skipped (same treatment as an unreachable agent card).
+
+### Adding schema fingerprinting to an agent
+
+Use the helpers provided by `agentutil`:
+
+```go
+tools, err := createTools()
+// ...
+cardOpts := agentutil.CardOptions{
+    // ... existing fields ...
+    SkillSchemaHash: agentutil.ComputeSchemaFingerprints("my_agent", tools),
+    ToolSchemas:     agentutil.ComputeInputSchemas(tools),
+}
+```
+
+`ComputeSchemaFingerprints` returns a map of `"agentName-toolName"` → 12-char hex fingerprint, suitable for `SkillSchemaHash`. `ComputeInputSchemas` returns a map of `toolName` → full schema, served at `/schemas`.
+
+Both functions iterate over the tools slice and call `Declaration().Parameters` on each tool that implements the `declarationProvider` interface. Tools that do not implement the interface (or have no declared parameters) are omitted silently.
+
+The `ServeWithTracing` and `ServeWithTracingAndDirectTools` helpers automatically register the `/schemas` handler when `ToolSchemas` is set in `CardOptions` — no additional wiring is needed.
+
+### Checking fingerprints in the live registry
+
+```bash
+curl -s http://localhost:8080/api/v1/tools \
+  | jq '.tools[] | select(.fleet_eligible) | {name, schema_fingerprint, agent_version}'
+```
+
+An empty `schema_fingerprint` means the tool has no declared parameters or was registered by an agent that does not call `ComputeSchemaFingerprints`.
 
 ---
 
 ## See also
 
-- [Fleet Management](FLEET.md) — fleet job definition, planner, approval gating
+- [Fleet Management](FLEET.md) — fleet job definition, planner, approval gating, schema drift detection
 - [AI Governance](AIGOVERNANCE.md) — policy engine architecture
 - [Mutation Tools](MUTATION_TOOLS.md) — write and destructive tool safety
 - [Audit Trail](AUDIT.md) — event logging for tool calls

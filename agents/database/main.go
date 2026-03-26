@@ -215,6 +215,8 @@ func main() {
 				"get_connection_stats",
 			},
 		},
+		SkillSchemaHash: agentutil.ComputeSchemaFingerprints("postgres_database_agent", tools),
+		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
 	}
 
 	if err := agentutil.ServeWithTracingAndDirectTools(ctx, dbAgent, cfg, traceStore, auditStore, NewDatabaseDirectRegistry(), cardOpts); err != nil {

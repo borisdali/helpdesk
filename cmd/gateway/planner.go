@@ -124,6 +124,19 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate step args against each tool's InputSchema (when available).
+	for _, step := range steps {
+		entry, _ := g.toolRegistry.Get(step.Tool)
+		if entry.InputSchema == nil {
+			continue
+		}
+		if err := validateStepArgs(step.Args, entry.InputSchema); err != nil {
+			writeError(w, http.StatusUnprocessableEntity,
+				fmt.Sprintf("step %q args invalid: %s", step.Tool, err))
+			return
+		}
+	}
+
 	// Deterministic safety check: verify all requested tags exist in infrastructure.
 	// The LLM must not guess at tag names — unknown tags produce zero servers in
 	// fleet-runner (hard exit), so returning a plan with them is misleading.
@@ -175,6 +188,20 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 			writtenSteps = append(writtenSteps, step.Tool)
 		}
 	}
+
+	// Snapshot tool schemas at plan time for drift detection at execution time.
+	capturedAt := time.Now().UTC()
+	snapshots := make(map[string]fleet.ToolSnapshot, len(steps))
+	for _, step := range steps {
+		if entry, ok := g.toolRegistry.Get(step.Tool); ok {
+			snapshots[step.Tool] = fleet.ToolSnapshot{
+				AgentVersion:      entry.AgentVersion,
+				SchemaFingerprint: entry.SchemaFingerprint,
+				CapturedAt:        capturedAt,
+			}
+		}
+	}
+	jobDef.ToolSnapshots = snapshots
 
 	// Pretty-print job_def for the raw field.
 	rawJobDefBytes, _ := json.MarshalIndent(jobDef, "", "  ")
@@ -248,12 +275,52 @@ func buildPlannerInfraContext(cfg *infra.Config) (summary string, restricted []s
 
 // buildPlannerToolCatalog formats fleet-eligible tools for the planner prompt.
 // Only tools marked FleetEligible are shown; non-fleet tools are invisible to the LLM.
+// When InputSchema is available, a parameter block is included so the LLM generates
+// correct argument names and types.
 func buildPlannerToolCatalog(r *toolregistry.Registry) string {
 	var sb strings.Builder
 	for _, entry := range r.ListFleetEligible() {
 		caps := strings.Join(entry.Capabilities, ", ")
 		sb.WriteString(fmt.Sprintf("  %s  agent=%s  class=%s  caps=[%s]  — %s\n",
 			entry.Name, entry.Agent, entry.ActionClass, caps, entry.Description))
+		if entry.InputSchema != nil {
+			sb.WriteString(fmt.Sprintf("    Parameters:\n"))
+			if props, ok := entry.InputSchema["properties"].(map[string]any); ok {
+				var required []string
+				if req, ok := entry.InputSchema["required"].([]any); ok {
+					for _, r := range req {
+						if s, ok := r.(string); ok {
+							required = append(required, s)
+						}
+					}
+				}
+				requiredSet := make(map[string]bool, len(required))
+				for _, r := range required {
+					requiredSet[r] = true
+				}
+				for paramName, paramDef := range props {
+					typeStr := "any"
+					descStr := ""
+					if def, ok := paramDef.(map[string]any); ok {
+						if t, ok := def["type"].(string); ok {
+							typeStr = t
+						}
+						if d, ok := def["description"].(string); ok {
+							descStr = d
+						}
+					}
+					req := "optional"
+					if requiredSet[paramName] {
+						req = "required"
+					}
+					if descStr != "" {
+						sb.WriteString(fmt.Sprintf("      %s (%s, %s): %s\n", paramName, typeStr, req, descStr))
+					} else {
+						sb.WriteString(fmt.Sprintf("      %s (%s, %s)\n", paramName, typeStr, req))
+					}
+				}
+			}
+		}
 	}
 	return sb.String()
 }
@@ -411,6 +478,42 @@ func filterStepsByName(steps []fleet.Step, names []string) []fleet.Step {
 		}
 	}
 	return result
+}
+
+// validateStepArgs checks step args against the tool's InputSchema.
+// It verifies no unknown parameter names (args not in schema properties) and
+// all required parameters are present. Types are not validated.
+// Returns nil if args are valid or if the schema has no properties.
+func validateStepArgs(args map[string]any, schema map[string]any) error {
+	props, _ := schema["properties"].(map[string]any)
+
+	// Check for unknown args (args not defined in schema properties).
+	if props != nil {
+		for argName := range args {
+			if _, defined := props[argName]; !defined {
+				return fmt.Errorf("unknown parameter %q (not in schema)", argName)
+			}
+		}
+	}
+
+	// Check required parameters are present.
+	var required []string
+	switch v := schema["required"].(type) {
+	case []string:
+		required = v
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				required = append(required, s)
+			}
+		}
+	}
+	for _, key := range required {
+		if _, present := args[key]; !present {
+			return fmt.Errorf("missing required parameter %q", key)
+		}
+	}
+	return nil
 }
 
 // stripMarkdownFences removes ```json ... ``` or ``` ... ``` wrappers from a string.

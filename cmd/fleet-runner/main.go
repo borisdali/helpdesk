@@ -30,6 +30,7 @@ func main() {
 		waveSizeOverride     = flag.Int("wave-size", 0, "Override strategy.wave_size")
 		pauseOverride        = flag.Int("pause", -1, "Override strategy.wave_pause_seconds")
 		approvalPollInterval = flag.Duration("approval-poll-interval", 5*time.Second, "How often to poll for approval status")
+		schemaDriftFlag      = flag.String("schema-drift", envOrDefault("HELPDESK_SCHEMA_DRIFT", ""), `Schema drift policy: "abort" (default), "warn", or "ignore"`)
 	)
 	flag.CommandLine.Parse(remaining) //nolint:errcheck
 
@@ -66,6 +67,15 @@ func main() {
 		def.Strategy.WavePauseSeconds = *pauseOverride
 	}
 
+	// Resolve schema drift policy. Priority: job file > --schema-drift flag > env var > "abort".
+	driftPolicy := "abort"
+	if *schemaDriftFlag != "" {
+		driftPolicy = *schemaDriftFlag
+	}
+	if def.Strategy.SchemaDrift != "" {
+		driftPolicy = def.Strategy.SchemaDrift // job file wins
+	}
+
 	// Validate required fields.
 	if def.Name == "" {
 		slog.Error("job definition missing required field: name")
@@ -94,13 +104,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Dry-run: print plan and exit.
+	// Dry-run: print plan (including drift report) and exit.
 	if def.Strategy.DryRun {
 		printDryRunPlan(&def, servers)
+		// Always show drift results in dry-run regardless of policy.
+		liveTools, err := fetchLiveTools(*gatewayURL)
+		if err != nil {
+			fmt.Printf("\nSCHEMA DRIFT: could not fetch live registry: %v\n", err)
+		} else {
+			results, _ := CheckSchemaDrift(def.ToolSnapshots, liveTools, "warn")
+			printDriftReport(results, driftPolicy)
+		}
 		return
 	}
 
 	ctx := context.Background()
+
+	// Schema drift check: compare job snapshots against the live registry.
+	// Must run before preflight so we abort before contacting any server.
+	if driftPolicy != "ignore" {
+		liveTools, err := fetchLiveTools(*gatewayURL)
+		if err != nil {
+			slog.Error("schema drift: failed to fetch live tool registry — aborting", "err", err)
+			os.Exit(1)
+		}
+		if _, err := CheckSchemaDrift(def.ToolSnapshots, liveTools, driftPolicy); err != nil {
+			slog.Error("schema drift check failed", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	// Preflight checks: verify all servers are reachable before creating the job.
 	pfCfg := preflightConfig{
@@ -202,6 +234,28 @@ func printDryRunPlan(def *fleet.JobDef, servers []string) {
 	fmt.Printf("  wave_pause_seconds:  %d\n", strategy.WavePauseSeconds)
 	fmt.Printf("  failure_threshold:   %.0f%%\n", strategy.FailureThreshold*100)
 	fmt.Printf("\nNo gateway or auditd contact (dry run).\n")
+}
+
+// printDriftReport prints a human-readable schema drift table to stdout.
+// Called during dry-run regardless of policy so operators always see drift.
+func printDriftReport(results []SchemaDriftResult, policy string) {
+	if len(results) == 0 {
+		fmt.Printf("\nSCHEMA DRIFT: no drift detected (policy=%s)\n", policy)
+		return
+	}
+	fmt.Printf("\nSCHEMA DRIFT (policy=%s):\n", policy)
+	for _, r := range results {
+		status := "VERSION CHANGED"
+		if r.FingerprintChanged {
+			status = "FINGERPRINT CHANGED"
+		}
+		fmt.Printf("  %-40s  [%s]\n", r.Tool, status)
+		fmt.Printf("    planned:  fingerprint=%-12s  version=%s  captured=%s\n",
+			r.Snapshot.SchemaFingerprint, r.Snapshot.AgentVersion,
+			r.Snapshot.CapturedAt.Format("2006-01-02T15:04:05Z"))
+		fmt.Printf("    current:  fingerprint=%-12s  version=%s\n",
+			r.CurrentFingerprint, r.CurrentVersion)
+	}
 }
 
 func envOrDefault(key, def string) string {

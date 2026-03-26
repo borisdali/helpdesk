@@ -19,6 +19,9 @@ type Agent struct {
 	Name      string
 	InvokeURL string
 	Card      *a2a.AgentCard
+	// Schemas maps tool name → JSON Schema properties, fetched from GET /schemas.
+	// Nil if the agent did not expose the endpoint.
+	Schemas map[string]map[string]any
 }
 
 // Discover fetches agent cards from a list of base URLs and returns
@@ -58,12 +61,33 @@ func Discover(baseURLs []string) (map[string]*Agent, error) {
 		invokeURL := base + "/invoke"
 		card.URL = invokeURL
 
+		// Fetch tool schemas from the agent's /schemas endpoint.
+		// This endpoint is required for schema fingerprinting and planner accuracy.
+		var schemas map[string]map[string]any
+		schemasURL := base + "/schemas"
+		sresp, err := client.Get(schemasURL)
+		if err != nil {
+			slog.Error("discovery: failed to fetch tool schemas — skipping agent", "agent", card.Name, "url", schemasURL, "err", err)
+			continue
+		}
+		sbody, _ := io.ReadAll(sresp.Body)
+		sresp.Body.Close()
+		if sresp.StatusCode != http.StatusOK {
+			slog.Error("discovery: non-200 status fetching tool schemas — skipping agent", "agent", card.Name, "url", schemasURL, "status", sresp.StatusCode)
+			continue
+		}
+		if err := json.Unmarshal(sbody, &schemas); err != nil {
+			slog.Error("discovery: failed to parse tool schemas — skipping agent", "agent", card.Name, "url", schemasURL, "err", err)
+			continue
+		}
+
 		agents[card.Name] = &Agent{
 			Name:      card.Name,
 			InvokeURL: invokeURL,
 			Card:      &card,
+			Schemas:   schemas,
 		}
-		slog.Info("discovered agent", "name", card.Name, "invoke_url", invokeURL)
+		slog.Info("discovered agent", "name", card.Name, "invoke_url", invokeURL, "schemas", len(schemas))
 	}
 
 	if len(agents) == 0 {

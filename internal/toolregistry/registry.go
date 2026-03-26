@@ -22,6 +22,11 @@ type ToolEntry struct {
 	FleetEligible bool           `json:"fleet_eligible"`         // hard gate: planner only sees these
 	Capabilities  []string       `json:"capabilities,omitempty"` // controlled vocabulary (Cap* constants)
 	Supersedes    []string       `json:"supersedes,omitempty"`   // tool names this one makes redundant
+	// AgentVersion is the agent's version string at discovery time (from card.Version).
+	AgentVersion string `json:"agent_version,omitempty"`
+	// SchemaFingerprint is the sha256[:12] hex of the tool's Declaration().Parameters JSON.
+	// Populated from "schema_hash:<fingerprint>" tags serialized by the agent at startup.
+	SchemaFingerprint string `json:"schema_fingerprint,omitempty"`
 }
 
 // Registry is an immutable catalog of tools built from agent cards.
@@ -191,8 +196,9 @@ var agentShortName = map[string]string{
 
 // Build constructs a Registry from the gateway's discovered agents.
 // agentCards maps agent name → *a2a.AgentCard.
+// agentSchemas maps agent name → (tool name → JSON Schema properties); pass nil if unavailable.
 // classification is audit.ToolClassification.
-func Build(agentCards map[string]*a2a.AgentCard, classification map[string]audit.ActionClass) *Registry {
+func Build(agentCards map[string]*a2a.AgentCard, agentSchemas map[string]map[string]map[string]any, classification map[string]audit.ActionClass) *Registry {
 	var entries []ToolEntry
 
 	for agentName, card := range agentCards {
@@ -223,16 +229,26 @@ func Build(agentCards map[string]*a2a.AgentCard, classification map[string]audit
 				desc = skill.Name
 			}
 
-			fleetEligible, caps, supersedes := parseSkillTags(skill.Tags)
+			fleetEligible, caps, supersedes, schemaFingerprint := parseSkillTags(skill.Tags)
+
+			var inputSchema map[string]any
+			if agentSchemas != nil {
+				if toolSchemas, ok := agentSchemas[agentName]; ok {
+					inputSchema = toolSchemas[toolName]
+				}
+			}
 
 			entries = append(entries, ToolEntry{
-				Name:          toolName,
-				Agent:         shortName,
-				Description:   desc,
-				ActionClass:   actionClass,
-				FleetEligible: fleetEligible,
-				Capabilities:  caps,
-				Supersedes:    supersedes,
+				Name:              toolName,
+				Agent:             shortName,
+				Description:       desc,
+				InputSchema:       inputSchema,
+				ActionClass:       actionClass,
+				FleetEligible:     fleetEligible,
+				Capabilities:      caps,
+				Supersedes:        supersedes,
+				AgentVersion:      card.Version,
+				SchemaFingerprint: schemaFingerprint,
 			})
 		}
 	}
@@ -254,7 +270,7 @@ func extractToolName(agentName, skillID string) string {
 
 // parseSkillTags extracts typed taxonomy metadata from the key:value tag strings
 // that applyCardOptions serializes from the typed CardOptions fields.
-func parseSkillTags(tags []string) (fleetEligible bool, caps, supersedes []string) {
+func parseSkillTags(tags []string) (fleetEligible bool, caps, supersedes []string, schemaFingerprint string) {
 	for _, tag := range tags {
 		switch {
 		case tag == "fleet:true":
@@ -263,7 +279,9 @@ func parseSkillTags(tags []string) (fleetEligible bool, caps, supersedes []strin
 			caps = append(caps, strings.TrimPrefix(tag, "cap:"))
 		case strings.HasPrefix(tag, "supersedes:"):
 			supersedes = append(supersedes, strings.TrimPrefix(tag, "supersedes:"))
+		case strings.HasPrefix(tag, "schema_hash:"):
+			schemaFingerprint = strings.TrimPrefix(tag, "schema_hash:")
 		}
 	}
-	return fleetEligible, caps, supersedes
+	return fleetEligible, caps, supersedes, schemaFingerprint
 }

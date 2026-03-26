@@ -158,6 +158,8 @@ func main() {
 			"k8s_agent-get_pod_logs":  {"Get the last 100 lines of logs from the postgres pod"},
 			"k8s_agent-get_endpoints": {"Check if the database service has healthy endpoints"},
 		},
+		SkillSchemaHash: agentutil.ComputeSchemaFingerprints("k8s_agent", tools),
+		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
 	}
 
 	if err := agentutil.ServeWithTracingAndDirectTools(ctx, k8sAgent, cfg, traceStore, auditStore, NewK8sDirectRegistry(), cardOpts); err != nil {

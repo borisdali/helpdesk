@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"google.golang.org/genai"
+	adktool "google.golang.org/adk/tool"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/identity"
@@ -1347,3 +1349,128 @@ policies:
 		t.Errorf("remediation purpose: write should be allowed, got: %v", err)
 	}
 }
+
+// ── Schema fingerprint helpers ────────────────────────────────────────────────
+
+// mockSchemaTool implements the minimal interface needed by ComputeSchemaFingerprints
+// and ComputeInputSchemas: tool.Tool + declarationProvider.
+type mockSchemaTool struct {
+	name string
+	decl *genai.FunctionDeclaration
+}
+
+func (m *mockSchemaTool) Name() string                                        { return m.name }
+func (m *mockSchemaTool) Description() string                                 { return "mock " + m.name }
+func (m *mockSchemaTool) IsLongRunning() bool                                 { return false }
+func (m *mockSchemaTool) Declaration() *genai.FunctionDeclaration             { return m.decl }
+
+func makeMockSchemaTool(name string, params *genai.Schema) *mockSchemaTool {
+	return &mockSchemaTool{
+		name: name,
+		decl: &genai.FunctionDeclaration{
+			Name:        name,
+			Description: "mock " + name,
+			Parameters:  params,
+		},
+	}
+}
+
+func TestComputeSchemaFingerprints_Basic(t *testing.T) {
+	params := &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"connection_string": {Type: genai.TypeString},
+		},
+		Required: []string{"connection_string"},
+	}
+	tool1 := makeMockSchemaTool("check_connection", params)
+	tool2 := makeMockSchemaTool("no_params_tool", nil) // no parameters → omitted
+
+	fps := ComputeSchemaFingerprints("myagent", []adktool.Tool{tool1, tool2})
+
+	if _, ok := fps["myagent-check_connection"]; !ok {
+		t.Error("expected fingerprint for check_connection")
+	}
+	if _, ok := fps["myagent-no_params_tool"]; ok {
+		t.Error("no_params_tool should be omitted (nil params)")
+	}
+	if len(fps["myagent-check_connection"]) != 12 {
+		t.Errorf("fingerprint length = %d, want 12", len(fps["myagent-check_connection"]))
+	}
+}
+
+func TestComputeSchemaFingerprints_Deterministic(t *testing.T) {
+	params := &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"pid": {Type: genai.TypeInteger},
+		},
+		Required: []string{"pid"},
+	}
+	tool := makeMockSchemaTool("terminate_connection", params)
+	fps1 := ComputeSchemaFingerprints("db", []adktool.Tool{tool})
+	fps2 := ComputeSchemaFingerprints("db", []adktool.Tool{tool})
+	if fps1["db-terminate_connection"] != fps2["db-terminate_connection"] {
+		t.Error("ComputeSchemaFingerprints is not deterministic")
+	}
+}
+
+func TestComputeInputSchemas_Basic(t *testing.T) {
+	params := &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"connection_string": {Type: genai.TypeString, Description: "PostgreSQL DSN"},
+		},
+		Required: []string{"connection_string"},
+	}
+	tool := makeMockSchemaTool("check_connection", params)
+	schemas := ComputeInputSchemas([]adktool.Tool{tool})
+
+	if _, ok := schemas["check_connection"]; !ok {
+		t.Fatal("expected schema for check_connection")
+	}
+	schema := schemas["check_connection"]
+	if _, ok := schema["properties"]; !ok {
+		t.Error("schema missing 'properties' key")
+	}
+}
+
+func TestComputeInputSchemas_NoDeclaration(t *testing.T) {
+	tool := &mockSchemaTool{name: "bare_tool"} // nil decl → omitted
+	schemas := ComputeInputSchemas([]adktool.Tool{tool})
+	if _, ok := schemas["bare_tool"]; ok {
+		t.Error("bare_tool (nil Declaration) should be omitted from schemas")
+	}
+}
+
+func TestApplyCardOptions_SkillSchemaHash(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "myagent",
+		Skills: []a2a.AgentSkill{
+			{ID: "myagent-check_connection"},
+			{ID: "myagent-get_pods"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillSchemaHash: map[string]string{
+			"myagent-check_connection": "abc123def456",
+		},
+	})
+
+	var foundHash string
+	for _, tag := range card.Skills[0].Tags {
+		if strings.HasPrefix(tag, "schema_hash:") {
+			foundHash = strings.TrimPrefix(tag, "schema_hash:")
+		}
+	}
+	if foundHash != "abc123def456" {
+		t.Errorf("schema_hash tag = %q, want %q", foundHash, "abc123def456")
+	}
+	// Second skill has no hash — verify no spurious tag.
+	for _, tag := range card.Skills[1].Tags {
+		if strings.HasPrefix(tag, "schema_hash:") {
+			t.Errorf("unexpected schema_hash tag on skill without hash: %q", tag)
+		}
+	}
+}
+

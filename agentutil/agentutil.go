@@ -6,6 +6,7 @@ package agentutil
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/identity"
@@ -1113,6 +1115,15 @@ type CardOptions struct {
 	// SkillSupersedes maps a skill ID to the tool names it makes redundant.
 	// When a superseding tool is selected, the planner removes the superseded ones.
 	SkillSupersedes map[string][]string
+
+	// SkillSchemaHash maps a skill ID to its schema fingerprint.
+	// Computed by ComputeSchemaFingerprints; serialized as "schema_hash:<fingerprint>"
+	// tags so the toolregistry can read it back during discovery.
+	SkillSchemaHash map[string]string
+
+	// ToolSchemas maps a tool name (without agent prefix) to its JSON Schema properties.
+	// Computed by ComputeInputSchemas; served at GET /schemas for gateway discovery.
+	ToolSchemas map[string]map[string]any
 }
 
 // applyCardOptions merges optional metadata onto an AgentCard.
@@ -1146,7 +1157,113 @@ func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
 		for _, sup := range opts.SkillSupersedes[skill.ID] {
 			skill.Tags = append(skill.Tags, "supersedes:"+sup)
 		}
+		if hash, ok := opts.SkillSchemaHash[skill.ID]; ok && hash != "" {
+			skill.Tags = append(skill.Tags, "schema_hash:"+hash)
+		}
 	}
+}
+
+// registerSchemasHandler registers GET /schemas on mux unconditionally.
+// The endpoint returns a JSON object mapping tool name → JSON Schema properties,
+// allowing gateway discovery to populate ToolEntry.InputSchema.
+// When schemas is nil or empty, it returns an empty JSON object so that
+// agents without declared schemas do not cause gateway discovery to skip them.
+func registerSchemasHandler(mux *http.ServeMux, schemas map[string]map[string]any) {
+	if schemas == nil {
+		schemas = map[string]map[string]any{}
+	}
+	b, err := json.Marshal(schemas)
+	if err != nil {
+		slog.Warn("agentutil: failed to marshal tool schemas", "err", err)
+		return
+	}
+	mux.HandleFunc("GET /schemas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b) //nolint:errcheck
+	})
+}
+
+// declarationProvider matches tools that expose Declaration().
+// Mirrors the unexported interface in internal/model/anthropic.go.
+type declarationProvider interface {
+	Declaration() *genai.FunctionDeclaration
+}
+
+// toolSchemaSource returns the schema source for a tool declaration.
+// functiontool.New populates ParametersJsonSchema (type any); older/custom tools
+// may use Parameters (*genai.Schema). We prefer ParametersJsonSchema when set.
+func toolSchemaSource(decl *genai.FunctionDeclaration) any {
+	if decl.ParametersJsonSchema != nil {
+		return decl.ParametersJsonSchema
+	}
+	if decl.Parameters != nil {
+		return decl.Parameters
+	}
+	return nil
+}
+
+// ComputeSchemaFingerprints computes a schema fingerprint (first 12 hex chars of
+// sha256 of the tool's parameter schema JSON) for each tool in the slice.
+// Returns a map of skillID → fingerprint suitable for CardOptions.SkillSchemaHash.
+// skillID format: "<agentName>-<toolName>" (matches the CardOptions key convention).
+// Tools without a Declaration or with no parameter schema are omitted.
+func ComputeSchemaFingerprints(agentName string, tools []tool.Tool) map[string]string {
+	result := make(map[string]string, len(tools))
+	for _, t := range tools {
+		dp, ok := t.(declarationProvider)
+		if !ok {
+			continue
+		}
+		decl := dp.Declaration()
+		if decl == nil {
+			continue
+		}
+		src := toolSchemaSource(decl)
+		if src == nil {
+			continue
+		}
+		b, err := json.Marshal(src)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(b)
+		fingerprint := fmt.Sprintf("%x", sum[:6]) // 12 hex chars
+		skillID := agentName + "-" + t.Name()
+		result[skillID] = fingerprint
+	}
+	return result
+}
+
+// ComputeInputSchemas returns a map of toolName → JSON Schema (map[string]any) for use
+// in CardOptions.ToolSchemas. Served at GET /schemas so gateway discovery can populate
+// ToolEntry.InputSchema.
+// Tools without a Declaration or with no parameter schema are omitted.
+func ComputeInputSchemas(tools []tool.Tool) map[string]map[string]any {
+	result := make(map[string]map[string]any, len(tools))
+	for _, t := range tools {
+		dp, ok := t.(declarationProvider)
+		if !ok {
+			continue
+		}
+		decl := dp.Declaration()
+		if decl == nil {
+			continue
+		}
+		src := toolSchemaSource(decl)
+		if src == nil {
+			continue
+		}
+		b, err := json.Marshal(src)
+		if err != nil {
+			continue
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(b, &schema); err != nil {
+			continue
+		}
+		result[t.Name()] = schema
+	}
+	return result
 }
 
 // Serve starts an A2A server for the given agent on cfg.ListenAddr.
@@ -1187,6 +1304,12 @@ func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) 
 
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	var toolSchemas map[string]map[string]any
+	if len(opts) > 0 {
+		toolSchemas = opts[0].ToolSchemas
+	}
+	registerSchemasHandler(mux, toolSchemas)
 
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
@@ -1275,6 +1398,12 @@ func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
 
+	var toolSchemas map[string]map[string]any
+	if len(opts) > 0 {
+		toolSchemas = opts[0].ToolSchemas
+	}
+	registerSchemasHandler(mux, toolSchemas)
+
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:        a.Name(),
@@ -1335,6 +1464,12 @@ func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Conf
 
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	var toolSchemas map[string]map[string]any
+	if len(opts) > 0 {
+		toolSchemas = opts[0].ToolSchemas
+	}
+	registerSchemasHandler(mux, toolSchemas)
 
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{

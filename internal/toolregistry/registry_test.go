@@ -2,6 +2,10 @@ package toolregistry
 
 import (
 	"testing"
+
+	"github.com/a2aproject/a2a-go/a2a"
+
+	"helpdesk/internal/audit"
 )
 
 func TestNew_GetAndList(t *testing.T) {
@@ -246,7 +250,7 @@ func TestParseSkillTags(t *testing.T) {
 		"supersedes:get_server_info",
 		"supersedes:get_connection_stats",
 	}
-	fleet, caps, supersedes := parseSkillTags(tags)
+	fleet, caps, supersedes, schemaFP := parseSkillTags(tags)
 	if !fleet {
 		t.Error("fleet = false, want true")
 	}
@@ -256,11 +260,52 @@ func TestParseSkillTags(t *testing.T) {
 	if len(supersedes) != 2 || supersedes[0] != "get_server_info" || supersedes[1] != "get_connection_stats" {
 		t.Errorf("supersedes = %v, want [get_server_info get_connection_stats]", supersedes)
 	}
+	if schemaFP != "" {
+		t.Errorf("schemaFingerprint = %q, want empty", schemaFP)
+	}
+}
+
+func TestParseSkillTags_SchemaHash(t *testing.T) {
+	tags := []string{"fleet:true", "schema_hash:abc123def456"}
+	_, _, _, schemaFP := parseSkillTags(tags)
+	if schemaFP != "abc123def456" {
+		t.Errorf("schemaFingerprint = %q, want %q", schemaFP, "abc123def456")
+	}
 }
 
 func TestParseSkillTags_Empty(t *testing.T) {
-	fleet, caps, supersedes := parseSkillTags([]string{"postgresql", "database"})
-	if fleet || len(caps) != 0 || len(supersedes) != 0 {
-		t.Errorf("parseSkillTags with no taxonomy tags: fleet=%v caps=%v supersedes=%v", fleet, caps, supersedes)
+	fleet, caps, supersedes, schemaFP := parseSkillTags([]string{"postgresql", "database"})
+	if fleet || len(caps) != 0 || len(supersedes) != 0 || schemaFP != "" {
+		t.Errorf("parseSkillTags with no taxonomy tags: fleet=%v caps=%v supersedes=%v schemaFP=%q", fleet, caps, supersedes, schemaFP)
+	}
+}
+
+func TestBuild_AgentVersionAndSchemaFingerprint(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name:    "postgres_database_agent",
+		Version: "2.0.0",
+		Skills: []a2a.AgentSkill{
+			{
+				ID:          "postgres_database_agent-check_connection",
+				Name:        "check_connection",
+				Description: "Check DB connectivity",
+				Tags:        []string{"schema_hash:deadbeef1234"},
+			},
+		},
+	}
+	reg := Build(
+		map[string]*a2a.AgentCard{"postgres_database_agent": card},
+		nil,
+		audit.ToolClassification,
+	)
+	entry, ok := reg.Get("check_connection")
+	if !ok {
+		t.Fatal("check_connection not found")
+	}
+	if entry.AgentVersion != "2.0.0" {
+		t.Errorf("AgentVersion = %q, want %q", entry.AgentVersion, "2.0.0")
+	}
+	if entry.SchemaFingerprint != "deadbeef1234" {
+		t.Errorf("SchemaFingerprint = %q, want %q", entry.SchemaFingerprint, "deadbeef1234")
 	}
 }

@@ -65,12 +65,16 @@ func main() {
 
 	gw := NewGateway(registry)
 
-	// Build tool registry from discovered agent cards.
+	// Build tool registry from discovered agent cards and schemas.
 	agentCards := make(map[string]*a2a.AgentCard, len(registry))
+	agentSchemas := make(map[string]map[string]map[string]any, len(registry))
 	for name, agent := range registry {
 		agentCards[name] = agent.Card
+		if agent.Schemas != nil {
+			agentSchemas[name] = agent.Schemas
+		}
 	}
-	toolReg := toolregistry.Build(agentCards, audit.ToolClassification)
+	toolReg := toolregistry.Build(agentCards, agentSchemas, audit.ToolClassification)
 	gw.SetToolRegistry(toolReg)
 	slog.Info("tool registry built", "tools", len(toolReg.List()))
 
