@@ -277,7 +277,7 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 	start := time.Now()
 	connStr = dbInfo.ConnectionStr
 
-	args := []string{"-c", query, "-x"}
+	args := []string{"-w", "-c", query, "-x"}
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}
@@ -433,7 +433,7 @@ func estimateRowsAffected(ctx context.Context, connStr, query string) (int, bool
 	if !strings.HasPrefix(upper, "DELETE") && !strings.HasPrefix(upper, "UPDATE") {
 		return 0, false
 	}
-	args := []string{"-t", "-A", "-c", "EXPLAIN (FORMAT JSON) " + query}
+	args := []string{"-w", "-t", "-A", "-c", "EXPLAIN (FORMAT JSON) " + query}
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}

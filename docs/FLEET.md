@@ -2,7 +2,7 @@
 
 While resolving issues with a specific database without engaging an often lengthy vendor support protocol is useful, aiHelpDesk also offers the Fleet Management capabilities where a set of diagnostic or remediation operations can be safely repeated across multiple databases. Examples here include the diagnostic sweeps, configuration checks, table health reports, or specific targeted write operations (e.g. changing a flag, terminating idle connections, etc.) — all without manual coordination, but with the optional human operator approval for the mission critical databases.
 
-To be sure, safety is the key here, especially for the mutations that target more than a single database and so multiple precaution, verification and approval mechanisms are part of this aiHelpDesk Fleet Management module as described on this page.
+To be sure, safety is the key here, especially for the mutations that target more than a single database and so multiple safeguard, verification and approval mechanisms are part of this aiHelpDesk Fleet Management module as described on this page.
 
 The core architectural element of this aiHelpDesk module is the `fleet-runner` that is designed to apply a sequence of operations across a subset of `infrastructure.json` targets via a staged progressive rollout with the optional canary and wave phases, preflight checks, circuit breaker, full mandatory [audit trail](AUDIT.md#65-fleet-jobs) while also adhering to the normal aiHelpDesk [identity & access](IDENTITY.md#24-fleet-runner-authentication) mechanisms.
 
@@ -561,14 +561,14 @@ The client prints the plan with approval warnings and a ready-to-run command.
 
 ### Planner safety guarantees
 
-All four checks are deterministic and run after the LLM response — they cannot be bypassed by prompt content.
+All four checks listed below are deterministic and run after the LLM response. They cannot be bypassed by any prompt content.
 
 - **Unknown tools are rejected** with `422`. Every generated tool name is validated against the live tool registry.
 - **Invalid step args are rejected** with `422`. When a tool has a declared parameter schema, the Planner validates each step's args: unknown parameters (not in the schema's `properties`) and missing required parameters both produce a `422` error with a descriptive message. Type mismatches are not checked — JSON number/string coercion is left to the agent.
 - **Unknown tags are rejected** with `422`. Every tag in `targets.tags` must exist verbatim in `infrastructure.json`. The Planner will not infer or substitute tag names (e.g. "staging" → "development"). The error response lists all available tags so you can correct the description.
 - **Restricted servers are rejected** with `422`. Any server with a non-empty `sensitivity` field that appears in the resolved target set causes an error. Refine the description or add the server to `targets.exclude`.
-- **The Planner never auto-submits.** A human must review and run the job.
 
+It was already stated earlier in this doc, but it bears repreating that **The Planner never auto-submits.** A human must review and run the job.
 `warning_messages` in the response are genuinely non-fatal notices (e.g. broad target scope, empty exclusion list). They do not indicate a validation failure.
 
 ### Parameter schemas in the tool catalog
