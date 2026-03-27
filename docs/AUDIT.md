@@ -130,10 +130,12 @@ Three additional event types appear in the audit chain whenever a rollback is in
 | `rollback_executed` | `rollback_id`, `original_event_id`, `status` (`success`/`failed`), `error_message` |
 | `rollback_verified` | `rollback_id`, `original_event_id`, `verification_result` |
 
-Rollback events carry a dedicated `rollback_trace_id` prefixed `rbk_tr_`. All three events share the same prefix so you can fetch the full rollback journey in one query:
+Rollback events carry a dedicated `rollback_trace_id` of the form `tr_rbk_<uuid8>` — the same `tr_` + record-ID convention used by fleet (`tr_flj_*`). This means the trace ID is derivable directly from the rollback record ID and vice versa. Fetch the full rollback journey in one query:
 
 ```bash
-curl "http://localhost:1199/v1/events?trace_id=rbk_tr_a1b2c3d4"
+curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
+# or as a journey summary:
+curl "http://localhost:1199/v1/journeys?trace_id=tr_rbk_a1b2c3d4"
 ```
 
 ### 4.2 policy_decision fields
@@ -337,7 +339,7 @@ curl -X POST http://localhost:1199/v1/rollbacks \
   -d '{"original_event_id": "tool_abc12345", "dry_run": true}'
 
 # All audit events for a rollback operation
-curl "http://localhost:1199/v1/events?trace_id=rbk_tr_a1b2c3d4"
+curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
 ```
 
 ### 6.7 Health

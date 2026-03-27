@@ -23,7 +23,9 @@ type RollbackRecord struct {
 	InitiatedBy     string    `json:"initiated_by"`
 	InitiatedAt     time.Time `json:"initiated_at"`
 	ApprovalID      string    `json:"approval_id,omitempty"`
-	// RollbackTraceID is the "rbk_tr_" + uuid[:8] trace for the compensating journey.
+	// RollbackTraceID is "tr_" + RollbackID (e.g. "tr_rbk_a1b2c3d4"), mirroring
+	// fleet's "tr_flj_<uuid8>" convention so the trace and record IDs are derivable
+	// from each other without a lookup.
 	RollbackTraceID string    `json:"rollback_trace_id"`
 	PlanJSON        string    `json:"plan_json"` // serialised RollbackPlan
 	ResultOutput    string    `json:"result_output,omitempty"`
@@ -133,7 +135,7 @@ func (s *RollbackStore) CreateRollback(ctx context.Context, r *RollbackRecord) e
 		r.RollbackID = "rbk_" + uuid.New().String()[:8]
 	}
 	if r.RollbackTraceID == "" {
-		r.RollbackTraceID = "rbk_tr_" + uuid.New().String()[:8]
+		r.RollbackTraceID = "tr_" + r.RollbackID // → "tr_rbk_<uuid8>"; mirrors fleet's "tr_flj_<uuid8>"
 	}
 	now := time.Now().UTC()
 	if r.InitiatedAt.IsZero() {

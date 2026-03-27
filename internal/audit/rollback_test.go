@@ -326,6 +326,10 @@ func TestRollbackStore_CreateAndGet(t *testing.T) {
 	if r.RollbackTraceID == "" {
 		t.Error("RollbackTraceID not set after create")
 	}
+	wantTraceID := "tr_" + r.RollbackID
+	if r.RollbackTraceID != wantTraceID {
+		t.Errorf("RollbackTraceID = %q, want %q (tr_ + RollbackID)", r.RollbackTraceID, wantTraceID)
+	}
 
 	got, err := s.GetRollback(ctx, r.RollbackID)
 	if err != nil {

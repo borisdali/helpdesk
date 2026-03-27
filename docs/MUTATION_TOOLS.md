@@ -287,7 +287,7 @@ touching running pods.
 
 ## 1.9 Rollback capability per tool
 
-Every mutation tool captures state before it executes so the operation can be reversed via the rollback API. Reversibility depends on the tool:
+Every mutation tool captures state before it executes so the operation can be reversed via the rollback API. Reversibility depends on the tool. Here are a few examples:
 
 | Tool | Reversible | Mechanism |
 |---|---|---|

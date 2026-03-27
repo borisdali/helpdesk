@@ -35,8 +35,8 @@ fleet-job rollbacks.
 ```
 Original mutation                    Rollback lifecycle
 ─────────────────                    ─────────────────────────────────────────────
-Agent calls scale_deployment   →  1. PreState captured in audit event (pre_state field)
-Event recorded in auditd       →  2. POST /v1/events/{id}/rollback-plan  → derive plan
+Agent calls scale_deployment    →  1. PreState captured in audit event (pre_state field)
+Event recorded in auditd        →  2. POST /v1/events/{id}/rollback-plan  → derive plan
                                    3. POST /v1/rollbacks                 → initiate
                                       ├─ duplicate check (409 if already exists)
                                       ├─ reversibility check (422 if not reversible)
@@ -49,11 +49,13 @@ Event recorded in auditd       →  2. POST /v1/events/{id}/rollback-plan  → d
 ```
 
 The `pre_state` field is written **inside** the `tool_execution` audit event at mutation
-time — no secondary table join is needed to derive a plan later.
+time. No secondary table join is needed to derive a plan later.
 
 ---
 
 ## 2. Reversibility classification
+
+The table below lists just the initial set of aiHelpDesk mutations, their reversibility and the potential rollback mechanism:
 
 | Tool | Reversibility | Mechanism |
 |------|--------------|-----------|
@@ -66,7 +68,7 @@ time — no secondary table join is needed to derive a plan later.
 | `terminate_connection` | **No** | Connection is already gone; `get_session_info` pre-flight surfaced the rollback cost before approval |
 | `terminate_idle_connections` | **No** | Same as above |
 | `cancel_query` | **No** | Query already cancelled; pre-flight warning is sufficient |
-| All other tools | **No** | No registered inverse operation |
+| All other tools | **No** | Inverse operation is tool specific |
 
 Operations marked **Partial** return a `rollback-plan` with `reversibility: "partial"` and a
 `not_reversible_reason` explaining the self-recovery path. They cannot be initiated via
@@ -109,7 +111,7 @@ Works on any PostgreSQL instance with normal `SELECT` access. Before the DML exe
 | `UPDATE` | `SELECT * FROM t WHERE <same condition>` captures old values | `UPDATE t SET col=old WHERE pk=…` (one per row) |
 | `DELETE` | `SELECT * FROM t WHERE <same condition>` captures the rows | `INSERT INTO t (cols) VALUES (old_vals…)` |
 
-Row count is bounded by the existing `max_rows_affected` blast-radius limit (default: 100).
+Row count is bounded by the existing `max_rows_affected` blast-radius limit (default: 100, see [here](AIGOVERNANCE.md#51-db-blast-radius-max_rows_affected)).
 This cap also limits the Tier 1 rollback plan to 100 rows. There is a TOCTOU gap between
 the pre-SELECT and the DML; it is acceptable for approval-gated, short-window mutations.
 
@@ -135,7 +137,7 @@ the pre-SELECT and the DML; it is acceptable for approval-gated, short-window mu
 }
 ```
 
-### 3.3 Database (Tier 2 — WAL decode)
+### 3.3 Database (Tier 2 — LSN bracketing / WAL decoding)
 
 Requires PostgreSQL server configured with `wal_level = logical` and the connecting
 user granted the `REPLICATION` privilege. This tier:
@@ -315,7 +317,7 @@ curl -X POST http://localhost:1199/v1/rollbacks \
     "status": "pending_approval",
     "initiated_by": "alice@example.com",
     "initiated_at": "2026-03-27T10:10:00Z",
-    "rollback_trace_id": "rbk_tr_e5f6g7h8",
+    "rollback_trace_id": "tr_rbk_a1b2c3d4",
     "plan_json": "..."
   }
 }
@@ -617,11 +619,13 @@ Every rollback produces three audit events:
 | `rollback_executed` | After the compensating op is dispatched | Status, result output |
 | `rollback_verified` | After post-rollback verification | Verification result |
 
-All three events carry the `rollback_trace_id` (`rbk_tr_*`) as their `trace_id`, so the
-entire rollback journey is queryable as a single governed journey:
+All three events carry the `rollback_trace_id` (`tr_rbk_*`) as their `trace_id`. The
+trace ID is `"tr_" + rollback_id` — the same convention fleet uses (`tr_flj_*`) — so
+the trace and record are derivable from each other without a lookup. The rollback
+journey is surfaced by `GET /v1/journeys` as a first-class entry:
 
 ```bash
-curl "http://localhost:1199/v1/journeys?trace_id=rbk_tr_e5f6g7h8"
+curl "http://localhost:1199/v1/journeys?trace_id=tr_rbk_a1b2c3d4"
 ```
 
 The compensating tool call itself (dispatched by `RollbackExecutor` via the gateway) also
@@ -667,6 +671,8 @@ completed fleet jobs can be reversed.
 
 **No image rollback:** `restart_deployment` image rollbacks (`kubectl rollout undo`) are
 not currently supported. This is scheduled for a future release.
+
+Also see [here](GOVPOSTEVAL.md#the-rollback-problem).
 
 ---
 

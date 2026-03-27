@@ -615,14 +615,17 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	}
 
 	// Step 1: find trace IDs from anchor events.
-	// Anchors are either delegation_decision events (old orchestrator path) or
-	// gateway_request events with no tool_name (gateway NL-query path).
+	// Anchors are:
+	//   - delegation_decision        — orchestrator NL-query path
+	//   - gateway_request (no tool)  — gateway NL-query path
+	//   - rollback_initiated         — operator-initiated rollback (trace_id = "tr_rbk_*")
 	// Direct tool calls (gateway_request with tool_name set) are excluded —
 	// they use dt_ prefixed trace IDs and are not surfaced as journeys.
 	q1 := `SELECT trace_id, MIN(timestamp) AS first_event
 		FROM audit_events
 		WHERE (event_type = 'delegation_decision'
-		    OR (event_type = 'gateway_request' AND (tool_name IS NULL OR tool_name = '')))
+		    OR (event_type = 'gateway_request' AND (tool_name IS NULL OR tool_name = ''))
+		    OR event_type = 'rollback_initiated')
 		  AND trace_id != ''`
 	var args1 []any
 	if opts.TraceID != "" {
