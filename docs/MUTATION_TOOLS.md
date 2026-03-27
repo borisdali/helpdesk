@@ -285,6 +285,40 @@ touching running pods.
 
 ---
 
+## 1.9 Rollback capability per tool
+
+Every mutation tool captures state before it executes so the operation can be reversed via the rollback API. Reversibility depends on the tool:
+
+| Tool | Reversible | Mechanism |
+|---|---|---|
+| `scale_deployment` | **Yes** | Captures `previous_replicas` before scaling; inverse = scale back |
+| `delete_pod` | **Partial** | Pod is recreated by the controller automatically; rollback plan is informational |
+| `restart_deployment` | **No** | Already happened; image rollback is a separate deployment concern |
+| `cancel_query` | **No** | Query cancellation is instantaneous; `get_session_info` pre-flight surfaces cost before execution |
+| `terminate_connection` | **No** | Connection closure is irreversible; `get_session_info` pre-flight surfaces cost before execution |
+| `terminate_idle_connections` | **No** | Same as above — pre-flight assessment is the control |
+
+Future DML tools (`exec_update`, `exec_delete`, `exec_insert`) will capture row-level pre-state using a two-tier model (bounded SELECT or WAL decoding depending on target capabilities).
+
+The `pre_state` field is stored inline in the `tool_execution` audit event. To inspect or initiate a rollback:
+
+```bash
+# Inspect the pre-state of any mutation
+curl http://localhost:1199/v1/events/tool_abc12345 | jq '.tool.pre_state'
+
+# Derive a rollback plan without executing
+curl -X POST http://localhost:1199/v1/events/tool_abc12345/rollback-plan | jq .
+
+# Initiate a rollback
+curl -X POST http://localhost:1199/v1/rollbacks \
+  -H "Content-Type: application/json" \
+  -d '{"original_event_id": "tool_abc12345", "justification": "scaled too far"}'
+```
+
+See [ROLLBACK.md](ROLLBACK.md) for the full pre-mutation state capture design, Tier 1/Tier 2 DB capture, and governance flow.
+
+---
+
 ## 2. Two-step `review-and-confirm` process
 
 This is all about informed consent. Upstream agents and SRE frameworks

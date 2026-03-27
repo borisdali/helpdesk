@@ -102,6 +102,11 @@ All flags have a corresponding environment variable. The flag takes precedence w
 | `--message` | _(flag only)_ | _(none)_ | One-shot message; omit for interactive REPL |
 | `--timeout` | _(flag only)_ | `5m` | Per-request timeout |
 | `--version` | _(flag only)_ | _(n/a)_ | Print version and exit |
+| `--rollback-plan` | _(flag only)_ | _(none)_ | Derive and print the rollback plan for an event ID, then exit (dry-run, no changes) |
+| `--rollback-event` | _(flag only)_ | _(none)_ | Initiate a rollback for the given event ID; pairs with `--rollback-dry-run` and `--rollback-justification` |
+| `--rollback-dry-run` | _(flag only)_ | `false` | When set with `--rollback-event`, print the plan but do not execute |
+| `--rollback-justification` | _(flag only)_ | _(none)_ | Free-text reason attached to the rollback record and audit trail |
+| `--list-rollbacks` | _(flag only)_ | _(none)_ | List recent rollback records and exit |
 
 ### Using environment variables
 
@@ -607,7 +612,55 @@ curl -s "http://localhost:1199/v1/events?event_type=policy_decision&limit=10" | 
 
 ---
 
-## 12. Related Documentation
+## 12. Rollback Operations
+
+`helpdesk-client` provides a thin CLI wrapper around the auditd rollback API. Rollback requires auditd to be running (`HELPDESK_AUDIT_URL` set or defaulting to `http://localhost:1199`).
+
+### Deriving a plan (read-only)
+
+```bash
+# Inspect the inverse operation for a prior mutation — no changes made
+helpdesk-client --rollback-plan tool_abc12345
+```
+
+Output shows `reversibility` (`yes`/`partial`/`no`), the `inverse_op` (tool name + args), and the `pre_state` that was captured at mutation time. Exit code 0 if reversible, 1 if not.
+
+### Initiating a rollback
+
+```bash
+# Dry-run first (strongly recommended)
+helpdesk-client --rollback-event tool_abc12345 --rollback-dry-run
+
+# Commit (requires operator or admin role)
+helpdesk-client \
+  --user alice@example.com \
+  --rollback-event tool_abc12345 \
+  --rollback-justification "scaled to 1 by mistake, INC-9201"
+```
+
+If the mutation requires approval, the rollback is created in `pending_approval` status and waits for sign-off via the normal approval workflow.
+
+### Listing rollbacks
+
+```bash
+helpdesk-client --list-rollbacks
+```
+
+### Fleet rollback (via fleet-runner)
+
+```bash
+# Dry-run reverse of a completed fleet job
+fleet-runner --rollback flj_abc12345 --dry-run
+
+# Roll back only the servers that failed
+fleet-runner --rollback flj_abc12345 --scope failed
+```
+
+See [ROLLBACK.md](ROLLBACK.md) and [FLEET.md](FLEET.md#fleet-rollback) for details.
+
+---
+
+## 13. Related Documentation
 
 - [API.md](API.md) — Gateway REST API reference (all endpoints, request/response shapes)
 - [IDENTITY.md](IDENTITY.md) — Identity provider setup (static, JWT)

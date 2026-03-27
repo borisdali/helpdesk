@@ -483,6 +483,14 @@ var auditdRoutes = []string{
 	"GET /v1/fleet/playbooks/{playbookID}",
 	"DELETE /v1/fleet/playbooks/{playbookID}",
 	"GET /health",
+	// Rollback & Undo
+	"POST /v1/rollbacks",
+	"GET /v1/rollbacks",
+	"GET /v1/rollbacks/{rollbackID}",
+	"POST /v1/rollbacks/{rollbackID}/cancel",
+	"POST /v1/events/{eventID}/rollback-plan",
+	"POST /v1/fleet/jobs/{jobID}/rollback",
+	"GET /v1/fleet/jobs/{jobID}/rollback",
 }
 
 func TestDefaultGatewayPermissions_Completeness(t *testing.T) {

@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -55,6 +56,10 @@ type ToolCall struct {
 	Name       string
 	Parameters map[string]any
 	RawCommand string // e.g., the actual SQL query or kubectl command
+	// PreState is the resource state captured immediately before a mutation.
+	// Agents populate this for reversible operations to enable rollback.
+	// Must be valid JSON (or nil). Stored verbatim in the audit event.
+	PreState json.RawMessage
 }
 
 // ToolResult represents the result of a tool invocation.
@@ -100,6 +105,7 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 			Error:      result.Error,
 			Duration:   duration,
 			Agent:      ta.agentName, // Track which agent executed this tool
+			PreState:   call.PreState,
 		},
 		// No Decision for tool executions - they're not LLM decisions
 		Outcome: &Outcome{

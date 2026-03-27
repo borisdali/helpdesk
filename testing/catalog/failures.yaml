@@ -597,6 +597,43 @@ failures:
         category: "oom_killed"
     timeout: 60s
 
+  - id: k8s-scale-to-zero
+    name: "Deployment scaled to zero replicas"
+    category: kubernetes
+    severity: high
+    description: >
+      The postgres StatefulSet has been scaled to zero replicas, making the
+      database unavailable. This simulates an operator error or a failed
+      rollout that left the deployment with no running pods. The agent must
+      diagnose the zero-replica state and restore service by scaling back up.
+    inject:
+      type: kustomize
+      overlay: k8s/overlays/scale-to-zero
+      wait: 15s
+    teardown:
+      type: kustomize_delete
+      overlay: k8s/overlays/scale-to-zero
+      restore: k8s/base
+    prompt: >
+      The database in namespace helpdesk-test is not responding and users
+      cannot connect. Please investigate the Kubernetes cluster and restore
+      database availability.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - scale_deployment
+      expected_keywords:
+        any_of:
+          - "zero replicas"
+          - "0 replicas"
+          - "no pods"
+          - "scaled"
+          - "replicas"
+          - "unavailable"
+      expected_diagnosis:
+        category: "deployment_scaled_down"
+    timeout: 90s
+
   # ── Compound failures (2) ──────────────────────────────────────────────
 
   - id: compound-db-pod-crash

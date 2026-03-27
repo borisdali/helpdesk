@@ -191,7 +191,7 @@ behavior of the components):
 | 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
 | — | [Fleet Management](FLEET.md) | **Implemented** | Staged rollout (`fleet-runner`) with canary/wave strategy, approval gating, per-step audit trail, and NL fleet planner; governance-integrated throughout (policy enforcement, `fleet_rollout` purpose, service-account identity) |
-| ?? | Rollback & Undo | Planned | Recovery from mistakes |
+| 11 | [Rollback & Undo](#rollback--undo) | **Implemented** | Pre-mutation state capture, two-tier DB rollback (row-capture + WAL decode), rollback API, fleet rollback, CLI |
 
 ---
 
@@ -1313,10 +1313,10 @@ date  # Check current local time
 - [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
 - [x] **LLM Fabrication Detection** — intra-agent post-mutation re-verification (L2 verify) and inter-agent audit-based delegation verification; `unverified_claim` journey outcome; queryable via `GET /v1/journeys?outcome=unverified_claim`. See [§1.1](#11-llm-fabrication-detection).
 
-### 12.3 Phase 3: Operations (In Progress)
+### 12.3 Phase 3: Operations
 - [x] **Identity & access** — three-dimension access control: verified identity (static/JWT providers), data sensitivity markings, and purpose-based conditions. See [§10](#10-identity--access) and [docs/IDENTITY.md](IDENTITY.md).
 - [x] **Fleet management** — `fleet-runner` CLI for staged rollouts across infrastructure fleets. Canary → wave strategy with circuit breaker, multi-step job sequences, approval gating for write/destructive jobs, NL fleet planner, Tool Registry, semantic tool error detection (HTTP 422 on `---\nERROR —` marker). Full governance integration: policy enforcement per tool call, `fleet_rollout` purpose, service-account identity, per-step audit trail. See [docs/FLEET.md](FLEET.md).
-- [ ] **Rollback & Undo** — recovery from agent-initiated mutations. Design pending.
+- [x] **Rollback & Undo** — recovery from agent-initiated mutations. `PreState json.RawMessage` inline in every tool_execution event; two-tier DB capture (Tier 1: bounded row-capture SELECT; Tier 2: WAL decode via `pg_create_logical_replication_slot` + `wal2json`); auto-capability detection (`DetectRollbackCapability`); K8s `scale_deployment` captures replica count before scaling; `DeriveRollbackPlan` generates inverse SQL or inverse scale args; `RollbackStore` (SQLite/PG dual-backend); 7 HTTP endpoints (`POST /v1/rollbacks`, `GET /v1/rollbacks`, `GET /v1/rollbacks/{id}`, `POST /v1/rollbacks/{id}/cancel`, `POST /v1/events/{id}/rollback-plan`, `POST /v1/fleet/jobs/{id}/rollback`, `GET /v1/fleet/jobs/{id}/rollback`); `RollbackExecutor` dispatches compensating ops via gateway; `BuildRollbackJobDef` reverses fleet jobs (steps reversed, canary-last); `helpdesk-client --rollback-event`, `--rollback-plan`, `--rollback-dry-run`, `--list-rollbacks` CLI flags. Rollback operations are first-class governed journeys (full policy check, approval gate, audit trail).
 - [ ] Rate limits (write frequency per session)
 - [ ] Circuit breaker (auto-pause on consecutive errors)
 

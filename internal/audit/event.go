@@ -57,6 +57,17 @@ const (
 	// Final=true means max retries were exhausted and the suppressed response
 	// was returned to the user.
 	EventTypeNoDelegationTurn EventType = "no_delegation_turn"
+
+	// EventTypeRollbackInitiated is emitted when an operator requests rollback
+	// of a prior mutation. It carries the RollbackPlan and triggers the approval
+	// workflow when required.
+	EventTypeRollbackInitiated EventType = "rollback_initiated"
+	// EventTypeRollbackExecuted is emitted when the compensating operation
+	// completes (success or failure). Carries the rollback_trace_id and outcome.
+	EventTypeRollbackExecuted EventType = "rollback_executed"
+	// EventTypeRollbackVerified is emitted after the post-rollback verification
+	// loop confirms the resource returned to the expected pre-mutation state.
+	EventTypeRollbackVerified EventType = "rollback_verified"
 )
 
 // RequestCategory classifies the type of user request.
@@ -130,6 +141,11 @@ type ToolExecution struct {
 
 	// Duration is how long the tool execution took.
 	Duration time.Duration `json:"duration_ms,omitempty"`
+
+	// PreState captures the resource state immediately before a mutation.
+	// Only populated for reversible operations (scale_deployment, future DML tools).
+	// Stored as raw JSON so the shape varies by tool without coupling audit to agent packages.
+	PreState json.RawMessage `json:"pre_state,omitempty"`
 }
 
 // Outcome captures the result of a delegation (filled in after completion).
@@ -206,6 +222,24 @@ type DelegationVerification struct {
 	Mismatch bool `json:"mismatch"`
 }
 
+// RollbackExecution is set on rollback_initiated, rollback_executed, and
+// rollback_verified events. It links the rollback to the original mutation
+// and carries the plan and outcome.
+type RollbackExecution struct {
+	// RollbackID is the "rbk_" prefixed identifier for this rollback record.
+	RollbackID string `json:"rollback_id"`
+	// OriginalEventID is the tool_execution event being reversed.
+	OriginalEventID string `json:"original_event_id"`
+	// OriginalTraceID links to the originating user request journey.
+	OriginalTraceID string `json:"original_trace_id"`
+	// Plan is the derived rollback plan (omitted on rollback_verified).
+	Plan *RollbackPlan `json:"plan,omitempty"`
+	// Status is the outcome of execution: "success" or "failed".
+	Status string `json:"status,omitempty"`
+	// ErrorMessage holds any error from the compensating operation.
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
 // GovernanceViolation records a compliance violation when a required governance
 // module is disabled or misconfigured in fix mode (HELPDESK_OPERATING_MODE=fix).
 type GovernanceViolation struct {
@@ -248,9 +282,10 @@ type Event struct {
 	Decision            *Decision            `json:"decision,omitempty"`
 	PolicyDecision      *PolicyDecision      `json:"policy_decision,omitempty"`
 	AgentReasoning      *AgentReasoning      `json:"agent_reasoning,omitempty"`
-	GovernanceViolation     *GovernanceViolation     `json:"governance_violation,omitempty"`
-	DelegationVerification  *DelegationVerification  `json:"delegation_verification,omitempty"`
-	Outcome                 *Outcome                 `json:"outcome,omitempty"`
+	GovernanceViolation    *GovernanceViolation    `json:"governance_violation,omitempty"`
+	DelegationVerification *DelegationVerification `json:"delegation_verification,omitempty"`
+	Outcome                *Outcome                `json:"outcome,omitempty"`
+	RollbackExecution      *RollbackExecution      `json:"rollback_execution,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

@@ -817,3 +817,62 @@ Query all events for a fleet job:
 curl "http://localhost:1199/v1/events?limit=200" | \
   jq '.[] | select(.purpose_note | startswith("job_id=flj_abc123"))'
 ```
+
+---
+
+## Fleet rollback
+
+A completed fleet job can be reversed by constructing a **reverse job** — the same servers and steps, but in the opposite order with inverted arguments. The reverse job goes through the normal fleet approval pipeline and produces its own full audit trail.
+
+### How it works
+
+1. `fleet-runner --rollback flj_abc12345` calls `POST /v1/fleet/jobs/flj_abc12345/rollback` on auditd
+2. `BuildRollbackJobDef` reads the original job definition, reverses the step order, and moves canary servers to the end (they ran first originally, they roll back last)
+3. The reverse job definition is submitted as a new fleet job (`flj_rbk_*`)
+4. Approval gate applies — same role requirements as any write/destructive fleet job
+5. `fleet-runner` executes the reverse job; every tool call carries `X-Rollback-Of: flj_abc12345` in the audit trail
+
+### Step reversal and canary ordering
+
+Given an original job with steps `[A, B, C]` on servers `[canary, wave-1-db-1, wave-1-db-2]`, the reverse job runs `[C, B, A]` on servers `[wave-1-db-1, wave-1-db-2, canary]`.
+
+This ensures:
+- The most recently applied change is undone first
+- The canary (highest-risk server) is reverted last, after the bulk is confirmed clean
+
+### Scope
+
+By default the rollback targets all servers from the original job. The `--scope` flag narrows it:
+
+| Scope | Effect |
+|---|---|
+| `all` | All servers (default) |
+| `canary_only` | Only the canary server(s) |
+| `failed_only` | Only servers whose status was `failed` in the original run |
+| `["server-a","server-b"]` | Explicit list (JSON array) |
+
+### CLI
+
+```bash
+# Dry-run: inspect the reverse job definition
+fleet-runner --rollback flj_abc12345 --dry-run
+
+# Roll back only failed servers
+fleet-runner --rollback flj_abc12345 --scope failed
+
+# Roll back everything (requires approval)
+fleet-runner --rollback flj_abc12345
+```
+
+### Status and audit trail
+
+```bash
+# Check rollback job status
+curl http://localhost:1199/v1/fleet/jobs/flj_abc12345/rollback | jq .
+
+# Audit events for the rollback job
+curl "http://localhost:1199/v1/events?limit=200" | \
+  jq '[.[] | select(.purpose_note | contains("flj_rbk_"))]'
+```
+
+See [ROLLBACK.md](ROLLBACK.md#6-fleet-rollback) for the full design including step reversal logic, inverse operation construction, and governance wiring.

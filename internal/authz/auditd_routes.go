@@ -77,4 +77,26 @@ var DefaultAuditdPermissions = map[string]Permission{
 
 	// Cancel: any authenticated caller (ownership/requester check is in the handler).
 	"POST /v1/approvals/{approvalID}/cancel": {AdminBypass: true},
+
+	// ── Rollback & Undo ───────────────────────────────────────────────────────
+
+	// Read-only: any authenticated caller can query rollbacks and derive plans.
+	"GET /v1/rollbacks":                          {AdminBypass: true},
+	"GET /v1/rollbacks/{rollbackID}":             {AdminBypass: true},
+	"POST /v1/events/{eventID}/rollback-plan":    {AdminBypass: true},
+	"GET /v1/fleet/jobs/{jobID}/rollback":        {AdminBypass: true},
+
+	// Mutation: requires operator or admin role.
+	"POST /v1/rollbacks": {
+		RequireRoles: []string{"operator", "admin"},
+		AdminBypass:  true,
+	},
+	"POST /v1/rollbacks/{rollbackID}/cancel": {
+		RequireRoles: []string{"operator", "admin"},
+		AdminBypass:  true,
+	},
+	"POST /v1/fleet/jobs/{jobID}/rollback": {
+		RequireRoles: []string{"operator", "fleet-approver", "admin"},
+		AdminBypass:  true,
+	},
 }

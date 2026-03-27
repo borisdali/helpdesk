@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const integrationConnStr = "host=localhost port=15432 dbname=testdb user=postgres password=testpass"
@@ -330,4 +333,130 @@ func TestGetStatusSummaryTool_Integration(t *testing.T) {
 			t.Errorf("max_connections = %d, pg_settings says %d", summary.MaxConns, wantInt)
 		}
 	}
+}
+
+// =============================================================================
+// Rollback capability detection
+// =============================================================================
+
+// TestDetectRollbackCapability_Integration probes a real PostgreSQL instance
+// and verifies that DetectRollbackCapability populates the capability fields
+// correctly. The test Docker image runs a plain PG 16 with no wal_level override
+// (defaults to "replica"), so auto-detection is expected to yield row_capture.
+func TestDetectRollbackCapability_Integration(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Open a *sql.DB directly against the test instance.
+	db, err := openIntegrationDB(t)
+	if err != nil {
+		t.Fatalf("open integration db: %v", err)
+	}
+
+	cap, err := DetectRollbackCapability(ctx, db, "public", "")
+	if err != nil {
+		t.Fatalf("DetectRollbackCapability: %v", err)
+	}
+	if cap == nil {
+		t.Fatal("capability is nil")
+	}
+
+	// WALLevel must be populated (we get "replica" from the stock PG 16 image).
+	if cap.WALLevel == "" {
+		t.Error("WALLevel is empty — SHOW wal_level query did not work against real PG")
+	}
+	t.Logf("WALLevel = %q  HasReplication = %v  Mode = %q",
+		cap.WALLevel, cap.HasReplication, cap.Mode)
+
+	// The standard test image does not have wal_level=logical, so auto-detect
+	// must fall back to row_capture (not wal_decode).
+	if cap.WALLevel != "logical" && cap.Mode != RollbackModeRowCapture {
+		t.Errorf("Mode = %q, want row_capture (wal_level=%q is not logical)", cap.Mode, cap.WALLevel)
+	}
+
+	// ReplicaIdentity map must be initialised (not nil), even if it's empty for
+	// the standard test DB schema.
+	if cap.ReplicaIdentity == nil {
+		t.Error("ReplicaIdentity map is nil — pg_class query did not initialise the map")
+	}
+}
+
+// TestDetectRollbackCapability_Integration_Override verifies that the
+// modeOverride parameter takes precedence over auto-detection results from
+// the real database.
+func TestDetectRollbackCapability_Integration_Override(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db, err := openIntegrationDB(t)
+	if err != nil {
+		t.Fatalf("open integration db: %v", err)
+	}
+
+	for _, tc := range []struct {
+		override string
+		want     DBRollbackMode
+	}{
+		{"wal_decode", RollbackModeWALDecode},
+		{"row_capture", RollbackModeRowCapture},
+		{"none", RollbackModeNone},
+	} {
+		cap, err := DetectRollbackCapability(ctx, db, "public", tc.override)
+		if err != nil {
+			t.Fatalf("override=%q: DetectRollbackCapability: %v", tc.override, err)
+		}
+		if cap.Mode != tc.want {
+			t.Errorf("override=%q: Mode = %q, want %q", tc.override, cap.Mode, tc.want)
+		}
+		// WALLevel must still be populated (DB was queried even when override is set).
+		if cap.WALLevel == "" {
+			t.Errorf("override=%q: WALLevel is empty — DB was not probed", tc.override)
+		}
+	}
+}
+
+// TestWALBracket_Open_FailsWithoutLogicalWAL verifies that WALBracket.Open
+// returns a meaningful error when the target DB does not have wal_level=logical.
+// This is the expected behaviour for the standard test instance.
+func TestWALBracket_Open_FailsWithoutLogicalWAL(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db, err := openIntegrationDB(t)
+	if err != nil {
+		t.Fatalf("open integration db: %v", err)
+	}
+
+	walLevel, _ := runIntegrationSQLOutput(ctx, "SHOW wal_level")
+	if walLevel == "logical" {
+		t.Skip("wal_level=logical on this instance — skipping non-logical failure test")
+	}
+
+	w := NewWALBracket(db, "integration-test-trace")
+	if err := w.Open(ctx); err == nil {
+		// Open succeeded — unexpected on a non-logical instance, but clean up.
+		_, _, _, _ = w.Close(ctx)
+		t.Fatal("WALBracket.Open succeeded on non-logical instance — expected an error")
+	} else {
+		t.Logf("WALBracket.Open correctly failed on wal_level=%q: %v", walLevel, err)
+	}
+}
+
+// openIntegrationDB opens a *sql.DB connection to the test PostgreSQL instance
+// using the pgx/v5 stdlib driver (registered as "pgx").
+func openIntegrationDB(t *testing.T) (*sql.DB, error) {
+	t.Helper()
+	db, err := sql.Open("pgx", "host=localhost port=15432 dbname=testdb user=postgres password=testpass sslmode=disable")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.PingContext(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	t.Cleanup(func() { db.Close() })
+	return db, nil
 }

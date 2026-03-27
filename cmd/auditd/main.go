@@ -105,6 +105,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create rollback store (shares the same database connection)
+	rollbackStore, err := audit.NewRollbackStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create rollback store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create approval notifier if configured
 	// Default baseURL to the listen address if not specified
 	baseURL := *approvalBaseURL
@@ -178,6 +185,7 @@ func main() {
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
 	playbookSrv := &playbookServer{store: playbookStore}
+	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore}
 
 	mux := http.NewServeMux()
 
@@ -233,6 +241,15 @@ func main() {
 	// Fleet job approval endpoints
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/approval", auth("POST /v1/fleet/jobs/{jobID}/approval", fleetSrv.handleCreateJobApproval))
 	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/approval/{approvalID}", auth("GET /v1/fleet/jobs/{jobID}/approval/{approvalID}", fleetSrv.handleGetJobApproval))
+
+	// Rollback & Undo endpoints
+	mux.HandleFunc("POST /v1/rollbacks", auth("POST /v1/rollbacks", rollbackSrv.handleInitiateRollback))
+	mux.HandleFunc("GET /v1/rollbacks", auth("GET /v1/rollbacks", rollbackSrv.handleListRollbacks))
+	mux.HandleFunc("GET /v1/rollbacks/{rollbackID}", auth("GET /v1/rollbacks/{rollbackID}", rollbackSrv.handleGetRollback))
+	mux.HandleFunc("POST /v1/rollbacks/{rollbackID}/cancel", auth("POST /v1/rollbacks/{rollbackID}/cancel", rollbackSrv.handleCancelRollback))
+	mux.HandleFunc("POST /v1/events/{eventID}/rollback-plan", auth("POST /v1/events/{eventID}/rollback-plan", rollbackSrv.handleDeriveRollbackPlan))
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/rollback", auth("POST /v1/fleet/jobs/{jobID}/rollback", rollbackSrv.handleInitiateFleetRollback))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/rollback", auth("GET /v1/fleet/jobs/{jobID}/rollback", rollbackSrv.handleGetFleetRollback))
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", auth("GET /health", srv.handleHealth))
