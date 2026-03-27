@@ -32,10 +32,11 @@ func main() {
 		approvalPollInterval = flag.Duration("approval-poll-interval", 5*time.Second, "How often to poll for approval status")
 		schemaDriftFlag      = flag.String("schema-drift", envOrDefault("HELPDESK_SCHEMA_DRIFT", ""), `Schema drift policy: "abort" (default), "warn", or "ignore"`)
 		refreshSnapshots     = flag.Bool("refresh-snapshots", false, "Refresh tool_snapshots from live registry, write back to job file, and exit")
-		replan               = flag.Bool("replan", false, "On schema drift, replan using the job's stored plan_description and re-execute")
 		planDescription      = flag.String("plan-description", "", "Call the fleet planner with this description instead of loading --job-file")
 		planTargetHints      = flag.String("plan-target-hints", "", "Comma-separated target hints passed to the planner with --plan-description")
 	)
+	var replanFlag replanMode
+	flag.CommandLine.Var(&replanFlag, "replan", `On schema drift, replan from stored plan_description.\n--replan writes fresh plan to --job-file and stops; --replan=auto also re-executes`)
 	flag.CommandLine.Parse(remaining) //nolint:errcheck
 
 	if *jobFile == "" && *planDescription == "" {
@@ -181,15 +182,50 @@ func main() {
 		}
 		_, driftErr := CheckSchemaDrift(def.ToolSnapshots, liveTools, driftPolicy)
 		if driftErr != nil {
-			if *replan && def.PlanDescription != "" {
-				slog.Warn("schema drift detected; replanning", "description", def.PlanDescription)
+			if replanFlag.isSet() && def.PlanDescription != "" {
+				slog.Warn("schema drift detected; replanning", "description", def.PlanDescription, "mode", replanFlag.mode)
 				planned, perr := callFleetPlan(*gatewayURL, *apiKey, def.PlanDescription, def.PlanTargetHints)
 				if perr != nil {
 					slog.Error("--replan: planner call failed", "err", perr)
 					os.Exit(1)
 				}
+
+				// Check divergence between original and fresh plan.
+				original := def
+				div := checkPlanDivergence(&original, planned)
+				if div.Significant() {
+					if replanFlag.mode == "auto" {
+						slog.Error("--replan=auto: replanned plan diverges significantly from original — review before executing",
+							"divergence", div.String())
+						slog.Error("hint: re-run with --replan (without =auto) to write the fresh plan to --job-file for review")
+						os.Exit(1)
+					}
+					slog.Warn("--replan: replanned plan diverges from original", "divergence", div.String())
+				}
+
+				// In stop mode: write fresh plan to --job-file and exit.
+				if replanFlag.mode == "stop" {
+					out, merr := json.MarshalIndent(planned, "", "  ")
+					if merr != nil {
+						slog.Error("--replan: failed to marshal fresh plan", "err", merr)
+						os.Exit(1)
+					}
+					dest := *jobFile
+					if dest == "" {
+						fmt.Println(string(out))
+						slog.Info("--replan: fresh plan written to stdout; review and re-run with --job-file")
+					} else {
+						if werr := os.WriteFile(dest, out, 0o644); werr != nil {
+							slog.Error("--replan: failed to write fresh plan", "path", dest, "err", werr)
+							os.Exit(1)
+						}
+						slog.Info("--replan: fresh plan written — review and re-run without --replan", "path", dest)
+					}
+					os.Exit(0)
+				}
+
+				// auto mode: apply overrides and continue.
 				def = *planned
-				// Re-apply strategy overrides on the new plan.
 				def.Strategy.Defaults()
 				if *dryRun {
 					def.Strategy.DryRun = true

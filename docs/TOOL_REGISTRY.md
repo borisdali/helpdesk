@@ -1,6 +1,6 @@
 # aiHelpDesk Tool Registry
 
-The Tool Registry is a live, queryable catalogue of every tool exposed by connected agents. Beyond simple name-and-description listing, each tool carries structured taxonomy metadata — fleet eligibility, capability labels, and supersedes relationships — that the fleet planner uses deterministically to select the right tools and strip redundant ones, without relying solely on LLM reasoning over free-form descriptions.
+The Tool Registry is a live, queryable catalog of every tool exposed by connected agents. Beyond simple name-and-description listing, each tool carries structured taxonomy metadata — fleet eligibility, capability labels, and supersedes relationships — that the fleet planner uses deterministically to select the right tools and strip redundant ones, without relying solely on LLM reasoning over free-form descriptions.
 
 This page covers:
 
