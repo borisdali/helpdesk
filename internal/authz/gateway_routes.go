@@ -42,18 +42,12 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
 
-	// Fleet playbooks: CRUD + run (any authenticated user; fleet-operator to create/delete)
-	"GET /api/v1/fleet/playbooks":                          {AdminBypass: true},
-	"GET /api/v1/fleet/playbooks/{playbookID}":             {AdminBypass: true},
-	"POST /api/v1/fleet/playbooks/{playbookID}/run":        {AdminBypass: true},
-	"POST /api/v1/fleet/playbooks": {
-		RequireRoles: []string{"fleet-operator"},
-		AdminBypass:  true,
-	},
-	"DELETE /api/v1/fleet/playbooks/{playbookID}": {
-		RequireRoles: []string{"fleet-operator"},
-		AdminBypass:  true,
-	},
+	// Fleet playbooks: CRUD + run (any authenticated user; same as /fleet/plan)
+	"GET /api/v1/fleet/playbooks":                      {AdminBypass: true},
+	"GET /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},
+	"POST /api/v1/fleet/playbooks":                     {AdminBypass: true},
+	"DELETE /api/v1/fleet/playbooks/{playbookID}":      {AdminBypass: true},
+	"POST /api/v1/fleet/playbooks/{playbookID}/run":    {AdminBypass: true},
 
 	// ── Role-required ─────────────────────────────────────────────────────────
 

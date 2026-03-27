@@ -45,7 +45,7 @@ service_accounts:
   # a fleet of databases or clusters (e.g. nightly health checks, capacity reports).
   - id: fleet-runner
     roles: [sre-automation, fleet-operator]
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$Zmxlc3RydW5uZXI$placeholder-replace-with-real-hash"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$u8UR+PESz89k41JVj0kSdQ$kJldcv8q4VJUXHVjp7Yxwg8OEIsTz/2nsV+BjOK1jTs"
 
   # prevention-monitor: proactive monitoring agent that polls for early warning
   # signals and triggers helpdesk-client queries when anomalies are detected.

@@ -50,6 +50,7 @@ type Gateway struct {
 	operatingMode    string                  // "readonly" or "fix"
 	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
+	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -107,6 +108,11 @@ func (g *Gateway) SetToolRegistry(r *toolregistry.Registry) {
 	g.toolRegistry = r
 }
 
+// SetUsersFile sets the path to the users YAML file (empty = dev/no-auth mode).
+func (g *Gateway) SetUsersFile(path string) {
+	g.usersFile = path
+}
+
 // resolveRequest extracts the verified principal and declared purpose from an
 // HTTP request. Falls back to NoAuthProvider behaviour when no provider is set.
 // The returned bool is true only when the caller explicitly declared a purpose.
@@ -124,6 +130,23 @@ func (g *Gateway) resolveRequest(r *http.Request, purposeFromBody, purposeNoteFr
 		purposeNote = purposeNoteFromBody
 	}
 	return principal, purpose, purposeNote, purposeExplicit, nil
+}
+
+// patternAgent returns the agent name to record in audit events for a given
+// route pattern. Used by the auth wrapper so denied events carry the right agent.
+func patternAgent(pattern string) string {
+	switch {
+	case strings.Contains(pattern, "/api/v1/db/"):
+		return agentNameDB
+	case strings.Contains(pattern, "/api/v1/k8s/"):
+		return agentNameK8s
+	case strings.Contains(pattern, "/api/v1/incidents"):
+		return agentNameIncident
+	case strings.Contains(pattern, "/api/v1/research"):
+		return agentNameResearch
+	default:
+		return "gateway"
+	}
 }
 
 // agentAliases maps short names (used in the /query endpoint) to internal
@@ -157,6 +180,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 						TraceID:   traceID,
 						Endpoint:  r.URL.Path,
 						Method:    r.Method,
+						Agent:     patternAgent(pattern),
 						StartTime: start,
 						Duration:  time.Since(start),
 						Status:    "error",
@@ -182,6 +206,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 						TraceID:           traceID,
 						Endpoint:          r.URL.Path,
 						Method:            r.Method,
+						Agent:             patternAgent(pattern),
 						StartTime:         start,
 						Duration:          time.Since(start),
 						Status:            "denied",
@@ -525,7 +550,58 @@ func (g *Gateway) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handleGovernance(w http.ResponseWriter, r *http.Request) {
-	g.proxyGovernanceRequest(w, r, "/v1/governance/info")
+	// Fetch upstream governance info from auditd.
+	if g.auditURL == "" {
+		authMode := "dev"
+		if g.usersFile != "" {
+			authMode = "enforcing"
+		}
+		cfg := map[string]any{"auth_mode": authMode}
+		if g.usersFile != "" {
+			cfg["users_file"] = g.usersFile
+		}
+		if g.authzr != nil {
+			cfg["roles"] = g.authzr.RoleGrants()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled": false,
+			"message": "Governance service not configured. Set HELPDESK_AUDIT_URL to enable.",
+			"config":  cfg,
+		})
+		return
+	}
+
+	targetURL := g.auditURL + "/v1/governance/info"
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		slog.Error("failed to query governance service", "err", err)
+		writeError(w, http.StatusBadGateway, "governance service unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Parse upstream response so we can inject the gateway config section.
+	var upstream map[string]any
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&upstream); decodeErr != nil {
+		writeError(w, http.StatusBadGateway, "governance service returned invalid JSON")
+		return
+	}
+
+	authMode := "dev"
+	if g.usersFile != "" {
+		authMode = "enforcing"
+	}
+	cfg := map[string]any{"auth_mode": authMode}
+	if g.usersFile != "" {
+		cfg["users_file"] = g.usersFile
+	}
+	if g.authzr != nil {
+		cfg["roles"] = g.authzr.RoleGrants()
+	}
+	upstream["config"] = cfg
+
+	writeJSON(w, resp.StatusCode, upstream)
 }
 
 func (g *Gateway) handleGovernancePolicies(w http.ResponseWriter, r *http.Request) {

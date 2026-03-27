@@ -631,23 +631,12 @@ func TestAuthorizer_RoleGrants(t *testing.T) {
 		t.Errorf("dba grants = %v, want [POST /api/v1/db/{tool}]", dbaGrants)
 	}
 
-	// "fleet-operator" grants fleet job submission + playbook create/delete
+	// "fleet-operator" should only grant POST /api/v1/fleet/jobs
 	foGrants, ok := grants["fleet-operator"]
 	if !ok {
 		t.Fatal("RoleGrants missing 'fleet-operator' key")
 	}
-	wantFOGrants := []string{
-		"DELETE /api/v1/fleet/playbooks/{playbookID}",
-		"POST /api/v1/fleet/jobs",
-		"POST /api/v1/fleet/playbooks",
-	}
-	if len(foGrants) != len(wantFOGrants) {
-		t.Errorf("fleet-operator grants = %v, want %v", foGrants, wantFOGrants)
-	} else {
-		for i, g := range foGrants {
-			if g != wantFOGrants[i] {
-				t.Errorf("fleet-operator grants[%d] = %q, want %q", i, g, wantFOGrants[i])
-			}
-		}
+	if len(foGrants) != 1 || foGrants[0] != "POST /api/v1/fleet/jobs" {
+		t.Errorf("fleet-operator grants = %v, want [POST /api/v1/fleet/jobs]", foGrants)
 	}
 }

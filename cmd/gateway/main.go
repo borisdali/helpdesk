@@ -85,6 +85,7 @@ func main() {
 		os.Exit(1)
 	}
 	gw.SetIdentityProvider(idProvider)
+	gw.SetUsersFile(os.Getenv("HELPDESK_USERS_FILE"))
 	gw.SetOperatingMode(os.Getenv("HELPDESK_OPERATING_MODE"))
 	slog.Info("identity provider initialized", "mode", os.Getenv("HELPDESK_IDENTITY_PROVIDER"))
 
