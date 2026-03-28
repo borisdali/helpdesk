@@ -151,7 +151,11 @@ func main() {
 
 	// Build central authorizer.
 	authzr := authz.NewAuthorizer(authz.DefaultAuditdPermissions, enforcing)
-	slog.Info("authorization configured", "enforcing", enforcing)
+	if enforcing {
+		slog.Info("authorization enforcing: approval and rollback endpoints require authentication")
+	} else {
+		slog.Warn("authorization NOT enforcing: all endpoints are open — set HELPDESK_USERS_FILE to enable role-based access control")
+	}
 
 	// auth wraps a handler with per-pattern identity resolution and authorization.
 	// The pattern is captured at registration time so r.Pattern need not be set.
@@ -286,7 +290,8 @@ func main() {
 		"listen", cfg.listenAddr,
 		"db", cfg.dbPath,
 		"backend", backend,
-		"socket", cfg.socketPath)
+		"socket", cfg.socketPath,
+		"authz_enforcing", enforcing)
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
@@ -423,6 +428,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := r.URL.Query().Get("origin"); v != "" {
 		opts.Origin = v
+	}
+	if v := r.URL.Query().Get("tool_name"); v != "" {
+		opts.ToolName = v
 	}
 
 	events, err := s.store.Query(r.Context(), opts)

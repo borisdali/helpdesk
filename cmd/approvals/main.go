@@ -86,6 +86,11 @@ Examples:
 	}
 
 	client := audit.NewApprovalClient(auditURL)
+	if creds.apiKey != "" {
+		client = client.WithAPIKey(creds.apiKey)
+	} else if creds.user != "" {
+		client = client.WithUser(creds.user)
+	}
 	ctx := context.Background()
 
 	command := remainingArgs[0]

@@ -16,7 +16,7 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /v1/approvals/pending":                             {AdminBypass: true},
 	"GET /v1/approvals/{approvalID}":                        {AdminBypass: true},
 	"GET /v1/approvals/{approvalID}/wait":                   {AdminBypass: true},
-	"GET /v1/governance/info":                               {AdminBypass: true},
+	"GET /v1/governance/info":                               {AllowAnonymous: true},
 	"GET /v1/governance/policies":                           {AdminBypass: true},
 	"GET /v1/governance/explain":                            {AdminBypass: true},
 	"GET /v1/govbot/runs":                                   {AdminBypass: true},

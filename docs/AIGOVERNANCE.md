@@ -191,7 +191,7 @@ behavior of the components):
 | 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
 | — | [Fleet Management](FLEET.md) | **Implemented** | Staged rollout (`fleet-runner`) with canary/wave strategy, approval gating, per-step audit trail, and NL fleet planner; governance-integrated throughout (policy enforcement, `fleet_rollout` purpose, service-account identity) |
-| 11 | [Rollback & Undo](#rollback--undo) | **Implemented** | Pre-mutation state capture, two-tier DB rollback (row-capture + WAL decode), rollback API, fleet rollback, CLI |
+| - | [Rollback & Undo](ROLLBACK.md) | **Implemented** | Pre-mutation state capture, two-tier DB rollback (row-capture + WAL decode), rollback API, fleet rollback, CLI |
 
 ---
 

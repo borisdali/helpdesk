@@ -113,9 +113,14 @@ func main() {
 	var auditor audit.Auditor
 	if auditEnabled {
 		auditURL := os.Getenv("HELPDESK_AUDIT_URL")
+		auditAPIKey := os.Getenv("HELPDESK_AUDIT_API_KEY")
 		if auditURL != "" {
 			// Use central audit service (preferred)
-			auditor = audit.NewRemoteStore(auditURL)
+			remoteStore := audit.NewRemoteStore(auditURL)
+			if auditAPIKey != "" {
+				remoteStore = remoteStore.WithAPIKey(auditAPIKey)
+			}
+			auditor = remoteStore
 			slog.Info("audit logging enabled (remote)", "url", auditURL)
 		} else {
 			// Fall back to local store with socket (legacy mode)

@@ -20,11 +20,33 @@ type RemoteStore struct {
 // NewRemoteStore creates a client for the central audit service.
 func NewRemoteStore(baseURL string) *RemoteStore {
 	return &RemoteStore{
-		baseURL: baseURL,
+		baseURL:    baseURL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// WithAPIKey returns a copy of the RemoteStore that authenticates every request
+// with the given API key as a Bearer token. Used when auditd runs with
+// HELPDESK_USERS_FILE set (enforcing mode) and agents have a service account.
+func (r *RemoteStore) WithAPIKey(apiKey string) *RemoteStore {
+	return &RemoteStore{
+		baseURL: r.baseURL,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   r.httpClient.Timeout,
+			Transport: &bearerTransport{base: http.DefaultTransport, token: apiKey},
 		},
 	}
+}
+
+type bearerTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
 }
 
 // Record sends an event to the audit service.

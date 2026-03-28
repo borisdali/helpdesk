@@ -49,6 +49,7 @@ type Config struct {
 	AuditEnabled bool
 	AuditURL     string // URL of central audit service (preferred)
 	AuditDir     string // Local directory for audit.db (fallback if AuditURL not set)
+	AuditAPIKey  string // Bearer token for auditd service account (when auditd enforces auth)
 
 	// Policy configuration
 	PolicyEnabled bool   // Master switch — must be true to enforce policy
@@ -102,6 +103,7 @@ func MustLoadConfig(defaultAddr string) Config {
 		AuditEnabled:    auditEnabled == "true" || auditEnabled == "1",
 		AuditURL:        os.Getenv("HELPDESK_AUDIT_URL"),
 		AuditDir:        os.Getenv("HELPDESK_AUDIT_DIR"),
+		AuditAPIKey:     os.Getenv("HELPDESK_AUDIT_API_KEY"),
 		PolicyEnabled:   policyEnabledBool,
 		PolicyFile:      policyFile,
 		PolicyDryRun:    policyDryRun == "true" || policyDryRun == "1",
@@ -204,7 +206,7 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 	// Remote check mode: policy evaluation is delegated to auditd.
 	// The PolicyEnforcer will call POST /v1/governance/check instead of a local engine.
 	if cfg.PolicyCheckURL != "" {
-		if probeRemotePolicyEngine(cfg.PolicyCheckURL) {
+		if probeRemotePolicyEngine(cfg.PolicyCheckURL, cfg.AuditAPIKey) {
 			slog.Info("policy enforcement enabled (remote check mode)", "url", cfg.PolicyCheckURL)
 		} else {
 			slog.Warn("policy enforcement enabled (remote check mode) but remote has no policy engine",
@@ -249,6 +251,7 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 type PolicyEnforcer struct {
 	engine                     *policy.Engine
 	policyCheckURL             string        // non-empty → remote check mode via auditd
+	policyCheckAPIKey          string        // Bearer token for authenticating to auditd (HELPDESK_AUDIT_API_KEY)
 	policyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
 	traceStore                 *audit.CurrentTraceStore
 	approvalClient             *audit.ApprovalClient
@@ -262,6 +265,7 @@ type PolicyEnforcer struct {
 type PolicyEnforcerConfig struct {
 	Engine                     *policy.Engine
 	PolicyCheckURL             string        // auditd base URL for remote checks (set from cfg.PolicyCheckURL)
+	PolicyCheckAPIKey          string        // Bearer token for authenticating to auditd (HELPDESK_AUDIT_API_KEY)
 	PolicyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
 	TraceStore                 *audit.CurrentTraceStore
 	ApprovalClient             *audit.ApprovalClient
@@ -293,6 +297,7 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 	return &PolicyEnforcer{
 		engine:                     cfg.Engine,
 		policyCheckURL:             cfg.PolicyCheckURL,
+		policyCheckAPIKey:          cfg.PolicyCheckAPIKey,
 		policyCheckTimeout:         checkTimeout,
 		traceStore:                 cfg.TraceStore,
 		approvalClient:             cfg.ApprovalClient,
@@ -928,13 +933,16 @@ type policyCheckResp struct {
 // probeRemotePolicyEngine calls GET /v1/governance/info on the auditd service and
 // returns true if the remote has a policy engine configured and enabled.
 // The call is best-effort: any network or parse error returns false.
-func probeRemotePolicyEngine(checkURL string) bool {
+func probeRemotePolicyEngine(checkURL, apiKey string) bool {
 	infoURL := strings.TrimRight(checkURL, "/") + "/v1/governance/info"
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, infoURL, nil)
 	if err != nil {
 		return false
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -970,6 +978,9 @@ func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCh
 		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service unreachable")
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if e.policyCheckAPIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+e.policyCheckAPIKey)
+	}
 
 	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
@@ -984,6 +995,9 @@ func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCh
 	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusForbidden {
 		slog.Warn("remote policy check: unexpected status; failing closed",
 			"url", checkURL, "status", httpResp.StatusCode)
+		if httpResp.StatusCode == http.StatusUnauthorized {
+			return policyCheckResp{}, fmt.Errorf("policy check failed: agent not authenticated to audit service (set HELPDESK_AUDIT_API_KEY)")
+		}
 		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service returned %d", httpResp.StatusCode)
 	}
 
@@ -1047,7 +1061,11 @@ func InitApprovalClient(cfg Config) *audit.ApprovalClient {
 		"audit_url", cfg.AuditURL,
 		"timeout", cfg.ApprovalTimeout)
 
-	return audit.NewApprovalClient(cfg.AuditURL)
+	client := audit.NewApprovalClient(cfg.AuditURL)
+	if cfg.AuditAPIKey != "" {
+		client = client.WithAPIKey(cfg.AuditAPIKey)
+	}
+	return client
 }
 
 // InitAuditStore initializes an audit store for an agent if auditing is enabled.
@@ -1062,7 +1080,11 @@ func InitAuditStore(cfg Config) (audit.Auditor, error) {
 	// Prefer central audit service
 	if cfg.AuditURL != "" {
 		slog.Info("agent audit logging enabled (remote)", "url", cfg.AuditURL)
-		return audit.NewRemoteStore(cfg.AuditURL), nil
+		store := audit.NewRemoteStore(cfg.AuditURL)
+		if cfg.AuditAPIKey != "" {
+			store = store.WithAPIKey(cfg.AuditAPIKey)
+		}
+		return store, nil
 	}
 
 	// Fall back to local SQLite

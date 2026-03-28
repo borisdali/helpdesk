@@ -21,9 +21,47 @@ type ApprovalClient struct {
 // baseURL should be the auditd service URL (e.g., "http://localhost:1199").
 func NewApprovalClient(baseURL string) *ApprovalClient {
 	return &ApprovalClient{
-		baseURL: baseURL,
+		baseURL:    baseURL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// authTransport is an http.RoundTripper that injects a fixed auth header on
+// every request. Exactly one of apiKey or userID should be non-empty.
+type authTransport struct {
+	base   http.RoundTripper
+	apiKey string
+	userID string
+}
+
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	if t.apiKey != "" {
+		r.Header.Set("Authorization", "Bearer "+t.apiKey)
+	} else if t.userID != "" {
+		r.Header.Set("X-User", t.userID)
+	}
+	return t.base.RoundTrip(r)
+}
+
+// WithAPIKey returns a copy of the client that authenticates as a service account.
+func (c *ApprovalClient) WithAPIKey(apiKey string) *ApprovalClient {
+	return &ApprovalClient{
+		baseURL: c.baseURL,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   c.httpClient.Timeout,
+			Transport: &authTransport{base: http.DefaultTransport, apiKey: apiKey},
+		},
+	}
+}
+
+// WithUser returns a copy of the client that authenticates as a human operator.
+func (c *ApprovalClient) WithUser(userID string) *ApprovalClient {
+	return &ApprovalClient{
+		baseURL: c.baseURL,
+		httpClient: &http.Client{
+			Timeout:   c.httpClient.Timeout,
+			Transport: &authTransport{base: http.DefaultTransport, userID: userID},
 		},
 	}
 }

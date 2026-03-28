@@ -310,7 +310,11 @@ func (s *rollbackServer) handleCancelRollback(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	rbk.Status = "cancelled"
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"rollback": rbk,
+	})
 }
 
 // handleInitiateFleetRollback initiates a rollback of a fleet job by creating a

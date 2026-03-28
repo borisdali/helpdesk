@@ -14,7 +14,7 @@
 
 users:
   - id: alice@example.com
-    roles: [dba, sre]
+    roles: [dba, sre, operator]
 
   - id: bob@example.com
     roles: [developer]
@@ -52,3 +52,17 @@ service_accounts:
   - id: prevention-monitor
     roles: [sre-automation]
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$cHJldm1vbml0b3I$placeholder-replace-with-real-hash"
+
+  # Internal service accounts for agents and gateway writing to auditd.
+  # Set HELPDESK_AUDIT_API_KEY to the matching plaintext key in each component's env.
+  - id: gateway
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$6thHHPTEEzEqTBUJQlKJSw$lCfcXgfMSPQ/P/1g8nIlqO2tEbh4a+2F/8CA01yEkl8"
+
+  - id: db-agent
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$aWCgWs2hjA41c28pVOOQkg$W9bGms1aClLQhVUTVpMfFa8hn069ZqjyrIj1QzkOEZY"
+
+  - id: k8s-agent
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$oLupOupEKUSDMa6Usb0w0Q$ZOwlZRUFT0CR53DmJk87QoPsMbz/UPowaWcjqzLGEfE"
