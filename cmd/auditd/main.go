@@ -189,7 +189,7 @@ func main() {
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
 	playbookSrv := &playbookServer{store: playbookStore}
-	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore}
+	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
 

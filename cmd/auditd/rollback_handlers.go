@@ -18,6 +18,7 @@ type rollbackServer struct {
 	store         *audit.RollbackStore
 	auditStore    *audit.Store
 	fleetStore    *audit.FleetStore
+	approvalStore *audit.ApprovalStore
 }
 
 // handleDeriveRollbackPlan derives a rollback plan for an existing tool_execution
@@ -168,6 +169,40 @@ func (s *rollbackServer) handleInitiateRollback(w http.ResponseWriter, r *http.R
 		slog.Error("initiate rollback: create record", "err", err)
 		http.Error(w, "failed to create rollback record", http.StatusInternalServerError)
 		return
+	}
+
+	// Create an approval request so the rollback appears in the approval queue.
+	if s.approvalStore != nil {
+		var inverseAgent string
+		if plan.InverseOp != nil {
+			inverseAgent = plan.InverseOp.Agent
+		}
+		approval := &audit.StoredApproval{
+			TraceID:      rbk.RollbackTraceID,
+			Status:       "pending",
+			ActionClass:  string(audit.ActionDestructive),
+			ToolName:     "rollback",
+			AgentName:    "auditd",
+			ResourceType: inverseAgent,
+			ResourceName: plan.OriginalTool,
+			RequestedBy:  initiatedBy,
+			RequestedAt:  rbk.CreatedAt,
+			PolicyName:   "rollback-requires-approval",
+			ApproverRole: "operator",
+			RequestContext: map[string]any{
+				"rollback_id":       rbk.RollbackID,
+				"original_event_id": req.OriginalEventID,
+				"justification":     req.Justification,
+			},
+		}
+		if createErr := s.approvalStore.CreateRequest(r.Context(), approval); createErr != nil {
+			slog.Warn("initiate rollback: failed to create approval request", "err", createErr)
+		} else {
+			rbk.ApprovalID = approval.ApprovalID
+			if updateErr := s.store.SetRollbackApprovalID(r.Context(), rbk.RollbackID, approval.ApprovalID); updateErr != nil {
+				slog.Warn("initiate rollback: failed to link approval to rollback", "err", updateErr)
+			}
+		}
 	}
 
 	// Emit rollback_initiated audit event.
