@@ -5,7 +5,9 @@ Platform specific instructions are also available for running aiHelpDesk jobs di
 
 aiHelpDesk supports both scheduled as well as the ad-hoc jobs. The sample of creating and running the latter is presented below. In this example the job is created via a NL request through the aiHelpDesk client tool. It can be used "as is" for testing, but for production use, you may consider using it as a template, customizing it as you see fit, testing it on the lower tier environments, going through the normal peer review process and checking into a version control system before running it across your database fleet.
 
-Sample run:
+## Fleet Job Definition generated via NL running on a host
+
+This is a sample run where a job def JSON file is generated through a `helpdesk-client` running on a host. This works for aiHelpDesk deployed on K8s or directly on a host/VM (for aiHelpDesk running in Docker containers on a VM, see [below](FLEET_SAMPLE.md#fleet-job-definition-generated-via-nl-running-in-docker-containers)).
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy/]$ /tmp/helpdesk-client --user alice@example.com --plan-fleet-job "check status, uptime and load on all development databases excluding fault-test-db"
@@ -68,7 +70,9 @@ The generated JSON file can be inspected, adapted to your needs and checked in. 
 }
 ```
 
-Now actually executing this job on K8s requires a few intermidiate steps because the generated JSON file resides locally and so it needs to be uploaded to a ConfigMap, a one-off Job needs to be created with the job definition from the file mounted to the fleet-runner's Pod, etc. These steps are automated through the [`run-fleet-job.sh`](../scripts/README.md#run-fleet-jobsh) helper script:
+## Running a Fleet Job on K8s (run-fleet-job.sh)
+
+Running this job on K8s requires a few intermidiate steps because the generated JSON file resides locally and so it needs to be uploaded to a ConfigMap, a one-off Job needs to be created with the job definition from the file mounted to the fleet-runner's Pod, etc. These steps are automated through the [`run-fleet-job.sh`](../scripts/README.md#run-fleet-jobsh) helper script:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy]$ ./scripts/run-fleet-job.sh --api-key $(cat helm/helpdesk/.helpdesk-fleet-api-key) check-status-uptime-and-load-on-development-databases.json
@@ -107,6 +111,96 @@ pg-cluster-minkube  ok      PG 16.2  15d 21h  8/100   99.99
 [fleet-run] Cleaning up...
 ```
 
+## Fleet Job Definition generated via NL running in Docker containers
+
+Similar to K8s, for aiHelpDesk deployed in Docker containers running on a VM, a local current directory needs to be mounted to a container (otherwise a job def file gets written into the container's ephemeral filesystem and then lost when the `--rm` option leads to a container removal):
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy/docker-compose]$ docker compose --profile interactive run --rm -v $(pwd):/work -w /work helpdesk-client --purpose diagnostic --user alice@example.com --plan-fleet-job "check status, uptime and load on all development databases excluding fault-test-db"
+[+] Creating 6/6
+ ✔ Container helpdesk-auditd-1          Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-database-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-research-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-incident-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-k8s-agent-1       Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-gateway-1         Running                                                                                                                                                                                              0.0s
+=== Fleet Job Plan ===
+
+Planner notes:
+  This job performs a health check on all development-tagged servers excluding fault-test-db. It uses get_status_summary to retrieve uptime, version, connection counts, and cache hit ratio. pg-cluster-minkube is excluded because it is marked [RESTRICTED] with sensitive data (PII, internal) and the request does not explicitly target sensitive data. The job is read-only diagnostic, so canary_count=1 and wave_size=0 are appropriate. on_failure is set to 'continue' to gather partial results if some servers are temporarily unavailable.
+
+Excluded: fault-test-db
+
+Job file written: health-check-development-databases.json
+
+To submit: fleet-runner --job-file health-check-development-databases.json
+
+[boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy/docker-compose]$ ll health-check-development-databases.json
+-rw-r--r--  1 boris  wheel  917 Mar 29 15:34 health-check-development-databases.json
+```
+
+With aiHelpDesk on Docker, the job can be just executed without resorting to `scripts/run-fleet-job.sh`, but the formatting of `scripts/show-fleet-job.sh` may be helpful:
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy/docker-compose]$ docker compose --profile fleet run --rm -v $(pwd):/work -w /work fleet-runner --job-file=health-check-development-databases.json --dry-run
+[+] Creating 6/6
+ ✔ Container helpdesk-auditd-1          Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-research-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-incident-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-k8s-agent-1       Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-database-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-gateway-1         Running                                                                                                                                                                                              0.0s
+DRY RUN — fleet job: health_check_development_databases
+Steps (1):
+  [1] database/get_status_summary  (on_failure=continue)
+Resolved servers (2):
+  alloydb-on-vm                             [canary]
+  pg-cluster-minkube                        [wave-1]
+
+Strategy:
+  canary_count:        1
+  wave_size:           0 (all remaining in one wave)
+  wave_pause_seconds:  0
+  failure_threshold:   50%
+
+No gateway or auditd contact (dry run).
+
+SCHEMA DRIFT: no drift detected (policy=abort)
+
+[boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy/docker-compose]$ docker compose --profile fleet run --rm -v $(pwd):/work -w /work fleet-runner --job-file=health-check-development-databases.json
+[+] Creating 6/6
+ ✔ Container helpdesk-auditd-1          Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-database-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-research-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-k8s-agent-1       Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-incident-agent-1  Running                                                                                                                                                                                              0.0s
+ ✔ Container helpdesk-gateway-1         Running                                                                                                                                                                                              0.0s
+time=2026-03-29T19:53:40.950Z level=INFO msg="preflight check" server=pg-cluster-minkube
+time=2026-03-29T19:53:41.305Z level=INFO msg="preflight ok" server=pg-cluster-minkube
+time=2026-03-29T19:53:41.305Z level=INFO msg="preflight check" server=alloydb-on-vm
+time=2026-03-29T19:53:41.567Z level=INFO msg="preflight ok" server=alloydb-on-vm
+time=2026-03-29T19:53:41.751Z level=INFO msg="fleet job created" job_id=flj_602aaa84
+time=2026-03-29T19:53:41.751Z level=INFO msg="fleet: starting canary phase" job_id=flj_602aaa84 servers=[pg-cluster-minkube]
+time=2026-03-29T19:53:41.852Z level=INFO msg="fleet: canary server ok" job_id=flj_602aaa84 server=pg-cluster-minkube
+time=2026-03-29T19:53:41.852Z level=INFO msg="fleet: starting wave phase" job_id=flj_602aaa84 waves=1
+time=2026-03-29T19:53:41.852Z level=INFO msg="fleet: starting wave" job_id=flj_602aaa84 wave=wave-1 servers=1
+time=2026-03-29T19:53:42.035Z level=INFO msg="fleet: server ok" job_id=flj_602aaa84 wave=wave-1 server=alloydb-on-vm
+time=2026-03-29T19:53:42.037Z level=INFO msg="fleet job completed" job_id=flj_602aaa84 servers=2
+
+[boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy/docker-compose]$ ../scripts/show-fleet-job.sh flj_602aaa84
+
+════════════════════════════════════════════════════════════════════════════
+  Fleet job: flj_602aaa84  [completed]
+════════════════════════════════════════════════════════════════════════════
+
+SERVER              STAGE  STATUS  VERSION  UPTIME   CONN    CACHE HIT%
+──────              ─────  ──────  ───────  ──────   ────    ──────────
+pg-cluster-minkube  -      ok      PG 16.2  20d 19h  8/100   99.99
+alloydb-on-vm       -      ok      PG 16.3  20d 20h  10/100  99.99
+
+```
+
+## Job stats and audit trail
 
 The job execution can be tracked through the Fleet Management as well as the Audit and Journey modules. In particular, the aiHelpDesk Journey is the good starting point for forensic analysis:
 
@@ -128,10 +222,24 @@ The job execution can be tracked through the Fleet Management as well as the Aud
       "get_status_summary",
     ],
     "outcome": "success",
-    "event_count": 8,
+    "event_count": 9,
     "origin": "direct_tool"
   }
 ]
+
+[boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy]$ curl -s -H "X-User: alice@example.com" "http://localhost:1199/v1/events?trace_id=tr_flj_602aaa84"|jq length
+9
+
+[boris@ /tmp/helpdesk/helpdesk-v0.7.0-deploy]$ curl -s -H "X-User: alice@example.com" "http://localhost:1199/v1/events?trace_id=tr_flj_602aaa84"|jq .[].event_type
+"gateway_request"
+"gateway_request"
+"tool_invoked"
+"policy_decision"
+"tool_execution"
+"gateway_request"
+"tool_invoked"
+"policy_decision"
+"tool_execution"
 ```
 
 The details of all 8 events summarized in a Journey can be further obtained from the Audit, but given that the operation was a Job, we can also interrogate the Fleet Management module directly:
