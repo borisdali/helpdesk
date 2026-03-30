@@ -263,7 +263,7 @@ kubectl -n helpdesk-system run hashapikey --rm -it --restart=Never \
   --image=ghcr.io/borisdali/helpdesk -- hashapikey my-secret-api-key
 ```
 
-Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`, then run `helm upgrade` — the chart's checksum annotation will automatically restart the gateway pod so the new hash takes effect. If you manage the users file via `usersSecret` (out-of-band), restart manually after updating the Secret:
+Copy the printed hash into the `api_key_hash` field in `usersConfig` or `users.yaml`, then run `helm upgrade` — the chart's checksum annotation will automatically restart the Gateway pod so the new hash takes effect. If you manage the users file via `usersSecret` (out-of-band), restart manually after updating the Secret:
 
 ```bash
 kubectl -n helpdesk-system rollout restart deploy/helpdesk-gateway
@@ -323,7 +323,7 @@ helm install helpdesk ./helm/helpdesk \
 
 ## 4. Interactive Session
 
-`helpdesk-client` is the recommended operator CLI. It runs on your workstation and connects to the gateway over HTTP — no `kubectl exec` required. Every query carries a verified identity and declared purpose, which appear in the audit trail.
+`helpdesk-client` is the recommended operator CLI. It runs on your workstation and connects to the Gateway over HTTP — no `kubectl exec` required. Every query carries a verified identity and declared purpose, which appear in the audit trail.
 
 ### 4.1 Get the binary
 
@@ -351,7 +351,7 @@ cd helpdesk
 go build -o helpdesk-client ./cmd/helpdesk-client/
 ```
 
-### 4.2 Expose the gateway
+### 4.2 Expose the Gateway
 
 **ClusterIP (default) — port-forward for occasional access:**
 
@@ -408,7 +408,7 @@ See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, authenti
 
 ### 4.4 Fallback: kubectl exec (in-cluster REPL)
 
-If you cannot reach the gateway from your workstation, you can still open an interactive session inside the orchestrator pod:
+If you cannot reach the Gateway from your workstation, you can still open an interactive session inside the orchestrator pod:
 
 ```bash
 kubectl -n helpdesk-system exec -it deploy/helpdesk-orchestrator -- helpdesk
@@ -437,7 +437,7 @@ Note that in-cluster sessions bypass `helpdesk-client` authentication and do not
 
 
 ┌─────────────────────────────────────────────────────┐
-│                   Orchestrator                       │
+│                   Orchestrator                      │
 │  (Interactive pod for human troubleshooting)        │
 │  - Loads infrastructure.json from ConfigMap         │
 │  - Routes queries to appropriate agents             │
@@ -891,11 +891,11 @@ kubectl -n helpdesk-system create secret generic helpdesk-fleet-api-key \
   --from-literal=api-key=$(cat .helpdesk-fleet-api-key)
 
 # Deploy with the updated usersConfig — the chart checksum annotation automatically
-# triggers a gateway rollout so the new hash is loaded without a manual restart.
+# triggers a Gateway rollout so the new hash is loaded without a manual restart.
 helm upgrade helpdesk ./helm/helpdesk -f my-values.yaml
 ```
 
-> **If using `usersSecret` (out-of-band Secret):** update the Secret content and then restart the gateway manually — the checksum annotation only covers `usersConfig`:
+> **If using `usersSecret` (out-of-band Secret):** update the Secret content and then restart the Gateway manually — the checksum annotation only covers `usersConfig`:
 > ```bash
 > kubectl -n helpdesk-system rollout restart deploy/helpdesk-gateway
 > ```
@@ -982,7 +982,7 @@ See [this sample run](../../docs/FLEET_SAMPLE.md) (where a job is created via a 
 **Generating a job definition from natural language:** use the planner endpoint from your workstation (all commands run locally; `run-fleet-job.sh` uses `kubectl` to create resources in the cluster):
 
 ```bash
-# Port-forward the gateway to your workstation
+# Port-forward the Gateway to your workstation
 kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080
 
 # Generate a job definition via the planner (saves to a local file)

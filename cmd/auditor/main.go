@@ -961,6 +961,11 @@ func (a *Auditor) checkCategoryMismatch(event *audit.Event) {
 	if event.Decision == nil {
 		return
 	}
+	// Gateway requests are direct service-account calls (e.g. fleet-runner);
+	// they have no agent name and category validation doesn't apply.
+	if event.EventType == audit.EventTypeGatewayRequest {
+		return
+	}
 
 	agent := event.Decision.Agent
 	category := string(event.Decision.RequestCategory)
@@ -1044,6 +1049,12 @@ func (a *Auditor) checkLongDuration(event *audit.Event) {
 
 // checkRepeatedQueries alerts on potential loops or stuck behavior.
 func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
+	// Fleet job traces legitimately repeat the same query across N servers —
+	// suppress loop detection for them.
+	if strings.HasPrefix(event.TraceID, "tr_flj_") {
+		return
+	}
+
 	queries := a.sessionQueries[event.Session.ID]
 	if len(queries) < 3 {
 		return
