@@ -18,6 +18,7 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
 )
@@ -75,6 +76,7 @@ func main() {
 	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
 		Engine:                     policyEngine,
 		PolicyCheckURL:             cfg.PolicyCheckURL,
+		PolicyCheckAPIKey:          cfg.AuditAPIKey,
 		TraceStore:                 traceStore,
 		ApprovalClient:             approvalClient,
 		ApprovalTimeout:            cfg.ApprovalTimeout,
@@ -136,7 +138,7 @@ func main() {
 	}
 
 	cardOpts := agentutil.CardOptions{
-		Version:  "1.0.0",
+		Version:  buildinfo.Version,
 		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
 		SkillTags: map[string][]string{
 			"k8s_agent":                       {"kubernetes", "infrastructure", "diagnostics"},
@@ -158,6 +160,8 @@ func main() {
 			"k8s_agent-get_pod_logs":  {"Get the last 100 lines of logs from the postgres pod"},
 			"k8s_agent-get_endpoints": {"Check if the database service has healthy endpoints"},
 		},
+		SkillSchemaHash: agentutil.ComputeSchemaFingerprints("k8s_agent", tools),
+		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
 	}
 
 	if err := agentutil.ServeWithTracingAndDirectTools(ctx, k8sAgent, cfg, traceStore, auditStore, NewK8sDirectRegistry(), cardOpts); err != nil {

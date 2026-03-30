@@ -245,7 +245,9 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 			}
 			note += "connection string not found in infraConfig; no tags available for policy matching"
 		}
-		if err := policyEnforcer.CheckDatabase(ctx, dbInfo.Name, action, dbInfo.Tags, note, dbInfo.Sensitivity); err != nil {
+		// Carry the tool name in context for policy matching on ResourceMatch.Tool/ToolPattern.
+		policyCtx := agentutil.WithToolName(ctx, toolName)
+		if err := policyEnforcer.CheckDatabase(policyCtx, dbInfo.Name, action, dbInfo.Tags, note, dbInfo.Sensitivity); err != nil {
 			slog.Warn("policy denied database access",
 				"tool", toolName,
 				"database", dbInfo.Name,
@@ -275,7 +277,7 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 	start := time.Now()
 	connStr = dbInfo.ConnectionStr
 
-	args := []string{"-c", query, "-x"}
+	args := []string{"-w", "-c", query, "-x"}
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}
@@ -431,7 +433,7 @@ func estimateRowsAffected(ctx context.Context, connStr, query string) (int, bool
 	if !strings.HasPrefix(upper, "DELETE") && !strings.HasPrefix(upper, "UPDATE") {
 		return 0, false
 	}
-	args := []string{"-t", "-A", "-c", "EXPLAIN (FORMAT JSON) " + query}
+	args := []string{"-w", "-t", "-A", "-c", "EXPLAIN (FORMAT JSON) " + query}
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}

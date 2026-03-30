@@ -33,12 +33,21 @@ var DefaultGatewayPermissions = map[string]Permission{
 
 	// Fleet reads and plan (plan is a dry-run — any authenticated user may preview)
 	"POST /api/v1/fleet/plan":                                   {AdminBypass: true},
+	"POST /api/v1/fleet/snapshot":                               {AdminBypass: true},
+	"POST /api/v1/fleet/review":                                 {AdminBypass: true},
 	"GET /api/v1/fleet/jobs":                                    {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}":                            {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/servers":                    {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}":       {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
+
+	// Fleet playbooks: CRUD + run (any authenticated user; same as /fleet/plan)
+	"GET /api/v1/fleet/playbooks":                      {AdminBypass: true},
+	"GET /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},
+	"POST /api/v1/fleet/playbooks":                     {AdminBypass: true},
+	"DELETE /api/v1/fleet/playbooks/{playbookID}":      {AdminBypass: true},
+	"POST /api/v1/fleet/playbooks/{playbookID}/run":    {AdminBypass: true},
 
 	// ── Role-required ─────────────────────────────────────────────────────────
 

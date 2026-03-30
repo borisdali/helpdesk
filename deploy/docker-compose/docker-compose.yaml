@@ -66,6 +66,7 @@ services:
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${DB_AGENT_API_KEY:-}
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
@@ -107,6 +108,7 @@ services:
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${K8S_AGENT_API_KEY:-}
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
@@ -143,6 +145,7 @@ services:
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${INCIDENT_AGENT_API_KEY:-}
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
@@ -176,6 +179,7 @@ services:
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${RESEARCH_AGENT_API_KEY:-}
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
@@ -204,6 +208,7 @@ services:
       # AI Governance - enables /api/v1/governance endpoints
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${GATEWAY_API_KEY:-}
       # Identity & access (optional; defaults to "none" — unverified X-User headers)
       HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
@@ -253,6 +258,7 @@ services:
       HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${ORCHESTRATOR_API_KEY:-}
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     stdin_open: true

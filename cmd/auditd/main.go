@@ -98,6 +98,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create playbook store (shares the same database connection)
+	playbookStore, err := audit.NewPlaybookStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create playbook store", "err", err)
+		os.Exit(1)
+	}
+
+	// Create rollback store (shares the same database connection)
+	rollbackStore, err := audit.NewRollbackStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create rollback store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create approval notifier if configured
 	// Default baseURL to the listen address if not specified
 	baseURL := *approvalBaseURL
@@ -137,7 +151,11 @@ func main() {
 
 	// Build central authorizer.
 	authzr := authz.NewAuthorizer(authz.DefaultAuditdPermissions, enforcing)
-	slog.Info("authorization configured", "enforcing", enforcing)
+	if enforcing {
+		slog.Info("authorization enforcing: approval and rollback endpoints require authentication")
+	} else {
+		slog.Warn("authorization NOT enforcing: all endpoints are open — set HELPDESK_USERS_FILE to enable role-based access control")
+	}
 
 	// auth wraps a handler with per-pattern identity resolution and authorization.
 	// The pattern is captured at registration time so r.Pattern need not be set.
@@ -170,6 +188,8 @@ func main() {
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
+	playbookSrv := &playbookServer{store: playbookStore}
+	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
 
@@ -216,9 +236,24 @@ func main() {
 	mux.HandleFunc("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", auth("PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}", fleetSrv.handleUpdateServerStep))
 	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", auth("GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps", fleetSrv.handleGetServerSteps))
 
+	// Fleet playbook endpoints
+	mux.HandleFunc("POST /v1/fleet/playbooks", auth("POST /v1/fleet/playbooks", playbookSrv.handleCreate))
+	mux.HandleFunc("GET /v1/fleet/playbooks", auth("GET /v1/fleet/playbooks", playbookSrv.handleList))
+	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}", auth("GET /v1/fleet/playbooks/{playbookID}", playbookSrv.handleGet))
+	mux.HandleFunc("DELETE /v1/fleet/playbooks/{playbookID}", auth("DELETE /v1/fleet/playbooks/{playbookID}", playbookSrv.handleDelete))
+
 	// Fleet job approval endpoints
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/approval", auth("POST /v1/fleet/jobs/{jobID}/approval", fleetSrv.handleCreateJobApproval))
 	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/approval/{approvalID}", auth("GET /v1/fleet/jobs/{jobID}/approval/{approvalID}", fleetSrv.handleGetJobApproval))
+
+	// Rollback & Undo endpoints
+	mux.HandleFunc("POST /v1/rollbacks", auth("POST /v1/rollbacks", rollbackSrv.handleInitiateRollback))
+	mux.HandleFunc("GET /v1/rollbacks", auth("GET /v1/rollbacks", rollbackSrv.handleListRollbacks))
+	mux.HandleFunc("GET /v1/rollbacks/{rollbackID}", auth("GET /v1/rollbacks/{rollbackID}", rollbackSrv.handleGetRollback))
+	mux.HandleFunc("POST /v1/rollbacks/{rollbackID}/cancel", auth("POST /v1/rollbacks/{rollbackID}/cancel", rollbackSrv.handleCancelRollback))
+	mux.HandleFunc("POST /v1/events/{eventID}/rollback-plan", auth("POST /v1/events/{eventID}/rollback-plan", rollbackSrv.handleDeriveRollbackPlan))
+	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/rollback", auth("POST /v1/fleet/jobs/{jobID}/rollback", rollbackSrv.handleInitiateFleetRollback))
+	mux.HandleFunc("GET /v1/fleet/jobs/{jobID}/rollback", auth("GET /v1/fleet/jobs/{jobID}/rollback", rollbackSrv.handleGetFleetRollback))
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", auth("GET /health", srv.handleHealth))
@@ -255,7 +290,8 @@ func main() {
 		"listen", cfg.listenAddr,
 		"db", cfg.dbPath,
 		"backend", backend,
-		"socket", cfg.socketPath)
+		"socket", cfg.socketPath,
+		"authz_enforcing", enforcing)
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
@@ -392,6 +428,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := r.URL.Query().Get("origin"); v != "" {
 		opts.Origin = v
+	}
+	if v := r.URL.Query().Get("tool_name"); v != "" {
+		opts.ToolName = v
 	}
 
 	events, err := s.store.Query(r.Context(), opts)

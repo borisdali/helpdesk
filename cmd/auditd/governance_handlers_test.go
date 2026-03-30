@@ -1234,3 +1234,105 @@ func TestHandlePolicyCheck_SensitivityPurposeMissing_Deny(t *testing.T) {
 		t.Errorf("Effect = %q, want deny", resp.Effect)
 	}
 }
+
+// TestHandlePolicyCheck_ToolNameDeny verifies that a policy with match.tool targeting
+// a specific tool name is enforced through the HTTP handler. The tool name is carried
+// in the request body and populates polReq.Resource.ToolName for engine evaluation.
+func TestHandlePolicyCheck_ToolNameDeny(t *testing.T) {
+	const toolPolicyYAML = `
+version: "1"
+policies:
+  - name: deny-terminate
+    resources:
+      - type: database
+        match:
+          tool: terminate_connection
+    rules:
+      - action: destructive
+        effect: deny
+        message: "terminate_connection is disabled by policy"
+`
+	store := newTestAuditStore(t)
+	gs := &governanceServer{
+		policyEngine: makeEngine(t, toolPolicyYAML),
+		auditStore:   store,
+	}
+
+	// terminate_connection should be denied.
+	body := strings.NewReader(`{
+		"resource_type": "database",
+		"resource_name": "prod-db",
+		"action":        "destructive",
+		"tool_name":     "terminate_connection",
+		"trace_id":      "tr_test001"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", w.Code, w.Body.String())
+	}
+	var resp PolicyCheckResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Effect != "deny" {
+		t.Errorf("Effect = %q, want deny", resp.Effect)
+	}
+	if !strings.Contains(resp.Message, "terminate_connection is disabled") {
+		t.Errorf("Message = %q, want tool-specific denial message", resp.Message)
+	}
+}
+
+// TestHandlePolicyCheck_ToolNameAllow verifies that a policy targeting a specific
+// tool does NOT affect other tools with the same action class. cancel_query is
+// destructive but should not match the terminate_connection policy.
+func TestHandlePolicyCheck_ToolNameAllow(t *testing.T) {
+	const toolPolicyYAML = `
+version: "1"
+policies:
+  - name: deny-terminate
+    resources:
+      - type: database
+        match:
+          tool: terminate_connection
+    rules:
+      - action: destructive
+        effect: deny
+        message: "terminate_connection is disabled by policy"
+`
+	store := newTestAuditStore(t)
+	// Engine built with defaultPolicy:"allow" so non-matching tools are allowed.
+	cfg, err := policy.Load([]byte(toolPolicyYAML))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	engine := policy.NewEngine(policy.EngineConfig{PolicyConfig: cfg, DefaultEffect: policy.EffectAllow})
+	gs := &governanceServer{
+		policyEngine: engine,
+		auditStore:   store,
+	}
+
+	body := strings.NewReader(`{
+		"resource_type": "database",
+		"resource_name": "prod-db",
+		"action":        "destructive",
+		"tool_name":     "cancel_query",
+		"trace_id":      "tr_test002"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/governance/check", body)
+	w := httptest.NewRecorder()
+	gs.handlePolicyCheck(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (cancel_query should not be blocked by terminate_connection policy); body: %s", w.Code, w.Body.String())
+	}
+	var resp PolicyCheckResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Effect != "allow" {
+		t.Errorf("Effect = %q, want allow (cancel_query not covered by tool-specific policy)", resp.Effect)
+	}
+}

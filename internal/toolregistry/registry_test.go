@@ -2,6 +2,10 @@ package toolregistry
 
 import (
 	"testing"
+
+	"github.com/a2aproject/a2a-go/a2a"
+
+	"helpdesk/internal/audit"
 )
 
 func TestNew_GetAndList(t *testing.T) {
@@ -148,5 +152,160 @@ func TestValidate_UnknownTool(t *testing.T) {
 	err := r.Validate("no_such_tool", nil)
 	if err == nil {
 		t.Error("Validate(unknown tool) returned nil, want error")
+	}
+}
+
+func TestListFleetEligible(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Agent: "database", FleetEligible: true},
+		{Name: "check_connection", Agent: "database", FleetEligible: false},
+		{Name: "get_server_info", Agent: "database"},
+	}
+	r := New(entries)
+	fleet := r.ListFleetEligible()
+	if len(fleet) != 1 {
+		t.Fatalf("ListFleetEligible() len = %d, want 1", len(fleet))
+	}
+	if fleet[0].Name != "get_status_summary" {
+		t.Errorf("ListFleetEligible()[0].Name = %q, want %q", fleet[0].Name, "get_status_summary")
+	}
+}
+
+func TestListByCapability(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Capabilities: []string{CapUptime, CapConnectionCount}},
+		{Name: "get_server_info", Capabilities: []string{CapUptime, CapVersion}},
+		{Name: "check_connection", Capabilities: []string{CapConnectivity}},
+	}
+	r := New(entries)
+
+	uptimeTools := r.ListByCapability(CapUptime)
+	if len(uptimeTools) != 2 {
+		t.Fatalf("ListByCapability(uptime) len = %d, want 2", len(uptimeTools))
+	}
+
+	connTools := r.ListByCapability(CapConnectivity)
+	if len(connTools) != 1 || connTools[0].Name != "check_connection" {
+		t.Errorf("ListByCapability(connectivity) = %v, want [check_connection]", connTools)
+	}
+
+	none := r.ListByCapability(CapLogs)
+	if len(none) != 0 {
+		t.Errorf("ListByCapability(logs) len = %d, want 0", len(none))
+	}
+}
+
+func TestResolveSuperseded_BasicCase(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Supersedes: []string{"get_server_info", "get_connection_stats"}},
+		{Name: "get_server_info"},
+		{Name: "get_connection_stats"},
+	}
+	r := New(entries)
+
+	input := []string{"get_server_info", "get_connection_stats", "get_status_summary"}
+	got := r.ResolveSuperseded(input)
+	if len(got) != 1 || got[0] != "get_status_summary" {
+		t.Errorf("ResolveSuperseded = %v, want [get_status_summary]", got)
+	}
+}
+
+func TestResolveSuperseded_NoSuperior(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "get_server_info"},
+		{Name: "get_connection_stats"},
+	}
+	r := New(entries)
+
+	input := []string{"get_server_info", "get_connection_stats"}
+	got := r.ResolveSuperseded(input)
+	if len(got) != 2 {
+		t.Errorf("ResolveSuperseded = %v, want unchanged [get_server_info, get_connection_stats]", got)
+	}
+}
+
+func TestResolveSuperseded_DisjointSet(t *testing.T) {
+	// Superior is in the registry but NOT in the input — subordinates should stay.
+	entries := []ToolEntry{
+		{Name: "get_status_summary", Supersedes: []string{"get_server_info", "get_connection_stats"}},
+		{Name: "get_server_info"},
+		{Name: "get_connection_stats"},
+	}
+	r := New(entries)
+
+	// get_status_summary not in input → subordinates not removed
+	input := []string{"get_server_info", "get_connection_stats"}
+	got := r.ResolveSuperseded(input)
+	if len(got) != 2 {
+		t.Errorf("ResolveSuperseded = %v, want unchanged [get_server_info, get_connection_stats]", got)
+	}
+}
+
+func TestParseSkillTags(t *testing.T) {
+	tags := []string{
+		"postgresql",
+		"fleet:true",
+		"cap:uptime",
+		"cap:connection_count",
+		"supersedes:get_server_info",
+		"supersedes:get_connection_stats",
+	}
+	fleet, caps, supersedes, schemaFP := parseSkillTags(tags)
+	if !fleet {
+		t.Error("fleet = false, want true")
+	}
+	if len(caps) != 2 || caps[0] != "uptime" || caps[1] != "connection_count" {
+		t.Errorf("caps = %v, want [uptime connection_count]", caps)
+	}
+	if len(supersedes) != 2 || supersedes[0] != "get_server_info" || supersedes[1] != "get_connection_stats" {
+		t.Errorf("supersedes = %v, want [get_server_info get_connection_stats]", supersedes)
+	}
+	if schemaFP != "" {
+		t.Errorf("schemaFingerprint = %q, want empty", schemaFP)
+	}
+}
+
+func TestParseSkillTags_SchemaHash(t *testing.T) {
+	tags := []string{"fleet:true", "schema_hash:abc123def456"}
+	_, _, _, schemaFP := parseSkillTags(tags)
+	if schemaFP != "abc123def456" {
+		t.Errorf("schemaFingerprint = %q, want %q", schemaFP, "abc123def456")
+	}
+}
+
+func TestParseSkillTags_Empty(t *testing.T) {
+	fleet, caps, supersedes, schemaFP := parseSkillTags([]string{"postgresql", "database"})
+	if fleet || len(caps) != 0 || len(supersedes) != 0 || schemaFP != "" {
+		t.Errorf("parseSkillTags with no taxonomy tags: fleet=%v caps=%v supersedes=%v schemaFP=%q", fleet, caps, supersedes, schemaFP)
+	}
+}
+
+func TestBuild_AgentVersionAndSchemaFingerprint(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name:    "postgres_database_agent",
+		Version: "2.0.0",
+		Skills: []a2a.AgentSkill{
+			{
+				ID:          "postgres_database_agent-check_connection",
+				Name:        "check_connection",
+				Description: "Check DB connectivity",
+				Tags:        []string{"schema_hash:deadbeef1234"},
+			},
+		},
+	}
+	reg := Build(
+		map[string]*a2a.AgentCard{"postgres_database_agent": card},
+		nil,
+		audit.ToolClassification,
+	)
+	entry, ok := reg.Get("check_connection")
+	if !ok {
+		t.Fatal("check_connection not found")
+	}
+	if entry.AgentVersion != "2.0.0" {
+		t.Errorf("AgentVersion = %q, want %q", entry.AgentVersion, "2.0.0")
+	}
+	if entry.SchemaFingerprint != "deadbeef1234" {
+		t.Errorf("SchemaFingerprint = %q, want %q", entry.SchemaFingerprint, "deadbeef1234")
 	}
 }

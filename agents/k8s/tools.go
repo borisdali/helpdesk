@@ -290,6 +290,13 @@ func runKubectlExec(ctx context.Context, kubeContext string, args ...string) (st
 // runKubectlWithToolName wraps runKubectl with timing, audit logging, and slog.
 // toolName is used for audit logging; if empty, no audit is recorded.
 func runKubectlWithToolName(ctx context.Context, kubeContext, toolName string, args ...string) (string, error) {
+	return runKubectlAndRecord(ctx, kubeContext, toolName, nil, args...)
+}
+
+// runKubectlAndRecord is the underlying implementation of runKubectlWithToolName.
+// preState is optional JSON captured before the mutation for rollback support;
+// pass nil for read-only operations or tools that don't support rollback.
+func runKubectlAndRecord(ctx context.Context, kubeContext, toolName string, preState json.RawMessage, args ...string) (string, error) {
 	start := time.Now()
 	output, err := runKubectl(ctx, kubeContext, args...)
 	duration := time.Since(start)
@@ -308,6 +315,7 @@ func runKubectlWithToolName(ctx context.Context, kubeContext, toolName string, a
 			Name:       toolName,
 			Parameters: map[string]any{"context": kubeContext, "args": args},
 			RawCommand: rawCommand,
+			PreState:   preState,
 		}, audit.ToolResult{
 			Output: truncateForAudit(output, 500),
 			Error:  errMsg,
@@ -855,12 +863,28 @@ func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (Kubectl
 		return KubectlResult{}, fmt.Errorf("blast radius check denied: %w", err)
 	}
 
+	// Best-effort pre-mutation state capture for rollback support.
+	// A failure to read the current replica count does NOT abort the scale operation.
+	var preStateJSON json.RawMessage
+	if out, readErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+		"-n", namespace, "-o", "jsonpath={.spec.replicas}"); readErr == nil {
+		if n, convErr := strconv.Atoi(strings.TrimSpace(out)); convErr == nil && n > 0 {
+			if b, marshalErr := json.Marshal(audit.ScalePreState{
+				Namespace:        namespace,
+				DeploymentName:   args.DeploymentName,
+				PreviousReplicas: n,
+			}); marshalErr == nil {
+				preStateJSON = b
+			}
+		}
+	}
+
 	cmdArgs := []string{
 		"scale", "deployment", args.DeploymentName,
 		"--replicas", strconv.Itoa(args.Replicas),
 		"-n", namespace,
 	}
-	output, err := runKubectlWithToolName(ctx, kubeContext, "scale_deployment", cmdArgs...)
+	output, err := runKubectlAndRecord(ctx, kubeContext, "scale_deployment", preStateJSON, cmdArgs...)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
 	}

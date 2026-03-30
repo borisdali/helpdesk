@@ -35,7 +35,7 @@ Building on the terms defined above, the table below summarizes aiHelpDesk's two
 | **HTTP authorization** (this doc) | Who can call which endpoint | `internal/authz/` | At the HTTP boundary, before the request reaches the handler |
 | **Policy governance** | What the agent may do (tools, resources, blast radius, approvals) | `internal/audit/`, policy engine | Inside the agent, after the request is admitted |
 
-A request rejected at the HTTP layer never reaches the agent. A request admitted at the HTTP layer may still be denied by a governance policy. For example, a DBA calling `POST /api/v1/db/cancel_query` is admitted (has the role), but the policy engine may still block the operation if the target database is out of maintenance window or the blast radius cap is exceeded. In a sense the HTTP endpoint security can be thought of as the coarse-grained AuthZ, while the next layer's policy governance can be perceived as the find-grained one, evaluated inside the agent with full context (resource tags, sensitivity, purpose, blast radius, time windows).
+A request rejected at the HTTP layer never reaches the agent. A request admitted at the HTTP layer may still be denied by a governance policy. For example, a DBA calling `POST /api/v1/db/cancel_query` is admitted (has the role), but the policy engine may still block the operation if the target database is out of maintenance window or the blast radius cap is exceeded. In a sense the HTTP endpoint security can be thought of as the coarse-grained AuthZ, while the next layer's policy governance can be perceived as the fine-grained one, evaluated inside the agent with full context (resource tags, sensitivity, purpose, blast radius, time windows).
 
 Both layers are required in Mode 2 and Mode 3 deployments, see [here](DEPLOYMENT_MODES.md) for details.
 
@@ -117,6 +117,7 @@ The following table lists all canonical role names, what each role grants access
 | `sre-automation` | Automation service accounts (srebot, secbot) | DB and K8s tool invocation programmatically |
 | `fleet-operator` | Fleet job authors | Submit fleet jobs (`POST /api/v1/fleet/jobs`) |
 | `fleet-approver` | Fleet job approvers | Approve/deny fleet approval requests |
+| `operator` | Operations engineers with rollback authority | Initiate and cancel rollbacks (`POST /v1/rollbacks`, `POST /v1/rollbacks/{id}/cancel`, `POST /v1/fleet/jobs/{id}/rollback`) |
 | `admin` | Superusers | Bypass all role checks on any route (configurable — see [§6](#6-admin-role)) |
 
 Roles not in this table are valid for policy governance purposes (e.g. `developer`, `security-scanner`) but do not grant any elevated HTTP authorization beyond what any authenticated user has.
@@ -169,6 +170,15 @@ auditd enforces the same model. Human-readable (GET) endpoints are open to any a
 | `POST /v1/govbot/runs` | govbot service account |
 | `POST /v1/fleet/jobs` and all fleet lifecycle writes | fleet-runner service account |
 
+**Authenticated — any verified non-anonymous user (rollback reads):**
+
+| Route | Description |
+|---|---|
+| `GET /v1/rollbacks` | List rollback records |
+| `GET /v1/rollbacks/{rollbackID}` | Get a rollback record and its derived plan |
+| `POST /v1/events/{eventID}/rollback-plan` | Derive a rollback plan without executing (read-only) |
+| `GET /v1/fleet/jobs/{jobID}/rollback` | Get fleet rollback status |
+
 **Role-required:**
 
 | Route | Required role(s) — any one suffices |
@@ -176,6 +186,9 @@ auditd enforces the same model. Human-readable (GET) endpoints are open to any a
 | `POST /v1/approvals/{approvalID}/approve` | `dba` (for DB approvals) or `fleet-approver` (for fleet approvals) |
 | `POST /v1/approvals/{approvalID}/deny` | `dba` or `fleet-approver` |
 | `POST /v1/approvals/{approvalID}/cancel` | any authenticated user (ownership enforced in handler) |
+| `POST /v1/rollbacks` | `operator` or `admin` |
+| `POST /v1/rollbacks/{rollbackID}/cancel` | `operator` or `admin` |
+| `POST /v1/fleet/jobs/{jobID}/rollback` | `operator`, `fleet-approver`, or `admin` |
 
 The middleware gate for approve/deny allows either `dba` or `fleet-approver` through. The handler then narrows the check: a `dba` cannot approve a fleet job and a `fleet-approver` cannot approve a DB action.
 
@@ -344,7 +357,7 @@ For engineers working on the authorization code:
 | `Permission`, `Authorizer`, `Authorize`, `Require` | `internal/authz/authz.go` | Core authorization logic and context helpers |
 | `Middleware` | `internal/authz/middleware.go` | http.Handler wrapper (for tests; production uses per-route closures) |
 | Gateway permission table | `internal/authz/gateway_routes.go` | `DefaultGatewayPermissions` — 30 entries |
-| auditd permission table | `internal/authz/auditd_routes.go` | `DefaultAuditdPermissions` — 37 entries |
+| auditd permission table | `internal/authz/auditd_routes.go` | `DefaultAuditdPermissions` — 45 entries |
 | Gateway route wiring | `cmd/gateway/gateway.go` `RegisterRoutes` | `auth(pattern, h)` closure applied to every route |
 | auditd route wiring | `cmd/auditd/main.go` | same `auth(pattern, h)` pattern |
 | Approval fine-grained check | `cmd/auditd/approval_handlers.go` | `authzr.Require(principal, required)` after middleware gate |

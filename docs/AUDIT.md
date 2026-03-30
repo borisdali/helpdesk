@@ -101,7 +101,7 @@ Core fields present on every event:
 |-------|-------------|
 | `event_id` | Unique identifier (e.g. `tool_a1b2c3d4`) |
 | `timestamp` | UTC timestamp (RFC3339Nano) |
-| `event_type` | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation` |
+| `event_type` | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation`, `rollback_initiated`, `rollback_executed`, `rollback_verified` |
 | `session_id` | Session identifier of the recording component |
 | `trace_id` | End-to-end correlation ID; empty when no orchestrator context |
 | `origin` | Dispatch path that produced the event: `"direct_tool"` (fleet-runner structured dispatch via `POST /tool/{name}`), `"agent"` (LLM/A2A path), or `"gateway"` (gateway-originated request). Set on `tool_execution` and `tool_invoked` events; absent on delegation and reasoning events. See [§4.5](#45-origin-values). |
@@ -118,6 +118,25 @@ Core fields present on every event:
 | `outcome_status` | `success` or `error` |
 | `outcome_error` | Error message if the tool failed |
 | `duration_ms` | Execution time in milliseconds |
+| `pre_state` | JSON object capturing state before the mutation — present on reversible tools only (see [ROLLBACK.md §3](ROLLBACK.md#3-pre-mutation-state-capture)). `scale_deployment` stores a `ScalePreState` (`namespace`, `deployment_name`, `previous_replicas`). Future DML tools store a `DMLPreState` with the old row values. Absent when capture failed (best-effort) or the tool is not reversible. |
+
+#### Rollback event fields
+
+Three additional event types appear in the audit chain whenever a rollback is initiated, executed, or verified.
+
+| Event type | Key fields |
+|---|---|
+| `rollback_initiated` | `rollback_id`, `original_event_id`, `original_trace_id`, `rollback_trace_id`, `plan` (tool + inverse args), `dry_run` |
+| `rollback_executed` | `rollback_id`, `original_event_id`, `status` (`success`/`failed`), `error_message` |
+| `rollback_verified` | `rollback_id`, `original_event_id`, `verification_result` |
+
+Rollback events carry a dedicated `rollback_trace_id` of the form `tr_rbk_<uuid8>` — the same `tr_` + record-ID convention used by fleet (`tr_flj_*`). This means the trace ID is derivable directly from the rollback record ID and vice versa. Fetch the full rollback journey in one query:
+
+```bash
+curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
+# or as a journey summary:
+curl "http://localhost:1199/v1/journeys?trace_id=tr_rbk_a1b2c3d4"
+```
 
 ### 4.2 policy_decision fields
 
@@ -290,7 +309,40 @@ curl -s 'http://localhost:1199/v1/events?event_type=gateway_request' | \
 curl -s 'http://localhost:1199/v1/journeys?purpose=fleet_rollout' | jq .
 ```
 
-### 6.6 Health
+### 6.6 Rollbacks
+
+Rollback records track compensating operations initiated against prior mutation events. See [ROLLBACK.md](ROLLBACK.md) for the full feature description.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/rollbacks` | Initiate a rollback for an event (`dry_run: true` for plan-only) |
+| `GET` | `/v1/rollbacks` | List rollback records |
+| `GET` | `/v1/rollbacks/{rollbackID}` | Get a rollback record and its derived plan |
+| `POST` | `/v1/rollbacks/{rollbackID}/cancel` | Cancel a pending rollback |
+| `POST` | `/v1/events/{eventID}/rollback-plan` | Derive a rollback plan without executing (read-only) |
+| `POST` | `/v1/fleet/jobs/{jobID}/rollback` | Initiate a fleet-level rollback |
+| `GET` | `/v1/fleet/jobs/{jobID}/rollback` | Get fleet rollback status |
+
+**Rollback status values:** `pending_approval` → `executing` → `success` / `failed` / `cancelled`
+
+Query rollback activity:
+```bash
+# List all rollbacks
+curl http://localhost:1199/v1/rollbacks | jq .
+
+# Derive a plan without executing
+curl -X POST http://localhost:1199/v1/events/tool_abc12345/rollback-plan | jq .
+
+# Initiate a rollback (dry-run first)
+curl -X POST http://localhost:1199/v1/rollbacks \
+  -H "Content-Type: application/json" \
+  -d '{"original_event_id": "tool_abc12345", "dry_run": true}'
+
+# All audit events for a rollback operation
+curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
+```
+
+### 6.7 Health
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -307,7 +359,7 @@ curl -s 'http://localhost:1199/v1/journeys?purpose=fleet_rollout' | jq .
 | `session_id` | string | Filter by agent session ID |
 | `trace_id` | string | Filter by exact trace ID |
 | `trace_id_prefix` | string | Filter by trace ID prefix (e.g. `tr_`, `dt_`) |
-| `event_type` | string | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation` |
+| `event_type` | string | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation`, `rollback_initiated`, `rollback_executed`, `rollback_verified` |
 | `agent` | string | Filter by agent name |
 | `action_class` | string | `read`, `write`, or `destructive` |
 | `tool_name` | string | Filter by tool name (e.g. `terminate_connection`) |

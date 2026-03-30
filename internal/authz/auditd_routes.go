@@ -16,7 +16,7 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /v1/approvals/pending":                             {AdminBypass: true},
 	"GET /v1/approvals/{approvalID}":                        {AdminBypass: true},
 	"GET /v1/approvals/{approvalID}/wait":                   {AdminBypass: true},
-	"GET /v1/governance/info":                               {AdminBypass: true},
+	"GET /v1/governance/info":                               {AllowAnonymous: true},
 	"GET /v1/governance/policies":                           {AdminBypass: true},
 	"GET /v1/governance/explain":                            {AdminBypass: true},
 	"GET /v1/govbot/runs":                                   {AdminBypass: true},
@@ -26,6 +26,10 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /v1/fleet/jobs/{jobID}/servers/{serverName}":       {AdminBypass: true},
 	"GET /v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
+
+	// Playbook reads
+	"GET /v1/fleet/playbooks":              {AdminBypass: true},
+	"GET /v1/fleet/playbooks/{playbookID}": {AdminBypass: true},
 
 	// ── Service-only writes: machine-to-machine paths ─────────────────────────
 	// These endpoints are called by agents and fleet-runner service accounts,
@@ -43,6 +47,10 @@ var DefaultAuditdPermissions = map[string]Permission{
 
 	// Govbot compliance history write
 	"POST /v1/govbot/runs": {ServiceOnly: true, AdminBypass: true},
+
+	// Playbook writes
+	"POST /v1/fleet/playbooks":                {AdminBypass: true},
+	"DELETE /v1/fleet/playbooks/{playbookID}": {AdminBypass: true},
 
 	// Fleet-runner lifecycle writes
 	"POST /v1/fleet/jobs":                                                   {ServiceOnly: true, AdminBypass: true},
@@ -69,4 +77,26 @@ var DefaultAuditdPermissions = map[string]Permission{
 
 	// Cancel: any authenticated caller (ownership/requester check is in the handler).
 	"POST /v1/approvals/{approvalID}/cancel": {AdminBypass: true},
+
+	// ── Rollback & Undo ───────────────────────────────────────────────────────
+
+	// Read-only: any authenticated caller can query rollbacks and derive plans.
+	"GET /v1/rollbacks":                          {AdminBypass: true},
+	"GET /v1/rollbacks/{rollbackID}":             {AdminBypass: true},
+	"POST /v1/events/{eventID}/rollback-plan":    {AdminBypass: true},
+	"GET /v1/fleet/jobs/{jobID}/rollback":        {AdminBypass: true},
+
+	// Mutation: requires operator or admin role.
+	"POST /v1/rollbacks": {
+		RequireRoles: []string{"operator", "admin"},
+		AdminBypass:  true,
+	},
+	"POST /v1/rollbacks/{rollbackID}/cancel": {
+		RequireRoles: []string{"operator", "admin"},
+		AdminBypass:  true,
+	},
+	"POST /v1/fleet/jobs/{jobID}/rollback": {
+		RequireRoles: []string{"operator", "fleet-approver", "admin"},
+		AdminBypass:  true,
+	},
 }

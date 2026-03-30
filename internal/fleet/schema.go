@@ -1,6 +1,20 @@
 // Package fleet defines the shared schema types for fleet-runner job definitions.
 package fleet
 
+import "time"
+
+// ToolSnapshot captures the schema state of a tool at the time a job was planned.
+// Stored in JobDef.ToolSnapshots so fleet-runner can detect drift between plan
+// time and execution time.
+type ToolSnapshot struct {
+	// AgentVersion is the agent's version string at plan time (from card.Version).
+	AgentVersion string `json:"agent_version,omitempty"`
+	// SchemaFingerprint is the sha256[:12] hex of the tool's Declaration().Parameters JSON.
+	SchemaFingerprint string `json:"schema_fingerprint,omitempty"`
+	// CapturedAt is when this snapshot was taken (UTC).
+	CapturedAt time.Time `json:"captured_at"`
+}
+
 // Step is one operation within a multi-step Change sequence.
 type Step struct {
 	Agent string         `json:"agent"`
@@ -23,6 +37,17 @@ type JobDef struct {
 	// fleet_jobs audit record so the three auditability questions can be answered:
 	// who planned it, was the description changed, and how many plans were attempted.
 	PlanTraceID string `json:"plan_trace_id,omitempty"`
+	// ToolSnapshots maps tool name → snapshot of its schema at plan time.
+	// Used by fleet-runner to detect schema drift before execution.
+	ToolSnapshots map[string]ToolSnapshot `json:"tool_snapshots,omitempty"`
+	// PlanDescription is the natural-language description given to the planner.
+	// Stored so fleet-runner can replan automatically on drift or on demand.
+	PlanDescription string `json:"plan_description,omitempty"`
+	// PlanTargetHints is the list of target hints given to the planner.
+	PlanTargetHints []string `json:"plan_target_hints,omitempty"`
+	// PlanServers is the list of server names resolved at plan time.
+	// Used by the review endpoint to detect servers added since the plan was created.
+	PlanServers []string `json:"plan_servers,omitempty"`
 }
 
 // Change describes the operation(s) to execute on each target server.
@@ -60,6 +85,11 @@ type Strategy struct {
 	CountPartialAsSuccess bool `json:"count_partial_as_success"`
 	// ApprovalTimeoutSeconds is reserved for future approval gate support.
 	ApprovalTimeoutSeconds int `json:"approval_timeout_seconds,omitempty"`
+	// SchemaDrift controls behaviour when tool schema drift is detected.
+	// "abort" (default): abort before preflight if any fingerprint changed.
+	// "warn": log a warning but continue.
+	// "ignore": silently skip the drift check.
+	SchemaDrift string `json:"schema_drift,omitempty"`
 }
 
 // defaults applies zero-value defaults to Strategy fields.

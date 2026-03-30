@@ -6,6 +6,7 @@ package agentutil
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/identity"
@@ -47,6 +49,7 @@ type Config struct {
 	AuditEnabled bool
 	AuditURL     string // URL of central audit service (preferred)
 	AuditDir     string // Local directory for audit.db (fallback if AuditURL not set)
+	AuditAPIKey  string // Bearer token for auditd service account (when auditd enforces auth)
 
 	// Policy configuration
 	PolicyEnabled bool   // Master switch — must be true to enforce policy
@@ -100,6 +103,7 @@ func MustLoadConfig(defaultAddr string) Config {
 		AuditEnabled:    auditEnabled == "true" || auditEnabled == "1",
 		AuditURL:        os.Getenv("HELPDESK_AUDIT_URL"),
 		AuditDir:        os.Getenv("HELPDESK_AUDIT_DIR"),
+		AuditAPIKey:     os.Getenv("HELPDESK_AUDIT_API_KEY"),
 		PolicyEnabled:   policyEnabledBool,
 		PolicyFile:      policyFile,
 		PolicyDryRun:    policyDryRun == "true" || policyDryRun == "1",
@@ -128,6 +132,43 @@ func MustLoadConfig(defaultAddr string) Config {
 	}
 
 	return cfg
+}
+
+// TextCompleter is a function that sends a single-turn text prompt to an LLM
+// and returns the response text. Suitable for one-shot generation tasks like
+// the fleet job planner that do not need a full agentic loop.
+type TextCompleter func(ctx context.Context, prompt string) (string, error)
+
+// NewTextCompleter creates a vendor-agnostic one-shot text completion function
+// backed by whichever LLM vendor is configured in cfg.ModelVendor.
+// The returned function is safe for concurrent use.
+func NewTextCompleter(ctx context.Context, cfg Config) (TextCompleter, error) {
+	llm, err := NewLLM(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, prompt string) (string, error) {
+		req := &adkmodel.LLMRequest{
+			Contents: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: prompt}},
+				},
+			},
+		}
+		var sb strings.Builder
+		for resp, err := range llm.GenerateContent(ctx, req, false) {
+			if err != nil {
+				return "", err
+			}
+			if resp != nil && resp.Content != nil {
+				for _, part := range resp.Content.Parts {
+					sb.WriteString(part.Text)
+				}
+			}
+		}
+		return sb.String(), nil
+	}, nil
 }
 
 // NewLLM creates an LLM model based on Config.ModelVendor (gemini or anthropic).
@@ -165,7 +206,7 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 	// Remote check mode: policy evaluation is delegated to auditd.
 	// The PolicyEnforcer will call POST /v1/governance/check instead of a local engine.
 	if cfg.PolicyCheckURL != "" {
-		if probeRemotePolicyEngine(cfg.PolicyCheckURL) {
+		if probeRemotePolicyEngine(cfg.PolicyCheckURL, cfg.AuditAPIKey) {
 			slog.Info("policy enforcement enabled (remote check mode)", "url", cfg.PolicyCheckURL)
 		} else {
 			slog.Warn("policy enforcement enabled (remote check mode) but remote has no policy engine",
@@ -210,6 +251,7 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 type PolicyEnforcer struct {
 	engine                     *policy.Engine
 	policyCheckURL             string        // non-empty → remote check mode via auditd
+	policyCheckAPIKey          string        // Bearer token for authenticating to auditd (HELPDESK_AUDIT_API_KEY)
 	policyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
 	traceStore                 *audit.CurrentTraceStore
 	approvalClient             *audit.ApprovalClient
@@ -223,6 +265,7 @@ type PolicyEnforcer struct {
 type PolicyEnforcerConfig struct {
 	Engine                     *policy.Engine
 	PolicyCheckURL             string        // auditd base URL for remote checks (set from cfg.PolicyCheckURL)
+	PolicyCheckAPIKey          string        // Bearer token for authenticating to auditd (HELPDESK_AUDIT_API_KEY)
 	PolicyCheckTimeout         time.Duration // HTTP timeout for remote checks (default 5s)
 	TraceStore                 *audit.CurrentTraceStore
 	ApprovalClient             *audit.ApprovalClient
@@ -254,6 +297,7 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 	return &PolicyEnforcer{
 		engine:                     cfg.Engine,
 		policyCheckURL:             cfg.PolicyCheckURL,
+		policyCheckAPIKey:          cfg.PolicyCheckAPIKey,
 		policyCheckTimeout:         checkTimeout,
 		traceStore:                 cfg.TraceStore,
 		approvalClient:             cfg.ApprovalClient,
@@ -348,6 +392,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		}
 		principal := audit.PrincipalFromContext(ctx)
 		purpose, purposeNote := audit.PurposeFromContext(ctx)
+		toolName := toolNameFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType: resourceType,
 			ResourceName: resourceName,
@@ -360,6 +405,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Purpose:      purpose,
 			PurposeNote:  purposeNote,
 			Sensitivity:  sensitivity,
+			ToolName:     toolName,
 		})
 		if err != nil {
 			return err
@@ -381,6 +427,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Name:        resourceName,
 			Tags:        tags,
 			Sensitivity: sensitivity,
+			ToolName:    toolNameFromContext(ctx),
 		},
 		Action: action,
 	}
@@ -834,6 +881,23 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 	return &policy.DeniedError{Decision: decision, Explanation: trace.Explanation}
 }
 
+// toolNameContextKey is an unexported type to prevent context key collisions.
+type toolNameContextKey struct{}
+
+// WithToolName returns a new context carrying the tool name for policy matching.
+// Call this at the start of each tool function: ctx = agentutil.WithToolName(ctx, "terminate_connection")
+func WithToolName(ctx context.Context, toolName string) context.Context {
+	return context.WithValue(ctx, toolNameContextKey{}, toolName)
+}
+
+// toolNameFromContext extracts the tool name set by WithToolName, or "" if not set.
+func toolNameFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(toolNameContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // policyCheckReq is the body sent to POST /v1/governance/check.
 // Field names match PolicyCheckRequest in cmd/auditd/governance_handlers.go.
 type policyCheckReq struct {
@@ -853,6 +917,7 @@ type policyCheckReq struct {
 	Purpose     string                     `json:"purpose,omitempty"`
 	PurposeNote string                     `json:"purpose_note,omitempty"`
 	Sensitivity []string                   `json:"sensitivity,omitempty"`
+	ToolName    string                     `json:"tool_name,omitempty"` // specific tool for policy matching
 }
 
 // policyCheckResp is the response from POST /v1/governance/check.
@@ -868,13 +933,16 @@ type policyCheckResp struct {
 // probeRemotePolicyEngine calls GET /v1/governance/info on the auditd service and
 // returns true if the remote has a policy engine configured and enabled.
 // The call is best-effort: any network or parse error returns false.
-func probeRemotePolicyEngine(checkURL string) bool {
+func probeRemotePolicyEngine(checkURL, apiKey string) bool {
 	infoURL := strings.TrimRight(checkURL, "/") + "/v1/governance/info"
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, infoURL, nil)
 	if err != nil {
 		return false
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -910,6 +978,9 @@ func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCh
 		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service unreachable")
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if e.policyCheckAPIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+e.policyCheckAPIKey)
+	}
 
 	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
@@ -924,6 +995,9 @@ func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCh
 	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusForbidden {
 		slog.Warn("remote policy check: unexpected status; failing closed",
 			"url", checkURL, "status", httpResp.StatusCode)
+		if httpResp.StatusCode == http.StatusUnauthorized {
+			return policyCheckResp{}, fmt.Errorf("policy check failed: agent not authenticated to audit service (set HELPDESK_AUDIT_API_KEY)")
+		}
 		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service returned %d", httpResp.StatusCode)
 	}
 
@@ -987,7 +1061,11 @@ func InitApprovalClient(cfg Config) *audit.ApprovalClient {
 		"audit_url", cfg.AuditURL,
 		"timeout", cfg.ApprovalTimeout)
 
-	return audit.NewApprovalClient(cfg.AuditURL)
+	client := audit.NewApprovalClient(cfg.AuditURL)
+	if cfg.AuditAPIKey != "" {
+		client = client.WithAPIKey(cfg.AuditAPIKey)
+	}
+	return client
 }
 
 // InitAuditStore initializes an audit store for an agent if auditing is enabled.
@@ -1002,7 +1080,11 @@ func InitAuditStore(cfg Config) (audit.Auditor, error) {
 	// Prefer central audit service
 	if cfg.AuditURL != "" {
 		slog.Info("agent audit logging enabled (remote)", "url", cfg.AuditURL)
-		return audit.NewRemoteStore(cfg.AuditURL), nil
+		store := audit.NewRemoteStore(cfg.AuditURL)
+		if cfg.AuditAPIKey != "" {
+			store = store.WithAPIKey(cfg.AuditAPIKey)
+		}
+		return store, nil
 	}
 
 	// Fall back to local SQLite
@@ -1042,6 +1124,28 @@ type CardOptions struct {
 
 	// SkillExamples maps a skill ID to example prompts/scenarios.
 	SkillExamples map[string][]string
+
+	// SkillFleetEligible declares which skills are eligible for fleet jobs.
+	// Only fleet-eligible tools are shown to the fleet planner.
+	// Skill IDs that are absent or false are invisible to the planner.
+	SkillFleetEligible map[string]bool
+
+	// SkillCapabilities maps a skill ID to capability constants (see toolregistry.Cap*).
+	// Capabilities describe what data a tool provides in a closed vocabulary.
+	SkillCapabilities map[string][]string
+
+	// SkillSupersedes maps a skill ID to the tool names it makes redundant.
+	// When a superseding tool is selected, the planner removes the superseded ones.
+	SkillSupersedes map[string][]string
+
+	// SkillSchemaHash maps a skill ID to its schema fingerprint.
+	// Computed by ComputeSchemaFingerprints; serialized as "schema_hash:<fingerprint>"
+	// tags so the toolregistry can read it back during discovery.
+	SkillSchemaHash map[string]string
+
+	// ToolSchemas maps a tool name (without agent prefix) to its JSON Schema properties.
+	// Computed by ComputeInputSchemas; served at GET /schemas for gateway discovery.
+	ToolSchemas map[string]map[string]any
 }
 
 // applyCardOptions merges optional metadata onto an AgentCard.
@@ -1063,7 +1167,125 @@ func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
 		if examples, ok := opts.SkillExamples[skill.ID]; ok {
 			skill.Examples = examples
 		}
+		// Serialize typed taxonomy fields as key:value tag strings.
+		// This keeps the A2A card transport unchanged while providing
+		// compile-time type safety to agent authors.
+		if v, ok := opts.SkillFleetEligible[skill.ID]; ok && v {
+			skill.Tags = append(skill.Tags, "fleet:true")
+		}
+		for _, cap := range opts.SkillCapabilities[skill.ID] {
+			skill.Tags = append(skill.Tags, "cap:"+cap)
+		}
+		for _, sup := range opts.SkillSupersedes[skill.ID] {
+			skill.Tags = append(skill.Tags, "supersedes:"+sup)
+		}
+		if hash, ok := opts.SkillSchemaHash[skill.ID]; ok && hash != "" {
+			skill.Tags = append(skill.Tags, "schema_hash:"+hash)
+		}
 	}
+}
+
+// registerSchemasHandler registers GET /schemas on mux unconditionally.
+// The endpoint returns a JSON object mapping tool name → JSON Schema properties,
+// allowing gateway discovery to populate ToolEntry.InputSchema.
+// When schemas is nil or empty, it returns an empty JSON object so that
+// agents without declared schemas do not cause gateway discovery to skip them.
+func registerSchemasHandler(mux *http.ServeMux, schemas map[string]map[string]any) {
+	if schemas == nil {
+		schemas = map[string]map[string]any{}
+	}
+	b, err := json.Marshal(schemas)
+	if err != nil {
+		slog.Warn("agentutil: failed to marshal tool schemas", "err", err)
+		return
+	}
+	mux.HandleFunc("GET /schemas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b) //nolint:errcheck
+	})
+}
+
+// declarationProvider matches tools that expose Declaration().
+// Mirrors the unexported interface in internal/model/anthropic.go.
+type declarationProvider interface {
+	Declaration() *genai.FunctionDeclaration
+}
+
+// toolSchemaSource returns the schema source for a tool declaration.
+// functiontool.New populates ParametersJsonSchema (type any); older/custom tools
+// may use Parameters (*genai.Schema). We prefer ParametersJsonSchema when set.
+func toolSchemaSource(decl *genai.FunctionDeclaration) any {
+	if decl.ParametersJsonSchema != nil {
+		return decl.ParametersJsonSchema
+	}
+	if decl.Parameters != nil {
+		return decl.Parameters
+	}
+	return nil
+}
+
+// ComputeSchemaFingerprints computes a schema fingerprint (first 12 hex chars of
+// sha256 of the tool's parameter schema JSON) for each tool in the slice.
+// Returns a map of skillID → fingerprint suitable for CardOptions.SkillSchemaHash.
+// skillID format: "<agentName>-<toolName>" (matches the CardOptions key convention).
+// Tools without a Declaration or with no parameter schema are omitted.
+func ComputeSchemaFingerprints(agentName string, tools []tool.Tool) map[string]string {
+	result := make(map[string]string, len(tools))
+	for _, t := range tools {
+		dp, ok := t.(declarationProvider)
+		if !ok {
+			continue
+		}
+		decl := dp.Declaration()
+		if decl == nil {
+			continue
+		}
+		src := toolSchemaSource(decl)
+		if src == nil {
+			continue
+		}
+		b, err := json.Marshal(src)
+		if err != nil {
+			continue
+		}
+		sum := sha256.Sum256(b)
+		fingerprint := fmt.Sprintf("%x", sum[:6]) // 12 hex chars
+		skillID := agentName + "-" + t.Name()
+		result[skillID] = fingerprint
+	}
+	return result
+}
+
+// ComputeInputSchemas returns a map of toolName → JSON Schema (map[string]any) for use
+// in CardOptions.ToolSchemas. Served at GET /schemas so gateway discovery can populate
+// ToolEntry.InputSchema.
+// Tools without a Declaration or with no parameter schema are omitted.
+func ComputeInputSchemas(tools []tool.Tool) map[string]map[string]any {
+	result := make(map[string]map[string]any, len(tools))
+	for _, t := range tools {
+		dp, ok := t.(declarationProvider)
+		if !ok {
+			continue
+		}
+		decl := dp.Declaration()
+		if decl == nil {
+			continue
+		}
+		src := toolSchemaSource(decl)
+		if src == nil {
+			continue
+		}
+		b, err := json.Marshal(src)
+		if err != nil {
+			continue
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(b, &schema); err != nil {
+			continue
+		}
+		result[t.Name()] = schema
+	}
+	return result
 }
 
 // Serve starts an A2A server for the given agent on cfg.ListenAddr.
@@ -1104,6 +1326,12 @@ func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) 
 
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	var toolSchemas map[string]map[string]any
+	if len(opts) > 0 {
+		toolSchemas = opts[0].ToolSchemas
+	}
+	registerSchemasHandler(mux, toolSchemas)
 
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
@@ -1192,6 +1420,12 @@ func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
 
+	var toolSchemas map[string]map[string]any
+	if len(opts) > 0 {
+		toolSchemas = opts[0].ToolSchemas
+	}
+	registerSchemasHandler(mux, toolSchemas)
+
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:        a.Name(),
@@ -1252,6 +1486,12 @@ func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Conf
 
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+
+	var toolSchemas map[string]map[string]any
+	if len(opts) > 0 {
+		toolSchemas = opts[0].ToolSchemas
+	}
+	registerSchemasHandler(mux, toolSchemas)
 
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{

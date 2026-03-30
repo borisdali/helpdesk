@@ -1,18 +1,14 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 
 	"helpdesk/internal/audit"
@@ -38,6 +34,66 @@ type FleetPlanResponse struct {
 	WarningMessages  []string     `json:"warning_messages,omitempty"`
 }
 
+// FleetSnapshotRequest is the input to the snapshot refresh endpoint.
+type FleetSnapshotRequest struct {
+	JobDef fleet.JobDef `json:"job_def"`
+}
+
+// FleetSnapshotResponse is returned by POST /api/v1/fleet/snapshot.
+type FleetSnapshotResponse struct {
+	JobDef    fleet.JobDef `json:"job_def"`
+	JobDefRaw string       `json:"job_def_raw"`
+}
+
+// handleFleetSnapshot handles POST /api/v1/fleet/snapshot.
+// It accepts a job def, refreshes tool_snapshots from the live registry, and
+// returns the updated job def. No LLM call is made.
+func (g *Gateway) handleFleetSnapshot(w http.ResponseWriter, r *http.Request) {
+	if g.toolRegistry == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet snapshot requires tool registry")
+		return
+	}
+
+	var req FleetSnapshotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	def := req.JobDef
+	steps := def.Change.Steps
+	if len(steps) == 0 {
+		writeError(w, http.StatusBadRequest, "job_def has no steps")
+		return
+	}
+
+	// Validate all tool names exist in the registry.
+	for _, step := range steps {
+		if _, ok := g.toolRegistry.Get(step.Tool); !ok {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("unknown tool %q", step.Tool))
+			return
+		}
+	}
+
+	// Rebuild tool_snapshots from the live registry.
+	capturedAt := time.Now().UTC()
+	snapshots := make(map[string]fleet.ToolSnapshot, len(steps))
+	for _, step := range steps {
+		if entry, ok := g.toolRegistry.Get(step.Tool); ok {
+			snapshots[step.Tool] = fleet.ToolSnapshot{
+				AgentVersion:      entry.AgentVersion,
+				SchemaFingerprint: entry.SchemaFingerprint,
+				CapturedAt:        capturedAt,
+			}
+		}
+	}
+	def.ToolSnapshots = snapshots
+
+	rawBytes, _ := json.MarshalIndent(def, "", "  ")
+	slog.Info("fleet snapshot refreshed", "steps", len(steps), "tools", len(snapshots))
+	writeJSON(w, http.StatusOK, FleetSnapshotResponse{JobDef: def, JobDefRaw: string(rawBytes)})
+}
+
 // handleFleetPlan is the POST /api/v1/fleet/plan handler.
 func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -58,6 +114,10 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if g.plannerLLM == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet planner LLM not configured (HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY)")
+		return
+	}
 	if g.infra == nil {
 		writeError(w, http.StatusServiceUnavailable, "fleet planner requires infrastructure config (HELPDESK_INFRA_CONFIG)")
 		return
@@ -76,7 +136,8 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		hints = strings.Join(req.TargetHints, ", ")
 	}
 
-	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, req.Description, hints)
+	intentSection := buildIntentSection()
+	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, req.Description, hints)
 
 	// Call LLM (injectable for tests; defaults to Anthropic SDK).
 	rawJSON, err := g.plannerLLM(r.Context(), prompt)
@@ -107,11 +168,31 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	// Stamp the plan trace ID so the job file can be linked back to this audit event.
 	jobDef.PlanTraceID = traceID
 
+	// Deterministic deduplication: remove tools superseded by another tool already
+	// in the plan. Safety net: even if the LLM ignores the intent mapping, redundant
+	// tools are stripped here before validation.
+	rawNames := toolNamesFromSteps(jobDef.Change.Steps)
+	resolvedNames := g.toolRegistry.ResolveSuperseded(rawNames)
+	jobDef.Change.Steps = filterStepsByName(jobDef.Change.Steps, resolvedNames)
+
 	// Validate: all step tool names must exist in the registry.
 	steps := jobDef.Change.Steps
 	for _, step := range steps {
 		if _, ok := g.toolRegistry.Get(step.Tool); !ok {
 			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("planner returned unknown tool %q", step.Tool))
+			return
+		}
+	}
+
+	// Validate step args against each tool's InputSchema (when available).
+	for _, step := range steps {
+		entry, _ := g.toolRegistry.Get(step.Tool)
+		if entry.InputSchema == nil {
+			continue
+		}
+		if err := validateStepArgs(step.Args, entry.InputSchema); err != nil {
+			writeError(w, http.StatusUnprocessableEntity,
+				fmt.Sprintf("step %q args invalid: %s", step.Tool, err))
 			return
 		}
 	}
@@ -168,6 +249,26 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Snapshot tool schemas at plan time for drift detection at execution time.
+	capturedAt := time.Now().UTC()
+	snapshots := make(map[string]fleet.ToolSnapshot, len(steps))
+	for _, step := range steps {
+		if entry, ok := g.toolRegistry.Get(step.Tool); ok {
+			snapshots[step.Tool] = fleet.ToolSnapshot{
+				AgentVersion:      entry.AgentVersion,
+				SchemaFingerprint: entry.SchemaFingerprint,
+				CapturedAt:        capturedAt,
+			}
+		}
+	}
+	jobDef.ToolSnapshots = snapshots
+
+	// Stamp intent fields so the job can be replayed or reviewed later.
+	jobDef.PlanDescription = req.Description
+	jobDef.PlanTargetHints = req.TargetHints
+	sort.Strings(resolved)
+	jobDef.PlanServers = resolved
+
 	// Pretty-print job_def for the raw field.
 	rawJobDefBytes, _ := json.MarshalIndent(jobDef, "", "  ")
 
@@ -176,6 +277,9 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		TraceID:           traceID,
 		Endpoint:          r.URL.Path,
 		Method:            r.Method,
+		Agent:             "gateway",
+		ToolName:          "fleet_plan",
+		ActionClass:       audit.ActionRead,
 		Message:           req.Description,
 		Response:          string(rawJobDefBytes),
 		StartTime:         start,
@@ -187,6 +291,15 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 		Purpose:           purpose,
 		PurposeNote:       purposeNote,
 	})
+
+	slog.Info("fleet plan generated",
+		"trace_id", traceID,
+		"principal", principalStr,
+		"steps", len(jobDef.Change.Steps),
+		"targets_tags", jobDef.Targets.Tags,
+		"requires_approval", requiresApproval,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 
 	writeJSON(w, http.StatusOK, FleetPlanResponse{
 		JobDef:           jobDef,
@@ -226,18 +339,76 @@ func buildPlannerInfraContext(cfg *infra.Config) (summary string, restricted []s
 	return sb.String(), restricted
 }
 
-// buildPlannerToolCatalog formats all registered tools for the planner prompt.
+// buildPlannerToolCatalog formats fleet-eligible tools for the planner prompt.
+// Only tools marked FleetEligible are shown; non-fleet tools are invisible to the LLM.
+// When InputSchema is available, a parameter block is included so the LLM generates
+// correct argument names and types.
 func buildPlannerToolCatalog(r *toolregistry.Registry) string {
 	var sb strings.Builder
-	for _, entry := range r.List() {
-		sb.WriteString(fmt.Sprintf("  %s  agent=%s  class=%s  — %s\n",
-			entry.Name, entry.Agent, entry.ActionClass, entry.Description))
+	for _, entry := range r.ListFleetEligible() {
+		caps := strings.Join(entry.Capabilities, ", ")
+		sb.WriteString(fmt.Sprintf("  %s  agent=%s  class=%s  caps=[%s]  — %s\n",
+			entry.Name, entry.Agent, entry.ActionClass, caps, entry.Description))
+		if entry.InputSchema != nil {
+			sb.WriteString(fmt.Sprintf("    Parameters:\n"))
+			if props, ok := entry.InputSchema["properties"].(map[string]any); ok {
+				var required []string
+				if req, ok := entry.InputSchema["required"].([]any); ok {
+					for _, r := range req {
+						if s, ok := r.(string); ok {
+							required = append(required, s)
+						}
+					}
+				}
+				requiredSet := make(map[string]bool, len(required))
+				for _, r := range required {
+					requiredSet[r] = true
+				}
+				for paramName, paramDef := range props {
+					typeStr := "any"
+					descStr := ""
+					if def, ok := paramDef.(map[string]any); ok {
+						if t, ok := def["type"].(string); ok {
+							typeStr = t
+						}
+						if d, ok := def["description"].(string); ok {
+							descStr = d
+						}
+					}
+					req := "optional"
+					if requiredSet[paramName] {
+						req = "required"
+					}
+					if descStr != "" {
+						sb.WriteString(fmt.Sprintf("      %s (%s, %s): %s\n", paramName, typeStr, req, descStr))
+					} else {
+						sb.WriteString(fmt.Sprintf("      %s (%s, %s)\n", paramName, typeStr, req))
+					}
+				}
+			}
+		}
+	}
+	return sb.String()
+}
+
+// buildIntentSection formats the IntentMap as sorted directive lines for the prompt.
+func buildIntentSection() string {
+	intents := make([]string, 0, len(toolregistry.IntentMap))
+	for intent := range toolregistry.IntentMap {
+		intents = append(intents, intent)
+	}
+	sort.Strings(intents)
+
+	var sb strings.Builder
+	for _, intent := range intents {
+		tools := toolregistry.IntentMap[intent]
+		sb.WriteString(fmt.Sprintf("  %s → %s\n", intent, strings.Join(tools, ", ")))
 	}
 	return sb.String()
 }
 
 // assemblePlannerPrompt builds the full LLM prompt for the fleet job planner.
-func assemblePlannerPrompt(infraSummary, toolCatalog, description, hints string) string {
+func assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, description, hints string) string {
 	return fmt.Sprintf(`You are a fleet job planner for an AI database operations platform.
 Generate a valid fleet job definition as JSON based on the user's request.
 
@@ -251,6 +422,9 @@ Always add excluded server names to the excluded_servers list in your response.
 
 ## Available Tools
 
+%s
+## Intent-to-Tool Mapping
+When the request matches a known intent, use EXACTLY the listed tools — do not add others:
 %s
 ## JobDef Schema
 
@@ -286,45 +460,9 @@ Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
   "planner_notes": "<plain English: what this job does, why these tools, which servers targeted>",
   "excluded_servers": ["server1", ...],
   "warning_messages": ["..."]
-}`, infraSummary, toolCatalog, description, hints)
+}`, infraSummary, toolCatalog, intentSection, description, hints)
 }
 
-// callPlannerLLM sends the planner prompt to the Anthropic API and returns the raw response text.
-func callPlannerLLM(ctx context.Context, prompt string) (string, error) {
-	apiKey := os.Getenv("HELPDESK_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-	}
-	if apiKey == "" {
-		return "", fmt.Errorf("HELPDESK_API_KEY is not set")
-	}
-
-	modelName := os.Getenv("HELPDESK_MODEL_NAME")
-	if modelName == "" {
-		modelName = "claude-3-5-haiku-20241022"
-	}
-
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
-
-	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     anthropic.Model(modelName),
-		MaxTokens: 4096,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("anthropic API error: %w", err)
-	}
-
-	var parts []string
-	for _, block := range msg.Content {
-		if block.Type == "text" {
-			parts = append(parts, block.Text)
-		}
-	}
-	return strings.Join(parts, ""), nil
-}
 
 // resolveTargetsFromInfra resolves fleet job Targets against the infra config,
 // returning the list of matched server keys. This is the gateway-side equivalent
@@ -377,6 +515,71 @@ func resolveTargetsFromInfra(cfg *infra.Config, targets fleet.Targets) []string 
 	}
 
 	return result
+}
+
+// toolNamesFromSteps returns a deduplicated, ordered list of tool names from steps.
+func toolNamesFromSteps(steps []fleet.Step) []string {
+	seen := make(map[string]bool, len(steps))
+	var result []string
+	for _, s := range steps {
+		if !seen[s.Tool] {
+			seen[s.Tool] = true
+			result = append(result, s.Tool)
+		}
+	}
+	return result
+}
+
+// filterStepsByName returns only the steps whose Tool is in the allowed set.
+// Preserves order; drops steps with tool names not in names.
+func filterStepsByName(steps []fleet.Step, names []string) []fleet.Step {
+	allowed := make(map[string]bool, len(names))
+	for _, n := range names {
+		allowed[n] = true
+	}
+	result := make([]fleet.Step, 0, len(steps))
+	for _, s := range steps {
+		if allowed[s.Tool] {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// validateStepArgs checks step args against the tool's InputSchema.
+// It verifies no unknown parameter names (args not in schema properties) and
+// all required parameters are present. Types are not validated.
+// Returns nil if args are valid or if the schema has no properties.
+func validateStepArgs(args map[string]any, schema map[string]any) error {
+	props, _ := schema["properties"].(map[string]any)
+
+	// Check for unknown args (args not defined in schema properties).
+	if props != nil {
+		for argName := range args {
+			if _, defined := props[argName]; !defined {
+				return fmt.Errorf("unknown parameter %q (not in schema)", argName)
+			}
+		}
+	}
+
+	// Check required parameters are present.
+	var required []string
+	switch v := schema["required"].(type) {
+	case []string:
+		required = v
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				required = append(required, s)
+			}
+		}
+	}
+	for _, key := range required {
+		if _, present := args[key]; !present {
+			return fmt.Errorf("missing required parameter %q", key)
+		}
+	}
+	return nil
 }
 
 // stripMarkdownFences removes ```json ... ``` or ``` ... ``` wrappers from a string.

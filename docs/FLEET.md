@@ -2,7 +2,7 @@
 
 While resolving issues with a specific database without engaging an often lengthy vendor support protocol is useful, aiHelpDesk also offers the Fleet Management capabilities where a set of diagnostic or remediation operations can be safely repeated across multiple databases. Examples here include the diagnostic sweeps, configuration checks, table health reports, or specific targeted write operations (e.g. changing a flag, terminating idle connections, etc.) — all without manual coordination, but with the optional human operator approval for the mission critical databases.
 
-To be sure, safety is the key here, especially for the mutations that target more than a single database and so multiple precaution, verification and approval mechanisms are part of this aiHelpDesk Fleet Management module as described on this page.
+To be sure, safety is the key here, especially for the mutations that target more than a single database and so multiple safeguard, verification and approval mechanisms are part of this aiHelpDesk Fleet Management module as described on this page.
 
 The core architectural element of this aiHelpDesk module is the `fleet-runner` that is designed to apply a sequence of operations across a subset of `infrastructure.json` targets via a staged progressive rollout with the optional canary and wave phases, preflight checks, circuit breaker, full mandatory [audit trail](AUDIT.md#65-fleet-jobs) while also adhering to the normal aiHelpDesk [identity & access](IDENTITY.md#24-fleet-runner-authentication) mechanisms.
 
@@ -114,6 +114,104 @@ If neither `tags` nor `names` is specified, all servers in `infrastructure.json`
 | `dry_run` | `false` | Print the plan without contacting Gateway or auditd. |
 | `count_partial_as_success` | `false` | When `true`, servers with `partial` status (continue-on-failure steps) do not count toward the circuit-breaker failure rate. |
 | `approval_timeout_seconds` | `0` | How long to wait for human approval before aborting. `0` = wait indefinitely. |
+| `schema_drift` | `"abort"` | Policy for schema drift detection: `"abort"` (default), `"warn"`, or `"ignore"`. Overrides the `--schema-drift` flag and `HELPDESK_SCHEMA_DRIFT` env var for this specific job. |
+
+### `tool_snapshots` object
+
+`tool_snapshots` records the schema fingerprint and agent version of every tool in the job at snapshot time. Fleet-runner compares these against the live registry at execution time and applies the `schema_drift` policy if anything changed.
+
+```json
+{
+  "name": "prod-connection-health",
+  "change": { "steps": [...] },
+  "targets": { "tags": ["production"] },
+  "strategy": { "canary_count": 1 },
+  "tool_snapshots": {
+    "check_connection": {
+      "agent_version": "v0.6.0",
+      "schema_fingerprint": "a3f9c2b17e84",
+      "captured_at": "2026-03-20T14:22:00Z"
+    }
+  }
+}
+```
+
+**Planner-generated jobs** have `tool_snapshots`, `plan_description`, `plan_target_hints`, and `plan_servers` populated automatically. These fields enable `--replan` (auto-replan on drift) and the review endpoint's new-server detection.
+
+**Hand-crafted or edited jobs** need snapshots added before running. Use `--refresh-snapshots` to capture the current live state:
+
+```bash
+fleet-runner --job-file jobs/prod-sweep.json --refresh-snapshots
+# Writes updated tool_snapshots into the file and exits. Then run normally:
+fleet-runner --job-file jobs/prod-sweep.json
+```
+
+Or use the gateway API directly (useful from scripts or CI):
+
+```bash
+cat jobs/prod-sweep.json \
+  | jq '{job_def: .}' \
+  | curl -s -X POST http://localhost:8080/api/v1/fleet/snapshot \
+      -H "Content-Type: application/json" -d @- \
+  | jq -r '.job_def_raw' > jobs/prod-sweep.json
+```
+
+Jobs without `tool_snapshots` are treated as a drift condition and abort by default. Use `--schema-drift=ignore` to run them without snapshots.
+
+---
+
+## Schema drift detection
+
+Fleet jobs are created at plan time but may run hours or days later. If an agent is redeployed with a changed tool schema (renamed argument, new required field, removed parameter) between plan and execution, the job would silently dispatch stale args to every target server.
+
+Schema drift detection prevents this by comparing the schema fingerprint recorded at plan time against the live registry at the start of execution.
+
+### Detection policy
+
+Policy is resolved in priority order (highest wins):
+
+1. `strategy.schema_drift` in the job file
+2. `--schema-drift` CLI flag
+3. `HELPDESK_SCHEMA_DRIFT` env var
+4. `"abort"` (hardcoded default)
+
+| Condition | `abort` (default) | `warn` | `ignore` |
+|-----------|------------------|--------|---------|
+| No change | silent | silent | silent |
+| Version changed, same fingerprint | warn + proceed | warn + proceed | silent |
+| Fingerprint changed | **error — abort** | warn + proceed | silent |
+| Tool removed from registry | **error — abort** | warn + proceed | silent |
+| No `tool_snapshots` in job file | **error — abort** | warn + proceed | silent |
+
+### Abort error format
+
+```
+schema drift detected for tool "get_status_summary":
+  planned against: fingerprint=a3f9c2  version=0.5.0  captured=2026-03-15T10:30:00Z
+  current:         fingerprint=def456  version=0.6.0
+  → aborting (set strategy.schema_drift=warn to override)
+```
+
+The job exits before any server is contacted. No approval request is created.
+
+### Dry-run behavior
+
+In dry-run mode (`--dry-run` or `strategy.dry_run: true`), drift results are printed as a table even when the policy is `"ignore"`, giving operators full visibility before committing to execution.
+
+### Overriding drift policy for a single job
+
+Add `"schema_drift": "warn"` to the `strategy` object in the job file before running:
+
+```json
+{
+  "strategy": {
+    "canary_count": 1,
+    "schema_drift": "warn"
+  }
+}
+```
+
+This overrides both the CLI flag and environment variable for that specific job.
 
 ---
 
@@ -156,19 +254,25 @@ Or use the `approvals` CLI:
 ```
 fleet-runner [flags]
 
-Required:
-  --job-file string     Path to JSON job definition file
+Job input (one of --job-file or --plan-description is required):
+  --job-file string           Path to JSON job definition file
+  --plan-description string   Call the fleet planner with this description instead of loading --job-file
+  --plan-target-hints string  Comma-separated target hints passed to the planner with --plan-description
 
 Optional:
-  --gateway string      Gateway URL (default: HELPDESK_GATEWAY_URL or http://localhost:8080)
-  --audit-url string    Auditd URL for job tracking (default: HELPDESK_AUDIT_URL or http://localhost:1199)
-  --api-key string      Service account API key (default: HELPDESK_CLIENT_API_KEY)
-  --infra string        Path to infrastructure.json (default: HELPDESK_INFRA_CONFIG or infrastructure.json)
-  --dry-run             Override strategy.dry_run: print plan, exit 0
-  --canary int          Override strategy.canary_count
-  --wave-size int       Override strategy.wave_size
-  --pause int           Override strategy.wave_pause_seconds
-  --log-level string    Log level: debug, info, warn, error (default: info)
+  --gateway string             Gateway URL (default: HELPDESK_GATEWAY_URL or http://localhost:8080)
+  --audit-url string           Auditd URL for job tracking (default: HELPDESK_AUDIT_URL or http://localhost:1199)
+  --api-key string             Service account API key (default: HELPDESK_CLIENT_API_KEY)
+  --infra string               Path to infrastructure.json (default: HELPDESK_INFRA_CONFIG or infrastructure.json)
+  --dry-run                    Override strategy.dry_run: print plan, exit 0
+  --canary int                 Override strategy.canary_count
+  --wave-size int              Override strategy.wave_size
+  --pause int                  Override strategy.wave_pause_seconds
+  --schema-drift string        Schema drift policy: abort, warn, ignore (default: abort; overridden by strategy.schema_drift in the job file)
+  --refresh-snapshots          Refresh tool_snapshots from live registry, write back to job file, and exit (does not run the job)
+  --replan                     On schema drift, replan from stored plan_description; write fresh plan to --job-file and stop for review
+  --replan=auto                On schema drift, replan and continue execution (aborts if replanned plan diverges significantly)
+  --log-level string           Log level: debug, info, warn, error (default: info)
 ```
 
 Environment variables (take precedence over defaults, overridden by flags):
@@ -181,6 +285,7 @@ Environment variables (take precedence over defaults, overridden by flags):
 | `HELPDESK_INFRA_CONFIG` | Path to infrastructure.json |
 | `HELPDESK_FLEET_JOB_FILE` | Path to job file |
 | `HELPDESK_CLIENT_USER` | Identity recorded as `submitted_by` (default: `fleet-runner`) |
+| `HELPDESK_SCHEMA_DRIFT` | Default schema drift policy (`abort`, `warn`, `ignore`). Overridden by `--schema-drift` flag; both overridden by `strategy.schema_drift` in the job file. |
 
 ---
 
@@ -237,7 +342,7 @@ Response:
 ### Save and run the plan
 
 ```bash
-# Save the job definition
+# Save the job definition (tool_snapshots included automatically)
 curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
   -H "Content-Type: application/json" \
   -d '{"description": "Check connection health on all production databases"}' \
@@ -251,6 +356,200 @@ cat jobs/prod-health.json
 ./fleet-runner --job-file jobs/prod-health.json
 ```
 
+### Refreshing snapshots after editing a job file
+
+If you edit a planner-generated job (change targets, add a step, adjust args) or author one from scratch, refresh `tool_snapshots` before running so drift detection has an accurate baseline:
+
+```bash
+./fleet-runner --job-file jobs/prod-health.json --refresh-snapshots
+```
+
+This calls `POST /api/v1/fleet/snapshot`, replaces `tool_snapshots` in the file with the current live registry state, and exits. The job file is updated in place — commit it to version control after refreshing if the job is stored there.
+
+The same endpoint is available directly for scripting:
+
+```bash
+# Refresh snapshots via API (pipe in, pipe out)
+cat jobs/prod-health.json \
+  | jq '{job_def: .}' \
+  | curl -s -X POST http://localhost:8080/api/v1/fleet/snapshot \
+      -H "Content-Type: application/json" -d @- \
+  | jq -r '.job_def_raw' > jobs/prod-health.json
+```
+
+`POST /api/v1/fleet/snapshot` accepts `{"job_def": {...}}` and returns `{"job_def": {...}, "job_def_raw": "..."}`. It validates that all tool names exist in the registry (returns `422` for unknown tools) but makes no LLM call.
+
+### Running the planner directly from fleet-runner
+
+Use `--plan-description` to skip the job file entirely and call the planner at startup:
+
+```bash
+./fleet-runner \
+  --plan-description "Check connection health on all staging databases" \
+  --plan-target-hints "staging" \
+  --dry-run
+```
+
+The planner is called, the resulting job def is used directly for the run. If `--job-file` is also specified, the generated job is saved there for audit / reuse before execution begins.
+
+This is the recommended path for **CronJobs and scheduled automation** — no stale job file, always a fresh plan against the current tool catalog.
+
+### Auto-replan on schema drift
+
+When drift is detected, `--replan` calls the planner using the job's stored `plan_description` and `plan_target_hints` to generate a fresh plan against the current tool catalog.
+
+`--replan` has two modes:
+
+**`--replan` (write-and-stop, recommended):** generates the fresh plan, writes it back to `--job-file`, and exits. The operator reviews the diff before re-running:
+
+```bash
+./fleet-runner --job-file jobs/weekly-sweep.json --replan
+# → rewrites jobs/weekly-sweep.json with the fresh plan, exits 0
+# review: git diff jobs/weekly-sweep.json
+./fleet-runner --job-file jobs/weekly-sweep.json   # re-run without --replan
+```
+
+If `--job-file` is not set, the fresh plan is printed to stdout.
+
+**`--replan=auto` (execute immediately):** generates the fresh plan and continues execution without stopping. Aborts if the replanned plan diverges significantly from the original (tool set changed or step count shifted by more than 50%):
+
+```bash
+./fleet-runner --job-file jobs/weekly-sweep.json --replan=auto
+```
+
+If `--replan=auto` aborts due to divergence, re-run with `--replan` to write the plan and review it before executing.
+
+**When replan cannot proceed:**
+
+| Condition | Behaviour |
+|-----------|-----------|
+| `plan_description` is empty | Falls through to normal drift abort — use `--refresh-snapshots` instead |
+| Gateway unreachable | Hard abort |
+| LLM timeout (>120 s) | Hard abort |
+| Auth failure (401/403) | Hard abort — check `--api-key` |
+| Fresh plan also drifts | Hard abort — agents may have been redeployed mid-run |
+| No servers match new plan targets | Hard abort |
+| Tool behavior changed (same schema) | Replan succeeds silently — fingerprints are signature-based only; a version bump in `agent_version` is the safety net |
+
+**Requirement:** the job file must have been generated by the planner (so `plan_description` is populated). Hand-crafted files without `plan_description` cannot be replanned — run `--refresh-snapshots` instead.
+
+### Job review endpoint
+
+`POST /api/v1/fleet/review` performs a pure registry analysis of a job file with no LLM call and no execution. Use it in CI pipelines, pre-run checks, or approval workflows:
+
+```bash
+cat jobs/prod-sweep.json \
+  | jq '{job_def: .}' \
+  | curl -s -X POST http://localhost:8080/api/v1/fleet/review \
+      -H "Content-Type: application/json" -d @- \
+  | jq .
+```
+
+Response:
+
+```json
+{
+  "ok": false,
+  "issues": [
+    {
+      "severity": "error",
+      "code": "schema_drift",
+      "message": "tool \"get_table_stats\" schema changed: planned fingerprint=a3f9c2, current=def456 ..."
+    },
+    {
+      "severity": "info",
+      "code": "new_servers",
+      "message": "2 server(s) added since plan: [prod-db-4, prod-db-5] — they will be included in the next run"
+    }
+  ],
+  "snapshot_age": "72h15m0s",
+  "new_servers": ["prod-db-4", "prod-db-5"]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `ok` | `true` if no errors or warnings found. |
+| `issues` | List of findings. Severity: `error`, `warning`, `info`. |
+| `snapshot_age` | Age of the oldest `tool_snapshots` entry — useful to detect stale plans. |
+| `new_servers` | Servers in the current infra that were absent at plan time (from `plan_servers`). |
+
+Issue codes:
+
+| Code | Severity | Meaning |
+|------|----------|---------|
+| `unknown_tool` | error | A step tool is no longer in the registry. |
+| `schema_drift` | error | Tool fingerprint changed since the plan was created. |
+| `version_changed` | warning | Agent version changed but fingerprint is the same. |
+| `tool_removed` | warning | Tool was in registry at plan time but is gone now. |
+| `no_snapshots` | warning | Job has no `tool_snapshots`; drift cannot be checked. |
+| `restricted_server` | warning | Job targets a sensitivity-tagged server. |
+| `new_servers` | info | New servers match the targets since the plan was created. |
+
+### Playbooks
+
+A **playbook** is a saved NL intent — a name, description, and optional target hints — stored in auditd. Running a playbook calls the planner fresh, always producing a plan against the current tool catalog and infrastructure state.
+
+**Create a playbook:**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "weekly-staging-health",
+    "description": "Check connection health and table statistics on all staging databases",
+    "target_hints": ["staging"],
+    "created_by": "alice@example.com"
+  }'
+```
+
+Response: `{"playbook_id": "pb_a1b2c3d4", "name": "weekly-staging-health", ...}`
+
+**List playbooks:**
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbooks | jq .playbooks
+```
+
+**Run a playbook (generates a fresh plan):**
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
+  -H "Content-Type: application/json" | jq '.job_def_raw' -r > /tmp/plan.json
+
+# Review, then run:
+./fleet-runner --job-file /tmp/plan.json --dry-run
+./fleet-runner --job-file /tmp/plan.json
+```
+
+`/run` returns the same `FleetPlanResponse` as `/api/v1/fleet/plan`. The returned job def includes fresh `tool_snapshots` and `plan_description` so `--replan` and `--refresh-snapshots` work as expected.
+
+**For scheduled execution** (CronJob), combine playbooks with `--plan-description`:
+
+```bash
+# CronJob command — always fresh plan, never a stale file:
+./fleet-runner \
+  --plan-description "Check connection health on all staging databases" \
+  --plan-target-hints "staging" \
+  --replan=auto
+```
+
+Or call the playbook run endpoint and pipe the result directly to fleet-runner:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
+  | jq -r '.job_def_raw' \
+  | fleet-runner --job-file /dev/stdin
+```
+
+**Delete a playbook:**
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4
+```
+
+Playbooks are stored in auditd's SQLite/Postgres database and are accessible directly via `GET /v1/fleet/playbooks` on the auditd service.
+
 ### Using the helpdesk client
 
 ```bash
@@ -262,14 +561,29 @@ The client prints the plan with approval warnings and a ready-to-run command.
 
 ### Planner safety guarantees
 
-All three checks are deterministic and run after the LLM response — they cannot be bypassed by prompt content.
+All four checks listed below are deterministic and run after the LLM response. They cannot be bypassed by any prompt content.
 
 - **Unknown tools are rejected** with `422`. Every generated tool name is validated against the live tool registry.
+- **Invalid step args are rejected** with `422`. When a tool has a declared parameter schema, the Planner validates each step's args: unknown parameters (not in the schema's `properties`) and missing required parameters both produce a `422` error with a descriptive message. Type mismatches are not checked — JSON number/string coercion is left to the agent.
 - **Unknown tags are rejected** with `422`. Every tag in `targets.tags` must exist verbatim in `infrastructure.json`. The Planner will not infer or substitute tag names (e.g. "staging" → "development"). The error response lists all available tags so you can correct the description.
 - **Restricted servers are rejected** with `422`. Any server with a non-empty `sensitivity` field that appears in the resolved target set causes an error. Refine the description or add the server to `targets.exclude`.
-- **The Planner never auto-submits.** A human must review and run the job.
 
+It was already stated earlier in this doc, but it bears repreating that **The Planner never auto-submits.** A human must review and run the job.
 `warning_messages` in the response are genuinely non-fatal notices (e.g. broad target scope, empty exclusion list). They do not indicate a validation failure.
+
+### Parameter schemas in the tool catalog
+
+When tools have declared parameter schemas (populated via `ComputeInputSchemas` in the agent), the Planner includes a `Parameters:` block in its tool catalog. This gives the LLM exact parameter names, types, and required markers — reducing hallucinated argument names significantly:
+
+```
+  get_status_summary  agent=database  class=read  caps=[uptime, version, ...]
+    Description: Returns a concise status snapshot...
+    Parameters:
+      connection_string (string, required): PostgreSQL connection string
+      verbose (boolean): Include extended diagnostics
+```
+
+Tools without a declared schema fall back to the single-line format. Plan quality degrades gracefully rather than breaking.
 
 ### Configuration
 
@@ -503,3 +817,62 @@ Query all events for a fleet job:
 curl "http://localhost:1199/v1/events?limit=200" | \
   jq '.[] | select(.purpose_note | startswith("job_id=flj_abc123"))'
 ```
+
+---
+
+## Fleet rollback
+
+A completed fleet job can be reversed by constructing a **reverse job** — the same servers and steps, but in the opposite order with inverted arguments. The reverse job goes through the normal fleet approval pipeline and produces its own full audit trail.
+
+### How it works
+
+1. `fleet-runner --rollback flj_abc12345` calls `POST /v1/fleet/jobs/flj_abc12345/rollback` on auditd
+2. `BuildRollbackJobDef` reads the original job definition, reverses the step order, and moves canary servers to the end (they ran first originally, they roll back last)
+3. The reverse job definition is submitted as a new fleet job (`flj_rbk_*`)
+4. Approval gate applies — same role requirements as any write/destructive fleet job
+5. `fleet-runner` executes the reverse job; every tool call carries `X-Rollback-Of: flj_abc12345` in the audit trail
+
+### Step reversal and canary ordering
+
+Given an original job with steps `[A, B, C]` on servers `[canary, wave-1-db-1, wave-1-db-2]`, the reverse job runs `[C, B, A]` on servers `[wave-1-db-1, wave-1-db-2, canary]`.
+
+This ensures:
+- The most recently applied change is undone first
+- The canary (highest-risk server) is reverted last, after the bulk is confirmed clean
+
+### Scope
+
+By default the rollback targets all servers from the original job. The `--scope` flag narrows it:
+
+| Scope | Effect |
+|---|---|
+| `all` | All servers (default) |
+| `canary_only` | Only the canary server(s) |
+| `failed_only` | Only servers whose status was `failed` in the original run |
+| `["server-a","server-b"]` | Explicit list (JSON array) |
+
+### CLI
+
+```bash
+# Dry-run: inspect the reverse job definition
+fleet-runner --rollback flj_abc12345 --dry-run
+
+# Roll back only failed servers
+fleet-runner --rollback flj_abc12345 --scope failed
+
+# Roll back everything (requires approval)
+fleet-runner --rollback flj_abc12345
+```
+
+### Status and audit trail
+
+```bash
+# Check rollback job status
+curl http://localhost:1199/v1/fleet/jobs/flj_abc12345/rollback | jq .
+
+# Audit events for the rollback job
+curl "http://localhost:1199/v1/events?limit=200" | \
+  jq '[.[] | select(.purpose_note | contains("flj_rbk_"))]'
+```
+
+See [ROLLBACK.md](ROLLBACK.md#6-fleet-rollback) for the full design including step reversal logic, inverse operation construction, and governance wiring.

@@ -54,6 +54,12 @@ var ToolClassification = map[string]ActionClass{
 	"restart_deployment": ActionDestructive,
 	"delete_pod":         ActionDestructive,
 
+	// Rollback operations — same action class as the original mutation they reverse
+	"rollback_scale_deployment": ActionDestructive,
+	"rollback_exec_update":      ActionDestructive,
+	"rollback_exec_delete":      ActionDestructive,
+	"rollback_exec_insert":      ActionWrite,
+
 	// Incident agent tools
 	"create_incident_bundle": ActionRead,
 	"list_incidents":         ActionRead,

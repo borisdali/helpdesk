@@ -1,6 +1,7 @@
 // Package main implements the REST gateway — a thin HTTP layer that translates
 // REST requests into A2A JSON-RPC calls to the helpdesk sub-agents.
-// No LLM is needed in the gateway itself; sub-agents handle AI reasoning.
+// The gateway itself uses an LLM only for the fleet job planner (POST /api/v1/fleet/plan);
+// all other AI reasoning is delegated to the sub-agents.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/buildinfo"
@@ -63,12 +65,16 @@ func main() {
 
 	gw := NewGateway(registry)
 
-	// Build tool registry from discovered agent cards.
+	// Build tool registry from discovered agent cards and schemas.
 	agentCards := make(map[string]*a2a.AgentCard, len(registry))
+	agentSchemas := make(map[string]map[string]map[string]any, len(registry))
 	for name, agent := range registry {
 		agentCards[name] = agent.Card
+		if agent.Schemas != nil {
+			agentSchemas[name] = agent.Schemas
+		}
 	}
-	toolReg := toolregistry.Build(agentCards, audit.ToolClassification)
+	toolReg := toolregistry.Build(agentCards, agentSchemas, audit.ToolClassification)
 	gw.SetToolRegistry(toolReg)
 	slog.Info("tool registry built", "tools", len(toolReg.List()))
 
@@ -79,6 +85,7 @@ func main() {
 		os.Exit(1)
 	}
 	gw.SetIdentityProvider(idProvider)
+	gw.SetUsersFile(os.Getenv("HELPDESK_USERS_FILE"))
 	gw.SetOperatingMode(os.Getenv("HELPDESK_OPERATING_MODE"))
 	slog.Info("identity provider initialized", "mode", os.Getenv("HELPDESK_IDENTITY_PROVIDER"))
 
@@ -91,6 +98,7 @@ func main() {
 
 	// Initialize audit store if enabled.
 	auditURL := os.Getenv("HELPDESK_AUDIT_URL")
+	auditAPIKey := os.Getenv("HELPDESK_AUDIT_API_KEY")
 	auditEnabled := os.Getenv("HELPDESK_AUDIT_ENABLED") == "true" || os.Getenv("HELPDESK_AUDIT_ENABLED") == "1"
 
 	// Always set audit URL for governance queries (even if audit logging is disabled)
@@ -103,7 +111,11 @@ func main() {
 		var auditor audit.Auditor
 		if auditURL != "" {
 			// Use central audit service (preferred)
-			auditor = audit.NewRemoteStore(auditURL)
+			remoteStore := audit.NewRemoteStore(auditURL)
+			if auditAPIKey != "" {
+				remoteStore = remoteStore.WithAPIKey(auditAPIKey)
+			}
+			auditor = remoteStore
 			slog.Info("audit logging enabled (remote)", "url", auditURL)
 		} else {
 			// Fall back to local store with socket (legacy mode)
@@ -150,6 +162,33 @@ func main() {
 				"db_servers", len(infraConfig.DBServers),
 				"k8s_clusters", len(infraConfig.K8sClusters),
 				"vms", len(infraConfig.VMs))
+		}
+	} else {
+		slog.Warn("HELPDESK_INFRA_CONFIG not set — fleet planner (POST /api/v1/fleet/plan) will return 503")
+	}
+
+	// Initialize fleet planner LLM (vendor-agnostic via agentutil).
+	plannerAPIKey := os.Getenv("HELPDESK_API_KEY")
+	if plannerAPIKey == "" {
+		plannerAPIKey = os.Getenv("ANTHROPIC_API_KEY") // convenience fallback
+	}
+	plannerCfg := agentutil.Config{
+		ModelVendor: os.Getenv("HELPDESK_MODEL_VENDOR"),
+		ModelName:   os.Getenv("HELPDESK_MODEL_NAME"),
+		APIKey:      plannerAPIKey,
+	}
+	if plannerCfg.ModelName == "" {
+		plannerCfg.ModelName = "claude-haiku-4-5-20251001"
+	}
+	if plannerCfg.ModelVendor == "" || plannerCfg.APIKey == "" {
+		slog.Warn("fleet planner LLM not configured (HELPDESK_MODEL_VENDOR or HELPDESK_API_KEY not set) — POST /api/v1/fleet/plan will return 503")
+	} else {
+		completer, err := agentutil.NewTextCompleter(context.Background(), plannerCfg)
+		if err != nil {
+			slog.Warn("fleet planner LLM initialization failed — POST /api/v1/fleet/plan will return 503", "err", err)
+		} else {
+			gw.SetPlannerLLM(completer)
+			slog.Info("fleet planner LLM configured", "vendor", plannerCfg.ModelVendor, "model", plannerCfg.ModelName)
 		}
 	}
 

@@ -27,6 +27,11 @@ func agentCardServer(t *testing.T, card a2a.AgentCard) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(card)
 	})
+	// /schemas is required by discovery; return an empty schema map.
+	mux.HandleFunc("/schemas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{}"))
+	})
 	return httptest.NewServer(mux)
 }
 
@@ -142,6 +147,33 @@ func TestDiscover_AllFailReturnsError(t *testing.T) {
 	_, err := Discover([]string{"http://127.0.0.1:1"})
 	if err == nil {
 		t.Fatal("expected error when all URLs fail, got nil")
+	}
+}
+
+func TestDiscover_SchemasPopulated(t *testing.T) {
+	mux := http.NewServeMux()
+	card := validAgentCard("schema-agent")
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(card)
+	})
+	mux.HandleFunc("/schemas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"check_connection":{"type":"object","properties":{"connection_string":{"type":"string"}}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	agents, err := Discover([]string{srv.URL})
+	if err != nil {
+		t.Fatalf("Discover() error: %v", err)
+	}
+	agent := agents["schema-agent"]
+	if agent.Schemas == nil {
+		t.Fatal("expected Schemas to be populated")
+	}
+	if _, ok := agent.Schemas["check_connection"]; !ok {
+		t.Error("expected check_connection in schemas")
 	}
 }
 

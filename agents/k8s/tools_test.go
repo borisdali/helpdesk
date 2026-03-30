@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,6 +18,7 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 )
 
@@ -550,8 +553,10 @@ func TestRestartDeploymentTool_PolicyDenied(t *testing.T) {
 
 func TestScaleDeploymentTool_Success(t *testing.T) {
 	mockOutput := `deployment.apps "web" scaled` + "\n"
-	// Call 1: scale. Call 2: verification get spec.replicas → matches requested 5.
+	// Call 1: pre-state read (current replicas before scale).
+	// Call 2: scale. Call 3: verification get spec.replicas → matches requested 5.
 	defer withMockKubectlSequence(
+		kubectlResponse{out: "3", err: nil},
 		kubectlResponse{out: mockOutput, err: nil},
 		kubectlResponse{out: "5", err: nil},
 	)()
@@ -572,8 +577,10 @@ func TestScaleDeploymentTool_Success(t *testing.T) {
 
 func TestScaleDeploymentTool_ScaleToZero(t *testing.T) {
 	mockOutput := `deployment.apps "batch-worker" scaled` + "\n"
-	// Call 1: scale to 0. Call 2: verification get spec.replicas → "0".
+	// Call 1: pre-state read (current replicas before scale).
+	// Call 2: scale to 0. Call 3: verification get spec.replicas → "0".
 	defer withMockKubectlSequence(
+		kubectlResponse{out: "2", err: nil},
 		kubectlResponse{out: mockOutput, err: nil},
 		kubectlResponse{out: "0", err: nil},
 	)()
@@ -589,6 +596,88 @@ func TestScaleDeploymentTool_ScaleToZero(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "scaled") {
 		t.Errorf("scaleDeploymentTool() output = %q, want 'scaled'", result.Output)
+	}
+}
+
+func TestScaleDeploymentTool_CapturesPreState(t *testing.T) {
+	// Verifies that scaleDeploymentImpl reads the current replica count before
+	// scaling and stores it as PreState in the audit event. Uses a real
+	// ToolAuditor backed by an in-process audit store.
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_prestate_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	defer withZeroVerifyConfig()()
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_prestate", "trace_prestate")
+	defer func() { toolAuditor = origAuditor }()
+
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "3", err: nil},                                    // pre-state read → previous = 3
+		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // scale
+		kubectlResponse{out: "5", err: nil},                                    // verify
+	)()
+
+	ctx := newK8sTestContext()
+	_, err = scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "default",
+		DeploymentName: "web",
+		Replicas:       5,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "scale_deployment",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) == 0 {
+		t.Fatal("no scale_deployment audit event found")
+	}
+	ev := events[0]
+	if ev.Tool == nil || len(ev.Tool.PreState) == 0 {
+		t.Fatal("PreState is empty in audit event")
+	}
+	var pre audit.ScalePreState
+	if jsonErr := json.Unmarshal(ev.Tool.PreState, &pre); jsonErr != nil {
+		t.Fatalf("unmarshal PreState: %v", jsonErr)
+	}
+	if pre.PreviousReplicas != 3 {
+		t.Errorf("PreviousReplicas = %d, want 3", pre.PreviousReplicas)
+	}
+	if pre.DeploymentName != "web" {
+		t.Errorf("DeploymentName = %q, want web", pre.DeploymentName)
+	}
+}
+
+func TestScaleDeploymentTool_PreStateReadFailure_ToolStillRuns(t *testing.T) {
+	// If the pre-state kubectl read fails, the scale must still proceed.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "", err: fmt.Errorf("connection refused")},        // pre-state read fails
+		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // scale
+		kubectlResponse{out: "2", err: nil},                                    // verify
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "default",
+		DeploymentName: "web",
+		Replicas:       2,
+	})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "scaled") {
+		t.Errorf("output = %q, want 'scaled'", result.Output)
 	}
 }
 

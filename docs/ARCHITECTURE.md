@@ -465,7 +465,8 @@ helpdesk/
 ### 10.1 Adding a New Agent
 
 1. Create a new directory under `agents/` (e.g., `agents/myagent/`)
-2. Write `main.go` using the `agentutil` SDK:
+2. Define tools in `tools.go` using `functiontool.New()` — see [10.2](#102-adding-tools-to-existing-agents).
+3. Write `main.go` using the `agentutil` SDK. Call `ComputeSchemaFingerprints` and `ComputeInputSchemas` after creating the tool slice, then pass the results via `CardOptions`:
    ```go
    package main
 
@@ -479,23 +480,52 @@ helpdesk/
        cfg := agentutil.MustLoadConfig("localhost:1200")
        ctx := context.Background()
        llm, _ := agentutil.NewLLM(ctx, cfg)
-       // create tools with functiontool.New(...)
+
+       tools, _ := createTools()
+
        agent, _ := llmagent.New(llmagent.Config{...})
-       agentutil.Serve(ctx, agent, cfg)
+
+       cardOpts := agentutil.CardOptions{
+           // Fleet taxonomy (optional — add when tools should appear in fleet plans)
+           SkillFleetEligible: map[string]bool{
+               "myagent-my_summary_tool": true,
+           },
+           SkillCapabilities: map[string][]string{
+               "myagent-my_summary_tool": {toolregistry.CapUptime},
+           },
+           // Schema fingerprinting — always include; enables drift detection and
+           // planner accuracy. Computed automatically from tool declarations.
+           SkillSchemaHash: agentutil.ComputeSchemaFingerprints("myagent", tools),
+           ToolSchemas:     agentutil.ComputeInputSchemas(tools),
+       }
+       agentutil.ServeWithTracing(ctx, agent, cfg, traceStore, cardOpts)
    }
    ```
-3. Define tools in `tools.go` using `functiontool.New()` with the signature:
-   ```go
-   func myTool(ctx tool.Context, args MyArgs) (MyResult, error)
-   ```
-4. Add the agent's URL to `agents.json` or `HELPDESK_AGENT_URLS`
+4. Add the agent's URL to `HELPDESK_AGENT_URLS`.
+
+`ServeWithTracing` (and `ServeWithTracingAndDirectTools`) automatically registers the `GET /schemas` endpoint from `ToolSchemas`. Gateway discovery fetches this endpoint after the agent card — it is required and the agent will be skipped if it is missing.
 
 ### 10.2 Adding Tools to Existing Agents
 
-1. Define the args struct with JSON schema tags
-2. Implement the tool function returning `(ResultStruct, error)`
-3. Create the tool with `functiontool.New()`
-4. Add to the agent's `Tools` slice in `createTools()`
+1. **Define the args struct.** Use `json:` tags for field names and `jsonschema:` tags for descriptions and required markers. `additionalProperties: false` is enforced automatically by the ADK schema library — no extra work needed.
+   ```go
+   type MyToolArgs struct {
+       ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string."`
+       PID              int    `json:"pid"                         jsonschema:"required,The backend PID to act on."`
+   }
+   ```
+   - `omitempty` on a field → field is **optional** (not in `required[]`)
+   - No `omitempty` + `jsonschema:"required,..."` prefix → field is **required**
+   - The text after `required,` (or the full tag value when not required) becomes the field's `description`
+
+2. **Implement the tool function** returning `(ResultStruct, error)`:
+   ```go
+   func myTool(ctx tool.Context, args MyToolArgs) (MyResult, error) { ... }
+   ```
+
+3. **Create the tool** with `functiontool.New()` and add it to the `[]tool.Tool` slice returned by `createTools()`.
+
+4. **Schema and fingerprint update automatically.** Because `main.go` calls `ComputeSchemaFingerprints` and `ComputeInputSchemas` over the full tool slice at startup, the new tool's schema appears at `GET /schemas`, its fingerprint appears in the agent card tags and the tool registry, and the fleet planner's catalog gains a parameter block for it — all without any further changes.
 
 ## 11. Agent-to-Agent Integration
 
@@ -700,33 +730,35 @@ per-step status tracking, and the NL planner.
 
 ### 12.1.1 Tool Registry
 
-The gateway builds a **Tool Registry** at startup from loaded agent cards and
-the `ToolClassification` map (`internal/audit/action.go`). The registry:
+The gateway builds a **Tool Registry** at startup from loaded agent cards,
+the `GET /schemas` endpoint fetched from each agent, and the `ToolClassification`
+map (`internal/audit/action.go`). The registry:
 
-- maps tool name → agent, description, input schema, action class
+- maps tool name → agent, description, input schema, action class, fleet taxonomy, `agent_version`, `schema_fingerprint`
 - powers `GET /api/v1/tools` for operators and automation
-- is used by the NL fleet planner to validate generated tool names
-- enables `fleet-runner --preflight` to verify every tool in a job exists
-  before submitting
+- is used by the NL fleet planner to build a parameter-aware tool catalog and validate generated tool names and args
+- enables `fleet-runner --preflight` to verify every tool in a job exists before submitting
+- provides live fingerprints and agent versions for schema drift detection at execution time
 
 ### 12.1.2 File Structure (fleet additions)
 
 ```
 cmd/
 ├── fleet-runner/        # fleet job execution CLI
-│   ├── main.go          # flags, config, job submission
+│   ├── main.go          # flags, config, job submission, --schema-drift flag
 │   ├── runner.go        # executeSteps, callGatewayTool
 │   ├── stages.go        # canary/wave logic, circuit breaker, approval gate
 │   ├── submit.go        # register job + server + step records in auditd
 │   ├── preflight.go     # tool existence check before submission
 │   ├── approve.go       # approval polling
+│   ├── schemadrift.go   # CheckSchemaDrift, SchemaDriftResult
 │   └── targets.go       # server selection from infra config
 │
 internal/
 ├── fleet/
-│   └── schema.go        # JobDef, Change, Step, NormalizeChange
+│   └── schema.go        # JobDef, Change, Step, ToolSnapshot, NormalizeChange
 ├── toolregistry/
-│   └── registry.go      # ToolEntry, Registry, Build, Validate
+│   └── registry.go      # ToolEntry (incl. AgentVersion, SchemaFingerprint), Registry, Build, Validate
 ```
 
 ## 13 Troubleshooting

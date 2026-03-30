@@ -533,6 +533,56 @@ To approve or deny, use the auditd approval endpoints directly (see below) — t
 
 ---
 
+### Rollback endpoints (auditd direct)
+
+Rollback endpoints are available directly on auditd (`http://localhost:1199`). The gateway does not proxy them. See [ROLLBACK.md](ROLLBACK.md) for full semantics.
+
+#### `POST /v1/rollbacks`
+
+Initiate a rollback for a prior mutation event. Returns `422` if the event is not reversible (includes `not_reversible_reason`). Returns `409` if an active rollback already exists for that event. Pass `"dry_run": true` to receive the plan without executing.
+
+```bash
+# Dry-run: inspect the inverse operation before committing
+curl -s -X POST http://localhost:1199/v1/rollbacks \
+  -H "Content-Type: application/json" \
+  -d '{"original_event_id": "tool_abc12345", "dry_run": true}' | jq .
+
+# Initiate (requires operator or admin role)
+curl -s -X POST http://localhost:1199/v1/rollbacks \
+  -H "Content-Type: application/json" \
+  -d '{"original_event_id": "tool_abc12345", "justification": "scaled too far"}' | jq .
+```
+
+#### `GET /v1/rollbacks`
+
+List all rollback records.
+
+#### `GET /v1/rollbacks/{rollbackID}`
+
+Get a rollback record including its derived `RollbackPlan` and current status.
+
+#### `POST /v1/rollbacks/{rollbackID}/cancel`
+
+Cancel a rollback that is in `pending_approval` status.
+
+#### `POST /v1/events/{eventID}/rollback-plan`
+
+Derive and return the rollback plan for an event without creating a rollback record. Returns the `RollbackPlan` with `reversibility`, `inverse_op`, and (if not reversible) `not_reversible_reason`. Read-only; no approval required.
+
+```bash
+curl -s -X POST http://localhost:1199/v1/events/tool_abc12345/rollback-plan | jq .
+```
+
+#### `POST /v1/fleet/jobs/{jobID}/rollback`
+
+Initiate a fleet-level rollback — constructs a reverse job definition and submits it through the normal fleet approval pipeline. Accepts `scope` (`"all"`, `"canary_only"`, `"failed_only"`, or a JSON array of server names) and `dry_run`.
+
+#### `GET /v1/fleet/jobs/{jobID}/rollback`
+
+Get the status of an in-progress or completed fleet rollback.
+
+---
+
 ### Approval endpoints
 
 The approval write operations are only available here — the gateway does not proxy them.

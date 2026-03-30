@@ -191,7 +191,7 @@ behavior of the components):
 | 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
 | 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
 | — | [Fleet Management](FLEET.md) | **Implemented** | Staged rollout (`fleet-runner`) with canary/wave strategy, approval gating, per-step audit trail, and NL fleet planner; governance-integrated throughout (policy enforcement, `fleet_rollout` purpose, service-account identity) |
-| ?? | Rollback & Undo | Planned | Recovery from mistakes |
+| — | [Rollback & Undo](ROLLBACK.md) | **Implemented** | Pre-mutation state capture, two-tier DB rollback (row-capture + WAL decode), rollback API, fleet rollback, CLI |
 
 ---
 
@@ -1296,31 +1296,10 @@ date  # Check current local time
 
 ---
 
-## 12. Roadmap
+## 12. Outstanding 
 
-### 12.1 Phase 1: Foundation (Complete)
-- [x] Audit system with hash chains
-- [x] Real-time monitoring (auditor)
-- [x] Security alerting (secbot)
-- [x] Policy engine (internal/policy/)
-- [x] Policy enforcement in agents (database, k8s)
-
-### 12.2 Phase 2: Enforcement (Complete)
-- [x] Approval workflows (cmd/approvals/, auditd API, Slack/email notifications)
-- [x] Compliance reporting (cmd/govbot/, Kubernetes CronJob)
-- [x] Guardrails: DB blast radius (`max_rows_affected`), K8s blast radius (`max_pods_affected`), transaction age (`max_xact_age_secs`), schedule — pre- and post-execution hooks
-- [x] Explainability — decision trace, `govexplain` CLI, explain API endpoints
-- [x] Operating mode switch (`readonly` / `fix`) with governance enforcement
-- [x] **LLM Fabrication Detection** — intra-agent post-mutation re-verification (L2 verify) and inter-agent audit-based delegation verification; `unverified_claim` journey outcome; queryable via `GET /v1/journeys?outcome=unverified_claim`. See [§1.1](#11-llm-fabrication-detection).
-
-### 12.3 Phase 3: Operations (In Progress)
-- [x] **Identity & access** — three-dimension access control: verified identity (static/JWT providers), data sensitivity markings, and purpose-based conditions. See [§10](#10-identity--access) and [docs/IDENTITY.md](IDENTITY.md).
-- [x] **Fleet management** — `fleet-runner` CLI for staged rollouts across infrastructure fleets. Canary → wave strategy with circuit breaker, multi-step job sequences, approval gating for write/destructive jobs, NL fleet planner, Tool Registry, semantic tool error detection (HTTP 422 on `---\nERROR —` marker). Full governance integration: policy enforcement per tool call, `fleet_rollout` purpose, service-account identity, per-step audit trail. See [docs/FLEET.md](FLEET.md).
-- [ ] **Rollback & Undo** — recovery from agent-initiated mutations. Design pending.
 - [ ] Rate limits (write frequency per session)
 - [ ] Circuit breaker (auto-pause on consecutive errors)
-
-### 12.4 Phase 4: Intelligence
 - [ ] Anomaly detection (ML-based)
 - [ ] Risk scoring
 - [ ] Automated remediation suggestions

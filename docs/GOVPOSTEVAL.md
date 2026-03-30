@@ -2,8 +2,8 @@
 
 This document captures the design analysis behind the blast-radius guardrail and
 the trade-offs involved in choosing between post-execution detection and
-pre-execution prevention. It is intended as a reference for future implementors
-rather than as a user-facing guide.
+pre-execution prevention. These considerations are taken into account in
+the aiHelpDesk [Rollback & Undo](ROLLBACK.md) implementation module.
 
 ---
 

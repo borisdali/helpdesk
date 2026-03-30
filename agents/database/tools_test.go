@@ -1924,6 +1924,64 @@ policies:
 	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
 }
 
+// newDenyToolEnforcer returns a PolicyEnforcer that denies access to a specific
+// tool name by exact match (using match.tool in the policy YAML).
+func newDenyToolEnforcer(t *testing.T, toolName string) *agentutil.PolicyEnforcer {
+	t.Helper()
+	yamlContent := fmt.Sprintf(`
+version: "1"
+policies:
+  - name: deny-tool-%s
+    resources:
+      - type: database
+        match:
+          tool: %s
+    rules:
+      - action: [read, write, destructive]
+        effect: deny
+        message: "tool %s is disabled by policy"
+`, toolName, toolName, toolName)
+	path := writeTempDBPolicyFile(t, yamlContent)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+// newDenyToolPatternEnforcer returns a PolicyEnforcer that denies access to tools
+// matching a glob pattern (using match.tool_pattern in the policy YAML).
+func newDenyToolPatternEnforcer(t *testing.T, toolPattern string) *agentutil.PolicyEnforcer {
+	t.Helper()
+	yamlContent := fmt.Sprintf(`
+version: "1"
+policies:
+  - name: deny-tool-pattern
+    resources:
+      - type: database
+        match:
+          tool_pattern: "%s"
+    rules:
+      - action: [read, write, destructive]
+        effect: deny
+        message: "tool matching %s is disabled by policy"
+`, toolPattern, toolPattern)
+	path := writeTempDBPolicyFile(t, yamlContent)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
 // newBlastRadiusDBEnforcer returns a PolicyEnforcer that allows destructive ops
 // but enforces a max_rows_affected limit (used to test terminate_idle_connections blast-radius).
 func newBlastRadiusDBEnforcer(t *testing.T, maxRows int) *agentutil.PolicyEnforcer {
@@ -2626,5 +2684,84 @@ func TestCancelQueryTool_XactAgeGuardrail(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "rollback") {
 		t.Errorf("cancelQueryTool() output = %q, want rollback warning in denial message", result.Output)
+	}
+}
+
+// =============================================================================
+// Tool-name-based policy enforcement tests
+// These verify that match.tool and match.tool_pattern policies are enforced
+// through the full chain: tool → runPsqlAs → WithToolName → CheckDatabase.
+// =============================================================================
+
+func TestTerminateConnectionTool_ToolNamePolicyDenied(t *testing.T) {
+	// A policy with match.tool: terminate_connection should block that specific
+	// tool even though other destructive tools are allowed.
+	defer withPolicyEnforcer(newDenyToolEnforcer(t, "terminate_connection"))()
+	defer withMockRunner("", nil)() // must not be reached
+
+	ctx := newTestContext()
+	result, err := terminateConnectionTool(ctx, TerminateConnectionArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("terminateConnectionTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("terminateConnectionTool() output = %q, want ERROR on tool-name policy denial", result.Output)
+	}
+	if !strings.Contains(result.Output, "policy denied") {
+		t.Errorf("terminateConnectionTool() output = %q, want 'policy denied'", result.Output)
+	}
+}
+
+func TestCancelQueryTool_ToolNamePolicyAllows_WhenOtherToolDenied(t *testing.T) {
+	// A policy that only denies terminate_connection should NOT block cancel_query,
+	// even though both are mutation operations.
+	defer withPolicyEnforcer(newDenyToolEnforcer(t, "terminate_connection"))()
+
+	mockOutput := `-[ RECORD 1 ]---+-----
+cancelled       | t
+pid             | 123
+usename         | app
+datname         | testdb
+state           | active
+query_preview   | SELECT 1
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              123,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	if strings.Contains(result.Output, "ERROR") {
+		t.Errorf("cancelQueryTool() output = %q, should NOT be denied when only terminate_connection is blocked", result.Output)
+	}
+}
+
+func TestTerminateIdleConnectionsTool_ToolPatternPolicyDenied(t *testing.T) {
+	// A policy with match.tool_pattern: "terminate_*" should block both
+	// terminate_connection and terminate_idle_connections.
+	defer withPolicyEnforcer(newDenyToolPatternEnforcer(t, "terminate_*"))()
+	defer withMockRunner("", nil)() // must not be reached
+
+	ctx := newTestContext()
+	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
+		ConnectionString: "host=localhost",
+		IdleMinutes:      10,
+		DryRun:           false,
+	})
+	if err != nil {
+		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want ERROR on tool-pattern policy denial", result.Output)
+	}
+	if !strings.Contains(result.Output, "policy denied") {
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want 'policy denied'", result.Output)
 	}
 }

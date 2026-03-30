@@ -47,8 +47,13 @@ func main() {
 		message      = flag.String("message", "", "One-shot `message` — runs a single query and exits")
 		timeout      = flag.Duration("timeout", 5*time.Minute, "Per-request `timeout`")
 		showVersion  = flag.Bool("version", false, "Print version and exit")
-		planFleetJob = flag.String("plan-fleet-job", "", "Plan a fleet job from a natural language description")
-		targetHints  = flag.String("target-hints", "", "Comma-separated target hints for fleet job planning")
+		planFleetJob        = flag.String("plan-fleet-job", "", "Plan a fleet job from a natural language description")
+		targetHints         = flag.String("target-hints", "", "Comma-separated target hints for fleet job planning")
+		rollbackEvent       = flag.String("rollback-event", "", "Initiate rollback for a tool_execution event ID")
+		rollbackJustification = flag.String("rollback-justification", "", "Justification text for the rollback (recorded in audit trail)")
+		rollbackDryRun      = flag.Bool("rollback-dry-run", false, "Derive the rollback plan without persisting or executing anything")
+		rollbackPlan        = flag.String("rollback-plan", "", "Print the rollback plan for a tool_execution event ID without persisting")
+		listRollbacks       = flag.Bool("list-rollbacks", false, "List rollback records from the audit service")
 	)
 	flag.Parse()
 
@@ -73,6 +78,33 @@ func main() {
 	// --plan-fleet-job: does not require a pre-ping (the fleet plan endpoint handles its own auth).
 	if *planFleetJob != "" {
 		if err := runFleetPlan(ctx, cfg, *planFleetJob, *targetHints); err != nil {
+			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// --rollback-plan: derive plan without persisting (hits auditd directly).
+	if *rollbackPlan != "" {
+		if err := runRollbackPlan(ctx, cfg, *rollbackPlan); err != nil {
+			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// --rollback-event: initiate (or dry-run) a rollback (hits auditd directly).
+	if *rollbackEvent != "" {
+		if err := runRollbackEvent(ctx, cfg, *rollbackEvent, *rollbackJustification, *rollbackDryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// --list-rollbacks: list rollback records (hits auditd directly).
+	if *listRollbacks {
+		if err := runListRollbacks(ctx, cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
 			os.Exit(1)
 		}

@@ -529,6 +529,9 @@ type PolicyCheckRequest struct {
 	// Sensitivity classes of the resource being accessed (e.g. ["pii", "critical"]).
 	// When non-empty, overrides infra-derived sensitivity for this evaluation.
 	Sensitivity []string `json:"sensitivity,omitempty"`
+	// ToolName is the specific tool being invoked (e.g. "terminate_connection").
+	// Used for tool-level policy matching via ResourceMatch.Tool / ToolPattern.
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // PolicyCheckResponse is returned by POST /v1/governance/check.
@@ -604,6 +607,7 @@ func (s *governanceServer) handlePolicyCheck(w http.ResponseWriter, r *http.Requ
 			Name:        req.ResourceName,
 			Tags:        tags,
 			Sensitivity: sensitivity,
+			ToolName:    req.ToolName,
 		},
 		Action: policy.ActionClass(req.Action),
 		Context: policy.RequestContext{

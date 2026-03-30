@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"google.golang.org/genai"
+	adktool "google.golang.org/adk/tool"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/identity"
@@ -1009,6 +1011,157 @@ func TestApplyCardOptions_SkillExamples(t *testing.T) {
 	}
 }
 
+func TestApplyCardOptions_SkillFleetEligible(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "test",
+		Skills: []a2a.AgentSkill{
+			{ID: "agent-get_status_summary"},
+			{ID: "agent-get_server_info"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillFleetEligible: map[string]bool{
+			"agent-get_status_summary": true,
+			"agent-get_server_info":    false, // explicit false should not append fleet:true
+		},
+	})
+
+	hasFleetsTag := func(skill a2a.AgentSkill) bool {
+		for _, tag := range skill.Tags {
+			if tag == "fleet:true" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasFleetsTag(card.Skills[0]) {
+		t.Errorf("get_status_summary: expected fleet:true tag, got tags %v", card.Skills[0].Tags)
+	}
+	if hasFleetsTag(card.Skills[1]) {
+		t.Errorf("get_server_info: expected no fleet:true tag (false), got tags %v", card.Skills[1].Tags)
+	}
+}
+
+func TestApplyCardOptions_SkillCapabilities(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "test",
+		Skills: []a2a.AgentSkill{
+			{ID: "agent-get_status_summary"},
+			{ID: "agent-check_connection"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillCapabilities: map[string][]string{
+			"agent-get_status_summary": {"uptime", "connection_count"},
+			"agent-check_connection":   {"connectivity"},
+		},
+	})
+
+	wantTags := func(skill a2a.AgentSkill, expected []string) {
+		t.Helper()
+		tagSet := make(map[string]bool, len(skill.Tags))
+		for _, tag := range skill.Tags {
+			tagSet[tag] = true
+		}
+		for _, want := range expected {
+			if !tagSet["cap:"+want] {
+				t.Errorf("skill %q: expected tag %q, got tags %v", skill.ID, "cap:"+want, skill.Tags)
+			}
+		}
+	}
+
+	wantTags(card.Skills[0], []string{"uptime", "connection_count"})
+	wantTags(card.Skills[1], []string{"connectivity"})
+
+	// Unrelated skill should have no cap: tags.
+	if len(card.Skills[0].Tags) != 2 {
+		t.Errorf("get_status_summary: expected exactly 2 tags, got %v", card.Skills[0].Tags)
+	}
+}
+
+func TestApplyCardOptions_SkillSupersedes(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "test",
+		Skills: []a2a.AgentSkill{
+			{ID: "agent-get_status_summary"},
+			{ID: "agent-get_server_info"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillSupersedes: map[string][]string{
+			"agent-get_status_summary": {"get_server_info", "get_connection_stats"},
+		},
+	})
+
+	hasSupersedesTag := func(skill a2a.AgentSkill, name string) bool {
+		for _, tag := range skill.Tags {
+			if tag == "supersedes:"+name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasSupersedesTag(card.Skills[0], "get_server_info") {
+		t.Errorf("get_status_summary: expected supersedes:get_server_info, got %v", card.Skills[0].Tags)
+	}
+	if !hasSupersedesTag(card.Skills[0], "get_connection_stats") {
+		t.Errorf("get_status_summary: expected supersedes:get_connection_stats, got %v", card.Skills[0].Tags)
+	}
+	if len(card.Skills[1].Tags) != 0 {
+		t.Errorf("get_server_info: expected no tags, got %v", card.Skills[1].Tags)
+	}
+}
+
+func TestApplyCardOptions_TaxonomyRoundTrip(t *testing.T) {
+	// Verify the full wire format: applyCardOptions serializes typed fields to
+	// key:value tag strings, and parseSkillTags (in toolregistry) deserializes them.
+	// This ensures the two halves of the pipeline agree on the format.
+	card := &a2a.AgentCard{
+		Name: "myagent",
+		Skills: []a2a.AgentSkill{
+			{ID: "myagent-get_status_summary"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillFleetEligible: map[string]bool{
+			"myagent-get_status_summary": true,
+		},
+		SkillCapabilities: map[string][]string{
+			"myagent-get_status_summary": {"uptime", "connection_count"},
+		},
+		SkillSupersedes: map[string][]string{
+			"myagent-get_status_summary": {"get_server_info"},
+		},
+	})
+
+	tags := card.Skills[0].Tags
+	// Manually parse using the same logic as toolregistry.parseSkillTags.
+	var fleetEligible bool
+	var caps, supersedes []string
+	for _, tag := range tags {
+		switch {
+		case tag == "fleet:true":
+			fleetEligible = true
+		case len(tag) > 4 && tag[:4] == "cap:":
+			caps = append(caps, tag[4:])
+		case len(tag) > 11 && tag[:11] == "supersedes:":
+			supersedes = append(supersedes, tag[11:])
+		}
+	}
+
+	if !fleetEligible {
+		t.Error("round-trip: fleet:true not found in tags")
+	}
+	if len(caps) != 2 {
+		t.Errorf("round-trip: caps = %v, want [uptime connection_count]", caps)
+	}
+	if len(supersedes) != 1 || supersedes[0] != "get_server_info" {
+		t.Errorf("round-trip: supersedes = %v, want [get_server_info]", supersedes)
+	}
+}
+
 // ── Identity & Purpose propagation ───────────────────────────────────────────
 
 // mockCapturingPolicyServer captures the decoded policyCheckReq and returns the
@@ -1196,3 +1349,131 @@ policies:
 		t.Errorf("remediation purpose: write should be allowed, got: %v", err)
 	}
 }
+
+// ── Schema fingerprint helpers ────────────────────────────────────────────────
+
+// mockSchemaTool implements the minimal interface needed by ComputeSchemaFingerprints
+// and ComputeInputSchemas: tool.Tool + declarationProvider.
+type mockSchemaTool struct {
+	name string
+	decl *genai.FunctionDeclaration
+}
+
+func (m *mockSchemaTool) Name() string                                        { return m.name }
+func (m *mockSchemaTool) Description() string                                 { return "mock " + m.name }
+func (m *mockSchemaTool) IsLongRunning() bool                                 { return false }
+func (m *mockSchemaTool) Declaration() *genai.FunctionDeclaration             { return m.decl }
+
+// makeMockSchemaTool creates a mock tool whose Declaration uses ParametersJsonSchema
+// (type any), matching what functiontool.New produces in production.
+// A nil params argument produces a declaration with no schema (tool will be omitted).
+func makeMockSchemaTool(name string, params map[string]any) *mockSchemaTool {
+	decl := &genai.FunctionDeclaration{
+		Name:        name,
+		Description: "mock " + name,
+	}
+	if params != nil {
+		decl.ParametersJsonSchema = params
+	}
+	return &mockSchemaTool{name: name, decl: decl}
+}
+
+func TestComputeSchemaFingerprints_Basic(t *testing.T) {
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"connection_string": map[string]any{"type": "string"},
+		},
+		"required": []any{"connection_string"},
+	}
+	tool1 := makeMockSchemaTool("check_connection", params)
+	tool2 := makeMockSchemaTool("no_params_tool", nil) // no parameters → omitted
+
+	fps := ComputeSchemaFingerprints("myagent", []adktool.Tool{tool1, tool2})
+
+	if _, ok := fps["myagent-check_connection"]; !ok {
+		t.Error("expected fingerprint for check_connection")
+	}
+	if _, ok := fps["myagent-no_params_tool"]; ok {
+		t.Error("no_params_tool should be omitted (nil params)")
+	}
+	if len(fps["myagent-check_connection"]) != 12 {
+		t.Errorf("fingerprint length = %d, want 12", len(fps["myagent-check_connection"]))
+	}
+}
+
+func TestComputeSchemaFingerprints_Deterministic(t *testing.T) {
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"pid": map[string]any{"type": "integer"},
+		},
+		"required": []any{"pid"},
+	}
+	tool := makeMockSchemaTool("terminate_connection", params)
+	fps1 := ComputeSchemaFingerprints("db", []adktool.Tool{tool})
+	fps2 := ComputeSchemaFingerprints("db", []adktool.Tool{tool})
+	if fps1["db-terminate_connection"] != fps2["db-terminate_connection"] {
+		t.Error("ComputeSchemaFingerprints is not deterministic")
+	}
+}
+
+func TestComputeInputSchemas_Basic(t *testing.T) {
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"connection_string": map[string]any{"type": "string", "description": "PostgreSQL DSN"},
+		},
+		"required": []any{"connection_string"},
+	}
+	tool := makeMockSchemaTool("check_connection", params)
+	schemas := ComputeInputSchemas([]adktool.Tool{tool})
+
+	if _, ok := schemas["check_connection"]; !ok {
+		t.Fatal("expected schema for check_connection")
+	}
+	schema := schemas["check_connection"]
+	if _, ok := schema["properties"]; !ok {
+		t.Error("schema missing 'properties' key")
+	}
+}
+
+func TestComputeInputSchemas_NoDeclaration(t *testing.T) {
+	tool := &mockSchemaTool{name: "bare_tool"} // nil decl → omitted
+	schemas := ComputeInputSchemas([]adktool.Tool{tool})
+	if _, ok := schemas["bare_tool"]; ok {
+		t.Error("bare_tool (nil Declaration) should be omitted from schemas")
+	}
+}
+
+func TestApplyCardOptions_SkillSchemaHash(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name: "myagent",
+		Skills: []a2a.AgentSkill{
+			{ID: "myagent-check_connection"},
+			{ID: "myagent-get_pods"},
+		},
+	}
+	applyCardOptions(card, CardOptions{
+		SkillSchemaHash: map[string]string{
+			"myagent-check_connection": "abc123def456",
+		},
+	})
+
+	var foundHash string
+	for _, tag := range card.Skills[0].Tags {
+		if strings.HasPrefix(tag, "schema_hash:") {
+			foundHash = strings.TrimPrefix(tag, "schema_hash:")
+		}
+	}
+	if foundHash != "abc123def456" {
+		t.Errorf("schema_hash tag = %q, want %q", foundHash, "abc123def456")
+	}
+	// Second skill has no hash — verify no spurious tag.
+	for _, tag := range card.Skills[1].Tags {
+		if strings.HasPrefix(tag, "schema_hash:") {
+			t.Errorf("unexpected schema_hash tag on skill without hash: %q", tag)
+		}
+	}
+}
+
