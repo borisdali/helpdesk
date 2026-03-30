@@ -259,6 +259,22 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getPodResourcesToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_pod_resources",
+		Description: "Show CPU and memory requests, limits, and live usage (from metrics-server) for containers in a namespace. Use to identify over- or under-provisioned workloads.",
+	}, getPodResourcesTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getNodeStatusToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_node_status",
+		Description: "Show node health conditions (MemoryPressure, DiskPressure, PIDPressure, Ready) and allocatable vs capacity CPU/memory. Use to diagnose scheduling failures or resource exhaustion.",
+	}, getNodeStatusTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		getPodsToolDef,
 		getServiceToolDef,
@@ -271,6 +287,8 @@ func createTools() ([]tool.Tool, error) {
 		deletePodToolDef,
 		restartDeploymentToolDef,
 		scaleDeploymentToolDef,
+		getPodResourcesToolDef,
+		getNodeStatusToolDef,
 	}, nil
 }
 

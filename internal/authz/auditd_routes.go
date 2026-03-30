@@ -50,7 +50,12 @@ var DefaultAuditdPermissions = map[string]Permission{
 
 	// Playbook writes
 	"POST /v1/fleet/playbooks":                {AdminBypass: true},
+	"PUT /v1/fleet/playbooks/{playbookID}":    {AdminBypass: true},
 	"DELETE /v1/fleet/playbooks/{playbookID}": {AdminBypass: true},
+
+	// Tool result endpoints
+	"POST /v1/tool-results": {ServiceOnly: true, AdminBypass: true},
+	"GET /v1/tool-results":  {AdminBypass: true},
 
 	// Fleet-runner lifecycle writes
 	"POST /v1/fleet/jobs":                                                   {ServiceOnly: true, AdminBypass: true},

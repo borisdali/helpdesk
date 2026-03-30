@@ -70,6 +70,12 @@ func (g *Gateway) handlePlaybookGet(w http.ResponseWriter, r *http.Request) {
 	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id)
 }
 
+// handlePlaybookUpdate proxies PUT /api/v1/fleet/playbooks/{id} → auditd.
+func (g *Gateway) handlePlaybookUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("playbookID")
+	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id)
+}
+
 // handlePlaybookDelete proxies DELETE /api/v1/fleet/playbooks/{id} → auditd.
 func (g *Gateway) handlePlaybookDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("playbookID")
@@ -110,6 +116,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	planReqBody, err := json.Marshal(FleetPlanRequest{
 		Description: pb.Description,
 		TargetHints: pb.TargetHints,
+		Guidance:    pb.Guidance,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to build plan request: "+err.Error())

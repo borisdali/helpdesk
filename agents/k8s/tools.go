@@ -944,6 +944,71 @@ func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlRes
 	return scaleDeploymentImpl(ctx, args)
 }
 
+// GetPodResourcesArgs defines arguments for the get_pod_resources tool.
+type GetPodResourcesArgs struct {
+	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace string `json:"namespace" jsonschema:"required,The Kubernetes namespace to query."`
+	PodName   string `json:"pod_name,omitempty" jsonschema:"Specific pod name. If empty, returns resources for all pods in the namespace."`
+}
+
+func getPodResourcesImpl(ctx context.Context, args GetPodResourcesArgs) (GetPodResourcesResult, error) {
+	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
+	if err != nil {
+		return GetPodResourcesResult{}, fmt.Errorf("access denied: %w", err)
+	}
+	namespace := nsInfo.Namespace
+	kubeContext := resolveContext(args.Context)
+
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return GetPodResourcesResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	start := time.Now()
+	result, err := fetchPodResources(ctx, kubeContext, namespace, args.PodName)
+	duration := time.Since(start)
+
+	recordClientGoAudit(ctx, "get_pod_resources", map[string]any{
+		"context":   kubeContext,
+		"namespace": namespace,
+		"pod_name":  args.PodName,
+	}, result.Count, err, duration)
+
+	return result, err
+}
+
+func getPodResourcesTool(ctx tool.Context, args GetPodResourcesArgs) (GetPodResourcesResult, error) {
+	return getPodResourcesImpl(ctx, args)
+}
+
+// GetNodeStatusArgs defines arguments for the get_node_status tool.
+type GetNodeStatusArgs struct {
+	Context  string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	NodeName string `json:"node_name,omitempty" jsonschema:"Specific node name. If empty, returns status for all nodes."`
+}
+
+func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
+	kubeContext := resolveContext(args.Context)
+
+	if err := checkK8sPolicy(ctx, "", policy.ActionRead, nil); err != nil {
+		return GetNodeStatusResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	start := time.Now()
+	result, err := fetchNodeStatus(ctx, kubeContext, args.NodeName)
+	duration := time.Since(start)
+
+	recordClientGoAudit(ctx, "get_node_status", map[string]any{
+		"context":   kubeContext,
+		"node_name": args.NodeName,
+	}, result.Count, err, duration)
+
+	return result, err
+}
+
+func getNodeStatusTool(ctx tool.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
+	return getNodeStatusImpl(ctx, args)
+}
+
 // k8sArgsToStruct converts a map[string]any to a typed struct via JSON round-trip.
 func k8sArgsToStruct[T any](args map[string]any) (T, error) {
 	var zero T
@@ -1102,6 +1167,30 @@ func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		return result.Output, nil
+	})
+
+	r.Register("get_pod_resources", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetPodResourcesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getPodResourcesImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return k8sJSONOutput(result)
+	})
+
+	r.Register("get_node_status", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[GetNodeStatusArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getNodeStatusImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return k8sJSONOutput(result)
 	})
 
 	return r

@@ -257,8 +257,14 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/fleet/playbooks", auth("POST /api/v1/fleet/playbooks", g.handlePlaybookCreate))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks", auth("GET /api/v1/fleet/playbooks", g.handlePlaybookList))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}", auth("GET /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookGet))
+	mux.HandleFunc("PUT /api/v1/fleet/playbooks/{playbookID}", auth("PUT /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookUpdate))
 	mux.HandleFunc("DELETE /api/v1/fleet/playbooks/{playbookID}", auth("DELETE /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookDelete))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/run", auth("POST /api/v1/fleet/playbooks/{playbookID}/run", g.handlePlaybookRun))
+
+	// Tool result query endpoint (read-only proxy to auditd)
+	mux.HandleFunc("GET /api/v1/tool-results", auth("GET /api/v1/tool-results", func(w http.ResponseWriter, r *http.Request) {
+		g.proxyToAuditd(w, r, "/v1/tool-results?"+r.URL.RawQuery)
+	}))
 
 	// Fleet runner job visibility endpoints
 	mux.HandleFunc("POST /api/v1/fleet/jobs", auth("POST /api/v1/fleet/jobs", g.handleFleetCreateJob))

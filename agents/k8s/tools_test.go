@@ -15,6 +15,10 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
@@ -1162,5 +1166,239 @@ func TestGetPodsTool_InfraEnforced_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
 		t.Errorf("getPodsTool() error = %v, want infra rejection message", err)
+	}
+}
+
+// --- get_pod_resources tests ---
+
+// injectFakeClientset injects cs under the given context key and returns cleanup.
+func injectFakeClientset(kubeContext string, cs *fake.Clientset) func() {
+	return sharedClient.injectForTest(kubeContext, cs)
+}
+
+func TestGetPodResources_RequestsLimitsOnly(t *testing.T) {
+	// Set up a fake pod with requests and limits, no metrics-server.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-abc123", Namespace: "production"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "app",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("250m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("1"),
+							corev1.ResourceMemory: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			},
+		},
+	}
+	cs := fake.NewSimpleClientset(pod)
+	defer injectFakeClientset("", cs)()
+	// kubectl top fails (metrics-server absent)
+	defer withMockKubectl("", fmt.Errorf("metrics not available"))()
+
+	ctx := newK8sTestContext()
+	result, err := getPodResourcesTool(ctx, GetPodResourcesArgs{Namespace: "production"})
+	if err != nil {
+		t.Fatalf("getPodResourcesTool() error = %v", err)
+	}
+	if result.Count != 1 {
+		t.Errorf("Count = %d, want 1", result.Count)
+	}
+	c := result.Containers[0]
+	if c.PodName != "web-abc123" {
+		t.Errorf("PodName = %q, want web-abc123", c.PodName)
+	}
+	if c.ContainerName != "app" {
+		t.Errorf("ContainerName = %q, want app", c.ContainerName)
+	}
+	if c.CPURequest != "250m" {
+		t.Errorf("CPURequest = %q, want 250m", c.CPURequest)
+	}
+	if c.MemLimit != "1Gi" {
+		t.Errorf("MemLimit = %q, want 1Gi", c.MemLimit)
+	}
+	if c.CPUUsage != "" || c.MemUsage != "" {
+		t.Errorf("expected empty live usage when metrics unavailable, got CPU=%q Mem=%q", c.CPUUsage, c.MemUsage)
+	}
+	if result.MetricsNote == "" {
+		t.Error("expected MetricsNote when metrics unavailable, got empty string")
+	}
+}
+
+func TestGetPodResources_WithLiveUsage(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-xyz", Namespace: "staging"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "server"}},
+		},
+	}
+	cs := fake.NewSimpleClientset(pod)
+	defer injectFakeClientset("", cs)()
+	// kubectl top output: NAME  CPU(cores)  MEMORY(bytes)
+	defer withMockKubectl("api-xyz   120m   200Mi", nil)()
+
+	ctx := newK8sTestContext()
+	result, err := getPodResourcesTool(ctx, GetPodResourcesArgs{Namespace: "staging"})
+	if err != nil {
+		t.Fatalf("getPodResourcesTool() error = %v", err)
+	}
+	if result.MetricsNote != "" {
+		t.Errorf("unexpected MetricsNote = %q", result.MetricsNote)
+	}
+	if result.Containers[0].CPUUsage != "120m" {
+		t.Errorf("CPUUsage = %q, want 120m", result.Containers[0].CPUUsage)
+	}
+	if result.Containers[0].MemUsage != "200Mi" {
+		t.Errorf("MemUsage = %q, want 200Mi", result.Containers[0].MemUsage)
+	}
+}
+
+func TestGetPodResources_PolicyDenied(t *testing.T) {
+	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
+	// Policy only denies destructive — read should still pass.
+	// Use a fake client so the tool can actually execute.
+	cs := fake.NewSimpleClientset()
+	defer injectFakeClientset("", cs)()
+	defer withMockKubectl("", fmt.Errorf("no metrics"))()
+
+	ctx := newK8sTestContext()
+	result, err := getPodResourcesTool(ctx, GetPodResourcesArgs{Namespace: "production"})
+	if err != nil {
+		t.Fatalf("getPodResourcesTool() unexpected error = %v", err)
+	}
+	if result.Count != 0 {
+		t.Errorf("Count = %d, want 0 (no pods)", result.Count)
+	}
+}
+
+// --- get_node_status tests ---
+
+func TestGetNodeStatus_AllNodes(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-1",
+			Labels: map[string]string{"node-role.kubernetes.io/worker": ""},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+				{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionFalse},
+				{Type: corev1.NodeDiskPressure, Status: corev1.ConditionFalse},
+			},
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("3800m"),
+				corev1.ResourceMemory: resource.MustParse("7Gi"),
+			},
+			Capacity: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("8Gi"),
+			},
+			NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.32.0"},
+		},
+	}
+	cs := fake.NewSimpleClientset(node)
+	defer injectFakeClientset("", cs)()
+
+	ctx := newK8sTestContext()
+	result, err := getNodeStatusTool(ctx, GetNodeStatusArgs{})
+	if err != nil {
+		t.Fatalf("getNodeStatusTool() error = %v", err)
+	}
+	if result.Count != 1 {
+		t.Errorf("Count = %d, want 1", result.Count)
+	}
+	n := result.Nodes[0]
+	if n.Name != "node-1" {
+		t.Errorf("Name = %q, want node-1", n.Name)
+	}
+	if n.Status != "Ready" {
+		t.Errorf("Status = %q, want Ready", n.Status)
+	}
+	if n.AllocatableCPU != "3800m" {
+		t.Errorf("AllocatableCPU = %q, want 3800m", n.AllocatableCPU)
+	}
+	if n.CapacityMem != "8Gi" {
+		t.Errorf("CapacityMem = %q, want 8Gi", n.CapacityMem)
+	}
+	if n.KubeletVersion != "v1.32.0" {
+		t.Errorf("KubeletVersion = %q, want v1.32.0", n.KubeletVersion)
+	}
+	if len(n.Conditions) != 3 {
+		t.Errorf("Conditions len = %d, want 3", len(n.Conditions))
+	}
+}
+
+func TestGetNodeStatus_SingleNode(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "control-plane-1"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+			},
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("2"),
+				corev1.ResourceMemory: resource.MustParse("4Gi"),
+			},
+			Capacity: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("2"),
+				corev1.ResourceMemory: resource.MustParse("4Gi"),
+			},
+		},
+	}
+	cs := fake.NewSimpleClientset(node)
+	defer injectFakeClientset("", cs)()
+
+	ctx := newK8sTestContext()
+	result, err := getNodeStatusTool(ctx, GetNodeStatusArgs{NodeName: "control-plane-1"})
+	if err != nil {
+		t.Fatalf("getNodeStatusTool() error = %v", err)
+	}
+	if result.Count != 1 {
+		t.Errorf("Count = %d, want 1", result.Count)
+	}
+	if result.Nodes[0].Name != "control-plane-1" {
+		t.Errorf("Name = %q, want control-plane-1", result.Nodes[0].Name)
+	}
+}
+
+func TestGetNodeStatus_MemoryPressure_IncludesMessage(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-degraded"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionFalse, Message: "kubelet stopped posting status"},
+				{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionTrue, Message: "memory usage above threshold"},
+			},
+		},
+	}
+	cs := fake.NewSimpleClientset(node)
+	defer injectFakeClientset("", cs)()
+
+	ctx := newK8sTestContext()
+	result, err := getNodeStatusTool(ctx, GetNodeStatusArgs{})
+	if err != nil {
+		t.Fatalf("getNodeStatusTool() error = %v", err)
+	}
+	n := result.Nodes[0]
+	// Find the MemoryPressure condition and verify message is present
+	var memCond *NodeCondition
+	for i := range n.Conditions {
+		if n.Conditions[i].Type == "MemoryPressure" {
+			memCond = &n.Conditions[i]
+			break
+		}
+	}
+	if memCond == nil {
+		t.Fatal("MemoryPressure condition not found")
+	}
+	if memCond.Message == "" {
+		t.Error("MemoryPressure condition should have Message set when Status=True")
 	}
 }

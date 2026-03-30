@@ -348,6 +348,78 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getPgSettingsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_pg_settings",
+		Description: "Show PostgreSQL configuration settings that differ from defaults, grouped by category. Use category filter (e.g. 'autovacuum', 'memory') to focus on a specific area. Set show_all=true to return all settings.",
+	}, getPgSettingsTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getExtensionsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_extensions",
+		Description: "List all installed PostgreSQL extensions with their installed and available default versions.",
+	}, getExtensionsTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getBaselineToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_baseline",
+		Description: "Collect a comprehensive server baseline: server info, non-default PostgreSQL settings, installed extensions, and disk usage. Useful for initial assessment, capacity planning, and scheduled health snapshots.",
+	}, getBaselineTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getSlowQueriesToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_slow_queries",
+		Description: "Show the top-N slowest queries by total execution time from pg_stat_statements. Requires the pg_stat_statements extension. Use for performance triage and identifying optimization targets.",
+	}, getSlowQueriesTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getVacuumStatusToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_vacuum_status",
+		Description: "Show vacuum and autovacuum health for all user tables: dead row ratios, last vacuum/analyze times, and autovacuum counts. Use min_dead_ratio to filter to tables needing attention.",
+	}, getVacuumStatusTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getDiskUsageToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_disk_usage",
+		Description: "Show disk usage at two levels: all databases by size, and the top-N largest tables (with table vs index breakdown). Use for capacity planning and identifying space hogs.",
+	}, getDiskUsageTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getWaitEventsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_wait_events",
+		Description: "Show a snapshot of current wait events aggregated by type and name from pg_stat_activity. Useful for diagnosing contention: Lock, LWLock, IO, Client, and other wait categories.",
+	}, getWaitEventsTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getBlockingQueriesToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_blocking_queries",
+		Description: "Find blocked queries and their blockers with extended detail: wait event type, lock mode, relation name, and how long the blocked query has been waiting. More detailed than get_lock_info.",
+	}, getBlockingQueriesTool)
+	if err != nil {
+		return nil, err
+	}
+
+	explainQueryToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "explain_query",
+		Description: "Run EXPLAIN (ANALYZE, BUFFERS) on a SQL query and return the full execution plan. By default only SELECT/WITH statements are accepted. Set allow_dml=true to explain DML statements (they are wrapped in BEGIN/ROLLBACK and never committed).",
+	}, explainQueryTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -364,6 +436,15 @@ func createTools() ([]tool.Tool, error) {
 		terminateConnectionToolDef,
 		terminateIdleConnectionsToolDef,
 		getStatusSummaryToolDef,
+		getPgSettingsToolDef,
+		getExtensionsToolDef,
+		getBaselineToolDef,
+		getSlowQueriesToolDef,
+		getVacuumStatusToolDef,
+		getDiskUsageToolDef,
+		getWaitEventsToolDef,
+		getBlockingQueriesToolDef,
+		explainQueryToolDef,
 	}, nil
 }
 

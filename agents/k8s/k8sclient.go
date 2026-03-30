@@ -21,19 +21,40 @@ import (
 )
 
 // k8sClient provides cached Kubernetes clientsets keyed by kubeconfig context.
+// Clients are stored as kubernetes.Interface so fake clients can be injected
+// in tests without needing a real cluster.
 type k8sClient struct {
 	mu      sync.Mutex
-	clients map[string]*kubernetes.Clientset
+	clients map[string]kubernetes.Interface
 }
 
 var sharedClient = &k8sClient{
-	clients: make(map[string]*kubernetes.Clientset),
+	clients: make(map[string]kubernetes.Interface),
 }
 
-// clientset returns a cached *kubernetes.Clientset for the given context.
+// injectForTest temporarily overrides the cached clientset for the given
+// context key. Returns a cleanup function that restores the previous state.
+// This is only intended for use in tests.
+func (kc *k8sClient) injectForTest(kubeContext string, cs kubernetes.Interface) func() {
+	kc.mu.Lock()
+	defer kc.mu.Unlock()
+	old, existed := kc.clients[kubeContext]
+	kc.clients[kubeContext] = cs
+	return func() {
+		kc.mu.Lock()
+		defer kc.mu.Unlock()
+		if existed {
+			kc.clients[kubeContext] = old
+		} else {
+			delete(kc.clients, kubeContext)
+		}
+	}
+}
+
+// clientset returns a cached kubernetes.Interface for the given context.
 // If kubeContext is "", it tries in-cluster config first (for running in K8s),
 // then falls back to the default kubeconfig context.
-func (kc *k8sClient) clientset(kubeContext string) (*kubernetes.Clientset, error) {
+func (kc *k8sClient) clientset(kubeContext string) (kubernetes.Interface, error) {
 	kc.mu.Lock()
 	defer kc.mu.Unlock()
 
@@ -452,4 +473,151 @@ func fetchNodes(ctx context.Context, kubeContext string, showLabels bool) (GetNo
 	}
 
 	return GetNodesResult{Nodes: nodes, Count: len(nodes)}, nil
+}
+
+// fetchNodeStatus lists nodes and returns detailed condition + resource info.
+func fetchNodeStatus(ctx context.Context, kubeContext string, nodeName string) (GetNodeStatusResult, error) {
+	cs, err := sharedClient.clientset(kubeContext)
+	if err != nil {
+		return GetNodeStatusResult{}, err
+	}
+
+	var nodeList *corev1.NodeList
+	if nodeName != "" {
+		node, err := cs.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return GetNodeStatusResult{}, diagnoseClientError(err)
+		}
+		nodeList = &corev1.NodeList{Items: []corev1.Node{*node}}
+	} else {
+		nodeList, err = cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return GetNodeStatusResult{}, diagnoseClientError(err)
+		}
+	}
+
+	nodes := make([]NodeStatusInfo, 0, len(nodeList.Items))
+	for _, n := range nodeList.Items {
+		info := NodeStatusInfo{
+			Name:           n.Name,
+			Status:         nodeStatus(n.Status.Conditions, n.Spec.Unschedulable),
+			Roles:          nodeRoles(n.Labels),
+			KubeletVersion: n.Status.NodeInfo.KubeletVersion,
+		}
+
+		// Allocatable and capacity
+		if cpu, ok := n.Status.Allocatable[corev1.ResourceCPU]; ok {
+			info.AllocatableCPU = cpu.String()
+		}
+		if mem, ok := n.Status.Allocatable[corev1.ResourceMemory]; ok {
+			info.AllocatableMem = mem.String()
+		}
+		if cpu, ok := n.Status.Capacity[corev1.ResourceCPU]; ok {
+			info.CapacityCPU = cpu.String()
+		}
+		if mem, ok := n.Status.Capacity[corev1.ResourceMemory]; ok {
+			info.CapacityMem = mem.String()
+		}
+
+		// Conditions: report all pressure/ready conditions
+		for _, c := range n.Status.Conditions {
+			nc := NodeCondition{
+				Type:   string(c.Type),
+				Status: string(c.Status),
+			}
+			// Include message only when not in normal/expected state
+			isNormal := (c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue) ||
+				(c.Type != corev1.NodeReady && c.Status == corev1.ConditionFalse)
+			if !isNormal && c.Message != "" {
+				nc.Message = c.Message
+			}
+			info.Conditions = append(info.Conditions, nc)
+		}
+
+		nodes = append(nodes, info)
+	}
+
+	return GetNodeStatusResult{Nodes: nodes, Count: len(nodes)}, nil
+}
+
+// fetchPodResources reads pod specs for requests/limits and optionally
+// supplements with live usage from kubectl top pods.
+func fetchPodResources(ctx context.Context, kubeContext, namespace, podName string) (GetPodResourcesResult, error) {
+	cs, err := sharedClient.clientset(kubeContext)
+	if err != nil {
+		return GetPodResourcesResult{}, err
+	}
+
+	var pods []corev1.Pod
+	if podName != "" {
+		pod, err := cs.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			return GetPodResourcesResult{}, diagnoseClientError(err)
+		}
+		pods = []corev1.Pod{*pod}
+	} else {
+		podList, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return GetPodResourcesResult{}, diagnoseClientError(err)
+		}
+		pods = podList.Items
+	}
+
+	// Build static requests/limits from pod specs
+	var containers []PodResourceInfo
+	for _, pod := range pods {
+		for _, c := range pod.Spec.Containers {
+			info := PodResourceInfo{
+				PodName:       pod.Name,
+				ContainerName: c.Name,
+			}
+			if req, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+				info.CPURequest = req.String()
+			}
+			if lim, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+				info.CPULimit = lim.String()
+			}
+			if req, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+				info.MemRequest = req.String()
+			}
+			if lim, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+				info.MemLimit = lim.String()
+			}
+			containers = append(containers, info)
+		}
+	}
+
+	// Attempt live usage via kubectl top pods
+	topArgs := []string{"top", "pods", "-n", namespace, "--no-headers"}
+	if podName != "" {
+		topArgs = append(topArgs, podName)
+	}
+	metricsNote := ""
+	topOut, topErr := runKubectl(ctx, kubeContext, topArgs...)
+	if topErr != nil {
+		metricsNote = "Live CPU/memory usage unavailable (metrics-server may not be installed). Showing requests/limits only."
+	} else {
+		// Parse kubectl top output: NAME  CPU(cores)  MEMORY(bytes)
+		// One line per pod (not per container), so map pod name → usage
+		type podUsage struct{ cpu, mem string }
+		usage := make(map[string]podUsage)
+		for _, line := range strings.Split(strings.TrimSpace(topOut), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 {
+				usage[fields[0]] = podUsage{cpu: fields[1], mem: fields[2]}
+			}
+		}
+		for i := range containers {
+			if u, ok := usage[containers[i].PodName]; ok {
+				containers[i].CPUUsage = u.cpu
+				containers[i].MemUsage = u.mem
+			}
+		}
+	}
+
+	return GetPodResourcesResult{
+		Containers:  containers,
+		Count:       len(containers),
+		MetricsNote: metricsNote,
+	}, nil
 }

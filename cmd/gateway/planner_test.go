@@ -155,7 +155,7 @@ func TestResolveSupersededInPlan(t *testing.T) {
 // TestAssemblePlannerPrompt_IntentSection verifies that the intent section
 // appears between the tool catalog and the JobDef schema.
 func TestAssemblePlannerPrompt_IntentSection(t *testing.T) {
-	prompt := assemblePlannerPrompt("infra", "tools", "  health_check → get_status_summary\n", "check status", "none")
+	prompt := assemblePlannerPrompt("infra", "tools", "  health_check → get_status_summary\\n", "check status", "none", "")
 
 	toolsIdx := strings.Index(prompt, "## Available Tools")
 	intentIdx := strings.Index(prompt, "## Intent-to-Tool Mapping")

@@ -1421,6 +1421,414 @@ func argsToStruct[T any](args map[string]any) (T, error) {
 // NewDatabaseDirectRegistry builds a DirectToolRegistry for all database tools.
 // These handlers are invoked via POST /tool/{name} on the agent HTTP server,
 // bypassing the LLM layer for deterministic fleet job execution.
+// ---------------------------------------------------------------------------
+// get_pg_settings
+// ---------------------------------------------------------------------------
+
+// GetPgSettingsArgs defines arguments for the get_pg_settings tool.
+type GetPgSettingsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Category         string `json:"category,omitempty" jsonschema:"Filter by settings category (e.g. 'autovacuum', 'memory'). Empty returns all non-default settings."`
+	ShowAll          bool   `json:"show_all,omitempty" jsonschema:"If true, return all settings not just non-default ones. Can produce large output."`
+}
+
+func getPgSettingsImpl(ctx context.Context, args GetPgSettingsArgs) (PsqlResult, error) {
+	var where string
+	if args.ShowAll {
+		where = "1=1"
+	} else {
+		where = "source NOT IN ('default', 'override')"
+	}
+	categoryFilter := ""
+	if args.Category != "" {
+		categoryFilter = fmt.Sprintf(" AND category ILIKE '%%%s%%'", strings.ReplaceAll(args.Category, "'", "''"))
+	}
+	query := fmt.Sprintf(`SELECT
+		category,
+		name,
+		setting,
+		unit,
+		boot_val as default_value,
+		source,
+		short_desc
+	FROM pg_settings
+	WHERE %s%s
+	ORDER BY category, name;`, where, categoryFilter)
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_pg_settings")
+	if err != nil {
+		return errorResult("get_pg_settings", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "All settings are at their default values."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getPgSettingsTool(ctx tool.Context, args GetPgSettingsArgs) (PsqlResult, error) {
+	return getPgSettingsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_extensions
+// ---------------------------------------------------------------------------
+
+// GetExtensionsArgs defines arguments for the get_extensions tool.
+type GetExtensionsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getExtensionsImpl(ctx context.Context, args GetExtensionsArgs) (PsqlResult, error) {
+	query := `SELECT
+		name,
+		installed_version,
+		default_version,
+		comment
+	FROM pg_available_extensions
+	WHERE installed_version IS NOT NULL
+	ORDER BY name;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_extensions")
+	if err != nil {
+		return errorResult("get_extensions", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No extensions installed."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getExtensionsTool(ctx tool.Context, args GetExtensionsArgs) (PsqlResult, error) {
+	return getExtensionsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_baseline
+// ---------------------------------------------------------------------------
+
+// GetBaselineArgs defines arguments for the get_baseline tool.
+type GetBaselineArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getBaselineImpl(ctx context.Context, args GetBaselineArgs) (PsqlResult, error) {
+	conn := args.ConnectionString
+	sections := []struct {
+		name string
+		fn   func() (PsqlResult, error)
+	}{
+		{"Server Info", func() (PsqlResult, error) {
+			return getServerInfoImpl(ctx, GetServerInfoArgs{ConnectionString: conn})
+		}},
+		{"PG Settings (non-default)", func() (PsqlResult, error) {
+			return getPgSettingsImpl(ctx, GetPgSettingsArgs{ConnectionString: conn})
+		}},
+		{"Extensions", func() (PsqlResult, error) {
+			return getExtensionsImpl(ctx, GetExtensionsArgs{ConnectionString: conn})
+		}},
+		{"Disk Usage", func() (PsqlResult, error) {
+			return getDiskUsageImpl(ctx, GetDiskUsageArgs{ConnectionString: conn})
+		}},
+	}
+
+	var sb strings.Builder
+	for _, s := range sections {
+		sb.WriteString("══════════════════════════════════════════\n")
+		sb.WriteString("  " + s.name + "\n")
+		sb.WriteString("══════════════════════════════════════════\n")
+		result, err := s.fn()
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("  WARNING: failed to collect %s: %v\n\n", s.name, err))
+			continue
+		}
+		sb.WriteString(result.Output)
+		sb.WriteString("\n")
+	}
+	return PsqlResult{Output: sb.String()}, nil
+}
+
+func getBaselineTool(ctx tool.Context, args GetBaselineArgs) (PsqlResult, error) {
+	return getBaselineImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_slow_queries
+// ---------------------------------------------------------------------------
+
+// GetSlowQueriesArgs defines arguments for the get_slow_queries tool.
+type GetSlowQueriesArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Limit            int    `json:"limit,omitempty" jsonschema:"Number of top queries to return by total execution time (default 10)."`
+}
+
+func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResult, error) {
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	query := fmt.Sprintf(`SELECT
+		LEFT(query, 120) as query,
+		calls,
+		ROUND(total_exec_time::numeric, 2) as total_ms,
+		ROUND(mean_exec_time::numeric, 2) as mean_ms,
+		ROUND(max_exec_time::numeric, 2) as max_ms,
+		rows
+	FROM pg_stat_statements
+	ORDER BY total_exec_time DESC
+	LIMIT %d;`, limit)
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_slow_queries")
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "42883") || strings.Contains(msg, "42P01") ||
+			strings.Contains(msg, "pg_stat_statements") {
+			return PsqlResult{Output: "pg_stat_statements extension is not installed. Enable it with: CREATE EXTENSION pg_stat_statements; and add it to shared_preload_libraries in postgresql.conf."}, nil
+		}
+		return errorResult("get_slow_queries", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No queries recorded yet. pg_stat_statements resets on server restart."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getSlowQueriesTool(ctx tool.Context, args GetSlowQueriesArgs) (PsqlResult, error) {
+	return getSlowQueriesImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_vacuum_status
+// ---------------------------------------------------------------------------
+
+// GetVacuumStatusArgs defines arguments for the get_vacuum_status tool.
+type GetVacuumStatusArgs struct {
+	ConnectionString string  `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	MinDeadRatio     float64 `json:"min_dead_ratio,omitempty" jsonschema:"Only show tables with a dead row ratio >= this value (0–100). Default 0 returns all tables."`
+}
+
+func getVacuumStatusImpl(ctx context.Context, args GetVacuumStatusArgs) (PsqlResult, error) {
+	query := fmt.Sprintf(`SELECT
+		schemaname,
+		relname as table_name,
+		n_live_tup as live_rows,
+		n_dead_tup as dead_rows,
+		ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) as dead_ratio_pct,
+		last_vacuum,
+		last_autovacuum,
+		last_analyze,
+		last_autoanalyze,
+		autovacuum_count,
+		autoanalyze_count
+	FROM pg_stat_user_tables
+	WHERE ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) >= %g
+	ORDER BY n_dead_tup DESC
+	LIMIT 30;`, args.MinDeadRatio)
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_vacuum_status")
+	if err != nil {
+		return errorResult("get_vacuum_status", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: fmt.Sprintf("No tables with dead row ratio >= %.0f%%. Vacuum health looks good.", args.MinDeadRatio)}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getVacuumStatusTool(ctx tool.Context, args GetVacuumStatusArgs) (PsqlResult, error) {
+	return getVacuumStatusImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_disk_usage
+// ---------------------------------------------------------------------------
+
+// GetDiskUsageArgs defines arguments for the get_disk_usage tool.
+type GetDiskUsageArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	TopN             int    `json:"top_n,omitempty" jsonschema:"Number of largest tables to include (default 10)."`
+}
+
+func getDiskUsageImpl(ctx context.Context, args GetDiskUsageArgs) (PsqlResult, error) {
+	topN := args.TopN
+	if topN <= 0 {
+		topN = 10
+	}
+	// Part 1: database-level sizes
+	dbQuery := `SELECT
+		datname as database,
+		pg_size_pretty(pg_database_size(datname)) as size,
+		pg_database_size(datname) as size_bytes
+	FROM pg_database
+	WHERE datistemplate = false
+	ORDER BY pg_database_size(datname) DESC;`
+
+	dbOut, err := runPsqlWithToolName(ctx, args.ConnectionString, dbQuery, "get_disk_usage")
+	if err != nil {
+		return errorResult("get_disk_usage", args.ConnectionString, err), nil
+	}
+
+	// Part 2: top-N tables across all schemas
+	tableQuery := fmt.Sprintf(`SELECT
+		schemaname,
+		relname as table_name,
+		pg_size_pretty(pg_total_relation_size(relid)) as total_size,
+		pg_size_pretty(pg_relation_size(relid)) as table_size,
+		pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) as index_size
+	FROM pg_stat_user_tables
+	ORDER BY pg_total_relation_size(relid) DESC
+	LIMIT %d;`, topN)
+
+	tableOut, err := runPsqlWithToolName(ctx, args.ConnectionString, tableQuery, "get_disk_usage")
+	if err != nil {
+		return errorResult("get_disk_usage", args.ConnectionString, err), nil
+	}
+
+	return PsqlResult{Output: "-- Database Sizes --\n" + dbOut + "\n-- Top " + strconv.Itoa(topN) + " Tables by Disk Usage --\n" + tableOut}, nil
+}
+
+func getDiskUsageTool(ctx tool.Context, args GetDiskUsageArgs) (PsqlResult, error) {
+	return getDiskUsageImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_wait_events
+// ---------------------------------------------------------------------------
+
+// GetWaitEventsArgs defines arguments for the get_wait_events tool.
+type GetWaitEventsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getWaitEventsImpl(ctx context.Context, args GetWaitEventsArgs) (PsqlResult, error) {
+	query := `SELECT
+		wait_event_type,
+		wait_event,
+		count(*) as sessions,
+		string_agg(state, ', ' ORDER BY state) as states
+	FROM pg_stat_activity
+	WHERE wait_event IS NOT NULL
+	  AND pid <> pg_backend_pid()
+	GROUP BY wait_event_type, wait_event
+	ORDER BY sessions DESC;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_wait_events")
+	if err != nil {
+		return errorResult("get_wait_events", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No sessions currently waiting."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getWaitEventsTool(ctx tool.Context, args GetWaitEventsArgs) (PsqlResult, error) {
+	return getWaitEventsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_blocking_queries
+// ---------------------------------------------------------------------------
+
+// GetBlockingQueriesArgs defines arguments for the get_blocking_queries tool.
+type GetBlockingQueriesArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getBlockingQueriesImpl(ctx context.Context, args GetBlockingQueriesArgs) (PsqlResult, error) {
+	query := `SELECT
+		blocked_locks.pid AS blocked_pid,
+		blocked_activity.usename AS blocked_user,
+		blocked_activity.application_name AS blocked_app,
+		blocked_activity.wait_event_type AS wait_type,
+		blocked_activity.wait_event,
+		blocking_locks.pid AS blocking_pid,
+		blocking_activity.usename AS blocking_user,
+		blocking_locks.mode AS lock_mode,
+		COALESCE(rel.relname, '(relation unknown)') AS relation,
+		now() - blocked_activity.xact_start AS blocked_duration,
+		LEFT(blocked_activity.query, 100) AS blocked_query,
+		LEFT(blocking_activity.query, 100) AS blocking_query
+	FROM pg_catalog.pg_locks blocked_locks
+	JOIN pg_catalog.pg_stat_activity blocked_activity
+		ON blocked_activity.pid = blocked_locks.pid
+	JOIN pg_catalog.pg_locks blocking_locks
+		ON blocking_locks.locktype = blocked_locks.locktype
+		AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+		AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+		AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+		AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+		AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+		AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+		AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+		AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+		AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+		AND blocking_locks.pid != blocked_locks.pid
+	JOIN pg_catalog.pg_stat_activity blocking_activity
+		ON blocking_activity.pid = blocking_locks.pid
+	LEFT JOIN pg_catalog.pg_class rel
+		ON rel.oid = blocked_locks.relation
+	WHERE NOT blocked_locks.granted
+	ORDER BY blocked_duration DESC NULLS LAST;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_blocking_queries")
+	if err != nil {
+		return errorResult("get_blocking_queries", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No blocking queries found."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getBlockingQueriesTool(ctx tool.Context, args GetBlockingQueriesArgs) (PsqlResult, error) {
+	return getBlockingQueriesImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// explain_query
+// ---------------------------------------------------------------------------
+
+// ExplainQueryArgs defines arguments for the explain_query tool.
+type ExplainQueryArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Query            string `json:"query" jsonschema:"required,SQL query to explain. Must be a SELECT/WITH statement unless allow_dml is true."`
+	AllowDML         bool   `json:"allow_dml,omitempty" jsonschema:"If false (default), rejects non-SELECT/WITH statements. If true, runs EXPLAIN ANALYZE inside BEGIN/ROLLBACK so DML executes but is never committed."`
+}
+
+func explainQueryImpl(ctx context.Context, args ExplainQueryArgs) (PsqlResult, error) {
+	if args.Query == "" {
+		return PsqlResult{Output: "explain_query: query is required"}, nil
+	}
+
+	trimmed := strings.TrimSpace(strings.ToUpper(args.Query))
+	isDML := !strings.HasPrefix(trimmed, "SELECT") &&
+		!strings.HasPrefix(trimmed, "WITH") &&
+		!strings.HasPrefix(trimmed, "EXPLAIN") &&
+		!strings.HasPrefix(trimmed, "TABLE")
+
+	if isDML && !args.AllowDML {
+		return PsqlResult{Output: "explain_query: only SELECT/WITH queries are allowed by default. Set allow_dml=true to EXPLAIN DML statements (they will be wrapped in BEGIN/ROLLBACK and not committed)."}, nil
+	}
+
+	var psqlQuery string
+	if isDML && args.AllowDML {
+		// Wrap in transaction so DML is rolled back after EXPLAIN ANALYZE.
+		psqlQuery = fmt.Sprintf("BEGIN; EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) %s; ROLLBACK;", args.Query)
+	} else {
+		psqlQuery = fmt.Sprintf("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) %s", args.Query)
+	}
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, psqlQuery, "explain_query")
+	if err != nil {
+		return errorResult("explain_query", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func explainQueryTool(ctx tool.Context, args ExplainQueryArgs) (PsqlResult, error) {
+	return explainQueryImpl(ctx, args)
+}
+
 func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 	r := agentutil.NewDirectToolRegistry()
 	r.Register("check_connection", func(ctx context.Context, args map[string]any) (string, error) {
@@ -1541,6 +1949,78 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := getStatusSummaryImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_pg_settings", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetPgSettingsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getPgSettingsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_extensions", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetExtensionsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getExtensionsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_baseline", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetBaselineArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getBaselineImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_slow_queries", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetSlowQueriesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getSlowQueriesImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_vacuum_status", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetVacuumStatusArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getVacuumStatusImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_disk_usage", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetDiskUsageArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getDiskUsageImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_wait_events", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetWaitEventsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getWaitEventsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_blocking_queries", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetBlockingQueriesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getBlockingQueriesImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("explain_query", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ExplainQueryArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := explainQueryImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r

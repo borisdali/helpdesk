@@ -105,6 +105,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create tool result store (shares the same database connection)
+	toolResultStore, err := audit.NewToolResultStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create tool result store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create rollback store (shares the same database connection)
 	rollbackStore, err := audit.NewRollbackStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -189,6 +196,7 @@ func main() {
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
 	playbookSrv := &playbookServer{store: playbookStore}
+	toolResultSrv := &toolResultServer{store: toolResultStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
@@ -240,7 +248,12 @@ func main() {
 	mux.HandleFunc("POST /v1/fleet/playbooks", auth("POST /v1/fleet/playbooks", playbookSrv.handleCreate))
 	mux.HandleFunc("GET /v1/fleet/playbooks", auth("GET /v1/fleet/playbooks", playbookSrv.handleList))
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}", auth("GET /v1/fleet/playbooks/{playbookID}", playbookSrv.handleGet))
+	mux.HandleFunc("PUT /v1/fleet/playbooks/{playbookID}", auth("PUT /v1/fleet/playbooks/{playbookID}", playbookSrv.handleUpdate))
 	mux.HandleFunc("DELETE /v1/fleet/playbooks/{playbookID}", auth("DELETE /v1/fleet/playbooks/{playbookID}", playbookSrv.handleDelete))
+
+	// Tool result endpoints
+	mux.HandleFunc("POST /v1/tool-results", auth("POST /v1/tool-results", toolResultSrv.handleRecord))
+	mux.HandleFunc("GET /v1/tool-results", auth("GET /v1/tool-results", toolResultSrv.handleList))
 
 	// Fleet job approval endpoints
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/approval", auth("POST /v1/fleet/jobs/{jobID}/approval", fleetSrv.handleCreateJobApproval))

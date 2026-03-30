@@ -2765,3 +2765,370 @@ func TestTerminateIdleConnectionsTool_ToolPatternPolicyDenied(t *testing.T) {
 		t.Errorf("terminateIdleConnectionsTool() output = %q, want 'policy denied'", result.Output)
 	}
 }
+
+// =============================================================================
+// get_pg_settings
+// =============================================================================
+
+func TestGetPgSettingsTool_NonDefaultSettings(t *testing.T) {
+	mockOutput := `  category  |         name          | setting | unit | default_value | source | short_desc
+------------+-----------------------+---------+------+---------------+--------+------------------------------
+ Autovacuum | autovacuum_max_workers| 5       |      | 3             | file   | Sets the maximum number of...`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgSettingsTool(ctx, GetPgSettingsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgSettingsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "autovacuum_max_workers") {
+		t.Errorf("getPgSettingsTool() output = %q, want autovacuum_max_workers", result.Output)
+	}
+}
+
+func TestGetPgSettingsTool_AllDefaultsReturnsMessage(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getPgSettingsTool(ctx, GetPgSettingsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgSettingsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "default values") {
+		t.Errorf("getPgSettingsTool() output = %q, want default values message", result.Output)
+	}
+}
+
+func TestGetPgSettingsTool_CategoryFilter(t *testing.T) {
+	mockOutput := ` category   |       name       | setting | unit | default_value | source | short_desc
+-------------+------------------+---------+------+---------------+--------+-------
+ Autovacuum  | autovacuum       | on      |      | on            | file   | Enables autovacuum.`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgSettingsTool(ctx, GetPgSettingsArgs{
+		ConnectionString: "host=localhost",
+		Category:         "autovacuum",
+	})
+	if err != nil {
+		t.Fatalf("getPgSettingsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Autovacuum") {
+		t.Errorf("getPgSettingsTool() output = %q, want Autovacuum", result.Output)
+	}
+}
+
+// =============================================================================
+// get_extensions
+// =============================================================================
+
+func TestGetExtensionsTool_WithExtensions(t *testing.T) {
+	mockOutput := `   name    | installed_version | default_version |           comment
+-----------+-------------------+-----------------+------------------------------
+ pg_stat_statements | 1.10    | 1.10            | track planning and execution statistics`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getExtensionsTool(ctx, GetExtensionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getExtensionsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "pg_stat_statements") {
+		t.Errorf("getExtensionsTool() output = %q, want pg_stat_statements", result.Output)
+	}
+}
+
+func TestGetExtensionsTool_NoExtensions(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getExtensionsTool(ctx, GetExtensionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getExtensionsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No extensions") {
+		t.Errorf("getExtensionsTool() output = %q, want 'No extensions'", result.Output)
+	}
+}
+
+// =============================================================================
+// get_baseline
+// =============================================================================
+
+func TestGetBaselineTool_Success(t *testing.T) {
+	// Each sub-tool call returns non-empty output. withMockRunner returns the
+	// same value for all calls, which is fine — baseline just concatenates sections.
+	mockOutput := `-[ RECORD 1 ]---+---
+version | PostgreSQL 16.3`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getBaselineTool(ctx, GetBaselineArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBaselineTool() error = %v", err)
+	}
+	// All four section headers should appear
+	for _, section := range []string{"Server Info", "PG Settings", "Extensions", "Disk Usage"} {
+		if !strings.Contains(result.Output, section) {
+			t.Errorf("getBaselineTool() output missing section %q\noutput: %s", section, result.Output)
+		}
+	}
+}
+
+func TestGetBaselineTool_PartialFailure(t *testing.T) {
+	// All calls fail — baseline still returns output; sub-tool errors appear as ERROR text.
+	defer withMockRunner("", errors.New("connection refused"))()
+
+	ctx := newTestContext()
+	result, err := getBaselineTool(ctx, GetBaselineArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBaselineTool() unexpected Go error: %v", err)
+	}
+	// At least one ERROR section from a failed sub-tool should appear
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("getBaselineTool() output = %q, want ERROR text from failed sub-tools", result.Output)
+	}
+}
+
+// =============================================================================
+// get_slow_queries
+// =============================================================================
+
+func TestGetSlowQueriesTool_WithResults(t *testing.T) {
+	mockOutput := ` query                                | calls | total_ms | mean_ms | max_ms | rows
+--------------------------------------+-------+----------+---------+--------+------
+ SELECT * FROM users WHERE id = $1    |  1250 |  3500.00 |    2.80 |  42.00 | 1250`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getSlowQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "total_ms") {
+		t.Errorf("getSlowQueriesTool() output = %q, want total_ms", result.Output)
+	}
+}
+
+func TestGetSlowQueriesTool_ExtensionMissing(t *testing.T) {
+	defer withMockRunner("", fmt.Errorf("exit status 1: ERROR:  relation \"pg_stat_statements\" does not exist"))()
+
+	ctx := newTestContext()
+	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getSlowQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "pg_stat_statements extension is not installed") {
+		t.Errorf("getSlowQueriesTool() output = %q, want extension-not-installed message", result.Output)
+	}
+}
+
+func TestGetSlowQueriesTool_NoResults(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getSlowQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No queries recorded") {
+		t.Errorf("getSlowQueriesTool() output = %q, want no-queries message", result.Output)
+	}
+}
+
+// =============================================================================
+// get_vacuum_status
+// =============================================================================
+
+func TestGetVacuumStatusTool_WithResults(t *testing.T) {
+	mockOutput := ` schemaname | table_name | live_rows | dead_rows | dead_ratio | last_autovacuum
+------------+------------+-----------+-----------+------------+-------------------
+ public     | orders     | 500000    | 50000     | 9.09       | 2026-03-29 10:00`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getVacuumStatusTool(ctx, GetVacuumStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getVacuumStatusTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "dead_ratio") {
+		t.Errorf("getVacuumStatusTool() output = %q, want dead_ratio", result.Output)
+	}
+}
+
+func TestGetVacuumStatusTool_NoResults(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getVacuumStatusTool(ctx, GetVacuumStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getVacuumStatusTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No tables") {
+		t.Errorf("getVacuumStatusTool() output = %q, want 'No tables' message", result.Output)
+	}
+}
+
+// =============================================================================
+// get_disk_usage
+// =============================================================================
+
+func TestGetDiskUsageTool_WithResults(t *testing.T) {
+	mockOutput := ` db_name | size
+---------+-------
+ prod    | 5 GB`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getDiskUsageTool(ctx, GetDiskUsageArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getDiskUsageTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "size") {
+		t.Errorf("getDiskUsageTool() output = %q, want size", result.Output)
+	}
+}
+
+// =============================================================================
+// get_wait_events
+// =============================================================================
+
+func TestGetWaitEventsTool_WithEvents(t *testing.T) {
+	mockOutput := ` wait_event_type | wait_event | count
+-----------------+------------+-------
+ Lock            | relation   |     8
+ IO              | DataFileRead|    3`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getWaitEventsTool(ctx, GetWaitEventsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getWaitEventsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "wait_event") {
+		t.Errorf("getWaitEventsTool() output = %q, want wait_event", result.Output)
+	}
+}
+
+func TestGetWaitEventsTool_NoWaits(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getWaitEventsTool(ctx, GetWaitEventsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getWaitEventsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No sessions currently waiting") {
+		t.Errorf("getWaitEventsTool() output = %q, want 'No wait events'", result.Output)
+	}
+}
+
+// =============================================================================
+// get_blocking_queries
+// =============================================================================
+
+func TestGetBlockingQueriesTool_WithBlocks(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]------+-------------------------------
+blocked_pid        | 1234
+blocked_user       | app
+blocking_pid       | 5678
+blocking_user      | admin
+wait_event_type    | Lock
+lock_mode          | ShareLock
+relation_name      | users
+duration           | 00:00:45.123`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getBlockingQueriesTool(ctx, GetBlockingQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBlockingQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "blocked_pid") {
+		t.Errorf("getBlockingQueriesTool() output = %q, want blocked_pid", result.Output)
+	}
+}
+
+func TestGetBlockingQueriesTool_NoBlocking(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getBlockingQueriesTool(ctx, GetBlockingQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBlockingQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No blocking queries") {
+		t.Errorf("getBlockingQueriesTool() output = %q, want 'No blocking queries'", result.Output)
+	}
+}
+
+// =============================================================================
+// explain_query
+// =============================================================================
+
+func TestExplainQueryTool_SelectQuery(t *testing.T) {
+	mockOutput := `Seq Scan on users  (cost=0.00..15.00 rows=500 width=40) (actual time=0.012..0.123 rows=500 loops=1)
+Planning Time: 0.1 ms
+Execution Time: 0.2 ms`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "SELECT * FROM users",
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Seq Scan") {
+		t.Errorf("explainQueryTool() output = %q, want Seq Scan plan", result.Output)
+	}
+}
+
+func TestExplainQueryTool_DMLRejectedByDefault(t *testing.T) {
+	// DML without allow_dml=true should be rejected without calling psql.
+	defer withMockRunner("should not be called", nil)()
+
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "UPDATE users SET active = false WHERE last_login < '2020-01-01'",
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "allow_dml=true") {
+		t.Errorf("explainQueryTool() output = %q, want allow_dml hint", result.Output)
+	}
+}
+
+func TestExplainQueryTool_DMLAllowedWithFlag(t *testing.T) {
+	mockOutput := `Update on users  (cost=0.00..25.00 rows=100 width=40)
+Planning Time: 0.3 ms
+Execution Time: 0.5 ms`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "UPDATE users SET active = false WHERE last_login < '2020-01-01'",
+		AllowDML:         true,
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Planning Time") {
+		t.Errorf("explainQueryTool() output = %q, want plan output", result.Output)
+	}
+}
+
+func TestExplainQueryTool_EmptyQuery(t *testing.T) {
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "query is required") {
+		t.Errorf("explainQueryTool() output = %q, want 'query is required'", result.Output)
+	}
+}

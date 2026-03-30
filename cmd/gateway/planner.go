@@ -21,6 +21,7 @@ import (
 type FleetPlanRequest struct {
 	Description string   `json:"description"`
 	TargetHints []string `json:"target_hints,omitempty"`
+	Guidance    string   `json:"guidance,omitempty"` // expert heuristics injected from a playbook
 }
 
 // FleetPlanResponse is the planner output — a JobDef ready for human review.
@@ -137,7 +138,7 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	intentSection := buildIntentSection()
-	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, req.Description, hints)
+	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, req.Description, hints, req.Guidance)
 
 	// Call LLM (injectable for tests; defaults to Anthropic SDK).
 	rawJSON, err := g.plannerLLM(r.Context(), prompt)
@@ -408,7 +409,12 @@ func buildIntentSection() string {
 }
 
 // assemblePlannerPrompt builds the full LLM prompt for the fleet job planner.
-func assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, description, hints string) string {
+// guidance is optional expert heuristics injected when running a playbook.
+func assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, description, hints, guidance string) string {
+	var guidanceSection string
+	if guidance != "" {
+		guidanceSection = "## Playbook Guidance\n\n" + guidance + "\n\n"
+	}
 	return fmt.Sprintf(`You are a fleet job planner for an AI database operations platform.
 Generate a valid fleet job definition as JSON based on the user's request.
 
@@ -425,8 +431,7 @@ Always add excluded server names to the excluded_servers list in your response.
 %s
 ## Intent-to-Tool Mapping
 When the request matches a known intent, use EXACTLY the listed tools — do not add others:
-%s
-## JobDef Schema
+%s%s## JobDef Schema
 
 {
   "name": "string",
@@ -460,7 +465,7 @@ Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
   "planner_notes": "<plain English: what this job does, why these tools, which servers targeted>",
   "excluded_servers": ["server1", ...],
   "warning_messages": ["..."]
-}`, infraSummary, toolCatalog, intentSection, description, hints)
+}`, infraSummary, toolCatalog, intentSection, guidanceSection, description, hints)
 }
 
 

@@ -80,6 +80,44 @@ func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"playbooks": playbooks})
 }
 
+func (s *playbookServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("playbookID")
+	if id == "" {
+		http.Error(w, "missing playbook ID", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+	var pb audit.Playbook
+	if err := json.Unmarshal(body, &pb); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if pb.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if pb.Description == "" {
+		http.Error(w, "description is required", http.StatusBadRequest)
+		return
+	}
+	pb.PlaybookID = id
+	if err := s.store.Update(r.Context(), &pb); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "playbook not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to update playbook", "err", err)
+		http.Error(w, "failed to update playbook", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pb)
+}
+
 func (s *playbookServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("playbookID")
 	if id == "" {

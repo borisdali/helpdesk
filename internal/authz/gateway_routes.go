@@ -31,6 +31,9 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/governance/journeys":          {AdminBypass: true},
 	"GET /api/v1/governance/govbot/runs":       {AdminBypass: true},
 
+	// Tool result query
+	"GET /api/v1/tool-results": {AdminBypass: true},
+
 	// Fleet reads and plan (plan is a dry-run — any authenticated user may preview)
 	"POST /api/v1/fleet/plan":                                   {AdminBypass: true},
 	"POST /api/v1/fleet/snapshot":                               {AdminBypass: true},
@@ -46,6 +49,7 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/fleet/playbooks":                      {AdminBypass: true},
 	"GET /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},
 	"POST /api/v1/fleet/playbooks":                     {AdminBypass: true},
+	"PUT /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},
 	"DELETE /api/v1/fleet/playbooks/{playbookID}":      {AdminBypass: true},
 	"POST /api/v1/fleet/playbooks/{playbookID}/run":    {AdminBypass: true},
 
