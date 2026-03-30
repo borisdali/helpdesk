@@ -172,6 +172,46 @@ func TestAssemblePlannerPrompt_IntentSection(t *testing.T) {
 	}
 }
 
+// TestAssemblePlannerPrompt_GuidanceInjection verifies that non-empty guidance
+// is injected as a "## Playbook Guidance" section positioned after the
+// intent mapping and before the JobDef schema, and that an empty guidance
+// string produces no such section.
+func TestAssemblePlannerPrompt_GuidanceInjection(t *testing.T) {
+	t.Run("non-empty guidance appears in correct position", func(t *testing.T) {
+		guidance := "Always prefer index scans over sequential scans."
+		prompt := assemblePlannerPrompt("infra", "tools", "  health_check → get_status_summary\n", "check status", "none", guidance)
+
+		if !strings.Contains(prompt, "## Playbook Guidance") {
+			t.Fatal("prompt should contain '## Playbook Guidance' when guidance is non-empty")
+		}
+		if !strings.Contains(prompt, guidance) {
+			t.Error("prompt should contain the guidance text")
+		}
+
+		intentIdx := strings.Index(prompt, "## Intent-to-Tool Mapping")
+		guidanceIdx := strings.Index(prompt, "## Playbook Guidance")
+		schemaIdx := strings.Index(prompt, "## JobDef Schema")
+
+		if intentIdx < 0 || guidanceIdx < 0 || schemaIdx < 0 {
+			t.Fatal("prompt missing one or more expected sections")
+		}
+		if !(intentIdx < guidanceIdx) {
+			t.Errorf("'## Playbook Guidance' should appear AFTER '## Intent-to-Tool Mapping': intent=%d guidance=%d", intentIdx, guidanceIdx)
+		}
+		if !(guidanceIdx < schemaIdx) {
+			t.Errorf("'## Playbook Guidance' should appear BEFORE '## JobDef Schema': guidance=%d schema=%d", guidanceIdx, schemaIdx)
+		}
+	})
+
+	t.Run("empty guidance produces no section", func(t *testing.T) {
+		prompt := assemblePlannerPrompt("infra", "tools", "  health_check → get_status_summary\n", "check status", "none", "")
+
+		if strings.Contains(prompt, "## Playbook Guidance") {
+			t.Error("prompt should NOT contain '## Playbook Guidance' when guidance is empty")
+		}
+	})
+}
+
 // --- buildPlannerToolCatalog with InputSchema ---
 
 func TestBuildPlannerToolCatalog_WithSchema(t *testing.T) {

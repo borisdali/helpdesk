@@ -3132,3 +3132,50 @@ func TestExplainQueryTool_EmptyQuery(t *testing.T) {
 		t.Errorf("explainQueryTool() output = %q, want 'query is required'", result.Output)
 	}
 }
+
+// capturingRunner is a CommandRunner that records the args from the last Run call.
+type capturingRunner struct {
+	lastArgs []string
+}
+
+func (c *capturingRunner) Run(_ context.Context, _ string, args []string, _ []string) (string, error) {
+	c.lastArgs = args
+	return `Update on users  (cost=0.00..25.00 rows=1 width=40)
+Planning Time: 0.2 ms
+Execution Time: 0.3 ms`, nil
+}
+
+func TestExplainQueryTool_DMLWrappedInTransaction(t *testing.T) {
+	capture := &capturingRunner{}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := newTestContext()
+	_, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "UPDATE users SET active = false WHERE id = 1",
+		AllowDML:         true,
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+
+	// The -c argument passed to psql must contain BEGIN and ROLLBACK.
+	foundBEGIN := false
+	foundROLLBACK := false
+	for _, arg := range capture.lastArgs {
+		if strings.Contains(arg, "BEGIN") {
+			foundBEGIN = true
+		}
+		if strings.Contains(arg, "ROLLBACK") {
+			foundROLLBACK = true
+		}
+	}
+	if !foundBEGIN {
+		t.Errorf("expected psql args to contain BEGIN; got %v", capture.lastArgs)
+	}
+	if !foundROLLBACK {
+		t.Errorf("expected psql args to contain ROLLBACK; got %v", capture.lastArgs)
+	}
+}

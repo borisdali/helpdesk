@@ -1,7 +1,7 @@
 version: "1"
 
 failures:
-  # ── Database failures (9) ──────────────────────────────────────────────
+  # ── Database failures (13) ─────────────────────────────────────────────
 
   - id: db-max-connections
     name: "Max connections exhausted"
@@ -99,6 +99,8 @@ failures:
       expected_tools:
         - get_lock_info
         - get_active_connections
+        - get_wait_events
+        - get_blocking_queries
       expected_keywords:
         any_of:
           - "deadlock"
@@ -161,6 +163,7 @@ failures:
     evaluation:
       expected_tools:
         - get_database_stats
+        - get_slow_queries
       expected_keywords:
         any_of:
           - "cache hit"
@@ -392,7 +395,7 @@ failures:
     # known behaviour gap, not a test assertion — the suite should still pass.
     governance_gap: true
 
-  # ── Kubernetes failures (6) ────────────────────────────────────────────
+  # ── Kubernetes failures (7) ────────────────────────────────────────────
 
   - id: k8s-crashloop
     name: "CrashLoopBackOff"
@@ -450,6 +453,7 @@ failures:
       expected_tools:
         - get_pods
         - get_events
+        - get_pod_resources
       expected_keywords:
         any_of:
           - "Pending"
@@ -586,6 +590,7 @@ failures:
       expected_tools:
         - get_pods
         - get_events
+        - get_pod_resources
       expected_keywords:
         any_of:
           - "OOMKilled"
@@ -633,6 +638,80 @@ failures:
       expected_diagnosis:
         category: "deployment_scaled_down"
     timeout: 90s
+
+  - id: db-vacuum-needed
+    name: "Tables needing vacuum (dead tuple bloat)"
+    category: database
+    severity: medium
+    description: >
+      Several tables have accumulated a large number of dead tuples with
+      autovacuum disabled, degrading query performance and wasting disk space.
+    inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS vacuum_bloat (id SERIAL PRIMARY KEY, val TEXT);
+        INSERT INTO vacuum_bloat (val) SELECT 'row' || g FROM generate_series(1, 5000) g;
+        ALTER TABLE vacuum_bloat SET (autovacuum_enabled = false);
+        DELETE FROM vacuum_bloat WHERE id % 2 = 0;
+    teardown:
+      type: sql
+      script_inline: "DROP TABLE IF EXISTS vacuum_bloat;"
+    prompt: >
+      A DBA reports that queries on several tables are getting slower and
+      autovacuum has not run recently. The connection_string is
+      `{{connection_string}}` — use it verbatim for all tool calls.
+      Check which tables need vacuuming.
+    evaluation:
+      expected_tools:
+        - get_vacuum_status
+      expected_keywords:
+        any_of:
+          - "dead tuples"
+          - "dead_ratio"
+          - "autovacuum"
+          - "vacuum"
+          - "bloat"
+      expected_diagnosis:
+        category: "vacuum_needed"
+    timeout: 60s
+
+  - id: db-disk-pressure
+    name: "Disk usage — large table growth"
+    category: database
+    severity: medium
+    description: >
+      A table has grown very large, consuming significant disk space. The
+      operator needs to identify which tables and databases are using the most
+      storage.
+    inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS disk_pressure_data (id SERIAL PRIMARY KEY, payload TEXT);
+        INSERT INTO disk_pressure_data (payload)
+          SELECT repeat('x', 2000) FROM generate_series(1, 10000);
+    teardown:
+      type: sql
+      script_inline: "DROP TABLE IF EXISTS disk_pressure_data;"
+    prompt: >
+      The database server is reporting low disk space alerts. The
+      connection_string is `{{connection_string}}` — use it verbatim for all
+      tool calls. Identify which databases and tables are consuming the most
+      storage.
+    evaluation:
+      expected_tools:
+        - get_disk_usage
+      expected_keywords:
+        any_of:
+          - "disk"
+          - "table size"
+          - "database size"
+          - "storage"
+          - "bytes"
+          - "MiB"
+          - "GiB"
+      expected_diagnosis:
+        category: "disk_pressure"
+    timeout: 60s
 
   # ── Compound failures (2) ──────────────────────────────────────────────
 

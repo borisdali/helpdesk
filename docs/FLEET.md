@@ -490,6 +490,24 @@ Issue codes:
 
 A **playbook** is a saved NL intent — a name, description, and optional target hints — stored in auditd. Running a playbook calls the planner fresh, always producing a plan against the current tool catalog and infrastructure state.
 
+Playbooks carry two classes of fields:
+
+- **Intent fields** — drive the planner: `name`, `description` (passed verbatim as the planner description), `target_hints`.
+- **Knowledge fields** — expert context that enriches authoring and execution: `problem_class`, `symptoms`, `guidance`, `escalation`, `related_playbooks`, `author`, `last_validated`, `version`.
+
+The `guidance` field is injected into the planner prompt as a `## Playbook Guidance` section when the playbook is run. It does not appear in ad-hoc `/fleet/plan` calls. Use it for expert heuristics, prioritisation notes, and common misdiagnosis warnings.
+
+| Knowledge field | Type | Purpose |
+|---|---|---|
+| `problem_class` | string | `performance`, `availability`, `capacity`, `data_integrity`, `security` |
+| `symptoms` | []string | Observable indicators that should trigger this playbook |
+| `guidance` | string | Expert reasoning injected into the planner prompt at run time |
+| `escalation` | []string | Conditions under which the agent must stop and escalate to a human |
+| `related_playbooks` | []string | `pb_*` IDs of related playbooks |
+| `author` | string | Author identity |
+| `last_validated` | RFC3339 | Date the playbook was last validated against real infrastructure |
+| `version` | string | Playbook version string (free-form; e.g. `"1.2"`) |
+
 **Create a playbook:**
 
 ```bash
@@ -499,11 +517,32 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks \
     "name": "weekly-staging-health",
     "description": "Check connection health and table statistics on all staging databases",
     "target_hints": ["staging"],
-    "created_by": "alice@example.com"
+    "created_by": "alice@example.com",
+    "problem_class": "availability",
+    "symptoms": ["connection timeouts", "high error rate"],
+    "guidance": "Start with check_connection before looking at table stats. High dead-tuple counts on staging often indicate autovacuum is disabled for testing — confirm before escalating.",
+    "author": "alice@example.com",
+    "version": "1.0"
   }'
 ```
 
 Response: `{"playbook_id": "pb_a1b2c3d4", "name": "weekly-staging-health", ...}`
+
+**Update a playbook:**
+
+```bash
+curl -s -X PUT http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "weekly-staging-health",
+    "description": "Check connection health and table statistics on all staging databases",
+    "guidance": "Updated guidance: also run get_vacuum_status if table stats look bloated.",
+    "version": "1.1",
+    "last_validated": "2026-03-30T00:00:00Z"
+  }'
+```
+
+Returns `404` if the playbook ID does not exist. All fields are replaced; omitting a field clears it.
 
 **List playbooks:**
 
@@ -522,7 +561,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 ./fleet-runner --job-file /tmp/plan.json
 ```
 
-`/run` returns the same `FleetPlanResponse` as `/api/v1/fleet/plan`. The returned job def includes fresh `tool_snapshots` and `plan_description` so `--replan` and `--refresh-snapshots` work as expected.
+`/run` returns the same `FleetPlanResponse` as `/api/v1/fleet/plan`. The returned job def includes fresh `tool_snapshots` and `plan_description` so `--replan` and `--refresh-snapshots` work as expected. When `guidance` is set on the playbook, `planner_notes` in the response will reflect the guidance the planner was given.
 
 **For scheduled execution** (CronJob), combine playbooks with `--plan-description`:
 

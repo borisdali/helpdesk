@@ -250,6 +250,37 @@ curl -s -X POST http://localhost:8080/api/v1/db/check_replication_lag \
   -d '{"host": "prod-db.example.com", "port": 5432}'
 ```
 
+#### Database tool quick reference
+
+All tools accept `connection_string` (PostgreSQL DSN; falls back to `HELPDESK_DB_URL` env). Action class is `read` unless noted.
+
+| Tool | Key parameters | What it returns |
+|------|----------------|----------------|
+| `check_connection` | — | Connectivity and server version |
+| `get_server_info` | — | Version, uptime, PG settings summary |
+| `get_status_summary` | — | Compact health snapshot (supersedes server_info + connection_stats) |
+| `get_database_stats` | — | Cache hit ratio, buffer and tuple counts |
+| `get_connection_stats` | — | Active/idle/waiting connection counts by state |
+| `get_active_connections` | — | `pg_stat_activity` snapshot |
+| `get_session_info` | `pid` (required) | Detailed session state, lock holds, uncommitted write estimate |
+| `get_lock_info` | — | Lock grants and waits from `pg_locks` |
+| `get_replication_status` | — | Streaming replica lag and WAL position |
+| `get_table_stats` | `schema` | Dead tuple counts, autovacuum timestamps per table |
+| `get_config_parameter` | `parameter` (required) | Single GUC value and source |
+| `get_database_info` | — | Database list with sizes and owner |
+| `get_pg_settings` | `category`, `show_all` | Non-default GUC values, grouped by category |
+| `get_extensions` | — | Installed extensions with versions |
+| `get_baseline` | — | Combined report: server info + settings + extensions + disk usage |
+| `get_slow_queries` | `limit` | Top-N queries by total execution time from `pg_stat_statements` |
+| `get_vacuum_status` | `min_dead_ratio` | Tables with high dead-tuple ratio, last autovacuum timestamps |
+| `get_disk_usage` | `top_n` | Database sizes (`pg_database_size`) + largest tables (`pg_total_relation_size`) |
+| `get_wait_events` | — | Aggregated wait event types from `pg_stat_activity` |
+| `get_blocking_queries` | — | Blocking/blocked session pairs with lock type and relation |
+| `explain_query` | `query` (required), `allow_dml` | `EXPLAIN (ANALYZE, BUFFERS)` output; DML wrapped in BEGIN/ROLLBACK when `allow_dml=true` |
+| `cancel_query` | `pid` (required) | `pg_cancel_backend` — **write** |
+| `terminate_connection` | `pid` (required) | `pg_terminate_backend` — **destructive** |
+| `kill_idle_connections` | `idle_threshold_seconds` | Terminate all idle connections older than threshold — **destructive** |
+
 ---
 
 ### `POST /api/v1/k8s/{tool}`
@@ -261,6 +292,24 @@ curl -s -X POST http://localhost:8080/api/v1/k8s/get_pod_logs \
   -H "Content-Type: application/json" \
   -d '{"namespace": "default", "pod": "my-pod-abc123"}'
 ```
+
+#### Kubernetes tool quick reference
+
+All tools accept `context` (kubeconfig context name; defaults to current context).
+
+| Tool | Key parameters | What it returns |
+|------|----------------|----------------|
+| `get_pods` | `namespace` (required), `pod_name` | Pod list with status, restarts, age |
+| `get_pod_logs` | `namespace` (required), `pod_name` (required), `lines` | Container log tail |
+| `get_events` | `namespace` (required), `resource_name` | K8s events (warnings + normals) |
+| `describe_pod` | `namespace` (required), `pod_name` (required) | Full pod describe output |
+| `get_service` | `namespace` (required), `service_name` | Service spec with ClusterIP, ports, selector |
+| `get_endpoints` | `namespace` (required), `service_name` | Endpoint addresses for a service |
+| `get_pod_resources` | `namespace` (required), `pod_name` | CPU/memory requests + limits; live usage via `kubectl top` when metrics-server is available |
+| `get_node_status` | `node_name` | Node conditions (Ready, MemoryPressure, DiskPressure, PIDPressure), allocatable vs capacity resources |
+| `scale_deployment` | `namespace` (required), `deployment_name` (required), `replicas` (required) | Scale a deployment — **destructive** |
+| `restart_deployment` | `namespace` (required), `deployment_name` (required) | Rolling restart — **destructive** |
+| `delete_pod` | `namespace` (required), `pod_name` (required) | Delete a pod — **destructive** |
 
 ---
 
@@ -530,6 +579,120 @@ curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/approval/apr_xyz789 | jq
 ```
 
 To approve or deny, use the auditd approval endpoints directly (see below) — the gateway does not proxy write operations on approvals.
+
+---
+
+#### Playbook endpoints
+
+Playbooks are saved NL intents with optional expert knowledge fields. They generate a fresh plan on each run. See [FLEET.md](FLEET.md#playbooks) for full semantics.
+
+#### `GET /api/v1/fleet/playbooks`
+
+List all playbooks.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/playbooks | jq .playbooks
+```
+
+#### `GET /api/v1/fleet/playbooks/{playbookID}`
+
+Get a single playbook by ID.
+
+#### `POST /api/v1/fleet/playbooks`
+
+Create a new playbook.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Human-readable name |
+| `description` | string | yes | Planner intent — passed verbatim as the plan description |
+| `target_hints` | []string | no | Tag hints to narrow target selection |
+| `created_by` | string | no | Author identity |
+| `problem_class` | string | no | `performance`, `availability`, `capacity`, `data_integrity`, `security` |
+| `symptoms` | []string | no | Observable indicators that should trigger this playbook |
+| `guidance` | string | no | Expert reasoning injected into the planner prompt at run time |
+| `escalation` | []string | no | Conditions under which the agent must stop and escalate |
+| `related_playbooks` | []string | no | `pb_*` IDs of related playbooks |
+| `author` | string | no | Author identity (distinct from `created_by` — can be a team) |
+| `last_validated` | RFC3339 | no | Date the playbook was last validated against real infrastructure |
+| `version` | string | no | Free-form version string (e.g. `"1.2"`) |
+
+Response: `201 Created` with the full playbook object including generated `playbook_id`.
+
+#### `PUT /api/v1/fleet/playbooks/{playbookID}`
+
+Replace a playbook's fields. All fields are overwritten; omitting an optional field clears it. Returns `404` if the playbook does not exist. Accepts the same body as `POST`.
+
+```bash
+curl -s -X PUT http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "weekly-staging-health",
+    "description": "Check connection health and table statistics on all staging databases",
+    "guidance": "Run get_vacuum_status if table stats show bloat.",
+    "version": "1.1"
+  }'
+```
+
+#### `DELETE /api/v1/fleet/playbooks/{playbookID}`
+
+Delete a playbook. Returns `204 No Content`.
+
+#### `POST /api/v1/fleet/playbooks/{playbookID}/run`
+
+Generate a fresh fleet plan from the playbook and return a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). If the playbook has a `guidance` field it is injected into the planner prompt.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
+  | jq -r '.job_def_raw' > /tmp/plan.json
+./fleet-runner --job-file /tmp/plan.json --dry-run
+```
+
+---
+
+#### `GET /api/v1/tool-results`
+
+Query the persistent tool result log — a record of every tool execution written by fleet-runner and direct tool calls (when `HELPDESK_AUDIT_URL` is configured). Useful for trend analysis ("how has vacuum dead-ratio trended on prod-db-1 over the last 30 days?") and post-incident triage.
+
+| Parameter | Description |
+|---|---|
+| `server` | Filter by server name |
+| `tool` | Filter by tool name |
+| `job_id` | Filter by fleet job ID (`flj_*`) |
+| `since` | Duration string: `7d`, `24h`, `30m` (results newer than this window) |
+| `limit` | Max results (default 100, max 1000) |
+
+```bash
+# Last 7 days of vacuum status results on prod-db-1
+curl "http://localhost:8080/api/v1/tool-results?server=prod-db-1&tool=get_vacuum_status&since=7d"
+
+# All results from a specific fleet job
+curl "http://localhost:8080/api/v1/tool-results?job_id=flj_abc123"
+```
+
+Response:
+
+```json
+{
+  "count": 3,
+  "results": [
+    {
+      "result_id":    "res_a1b2c3d4",
+      "server_name":  "prod-db-1",
+      "tool_name":    "get_vacuum_status",
+      "tool_args":    "{\"connection_string\":\"...\"}",
+      "output":       "...",
+      "job_id":       "flj_abc123",
+      "trace_id":     "tr_flj_abc123",
+      "recorded_by":  "fleet-runner",
+      "recorded_at":  "2026-03-30T02:01:00Z",
+      "success":      true
+    }
+  ]
+}
+```
+
+Results are ordered most-recent first.
 
 ---
 

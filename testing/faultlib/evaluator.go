@@ -25,6 +25,21 @@ var ToolPatterns = map[string][]string{
 	"get_session_info":     {"session", "pid", "state", "duration", "client_addr"},
 	"terminate_connection": {"terminated", "terminate", "pg_terminate_backend"},
 	"cancel_query":         {"cancelled", "cancel", "pg_cancel_backend"},
+	// New DB diagnostic tools (Phase 1a).
+	"get_slow_queries":     {"pg_stat_statements", "total_exec_time", "mean_time"},
+	"get_vacuum_status":    {"dead_ratio", "last_autovacuum", "vacuum needed"},
+	"get_disk_usage":       {"pg_database_size", "pg_total_relation_size", "database size"},
+	"get_wait_events":      {"wait_event_type", "wait_event", "sessions waiting"},
+	"get_blocking_queries": {"blocking_pid", "lock_type", "relation_name"},
+	"get_pg_settings":      {"pg_settings", "non-default", "altered"},
+	"get_extensions":       {"installed_version", "pg_available_extensions"},
+	"get_baseline":         {"server info", "pg settings", "baseline"},
+	"explain_query":        {"seq scan", "index scan", "cost="},
+	// New K8s tools (Phase 1a).
+	"get_pod_resources": {"cpu request", "memory limit", "requests", "millicores"},
+	"get_node_status":   {"memorypressure", "diskpressure", "allocatable", "node condition"},
+	// scale_deployment is used in k8s-scale-to-zero; patterns reference output text.
+	"scale_deployment": {"scaled", "replicas", "scale"},
 }
 
 // ToolOrderingPatterns overrides ToolPatterns for the tool-ordering check only.
