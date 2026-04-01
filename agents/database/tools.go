@@ -1460,7 +1460,11 @@ func getPgSettingsImpl(ctx context.Context, args GetPgSettingsArgs) (PsqlResult,
 		return errorResult("get_pg_settings", args.ConnectionString, err), nil
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
-		return PsqlResult{Output: "All settings are at their default values."}, nil
+		msg := "All settings are at their default values."
+		if args.Category != "" {
+			msg = fmt.Sprintf("All %q category settings are at their default values.", args.Category)
+		}
+		return PsqlResult{Output: msg}, nil
 	}
 	return PsqlResult{Output: output}, nil
 }

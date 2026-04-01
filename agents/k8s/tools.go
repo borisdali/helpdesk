@@ -673,8 +673,8 @@ type GetNodesArgs struct {
 func getNodesImpl(ctx context.Context, args GetNodesArgs) (GetNodesResult, error) {
 	kubeContext := resolveContext(args.Context)
 
-	// Check policy for cluster-level access (no namespace)
-	if err := checkK8sPolicy(ctx, "", policy.ActionRead, nil); err != nil {
+	// Nodes are cluster-scoped; use "cluster" as the sentinel resource_name.
+	if err := checkK8sPolicy(ctx, "cluster", policy.ActionRead, nil); err != nil {
 		return GetNodesResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -989,7 +989,9 @@ type GetNodeStatusArgs struct {
 func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
 	kubeContext := resolveContext(args.Context)
 
-	if err := checkK8sPolicy(ctx, "", policy.ActionRead, nil); err != nil {
+	// Nodes are cluster-scoped (no namespace); use the sentinel "cluster" so the
+	// policy check request carries a non-empty resource_name.
+	if err := checkK8sPolicy(ctx, "cluster", policy.ActionRead, nil); err != nil {
 		return GetNodeStatusResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 

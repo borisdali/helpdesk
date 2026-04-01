@@ -1049,9 +1049,9 @@ func (a *Auditor) checkLongDuration(event *audit.Event) {
 
 // checkRepeatedQueries alerts on potential loops or stuck behavior.
 func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
-	// Fleet job traces legitimately repeat the same query across N servers —
-	// suppress loop detection for them.
-	if strings.HasPrefix(event.TraceID, "tr_flj_") {
+	// Fleet job traces and direct tool calls legitimately repeat the same
+	// query across N servers or in polling loops — suppress loop detection.
+	if strings.HasPrefix(event.TraceID, "tr_flj_") || strings.HasPrefix(event.TraceID, "dt_") {
 		return
 	}
 
@@ -1259,8 +1259,11 @@ func (a *Auditor) checkTimestampGap(event *audit.Event) {
 
 	gap := event.Timestamp.Sub(a.lastEventTime)
 
-	// Negative gap indicates time manipulation or out-of-order events
-	if gap < -time.Second {
+	// Negative gap indicates time manipulation or out-of-order events.
+	// Allow up to 5 s of clock skew between services (NTP drift); beyond that
+	// treat as a genuine anomaly.
+	const clockSkewTolerance = -5 * time.Second
+	if gap < clockSkewTolerance {
 		a.recordSecurityAlert("timestamp_anomaly", AlertCritical,
 			"Event timestamp is before previous event - possible manipulation", event,
 			"gap", gap.String(),

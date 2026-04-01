@@ -33,8 +33,13 @@ func (g *Gateway) proxyToAuditd(w http.ResponseWriter, r *http.Request, auditPat
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
+	// Authenticate to auditd using the gateway's own service account key.
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	// Forward the originating user identity so auditd can record who made the change.
+	if user := r.Header.Get("X-User"); user != "" {
+		req.Header.Set("X-User", user)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

@@ -170,8 +170,12 @@ func main() {
 		return func(w http.ResponseWriter, r *http.Request) {
 			principal, err := idProvider.Resolve(r)
 			if err != nil {
-				http.Error(w, "authentication failed: "+err.Error(), http.StatusUnauthorized)
-				return
+				// Bad or unrecognized credential: fall through as anonymous and
+				// let Authorize decide. AllowAnonymous routes pass; protected
+				// routes still get 401 from the Authorize block below.
+				slog.Debug("auth: unrecognized credential, treating as anonymous",
+					"pattern", pattern, "err", err)
+				principal = identity.ResolvedPrincipal{AuthMethod: "header"}
 			}
 			if authErr := authzr.Authorize(pattern, principal); authErr != nil {
 				status := http.StatusForbidden

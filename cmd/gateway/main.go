@@ -106,6 +106,9 @@ func main() {
 		gw.SetAuditURL(auditURL)
 		slog.Info("governance queries enabled", "url", auditURL)
 	}
+	if auditAPIKey != "" {
+		gw.SetAuditAPIKey(auditAPIKey)
+	}
 
 	if auditEnabled {
 		var auditor audit.Auditor

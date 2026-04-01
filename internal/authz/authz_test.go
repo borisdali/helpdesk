@@ -293,7 +293,8 @@ func makeTestRequest(method, path, pattern string) *http.Request {
 	return captured
 }
 
-func TestMiddleware_ProviderError(t *testing.T) {
+func TestMiddleware_ProviderError_ProtectedRoute_Returns401(t *testing.T) {
+	// Bad credential on a protected route → 401 (from Authorize, not from Resolve).
 	a := NewAuthorizer(DefaultGatewayPermissions, true)
 	provider := &fakeProvider{err: errors.New("bad token")}
 
@@ -301,15 +302,38 @@ func TestMiddleware_ProviderError(t *testing.T) {
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { nextCalled = true })
 
 	handler := a.Middleware(provider)(next)
-	r := makeTestRequest("GET", "/api/v1/agents", "GET /api/v1/agents")
+	r := makeTestRequest("POST", "/api/v1/query", "POST /api/v1/query")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
 	if nextCalled {
-		t.Error("next should not be called when provider returns error")
+		t.Error("next should not be called when auth fails on a protected route")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestMiddleware_ProviderError_PublicRoute_PassesThrough(t *testing.T) {
+	// Bad credential on an AllowAnonymous route → falls through as anonymous → 200.
+	// This is the probe-startup scenario: agent sends a wrong API key to
+	// GET /v1/governance/info (AllowAnonymous) and should still get a valid response.
+	a := NewAuthorizer(DefaultGatewayPermissions, true)
+	provider := &fakeProvider{err: errors.New("invalid API key")}
+
+	nextCalled := false
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { nextCalled = true })
+
+	handler := a.Middleware(provider)(next)
+	r := makeTestRequest("GET", "/health", "GET /health")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if !nextCalled {
+		t.Error("next should be called: bad credential on AllowAnonymous route should fall through as anonymous")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
 	}
 }
 

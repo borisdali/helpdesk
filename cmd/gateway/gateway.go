@@ -45,6 +45,7 @@ type Gateway struct {
 	infra            *infra.Config
 	auditor          *audit.GatewayAuditor
 	auditURL         string                  // URL to auditd service for governance queries
+	auditAPIKey      string                  // Bearer token for authenticating proxy requests to auditd
 	identityProvider identity.Provider       // resolves caller identity on every request
 	authzr           *authz.Authorizer       // central per-route authorizer (nil = no authz)
 	operatingMode    string                  // "readonly" or "fix"
@@ -86,6 +87,11 @@ func (g *Gateway) SetAuditor(auditor *audit.GatewayAuditor) {
 // SetAuditURL sets the auditd service URL for governance queries.
 func (g *Gateway) SetAuditURL(url string) {
 	g.auditURL = url
+}
+
+// SetAuditAPIKey sets the Bearer token used when proxying requests to auditd.
+func (g *Gateway) SetAuditAPIKey(key string) {
+	g.auditAPIKey = key
 }
 
 // SetIdentityProvider sets the identity provider used to resolve caller identity.
@@ -176,19 +182,12 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 				var err error
 				principal, err = g.identityProvider.Resolve(r)
 				if err != nil {
-					g.recordAudit(r.Context(), &audit.GatewayRequest{
-						TraceID:   traceID,
-						Endpoint:  r.URL.Path,
-						Method:    r.Method,
-						Agent:     patternAgent(pattern),
-						StartTime: start,
-						Duration:  time.Since(start),
-						Status:    "error",
-						Error:     "authentication failed: " + err.Error(),
-						HTTPCode:  http.StatusUnauthorized,
-					})
-					writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
-					return
+					// Bad or unrecognized credential: fall through as anonymous and
+					// let Authorize decide. AllowAnonymous routes pass; protected
+					// routes still get 401 from the Authorize block below.
+					slog.Debug("auth: unrecognized credential, treating as anonymous",
+						"pattern", pattern, "err", err)
+					principal = identity.ResolvedPrincipal{AuthMethod: "header"}
 				}
 			}
 			if g.authzr != nil {
