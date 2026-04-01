@@ -17,6 +17,8 @@ const (
 	CapConfig          = "config"
 	CapConnectivity    = "connectivity"
 	CapSessionInspect  = "session_inspect"
+	CapDiskUsage       = "disk_usage"
+	CapExtensions      = "extensions"
 )
 
 // Capability constants — Kubernetes domain.

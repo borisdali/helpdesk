@@ -173,6 +173,13 @@ func main() {
 			"postgres_database_agent-get_status_summary": true,
 		},
 		SkillCapabilities: map[string][]string{
+			"postgres_database_agent-get_baseline": {
+				toolregistry.CapUptime,
+				toolregistry.CapVersion,
+				toolregistry.CapConfig,
+				toolregistry.CapDiskUsage,
+				toolregistry.CapExtensions,
+			},
 			"postgres_database_agent-get_status_summary": {
 				toolregistry.CapUptime,
 				toolregistry.CapVersion,
@@ -212,6 +219,12 @@ func main() {
 			},
 		},
 		SkillSupersedes: map[string][]string{
+			"postgres_database_agent-get_baseline": {
+				"get_server_info",
+				"get_pg_settings",
+				"get_extensions",
+				"get_disk_usage",
+			},
 			"postgres_database_agent-get_status_summary": {
 				"get_server_info",
 				"get_connection_stats",
