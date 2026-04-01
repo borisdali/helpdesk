@@ -124,7 +124,9 @@ func (s *ToolResultStore) List(ctx context.Context, q ToolResultQuery) ([]*Persi
 	if q.Since > 0 {
 		since := time.Now().UTC().Add(-q.Since)
 		where = append(where, "recorded_at >= ?")
-		args = append(args, since.Format(time.RFC3339Nano))
+		// Use the same space-separated format SQLite stores time.Time values in
+		// so that string comparison is lexicographically correct.
+		args = append(args, since.Format("2006-01-02 15:04:05"))
 	}
 
 	query := `SELECT result_id, server_name, tool_name, tool_args, output,

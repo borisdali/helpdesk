@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -1467,5 +1469,123 @@ func TestHandleFleetPlan_ResolveSuperseded(t *testing.T) {
 	}
 	if steps[0].Tool != "get_status_summary" {
 		t.Errorf("steps[0].Tool = %q, want get_status_summary", steps[0].Tool)
+	}
+}
+
+func TestServerNameFromArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"db tool with connection_string", map[string]any{"connection_string": "prod-db-1"}, "prod-db-1"},
+		{"k8s tool with context", map[string]any{"context": "prod-cluster", "namespace": "default"}, "prod-cluster"},
+		{"k8s tool with namespace only", map[string]any{"namespace": "helpdesk-test"}, "helpdesk-test"},
+		{"empty connection_string falls through", map[string]any{"connection_string": "", "namespace": "ns1"}, "ns1"},
+		{"no relevant keys", map[string]any{"limit": 10}, "unknown"},
+		{"empty args", map[string]any{}, "unknown"},
+		{"nil-ish value", map[string]any{"connection_string": nil}, "unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := serverNameFromArgs(tc.args)
+			if got != tc.want {
+				t.Errorf("serverNameFromArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDispatchDirectTool_RecordsToolResult verifies that a successful direct tool
+// call causes the gateway to POST the result to auditd's /v1/tool-results endpoint.
+func TestDispatchDirectTool_RecordsToolResult(t *testing.T) {
+	const toolOutput = "dead_ratio | 0.42"
+
+	// Fake agent that returns a successful tool output.
+	_, agent := mockDirectToolAgent(t, "get_vacuum_status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"output": toolOutput}) //nolint:errcheck
+	})
+
+	// Fake auditd: captures any POST to /v1/tool-results.
+	var (
+		toolResultMu   sync.Mutex
+		toolResultBody []byte
+		toolResultDone = make(chan struct{})
+	)
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/tool-results" {
+			body, _ := io.ReadAll(r.Body)
+			toolResultMu.Lock()
+			toolResultBody = body
+			toolResultMu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			close(toolResultDone)
+			return
+		}
+		// Ignore other auditd calls (audit events, etc.).
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	gw := &Gateway{
+		agents:      map[string]*discovery.Agent{agent.Name: agent},
+		clients:     make(map[string]*a2aclient.Client),
+		auditURL:    auditdSrv.URL,
+		auditAPIKey: "test-key",
+		toolRegistry: makeRegistryWithTools([]toolregistry.ToolEntry{
+			{Name: "get_vacuum_status", Agent: "database", ActionClass: "read"},
+		}),
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	// Use a cancellable context and cancel it immediately after the handler
+	// returns — this simulates the real production scenario where r.Context()
+	// is cancelled as soon as the HTTP server finishes writing the response.
+	// The goroutine must use context.WithoutCancel so it survives this.
+	reqCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/db/get_vacuum_status",
+		strings.NewReader(`{"connection_string":"staging-db-1"}`))
+	req = req.WithContext(reqCtx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	cancel() // cancel immediately, like a real server would after the response is sent
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tool call status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Wait for the goroutine to deliver the result to auditd despite the
+	// cancelled request context.
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer timeoutCancel()
+	select {
+	case <-toolResultDone:
+	case <-timeoutCtx.Done():
+		t.Fatal("timed out waiting for tool result to be recorded")
+	}
+
+	toolResultMu.Lock()
+	body := toolResultBody
+	toolResultMu.Unlock()
+
+	var recorded map[string]any
+	if err := json.Unmarshal(body, &recorded); err != nil {
+		t.Fatalf("unmarshal tool result body: %v", err)
+	}
+	if got := recorded["tool_name"]; got != "get_vacuum_status" {
+		t.Errorf("tool_name = %v, want get_vacuum_status", got)
+	}
+	if got := recorded["server_name"]; got != "staging-db-1" {
+		t.Errorf("server_name = %v, want staging-db-1", got)
+	}
+	if got := recorded["output"]; got != toolOutput {
+		t.Errorf("output = %v, want %q", got, toolOutput)
+	}
+	if got, _ := recorded["success"].(bool); !got {
+		t.Errorf("success = %v, want true", recorded["success"])
 	}
 }

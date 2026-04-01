@@ -1129,6 +1129,63 @@ func (g *Gateway) recordAudit(ctx context.Context, req *audit.GatewayRequest) {
 	}
 }
 
+// serverNameFromArgs derives a human-readable server identifier from tool args.
+// Checks connection_string (DB tools), context (K8s tools), then namespace,
+// in priority order. Returns "unknown" when none are present.
+func serverNameFromArgs(args map[string]any) string {
+	for _, key := range []string{"connection_string", "context", "namespace"} {
+		if v, ok := args[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return "unknown"
+}
+
+// recordToolResult persists a successful direct tool execution to the
+// ToolResultStore via auditd. Best-effort: failures are logged, not fatal.
+func (g *Gateway) recordToolResult(ctx context.Context, toolName string, args map[string]any, output, traceID, recordedBy string) {
+	serverName := serverNameFromArgs(args)
+
+	toolArgsJSON, _ := json.Marshal(args)
+
+	body, err := json.Marshal(map[string]any{
+		"server_name": serverName,
+		"tool_name":   toolName,
+		"tool_args":   string(toolArgsJSON),
+		"output":      output,
+		"trace_id":    traceID,
+		"recorded_by": recordedBy,
+		"success":     true,
+	})
+	if err != nil {
+		slog.Warn("recordToolResult: failed to marshal", "tool", toolName, "err", err)
+		return
+	}
+
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/tool-results"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("recordToolResult: failed to build request", "tool", toolName, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("recordToolResult: request failed", "tool", toolName, "err", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		slog.Warn("recordToolResult: unexpected status", "tool", toolName, "status", resp.StatusCode)
+	}
+}
+
 // directToolReq is the JSON body sent to POST /tool/{name} on an agent.
 type directToolReq struct {
 	TraceID         string                     `json:"trace_id,omitempty"`
@@ -1352,6 +1409,11 @@ func (g *Gateway) dispatchDirectTool(w http.ResponseWriter, r *http.Request, age
 		Purpose:           purpose,
 		PurposeNote:       purposeNote,
 	})
+
+	// Persist the tool result for historical trend queries (best-effort).
+	if g.auditURL != "" {
+		go g.recordToolResult(context.WithoutCancel(r.Context()), toolName, args, text, traceID, principalStr)
+	}
 
 	// Return the same a2aResponse structure as the NL path for client compatibility.
 	writeJSON(w, http.StatusOK, a2aResponse{
