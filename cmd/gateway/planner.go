@@ -140,6 +140,17 @@ func (g *Gateway) handleFleetPlan(w http.ResponseWriter, r *http.Request) {
 	intentSection := buildIntentSection()
 	prompt := assemblePlannerPrompt(infraSummary, toolCatalog, intentSection, req.Description, hints, req.Guidance)
 
+	// Log the prompt at DEBUG so operators can verify guidance injection and
+	// diagnose unexpected plans without guessing what the LLM saw.
+	if slog.Default().Enabled(r.Context(), slog.LevelDebug) {
+		const maxPromptLog = 4000
+		logged := prompt
+		if len(logged) > maxPromptLog {
+			logged = logged[:maxPromptLog] + fmt.Sprintf("... [truncated %d chars]", len(prompt)-maxPromptLog)
+		}
+		slog.Debug("fleet planner: prompt", "chars", len(prompt), "has_guidance", req.Guidance != "", "prompt", logged)
+	}
+
 	// Call LLM (injectable for tests; defaults to Anthropic SDK).
 	rawJSON, err := g.plannerLLM(r.Context(), prompt)
 	if err != nil {

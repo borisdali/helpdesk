@@ -148,6 +148,9 @@ func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook
 	if err != nil {
 		return nil, err
 	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
 	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
