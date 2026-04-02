@@ -57,13 +57,15 @@ aiHelpDesk ships 7 expert-authored system playbooks that are seeded into auditd 
 | `pbs_slow_query_triage` | Slow Query Triage | performance | `get_slow_queries`, `get_wait_events`, `get_blocking_queries`, `explain_query` |
 | `pbs_connection_triage` | Connection & Lock Triage | availability | `get_server_info`, `get_blocking_queries`, `get_session_info`, `get_lock_info` |
 | `pbs_replication_lag` | Replication Lag Triage | availability | `get_replication_status`, `get_server_info` |
-| `pbs_db_restart_triage` | Database Down — Restart Triage | availability | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `restart_deployment` |
-| `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | `get_pod_logs`, `get_events`, `get_pg_settings`, `restart_deployment` |
-| `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | `check_connection`, `get_pod_logs`, `get_events` |
+| `pbs_db_restart_triage` | Database Down — Restart Triage | availability | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
+| `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
+| `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
 
 The three "Database Down" playbooks form an escalating sequence. When a database is completely unreachable, begin with **Restart Triage** to classify the failure from pod logs. If the logs reveal a configuration error, proceed to **Configuration Recovery**. If they reveal data corruption or missing files, escalate immediately to **Backup Restore & PITR**, which always requires human DBA involvement.
 
 Because psql-based tools cannot reach a down database, all three playbooks rely on K8s tools (`get_pod_logs`, `get_events`) for live diagnostics, and on stored baseline data from prior `get_server_info` snapshots (held in the ToolResultStore) to locate `data_directory`, `config_file`, `hba_file`, and `log_directory` without a live connection.
+
+For databases running on bare-metal hosts (no Kubernetes), `get_pod_logs` is unavailable. In that case the agent will attempt `read_pg_log`, which reads the PostgreSQL log directly via `pg_read_file()` — but this too requires a live DB connection. When the database is completely down and unreachable, an operator must retrieve the log file manually (e.g. via SSH or a jump host) and upload it with `POST /api/v1/fleet/uploads`. The agent then reads it using `read_uploaded_file` with the returned `upload_id`. See [Operator file uploads](API.md#operator-file-uploads) in the API reference.
 
 System playbooks are **read-only**: `PUT` and `DELETE` return `400 Bad Request`. To customise one, run it as-is, or import and save your own version in the same series (the activate endpoint then lets you promote your version).
 

@@ -280,6 +280,8 @@ All tools accept `connection_string` (PostgreSQL DSN; falls back to `HELPDESK_DB
 | `cancel_query` | `pid` (required) | `pg_cancel_backend` — **write** |
 | `terminate_connection` | `pid` (required) | `pg_terminate_backend` — **destructive** |
 | `kill_idle_connections` | `idle_threshold_seconds` | Terminate all idle connections older than threshold — **destructive** |
+| `read_pg_log` | `lines`, `filter` | Read the tail of the most-recently-modified PostgreSQL log file via `pg_read_file()`. Requires a live DB connection and `pg_read_server_files` privilege or superuser. Returns up to 128 KB (last ~1000 lines). Use `filter` (case-insensitive substring) to focus on errors. |
+| `read_uploaded_file` | `upload_id` (required), `filter` | Read the content of a file previously uploaded by an operator via `POST /api/v1/fleet/uploads`. Use this when `read_pg_log` is not available (e.g. DB is completely down). Requires `HELPDESK_AUDIT_URL` to be configured. |
 
 ---
 
@@ -653,6 +655,67 @@ Convert an existing runbook into a playbook draft without persisting it. The cal
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/import \
   -H "Content-Type: application/json" \
   -d '{"text": "<runbook yaml>", "format": "yaml"}' | jq '{draft: .draft.name, confidence: .confidence}'
+```
+
+---
+
+### Operator file uploads
+
+Operators upload files (typically PostgreSQL log files retrieved from a remote host) so that agents can analyse them when the database is unreachable. The `read_uploaded_file` database tool reads uploaded content by `upload_id`.
+
+Uploads are stored in auditd's SQLite database, expire after **24 hours**, and are capped at **50 MB** per file.
+
+#### `POST /api/v1/fleet/uploads`
+
+Upload a file as `multipart/form-data` with a single `file` field. Returns `201 Created` with upload metadata.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/uploads \
+  -F "file=@/var/log/postgresql/postgresql-2024.log" | jq '{upload_id, filename, size, expires_at}'
+```
+
+Response:
+
+```json
+{
+  "upload_id":   "ul_3f7a2b1c",
+  "filename":    "postgresql-2024.log",
+  "size":        94208,
+  "uploaded_at": "2024-01-15T10:00:00Z",
+  "expires_at":  "2024-01-16T10:00:00Z"
+}
+```
+
+#### `GET /api/v1/fleet/uploads/{uploadID}`
+
+Get upload metadata (no content). Returns `404` if not found or expired.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/uploads/ul_3f7a2b1c | jq .
+```
+
+#### `GET /api/v1/fleet/uploads/{uploadID}/content`
+
+Return the raw file content (`text/plain`). Returns `404` if not found or expired.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/uploads/ul_3f7a2b1c
+```
+
+**Typical workflow for DB-down log analysis:**
+
+```bash
+# 1. Retrieve the log from the remote host however you can (scp, jump host, etc.)
+scp ops@db-host:/var/log/postgresql/postgresql.log /tmp/pg.log
+
+# 2. Upload it to aiHelpDesk
+UPLOAD_ID=$(curl -s -X POST http://localhost:8080/api/v1/fleet/uploads \
+  -F "file=@/tmp/pg.log" | jq -r .upload_id)
+
+# 3. Ask the database agent to analyse it
+curl -s -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d "{\"agent\":\"database\",\"message\":\"Analyse the uploaded log (upload_id: $UPLOAD_ID). Look for FATAL errors and the likely root cause.\"}"
 ```
 
 ---

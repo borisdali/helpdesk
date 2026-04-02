@@ -3197,6 +3197,125 @@ func TestExplainQueryTool_DMLWrappedInTransaction(t *testing.T) {
 }
 
 // =============================================================================
+// read_uploaded_file
+// =============================================================================
+
+// withMockAuditServer starts an httptest.Server that serves the given body/status
+// at GET /v1/uploads/{id}/content, sets auditBaseURL to point at it, and returns
+// a cleanup function. The upload_id in the URL is ignored — any ID returns the
+// same response (sufficient for unit tests).
+func withMockAuditServer(status int, body string) func() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		w.Write([]byte(body)) //nolint:errcheck
+	}))
+	old := auditBaseURL
+	auditBaseURL = srv.URL
+	return func() {
+		auditBaseURL = old
+		srv.Close()
+	}
+}
+
+func TestReadUploadedFileTool_Success(t *testing.T) {
+	logContent := "2024-01-15 10:00:00 UTC: LOG: connection received\n" +
+		"2024-01-15 10:00:01 UTC: FATAL: invalid value for parameter \"max_connections\"\n" +
+		"2024-01-15 10:00:02 UTC: LOG: database system is shut down\n"
+	defer withMockAuditServer(http.StatusOK, logContent)()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{UploadID: "ul_abc123"})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Uploaded File") {
+		t.Errorf("output = %q, want header", result.Output)
+	}
+	if !strings.Contains(result.Output, "FATAL") {
+		t.Errorf("output = %q, want FATAL line present", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_WithFilter(t *testing.T) {
+	logContent := "2024-01-15 10:00:00 UTC: LOG: connection received\n" +
+		"2024-01-15 10:00:01 UTC: FATAL: invalid value for parameter \"max_connections\"\n" +
+		"2024-01-15 10:00:02 UTC: LOG: database system is shut down\n"
+	defer withMockAuditServer(http.StatusOK, logContent)()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{
+		UploadID: "ul_abc123",
+		Filter:   "FATAL",
+	})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "FATAL") {
+		t.Errorf("output = %q, want FATAL line", result.Output)
+	}
+	if strings.Contains(result.Output, "connection received") {
+		t.Errorf("output should not contain non-FATAL lines")
+	}
+}
+
+func TestReadUploadedFileTool_NotFound(t *testing.T) {
+	defer withMockAuditServer(http.StatusNotFound, "upload not found or expired")()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{UploadID: "ul_gone"})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "not found or expired") {
+		t.Errorf("output = %q, want not-found message", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_NoAuditURL(t *testing.T) {
+	old := auditBaseURL
+	auditBaseURL = ""
+	defer func() { auditBaseURL = old }()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{UploadID: "ul_abc123"})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "HELPDESK_AUDIT_URL") {
+		t.Errorf("output = %q, want HELPDESK_AUDIT_URL hint", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_EmptyUploadID(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, "irrelevant")()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "upload_id is required") {
+		t.Errorf("output = %q, want upload_id required message", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_FilterNoMatch(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, "LOG: autovacuum running\n")()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{
+		UploadID: "ul_abc123",
+		Filter:   "PANIC",
+	})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no lines matched") {
+		t.Errorf("output = %q, want no-match message", result.Output)
+	}
+}
+
+// =============================================================================
 // read_pg_log
 // =============================================================================
 

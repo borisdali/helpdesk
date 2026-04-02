@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"strings"
@@ -252,6 +253,60 @@ func (c *GatewayClient) PlaybookDelete(ctx context.Context, id string) (int, err
 // PlaybookUpdate calls PUT /api/v1/fleet/playbooks/{id} and returns the HTTP status code.
 func (c *GatewayClient) PlaybookUpdate(ctx context.Context, id string, body map[string]any) (int, error) {
 	return c.rawDo(ctx, http.MethodPut, "/api/v1/fleet/playbooks/"+id, body)
+}
+
+// UploadCreate posts filename/content as multipart/form-data to POST /api/v1/fleet/uploads.
+// Returns the decoded Upload metadata map on success.
+func (c *GatewayClient) UploadCreate(ctx context.Context, filename, content string) (map[string]any, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, fmt.Errorf("CreateFormFile: %w", err)
+	}
+	if _, err := fw.Write([]byte(content)); err != nil {
+		return nil, fmt.Errorf("write form file: %w", err)
+	}
+	mw.Close()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/fleet/uploads", &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST /api/v1/fleet/uploads: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("POST /api/v1/fleet/uploads: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode upload: %w", err)
+	}
+	return result, nil
+}
+
+// UploadGet calls GET /api/v1/fleet/uploads/{id} and returns the upload metadata.
+func (c *GatewayClient) UploadGet(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/uploads/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode upload: %w", err)
+	}
+	return result, nil
+}
+
+// UploadGetContent calls GET /api/v1/fleet/uploads/{id}/content and returns the raw bytes.
+func (c *GatewayClient) UploadGetContent(ctx context.Context, id string) ([]byte, error) {
+	return c.get(ctx, "/api/v1/fleet/uploads/"+id+"/content")
 }
 
 // rawDo executes an HTTP request and returns the response status code.
