@@ -253,11 +253,13 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/fleet/plan", auth("POST /api/v1/fleet/plan", g.handleFleetPlan))
 	mux.HandleFunc("POST /api/v1/fleet/snapshot", auth("POST /api/v1/fleet/snapshot", g.handleFleetSnapshot))
 	mux.HandleFunc("POST /api/v1/fleet/review", auth("POST /api/v1/fleet/review", g.handleFleetReview))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks/import", auth("POST /api/v1/fleet/playbooks/import", g.handlePlaybookImport))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks", auth("POST /api/v1/fleet/playbooks", g.handlePlaybookCreate))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks", auth("GET /api/v1/fleet/playbooks", g.handlePlaybookList))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}", auth("GET /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookGet))
 	mux.HandleFunc("PUT /api/v1/fleet/playbooks/{playbookID}", auth("PUT /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookUpdate))
 	mux.HandleFunc("DELETE /api/v1/fleet/playbooks/{playbookID}", auth("DELETE /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookDelete))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/activate", auth("POST /api/v1/fleet/playbooks/{playbookID}/activate", g.handlePlaybookActivate))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/run", auth("POST /api/v1/fleet/playbooks/{playbookID}/run", g.handlePlaybookRun))
 
 	// Tool result query endpoint (read-only proxy to auditd)

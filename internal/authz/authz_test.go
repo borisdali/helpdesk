@@ -509,6 +509,7 @@ var auditdRoutes = []string{
 	"GET /v1/fleet/playbooks/{playbookID}",
 	"PUT /v1/fleet/playbooks/{playbookID}",
 	"DELETE /v1/fleet/playbooks/{playbookID}",
+	"POST /v1/fleet/playbooks/{playbookID}/activate",
 	"POST /v1/tool-results",
 	"GET /v1/tool-results",
 	"GET /health",

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -304,6 +305,115 @@ func TestPlaybookHandlers_Update_MissingName(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+// --- handleDelete ---
+
+// --- handleActivate ---
+
+func TestHandleActivate_Success(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	// Create two versions in the same series.
+	v1 := createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "my-playbook v1",
+		"description": "version one",
+	})
+	// v1 got a series_id auto-generated; create v2 in the same series.
+	v2 := createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "my-playbook v2",
+		"description": "version two",
+		"series_id":   v1.SeriesID,
+	})
+
+	// v2 was created with an explicit series_id so IsActive defaults to false.
+	// Activate v2.
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/"+v2.PlaybookID+"/activate", nil)
+	req.SetPathValue("playbookID", v2.PlaybookID)
+	w := httptest.NewRecorder()
+	srv.handleActivate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleActivate: status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var activated audit.Playbook
+	if err := json.NewDecoder(w.Body).Decode(&activated); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !activated.IsActive {
+		t.Error("expected activated playbook to have is_active=true")
+	}
+	if activated.PlaybookID != v2.PlaybookID {
+		t.Errorf("playbook_id = %q, want %q", activated.PlaybookID, v2.PlaybookID)
+	}
+
+	// Verify v1 is now inactive via GET.
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/playbooks/"+v1.PlaybookID, nil)
+	getReq.SetPathValue("playbookID", v1.PlaybookID)
+	getW := httptest.NewRecorder()
+	srv.handleGet(getW, getReq)
+	var v1Got audit.Playbook
+	if err := json.NewDecoder(getW.Body).Decode(&v1Got); err != nil {
+		t.Fatalf("decode v1: %v", err)
+	}
+	if v1Got.IsActive {
+		t.Error("expected v1 to be inactive after activating v2")
+	}
+}
+
+func TestHandleActivate_NotFound(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/pb_nonexistent/activate", nil)
+	req.SetPathValue("playbookID", "pb_nonexistent")
+	w := httptest.NewRecorder()
+	srv.handleActivate(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleActivate_SystemPlaybook(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	// Directly insert a system playbook into the store.
+	sysPB := &audit.Playbook{
+		Name:        "system-vacuum",
+		Description: "System-provided vacuum playbook",
+		IsSystem:    true,
+		Source:      "system",
+	}
+	if err := srv.store.Create(context.Background(), sysPB); err != nil {
+		t.Fatalf("Create system playbook: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/"+sysPB.PlaybookID+"/activate", nil)
+	req.SetPathValue("playbookID", sysPB.PlaybookID)
+	w := httptest.NewRecorder()
+	srv.handleActivate(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleActivate_Idempotent(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	pb := createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "solo-playbook",
+		"description": "only one in its series",
+	})
+	// Activate an already-active playbook — should succeed silently.
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/"+pb.PlaybookID+"/activate", nil)
+	req.SetPathValue("playbookID", pb.PlaybookID)
+	w := httptest.NewRecorder()
+	srv.handleActivate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
 	}
 }
 

@@ -64,9 +64,14 @@ func (g *Gateway) handlePlaybookCreate(w http.ResponseWriter, r *http.Request) {
 	g.proxyToAuditd(w, r, "/v1/fleet/playbooks")
 }
 
-// handlePlaybookList proxies GET /api/v1/fleet/playbooks → auditd.
+// handlePlaybookList proxies GET /api/v1/fleet/playbooks → auditd, forwarding
+// query parameters (active_only, include_system, series_id).
 func (g *Gateway) handlePlaybookList(w http.ResponseWriter, r *http.Request) {
-	g.proxyToAuditd(w, r, "/v1/fleet/playbooks")
+	path := "/v1/fleet/playbooks"
+	if r.URL.RawQuery != "" {
+		path += "?" + r.URL.RawQuery
+	}
+	g.proxyToAuditd(w, r, path)
 }
 
 // handlePlaybookGet proxies GET /api/v1/fleet/playbooks/{id} → auditd.
@@ -85,6 +90,12 @@ func (g *Gateway) handlePlaybookUpdate(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handlePlaybookDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("playbookID")
 	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id)
+}
+
+// handlePlaybookActivate proxies POST /api/v1/fleet/playbooks/{id}/activate → auditd.
+func (g *Gateway) handlePlaybookActivate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("playbookID")
+	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/activate")
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.

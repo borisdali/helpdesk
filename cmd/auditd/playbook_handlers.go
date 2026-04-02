@@ -43,7 +43,7 @@ func (s *playbookServer) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(pb)
+	json.NewEncoder(w).Encode(pb) //nolint:errcheck
 }
 
 func (s *playbookServer) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -63,11 +63,22 @@ func (s *playbookServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(pb)
+	json.NewEncoder(w).Encode(pb) //nolint:errcheck
 }
 
 func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
-	playbooks, err := s.store.List(r.Context())
+	q := audit.DefaultPlaybookListQuery()
+	if r.URL.Query().Get("active_only") == "false" {
+		q.ActiveOnly = false
+	}
+	if r.URL.Query().Get("include_system") == "false" {
+		q.IncludeSystem = false
+	}
+	if v := r.URL.Query().Get("series_id"); v != "" {
+		q.SeriesID = v
+	}
+
+	playbooks, err := s.store.List(r.Context(), q)
 	if err != nil {
 		slog.Error("failed to list playbooks", "err", err)
 		http.Error(w, "failed to list playbooks", http.StatusInternalServerError)
@@ -77,7 +88,7 @@ func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
 		playbooks = []*audit.Playbook{}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"playbooks": playbooks})
+	json.NewEncoder(w).Encode(map[string]any{"playbooks": playbooks}) //nolint:errcheck
 }
 
 func (s *playbookServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -110,12 +121,16 @@ func (s *playbookServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "playbook not found", http.StatusNotFound)
 			return
 		}
+		if errors.Is(err, audit.ErrSystemPlaybook) {
+			http.Error(w, "system playbooks are read-only", http.StatusBadRequest)
+			return
+		}
 		slog.Error("failed to update playbook", "err", err)
 		http.Error(w, "failed to update playbook", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(pb)
+	json.NewEncoder(w).Encode(pb) //nolint:errcheck
 }
 
 func (s *playbookServer) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -125,9 +140,44 @@ func (s *playbookServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, audit.ErrSystemPlaybook) {
+			http.Error(w, "system playbooks are read-only", http.StatusBadRequest)
+			return
+		}
 		slog.Error("failed to delete playbook", "err", err)
 		http.Error(w, "failed to delete playbook", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleActivate promotes a playbook version: deactivates all other versions in its
+// series and marks the target active. Returns the updated playbook.
+func (s *playbookServer) handleActivate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("playbookID")
+	if id == "" {
+		http.Error(w, "missing playbook ID", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.Activate(r.Context(), id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "playbook not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, audit.ErrSystemPlaybook) {
+			http.Error(w, "system playbooks cannot be activated via API — managed by system seeder", http.StatusBadRequest)
+			return
+		}
+		slog.Error("failed to activate playbook", "id", id, "err", err)
+		http.Error(w, "failed to activate playbook", http.StatusInternalServerError)
+		return
+	}
+	pb, err := s.store.Get(r.Context(), id)
+	if err != nil {
+		slog.Error("failed to re-fetch playbook after activation", "id", id, "err", err)
+		http.Error(w, "activation succeeded but failed to fetch result", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pb) //nolint:errcheck
 }

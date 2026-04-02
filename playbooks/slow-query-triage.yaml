@@ -1,0 +1,38 @@
+series_id: pbs_slow_query_triage
+name: Slow Query Triage
+version: "1.0"
+problem_class: performance
+author: aiHelpDesk
+description: |
+  Investigate slow query performance on the target database. Identify the top
+  queries by execution time, examine current wait events, detect blocking chains,
+  and optionally run EXPLAIN ANALYZE on the most expensive query.
+symptoms:
+  - "p99 or p95 latency elevated"
+  - "application timeouts increasing"
+  - "query time > 1s in application logs"
+  - "pg_stat_statements showing high mean_exec_time"
+  - "users reporting slow page loads"
+guidance: |
+  Begin with get_slow_queries (limit=10) to identify the worst offenders by
+  total_exec_time. Focus on queries with high mean_exec_time AND high calls —
+  a slow query called 10,000 times per hour has more impact than one called once.
+
+  Check get_wait_events to see if the database is currently blocked on I/O,
+  locks, or IPC. A sudden spike in Lock wait events points to a blocking chain;
+  use get_blocking_queries to identify the blocker.
+
+  If pg_stat_statements is not installed, the investigation is limited — note this
+  as a gap and recommend installing the extension.
+
+  For the single most expensive query, use explain_query (allow_dml=false) to get
+  the execution plan. Look for: sequential scans on large tables, nested loops with
+  high row estimates, missing index conditions.
+
+  Common misdiagnoses: blaming a slow query that is actually waiting for a lock
+  held by a separate long-running transaction — always check blocking chains first.
+escalation:
+  - "mean_exec_time > 10s for any query with calls > 100/hour"
+  - "blocking chain involves a transaction open > 10 minutes"
+  - "sequential scan on a table > 10GB with no index candidate"
+target_hints: []

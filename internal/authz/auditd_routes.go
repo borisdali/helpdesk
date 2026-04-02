@@ -49,9 +49,10 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"POST /v1/govbot/runs": {ServiceOnly: true, AdminBypass: true},
 
 	// Playbook writes
-	"POST /v1/fleet/playbooks":                {AdminBypass: true},
-	"PUT /v1/fleet/playbooks/{playbookID}":    {AdminBypass: true},
-	"DELETE /v1/fleet/playbooks/{playbookID}": {AdminBypass: true},
+	"POST /v1/fleet/playbooks":                         {AdminBypass: true},
+	"PUT /v1/fleet/playbooks/{playbookID}":             {AdminBypass: true},
+	"DELETE /v1/fleet/playbooks/{playbookID}":          {AdminBypass: true},
+	"POST /v1/fleet/playbooks/{playbookID}/activate":   {AdminBypass: true},
 
 	// Tool result endpoints
 	"POST /v1/tool-results": {ServiceOnly: true, AdminBypass: true},

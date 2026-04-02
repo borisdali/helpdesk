@@ -22,6 +22,7 @@ import (
 	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
+	"helpdesk/playbooks"
 )
 
 type config struct {
@@ -103,6 +104,11 @@ func main() {
 	if err != nil {
 		slog.Error("failed to create playbook store", "err", err)
 		os.Exit(1)
+	}
+
+	// Seed system playbooks (idempotent; non-fatal if it fails).
+	if err := playbooks.SeedSystemPlaybooks(context.Background(), playbookStore); err != nil {
+		slog.Warn("failed to seed system playbooks", "err", err)
 	}
 
 	// Create tool result store (shares the same database connection)
@@ -254,6 +260,7 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}", auth("GET /v1/fleet/playbooks/{playbookID}", playbookSrv.handleGet))
 	mux.HandleFunc("PUT /v1/fleet/playbooks/{playbookID}", auth("PUT /v1/fleet/playbooks/{playbookID}", playbookSrv.handleUpdate))
 	mux.HandleFunc("DELETE /v1/fleet/playbooks/{playbookID}", auth("DELETE /v1/fleet/playbooks/{playbookID}", playbookSrv.handleDelete))
+	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/activate", auth("POST /v1/fleet/playbooks/{playbookID}/activate", playbookSrv.handleActivate))
 
 	// Tool result endpoints
 	mux.HandleFunc("POST /v1/tool-results", auth("POST /v1/tool-results", toolResultSrv.handleRecord))

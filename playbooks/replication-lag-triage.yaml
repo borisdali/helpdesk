@@ -1,0 +1,45 @@
+series_id: pbs_replication_lag
+name: Replication Lag Triage
+version: "1.0"
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Investigate replication lag on PostgreSQL streaming replicas. Identify the
+  source of lag (WAL sender state, network, replica load) and assess the risk
+  to read workloads and failover readiness.
+symptoms:
+  - "replica lag > acceptable threshold"
+  - "monitoring alert: replication_lag_seconds elevated"
+  - "read replicas returning stale data"
+  - "WAL receiver stopped or in error state"
+  - "pg_stat_replication shows large sent_lsn vs replay_lsn delta"
+guidance: |
+  Begin with get_replication_status to get the full picture: sent_lsn,
+  write_lsn, flush_lsn, replay_lsn gaps for each replica, plus WAL sender
+  state. A replica in "streaming" state with growing lag indicates the replica
+  cannot keep up with write volume. A replica in "catchup" state is recovering
+  from a larger gap.
+
+  Cross-check with get_server_info on the primary to confirm uptime and role
+  (must be "primary"). If pg_is_in_recovery() is true on the target, run the
+  checks on the primary instead.
+
+  Key signals:
+  - write_lag: time for primary to confirm WAL written to replica disk
+  - flush_lag: time for replica to fsync WAL
+  - replay_lag: time for replica to apply WAL to its data files
+  Replay lag is the most impactful for read-workload staleness.
+
+  Replication slot bloat: if any slot's confirmed_flush_lsn falls far behind
+  current LSN and there is no active connection using it, the slot is leaking
+  WAL. This can fill disk on the primary. Flag immediately.
+
+  Common misdiagnosis: treating a replica lag spike during a large batch write
+  (bulk insert/delete) as a failure — it is normal and will resolve. Only
+  escalate if lag does not recover within 15 minutes of the batch completing.
+escalation:
+  - "replay_lag > 5 minutes on any replica"
+  - "replication slot with no active connection and lsn delta > 10GB"
+  - "WAL sender state is not 'streaming' and not 'catchup'"
+  - "replica has been disconnected (no entry in pg_stat_replication)"
+target_hints: []
