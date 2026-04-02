@@ -64,6 +64,10 @@ func main() {
 		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
 
+	// Store audit URL + key so read_uploaded_file can fetch operator uploads.
+	auditBaseURL = cfg.AuditURL
+	auditAPIKey = cfg.AuditAPIKey
+
 	// Initialize policy engine if configured
 	policyEngine, err := agentutil.InitPolicyEngine(cfg)
 	if err != nil {
@@ -433,6 +437,22 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getPgLogToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "read_pg_log",
+		Description: "Read recent lines from the PostgreSQL server log file using pg_read_file(). Requires superuser or pg_read_server_files privilege. Use the filter parameter to focus on errors (e.g. filter=FATAL). Only works when the database is running — for a completely down database use get_pod_logs (Kubernetes) or check the log path from ToolResultStore baseline data.",
+	}, getPgLogTool)
+	if err != nil {
+		return nil, err
+	}
+
+	readUploadedFileToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "read_uploaded_file",
+		Description: "Read a file that an operator has uploaded via POST /api/v1/fleet/uploads. Use this when read_pg_log cannot reach the database (e.g. DB is down) — ask the operator to upload the log file and provide the upload_id. Applies the same line filtering as read_pg_log. Uploads expire after 24 hours.",
+	}, readUploadedFileTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -458,6 +478,8 @@ func createTools() ([]tool.Tool, error) {
 		getWaitEventsToolDef,
 		getBlockingQueriesToolDef,
 		explainQueryToolDef,
+		getPgLogToolDef,
+		readUploadedFileToolDef,
 	}, nil
 }
 

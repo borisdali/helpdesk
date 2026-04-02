@@ -45,6 +45,11 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
 
+	// Uploads: operator file uploads for agent analysis (e.g. PostgreSQL log files)
+	"POST /api/v1/fleet/uploads":                       {AdminBypass: true},
+	"GET /api/v1/fleet/uploads/{uploadID}":             {AdminBypass: true},
+	"GET /api/v1/fleet/uploads/{uploadID}/content":     {AdminBypass: true},
+
 	// Fleet playbooks: CRUD + run (any authenticated user; same as /fleet/plan)
 	"GET /api/v1/fleet/playbooks":                      {AdminBypass: true},
 	"GET /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},

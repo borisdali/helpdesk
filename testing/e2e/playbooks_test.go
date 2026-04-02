@@ -42,12 +42,15 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		}
 	}
 
-	// At least the 4 known system series must be present.
+	// All known system series must be present.
 	expectedSeries := []string{
 		"pbs_vacuum_triage",
 		"pbs_slow_query_triage",
 		"pbs_connection_triage",
 		"pbs_replication_lag",
+		"pbs_db_restart_triage",
+		"pbs_db_config_recovery",
+		"pbs_db_pitr_recovery",
 	}
 	seriesFound := map[string]bool{}
 	for _, pb := range playbooks {
@@ -68,8 +71,8 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 			systemCount++
 		}
 	}
-	if systemCount < 4 {
-		t.Errorf("expected at least 4 system playbooks, got %d", systemCount)
+	if systemCount < len(expectedSeries) {
+		t.Errorf("expected at least %d system playbooks, got %d", len(expectedSeries), systemCount)
 	}
 
 	t.Logf("playbook list: total=%d system=%d series_found=%v",

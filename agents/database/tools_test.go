@@ -3195,3 +3195,152 @@ func TestExplainQueryTool_DMLWrappedInTransaction(t *testing.T) {
 		t.Errorf("expected psql args to contain ROLLBACK; got %v", capture.lastArgs)
 	}
 }
+
+// =============================================================================
+// read_pg_log
+// =============================================================================
+
+func TestGetPgLogTool_ReturnsLastNLines(t *testing.T) {
+	// Simulate a log file with 200 lines; mock returns them as raw text
+	// (as runPsqlTuples would with -t -A flags).
+	var sb strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&sb, "2024-01-15 10:%02d:00 UTC [1234]: LOG: line %d\n", i%60, i)
+	}
+	defer withMockRunner(sb.String(), nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{
+		ConnectionString: "host=localhost",
+		Lines:            50,
+	})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "last 50 lines") {
+		t.Errorf("getPgLogTool() output = %q, want '50 lines' in header", result.Output)
+	}
+	// Should contain the last line but not early lines.
+	if !strings.Contains(result.Output, "line 200") {
+		t.Errorf("getPgLogTool() output does not contain last log line")
+	}
+	if strings.Contains(result.Output, "line 1\n") {
+		t.Errorf("getPgLogTool() output should not contain early lines when truncated to 50")
+	}
+}
+
+func TestGetPgLogTool_WithFilter(t *testing.T) {
+	mockOutput := `2024-01-15 10:00:00 UTC [1]: LOG: connection received
+2024-01-15 10:00:01 UTC [1]: FATAL: invalid value for parameter "max_connections": "unlimited"
+2024-01-15 10:00:02 UTC [1]: LOG: database system is shut down
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{
+		ConnectionString: "host=localhost",
+		Filter:           "FATAL",
+	})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "FATAL") {
+		t.Errorf("getPgLogTool() output = %q, want FATAL line", result.Output)
+	}
+	if strings.Contains(result.Output, "connection received") {
+		t.Errorf("getPgLogTool() output should not contain non-FATAL lines")
+	}
+	if strings.Contains(result.Output, "shut down") {
+		t.Errorf("getPgLogTool() output should not contain non-FATAL lines")
+	}
+}
+
+func TestGetPgLogTool_FilterCaseInsensitive(t *testing.T) {
+	mockOutput := "2024-01-15 10:00:00 UTC: PANIC: could not locate a valid checkpoint record\n"
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{Filter: "panic"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "PANIC") {
+		t.Errorf("getPgLogTool() filter should be case-insensitive; output = %q", result.Output)
+	}
+}
+
+func TestGetPgLogTool_EmptyLog(t *testing.T) {
+	defer withMockRunner("", nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no log content") {
+		t.Errorf("getPgLogTool() output = %q, want 'no log content' message", result.Output)
+	}
+}
+
+func TestGetPgLogTool_FilterNoMatch(t *testing.T) {
+	mockOutput := "2024-01-15 10:00:00 UTC: LOG: autovacuum: processing table\n"
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{Filter: "PANIC"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no log lines matched") {
+		t.Errorf("getPgLogTool() output = %q, want no-match message", result.Output)
+	}
+}
+
+func TestGetPgLogTool_ConnectionError(t *testing.T) {
+	defer withMockRunner("connection refused", errors.New("exit status 1"))()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("getPgLogTool() output = %q, want ERROR on connection failure", result.Output)
+	}
+	if !strings.Contains(result.Output, "read_pg_log") {
+		t.Errorf("getPgLogTool() output = %q, want tool name in error", result.Output)
+	}
+}
+
+func TestRunPsqlTuples_UsesTupleFlags(t *testing.T) {
+	capture := &capturingRunner{}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := newTestContext()
+	_, _ = runPsqlTuples(ctx, "", "SELECT 1", "test_tool")
+
+	foundT := false
+	foundA := false
+	for _, arg := range capture.lastArgs {
+		if arg == "-t" {
+			foundT = true
+		}
+		if arg == "-A" {
+			foundA = true
+		}
+	}
+	if !foundT {
+		t.Errorf("runPsqlTuples: expected -t flag in psql args; got %v", capture.lastArgs)
+	}
+	if !foundA {
+		t.Errorf("runPsqlTuples: expected -A flag in psql args; got %v", capture.lastArgs)
+	}
+	// Must NOT use expanded mode (-x).
+	for _, arg := range capture.lastArgs {
+		if arg == "-x" {
+			t.Errorf("runPsqlTuples: must not use -x (expanded) flag; got %v", capture.lastArgs)
+		}
+	}
+}

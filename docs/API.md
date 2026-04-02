@@ -584,68 +584,75 @@ To approve or deny, use the auditd approval endpoints directly (see below) — t
 
 #### Playbook endpoints
 
-Playbooks are saved NL intents with optional expert knowledge fields. They generate a fresh plan on each run. See [FLEET.md](FLEET.md#playbooks) for full semantics.
+Playbooks are saved runbook artifacts combining a natural-language fleet intent with expert triage knowledge. aiHelpDesk ships 4 system playbooks out of the box; operators create, version, and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
 
 #### `GET /api/v1/fleet/playbooks`
 
-List all playbooks.
+List playbooks. Returns the active version of every playbook by default.
+
+Query params: `active_only` (default `true`), `include_system` (default `true`), `series_id` (filter to one series).
 
 ```bash
 curl http://localhost:8080/api/v1/fleet/playbooks | jq .playbooks
+
+# All versions of a series
+curl "http://localhost:8080/api/v1/fleet/playbooks?series_id=pbs_vacuum_triage&active_only=false"
 ```
 
 #### `GET /api/v1/fleet/playbooks/{playbookID}`
 
-Get a single playbook by ID.
+Get a single playbook by ID. Returns `404` if not found.
 
 #### `POST /api/v1/fleet/playbooks`
 
-Create a new playbook.
+Create a new playbook. `name` and `description` are required. Supply `series_id` to add a version to an existing series (new version starts inactive); omit it to start a new series (starts active).
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | yes | Human-readable name |
-| `description` | string | yes | Planner intent — passed verbatim as the plan description |
-| `target_hints` | []string | no | Tag hints to narrow target selection |
-| `created_by` | string | no | Author identity |
-| `problem_class` | string | no | `performance`, `availability`, `capacity`, `data_integrity`, `security` |
-| `symptoms` | []string | no | Observable indicators that should trigger this playbook |
-| `guidance` | string | no | Expert reasoning injected into the planner prompt at run time |
-| `escalation` | []string | no | Conditions under which the agent must stop and escalate |
-| `related_playbooks` | []string | no | `pb_*` IDs of related playbooks |
-| `author` | string | no | Author identity (distinct from `created_by` — can be a team) |
-| `last_validated` | RFC3339 | no | Date the playbook was last validated against real infrastructure |
-| `version` | string | no | Free-form version string (e.g. `"1.2"`) |
-
-Response: `201 Created` with the full playbook object including generated `playbook_id`.
+Response: `201 Created` with the full playbook object. See [PLAYBOOKS.md — field reference](PLAYBOOKS.md#playbook-schema-reference) for all fields.
 
 #### `PUT /api/v1/fleet/playbooks/{playbookID}`
 
-Replace a playbook's fields. All fields are overwritten; omitting an optional field clears it. Returns `404` if the playbook does not exist. Accepts the same body as `POST`.
+Replace a playbook's fields. All fields overwritten; omitting a field clears it. Returns `404` if not found, `400` for system playbooks.
+
+#### `POST /api/v1/fleet/playbooks/{playbookID}/activate`
+
+Atomically promotes a version to active within its series, deactivating all others. Idempotent. Returns `404` if not found, `400` for system playbooks.
 
 ```bash
-curl -s -X PUT http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "weekly-staging-health",
-    "description": "Check connection health and table statistics on all staging databases",
-    "guidance": "Run get_vacuum_status if table stats show bloat.",
-    "version": "1.1"
-  }'
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_v2id/activate | jq .is_active
 ```
 
 #### `DELETE /api/v1/fleet/playbooks/{playbookID}`
 
-Delete a playbook. Returns `204 No Content`.
+Delete a playbook. Returns `204 No Content`, `404` if not found, `400` for system playbooks.
 
 #### `POST /api/v1/fleet/playbooks/{playbookID}/run`
 
-Generate a fresh fleet plan from the playbook and return a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). If the playbook has a `guidance` field it is injected into the planner prompt.
+Generate a fresh fleet plan from the playbook and return a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The `guidance` field is injected into the planner prompt.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
   | jq -r '.job_def_raw' > /tmp/plan.json
 ./fleet-runner --job-file /tmp/plan.json --dry-run
+```
+
+#### `POST /api/v1/fleet/playbooks/import`
+
+Convert an existing runbook into a playbook draft without persisting it. The caller reviews the draft and saves it via `POST /api/v1/fleet/playbooks`.
+
+| Field | Required | Description |
+|---|---|---|
+| `text` | yes | Raw runbook content |
+| `format` | no | `yaml` \| `text` \| `markdown` \| `rundeck` \| `ansible` (default: `text`) |
+| `hints.name` | no | Pre-filled name (used when LLM cannot extract one) |
+| `hints.problem_class` | no | Pre-filled problem class |
+| `hints.series_id` | no | Target series for the imported draft |
+
+`format=yaml` uses a direct parse (no LLM, `confidence=1.0`). Other formats require LLM configuration. See [PLAYBOOKS.md — importing playbooks](PLAYBOOKS.md#importing-playbooks) for format details and the YAML schema.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/import \
+  -H "Content-Type: application/json" \
+  -d '{"text": "<runbook yaml>", "format": "yaml"}' | jq '{draft: .draft.name, confidence: .confidence}'
 ```
 
 ---

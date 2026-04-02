@@ -50,6 +50,8 @@ var ToolClassification = map[string]ActionClass{
 	"get_wait_events":             ActionRead,
 	"get_blocking_queries":        ActionRead,
 	"explain_query":               ActionRead,
+	"read_pg_log":                 ActionRead,
+	"read_uploaded_file":          ActionRead,
 
 	// Kubernetes agent tools
 	"get_pods":           ActionRead,

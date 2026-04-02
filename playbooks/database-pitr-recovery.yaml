@@ -1,0 +1,111 @@
+series_id: pbs_db_pitr_recovery
+name: Database Down — Backup Restore & PITR
+version: "1.0"
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Assess and begin recovery of a PostgreSQL instance where data files, WAL
+  segments, or the entire data directory have been lost or corrupted beyond
+  repair. Confirm the failure type from pod logs and K8s events, retrieve
+  PGDATA and WAL archive location from stored baseline data, and guide the
+  operator through the restore-from-backup and point-in-time recovery
+  procedure. This playbook requires human DBA involvement throughout.
+symptoms:
+  - "PostgreSQL log: 'invalid page in block' or 'could not read block'"
+  - "PostgreSQL log: 'requested WAL segment has already been removed'"
+  - "PostgreSQL log: 'PANIC: could not locate a valid checkpoint record'"
+  - "PostgreSQL log: 'data directory ... has wrong ownership'"
+  - "storage alert: PVC data loss, disk failure, or volume snapshot failure"
+  - "database will not start and config recovery did not resolve it"
+  - "partial data directory — some files present but database will not open"
+guidance: |
+  IMPORTANT: This is the most severe database recovery scenario. The database
+  cannot be brought back with a simple restart or config change. A human DBA
+  must be involved from the start. This playbook provides the diagnostic
+  framework and key decision points — it does not perform the restore itself.
+  Escalate immediately before taking any action that could overwrite salvageable
+  data.
+
+  Step 1 — Confirm the failure type and scope:
+  Use get_pod_logs to identify the specific error. The error class determines
+  the recovery path:
+
+  Corruption errors ("invalid page", "checksum failure", "could not read block"):
+    One or more data files are unreadable. The scope may be limited to a single
+    table/index (partial corruption) or the entire data directory. Do not restart
+    the database — repeated restarts against a corrupted cluster can make
+    recovery harder.
+
+  WAL errors ("requested WAL segment has already been removed",
+  "could not open file pg_wal/..."):
+    WAL files have been deleted or the WAL directory is empty. If WAL archiving
+    was enabled, recovery may be possible from the archive. If not, the cluster
+    must be restored from a base backup.
+
+  PANIC at startup ("could not locate a valid checkpoint record"):
+    PostgreSQL cannot find a consistent starting point. The pg_control file or
+    pg_wal directory may be damaged. This requires pg_resetwal (data loss) or
+    a full restore — always prefer a full restore.
+
+  Missing data directory: Entire PGDATA is gone (volume deleted, mount lost).
+    Full restore from backup is the only option.
+
+  Step 2 — Retrieve baseline data:
+  Use ToolResultStore history from get_server_info to get:
+  - data_directory: location of PGDATA
+  - config_file: postgresql.conf path (for restore configuration)
+  - hba_file: pg_hba.conf path (must be restored or recreated)
+  - log_directory / log_filename: where to find earlier error context
+
+  Use get_events for the pod namespace to check for storage events: PVC
+  capacity exceeded, volume detach/reattach, node failure. These indicate
+  whether the data loss is on the primary storage volume or a secondary
+  failure.
+
+  Step 3 — Check WAL archive availability:
+  If the database had archive_mode=on (check ToolResultStore history from
+  get_pg_settings), a WAL archive exists. Its location is in archive_command
+  or archive_library. A WAL archive enables PITR — restoring to a point
+  just before the failure rather than to the last full backup.
+
+  Step 4 — Identify the base backup:
+  Recovery requires a base backup taken while the cluster was consistent.
+  Locate the most recent base backup from your backup tool (pg_basebackup,
+  pgBackRest, Barman, cloud snapshot). The backup must predate the failure
+  and must be complete.
+
+  Step 5 — Restore procedure (operator-executed):
+  a. Stop the PostgreSQL pod completely (scale to 0 replicas).
+  b. Mount the backup volume or copy the base backup to the PGDATA location.
+  c. If using PITR: place a recovery.conf (PostgreSQL ≤ 11) or create
+     recovery signal file + configure restore_command in postgresql.conf
+     (PostgreSQL 12+). Set recovery_target_time to just before the failure.
+  d. Set permissions on PGDATA: chown -R postgres:postgres $PGDATA; chmod 700.
+  e. Start the pod. Monitor get_pod_logs for WAL replay progress:
+     "LOG: restored log file ... from archive"
+     "LOG: recovery stopping before commit of transaction ..."
+     "LOG: database system is ready to accept read only connections"
+  f. Promote: SELECT pg_promote() or touch $PGDATA/promote signal file once
+     recovery reaches the target point.
+  g. Verify with check_connection, get_server_info, and application-level
+     data integrity checks before restoring write traffic.
+
+  Step 6 — Replication (if this is a primary):
+  After promoting the restored primary, all replicas must be rebuilt — their
+  WAL timelines diverge at the point of recovery. Use pg_basebackup from the
+  new primary to re-establish each replica.
+
+  Common misdiagnosis: attempting pg_resetwal to "fix" a corrupt cluster. This
+  discards all unrecoverable WAL and should be an absolute last resort —
+  it guarantees data loss and may make the cluster appear healthy while
+  silently returning incorrect query results. Always restore from backup first.
+escalation:
+  - "ALWAYS — this playbook requires human DBA involvement before any action"
+  - "no base backup is available — data loss may be total"
+  - "WAL archive is unavailable or incomplete — PITR is not possible"
+  - "pg_resetwal is being considered — requires explicit DBA sign-off"
+  - "corruption spans multiple tables or the entire data directory"
+  - "storage volume shows hardware errors — engage infrastructure team"
+  - "database is a primary with active replicas — replica rebuild plan required"
+  - "recovery is taking longer than the RTO — consider failover to a replica if available"
+target_hints: []

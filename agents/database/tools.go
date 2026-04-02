@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -25,6 +27,11 @@ var toolAuditor *audit.ToolAuditor
 
 // policyEnforcer is set during initialization for policy enforcement.
 var policyEnforcer *agentutil.PolicyEnforcer
+
+// auditBaseURL and auditAPIKey are set during initialization and used by
+// read_uploaded_file to retrieve operator-uploaded files from auditd.
+var auditBaseURL string
+var auditAPIKey string
 
 // verifyRetryConfig controls the re-check retry loop for Level 2 post-mutation
 // verification (cancel_query). Overridable in tests to use zero delays.
@@ -1837,6 +1844,252 @@ func explainQueryTool(ctx tool.Context, args ExplainQueryArgs) (PsqlResult, erro
 	return explainQueryImpl(ctx, args)
 }
 
+// ---------------------------------------------------------------------------
+// read_pg_log
+// ---------------------------------------------------------------------------
+
+const (
+	pgLogReadBytes    = 131072 // 128 KB — enough for ~1000 typical log lines
+	pgLogDefaultLines = 100
+	pgLogMaxLines     = 500
+)
+
+// GetPgLogArgs defines arguments for the read_pg_log tool.
+type GetPgLogArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Lines            int    `json:"lines,omitempty" jsonschema:"Number of recent log lines to return (default 100, max 500)."`
+	Filter           string `json:"filter,omitempty" jsonschema:"Only return lines containing this string (case-insensitive). Useful for: ERROR, FATAL, PANIC, or a specific parameter name."`
+}
+
+func getPgLogImpl(ctx context.Context, args GetPgLogArgs) (PsqlResult, error) {
+	lines := args.Lines
+	if lines <= 0 {
+		lines = pgLogDefaultLines
+	}
+	if lines > pgLogMaxLines {
+		lines = pgLogMaxLines
+	}
+
+	// pg_ls_logdir() + pg_read_file() require PostgreSQL ≥ 10 and superuser or
+	// pg_read_server_files. log_directory may be absolute (/var/log/postgresql)
+	// or relative to data_directory (pg_log) — handle both.
+	query := fmt.Sprintf(`
+WITH latest AS (
+  SELECT
+    CASE WHEN current_setting('log_directory') LIKE '/%%'
+      THEN current_setting('log_directory') || '/' || name
+      ELSE current_setting('data_directory') || '/' || current_setting('log_directory') || '/' || name
+    END AS path,
+    size
+  FROM pg_ls_logdir()
+  ORDER BY modification DESC
+  LIMIT 1
+)
+SELECT COALESCE(
+  pg_read_file(path, GREATEST(0, size - %d), LEAST(size, %d)),
+  ''
+)
+FROM latest;`, pgLogReadBytes, pgLogReadBytes)
+
+	raw, err := runPsqlTuples(ctx, args.ConnectionString, query, "read_pg_log")
+	if err != nil {
+		return errorResult("read_pg_log", args.ConnectionString, err), nil
+	}
+
+	content := strings.TrimRight(raw, "\n")
+	if content == "" {
+		return PsqlResult{Output: "read_pg_log: no log content found. Check that logging_collector=on and log_destination includes stderr or csvlog."}, nil
+	}
+
+	allLines := strings.Split(content, "\n")
+
+	filterLower := strings.ToLower(strings.TrimSpace(args.Filter))
+	if filterLower != "" {
+		filtered := allLines[:0]
+		for _, l := range allLines {
+			if strings.Contains(strings.ToLower(l), filterLower) {
+				filtered = append(filtered, l)
+			}
+		}
+		allLines = filtered
+		if len(allLines) == 0 {
+			return PsqlResult{Output: fmt.Sprintf("read_pg_log: no log lines matched filter %q.", args.Filter)}, nil
+		}
+	}
+
+	if len(allLines) > lines {
+		allLines = allLines[len(allLines)-lines:]
+	}
+
+	header := fmt.Sprintf("=== PostgreSQL Log (last %d lines", len(allLines))
+	if filterLower != "" {
+		header += fmt.Sprintf(", filter=%q", args.Filter)
+	}
+	header += ") ===\n"
+
+	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
+}
+
+func getPgLogTool(ctx tool.Context, args GetPgLogArgs) (PsqlResult, error) {
+	return getPgLogImpl(ctx, args)
+}
+
+// runPsqlTuples executes a read-only psql query and returns the raw column
+// value without any formatting (-t -A flags, tuples-only unaligned output).
+// Use this instead of runPsqlWithToolName when the result is large text that
+// would be corrupted by psql's expanded (-x) column wrapping, e.g. pg_read_file.
+func runPsqlTuples(ctx context.Context, connStr string, query string, toolName string) (string, error) {
+	dbInfo, err := resolveDatabaseInfo(connStr)
+	if err != nil {
+		return "", err
+	}
+
+	if policyEnforcer != nil {
+		note := ""
+		if !dbInfo.IsFromInfraConfig {
+			note = "connection string not found in infraConfig; no tags available for policy matching"
+		}
+		policyCtx := agentutil.WithToolName(ctx, toolName)
+		if err := policyEnforcer.CheckDatabase(policyCtx, dbInfo.Name, policy.ActionRead, dbInfo.Tags, note, dbInfo.Sensitivity); err != nil {
+			slog.Warn("policy denied database access", "tool", toolName, "database", dbInfo.Name, "err", err)
+			return "", fmt.Errorf("policy denied: %w", err)
+		}
+	}
+
+	start := time.Now()
+	psqlArgs := []string{"-w", "-t", "-A", "-c", query}
+	if dbInfo.ConnectionStr != "" {
+		psqlArgs = append([]string{dbInfo.ConnectionStr}, psqlArgs...)
+	}
+	output, err := cmdRunner.Run(ctx, "psql", psqlArgs, []string{"PGCONNECT_TIMEOUT=10"})
+	duration := time.Since(start)
+
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       toolName,
+			Parameters: map[string]any{"connection_string": maskPassword(connStr)},
+			RawCommand: query,
+		}, audit.ToolResult{
+			Output: truncateForAudit(output, 500),
+			Error:  errMsg,
+		}, duration)
+	}
+
+	if err != nil {
+		out := strings.TrimSpace(output)
+		if out == "" {
+			out = "(no output from psql)"
+		}
+		slog.Error("psql command failed", "tool", toolName, "ms", duration.Milliseconds(), "err", err, "output", out)
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("psql timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
+		}
+		if diagnosis := diagnosePsqlError(out); diagnosis != "" {
+			return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		}
+		return "", fmt.Errorf("psql failed: %v\nOutput: %s", err, out)
+	}
+
+	slog.Info("tool ok", "name", toolName, "ms", duration.Milliseconds())
+	return output, nil
+}
+
+// ---------------------------------------------------------------------------
+// read_uploaded_file
+// ---------------------------------------------------------------------------
+
+// ReadUploadedFileArgs defines arguments for the read_uploaded_file tool.
+type ReadUploadedFileArgs struct {
+	UploadID string `json:"upload_id" jsonschema:"Upload ID returned by the POST /api/v1/fleet/uploads endpoint (ul_ prefix)."`
+	Lines    int    `json:"lines,omitempty" jsonschema:"Number of recent lines to return (default 100, max 500)."`
+	Filter   string `json:"filter,omitempty" jsonschema:"Only return lines containing this string (case-insensitive). Useful for: ERROR, FATAL, PANIC, or a specific parameter name."`
+}
+
+func readUploadedFileImpl(ctx context.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
+	if auditBaseURL == "" {
+		return PsqlResult{Output: "read_uploaded_file: HELPDESK_AUDIT_URL is not configured — cannot retrieve uploads"}, nil
+	}
+	if args.UploadID == "" {
+		return PsqlResult{Output: "read_uploaded_file: upload_id is required"}, nil
+	}
+
+	lines := args.Lines
+	if lines <= 0 {
+		lines = pgLogDefaultLines
+	}
+	if lines > pgLogMaxLines {
+		lines = pgLogMaxLines
+	}
+
+	url := strings.TrimSuffix(auditBaseURL, "/") + "/v1/uploads/" + args.UploadID + "/content"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: failed to build request: %v", err)}, nil
+	}
+	if auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: auditd unreachable: %v", err)}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file: upload %q not found or expired (uploads expire after 24 hours)", args.UploadID)}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: auditd returned status %d", resp.StatusCode)}, nil
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, pgLogReadBytes))
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: failed to read response: %v", err)}, nil
+	}
+
+	content := strings.TrimRight(string(raw), "\n")
+	if content == "" {
+		return PsqlResult{Output: "read_uploaded_file: the uploaded file is empty."}, nil
+	}
+
+	allLines := strings.Split(content, "\n")
+
+	filterLower := strings.ToLower(strings.TrimSpace(args.Filter))
+	if filterLower != "" {
+		filtered := allLines[:0]
+		for _, l := range allLines {
+			if strings.Contains(strings.ToLower(l), filterLower) {
+				filtered = append(filtered, l)
+			}
+		}
+		allLines = filtered
+		if len(allLines) == 0 {
+			return PsqlResult{Output: fmt.Sprintf("read_uploaded_file: no lines matched filter %q.", args.Filter)}, nil
+		}
+	}
+
+	if len(allLines) > lines {
+		allLines = allLines[len(allLines)-lines:]
+	}
+
+	header := fmt.Sprintf("=== Uploaded File (last %d lines", len(allLines))
+	if filterLower != "" {
+		header += fmt.Sprintf(", filter=%q", args.Filter)
+	}
+	header += ") ===\n"
+
+	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
+}
+
+func readUploadedFileTool(ctx tool.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
+	return readUploadedFileImpl(ctx, args)
+}
+
 func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 	r := agentutil.NewDirectToolRegistry()
 	r.Register("check_connection", func(ctx context.Context, args map[string]any) (string, error) {
@@ -2029,6 +2282,22 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := explainQueryImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("read_pg_log", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetPgLogArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getPgLogImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("read_uploaded_file", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ReadUploadedFileArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := readUploadedFileImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r

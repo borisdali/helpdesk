@@ -1,0 +1,79 @@
+series_id: pbs_db_restart_triage
+name: Database Down — Restart Triage
+version: "1.0"
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Triage a completely unresponsive PostgreSQL instance. Confirm the database is
+  unreachable, classify the failure type from pod logs and K8s events, and attempt
+  a controlled restart if the logs indicate a clean shutdown or transient OOM kill.
+  Use stored baseline data (data_directory, log paths) from prior get_server_info
+  snapshots to orient recovery when the database cannot be directly queried.
+symptoms:
+  - "database is not accepting connections"
+  - "check_connection returns connection refused or timeout"
+  - "monitoring alert: database_up=0"
+  - "application errors: could not connect to server"
+  - "K8s pod in CrashLoopBackOff or Error state"
+  - "pg_isready returns 'no response'"
+guidance: |
+  IMPORTANT: When the database is down, psql-based tools (get_server_info,
+  get_slow_queries, etc.) will fail immediately. Use check_connection first
+  to confirm the failure mode (connection refused vs. timeout vs. auth error),
+  then shift to K8s tools and baseline history.
+
+  Step 1 — Confirm and classify the outage:
+  Run check_connection to capture the exact error. "Connection refused" means
+  the PostgreSQL process is not running. "Connection timed out" may indicate a
+  network or firewall issue rather than a DB failure — check K8s service and
+  endpoint health. "Password authentication failed" means the DB is up but
+  pg_hba.conf or credentials changed — this is not a restart scenario.
+
+  Step 2 — Check K8s pod state (Kubernetes deployments):
+  Use get_pod_status to determine the container state. CrashLoopBackOff means
+  PostgreSQL is repeatedly failing to start — this is a config or data issue,
+  not a simple restart. OOMKilled means the pod was killed by the OOM killer —
+  a restart will likely succeed but the root cause (memory pressure) must be
+  addressed. Completed/Succeeded is unexpected for a DB pod and indicates the
+  process exited cleanly — check for intentional shutdown.
+
+  Step 3 — Read the logs:
+  Use get_pod_logs to retrieve the last 100–200 lines of PostgreSQL output.
+  Key signals to look for:
+  - "database system was shut down" followed by absence of "database system is
+    ready to accept connections" — clean shutdown, safe to restart.
+  - "out of memory" or "OOM" in system/kernel messages — OOM kill, safe to
+    restart but monitor memory.
+  - "FATAL" or "PANIC" lines — indicate a hard failure; see the config recovery
+    or data recovery playbooks before attempting restart.
+  - "invalid page" or "checksum failure" — do NOT restart; escalate to data
+    recovery immediately.
+
+  Step 4 — Check K8s events:
+  Use get_events for the pod's namespace to see recent evictions, OOM kills,
+  node pressure events, or storage mount failures. Storage mount failures
+  (PVC not bound, volume unavailable) cannot be resolved by a restart.
+
+  Step 5 — Attempt restart (only if logs show clean shutdown or OOM kill):
+  Use restart_deployment to trigger a rolling restart. Watch get_pod_status
+  for the new pod to reach Running state. Then retry check_connection — if
+  the database accepts connections within 60 seconds, the incident is resolved.
+
+  Step 6 — Use baseline data if the DB does not come back:
+  If the database was previously monitored, ToolResultStore history contains
+  a get_server_info snapshot with data_directory, config_file, hba_file,
+  log_directory, and log_filename. Retrieve this to orient deeper investigation
+  without requiring a live connection.
+
+  Common misdiagnosis: restarting a pod that is in CrashLoopBackOff due to a
+  config error — the restart will fail again immediately. Always read the logs
+  before restarting. If you see any FATAL or PANIC lines, use the config
+  recovery playbook instead.
+escalation:
+  - "pod logs contain 'invalid page in block' or 'checksum failure'"
+  - "pod logs contain PANIC (not FATAL) — indicates unrecoverable state"
+  - "CrashLoopBackOff and logs show FATAL config errors — use config recovery playbook"
+  - "storage mount failure or PVC not bound — requires infrastructure intervention"
+  - "database does not accept connections within 5 minutes of pod restart"
+  - "get_events shows node NotReady or repeated evictions — node-level issue"
+target_hints: []
