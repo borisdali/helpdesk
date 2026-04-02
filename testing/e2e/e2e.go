@@ -245,6 +245,13 @@ func (c *GatewayClient) PlaybookImport(ctx context.Context, body map[string]any)
 	return c.postJSON(ctx, "/api/v1/fleet/playbooks/import", body)
 }
 
+// PlaybookRun calls POST /api/v1/fleet/playbooks/{id}/run with an optional body.
+// Returns the raw response map (either a FleetPlanResponse for fleet-mode playbooks
+// or an a2aResponse for agent-mode playbooks).
+func (c *GatewayClient) PlaybookRun(ctx context.Context, id string, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks/"+id+"/run", body)
+}
+
 // PlaybookDelete calls DELETE /api/v1/fleet/playbooks/{id} and returns the HTTP status code.
 func (c *GatewayClient) PlaybookDelete(ctx context.Context, id string) (int, error) {
 	return c.rawDo(ctx, http.MethodDelete, "/api/v1/fleet/playbooks/"+id, nil)

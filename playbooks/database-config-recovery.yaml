@@ -1,6 +1,13 @@
 series_id: pbs_db_config_recovery
 name: Database Down — Configuration Recovery
-version: "1.0"
+version: "1.1"
+execution_mode: agent
+escalates_to:
+  - pbs_db_pitr_recovery
+requires_evidence:
+  - "FATAL.*invalid value for parameter"
+  - "FATAL.*configuration file"
+  - "FATAL.*could not open file"
 problem_class: availability
 author: aiHelpDesk
 description: |

@@ -1,6 +1,7 @@
 series_id: pbs_connection_triage
 name: Connection & Lock Triage
 version: "1.0"
+execution_mode: fleet
 problem_class: availability
 author: aiHelpDesk
 description: |

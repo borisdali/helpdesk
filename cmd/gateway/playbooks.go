@@ -98,24 +98,35 @@ func (g *Gateway) handlePlaybookActivate(w http.ResponseWriter, r *http.Request)
 	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/activate")
 }
 
+// PlaybookRunRequest is the optional request body for POST /api/v1/fleet/playbooks/{id}/run.
+// For fleet-mode playbooks the body is ignored; the planner uses the playbook's own
+// description, target_hints, and guidance. For agent-mode playbooks, connection_string
+// and context are injected into the triage prompt.
+type PlaybookRunRequest struct {
+	ConnectionString string `json:"connection_string,omitempty"`
+	Context          string `json:"context,omitempty"`    // operator-supplied context (server name, symptoms, etc.)
+	ContextID        string `json:"context_id,omitempty"` // A2A session ID for multi-turn continuity
+}
+
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
-// It fetches the playbook from auditd, calls the fleet planner, and returns
-// a FleetPlanResponse — identical to /api/v1/fleet/plan but without requiring
-// the caller to supply the description.
+// Routes to the fleet planner (execution_mode="fleet") or the database agent
+// (execution_mode="agent") based on the playbook's execution_mode field.
 func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("playbookID")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "missing playbook ID")
 		return
 	}
-
-	if g.plannerLLM == nil {
-		writeError(w, http.StatusServiceUnavailable, "fleet planner LLM not configured")
-		return
-	}
 	if g.auditURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "auditd URL not configured")
 		return
+	}
+
+	// Parse optional request body (ignore errors — body is optional for fleet mode).
+	var req PlaybookRunRequest
+	if r.Body != nil {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &req) //nolint:errcheck
 	}
 
 	// Fetch the playbook from auditd.
@@ -126,9 +137,16 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build a synthetic FleetPlanRequest and call the planner by forwarding
-	// to handleFleetPlan. We do this by constructing a new request with the
-	// playbook's description and target hints.
+	if pb.ExecutionMode == "agent" {
+		g.handlePlaybookRunAsAgent(w, r, pb, req)
+		return
+	}
+
+	// Fleet path: build a synthetic FleetPlanRequest and delegate to handleFleetPlan.
+	if g.plannerLLM == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet planner LLM not configured")
+		return
+	}
 	planReqBody, err := json.Marshal(FleetPlanRequest{
 		Description: pb.Description,
 		TargetHints: pb.TargetHints,
@@ -143,13 +161,55 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to build plan request: "+err.Error())
 		return
 	}
-	// Copy identity headers so the planner audit record captures the right principal.
 	for _, h := range []string{"X-User", "X-API-Key", "Authorization"} {
 		if v := r.Header.Get(h); v != "" {
 			planReq.Header.Set(h, v)
 		}
 	}
 	g.handleFleetPlan(w, planReq)
+}
+
+// handlePlaybookRunAsAgent routes an agent-mode playbook run to the database agent
+// as an interactive agentic session. The playbook's guidance is injected into the
+// prompt as expert context. All tool calls within the session are expected to be
+// read-only; the agent presents remediation as recommendations for operator review.
+func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest) {
+	prompt := assembleTriagePrompt(pb, req)
+	g.proxyToAgent(w, r, agentNameDB, req.ContextID, prompt)
+}
+
+// assembleTriagePrompt builds the LLM prompt for an agent-mode playbook run.
+func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
+	var b strings.Builder
+
+	b.WriteString("You are performing a database availability investigation.\n\n")
+	fmt.Fprintf(&b, "## Playbook: %s\n\n", pb.Name)
+
+	if pb.Description != "" {
+		fmt.Fprintf(&b, "## Objective\n%s\n\n", pb.Description)
+	}
+	if pb.Guidance != "" {
+		fmt.Fprintf(&b, "## Expert Guidance\n%s\n\n", pb.Guidance)
+	}
+	if len(pb.EscalatesTo) > 0 {
+		fmt.Fprintf(&b, "## Escalation paths\nIf your investigation reveals a different root cause than this playbook addresses, the next playbooks to consider are (by series ID): %s\n\n",
+			strings.Join(pb.EscalatesTo, ", "))
+	}
+
+	b.WriteString("## Constraints\n")
+	b.WriteString("- Use only read-only diagnostic tools. Do not execute any write or destructive operations.\n")
+	b.WriteString("- Collect evidence, form a hypothesis, and if the evidence contradicts it, back out and pursue a different hypothesis.\n")
+	b.WriteString("- When you reach a clear diagnosis, present your findings and recommended remediation steps.\n")
+	b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n\n")
+
+	if req.ConnectionString != "" {
+		fmt.Fprintf(&b, "## Target\nConnection string: `%s`\n\n", req.ConnectionString)
+	}
+	if req.Context != "" {
+		fmt.Fprintf(&b, "## Additional context\n%s\n\n", req.Context)
+	}
+
+	return b.String()
 }
 
 // fetchPlaybook retrieves a single playbook record from auditd.

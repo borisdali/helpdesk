@@ -43,6 +43,12 @@ type Playbook struct {
 	IsActive bool   `json:"is_active"`            // exactly one version per series should be active
 	IsSystem bool   `json:"is_system"`            // true = shipped with aiHelpDesk; read-only via API
 	Source   string `json:"source"`               // "system" | "imported" | "manual"
+
+	// Triage routing fields
+	EntryPoint      bool     `json:"entry_point"`                // true = preferred starting point for this problem_class
+	EscalatesTo     []string `json:"escalates_to,omitempty"`     // series IDs to try if this hypothesis is disproven
+	RequiresEvidence []string `json:"requires_evidence,omitempty"` // log/error patterns expected before selecting this playbook
+	ExecutionMode   string   `json:"execution_mode"`             // "fleet" (static JobDef) | "agent" (agentic R/O session)
 }
 
 // PlaybookStore persists fleet playbooks.
@@ -96,6 +102,11 @@ func (s *PlaybookStore) migrateSchema() error {
 		"ALTER TABLE playbooks ADD COLUMN is_active      INTEGER NOT NULL DEFAULT 1",
 		"ALTER TABLE playbooks ADD COLUMN is_system      INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE playbooks ADD COLUMN source         TEXT    NOT NULL DEFAULT 'manual'",
+		// Triage routing
+		"ALTER TABLE playbooks ADD COLUMN entry_point        INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE playbooks ADD COLUMN escalates_to       TEXT    NOT NULL DEFAULT '[]'",
+		"ALTER TABLE playbooks ADD COLUMN requires_evidence  TEXT    NOT NULL DEFAULT '[]'",
+		"ALTER TABLE playbooks ADD COLUMN execution_mode     TEXT    NOT NULL DEFAULT 'fleet'",
 	}
 	for _, stmt := range newCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -137,6 +148,9 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 	if pb.Source == "" {
 		pb.Source = "manual"
 	}
+	if pb.ExecutionMode == "" {
+		pb.ExecutionMode = "fleet"
+	}
 	// For brand-new series (caller didn't provide SeriesID), default IsActive=true.
 	// For callers that set an explicit SeriesID (e.g., the seeder inserting a later version),
 	// respect whatever IsActive value they provided.
@@ -164,6 +178,14 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 	if err != nil {
 		return fmt.Errorf("marshal related_playbooks: %w", err)
 	}
+	escalatesToJSON, err := json.Marshal(pb.EscalatesTo)
+	if err != nil {
+		return fmt.Errorf("marshal escalates_to: %w", err)
+	}
+	requiresEvidenceJSON, err := json.Marshal(pb.RequiresEvidence)
+	if err != nil {
+		return fmt.Errorf("marshal requires_evidence: %w", err)
+	}
 
 	var lastValidatedStr *string
 	if pb.LastValidated != nil {
@@ -179,17 +201,23 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 	if pb.IsSystem {
 		isSystemInt = 1
 	}
+	entryPointInt := 0
+	if pb.EntryPoint {
+		entryPointInt = 1
+	}
 
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO playbooks
 		    (playbook_id, name, description, target_hints, created_by, created_at, updated_at,
 		     problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
-		     series_id, is_active, is_system, source)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     series_id, is_active, is_system, source,
+		     entry_point, escalates_to, requires_evidence, execution_mode)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
+		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode,
 	)
 	return err
 }
@@ -230,6 +258,14 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 	if err != nil {
 		return fmt.Errorf("marshal related_playbooks: %w", err)
 	}
+	escalatesToJSON, err := json.Marshal(pb.EscalatesTo)
+	if err != nil {
+		return fmt.Errorf("marshal escalates_to: %w", err)
+	}
+	requiresEvidenceJSON, err := json.Marshal(pb.RequiresEvidence)
+	if err != nil {
+		return fmt.Errorf("marshal requires_evidence: %w", err)
+	}
 
 	var lastValidatedStr *string
 	if pb.LastValidated != nil {
@@ -237,17 +273,28 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 		lastValidatedStr = &s
 	}
 
+	entryPointInt := 0
+	if pb.EntryPoint {
+		entryPointInt = 1
+	}
+	executionMode := pb.ExecutionMode
+	if executionMode == "" {
+		executionMode = "fleet"
+	}
+
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE playbooks SET
 		    name=?, description=?, target_hints=?, updated_at=?,
 		    problem_class=?, symptoms=?, guidance=?, escalation=?,
 		    related_playbooks=?, author=?, last_validated=?, version=?,
-		    series_id=?
+		    series_id=?,
+		    entry_point=?, escalates_to=?, requires_evidence=?, execution_mode=?
 		 WHERE playbook_id=?`,
 		pb.Name, pb.Description, string(hintsJSON), pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON),
 		string(relatedJSON), pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID,
+		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), executionMode,
 		pb.PlaybookID,
 	)
 	if err != nil {
@@ -338,7 +385,8 @@ func DefaultPlaybookListQuery() PlaybookListQuery {
 
 const playbookColumns = `playbook_id, name, description, target_hints, created_by, created_at, updated_at,
 	problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
-	series_id, is_active, is_system, source`
+	series_id, is_active, is_system, source,
+	entry_point, escalates_to, requires_evidence, execution_mode`
 
 // Get returns a playbook by ID, or sql.ErrNoRows if not found.
 func (s *PlaybookStore) Get(ctx context.Context, id string) (*Playbook, error) {
@@ -393,9 +441,10 @@ type scanner interface {
 func scanPlaybook(s scanner) (*Playbook, error) {
 	var pb Playbook
 	var hintsJSON, symptomsJSON, escalationJSON, relatedJSON string
+	var escalatesToJSON, requiresEvidenceJSON string
 	var createdAt, updatedAt string
 	var lastValidatedStr *string
-	var isActive, isSystem int // SQLite stores bools as INTEGER; scan into int then convert
+	var isActive, isSystem, entryPoint int // SQLite stores bools as INTEGER; scan into int then convert
 
 	if err := s.Scan(
 		&pb.PlaybookID, &pb.Name, &pb.Description, &hintsJSON,
@@ -403,12 +452,14 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 		&pb.ProblemClass, &symptomsJSON, &pb.Guidance, &escalationJSON,
 		&relatedJSON, &pb.Author, &lastValidatedStr, &pb.Version,
 		&pb.SeriesID, &isActive, &isSystem, &pb.Source,
+		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode,
 	); err != nil {
 		return nil, err
 	}
 
 	pb.IsActive = isActive != 0
 	pb.IsSystem = isSystem != 0
+	pb.EntryPoint = entryPoint != 0
 
 	// JSON array fields
 	if err := json.Unmarshal([]byte(hintsJSON), &pb.TargetHints); err != nil {
@@ -427,6 +478,16 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 	if relatedJSON != "" && relatedJSON != "null" {
 		if err := json.Unmarshal([]byte(relatedJSON), &pb.RelatedPlaybooks); err != nil {
 			pb.RelatedPlaybooks = nil
+		}
+	}
+	if escalatesToJSON != "" && escalatesToJSON != "null" {
+		if err := json.Unmarshal([]byte(escalatesToJSON), &pb.EscalatesTo); err != nil {
+			pb.EscalatesTo = nil
+		}
+	}
+	if requiresEvidenceJSON != "" && requiresEvidenceJSON != "null" {
+		if err := json.Unmarshal([]byte(requiresEvidenceJSON), &pb.RequiresEvidence); err != nil {
+			pb.RequiresEvidence = nil
 		}
 	}
 

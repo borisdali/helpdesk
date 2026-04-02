@@ -629,12 +629,32 @@ Delete a playbook. Returns `204 No Content`, `404` if not found, `400` for syste
 
 #### `POST /api/v1/fleet/playbooks/{playbookID}/run`
 
-Generate a fresh fleet plan from the playbook and return a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The `guidance` field is injected into the planner prompt.
+Runs a playbook. Behaviour depends on the playbook's `execution_mode`:
+
+**`execution_mode: fleet` (default)** — calls the fleet planner and returns a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The playbook's `description`, `guidance`, and `target_hints` are injected into the planner prompt. Requires LLM configuration.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
   | jq -r '.job_def_raw' > /tmp/plan.json
 ./fleet-runner --job-file /tmp/plan.json --dry-run
+```
+
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms and tests hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`. Used by the Database Down playbooks.
+
+Optional request body:
+
+| Field | Description |
+|---|---|
+| `connection_string` | PostgreSQL DSN for the target database |
+| `context` | Free-form operator context (server name, symptoms, recent changes) |
+| `context_id` | A2A session ID for multi-turn continuity |
+
+```bash
+# Triage a down database (agent mode)
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string":"postgres://prod-db.example.com/app","context":"pod in CrashLoopBackOff since 10:00 UTC"}' \
+  | jq .text
 ```
 
 #### `POST /api/v1/fleet/playbooks/import`

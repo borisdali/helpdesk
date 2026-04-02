@@ -188,3 +188,90 @@ func TestSeedSystemPlaybooks_YAMLParseRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	ps, err := audit.NewPlaybookStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		t.Fatalf("NewPlaybookStore: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := playbooks.SeedSystemPlaybooks(ctx, ps); err != nil {
+		t.Fatalf("SeedSystemPlaybooks: %v", err)
+	}
+
+	all, err := ps.List(ctx, audit.PlaybookListQuery{IncludeSystem: true, ActiveOnly: false})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	bySeriesID := make(map[string]*audit.Playbook)
+	for _, pb := range all {
+		bySeriesID[pb.SeriesID] = pb
+	}
+
+	// Restart triage: entry_point=true, execution_mode=agent, escalates_to set.
+	restart := bySeriesID["pbs_db_restart_triage"]
+	if restart == nil {
+		t.Fatal("pbs_db_restart_triage not seeded")
+	}
+	if !restart.EntryPoint {
+		t.Error("pbs_db_restart_triage: entry_point = false, want true")
+	}
+	if restart.ExecutionMode != "agent" {
+		t.Errorf("pbs_db_restart_triage: execution_mode = %q, want agent", restart.ExecutionMode)
+	}
+	if len(restart.EscalatesTo) == 0 {
+		t.Error("pbs_db_restart_triage: escalates_to is empty")
+	}
+
+	// Config recovery: execution_mode=agent, escalates_to and requires_evidence set.
+	config := bySeriesID["pbs_db_config_recovery"]
+	if config == nil {
+		t.Fatal("pbs_db_config_recovery not seeded")
+	}
+	if config.ExecutionMode != "agent" {
+		t.Errorf("pbs_db_config_recovery: execution_mode = %q, want agent", config.ExecutionMode)
+	}
+	if len(config.EscalatesTo) == 0 {
+		t.Error("pbs_db_config_recovery: escalates_to is empty")
+	}
+	if len(config.RequiresEvidence) == 0 {
+		t.Error("pbs_db_config_recovery: requires_evidence is empty")
+	}
+
+	// PITR recovery: execution_mode=agent, requires_evidence set, entry_point=false.
+	pitr := bySeriesID["pbs_db_pitr_recovery"]
+	if pitr == nil {
+		t.Fatal("pbs_db_pitr_recovery not seeded")
+	}
+	if pitr.ExecutionMode != "agent" {
+		t.Errorf("pbs_db_pitr_recovery: execution_mode = %q, want agent", pitr.ExecutionMode)
+	}
+	if len(pitr.RequiresEvidence) == 0 {
+		t.Error("pbs_db_pitr_recovery: requires_evidence is empty")
+	}
+	if pitr.EntryPoint {
+		t.Error("pbs_db_pitr_recovery: entry_point = true, want false")
+	}
+
+	// Operational playbooks: execution_mode=fleet (from YAML or migration default).
+	for _, sid := range []string{"pbs_vacuum_triage", "pbs_slow_query_triage", "pbs_connection_triage", "pbs_replication_lag"} {
+		pb := bySeriesID[sid]
+		if pb == nil {
+			t.Errorf("%s not seeded", sid)
+			continue
+		}
+		if pb.ExecutionMode != "fleet" {
+			t.Errorf("%s: execution_mode = %q, want fleet", sid, pb.ExecutionMode)
+		}
+	}
+}

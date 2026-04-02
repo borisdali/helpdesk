@@ -1,6 +1,11 @@
 series_id: pbs_db_restart_triage
 name: Database Down — Restart Triage
-version: "1.0"
+version: "1.1"
+entry_point: true
+execution_mode: agent
+escalates_to:
+  - pbs_db_config_recovery
+  - pbs_db_pitr_recovery
 problem_class: availability
 author: aiHelpDesk
 description: |

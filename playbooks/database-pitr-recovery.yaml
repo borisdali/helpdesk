@@ -1,6 +1,11 @@
 series_id: pbs_db_pitr_recovery
 name: Database Down — Backup Restore & PITR
-version: "1.0"
+version: "1.1"
+execution_mode: agent
+requires_evidence:
+  - "PANIC.*could not locate a valid checkpoint"
+  - "database files are incompatible with server"
+  - "invalid page.*could not read block"
 problem_class: availability
 author: aiHelpDesk
 description: |

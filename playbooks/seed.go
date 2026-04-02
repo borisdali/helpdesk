@@ -13,16 +13,20 @@ import (
 // systemPlaybookYAML is the wire format for YAML playbook files. Explicit yaml: tags
 // are used to avoid dependency on audit.Playbook gaining yaml tags.
 type systemPlaybookYAML struct {
-	SeriesID     string   `yaml:"series_id"`
-	Name         string   `yaml:"name"`
-	Version      string   `yaml:"version"`
-	ProblemClass string   `yaml:"problem_class"`
-	Author       string   `yaml:"author"`
-	Description  string   `yaml:"description"`
-	Symptoms     []string `yaml:"symptoms"`
-	Guidance     string   `yaml:"guidance"`
-	Escalation   []string `yaml:"escalation"`
-	TargetHints  []string `yaml:"target_hints"`
+	SeriesID        string   `yaml:"series_id"`
+	Name            string   `yaml:"name"`
+	Version         string   `yaml:"version"`
+	ProblemClass    string   `yaml:"problem_class"`
+	Author          string   `yaml:"author"`
+	Description     string   `yaml:"description"`
+	Symptoms        []string `yaml:"symptoms"`
+	Guidance        string   `yaml:"guidance"`
+	Escalation      []string `yaml:"escalation"`
+	TargetHints     []string `yaml:"target_hints"`
+	EntryPoint      bool     `yaml:"entry_point"`
+	EscalatesTo     []string `yaml:"escalates_to"`
+	RequiresEvidence []string `yaml:"requires_evidence"`
+	ExecutionMode   string   `yaml:"execution_mode"`
 }
 
 // SeedSystemPlaybooks reads all embedded *.yaml files and inserts them into the
@@ -85,19 +89,23 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 			// First version of a series → active; subsequent versions → inactive.
 			isActive := len(existing) == 0
 			pb := &audit.Playbook{
-				SeriesID:     y.SeriesID,
-				Name:         y.Name,
-				Version:      y.Version,
-				ProblemClass: y.ProblemClass,
-				Author:       y.Author,
-				Description:  y.Description,
-				Symptoms:     y.Symptoms,
-				Guidance:     y.Guidance,
-				Escalation:   y.Escalation,
-				TargetHints:  y.TargetHints,
-				IsSystem:     true,
-				IsActive:     isActive,
-				Source:       "system",
+				SeriesID:        y.SeriesID,
+				Name:            y.Name,
+				Version:         y.Version,
+				ProblemClass:    y.ProblemClass,
+				Author:          y.Author,
+				Description:     y.Description,
+				Symptoms:        y.Symptoms,
+				Guidance:        y.Guidance,
+				Escalation:      y.Escalation,
+				TargetHints:     y.TargetHints,
+				EntryPoint:      y.EntryPoint,
+				EscalatesTo:     y.EscalatesTo,
+				RequiresEvidence: y.RequiresEvidence,
+				ExecutionMode:   y.ExecutionMode,
+				IsSystem:        true,
+				IsActive:        isActive,
+				Source:          "system",
 			}
 			if err := store.Create(ctx, pb); err != nil {
 				return fmt.Errorf("seed playbook %q v%s: %w", y.SeriesID, y.Version, err)

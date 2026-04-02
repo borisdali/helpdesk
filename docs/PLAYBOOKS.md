@@ -457,5 +457,9 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `is_active` | bool | `true` if this is the active version in its series |
 | `is_system` | bool | `true` for playbooks shipped with aiHelpDesk (read-only) |
 | `source` | string | `system` \| `imported` \| `manual` |
+| `entry_point` | bool | `true` marks this as the preferred starting playbook for its `problem_class`. Used by the planner to resolve "where do I start?" when multiple playbooks could apply. Only one playbook per problem class should have `entry_point=true`. |
+| `escalates_to` | []string | Series IDs (`pbs_*`) of playbooks to consider next if this playbook's hypothesis is disproven by the collected evidence. Injected into the agent prompt as escalation context. |
+| `requires_evidence` | []string | Log patterns or error signals expected to be present before this playbook is selected. Expressed as human-readable substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). Used as selection guidance; not enforced as hard gates in the current release. |
+| `execution_mode` | string | `fleet` (default) — runs through the fleet planner, returns a `JobDef` for operator review. `agent` — routes directly to the database agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. |
 | `created_at` | RFC3339 | Creation timestamp |
 | `updated_at` | RFC3339 | Last update timestamp |

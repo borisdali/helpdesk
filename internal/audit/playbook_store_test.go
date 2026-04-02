@@ -602,3 +602,98 @@ func TestPlaybookStore_NullOptionalFields(t *testing.T) {
 		t.Errorf("Version = %q, want empty", got.Version)
 	}
 }
+
+func TestPlaybookStore_NewFields_Defaults(t *testing.T) {
+	ps := newPlaybookTestStore(t)
+	ctx := context.Background()
+
+	pb := &Playbook{Name: "defaults test", Description: "desc"}
+	if err := ps.Create(ctx, pb); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ExecutionMode != "fleet" {
+		t.Errorf("ExecutionMode = %q, want fleet", got.ExecutionMode)
+	}
+	if got.EntryPoint {
+		t.Error("EntryPoint = true, want false")
+	}
+	if len(got.EscalatesTo) != 0 {
+		t.Errorf("EscalatesTo = %v, want empty", got.EscalatesTo)
+	}
+	if len(got.RequiresEvidence) != 0 {
+		t.Errorf("RequiresEvidence = %v, want empty", got.RequiresEvidence)
+	}
+}
+
+func TestPlaybookStore_NewFields_RoundTrip(t *testing.T) {
+	ps := newPlaybookTestStore(t)
+	ctx := context.Background()
+
+	pb := &Playbook{
+		Name:             "round-trip test",
+		Description:      "desc",
+		EntryPoint:       true,
+		EscalatesTo:      []string{"pbs_config_recovery", "pbs_pitr_recovery"},
+		RequiresEvidence: []string{"FATAL.*invalid parameter", "PANIC.*checkpoint"},
+		ExecutionMode:    "agent",
+	}
+	if err := ps.Create(ctx, pb); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ExecutionMode != "agent" {
+		t.Errorf("ExecutionMode = %q, want agent", got.ExecutionMode)
+	}
+	if !got.EntryPoint {
+		t.Error("EntryPoint = false, want true")
+	}
+	if len(got.EscalatesTo) != 2 || got.EscalatesTo[0] != "pbs_config_recovery" {
+		t.Errorf("EscalatesTo = %v, want [pbs_config_recovery pbs_pitr_recovery]", got.EscalatesTo)
+	}
+	if len(got.RequiresEvidence) != 2 || got.RequiresEvidence[0] != "FATAL.*invalid parameter" {
+		t.Errorf("RequiresEvidence = %v, want 2 entries", got.RequiresEvidence)
+	}
+
+	// Verify Update round-trip too.
+	got.EscalatesTo = []string{"pbs_only_one"}
+	got.ExecutionMode = "fleet"
+	if err := ps.Update(ctx, got); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	updated, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get after Update: %v", err)
+	}
+	if len(updated.EscalatesTo) != 1 || updated.EscalatesTo[0] != "pbs_only_one" {
+		t.Errorf("EscalatesTo after update = %v, want [pbs_only_one]", updated.EscalatesTo)
+	}
+	if updated.ExecutionMode != "fleet" {
+		t.Errorf("ExecutionMode after update = %q, want fleet", updated.ExecutionMode)
+	}
+}
+
+func TestPlaybookStore_EntryPoint(t *testing.T) {
+	ps := newPlaybookTestStore(t)
+	ctx := context.Background()
+
+	pb := &Playbook{Name: "entry", Description: "d", EntryPoint: true}
+	if err := ps.Create(ctx, pb); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.EntryPoint {
+		t.Error("EntryPoint = false, want true")
+	}
+}

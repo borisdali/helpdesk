@@ -1,6 +1,7 @@
 series_id: pbs_slow_query_triage
 name: Slow Query Triage
 version: "1.0"
+execution_mode: fleet
 problem_class: performance
 author: aiHelpDesk
 description: |

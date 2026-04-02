@@ -421,3 +421,99 @@ func TestPlaybooks_ListQueryParams(t *testing.T) {
 	t.Logf("list params OK: default=%d no_system=%d series_with_inactive=%d",
 		len(allDefault), len(noSystem), len(withInactive))
 }
+
+// TestPlaybooks_RunFleetMode calls POST /run on a fleet-mode system playbook
+// (Vacuum & Bloat Triage) and verifies the response has the fleet plan shape.
+// Requires LLM configuration — skipped if no API key present.
+func TestPlaybooks_RunFleetMode(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Find the vacuum triage system playbook (fleet mode, entry_point=false).
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var vacuumID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_vacuum_triage" {
+			vacuumID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if vacuumID == "" {
+		t.Skip("pbs_vacuum_triage system playbook not found — stack may not be seeded")
+	}
+
+	resp, err := client.PlaybookRun(ctx, vacuumID, map[string]any{
+		"connection_string": cfg.ConnStr,
+	})
+	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
+		t.Fatalf("PlaybookRun: %v", err)
+	}
+
+	// Fleet response must contain job_def_raw (plan shape), not agent text.
+	if resp["job_def_raw"] == nil && resp["job_def"] == nil {
+		t.Errorf("fleet-mode run response missing job_def_raw/job_def: %v", resp)
+	}
+	if resp["text"] != nil {
+		t.Error("fleet-mode run should not return agent 'text' field")
+	}
+	t.Logf("fleet run OK: playbook_id=%s has_job_def=%v", vacuumID, resp["job_def_raw"] != nil)
+}
+
+// TestPlaybooks_RunAgentMode calls POST /run on an agent-mode system playbook
+// (Database Down — Restart Triage) and verifies the response has the agent shape.
+// Requires LLM + a running database agent.
+func TestPlaybooks_RunAgentMode(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var restartID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_db_restart_triage" {
+			restartID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if restartID == "" {
+		t.Skip("pbs_db_restart_triage system playbook not found")
+	}
+
+	resp, err := client.PlaybookRun(ctx, restartID, map[string]any{
+		"connection_string": cfg.ConnStr,
+		"context":           "e2e test: checking agent-mode routing",
+	})
+	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
+		t.Fatalf("PlaybookRun (agent mode): %v", err)
+	}
+
+	// Agent response must contain text, not job_def_raw.
+	if resp["text"] == nil {
+		t.Errorf("agent-mode run response missing 'text' field: %v", resp)
+	}
+	if resp["job_def_raw"] != nil {
+		t.Error("agent-mode run should not return fleet 'job_def_raw' field")
+	}
+	t.Logf("agent run OK: playbook_id=%s text_len=%d", restartID, len(fmt.Sprintf("%v", resp["text"])))
+}
