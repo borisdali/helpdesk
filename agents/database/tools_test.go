@@ -331,6 +331,10 @@ server_started     | 2024-01-15 08:30:00+00
 uptime             | 3 days 14:25:33
 data_directory     | /var/lib/postgresql/16/main
 config_file        | /etc/postgresql/16/main/postgresql.conf
+hba_file           | /etc/postgresql/16/main/pg_hba.conf
+ident_file         | /etc/postgresql/16/main/pg_ident.conf
+log_directory      | /var/log/postgresql
+log_filename       | postgresql-%Y-%m-%d_%H%M%S.log
 current_db_size    | 250 MB
 role               | primary
 total_connections  | 15
@@ -349,6 +353,18 @@ max_connections    | 100
 	}
 	if !strings.Contains(result.Output, "primary") {
 		t.Errorf("getServerInfoTool() output = %q, want to contain 'primary'", result.Output)
+	}
+	if !strings.Contains(result.Output, "pg_hba.conf") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'pg_hba.conf'", result.Output)
+	}
+	if !strings.Contains(result.Output, "pg_ident.conf") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'pg_ident.conf'", result.Output)
+	}
+	if !strings.Contains(result.Output, "log_directory") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'log_directory'", result.Output)
+	}
+	if !strings.Contains(result.Output, "log_filename") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'log_filename'", result.Output)
 	}
 }
 

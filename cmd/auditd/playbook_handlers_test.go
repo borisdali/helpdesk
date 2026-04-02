@@ -308,7 +308,189 @@ func TestPlaybookHandlers_Update_MissingName(t *testing.T) {
 	}
 }
 
+func TestPlaybookHandlers_Update_SystemPlaybook(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	sys := &audit.Playbook{
+		Name:        "system-vacuum",
+		Description: "System vacuum playbook",
+		IsSystem:    true,
+		Source:      "system",
+	}
+	if err := srv.store.Create(context.Background(), sys); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	data, _ := json.Marshal(map[string]any{
+		"name":        "hacked-name",
+		"description": "attempted override",
+	})
+	req := httptest.NewRequest(http.MethodPut, "/v1/playbooks/"+sys.PlaybookID, bytes.NewReader(data))
+	req.SetPathValue("playbookID", sys.PlaybookID)
+	w := httptest.NewRecorder()
+	srv.handleUpdate(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
 // --- handleDelete ---
+
+func TestPlaybookHandlers_Delete_SystemPlaybook(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	sys := &audit.Playbook{
+		Name:        "system-vacuum",
+		Description: "System vacuum playbook",
+		IsSystem:    true,
+		Source:      "system",
+	}
+	if err := srv.store.Create(context.Background(), sys); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/playbooks/"+sys.PlaybookID, nil)
+	req.SetPathValue("playbookID", sys.PlaybookID)
+	w := httptest.NewRecorder()
+	srv.handleDelete(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+// --- handleList query params ---
+
+func TestPlaybookHandlers_List_ActiveOnly(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	// Create two versions in the same series; v2 is inactive.
+	v1 := createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "my-playbook v1",
+		"description": "version one",
+	})
+	createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "my-playbook v2",
+		"description": "version two",
+		"series_id":   v1.SeriesID,
+	})
+
+	// Default (active_only=true) → only v1.
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks", nil)
+	w := httptest.NewRecorder()
+	srv.handleList(w, req)
+
+	var result struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Playbooks) != 1 {
+		t.Errorf("default list: got %d playbooks, want 1 (active only)", len(result.Playbooks))
+	}
+
+	// active_only=false → both versions.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks?active_only=false", nil)
+	w2 := httptest.NewRecorder()
+	srv.handleList(w2, req2)
+
+	var result2 struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.NewDecoder(w2.Body).Decode(&result2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result2.Playbooks) != 2 {
+		t.Errorf("active_only=false: got %d playbooks, want 2", len(result2.Playbooks))
+	}
+}
+
+func TestPlaybookHandlers_List_IncludeSystem(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	// Insert a system playbook directly.
+	sys := &audit.Playbook{
+		Name:        "system-vacuum",
+		Description: "System vacuum playbook",
+		IsSystem:    true,
+		IsActive:    true,
+		Source:      "system",
+	}
+	if err := srv.store.Create(context.Background(), sys); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Also create a normal playbook.
+	createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "user-playbook",
+		"description": "user-authored",
+	})
+
+	// Default (include_system=true) → both.
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks", nil)
+	w := httptest.NewRecorder()
+	srv.handleList(w, req)
+
+	var result struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Playbooks) != 2 {
+		t.Errorf("default list: got %d playbooks, want 2", len(result.Playbooks))
+	}
+
+	// include_system=false → only the user playbook.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks?include_system=false", nil)
+	w2 := httptest.NewRecorder()
+	srv.handleList(w2, req2)
+
+	var result2 struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.NewDecoder(w2.Body).Decode(&result2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result2.Playbooks) != 1 {
+		t.Errorf("include_system=false: got %d playbooks, want 1", len(result2.Playbooks))
+	}
+	if result2.Playbooks[0].IsSystem {
+		t.Error("expected no system playbooks when include_system=false")
+	}
+}
+
+func TestPlaybookHandlers_List_SeriesID(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	// Two unrelated playbooks (each in their own series).
+	pb1 := createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "alpha",
+		"description": "alpha playbook",
+	})
+	createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "beta",
+		"description": "beta playbook",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks?series_id="+pb1.SeriesID, nil)
+	w := httptest.NewRecorder()
+	srv.handleList(w, req)
+
+	var result struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Playbooks) != 1 {
+		t.Errorf("series_id filter: got %d playbooks, want 1", len(result.Playbooks))
+	}
+	if result.Playbooks[0].SeriesID != pb1.SeriesID {
+		t.Errorf("series_id = %q, want %q", result.Playbooks[0].SeriesID, pb1.SeriesID)
+	}
+}
 
 // --- handleActivate ---
 

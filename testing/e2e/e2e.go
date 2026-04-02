@@ -197,6 +197,123 @@ func (c *GatewayClient) Research(ctx context.Context, query string) (*A2ARespons
 	})
 }
 
+// PlaybookCreate calls POST /api/v1/fleet/playbooks and returns the created playbook.
+func (c *GatewayClient) PlaybookCreate(ctx context.Context, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks", body)
+}
+
+// PlaybookGet calls GET /api/v1/fleet/playbooks/{id}.
+func (c *GatewayClient) PlaybookGet(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook: %w", err)
+	}
+	return result, nil
+}
+
+// PlaybookList calls GET /api/v1/fleet/playbooks with optional query params (e.g. "active_only=false").
+func (c *GatewayClient) PlaybookList(ctx context.Context, query string) ([]map[string]any, error) {
+	path := "/api/v1/fleet/playbooks"
+	if query != "" {
+		path += "?" + query
+	}
+	raw, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Playbooks []map[string]any `json:"playbooks"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, fmt.Errorf("decode playbook list: %w", err)
+	}
+	return wrapper.Playbooks, nil
+}
+
+// PlaybookActivate calls POST /api/v1/fleet/playbooks/{id}/activate.
+func (c *GatewayClient) PlaybookActivate(ctx context.Context, id string) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks/"+id+"/activate", nil)
+}
+
+// PlaybookImport calls POST /api/v1/fleet/playbooks/import.
+func (c *GatewayClient) PlaybookImport(ctx context.Context, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks/import", body)
+}
+
+// PlaybookDelete calls DELETE /api/v1/fleet/playbooks/{id} and returns the HTTP status code.
+func (c *GatewayClient) PlaybookDelete(ctx context.Context, id string) (int, error) {
+	return c.rawDo(ctx, http.MethodDelete, "/api/v1/fleet/playbooks/"+id, nil)
+}
+
+// PlaybookUpdate calls PUT /api/v1/fleet/playbooks/{id} and returns the HTTP status code.
+func (c *GatewayClient) PlaybookUpdate(ctx context.Context, id string, body map[string]any) (int, error) {
+	return c.rawDo(ctx, http.MethodPut, "/api/v1/fleet/playbooks/"+id, body)
+}
+
+// rawDo executes an HTTP request and returns the response status code.
+// body may be nil (sends no body). The response body is drained and discarded.
+func (c *GatewayClient) rawDo(ctx context.Context, method, path string, body map[string]any) (int, error) {
+	var reqBody *bytes.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return 0, fmt.Errorf("marshal: %w", err)
+		}
+		reqBody = bytes.NewReader(data)
+	} else {
+		reqBody = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reqBody)
+	if err != nil {
+		return 0, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body) //nolint:errcheck
+	return resp.StatusCode, nil
+}
+
+// postJSON is like post but returns a raw map[string]any instead of A2AResponse,
+// and accepts a nil payload (sends an empty JSON object).
+func (c *GatewayClient) postJSON(ctx context.Context, path string, payload map[string]any) (map[string]any, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("POST %s: HTTP %d: %s", path, resp.StatusCode, string(body))
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("POST %s: decode: %w", path, err)
+	}
+	return result, nil
+}
+
 func (c *GatewayClient) get(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {

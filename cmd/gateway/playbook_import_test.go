@@ -281,6 +281,47 @@ func TestHandlePlaybookImport_HintsApplied(t *testing.T) {
 	}
 }
 
+// --- parseImportResponse (markdown fence stripping) ---
+
+func TestParseImportResponse_StripMarkdownFences(t *testing.T) {
+	pb := &audit.Playbook{
+		Name:         "Fence Test",
+		Description:  "LLM wrapped the JSON in fences",
+		ProblemClass: "performance",
+	}
+	inner := mockLLMResponse(pb, nil, 0.85)
+
+	// Simulate common LLM wrapping patterns.
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"json fence", "```json\n" + inner + "\n```"},
+		{"plain fence", "```\n" + inner + "\n```"},
+		{"fence with trailing newline", "```json\n" + inner + "\n```\n"},
+		{"no fence (baseline)", inner},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, warnings, confidence, err := parseImportResponse(tc.raw)
+			if err != nil {
+				t.Fatalf("parseImportResponse(%q): %v", tc.name, err)
+			}
+			if got.Name != "Fence Test" {
+				t.Errorf("name = %q, want Fence Test", got.Name)
+			}
+			if got.Source != "imported" {
+				t.Errorf("source = %q, want imported", got.Source)
+			}
+			if confidence != 0.85 {
+				t.Errorf("confidence = %v, want 0.85", confidence)
+			}
+			_ = warnings
+		})
+	}
+}
+
 // --- assembleImportPrompt ---
 
 func TestAssembleImportPrompt_IncludesToolCatalog(t *testing.T) {
