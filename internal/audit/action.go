@@ -111,6 +111,15 @@ func ClassifyEndpoint(method, path string) ActionClass {
 		return ActionUnknown // Depends on the specific tool
 	case contains(path, "/query"):
 		return ActionUnknown // Generic query endpoint
+	// Playbook endpoints
+	case contains(path, "/fleet/playbooks") && contains(path, "/run"):
+		return ActionRead // Playbook run: fleet plan or agent diagnostic session — no mutations
+	case contains(path, "/fleet/playbooks") && contains(path, "/import"):
+		return ActionRead // Import returns a draft; nothing is persisted
+	case contains(path, "/fleet/playbooks") && (method == "POST" || method == "PUT"):
+		return ActionWrite // Create / update / activate a playbook
+	case contains(path, "/fleet/playbooks") && method == "DELETE":
+		return ActionDestructive
 	default:
 		return ActionUnknown
 	}

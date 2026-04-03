@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -294,16 +295,22 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Warn("recordPlaybookRunStart: request failed", "err", err)
+		slog.Error("recordPlaybookRunStart: request failed — run not recorded", "playbook_id", pb.PlaybookID, "err", err)
 		return ""
 	}
 	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
-		slog.Warn("recordPlaybookRunStart: unexpected status", "status", resp.StatusCode)
+		slog.Error("recordPlaybookRunStart: run not recorded",
+			"playbook_id", pb.PlaybookID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
 		return ""
 	}
 	var created audit.PlaybookRun
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(respBody)).Decode(&created); err != nil {
+		slog.Error("recordPlaybookRunStart: failed to decode run response", "playbook_id", pb.PlaybookID, "err", err)
 		return ""
 	}
 	return created.RunID
@@ -334,8 +341,16 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 	req = req.WithContext(ctx2)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Warn("recordPlaybookRunComplete: request failed", "run_id", runID, "err", err)
+		slog.Error("recordPlaybookRunComplete: run outcome not recorded — run stuck at outcome=unknown", "run_id", runID, "err", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		slog.Error("recordPlaybookRunComplete: unexpected status — run stuck at outcome=unknown",
+			"run_id", runID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(body)),
+		)
+	}
 }

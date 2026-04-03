@@ -54,6 +54,12 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"DELETE /v1/fleet/playbooks/{playbookID}":          {AdminBypass: true},
 	"POST /v1/fleet/playbooks/{playbookID}/activate":   {AdminBypass: true},
 
+	// Playbook run tracking (recording called by gateway service account; reads open to any authenticated user)
+	"POST /v1/fleet/playbooks/{playbookID}/runs": {ServiceOnly: true, AdminBypass: true},
+	"GET /v1/fleet/playbooks/{playbookID}/runs":  {AdminBypass: true},
+	"GET /v1/fleet/playbooks/{playbookID}/stats": {AdminBypass: true},
+	"PATCH /v1/fleet/playbook-runs/{runID}":      {AdminBypass: true},
+
 	// Upload endpoints (operator file uploads, e.g. PostgreSQL log files)
 	"POST /v1/uploads":                     {AdminBypass: true},
 	"GET /v1/uploads/{uploadID}":           {AdminBypass: true},
