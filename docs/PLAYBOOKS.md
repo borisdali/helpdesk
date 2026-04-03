@@ -347,9 +347,15 @@ escalation:
   - "any query running > 30 minutes with writes (has_writes=true)"
   - "blocking chain involves a write transaction open > 10 minutes"
 target_hints: []
+execution_mode: fleet            # fleet (default) | agent
+entry_point: false               # true = preferred starting playbook for this problem_class
+escalates_to: []                 # series IDs of follow-on playbooks if hypothesis is wrong
+requires_evidence: []            # log patterns expected before selecting this playbook
 ```
 
 `name` and `description` are required. Missing fields produce `warning_messages` and reduce `confidence` to `0.8`.
+
+When importing via LLM (`format=markdown`, `text`, `rundeck`, `ansible`), the importer infers `execution_mode` and `entry_point` from context and extracts `requires_evidence` from "when to use" language in the source. `escalates_to` is always left empty on import — series IDs of other playbooks cannot be inferred from text and must be filled in by the operator after reviewing the draft.
 
 ---
 

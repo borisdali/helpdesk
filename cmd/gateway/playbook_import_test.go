@@ -362,3 +362,131 @@ func TestAssembleImportPrompt_HintsSection(t *testing.T) {
 		t.Error("prompt should include problem_class hint")
 	}
 }
+
+func TestAssembleImportPrompt_IncludesNewFields(t *testing.T) {
+	prompt := assembleImportPrompt("text", "markdown", PlaybookImportHints{}, "")
+
+	for _, field := range []string{"execution_mode", "entry_point", "escalates_to", "requires_evidence"} {
+		if !strings.Contains(prompt, field) {
+			t.Errorf("prompt missing field %q", field)
+		}
+	}
+}
+
+// TestHandlePlaybookImport_YAML_NewFields verifies that execution_mode, entry_point,
+// escalates_to, and requires_evidence round-trip correctly through the YAML parser.
+func TestHandlePlaybookImport_YAML_NewFields(t *testing.T) {
+	g := newImportGateway(t, nil)
+
+	yamlText := `
+name: DB Down Triage
+description: Triage a completely unresponsive PostgreSQL instance.
+problem_class: availability
+execution_mode: agent
+entry_point: true
+escalates_to:
+  - pbs_db_config_recovery
+  - pbs_db_pitr_recovery
+requires_evidence:
+  - "connection refused"
+  - "FATAL.*could not connect"
+`
+	w := doImportRequest(t, g, map[string]any{
+		"text":   yamlText,
+		"format": "yaml",
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp PlaybookImportResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	d := resp.Draft
+	if d.ExecutionMode != "agent" {
+		t.Errorf("execution_mode = %q, want agent", d.ExecutionMode)
+	}
+	if !d.EntryPoint {
+		t.Error("entry_point should be true")
+	}
+	if len(d.EscalatesTo) != 2 || d.EscalatesTo[0] != "pbs_db_config_recovery" {
+		t.Errorf("escalates_to = %v, want [pbs_db_config_recovery pbs_db_pitr_recovery]", d.EscalatesTo)
+	}
+	if len(d.RequiresEvidence) != 2 {
+		t.Errorf("requires_evidence = %v, want 2 entries", d.RequiresEvidence)
+	}
+}
+
+// TestHandlePlaybookImport_YAML_ExecutionModeDefaults verifies that omitting
+// execution_mode in YAML produces the "fleet" default.
+func TestHandlePlaybookImport_YAML_ExecutionModeDefaults(t *testing.T) {
+	g := newImportGateway(t, nil)
+
+	w := doImportRequest(t, g, map[string]any{
+		"text":   "name: Vacuum Triage\ndescription: Run vacuum checks.\n",
+		"format": "yaml",
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp PlaybookImportResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Draft.ExecutionMode != "fleet" {
+		t.Errorf("execution_mode = %q, want fleet (default)", resp.Draft.ExecutionMode)
+	}
+	if resp.Draft.EntryPoint {
+		t.Error("entry_point should default to false")
+	}
+}
+
+// TestParseImportResponse_NewFields verifies that the LLM response parser
+// correctly populates the 4 new fields.
+func TestParseImportResponse_NewFields(t *testing.T) {
+	raw := `{
+		"playbook": {
+			"name": "Config Recovery",
+			"description": "Recover from a misconfigured postgresql.conf.",
+			"execution_mode": "agent",
+			"entry_point": false,
+			"escalates_to": ["pbs_db_pitr_recovery"],
+			"requires_evidence": ["FATAL.*invalid value for parameter", "FATAL.*configuration file"]
+		},
+		"warning_messages": [],
+		"confidence": 0.9
+	}`
+
+	pb, _, _, err := parseImportResponse(raw)
+	if err != nil {
+		t.Fatalf("parseImportResponse: %v", err)
+	}
+	if pb.ExecutionMode != "agent" {
+		t.Errorf("execution_mode = %q, want agent", pb.ExecutionMode)
+	}
+	if pb.EntryPoint {
+		t.Error("entry_point should be false")
+	}
+	if len(pb.EscalatesTo) != 1 || pb.EscalatesTo[0] != "pbs_db_pitr_recovery" {
+		t.Errorf("escalates_to = %v", pb.EscalatesTo)
+	}
+	if len(pb.RequiresEvidence) != 2 {
+		t.Errorf("requires_evidence = %v, want 2 entries", pb.RequiresEvidence)
+	}
+}
+
+// TestParseImportResponse_ExecutionModeDefault verifies the "fleet" fallback
+// when the LLM omits execution_mode.
+func TestParseImportResponse_ExecutionModeDefault(t *testing.T) {
+	raw := `{"playbook": {"name": "Vacuum"}, "confidence": 0.8}`
+
+	pb, _, _, err := parseImportResponse(raw)
+	if err != nil {
+		t.Fatalf("parseImportResponse: %v", err)
+	}
+	if pb.ExecutionMode != "fleet" {
+		t.Errorf("execution_mode = %q, want fleet (default)", pb.ExecutionMode)
+	}
+}

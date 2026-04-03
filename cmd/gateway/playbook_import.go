@@ -133,16 +133,20 @@ func (g *Gateway) handlePlaybookImport(w http.ResponseWriter, r *http.Request) {
 // importPlaybookYAML is the intermediate struct for parsing YAML playbook files,
 // matching the format used by system playbooks in the playbooks/ package.
 type importPlaybookYAML struct {
-	SeriesID     string   `yaml:"series_id"`
-	Name         string   `yaml:"name"`
-	Version      string   `yaml:"version"`
-	ProblemClass string   `yaml:"problem_class"`
-	Author       string   `yaml:"author"`
-	Description  string   `yaml:"description"`
-	Symptoms     []string `yaml:"symptoms"`
-	Guidance     string   `yaml:"guidance"`
-	Escalation   []string `yaml:"escalation"`
-	TargetHints  []string `yaml:"target_hints"`
+	SeriesID        string   `yaml:"series_id"`
+	Name            string   `yaml:"name"`
+	Version         string   `yaml:"version"`
+	ProblemClass    string   `yaml:"problem_class"`
+	Author          string   `yaml:"author"`
+	Description     string   `yaml:"description"`
+	Symptoms        []string `yaml:"symptoms"`
+	Guidance        string   `yaml:"guidance"`
+	Escalation      []string `yaml:"escalation"`
+	TargetHints     []string `yaml:"target_hints"`
+	EntryPoint      bool     `yaml:"entry_point"`
+	EscalatesTo     []string `yaml:"escalates_to"`
+	RequiresEvidence []string `yaml:"requires_evidence"`
+	ExecutionMode   string   `yaml:"execution_mode"`
 }
 
 // parsePlaybookYAML parses a canonical YAML playbook and returns a draft response.
@@ -161,18 +165,27 @@ func parsePlaybookYAML(text string, hints PlaybookImportHints) (*PlaybookImportR
 		warnings = append(warnings, "description is missing — the planner needs this to generate steps")
 	}
 
+	executionMode := y.ExecutionMode
+	if executionMode == "" {
+		executionMode = "fleet"
+	}
+
 	pb := &audit.Playbook{
-		SeriesID:     y.SeriesID,
-		Name:         y.Name,
-		Version:      y.Version,
-		ProblemClass: y.ProblemClass,
-		Author:       y.Author,
-		Description:  y.Description,
-		Symptoms:     y.Symptoms,
-		Guidance:     y.Guidance,
-		Escalation:   y.Escalation,
-		TargetHints:  y.TargetHints,
-		Source:       "imported",
+		SeriesID:         y.SeriesID,
+		Name:             y.Name,
+		Version:          y.Version,
+		ProblemClass:     y.ProblemClass,
+		Author:           y.Author,
+		Description:      y.Description,
+		Symptoms:         y.Symptoms,
+		Guidance:         y.Guidance,
+		Escalation:       y.Escalation,
+		TargetHints:      y.TargetHints,
+		EntryPoint:       y.EntryPoint,
+		EscalatesTo:      y.EscalatesTo,
+		RequiresEvidence: y.RequiresEvidence,
+		ExecutionMode:    executionMode,
+		Source:           "imported",
 	}
 
 	confidence := 1.0
@@ -204,7 +217,17 @@ func assembleImportPrompt(text, format string, hints PlaybookImportHints, toolCa
 	sb.WriteString("- target_hints: list of server names, tags, or patterns this playbook applies to\n")
 	sb.WriteString("- author: author or team name if mentioned\n")
 	sb.WriteString("- version: version string if mentioned\n")
-	sb.WriteString("- series_id: leave empty (will be generated)\n\n")
+	sb.WriteString("- series_id: leave empty (will be generated)\n")
+	sb.WriteString("- execution_mode: \"fleet\" (default) for automated fleet jobs; \"agent\" for interactive diagnostic\n")
+	sb.WriteString("  sessions where the agent investigates and presents findings for operator review (read-only tools only).\n")
+	sb.WriteString("  Use \"agent\" only when the runbook is clearly an investigative/triage workflow, not a fleet operation.\n")
+	sb.WriteString("- entry_point: true if this is the recommended starting playbook for its problem class (e.g. the\n")
+	sb.WriteString("  first playbook to run when a database is down). Default false.\n")
+	sb.WriteString("- escalates_to: leave empty — series IDs of follow-on playbooks cannot be inferred from text and\n")
+	sb.WriteString("  must be filled in by the operator after import.\n")
+	sb.WriteString("- requires_evidence: list of log patterns or error signals that should be present before this\n")
+	sb.WriteString("  playbook is selected (e.g. \"FATAL.*invalid value for parameter\"). Extract from the source text\n")
+	sb.WriteString("  where the author describes when to use this playbook.\n\n")
 	sb.WriteString("For 'description', write it as a clear intent statement that an LLM fleet planner can\n")
 	sb.WriteString("use to select appropriate tools from the Available Tools list above.\n\n")
 
@@ -249,7 +272,11 @@ func assembleImportPrompt(text, format string, hints PlaybookImportHints, toolCa
     "target_hints": [],
     "author": "...",
     "version": "",
-    "series_id": ""
+    "series_id": "",
+    "execution_mode": "fleet",
+    "entry_point": false,
+    "escalates_to": [],
+    "requires_evidence": ["..."]
   },
   "warning_messages": ["list any fields that could not be extracted or are uncertain"],
   "confidence": 0.85
@@ -266,16 +293,20 @@ func parseImportResponse(raw string) (*audit.Playbook, []string, float64, error)
 
 	var wrapper struct {
 		Playbook struct {
-			Name         string   `json:"name"`
-			Description  string   `json:"description"`
-			ProblemClass string   `json:"problem_class"`
-			Symptoms     []string `json:"symptoms"`
-			Guidance     string   `json:"guidance"`
-			Escalation   []string `json:"escalation"`
-			TargetHints  []string `json:"target_hints"`
-			Author       string   `json:"author"`
-			Version      string   `json:"version"`
-			SeriesID     string   `json:"series_id"`
+			Name             string   `json:"name"`
+			Description      string   `json:"description"`
+			ProblemClass     string   `json:"problem_class"`
+			Symptoms         []string `json:"symptoms"`
+			Guidance         string   `json:"guidance"`
+			Escalation       []string `json:"escalation"`
+			TargetHints      []string `json:"target_hints"`
+			Author           string   `json:"author"`
+			Version          string   `json:"version"`
+			SeriesID         string   `json:"series_id"`
+			ExecutionMode    string   `json:"execution_mode"`
+			EntryPoint       bool     `json:"entry_point"`
+			EscalatesTo      []string `json:"escalates_to"`
+			RequiresEvidence []string `json:"requires_evidence"`
 		} `json:"playbook"`
 		WarningMessages []string `json:"warning_messages"`
 		Confidence      float64  `json:"confidence"`
@@ -293,18 +324,27 @@ func parseImportResponse(raw string) (*audit.Playbook, []string, float64, error)
 		warnings = append(warnings, "name could not be extracted from the source text")
 	}
 
+	executionMode := p.ExecutionMode
+	if executionMode == "" {
+		executionMode = "fleet"
+	}
+
 	pb := &audit.Playbook{
-		Name:         p.Name,
-		Description:  p.Description,
-		ProblemClass: p.ProblemClass,
-		Symptoms:     p.Symptoms,
-		Guidance:     p.Guidance,
-		Escalation:   p.Escalation,
-		TargetHints:  p.TargetHints,
-		Author:       p.Author,
-		Version:      p.Version,
-		SeriesID:     p.SeriesID,
-		Source:       "imported",
+		Name:             p.Name,
+		Description:      p.Description,
+		ProblemClass:     p.ProblemClass,
+		Symptoms:         p.Symptoms,
+		Guidance:         p.Guidance,
+		Escalation:       p.Escalation,
+		TargetHints:      p.TargetHints,
+		Author:           p.Author,
+		Version:          p.Version,
+		SeriesID:         p.SeriesID,
+		ExecutionMode:    executionMode,
+		EntryPoint:       p.EntryPoint,
+		EscalatesTo:      p.EscalatesTo,
+		RequiresEvidence: p.RequiresEvidence,
+		Source:           "imported",
 	}
 
 	confidence := wrapper.Confidence
