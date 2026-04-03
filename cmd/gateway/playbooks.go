@@ -137,8 +137,12 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the run start. Best-effort: failure does not block execution.
+	operator := r.Header.Get("X-User")
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, operator)
+
 	if pb.ExecutionMode == "agent" {
-		g.handlePlaybookRunAsAgent(w, r, pb, req)
+		g.handlePlaybookRunAsAgent(w, r, pb, req, runID)
 		return
 	}
 
@@ -167,15 +171,25 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	g.handleFleetPlan(w, planReq)
+	// Fleet runs complete synchronously; outcome is unknown until operator
+	// reviews and approves the plan. Record completion best-effort.
+	if runID != "" {
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "")
+	}
 }
 
 // handlePlaybookRunAsAgent routes an agent-mode playbook run to the database agent
 // as an interactive agentic session. The playbook's guidance is injected into the
 // prompt as expert context. All tool calls within the session are expected to be
 // read-only; the agent presents remediation as recommendations for operator review.
-func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest) {
+func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string) {
 	prompt := assembleTriagePrompt(pb, req)
 	g.proxyToAgent(w, r, agentNameDB, req.ContextID, prompt)
+	// Mark run completed with outcome=unknown — the operator updates it via PATCH
+	// /api/v1/fleet/playbook-runs/{runID} once they've reviewed the diagnosis.
+	if runID != "" {
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "")
+	}
 }
 
 // assembleTriagePrompt builds the LLM prompt for an agent-mode playbook run.
@@ -246,4 +260,82 @@ func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook
 		return nil, err
 	}
 	return &pb, nil
+}
+
+// recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
+// Best-effort: returns "" on any failure so callers can proceed without blocking.
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, operator string) string {
+	if g.auditURL == "" {
+		return ""
+	}
+	run := audit.PlaybookRun{
+		PlaybookID:    pb.PlaybookID,
+		SeriesID:      pb.SeriesID,
+		ExecutionMode: pb.ExecutionMode,
+		ContextID:     contextID,
+		Operator:      operator,
+	}
+	body, err := json.Marshal(run)
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbooks/" + pb.PlaybookID + "/runs"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("recordPlaybookRunStart: request failed", "err", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		slog.Warn("recordPlaybookRunStart: unexpected status", "status", resp.StatusCode)
+		return ""
+	}
+	var created audit.PlaybookRun
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return ""
+	}
+	return created.RunID
+}
+
+// recordPlaybookRunComplete patches an existing run with its final outcome.
+// Best-effort: failures are logged but not returned.
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, findingsSummary string) {
+	if g.auditURL == "" || runID == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{
+		"outcome":          outcome,
+		"escalated_to":     escalatedTo,
+		"findings_summary": findingsSummary,
+	})
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("recordPlaybookRunComplete: request failed", "run_id", runID, "err", err)
+		return
+	}
+	resp.Body.Close()
 }

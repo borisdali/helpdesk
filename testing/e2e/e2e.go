@@ -262,6 +262,32 @@ func (c *GatewayClient) PlaybookUpdate(ctx context.Context, id string, body map[
 	return c.rawDo(ctx, http.MethodPut, "/api/v1/fleet/playbooks/"+id, body)
 }
 
+// PlaybookRuns calls GET /api/v1/fleet/playbooks/{id}/runs and returns the response map.
+func (c *GatewayClient) PlaybookRuns(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id+"/runs")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook runs: %w", err)
+	}
+	return result, nil
+}
+
+// PlaybookStats calls GET /api/v1/fleet/playbooks/{id}/stats and returns the response map.
+func (c *GatewayClient) PlaybookStats(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id+"/stats")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook stats: %w", err)
+	}
+	return result, nil
+}
+
 // UploadCreate posts filename/content as multipart/form-data to POST /api/v1/fleet/uploads.
 // Returns the decoded Upload metadata map on success.
 func (c *GatewayClient) UploadCreate(ctx context.Context, filename, content string) (map[string]any, error) {

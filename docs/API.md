@@ -658,6 +658,44 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/r
   | jq .text
 ```
 
+#### `GET /api/v1/fleet/playbooks/{playbookID}/runs`
+
+List recorded runs for a playbook, most recent first. Default limit 20, maximum 100.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/runs | jq '{count: .count, last_outcome: .runs[0].outcome}'
+```
+
+Response: `{ "runs": [...], "count": N }`. Each run object includes `run_id`, `playbook_id`, `series_id`, `execution_mode`, `outcome`, `escalated_to`, `findings_summary`, `operator`, `started_at`, `completed_at`.
+
+#### `GET /api/v1/fleet/playbooks/{playbookID}/stats`
+
+Aggregated outcome statistics for the **series** the playbook belongs to (all versions combined). Returns `404` if the playbook is not found.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/stats | jq '{total_runs, resolution_rate, escalation_rate}'
+```
+
+Response: `{ "series_id", "total_runs", "resolved", "escalated", "abandoned", "resolution_rate", "escalation_rate", "last_run_at" }`.
+
+#### `PATCH /api/v1/fleet/playbook-runs/{runID}`
+
+Record the final outcome of a run. Every `/run` call starts a run with `outcome=unknown`; operators patch it after reviewing the diagnosis or confirming a fleet plan resolved the issue.
+
+| Field | Required | Description |
+|---|---|---|
+| `outcome` | yes | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `escalated_to` | no | Series ID (`pbs_*`) of the next playbook when `outcome=escalated` |
+| `findings_summary` | no | Summary of what was found and what action was taken |
+
+Returns `204 No Content`. See [PLAYBOOKS.md — Run tracking](PLAYBOOKS.md#run-tracking) for the full lifecycle and field reference.
+
+```bash
+curl -s -X PATCH http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
+  -H "Content-Type: application/json" \
+  -d '{"outcome":"resolved","findings_summary":"Autovacuum disabled on accounts table; re-enabled and ran VACUUM ANALYZE."}'
+```
+
 #### `POST /api/v1/fleet/playbooks/import`
 
 Convert an existing runbook into a playbook draft without persisting it. The caller reviews the draft and saves it via `POST /api/v1/fleet/playbooks`.

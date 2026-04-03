@@ -125,6 +125,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create playbook run store (shares the same database connection)
+	playbookRunStore, err := audit.NewPlaybookRunStore(store.DB())
+	if err != nil {
+		slog.Error("failed to create playbook run store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create rollback store (shares the same database connection)
 	rollbackStore, err := audit.NewRollbackStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -215,6 +222,7 @@ func main() {
 	playbookSrv := &playbookServer{store: playbookStore}
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
+	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
@@ -269,6 +277,10 @@ func main() {
 	mux.HandleFunc("PUT /v1/fleet/playbooks/{playbookID}", auth("PUT /v1/fleet/playbooks/{playbookID}", playbookSrv.handleUpdate))
 	mux.HandleFunc("DELETE /v1/fleet/playbooks/{playbookID}", auth("DELETE /v1/fleet/playbooks/{playbookID}", playbookSrv.handleDelete))
 	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/activate", auth("POST /v1/fleet/playbooks/{playbookID}/activate", playbookSrv.handleActivate))
+	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/runs", auth("POST /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleRecord))
+	mux.HandleFunc("PATCH /v1/fleet/playbook-runs/{runID}", auth("PATCH /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleUpdate))
+	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/runs", auth("GET /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleList))
+	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/stats", auth("GET /v1/fleet/playbooks/{playbookID}/stats", playbookRunSrv.handleStats))
 
 	// Tool result endpoints
 	// Upload endpoints

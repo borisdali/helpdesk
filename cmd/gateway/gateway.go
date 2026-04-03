@@ -265,6 +265,18 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/fleet/playbooks/{playbookID}", auth("DELETE /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookDelete))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/activate", auth("POST /api/v1/fleet/playbooks/{playbookID}/activate", g.handlePlaybookActivate))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/run", auth("POST /api/v1/fleet/playbooks/{playbookID}/run", g.handlePlaybookRun))
+	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}/runs", auth("GET /api/v1/fleet/playbooks/{playbookID}/runs", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("playbookID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/runs?"+r.URL.RawQuery)
+	}))
+	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}/stats", auth("GET /api/v1/fleet/playbooks/{playbookID}/stats", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("playbookID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/stats")
+	}))
+	mux.HandleFunc("PATCH /api/v1/fleet/playbook-runs/{runID}", auth("PATCH /api/v1/fleet/playbook-runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id)
+	}))
 
 	// Tool result query endpoint (read-only proxy to auditd)
 	mux.HandleFunc("GET /api/v1/tool-results", auth("GET /api/v1/tool-results", func(w http.ResponseWriter, r *http.Request) {

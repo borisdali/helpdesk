@@ -226,7 +226,9 @@ Deletes a playbook version. Returns `204 No Content` on success, `404` if not fo
 POST /api/v1/fleet/playbooks/{playbookID}/run
 ```
 
-Generates a fresh fleet plan from the playbook's `description` (and `guidance` if set) and returns a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The returned job definition includes fresh `tool_snapshots` and a `plan_description`.
+Executes the playbook. Behaviour depends on `execution_mode`:
+
+**`execution_mode: fleet` (default)** — generates a fresh fleet plan from the playbook's `description` and `guidance` and returns a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). Requires LLM configuration.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
@@ -237,7 +239,150 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 ./fleet-runner --job-file /tmp/plan.json
 ```
 
-See [FLEET.md](FLEET.md#natural-language-job-planner) for full planner semantics.
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms hypotheses, backs out when evidence contradicts them, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`. Used by the Database Down playbooks.
+
+Optional request body (used by agent-mode playbooks; ignored for fleet-mode):
+
+| Field | Description |
+|---|---|
+| `connection_string` | PostgreSQL DSN for the target database |
+| `context` | Free-form operator context (server name, symptoms, recent changes) |
+| `context_id` | A2A session ID for multi-turn continuity |
+
+```bash
+# Triage a down database (agent mode)
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string":"postgres://prod-db.example.com/app","context":"pod in CrashLoopBackOff since 10:00 UTC"}' \
+  | jq .text
+```
+
+**Run recording** — every `/run` call records a `PlaybookRun` entry in auditd before the LLM or agent is invoked. The run starts with `outcome=unknown`. Operators close the loop by patching the run with the final outcome once they've reviewed the diagnosis or confirmed the fleet plan resolved the issue. See [Run tracking](#run-tracking) below.
+
+See [FLEET.md](FLEET.md#natural-language-job-planner) for full fleet planner semantics.
+
+---
+
+## Run tracking
+
+Every call to `POST /run` writes a `PlaybookRun` record to auditd before routing to the fleet planner or database agent. This gives operators a complete audit trail of what was investigated, when, and with what outcome.
+
+### Run lifecycle
+
+```
+POST /run → outcome=unknown (run recorded)
+                    ↓
+       operator reviews diagnosis / executes plan
+                    ↓
+PATCH /playbook-runs/{runID} → outcome=resolved|escalated|abandoned
+```
+
+The gateway records run start synchronously and run completion asynchronously (best-effort, 5s timeout). Outcome is always `unknown` until an operator patches it — the system cannot know whether a fleet plan was accepted and executed, or whether an agent diagnosis actually resolved the incident.
+
+### List runs for a playbook
+
+```
+GET /api/v1/fleet/playbooks/{playbookID}/runs
+```
+
+Returns the most recent runs for a specific playbook ID (not series-wide), most recent first. Default limit is 20, maximum 100.
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/runs | jq .
+```
+
+Response:
+
+```json
+{
+  "runs": [
+    {
+      "run_id":          "plr_3f7a2b1c",
+      "playbook_id":     "pb_a1b2c3d4",
+      "series_id":       "pbs_vacuum_triage",
+      "execution_mode":  "fleet",
+      "outcome":         "resolved",
+      "operator":        "alice@example.com",
+      "started_at":      "2026-04-03T10:00:00Z",
+      "completed_at":    "2026-04-03T10:05:00Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+### Get run statistics
+
+```
+GET /api/v1/fleet/playbooks/{playbookID}/stats
+```
+
+Returns aggregated outcome statistics for the **series** the playbook belongs to (i.e. all versions of the playbook combined). Returns `404` if the playbook ID is not found.
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/stats | jq .
+```
+
+Response:
+
+```json
+{
+  "series_id":       "pbs_vacuum_triage",
+  "total_runs":      47,
+  "resolved":        38,
+  "escalated":        6,
+  "abandoned":        3,
+  "resolution_rate":  0.809,
+  "escalation_rate":  0.128,
+  "last_run_at":     "2026-04-03T10:05:00Z"
+}
+```
+
+Use `resolution_rate` to identify playbooks that frequently escalate — a low rate often signals that the playbook's guidance or escalation conditions need tuning.
+
+### Record an outcome
+
+```
+PATCH /api/v1/fleet/playbook-runs/{runID}
+```
+
+Updates an existing run with its final outcome. Called by operators after reviewing the agent's diagnosis or confirming a fleet plan resolved the issue.
+
+| Field | Required | Description |
+|---|---|---|
+| `outcome` | yes | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `escalated_to` | no | Series ID (`pbs_*`) of the next playbook if outcome is `escalated` |
+| `findings_summary` | no | Free-form summary of what was found and recommended |
+
+```bash
+# Mark a run as resolved
+curl -s -X PATCH http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
+  -H "Content-Type: application/json" \
+  -d '{"outcome":"resolved","findings_summary":"Autovacuum was disabled on accounts table. Re-enabled and ran VACUUM ANALYZE."}'
+
+# Mark a run as escalated to a follow-on playbook
+curl -s -X PATCH http://localhost:8080/api/v1/fleet/playbook-runs/plr_8c9d2e3f \
+  -H "Content-Type: application/json" \
+  -d '{"outcome":"escalated","escalated_to":"pbs_db_config_recovery","findings_summary":"Logs show FATAL: invalid value for parameter max_connections."}'
+```
+
+Returns `204 No Content` on success.
+
+### `PlaybookRun` object
+
+| Field | Type | Description |
+|---|---|---|
+| `run_id` | string | Unique run identifier (`plr_` prefix) |
+| `playbook_id` | string | The specific playbook version that was run |
+| `series_id` | string | Series the playbook belongs to |
+| `execution_mode` | string | `fleet` or `agent` |
+| `outcome` | string | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `escalated_to` | string | Series ID of the follow-on playbook (when `outcome=escalated`) |
+| `findings_summary` | string | Operator-provided summary of diagnosis and action taken |
+| `context_id` | string | A2A session ID (agent-mode runs only) |
+| `operator` | string | Identity from `X-User` request header |
+| `started_at` | RFC3339 | When the run was initiated |
+| `completed_at` | RFC3339 | When the run was patched with a final outcome |
 
 ---
 

@@ -473,6 +473,87 @@ func TestPlaybooks_RunFleetMode(t *testing.T) {
 	t.Logf("fleet run OK: playbook_id=%s has_job_def=%v", vacuumID, resp["job_def_raw"] != nil)
 }
 
+// TestPlaybooks_RunRecording verifies that the gateway records a playbook run
+// in auditd (via recordPlaybookRunStart) before the LLM is invoked, so that
+// the run audit trail is captured even when the LLM call fails or is skipped.
+//
+// This test does NOT require an API key — it finds a playbook, calls /run
+// (which may 503 for fleet-mode due to missing infra config), and then verifies
+// that the run appears in /runs and /stats. Recording is synchronous and happens
+// before routing to the fleet planner or database agent.
+func TestPlaybooks_RunRecording(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Find any active system playbook to use as the target.
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	if len(playbooks) == 0 {
+		t.Skip("no playbooks available — stack may not be seeded")
+	}
+	// Prefer a fleet-mode playbook (vacuum triage) since it avoids the agent dependency.
+	var pbID, pbSeries string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_vacuum_triage" {
+			pbID, _ = pb["playbook_id"].(string)
+			pbSeries = sid
+			break
+		}
+	}
+	// Fall back to any playbook if vacuum triage is not found.
+	if pbID == "" {
+		pbID, _ = playbooks[0]["playbook_id"].(string)
+		pbSeries, _ = playbooks[0]["series_id"].(string)
+	}
+	if pbID == "" {
+		t.Skip("no playbook_id available")
+	}
+	t.Logf("using playbook id=%s series=%s", pbID, pbSeries)
+
+	// Trigger a run. This may fail with 503 (fleet planner not configured) or
+	// 500/502 (agent not reachable) — that's OK. What matters is that the run
+	// was recorded before the error was returned.
+	//
+	// We call /run directly (without RequireAPIKey) since recording is
+	// synchronous and does not require LLM credentials.
+	_, runErr := client.PlaybookRun(ctx, pbID, map[string]any{
+		"connection_string": cfg.ConnStr,
+	})
+	if runErr != nil {
+		t.Logf("PlaybookRun returned error (expected for unconfigured stack): %v", runErr)
+	}
+
+	// Verify the run was recorded — the /runs endpoint should return at least 1 run.
+	runsResp, err := client.PlaybookRuns(ctx, pbID)
+	if err != nil {
+		t.Fatalf("PlaybookRuns: %v", err)
+	}
+	count, _ := runsResp["count"].(float64)
+	if count == 0 {
+		t.Errorf("expected at least 1 run recorded for playbook %s, got count=0", pbID)
+	}
+	t.Logf("run recording: count=%.0f", count)
+
+	// Verify stats are available via /stats.
+	statsResp, err := client.PlaybookStats(ctx, pbID)
+	if err != nil {
+		t.Fatalf("PlaybookStats: %v", err)
+	}
+	totalRuns, _ := statsResp["total_runs"].(float64)
+	if totalRuns == 0 {
+		t.Errorf("expected total_runs > 0 in stats for playbook %s", pbID)
+	}
+	t.Logf("stats: total_runs=%.0f series_id=%v", totalRuns, statsResp["series_id"])
+}
+
 // TestPlaybooks_RunAgentMode calls POST /run on an agent-mode system playbook
 // (Database Down — Restart Triage) and verifies the response has the agent shape.
 // Requires LLM + a running database agent.
