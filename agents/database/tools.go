@@ -2090,6 +2090,112 @@ func readUploadedFileTool(ctx tool.Context, args ReadUploadedFileArgs) (PsqlResu
 	return readUploadedFileImpl(ctx, args)
 }
 
+// ---------------------------------------------------------------------------
+// get_saved_snapshots
+// ---------------------------------------------------------------------------
+
+// maxSnapshotOutputBytes caps the total output returned to avoid filling the
+// context window when multiple large baselines are fetched at once.
+const maxSnapshotOutputBytes = 32 * 1024 // 32 KB total
+
+// GetSavedSnapshotsArgs defines arguments for the get_saved_snapshots tool.
+type GetSavedSnapshotsArgs struct {
+	ToolName   string `json:"tool_name" jsonschema:"Name of the tool whose saved outputs to retrieve (e.g. 'get_baseline', 'get_pg_settings')."`
+	ServerName string `json:"server_name,omitempty" jsonschema:"Filter to a specific server name. If omitted, results for all servers are returned."`
+	Limit      int    `json:"limit,omitempty" jsonschema:"Number of snapshots to return, most recent first (default 3, max 10). Use 1 to extract a value; use 2 to diff; use 5–10 to find when something changed."`
+	Since      string `json:"since,omitempty" jsonschema:"How far back to search, e.g. '7d', '30d', '90d' (default '90d')."`
+}
+
+func getSavedSnapshotsImpl(ctx context.Context, args GetSavedSnapshotsArgs) (PsqlResult, error) {
+	if auditBaseURL == "" {
+		return PsqlResult{Output: "get_saved_snapshots: HELPDESK_AUDIT_URL is not configured — snapshot history is unavailable"}, nil
+	}
+	if args.ToolName == "" {
+		return PsqlResult{Output: "get_saved_snapshots: tool_name is required"}, nil
+	}
+
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 3
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	since := args.Since
+	if since == "" {
+		since = "90d"
+	}
+
+	u := strings.TrimSuffix(auditBaseURL, "/") + "/v1/tool-results"
+	u += fmt.Sprintf("?tool=%s&limit=%d&since=%s", args.ToolName, limit, since)
+	if args.ServerName != "" {
+		u += "&server=" + args.ServerName
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: failed to build request: %v", err)}, nil
+	}
+	if auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: auditd unreachable: %v", err)}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: auditd returned status %d", resp.StatusCode)}, nil
+	}
+
+	var body struct {
+		Results []*audit.PersistedToolResult `json:"results"`
+		Count   int                          `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: failed to parse response: %v", err)}, nil
+	}
+
+	if body.Count == 0 {
+		msg := fmt.Sprintf("get_saved_snapshots: no saved results found for tool %q", args.ToolName)
+		if args.ServerName != "" {
+			msg += fmt.Sprintf(" on server %q", args.ServerName)
+		}
+		msg += fmt.Sprintf(" in the last %s", since)
+		return PsqlResult{Output: msg}, nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "=== %d saved snapshot(s) for tool %q", body.Count, args.ToolName)
+	if args.ServerName != "" {
+		fmt.Fprintf(&sb, " on %q", args.ServerName)
+	}
+	fmt.Fprintf(&sb, " (most recent first) ===\n\n")
+
+	for i, r := range body.Results {
+		fmt.Fprintf(&sb, "── Snapshot %d ─ recorded: %s UTC ─ server: %s ─ by: %s ──\n",
+			i+1, r.RecordedAt.UTC().Format("2006-01-02 15:04:05"), r.ServerName, r.RecordedBy)
+		sb.WriteString(r.Output)
+		if !strings.HasSuffix(r.Output, "\n") {
+			sb.WriteByte('\n')
+		}
+		sb.WriteByte('\n')
+
+		if sb.Len() > maxSnapshotOutputBytes {
+			fmt.Fprintf(&sb, "[output truncated — %d of %d snapshots shown]\n", i+1, body.Count)
+			break
+		}
+	}
+
+	return PsqlResult{Output: sb.String()}, nil
+}
+
+func getSavedSnapshotsTool(ctx tool.Context, args GetSavedSnapshotsArgs) (PsqlResult, error) {
+	return getSavedSnapshotsImpl(ctx, args)
+}
+
 func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 	r := agentutil.NewDirectToolRegistry()
 	r.Register("check_connection", func(ctx context.Context, args map[string]any) (string, error) {
@@ -2298,6 +2404,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := readUploadedFileImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_saved_snapshots", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetSavedSnapshotsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getSavedSnapshotsImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r

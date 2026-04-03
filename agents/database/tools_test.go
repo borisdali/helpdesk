@@ -3463,3 +3463,189 @@ func TestRunPsqlTuples_UsesTupleFlags(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// get_saved_snapshots
+// =============================================================================
+
+// mockToolResultsResponse builds a JSON body in the shape auditd returns for
+// GET /v1/tool-results.
+func mockToolResultsResponse(results []map[string]any) string {
+	body, _ := json.Marshal(map[string]any{
+		"results": results,
+		"count":   len(results),
+	})
+	return string(body)
+}
+
+func TestGetSavedSnapshots_Success(t *testing.T) {
+	body := mockToolResultsResponse([]map[string]any{
+		{
+			"result_id":   "res_aaa",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_baseline",
+			"tool_args":   "{}",
+			"output":      "config_file | /etc/postgresql/14/main/postgresql.conf\ndata_directory | /var/lib/postgresql/14/main\n",
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-15T10:23:00Z",
+			"success":     true,
+		},
+	})
+	defer withMockAuditServer(http.StatusOK, body)()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName:   "get_baseline",
+		ServerName: "prod-db-1",
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "prod-db-1") {
+		t.Errorf("output missing server name: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "config_file") {
+		t.Errorf("output missing snapshot content: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "alice@example.com") {
+		t.Errorf("output missing recorded_by: %s", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_MultipleSnapshots(t *testing.T) {
+	body := mockToolResultsResponse([]map[string]any{
+		{
+			"result_id":   "res_bbb",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_pg_settings",
+			"tool_args":   "{}",
+			"output":      "work_mem | 64MB\n",
+			"recorded_by": "bob@example.com",
+			"recorded_at": "2026-03-20T08:00:00Z",
+			"success":     true,
+		},
+		{
+			"result_id":   "res_aaa",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_pg_settings",
+			"tool_args":   "{}",
+			"output":      "work_mem | 4MB\n",
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-10T12:00:00Z",
+			"success":     true,
+		},
+	})
+	defer withMockAuditServer(http.StatusOK, body)()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName: "get_pg_settings",
+		Limit:    2,
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	// Both snapshots should appear so the agent can diff them.
+	if !strings.Contains(result.Output, "Snapshot 1") {
+		t.Errorf("output missing Snapshot 1: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Snapshot 2") {
+		t.Errorf("output missing Snapshot 2: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "64MB") || !strings.Contains(result.Output, "4MB") {
+		t.Errorf("output missing both work_mem values: %s", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_Empty(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, mockToolResultsResponse(nil))()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName:   "get_baseline",
+		ServerName: "prod-db-1",
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no saved results") {
+		t.Errorf("output = %q, want no-results message", result.Output)
+	}
+	if !strings.Contains(result.Output, "get_baseline") {
+		t.Errorf("output should mention the tool name: %s", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_NoAuditURL(t *testing.T) {
+	old := auditBaseURL
+	auditBaseURL = ""
+	defer func() { auditBaseURL = old }()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{ToolName: "get_baseline"})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "HELPDESK_AUDIT_URL") {
+		t.Errorf("output = %q, want HELPDESK_AUDIT_URL hint", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_NoToolName(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, "irrelevant")()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "tool_name is required") {
+		t.Errorf("output = %q, want tool_name required message", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_Truncation(t *testing.T) {
+	// Build a snapshot whose output exceeds the 32 KB cap.
+	largeOutput := strings.Repeat("x", maxSnapshotOutputBytes+1)
+	body := mockToolResultsResponse([]map[string]any{
+		{
+			"result_id":   "res_big",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_baseline",
+			"output":      largeOutput,
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-15T10:00:00Z",
+			"success":     true,
+		},
+		{
+			"result_id":   "res_big2",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_baseline",
+			"output":      "second snapshot — should not appear",
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-14T10:00:00Z",
+			"success":     true,
+		},
+	})
+	defer withMockAuditServer(http.StatusOK, body)()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName: "get_baseline",
+		Limit:    2,
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "truncated") {
+		preview := result.Output
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		t.Errorf("output should contain truncation notice: %s", preview)
+	}
+	if strings.Contains(result.Output, "second snapshot") {
+		t.Errorf("truncated output should not include second snapshot")
+	}
+}

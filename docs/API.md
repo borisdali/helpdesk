@@ -282,6 +282,7 @@ All tools accept `connection_string` (PostgreSQL DSN; falls back to `HELPDESK_DB
 | `kill_idle_connections` | `idle_threshold_seconds` | Terminate all idle connections older than threshold — **destructive** |
 | `read_pg_log` | `lines`, `filter` | Read the tail of the most-recently-modified PostgreSQL log file via `pg_read_file()`. Requires a live DB connection and `pg_read_server_files` privilege or superuser. Returns up to 128 KB (last ~1000 lines). Use `filter` (case-insensitive substring) to focus on errors. |
 | `read_uploaded_file` | `upload_id` (required), `filter` | Read the content of a file previously uploaded by an operator via `POST /api/v1/fleet/uploads`. Use this when `read_pg_log` is not available (e.g. DB is completely down). Requires `HELPDESK_AUDIT_URL` to be configured. |
+| `get_saved_snapshots` | `tool_name` (required), `server_name`, `limit`, `since` | Retrieve previously recorded outputs of a tool from the audit history. Use when the DB is unreachable and you need a value captured in a prior run — e.g. `config_file` path or `data_directory` from a past `get_baseline`. Also useful for diffing two snapshots ("what changed?") or finding when a setting last changed. Returns up to 3 snapshots by default (max 10), capped at 32 KB total. Requires `HELPDESK_AUDIT_URL`. |
 
 ---
 
@@ -742,7 +743,9 @@ curl -s -X POST http://localhost:8080/api/v1/query \
 
 #### `GET /api/v1/tool-results`
 
-Query the persistent tool result log — a record of every tool execution written by fleet-runner and direct tool calls (when `HELPDESK_AUDIT_URL` is configured). Useful for trend analysis ("how has vacuum dead-ratio trended on prod-db-1 over the last 30 days?") and post-incident triage.
+Query the persistent tool result log — a record of every tool execution written by fleet-runner jobs and direct tool calls (when `HELPDESK_AUDIT_URL` is configured). Useful for post-incident triage and auditing what was collected during a job.
+
+The database agent's `get_saved_snapshots` tool uses this endpoint internally to retrieve prior outputs during triage (e.g. recovering a `config_file` path when the DB is down, or diffing two baselines).
 
 | Parameter | Description |
 |---|---|

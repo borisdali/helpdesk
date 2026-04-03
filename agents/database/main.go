@@ -453,6 +453,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getSavedSnapshotsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_saved_snapshots",
+		Description: "Retrieve previously recorded outputs of a tool from the audit history. Use this when the database is unreachable and you need a value that was captured in a prior baseline (e.g. config_file path, data_directory, postgresql.conf location). Also use it to diff two snapshots ('what changed since the baseline?') or to find when a setting last changed ('when was work_mem modified?'). Common tool_name values: 'get_baseline', 'get_pg_settings', 'get_server_info'.",
+	}, getSavedSnapshotsTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -480,6 +488,7 @@ func createTools() ([]tool.Tool, error) {
 		explainQueryToolDef,
 		getPgLogToolDef,
 		readUploadedFileToolDef,
+		getSavedSnapshotsToolDef,
 	}, nil
 }
 

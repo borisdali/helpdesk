@@ -457,6 +457,9 @@ func TestPlaybooks_RunFleetMode(t *testing.T) {
 	})
 	if err != nil {
 		SkipIfLLMKeyInvalid(t, err.Error())
+		if strings.Contains(err.Error(), "infrastructure config") || strings.Contains(err.Error(), "HELPDESK_INFRA_CONFIG") {
+			t.Skipf("fleet planner requires infrastructure config (HELPDESK_INFRA_CONFIG) — not configured in this e2e stack: %v", err)
+		}
 		t.Fatalf("PlaybookRun: %v", err)
 	}
 
