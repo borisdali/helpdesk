@@ -467,6 +467,10 @@ var gatewayRoutes = []string{
 	"PUT /api/v1/fleet/playbooks/{playbookID}",
 	"DELETE /api/v1/fleet/playbooks/{playbookID}",
 	"POST /api/v1/fleet/playbooks/{playbookID}/run",
+	"GET /api/v1/fleet/playbooks/{playbookID}/runs",
+	"GET /api/v1/fleet/playbooks/{playbookID}/stats",
+	"PATCH /api/v1/fleet/playbook-runs/{runID}",
+	"GET /api/v1/fleet/playbook-runs/{runID}",
 	"GET /api/v1/tool-results",
 	"GET /api/v1/roles",
 }
@@ -517,6 +521,7 @@ var auditdRoutes = []string{
 	"GET /v1/fleet/playbooks/{playbookID}/runs",
 	"GET /v1/fleet/playbooks/{playbookID}/stats",
 	"PATCH /v1/fleet/playbook-runs/{runID}",
+	"GET /v1/fleet/playbook-runs/{runID}",
 	"POST /v1/uploads",
 	"GET /v1/uploads/{uploadID}",
 	"GET /v1/uploads/{uploadID}/content",

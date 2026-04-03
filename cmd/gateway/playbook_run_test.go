@@ -215,6 +215,242 @@ func TestAssembleTriagePrompt_NoEscalatesTo(t *testing.T) {
 // to ensure the import is used.
 var _ *infra.Config
 
+// --- parseAgentEscalation ---
+
+func TestParseAgentEscalation_FullSignal(t *testing.T) {
+	text := "The database appears to have a corrupted WAL file.\n\nRecommendation: initiate PITR recovery.\n\nFINDINGS: WAL corruption detected; PITR recovery needed.\nESCALATE_TO: pbs_pitr_recovery\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Findings != "WAL corruption detected; PITR recovery needed." {
+		t.Errorf("findings = %q", esc.Findings)
+	}
+	if esc.EscalateTo != "pbs_pitr_recovery" {
+		t.Errorf("escalate_to = %q", esc.EscalateTo)
+	}
+	if strings.Contains(esc.CleanText, "FINDINGS:") {
+		t.Error("CleanText should not contain FINDINGS: line")
+	}
+	if strings.Contains(esc.CleanText, "ESCALATE_TO:") {
+		t.Error("CleanText should not contain ESCALATE_TO: line")
+	}
+	if !strings.Contains(esc.CleanText, "corrupted WAL") {
+		t.Error("CleanText should retain the diagnostic text")
+	}
+}
+
+func TestParseAgentEscalation_FindingsOnly(t *testing.T) {
+	text := "Replication lag is caused by a long-running transaction on the primary.\n\nFINDINGS: Long-running transaction blocking replication; cancel or wait for completion.\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Findings == "" {
+		t.Error("findings should be set")
+	}
+	if esc.EscalateTo != "" {
+		t.Errorf("escalate_to should be empty, got %q", esc.EscalateTo)
+	}
+	if strings.Contains(esc.CleanText, "FINDINGS:") {
+		t.Error("CleanText should not contain FINDINGS: line")
+	}
+}
+
+func TestParseAgentEscalation_NoSignal(t *testing.T) {
+	text := "The connection check returned: could not connect to server."
+	esc := parseAgentEscalation(text)
+
+	if esc.Findings != "" || esc.EscalateTo != "" {
+		t.Errorf("expected empty signal, got findings=%q escalate_to=%q", esc.Findings, esc.EscalateTo)
+	}
+	if esc.CleanText != text {
+		t.Errorf("CleanText should equal original text when no signal present")
+	}
+}
+
+// --- checkRequiresEvidence ---
+
+func TestCheckRequiresEvidence_EmptyPatterns(t *testing.T) {
+	warnings := checkRequiresEvidence(nil, "some context")
+	if warnings != nil {
+		t.Errorf("expected nil warnings for empty patterns, got %v", warnings)
+	}
+}
+
+func TestCheckRequiresEvidence_EmptyContext(t *testing.T) {
+	// Empty context means the operator hasn't confirmed the evidence — all patterns missing.
+	warnings := checkRequiresEvidence([]string{"FATAL.*invalid"}, "")
+	if len(warnings) != 1 {
+		t.Errorf("expected 1 warning for empty context, got %v", warnings)
+	}
+}
+
+func TestCheckRequiresEvidence_AllFound(t *testing.T) {
+	patterns := []string{"FATAL.*invalid value for parameter", "could not open file"}
+	ctx := "2024-01-01 FATAL: invalid value for parameter max_connections; also could not open file pg_hba.conf"
+	warnings := checkRequiresEvidence(patterns, ctx)
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings when all patterns match, got %v", warnings)
+	}
+}
+
+func TestCheckRequiresEvidence_PatternMissing(t *testing.T) {
+	patterns := []string{"FATAL.*invalid value for parameter", "PANIC.*checkpoint"}
+	ctx := "2024-01-01 FATAL: invalid value for parameter max_connections"
+	warnings := checkRequiresEvidence(patterns, ctx)
+	if len(warnings) != 1 {
+		t.Errorf("expected 1 warning for missing pattern, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "PANIC.*checkpoint") {
+		t.Errorf("warning should name the missing pattern, got %q", warnings[0])
+	}
+}
+
+func TestCheckRequiresEvidence_AllMissing(t *testing.T) {
+	patterns := []string{"FATAL.*invalid", "PANIC.*checkpoint"}
+	warnings := checkRequiresEvidence(patterns, "server is reachable but slow")
+	if len(warnings) != 2 {
+		t.Errorf("expected 2 warnings, got %d", len(warnings))
+	}
+}
+
+// --- assembleTriagePrompt additions ---
+
+func TestAssembleTriagePrompt_PriorFindings(t *testing.T) {
+	pb := &audit.Playbook{Name: "PITR Recovery", Description: "Recover from data loss."}
+	req := PlaybookRunRequest{
+		PriorFindings: "Restart triage found WAL corruption; PITR required.",
+	}
+	prompt := assembleTriagePrompt(pb, req)
+
+	if !strings.Contains(prompt, "Prior Investigation Findings") {
+		t.Error("prompt missing 'Prior Investigation Findings' section")
+	}
+	if !strings.Contains(prompt, "WAL corruption") {
+		t.Error("prompt should contain the prior findings text")
+	}
+}
+
+func TestAssembleTriagePrompt_NoPriorFindings(t *testing.T) {
+	pb := &audit.Playbook{Name: "Restart Triage"}
+	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{})
+
+	if strings.Contains(prompt, "Prior Investigation Findings") {
+		t.Error("prompt should not have prior findings section when PriorFindings is empty")
+	}
+}
+
+func TestAssembleTriagePrompt_ResponseProtocol(t *testing.T) {
+	pb := &audit.Playbook{Name: "Triage"}
+	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{})
+
+	if !strings.Contains(prompt, "Response Protocol") {
+		t.Error("prompt missing Response Protocol section")
+	}
+	if !strings.Contains(prompt, "FINDINGS:") {
+		t.Error("prompt should instruct agent to emit FINDINGS: line")
+	}
+	if !strings.Contains(prompt, "ESCALATE_TO:") {
+		t.Error("prompt should mention ESCALATE_TO: line")
+	}
+}
+
+// --- requires_evidence warnings in fleet mode ---
+
+// mockAuditdPlaybookAndRun starts an httptest server that serves a playbook at
+// GET /v1/fleet/playbooks/{id} and (optionally) a run at GET /v1/fleet/playbook-runs/{runID}.
+func mockAuditdPlaybookAndRun(t *testing.T, pb *audit.Playbook, run *audit.PlaybookRun) *httptest.Server {
+	t.Helper()
+	pbData, _ := json.Marshal(pb)
+	var runData []byte
+	if run != nil {
+		runData, _ = json.Marshal(run)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/v1/fleet/playbook-runs/") && run != nil {
+			w.Write(runData) //nolint:errcheck
+			return
+		}
+		if r.Method == http.MethodPost {
+			// Simulate run recording: return a run with a generated run_id.
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_test01"}) //nolint:errcheck
+			return
+		}
+		w.Write(pbData) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestHandlePlaybookRun_FleetMode_RequiresEvidenceWarning(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:       "pb_cfg01",
+		SeriesID:         "pbs_db_config",
+		Name:             "Config Recovery",
+		Description:      "Recover from a bad PostgreSQL configuration.",
+		ExecutionMode:    "fleet",
+		IsActive:         true,
+		RequiresEvidence: []string{"FATAL.*invalid value for parameter"},
+	}
+	auditSrv := mockAuditdPlaybookAndRun(t, pb, nil)
+
+	llmFn := func(ctx context.Context, prompt string) (string, error) {
+		return `{"name":"cfg-recovery","change":{"steps":[{"tool":"check_connection","args":{}}]},"targets":["db1"],"strategy":{}}`, nil
+	}
+	gw := makePlaybookRunGateway(auditSrv.URL, llmFn)
+
+	// No context provided — required evidence pattern is absent.
+	rec := postPlaybookRun(t, gw, "pb_cfg01", `{}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	warnings, ok := resp["warnings"]
+	if !ok {
+		t.Fatal("response missing 'warnings' field when required evidence is absent")
+	}
+	wList, _ := warnings.([]any)
+	if len(wList) == 0 {
+		t.Error("warnings should be non-empty when required evidence pattern is not in context")
+	}
+}
+
+func TestHandlePlaybookRun_FleetMode_RequiresEvidenceMatch(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:       "pb_cfg02",
+		SeriesID:         "pbs_db_config2",
+		Name:             "Config Recovery",
+		Description:      "Recover from a bad PostgreSQL configuration.",
+		ExecutionMode:    "fleet",
+		IsActive:         true,
+		RequiresEvidence: []string{"FATAL.*invalid value for parameter"},
+	}
+	auditSrv := mockAuditdPlaybookAndRun(t, pb, nil)
+
+	llmFn := func(ctx context.Context, prompt string) (string, error) {
+		return `{"name":"cfg-recovery","change":{"steps":[{"tool":"check_connection","args":{}}]},"targets":["db1"],"strategy":{}}`, nil
+	}
+	gw := makePlaybookRunGateway(auditSrv.URL, llmFn)
+
+	// Context matches the required evidence pattern — no warnings expected.
+	body := `{"context":"2024-01-15 FATAL: invalid value for parameter max_connections = 9999"}`
+	rec := postPlaybookRun(t, gw, "pb_cfg02", body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if _, hasWarnings := resp["warnings"]; hasWarnings {
+		t.Error("response should not contain 'warnings' when required evidence is present in context")
+	}
+}
+
 // TestHandlePlaybookRun_FleetMode_NoLLM verifies that a fleet-mode playbook run
 // returns 503 when the planner LLM is not configured.
 func TestHandlePlaybookRun_FleetMode_NoLLM(t *testing.T) {

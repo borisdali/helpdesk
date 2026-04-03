@@ -13,7 +13,8 @@ import (
 
 // playbookServer handles HTTP endpoints for fleet playbook management.
 type playbookServer struct {
-	store *audit.PlaybookStore
+	store    *audit.PlaybookStore
+	runStore *audit.PlaybookRunStore
 }
 
 func (s *playbookServer) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +88,24 @@ func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
 	if playbooks == nil {
 		playbooks = []*audit.Playbook{}
 	}
+
+	// Inject run stats inline so callers don't need a second request per playbook.
+	if s.runStore != nil && len(playbooks) > 0 {
+		seriesIDs := make([]string, 0, len(playbooks))
+		for _, pb := range playbooks {
+			if pb.SeriesID != "" {
+				seriesIDs = append(seriesIDs, pb.SeriesID)
+			}
+		}
+		if statsMap, err := s.runStore.StatsBatch(r.Context(), seriesIDs); err == nil {
+			for _, pb := range playbooks {
+				if st, ok := statsMap[pb.SeriesID]; ok {
+					pb.Stats = st
+				}
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"playbooks": playbooks}) //nolint:errcheck
 }

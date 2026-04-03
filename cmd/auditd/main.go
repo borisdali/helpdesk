@@ -219,7 +219,7 @@ func main() {
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
-	playbookSrv := &playbookServer{store: playbookStore}
+	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore}
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
 	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore}
@@ -281,6 +281,7 @@ func main() {
 	mux.HandleFunc("PATCH /v1/fleet/playbook-runs/{runID}", auth("PATCH /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleUpdate))
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/runs", auth("GET /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleList))
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/stats", auth("GET /v1/fleet/playbooks/{playbookID}/stats", playbookRunSrv.handleStats))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}", auth("GET /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleGetRun))
 
 	// Tool result endpoints
 	// Upload endpoints

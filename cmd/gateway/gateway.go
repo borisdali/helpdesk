@@ -277,6 +277,10 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		id := r.PathValue("runID")
 		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id)
 	}))
+	mux.HandleFunc("GET /api/v1/fleet/playbook-runs/{runID}", auth("GET /api/v1/fleet/playbook-runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id)
+	}))
 
 	// Tool result query endpoint (read-only proxy to auditd)
 	mux.HandleFunc("GET /api/v1/tool-results", auth("GET /api/v1/tool-results", func(w http.ResponseWriter, r *http.Request) {

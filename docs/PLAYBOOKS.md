@@ -110,24 +110,38 @@ Response:
 {
   "playbooks": [
     {
-      "playbook_id": "pb_a1b2c3d4",
-      "series_id":   "pbs_vacuum_triage",
-      "name":        "Vacuum & Bloat Triage",
-      "version":     "1.0",
-      "is_active":   true,
-      "is_system":   true,
-      "source":      "system",
-      "problem_class": "capacity",
-      "description": "...",
-      "guidance":    "...",
-      "symptoms":    ["..."],
-      "escalation":  ["..."],
-      "created_at":  "2026-04-02T00:00:00Z",
-      "updated_at":  "2026-04-02T00:00:00Z"
+      "playbook_id":    "pb_a1b2c3d4",
+      "series_id":      "pbs_vacuum_triage",
+      "name":           "Vacuum & Bloat Triage",
+      "version":        "1.0",
+      "is_active":      true,
+      "is_system":      true,
+      "source":         "system",
+      "problem_class":  "capacity",
+      "execution_mode": "fleet",
+      "entry_point":    false,
+      "description":    "...",
+      "guidance":       "...",
+      "symptoms":       ["..."],
+      "escalation":     ["..."],
+      "created_at":     "2026-04-02T00:00:00Z",
+      "updated_at":     "2026-04-02T00:00:00Z",
+      "stats": {
+        "series_id":       "pbs_vacuum_triage",
+        "total_runs":      12,
+        "resolved":        10,
+        "escalated":        1,
+        "abandoned":        1,
+        "resolution_rate":  0.833,
+        "escalation_rate":  0.083,
+        "last_run_at":     "2026-04-03T10:05:00Z"
+      }
     }
   ]
 }
 ```
+
+The `stats` field is included inline on every playbook that has at least one recorded run. It is `null` / omitted for playbooks that have never been run. Stats are series-wide (all versions of a playbook combined). To get stats for a specific playbook separately, use `GET /api/v1/fleet/playbooks/{playbookID}/stats`.
 
 ### Get a playbook
 
@@ -239,15 +253,16 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 ./fleet-runner --job-file /tmp/plan.json
 ```
 
-**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms hypotheses, backs out when evidence contradicts them, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query` and provide feedback to the playbooks (e.g. Database Down playbooks).
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms hypotheses, backs out when evidence contradicts them, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`.
 
-Optional request body (used by agent-mode playbooks; ignored for fleet-mode):
+Optional request body:
 
 | Field | Description |
 |---|---|
 | `connection_string` | PostgreSQL DSN for the target database |
-| `context` | Free-form operator context (server name, symptoms, recent changes) |
-| `context_id` | A2A session ID for multi-turn continuity |
+| `context` | Free-form operator context (server name, symptoms, recent changes, relevant log lines) |
+| `context_id` | A2A session ID for multi-turn continuity within an existing session |
+| `prior_run_id` | `plr_*` run ID of a previous investigation to continue from (see [Continuity threading](#continuity-threading)) |
 
 ```bash
 # Triage a down database (agent mode)
@@ -257,7 +272,20 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/r
   | jq .text
 ```
 
-**Run recording** — every `/run` call records a `PlaybookRun` entry in auditd before the LLM or agent is invoked. The run starts with `outcome=unknown`. Operators close the loop by patching the run with the final outcome once they've reviewed the diagnosis or confirmed the fleet plan resolved the issue. See [Run tracking](#run-tracking) below.
+**Run recording** — every `/run` call records a `PlaybookRun` entry in auditd before the LLM or agent is invoked. The run starts with `outcome=unknown`. For agent-mode runs the gateway parses the agent's structured response and updates the outcome automatically — see [Structured escalation signal](#structured-escalation-signal). Operators can always override the outcome via `PATCH /playbook-runs/{runID}`. See [Run tracking](#run-tracking) below.
+
+**Requires-evidence warnings** — if the playbook has `requires_evidence` patterns and the provided `context` does not contain matching log lines or error text, the response includes a `warnings` array:
+
+```json
+{
+  "text": "...",
+  "warnings": [
+    "expected evidence pattern not found in provided context: \"FATAL.*invalid value for parameter\""
+  ]
+}
+```
+
+Warnings are soft — execution is not blocked. They signal that you may be running the wrong playbook for the observed failure mode. Providing relevant log lines in `context` removes the warning if the pattern matches.
 
 See [FLEET.md](FLEET.md#natural-language-job-planner) for full fleet planner semantics.
 
@@ -269,15 +297,43 @@ Every call to `POST /run` writes a `PlaybookRun` record to auditd before routing
 
 ### Run lifecycle
 
+**Fleet mode:**
 ```
 POST /run → outcome=unknown (run recorded)
                     ↓
-       operator reviews diagnosis / executes plan
+       operator reviews plan, executes via fleet-runner
                     ↓
 PATCH /playbook-runs/{runID} → outcome=resolved|escalated|abandoned
 ```
 
-The gateway records run start synchronously and run completion asynchronously (best-effort, 5s timeout). Outcome is always `unknown` until an operator patches it — the system cannot know whether a fleet plan was accepted and executed, or whether an agent diagnosis actually resolved the incident.
+**Agent mode:**
+```
+POST /run → outcome=unknown (run recorded)
+                    ↓
+       agent investigates, emits FINDINGS / ESCALATE_TO signal
+                    ↓
+       gateway parses signal → outcome auto-updated (resolved|escalated|unknown)
+                    ↓
+       operator reviews diagnosis — may patch outcome to correct it
+```
+
+For agent-mode runs the gateway parses the agent's structured response (see [Structured escalation signal](#structured-escalation-signal)) and calls `PATCH /playbook-runs/{runID}` automatically once the agent session completes. `findings_summary` and `escalated_to` are populated from the agent's output. Operators can always override via a manual PATCH.
+
+The gateway records run start **synchronously** and run completion **asynchronously** (best-effort, 5 s timeout). If completion recording fails, the run remains at `outcome=unknown` — this is visible in `/stats` as the `abandoned` bucket if the operator patches it, or remains `unknown` until corrected.
+
+### Get a specific run
+
+```
+GET /api/v1/fleet/playbook-runs/{runID}
+```
+
+Returns a single `PlaybookRun` by its `run_id`. Use this to retrieve the full record after an agent session completes — in particular `findings_summary` and `escalated_to`, which are populated automatically from the agent's structured response.
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c | jq '{outcome, findings_summary, escalated_to}'
+```
+
+Returns `404` if the run ID is not found.
 
 ### List runs for a playbook
 
@@ -383,6 +439,152 @@ Returns `204 No Content` on success.
 | `operator` | string | Identity from `X-User` request header |
 | `started_at` | RFC3339 | When the run was initiated |
 | `completed_at` | RFC3339 | When the run was patched with a final outcome |
+
+---
+
+## Adaptive triage
+
+The three Database Down playbooks form an adaptive triage system. Rather than following a fixed script, the agent gathers evidence, tests hypotheses, and navigates the escalation graph based on what it finds.
+
+### Entry points
+
+The `entry_point: true` field marks the **starting playbook** for a problem class. When a database goes completely unreachable, the operator runs the entry-point playbook for `problem_class: availability` — currently **Database Down — Restart Triage** — regardless of the suspected cause. The agent classifies the failure from pod logs and either resolves it (pod restart suffices) or escalates along the appropriate path.
+
+Only one playbook per `problem_class` should have `entry_point: true`.
+
+### Escalation graph
+
+`escalates_to` lists the series IDs the agent should consider next if its current hypothesis is disproven by the evidence. This forms a directed graph of triage paths:
+
+```
+pbs_db_restart_triage  (entry_point: true)
+        │
+        ├─ logs show bad config → pbs_db_config_recovery
+        │                               │
+        │                               └─ logs show corrupt data → pbs_db_pitr_recovery
+        │
+        └─ logs show corrupt/missing files → pbs_db_pitr_recovery
+```
+
+The agent is prompted with the escalation paths at run time:
+
+> "If your investigation reveals a different root cause than this playbook addresses, the next playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`"
+
+### Requires-evidence warnings
+
+`requires_evidence` contains log patterns or error substrings that should be present in the operator's context before this playbook is appropriate. They are regex-compatible (e.g. `"FATAL.*invalid value for parameter"`).
+
+When you run a playbook with `requires_evidence` set and the patterns are absent from the `context` you provided (or you provided no context at all), the response includes a `warnings` array:
+
+```json
+{
+  "text": "...",
+  "warnings": [
+    "expected evidence pattern not found in provided context: \"FATAL.*invalid value for parameter\"",
+    "expected evidence pattern not found in provided context: \"FATAL.*configuration file\""
+  ]
+}
+```
+
+This signals that you may have selected the wrong playbook for the failure mode. To suppress the warning, include the relevant log lines in the `context` field.
+
+Warnings never block execution — they are advisory.
+
+### Structured escalation signal
+
+For agent-mode runs the gateway parses a structured signal from the agent's response before returning it to the caller. The agent is instructed to append two lines at the end of its response:
+
+```
+FINDINGS: <one-sentence diagnosis and recommended action>
+ESCALATE_TO: <series_id>     # optional — only when a follow-on playbook is needed
+```
+
+The gateway strips these lines from the visible `text` returned to the operator, then uses them to:
+
+- Set `outcome=resolved` when only `FINDINGS:` is present (root cause identified)
+- Set `outcome=escalated` and `escalated_to=<series_id>` when `ESCALATE_TO:` is present
+- Populate `findings_summary` with the FINDINGS text
+- Add `escalation_hint` to the JSON response when `ESCALATE_TO:` is present
+
+The `escalation_hint` field lets the caller automatically chain to the next playbook:
+
+```bash
+# Run restart triage, capture any escalation hint
+RESP=$(curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string":"...","context":"<pod logs>"}')
+
+echo "$RESP" | jq .text    # diagnosis for operator review
+HINT=$(echo "$RESP" | jq -r '.escalation_hint // empty')
+
+if [ -n "$HINT" ]; then
+  # Resolve the series ID to a playbook ID and continue the investigation
+  NEXT_ID=$(curl -s "http://localhost:8080/api/v1/fleet/playbooks?series_id=$HINT" \
+    | jq -r '.playbooks[0].playbook_id')
+  FIRST_RUN_ID=$(echo "$RESP" | jq -r .run_id)   # from run tracking
+  echo "Escalating to $HINT (playbook $NEXT_ID)"
+fi
+```
+
+### Continuity threading
+
+When following an escalation path, pass the `prior_run_id` of the previous investigation in the request body. The gateway fetches the prior run's `findings_summary` from auditd and injects it into the agent prompt:
+
+```
+## Prior Investigation Findings
+A previous investigation reached the following conclusion:
+<prior findings_summary>
+
+Continue from this context and investigate further.
+```
+
+This gives the next agent session full context about what was already ruled out, avoiding redundant tool calls.
+
+```bash
+# Escalate from restart triage to config recovery, passing prior findings
+FIRST_RUN_ID="plr_8c9d2e3f"
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_config_recovery/run \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"connection_string\": \"postgres://prod-db.example.com/app\",
+    \"context\": \"<additional log lines>\",
+    \"prior_run_id\": \"$FIRST_RUN_ID\"
+  }" | jq .text
+```
+
+### Full Database Down triage example
+
+```bash
+GW=http://localhost:8080
+CONN="postgres://prod-db.example.com/app"
+LOGS="$(cat /tmp/postgres.log)"  # retrieved via SSH or uploaded via /uploads
+
+# 1. Find the entry-point playbook for availability
+PB=$(curl -s "$GW/api/v1/fleet/playbooks" \
+  | jq -r '.playbooks[] | select(.series_id == "pbs_db_restart_triage") | .playbook_id')
+
+# 2. Run it — the agent classifies the failure
+RESP=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/$PB/run" \
+  -H "Content-Type: application/json" \
+  -d "{\"connection_string\":\"$CONN\",\"context\":\"$LOGS\"}")
+
+echo "=== Diagnosis ==="
+echo "$RESP" | jq -r .text
+
+HINT=$(echo "$RESP" | jq -r '.escalation_hint // empty')
+RUN_ID=$(curl -s "$GW/api/v1/fleet/playbooks/$PB/runs" | jq -r '.runs[0].run_id')
+
+# 3. If the agent recommends escalation, continue in the next playbook
+if [ -n "$HINT" ]; then
+  NEXT_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=$HINT" \
+    | jq -r '.playbooks[0].playbook_id')
+  echo "=== Escalating to $HINT ==="
+  curl -s -X POST "$GW/api/v1/fleet/playbooks/$NEXT_PB/run" \
+    -H "Content-Type: application/json" \
+    -d "{\"connection_string\":\"$CONN\",\"context\":\"$LOGS\",\"prior_run_id\":\"$RUN_ID\"}" \
+    | jq -r .text
+fi
+```
 
 ---
 
@@ -610,7 +812,23 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `source` | string | `system` \| `imported` \| `manual` |
 | `entry_point` | bool | `true` marks this as the preferred starting playbook for its `problem_class`. Used by the planner to resolve "where do I start?" when multiple playbooks could apply. Only one playbook per problem class should have `entry_point=true`. |
 | `escalates_to` | []string | Series IDs (`pbs_*`) of playbooks to consider next if this playbook's hypothesis is disproven by the collected evidence. Injected into the agent prompt as escalation context. |
-| `requires_evidence` | []string | Log patterns or error signals expected to be present before this playbook is selected. Expressed as human-readable substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). Used as selection guidance; not enforced as hard gates in the current release. |
-| `execution_mode` | string | `fleet` (default) — runs through the fleet planner, returns a `JobDef` for operator review. `agent` — routes directly to the database agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. |
+| `requires_evidence` | []string | Log patterns or error signals expected to be present before this playbook is selected. Expressed as case-insensitive substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). At run time the gateway checks these patterns against the `context` field of the run request and emits `warnings` for any that are missing. Execution is never blocked — warnings are advisory only. |
+| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to the database agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. The gateway automatically parses the agent's structured response to set `outcome` and `findings_summary` on the run record. |
+| `stats` | object | Inline run statistics for the playbook's series. Populated by `GET /fleet/playbooks` (list); omitted when no runs have been recorded. See `PlaybookRunStats` below. Not persisted — computed on read. |
 | `created_at` | RFC3339 | Creation timestamp |
 | `updated_at` | RFC3339 | Last update timestamp |
+
+### `PlaybookRunStats` object
+
+Returned inline in `GET /fleet/playbooks` and by `GET /fleet/playbooks/{playbookID}/stats`. Stats are **series-wide** — they aggregate all versions of a playbook.
+
+| Field | Type | Description |
+|---|---|---|
+| `series_id` | string | Series the stats belong to |
+| `total_runs` | int | Total number of recorded runs |
+| `resolved` | int | Runs with `outcome=resolved` |
+| `escalated` | int | Runs with `outcome=escalated` |
+| `abandoned` | int | Runs with `outcome=abandoned` |
+| `resolution_rate` | float | `resolved / total_runs` (0–1) |
+| `escalation_rate` | float | `escalated / total_runs` (0–1) |
+| `last_run_at` | string | Timestamp of the most recent run |

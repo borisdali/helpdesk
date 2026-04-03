@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -107,6 +108,8 @@ type PlaybookRunRequest struct {
 	ConnectionString string `json:"connection_string,omitempty"`
 	Context          string `json:"context,omitempty"`    // operator-supplied context (server name, symptoms, etc.)
 	ContextID        string `json:"context_id,omitempty"` // A2A session ID for multi-turn continuity
+	PriorRunID       string `json:"prior_run_id,omitempty"` // run_id of prior investigation for continuity threading
+	PriorFindings    string `json:"-"`                       // populated at runtime from prior run; not from body
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -138,12 +141,25 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Item 5: soft-warn when required evidence patterns are absent from the
+	// operator-supplied context. Execution is not blocked.
+	warnings := checkRequiresEvidence(pb.RequiresEvidence, req.Context)
+
+	// Item 4: continuity threading — fetch prior run's findings to seed the prompt.
+	if req.PriorRunID != "" {
+		if prior, err := g.fetchPlaybookRun(r.Context(), req.PriorRunID); err == nil {
+			req.PriorFindings = prior.FindingsSummary
+		} else {
+			slog.Warn("handlePlaybookRun: could not fetch prior run for continuity", "prior_run_id", req.PriorRunID, "err", err)
+		}
+	}
+
 	// Record the run start. Best-effort: failure does not block execution.
 	operator := r.Header.Get("X-User")
 	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, operator)
 
 	if pb.ExecutionMode == "agent" {
-		g.handlePlaybookRunAsAgent(w, r, pb, req, runID)
+		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
 		return
 	}
 
@@ -171,7 +187,17 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 			planReq.Header.Set(h, v)
 		}
 	}
-	g.handleFleetPlan(w, planReq)
+
+	// Capture the fleet plan response so we can inject warnings if needed.
+	capture := newResponseCapture()
+	g.handleFleetPlan(capture, planReq)
+
+	extra := map[string]any{}
+	if len(warnings) > 0 {
+		extra["warnings"] = warnings
+	}
+	injectFields(w, capture, extra)
+
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
@@ -183,13 +209,57 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 // as an interactive agentic session. The playbook's guidance is injected into the
 // prompt as expert context. All tool calls within the session are expected to be
 // read-only; the agent presents remediation as recommendations for operator review.
-func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string) {
+//
+// The agent response is captured to:
+//   - Parse structured escalation signals (ESCALATE_TO / FINDINGS lines)
+//   - Strip signal lines from the operator-visible text
+//   - Record the run with the real outcome instead of "unknown"
+//   - Inject optional warnings about missing required evidence
+func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
 	prompt := assembleTriagePrompt(pb, req)
-	g.proxyToAgent(w, r, agentNameDB, req.ContextID, prompt)
-	// Mark run completed with outcome=unknown — the operator updates it via PATCH
-	// /api/v1/fleet/playbook-runs/{runID} once they've reviewed the diagnosis.
+
+	// Capture the agent response to parse escalation signals.
+	capture := newResponseCapture()
+	g.proxyToAgent(capture, r, agentNameDB, req.ContextID, prompt)
+
+	var outcome, escalatedTo, findings string
+	extra := map[string]any{}
+
+	if capture.code == http.StatusOK {
+		var respBody map[string]any
+		if err := json.Unmarshal(capture.body.Bytes(), &respBody); err == nil {
+			if text, ok := respBody["text"].(string); ok {
+				esc := parseAgentEscalation(text)
+				findings = esc.Findings
+				if esc.EscalateTo != "" {
+					outcome = "escalated"
+					escalatedTo = esc.EscalateTo
+					extra["escalation_hint"] = esc.EscalateTo
+				} else if findings != "" {
+					outcome = "resolved"
+				}
+				// Replace text with the clean version (signal lines stripped).
+				respBody["text"] = esc.CleanText
+				if b, err := json.Marshal(respBody); err == nil {
+					capture.body.Reset()
+					capture.body.Write(b) //nolint:errcheck
+				}
+			}
+		}
+	}
+	if outcome == "" {
+		outcome = "unknown"
+	}
+
+	if len(warnings) > 0 {
+		extra["warnings"] = warnings
+	}
+
+	injectFields(w, capture, extra)
+
+	// Record completion with real outcome in background.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "")
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, escalatedTo, findings)
 	}
 }
 
@@ -211,6 +281,11 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 			strings.Join(pb.EscalatesTo, ", "))
 	}
 
+	// Item 4: inject prior investigation findings for continuity.
+	if req.PriorFindings != "" {
+		fmt.Fprintf(&b, "## Prior Investigation Findings\nA previous investigation reached the following conclusion:\n%s\n\nContinue from this context and investigate further.\n\n", req.PriorFindings)
+	}
+
 	b.WriteString("## Constraints\n")
 	b.WriteString("- Use only read-only diagnostic tools. Do not execute any write or destructive operations.\n")
 	b.WriteString("- Collect evidence, form a hypothesis, and if the evidence contradicts it, back out and pursue a different hypothesis.\n")
@@ -223,6 +298,12 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 	if req.Context != "" {
 		fmt.Fprintf(&b, "## Additional context\n%s\n\n", req.Context)
 	}
+
+	// Item 3: structured response protocol so the gateway can parse the outcome.
+	b.WriteString("## Response Protocol\n")
+	b.WriteString("At the very end of your response, on separate lines, include:\n")
+	b.WriteString("- `FINDINGS: <one-sentence diagnosis and recommended action>`\n")
+	b.WriteString("- If the evidence points to a different root cause covered by a different playbook, also add: `ESCALATE_TO: <series_id>`\n")
 
 	return b.String()
 }
@@ -261,6 +342,42 @@ func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook
 		return nil, err
 	}
 	return &pb, nil
+}
+
+// fetchPlaybookRun retrieves a single run record from auditd by run_id.
+func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.PlaybookRun, error) {
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("not found")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var run audit.PlaybookRun
+	if err := json.Unmarshal(body, &run); err != nil {
+		return nil, err
+	}
+	return &run, nil
 }
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
@@ -353,4 +470,119 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 			"auditd_error", strings.TrimSpace(string(body)),
 		)
 	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// responseCapture is a minimal http.ResponseWriter that buffers the response
+// so callers can inspect and modify it before forwarding to the real writer.
+type responseCapture struct {
+	header http.Header
+	body   bytes.Buffer
+	code   int
+}
+
+func newResponseCapture() *responseCapture {
+	return &responseCapture{header: make(http.Header), code: http.StatusOK}
+}
+
+func (rc *responseCapture) Header() http.Header         { return rc.header }
+func (rc *responseCapture) Write(b []byte) (int, error) { return rc.body.Write(b) }
+func (rc *responseCapture) WriteHeader(code int)        { rc.code = code }
+
+// injectFields merges additionalFields into a captured JSON object response
+// and writes the result to w. If the body is not a JSON object or
+// additionalFields is empty, the captured response is written unchanged.
+func injectFields(w http.ResponseWriter, capture *responseCapture, additionalFields map[string]any) {
+	// Copy captured headers to real writer first.
+	for k, vals := range capture.header {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+
+	if len(additionalFields) == 0 || capture.code != http.StatusOK {
+		w.WriteHeader(capture.code)
+		w.Write(capture.body.Bytes()) //nolint:errcheck
+		return
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(capture.body.Bytes(), &obj); err != nil {
+		// Not a JSON object — forward as-is.
+		w.WriteHeader(capture.code)
+		w.Write(capture.body.Bytes()) //nolint:errcheck
+		return
+	}
+	for k, v := range additionalFields {
+		obj[k] = v
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		w.WriteHeader(capture.code)
+		w.Write(capture.body.Bytes()) //nolint:errcheck
+		return
+	}
+	w.WriteHeader(capture.code)
+	w.Write(b) //nolint:errcheck
+}
+
+// agentEscalation holds the structured signals parsed from an agent response.
+type agentEscalation struct {
+	EscalateTo string // series_id to pass to the next playbook, or ""
+	Findings   string // one-sentence diagnosis summary
+	CleanText  string // response text with signal lines removed
+}
+
+// parseAgentEscalation scans the agent's response text for structured signal
+// lines injected by the response protocol section of the triage prompt:
+//
+//	FINDINGS: <summary>
+//	ESCALATE_TO: <series_id>
+//
+// These lines are stripped from the visible text returned to the operator.
+func parseAgentEscalation(text string) agentEscalation {
+	var result agentEscalation
+	var cleaned strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ESCALATE_TO:") {
+			result.EscalateTo = strings.TrimSpace(strings.TrimPrefix(trimmed, "ESCALATE_TO:"))
+		} else if strings.HasPrefix(trimmed, "FINDINGS:") {
+			result.Findings = strings.TrimSpace(strings.TrimPrefix(trimmed, "FINDINGS:"))
+		} else {
+			cleaned.WriteString(line)
+			cleaned.WriteByte('\n')
+		}
+	}
+	result.CleanText = strings.TrimRight(cleaned.String(), "\n")
+	return result
+}
+
+// checkRequiresEvidence checks whether any of the playbook's required evidence
+// patterns are absent from the provided context string. Returns a warning
+// message for each unmatched pattern. Returns nil when RequiresEvidence is empty.
+// When context is empty all patterns are considered absent (the operator has not
+// supplied log snippets confirming the hypothesis).
+func checkRequiresEvidence(patterns []string, ctx string) []string {
+	if len(patterns) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, pat := range patterns {
+		var matched bool
+		if ctx != "" {
+			re, err := regexp.Compile("(?i)" + pat)
+			if err == nil {
+				matched = re.MatchString(ctx)
+			} else {
+				// Fall back to case-insensitive substring match for invalid regexps.
+				matched = strings.Contains(strings.ToLower(ctx), strings.ToLower(pat))
+			}
+		}
+		if !matched {
+			missing = append(missing, fmt.Sprintf("expected evidence pattern not found in provided context: %q", pat))
+		}
+	}
+	return missing
 }

@@ -554,6 +554,130 @@ func TestPlaybooks_RunRecording(t *testing.T) {
 	t.Logf("stats: total_runs=%.0f series_id=%v", totalRuns, statsResp["series_id"])
 }
 
+// TestPlaybooks_InlineStatsInList verifies that after at least one run has been
+// recorded, GET /fleet/playbooks returns a stats object inline on the relevant
+// playbook — no second request to /stats needed.
+func TestPlaybooks_InlineStatsInList(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Find a fleet-mode playbook to use as the target.
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var pbID string
+	for _, pb := range playbooks {
+		if mode, _ := pb["execution_mode"].(string); mode == "fleet" {
+			pbID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if pbID == "" {
+		t.Skip("no fleet-mode playbook available")
+	}
+
+	// Trigger a run to ensure at least one run is recorded (ignore execution errors).
+	client.PlaybookRun(ctx, pbID, map[string]any{"connection_string": cfg.ConnStr}) //nolint:errcheck
+
+	// Re-list playbooks and find the one we just ran.
+	playbooks, err = client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList (second): %v", err)
+	}
+	var found map[string]any
+	for _, pb := range playbooks {
+		if id, _ := pb["playbook_id"].(string); id == pbID {
+			found = pb
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("playbook %s not found in list after run", pbID)
+	}
+
+	stats, hasStats := found["stats"]
+	if !hasStats || stats == nil {
+		t.Fatalf("playbook %s missing inline 'stats' field in list response after a run was recorded", pbID)
+	}
+	statsMap, ok := stats.(map[string]any)
+	if !ok {
+		t.Fatalf("stats field is not a JSON object: %T", stats)
+	}
+	totalRuns, _ := statsMap["total_runs"].(float64)
+	if totalRuns == 0 {
+		t.Errorf("stats.total_runs = 0 for playbook %s after recording a run", pbID)
+	}
+	t.Logf("inline stats OK: playbook_id=%s total_runs=%.0f", pbID, totalRuns)
+}
+
+// TestPlaybooks_GetRunByID verifies that a run recorded via POST /run can be
+// fetched individually via GET /fleet/playbook-runs/{runID}.
+func TestPlaybooks_GetRunByID(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Find any active playbook.
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	if len(playbooks) == 0 {
+		t.Skip("no playbooks available")
+	}
+	pbID, _ := playbooks[0]["playbook_id"].(string)
+	if pbID == "" {
+		t.Skip("no playbook_id available")
+	}
+
+	// Trigger a run (ignore execution errors — recording is best-effort synchronous).
+	client.PlaybookRun(ctx, pbID, map[string]any{"connection_string": cfg.ConnStr}) //nolint:errcheck
+
+	// List runs to get the latest run_id.
+	runsResp, err := client.PlaybookRuns(ctx, pbID)
+	if err != nil {
+		t.Fatalf("PlaybookRuns: %v", err)
+	}
+	runs, _ := runsResp["runs"].([]any)
+	if len(runs) == 0 {
+		t.Skip("no runs recorded — stack may not have auditd configured")
+	}
+	latestRun, _ := runs[0].(map[string]any)
+	runID, _ := latestRun["run_id"].(string)
+	if runID == "" {
+		t.Fatalf("latest run has no run_id: %v", latestRun)
+	}
+	t.Logf("fetching run_id=%s", runID)
+
+	// Fetch the run by ID via the new GET endpoint.
+	run, err := client.PlaybookRunGet(ctx, runID)
+	if err != nil {
+		t.Fatalf("PlaybookRunGet(%s): %v", runID, err)
+	}
+	if gotID, _ := run["run_id"].(string); gotID != runID {
+		t.Errorf("run_id = %q, want %q", gotID, runID)
+	}
+	if run["playbook_id"] == nil {
+		t.Error("run missing playbook_id field")
+	}
+	if run["started_at"] == nil {
+		t.Error("run missing started_at field")
+	}
+	t.Logf("GET run OK: run_id=%s playbook_id=%v outcome=%v", runID, run["playbook_id"], run["outcome"])
+}
+
 // TestPlaybooks_RunAgentMode calls POST /run on an agent-mode system playbook
 // (Database Down — Restart Triage) and verifies the response has the agent shape.
 // Requires LLM + a running database agent.

@@ -275,6 +275,19 @@ func (c *GatewayClient) PlaybookRuns(ctx context.Context, id string) (map[string
 	return result, nil
 }
 
+// PlaybookRunGet calls GET /api/v1/fleet/playbook-runs/{runID} and returns the run map.
+func (c *GatewayClient) PlaybookRunGet(ctx context.Context, runID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook run: %w", err)
+	}
+	return result, nil
+}
+
 // PlaybookStats calls GET /api/v1/fleet/playbooks/{id}/stats and returns the response map.
 func (c *GatewayClient) PlaybookStats(ctx context.Context, id string) (map[string]any, error) {
 	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id+"/stats")

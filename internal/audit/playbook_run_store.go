@@ -202,6 +202,17 @@ func (s *PlaybookRunStore) StatsBatch(ctx context.Context, seriesIDs []string) (
 	return result, rows.Err()
 }
 
+// GetByRunID returns a single PlaybookRun by its run_id.
+// Returns sql.ErrNoRows if not found.
+func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*PlaybookRun, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
+		       escalated_to, findings_summary, context_id, operator, started_at, completed_at
+		FROM playbook_runs
+		WHERE run_id = ?`, runID)
+	return scanPlaybookRun(row)
+}
+
 // ListByPlaybook returns runs for a specific playbook_id, most recent first.
 func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string, limit int) ([]*PlaybookRun, error) {
 	if limit <= 0 || limit > 100 {

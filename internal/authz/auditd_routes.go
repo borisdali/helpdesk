@@ -59,6 +59,7 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /v1/fleet/playbooks/{playbookID}/runs":  {AdminBypass: true},
 	"GET /v1/fleet/playbooks/{playbookID}/stats": {AdminBypass: true},
 	"PATCH /v1/fleet/playbook-runs/{runID}":      {AdminBypass: true},
+	"GET /v1/fleet/playbook-runs/{runID}":        {AdminBypass: true},
 
 	// Upload endpoints (operator file uploads, e.g. PostgreSQL log files)
 	"POST /v1/uploads":                     {AdminBypass: true},

@@ -213,3 +213,52 @@ func TestPlaybookRunStore_DefaultOutcome(t *testing.T) {
 	}
 }
 
+func TestPlaybookRunStore_GetByRunID(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	run := &PlaybookRun{
+		PlaybookID:      "pb_get1",
+		SeriesID:        "pbs_get_series",
+		ExecutionMode:   "agent",
+		Outcome:         "escalated",
+		EscalatedTo:     "pbs_pitr",
+		FindingsSummary: "WAL corruption detected; recommend PITR recovery.",
+		Operator:        "bob@example.com",
+		StartedAt:       time.Now().UTC(),
+	}
+	if err := s.Record(ctx, run); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, err := s.GetByRunID(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID: %v", err)
+	}
+	if got.RunID != run.RunID {
+		t.Errorf("run_id = %q, want %q", got.RunID, run.RunID)
+	}
+	if got.Outcome != "escalated" {
+		t.Errorf("outcome = %q, want escalated", got.Outcome)
+	}
+	if got.EscalatedTo != "pbs_pitr" {
+		t.Errorf("escalated_to = %q, want pbs_pitr", got.EscalatedTo)
+	}
+	if got.FindingsSummary != run.FindingsSummary {
+		t.Errorf("findings_summary = %q", got.FindingsSummary)
+	}
+	if got.Operator != "bob@example.com" {
+		t.Errorf("operator = %q", got.Operator)
+	}
+}
+
+func TestPlaybookRunStore_GetByRunID_NotFound(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	_, err := s.GetByRunID(ctx, "plr_nonexistent")
+	if err == nil {
+		t.Error("expected error for non-existent run_id, got nil")
+	}
+}
+

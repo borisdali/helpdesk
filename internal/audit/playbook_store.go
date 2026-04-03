@@ -45,10 +45,13 @@ type Playbook struct {
 	Source   string `json:"source"`               // "system" | "imported" | "manual"
 
 	// Triage routing fields
-	EntryPoint      bool     `json:"entry_point"`                // true = preferred starting point for this problem_class
-	EscalatesTo     []string `json:"escalates_to,omitempty"`     // series IDs to try if this hypothesis is disproven
+	EntryPoint       bool     `json:"entry_point"`                // true = preferred starting point for this problem_class
+	EscalatesTo      []string `json:"escalates_to,omitempty"`     // series IDs to try if this hypothesis is disproven
 	RequiresEvidence []string `json:"requires_evidence,omitempty"` // log/error patterns expected before selecting this playbook
-	ExecutionMode   string   `json:"execution_mode"`             // "fleet" (static JobDef) | "agent" (agentic R/O session)
+	ExecutionMode    string   `json:"execution_mode"`             // "fleet" (static JobDef) | "agent" (agentic R/O session)
+
+	// Computed fields (not persisted; populated on demand)
+	Stats *PlaybookRunStats `json:"stats,omitempty"` // run statistics, injected by handleList
 }
 
 // PlaybookStore persists fleet playbooks.

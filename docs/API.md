@@ -587,11 +587,11 @@ To approve or deny, use the auditd approval endpoints directly (see below) — t
 
 #### Playbook endpoints
 
-Playbooks are saved runbook artifacts combining a natural-language fleet intent with expert triage knowledge. aiHelpDesk ships 4 system playbooks out of the box; operators create, version, and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
+Playbooks are saved runbook artifacts combining a natural-language fleet intent with expert triage knowledge. aiHelpDesk ships 7 system playbooks out of the box (4 operational + 3 Database Down triage), with adaptive escalation across the triage graph. Operators create, version, and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
 
 #### `GET /api/v1/fleet/playbooks`
 
-List playbooks. Returns the active version of every playbook by default.
+List playbooks. Returns the active version of every playbook by default. Each entry includes an inline `stats` object (series-wide run history) when at least one run exists.
 
 Query params: `active_only` (default `true`), `include_system` (default `true`), `series_id` (filter to one series).
 
@@ -630,7 +630,7 @@ Delete a playbook. Returns `204 No Content`, `404` if not found, `400` for syste
 
 #### `POST /api/v1/fleet/playbooks/{playbookID}/run`
 
-Runs a playbook. Behaviour depends on the playbook's `execution_mode`:
+Runs a playbook. Behaviour depends on the playbook's `execution_mode`.
 
 **`execution_mode: fleet` (default)** — calls the fleet planner and returns a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The playbook's `description`, `guidance`, and `target_hints` are injected into the planner prompt. Requires LLM configuration.
 
@@ -640,23 +640,45 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 ./fleet-runner --job-file /tmp/plan.json --dry-run
 ```
 
-**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms and tests hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`. Used by the Database Down playbooks.
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms and tests hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`. Used by the Database Down playbooks. The gateway parses a structured signal from the agent's response to automatically set `outcome`, `findings_summary`, and `escalated_to` on the run record.
 
 Optional request body:
 
 | Field | Description |
 |---|---|
 | `connection_string` | PostgreSQL DSN for the target database |
-| `context` | Free-form operator context (server name, symptoms, recent changes) |
-| `context_id` | A2A session ID for multi-turn continuity |
+| `context` | Free-form operator context: server name, symptoms, log lines, recent changes. Used to evaluate `requires_evidence` patterns. |
+| `context_id` | A2A session ID to resume a multi-turn session |
+| `prior_run_id` | `plr_*` run ID of a prior investigation; its `findings_summary` is injected into the prompt for continuity |
+
+Response fields (in addition to the standard `text`, `agent`, `task_id`, `context_id`):
+
+| Field | When present | Description |
+|---|---|---|
+| `warnings` | `requires_evidence` patterns absent from `context` | Advisory list of missing evidence patterns. Execution is not blocked. |
+| `escalation_hint` | Agent signalled escalation | Series ID (`pbs_*`) of the recommended follow-on playbook |
 
 ```bash
-# Triage a down database (agent mode)
-curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+# First investigation — entry-point playbook
+RESP=$(curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
   -H "Content-Type: application/json" \
-  -d '{"connection_string":"postgres://prod-db.example.com/app","context":"pod in CrashLoopBackOff since 10:00 UTC"}' \
-  | jq .text
+  -d '{"connection_string":"postgres://prod-db.example.com/app","context":"pod CrashLoopBackOff; logs show FATAL: invalid value for parameter max_connections"}')
+echo "$RESP" | jq .text
+
+# Follow-on investigation using escalation hint and prior run ID
+RUN_ID=$(curl -s http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/runs | jq -r '.runs[0].run_id')
+NEXT_SERIES=$(echo "$RESP" | jq -r '.escalation_hint // empty')
+if [ -n "$NEXT_SERIES" ]; then
+  NEXT_PB=$(curl -s "http://localhost:8080/api/v1/fleet/playbooks?series_id=$NEXT_SERIES" \
+    | jq -r '.playbooks[0].playbook_id')
+  curl -s -X POST "http://localhost:8080/api/v1/fleet/playbooks/$NEXT_PB/run" \
+    -H "Content-Type: application/json" \
+    -d "{\"connection_string\":\"postgres://prod-db.example.com/app\",\"prior_run_id\":\"$RUN_ID\"}" \
+    | jq .text
+fi
 ```
+
+See [PLAYBOOKS.md — Adaptive triage](PLAYBOOKS.md#adaptive-triage) for the full escalation graph, requires-evidence system, and continuity threading details.
 
 #### `GET /api/v1/fleet/playbooks/{playbookID}/runs`
 
@@ -667,6 +689,17 @@ curl http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/runs | jq '{count:
 ```
 
 Response: `{ "runs": [...], "count": N }`. Each run object includes `run_id`, `playbook_id`, `series_id`, `execution_mode`, `outcome`, `escalated_to`, `findings_summary`, `operator`, `started_at`, `completed_at`.
+
+#### `GET /api/v1/fleet/playbook-runs/{runID}`
+
+Fetch a single run by its `run_id`. Useful for retrieving the `findings_summary` and `escalated_to` fields that are populated automatically after an agent-mode run completes.
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
+  | jq '{outcome, findings_summary, escalated_to}'
+```
+
+Returns `404` if the run ID is not found.
 
 #### `GET /api/v1/fleet/playbooks/{playbookID}/stats`
 
@@ -680,7 +713,7 @@ Response: `{ "series_id", "total_runs", "resolved", "escalated", "abandoned", "r
 
 #### `PATCH /api/v1/fleet/playbook-runs/{runID}`
 
-Record the final outcome of a run. Every `/run` call starts a run with `outcome=unknown`; operators patch it after reviewing the diagnosis or confirming a fleet plan resolved the issue.
+Record or correct the final outcome of a run. For agent-mode runs the outcome is set automatically from the agent's structured response; this endpoint lets operators override it after reviewing.
 
 | Field | Required | Description |
 |---|---|---|

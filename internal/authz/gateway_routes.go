@@ -57,6 +57,10 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"PUT /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},
 	"DELETE /api/v1/fleet/playbooks/{playbookID}":      {AdminBypass: true},
 	"POST /api/v1/fleet/playbooks/{playbookID}/run":    {AdminBypass: true},
+	"GET /api/v1/fleet/playbooks/{playbookID}/runs":    {AdminBypass: true},
+	"GET /api/v1/fleet/playbooks/{playbookID}/stats":   {AdminBypass: true},
+	"PATCH /api/v1/fleet/playbook-runs/{runID}":        {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}":          {AdminBypass: true},
 
 	// ── Role-required ─────────────────────────────────────────────────────────
 

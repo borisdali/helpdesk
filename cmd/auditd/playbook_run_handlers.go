@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -112,6 +114,27 @@ func (s *playbookRunServer) handleList(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"runs": runs, "count": len(runs)}) //nolint:errcheck
+}
+
+// handleGetRun handles GET /v1/fleet/playbook-runs/{runID}.
+func (s *playbookRunServer) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	run, err := s.store.GetByRunID(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "run not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to get playbook run", "run_id", runID, "err", err)
+		http.Error(w, "failed to get run", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(run) //nolint:errcheck
 }
 
 // handleStats handles GET /v1/fleet/playbooks/{playbookID}/stats.

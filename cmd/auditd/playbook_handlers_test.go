@@ -16,6 +16,15 @@ import (
 // newPlaybookServer returns a playbookServer backed by a fresh temp-dir SQLite store.
 func newPlaybookServer(t *testing.T) *playbookServer {
 	t.Helper()
+	srv, _ := newPlaybookServerWithRuns(t)
+	return srv
+}
+
+// newPlaybookServerWithRuns returns a playbookServer wired with both the playbook
+// store and the run store so that inline stats are populated on handleList.
+// The second return value is the run store for seeding test data.
+func newPlaybookServerWithRuns(t *testing.T) (*playbookServer, *audit.PlaybookRunStore) {
+	t.Helper()
 	store, err := audit.NewStore(audit.StoreConfig{
 		DBPath: filepath.Join(t.TempDir(), "test.db"),
 	})
@@ -28,7 +37,11 @@ func newPlaybookServer(t *testing.T) *playbookServer {
 	if err != nil {
 		t.Fatalf("NewPlaybookStore: %v", err)
 	}
-	return &playbookServer{store: ps}
+	rs, err := audit.NewPlaybookRunStore(store.DB())
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	return &playbookServer{store: ps, runStore: rs}, rs
 }
 
 // createPlaybookViaHandler POSTs to handleCreate and returns the decoded response playbook.
@@ -626,5 +639,94 @@ func TestPlaybookHandlers_Delete_OK(t *testing.T) {
 
 	if getW.Code != http.StatusNotFound {
 		t.Errorf("after delete: status = %d, want 404", getW.Code)
+	}
+}
+
+// --- handleList with inline stats ---
+
+func TestPlaybookHandlers_List_InlineStats(t *testing.T) {
+	srv, runStore := newPlaybookServerWithRuns(t)
+	ctx := context.Background()
+
+	pb := createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "vacuum-triage",
+		"description": "check vacuum status",
+	})
+	// Re-fetch to get the series_id assigned by the store.
+	req := httptest.NewRequest(http.MethodGet, "/v1/playbooks/"+pb.PlaybookID, nil)
+	req.SetPathValue("playbookID", pb.PlaybookID)
+	w := httptest.NewRecorder()
+	srv.handleGet(w, req)
+	var fetched audit.Playbook
+	if err := json.NewDecoder(w.Body).Decode(&fetched); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
+
+	// Seed two runs against the playbook's series.
+	for _, outcome := range []string{"resolved", "escalated"} {
+		if err := runStore.Record(ctx, &audit.PlaybookRun{
+			PlaybookID:    fetched.PlaybookID,
+			SeriesID:      fetched.SeriesID,
+			ExecutionMode: "fleet",
+			Outcome:       outcome,
+		}); err != nil {
+			t.Fatalf("Record run: %v", err)
+		}
+	}
+
+	// List playbooks — stats should be inline.
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/playbooks", nil)
+	listW := httptest.NewRecorder()
+	srv.handleList(listW, listReq)
+
+	if listW.Code != http.StatusOK {
+		t.Fatalf("handleList: status = %d, want 200", listW.Code)
+	}
+
+	var result struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.NewDecoder(listW.Body).Decode(&result); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(result.Playbooks) != 1 {
+		t.Fatalf("expected 1 playbook, got %d", len(result.Playbooks))
+	}
+	stats := result.Playbooks[0].Stats
+	if stats == nil {
+		t.Fatal("expected inline stats to be populated, got nil")
+	}
+	if stats.TotalRuns != 2 {
+		t.Errorf("total_runs = %d, want 2", stats.TotalRuns)
+	}
+	if stats.Resolved != 1 {
+		t.Errorf("resolved = %d, want 1", stats.Resolved)
+	}
+	if stats.Escalated != 1 {
+		t.Errorf("escalated = %d, want 1", stats.Escalated)
+	}
+}
+
+func TestPlaybookHandlers_List_InlineStats_NoRuns(t *testing.T) {
+	// When a playbook has no runs, its Stats field should be omitted (nil).
+	srv := newPlaybookServer(t)
+	createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "new-playbook",
+		"description": "never run",
+	})
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/playbooks", nil)
+	listW := httptest.NewRecorder()
+	srv.handleList(listW, listReq)
+
+	var result struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	json.NewDecoder(listW.Body).Decode(&result) //nolint:errcheck
+	if len(result.Playbooks) != 1 {
+		t.Fatalf("expected 1 playbook, got %d", len(result.Playbooks))
+	}
+	if result.Playbooks[0].Stats != nil {
+		t.Error("Stats should be nil (omitempty) when the playbook has no runs")
 	}
 }
