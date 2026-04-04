@@ -832,3 +832,14 @@ Returned inline in `GET /fleet/playbooks` and by `GET /fleet/playbooks/{playbook
 | `resolution_rate` | float | `resolved / total_runs` (0–1) |
 | `escalation_rate` | float | `escalated / total_runs` (0–1) |
 | `last_run_at` | string | Timestamp of the most recent run |
+
+**How outcomes are set:**
+
+| Outcome | How it gets recorded |
+|---|---|
+| `resolved` | Agent-mode: gateway parses a `FINDINGS:` line (or conclusion fallback) from the agent's response and no `ESCALATE_TO:` signal is present. Fleet-mode: operator PATCHes the run after confirming the plan resolved the issue. |
+| `escalated` | Agent-mode: gateway parses an `ESCALATE_TO: <series_id>` signal from the agent's response; `escalated_to` is set to that series ID. Fleet or agent: operator PATCHes with `outcome=escalated`. |
+| `abandoned` | Operator explicitly PATCHes the run with `outcome=abandoned` — used when an investigation was started but not completed (e.g. alert cleared before diagnosis, wrong playbook selected). |
+| `unknown` | Default at run start. Remains `unknown` if the agent's response contained no parseable signal and the operator has not yet patched the run. Runs that stay `unknown` are **not counted** in `resolution_rate` or `escalation_rate` — only the denominator `total_runs` includes them. |
+
+`resolution_rate` and `escalation_rate` use `total_runs` (not `resolved + escalated`) as the denominator, so `unknown` and `abandoned` runs dilute the rates. A low `resolution_rate` on an agent-mode playbook often means the agent is not producing parseable `FINDINGS:` signals — check the `findings_summary` field on recent runs via `GET /playbook-runs/{runID}`.

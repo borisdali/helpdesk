@@ -57,6 +57,9 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 		defer store.Clear()
 
 		slog.Debug("trace middleware: trace_id set", "trace_id", traceID, "generated", parsed.traceID == "")
+		if parsed.userQuery != "" {
+			slog.Debug("incoming task prompt", "agent", agentName, "trace_id", traceID, "prompt", parsed.userQuery)
+		}
 
 		// Build a TraceContext from the parsed A2A metadata and store it in the
 		// request context so tools can access principal and purpose via context helpers.

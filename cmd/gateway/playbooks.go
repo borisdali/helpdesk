@@ -251,6 +251,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		outcome = "unknown"
 	}
 
+	if runID != "" {
+		extra["run_id"] = runID
+	}
 	if len(warnings) > 0 {
 		extra["warnings"] = warnings
 	}
@@ -268,6 +271,13 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 	var b strings.Builder
 
 	b.WriteString("You are performing a database availability investigation.\n\n")
+
+	// Response protocol first — models attend more reliably to instructions at the top.
+	b.WriteString("## Response Protocol\n")
+	b.WriteString("Do NOT write a CONCLUSION section or end with '---'. Instead, close your response with these two plain-text lines (no markdown, no bold, no backticks):\n")
+	b.WriteString("FINDINGS: <one-sentence diagnosis and recommended action>\n")
+	b.WriteString("ESCALATE_TO: <series_id or \"none\">\n\n")
+
 	fmt.Fprintf(&b, "## Playbook: %s\n\n", pb.Name)
 
 	if pb.Description != "" {
@@ -299,11 +309,14 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 		fmt.Fprintf(&b, "## Additional context\n%s\n\n", req.Context)
 	}
 
-	// Item 3: structured response protocol so the gateway can parse the outcome.
-	b.WriteString("## Response Protocol\n")
-	b.WriteString("At the very end of your response, on separate lines, include:\n")
-	b.WriteString("- `FINDINGS: <one-sentence diagnosis and recommended action>`\n")
-	b.WriteString("- If the evidence points to a different root cause covered by a different playbook, also add: `ESCALATE_TO: <series_id>`\n")
+	slog.Debug("triage prompt assembled", "playbook", pb.SeriesID, "prompt_len", b.Len(), "prompt", b.String())
+
+	// Closing reminder — Gemini attends more reliably when the instruction is
+	// repeated as the last thing in the prompt. Explicitly forbid the patterns
+	// Gemini uses as alternatives (**CONCLUSION:** and trailing ---).
+	b.WriteString("IMPORTANT: Do not write **CONCLUSION:** or end with ---. Close with exactly:\n")
+	b.WriteString("FINDINGS: <one-sentence diagnosis>\n")
+	b.WriteString("ESCALATE_TO: <series_id or \"none\">\n")
 
 	return b.String()
 }
@@ -541,13 +554,20 @@ type agentEscalation struct {
 //	ESCALATE_TO: <series_id>
 //
 // These lines are stripped from the visible text returned to the operator.
+// As a fallback, if no FINDINGS: line is present, the function extracts the
+// content of a **CONCLUSION:** paragraph (Gemini's preferred alternative).
 func parseAgentEscalation(text string) agentEscalation {
 	var result agentEscalation
 	var cleaned strings.Builder
 	for _, line := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(line)
+		// Normalise markdown bold: **FINDINGS:** → FINDINGS:
+		trimmed = strings.NewReplacer("**FINDINGS:**", "FINDINGS:", "**ESCALATE_TO:**", "ESCALATE_TO:").Replace(trimmed)
 		if strings.HasPrefix(trimmed, "ESCALATE_TO:") {
-			result.EscalateTo = strings.TrimSpace(strings.TrimPrefix(trimmed, "ESCALATE_TO:"))
+			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "ESCALATE_TO:"))
+			if v != "none" && v != "" {
+				result.EscalateTo = v
+			}
 		} else if strings.HasPrefix(trimmed, "FINDINGS:") {
 			result.Findings = strings.TrimSpace(strings.TrimPrefix(trimmed, "FINDINGS:"))
 		} else {
@@ -556,7 +576,75 @@ func parseAgentEscalation(text string) agentEscalation {
 		}
 	}
 	result.CleanText = strings.TrimRight(cleaned.String(), "\n")
+
+	// Fallback: extract findings from **CONCLUSION:** when the model ignored the protocol.
+	if result.Findings == "" {
+		result.Findings = extractConclusionFallback(result.CleanText)
+	}
 	return result
+}
+
+// extractConclusionFallback extracts a findings summary from common conclusion
+// patterns that LLMs use instead of the structured FINDINGS: line:
+//
+//   - Inline: "**CONCLUSION:** ..." or "CONCLUSION: ..."
+//   - Section heading followed by a bold status line:
+//     "## Findings Summary\n\n**DB status: HEALTHY**"
+//   - Any standalone bold line containing a status keyword (last resort)
+func extractConclusionFallback(text string) string {
+	lines := strings.Split(text, "\n")
+
+	// Pass 1: inline CONCLUSION: prefix on a single line.
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range []string{"**CONCLUSION:**", "**Conclusion:**", "CONCLUSION:"} {
+			if strings.HasPrefix(trimmed, prefix) {
+				v := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+				v = strings.Trim(v, "* ")
+				if v != "" {
+					return v
+				}
+			}
+		}
+	}
+
+	// Pass 2: section heading ("## Findings Summary", "## Summary", "## Conclusion")
+	// followed by the first non-empty, non-heading line.
+	headingRe := regexp.MustCompile(`(?i)^#{1,3}\s+(findings\s+summary|summary|conclusion|investigation\s+summary)`)
+	for i, line := range lines {
+		if headingRe.MatchString(strings.TrimSpace(line)) {
+			for _, after := range lines[i+1:] {
+				v := strings.TrimSpace(after)
+				if v == "" || strings.HasPrefix(v, "#") {
+					continue
+				}
+				// Strip markdown bold/italic markers.
+				v = strings.Trim(v, "* _")
+				if v != "" {
+					return v
+				}
+			}
+		}
+	}
+
+	// Pass 3: last-resort — any standalone bold line in the final third of the
+	// response containing a status keyword (OPERATIONAL, HEALTHY, DOWN, etc.).
+	statusRe := regexp.MustCompile(`(?i)(operational|healthy|unavailable|unreachable|down|resolved|escalat)`)
+	start := len(lines) * 2 / 3
+	if start < 0 {
+		start = 0
+	}
+	for _, line := range lines[start:] {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "**") && strings.HasSuffix(trimmed, "**") && statusRe.MatchString(trimmed) {
+			v := strings.Trim(trimmed, "* ")
+			if v != "" {
+				return v
+			}
+		}
+	}
+
+	return ""
 }
 
 // checkRequiresEvidence checks whether any of the playbook's required evidence
