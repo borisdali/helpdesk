@@ -145,10 +145,10 @@ Identify the most relevant line. Common patterns and what they mean:
 | `connection refused` (no log) | Process not running | `pbs_db_restart_triage` |
 | `database system was shut down` | Clean shutdown | `pbs_db_restart_triage` |
 | `OOM kill` / `out of memory` | OOM kill | `pbs_db_restart_triage` |
-| `FATAL: invalid value for parameter` | Bad config value | `pbs_db_config_recovery` |
-| `FATAL: could not open file "postgresql.conf"` | Config file missing/corrupt | `pbs_db_config_recovery` |
-| `PANIC: could not locate a valid checkpoint` | WAL corruption | `pbs_db_pitr_recovery` |
-| `invalid page in block` / `checksum failure` | Data corruption | `pbs_db_pitr_recovery` |
+| `FATAL: invalid value for parameter` | Bad config value | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_config_recovery` |
+| `FATAL: could not open file "postgresql.conf"` | Config file missing/corrupt | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_config_recovery` |
+| `PANIC: could not locate a valid checkpoint` | WAL corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_pitr_recovery` |
+| `invalid page in block` / `checksum failure` | Data corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_pitr_recovery` |
 
 ### 2.2 Step 2 — Trigger the entry-point playbook
 

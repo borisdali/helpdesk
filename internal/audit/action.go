@@ -80,6 +80,14 @@ var ToolClassification = map[string]ActionClass{
 
 	// Research agent tools
 	"web_search": ActionRead,
+
+	// Sysadmin agent tools
+	"check_host":        ActionRead,
+	"get_host_logs":     ActionRead,
+	"check_disk":        ActionRead,
+	"check_memory":      ActionRead,
+	"restart_container": ActionDestructive,
+	"restart_service":   ActionDestructive,
 }
 
 // ClassifyTool returns the action class for a given tool name.

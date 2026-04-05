@@ -48,7 +48,8 @@ type Playbook struct {
 	EntryPoint       bool     `json:"entry_point"`                // true = preferred starting point for this problem_class
 	EscalatesTo      []string `json:"escalates_to,omitempty"`     // series IDs to try if this hypothesis is disproven
 	RequiresEvidence []string `json:"requires_evidence,omitempty"` // log/error patterns expected before selecting this playbook
-	ExecutionMode    string   `json:"execution_mode"`             // "fleet" (static JobDef) | "agent" (agentic R/O session)
+	ExecutionMode    string   `json:"execution_mode"`             // "fleet" | "agent" (R/O) | "agent_approve" (mutations+approval) | "agent_auto" (pre-approved mutations)
+	PermittedTools   []string `json:"permitted_tools,omitempty"`  // agent_auto: tools allowed to execute without per-step approval
 
 	// Computed fields (not persisted; populated on demand)
 	Stats *PlaybookRunStats `json:"stats,omitempty"` // run statistics, injected by handleList
@@ -110,6 +111,7 @@ func (s *PlaybookStore) migrateSchema() error {
 		"ALTER TABLE playbooks ADD COLUMN escalates_to       TEXT    NOT NULL DEFAULT '[]'",
 		"ALTER TABLE playbooks ADD COLUMN requires_evidence  TEXT    NOT NULL DEFAULT '[]'",
 		"ALTER TABLE playbooks ADD COLUMN execution_mode     TEXT    NOT NULL DEFAULT 'fleet'",
+		"ALTER TABLE playbooks ADD COLUMN permitted_tools    TEXT    NOT NULL DEFAULT '[]'",
 	}
 	for _, stmt := range newCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -190,6 +192,11 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		return fmt.Errorf("marshal requires_evidence: %w", err)
 	}
 
+	permittedToolsJSON, err := json.Marshal(pb.PermittedTools)
+	if err != nil {
+		return fmt.Errorf("marshal permitted_tools: %w", err)
+	}
+
 	var lastValidatedStr *string
 	if pb.LastValidated != nil {
 		s := pb.LastValidated.UTC().Format(time.RFC3339Nano)
@@ -214,13 +221,13 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		    (playbook_id, name, description, target_hints, created_by, created_at, updated_at,
 		     problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 		     series_id, is_active, is_system, source,
-		     entry_point, escalates_to, requires_evidence, execution_mode)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
-		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode,
+		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode, string(permittedToolsJSON),
 	)
 	return err
 }
@@ -270,6 +277,11 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 		return fmt.Errorf("marshal requires_evidence: %w", err)
 	}
 
+	permittedToolsJSON, err := json.Marshal(pb.PermittedTools)
+	if err != nil {
+		return fmt.Errorf("marshal permitted_tools: %w", err)
+	}
+
 	var lastValidatedStr *string
 	if pb.LastValidated != nil {
 		s := pb.LastValidated.UTC().Format(time.RFC3339Nano)
@@ -291,13 +303,13 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 		    problem_class=?, symptoms=?, guidance=?, escalation=?,
 		    related_playbooks=?, author=?, last_validated=?, version=?,
 		    series_id=?,
-		    entry_point=?, escalates_to=?, requires_evidence=?, execution_mode=?
+		    entry_point=?, escalates_to=?, requires_evidence=?, execution_mode=?, permitted_tools=?
 		 WHERE playbook_id=?`,
 		pb.Name, pb.Description, string(hintsJSON), pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON),
 		string(relatedJSON), pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID,
-		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), executionMode,
+		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), executionMode, string(permittedToolsJSON),
 		pb.PlaybookID,
 	)
 	if err != nil {
@@ -389,7 +401,7 @@ func DefaultPlaybookListQuery() PlaybookListQuery {
 const playbookColumns = `playbook_id, name, description, target_hints, created_by, created_at, updated_at,
 	problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 	series_id, is_active, is_system, source,
-	entry_point, escalates_to, requires_evidence, execution_mode`
+	entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools`
 
 // Get returns a playbook by ID, or sql.ErrNoRows if not found.
 func (s *PlaybookStore) Get(ctx context.Context, id string) (*Playbook, error) {
@@ -444,7 +456,7 @@ type scanner interface {
 func scanPlaybook(s scanner) (*Playbook, error) {
 	var pb Playbook
 	var hintsJSON, symptomsJSON, escalationJSON, relatedJSON string
-	var escalatesToJSON, requiresEvidenceJSON string
+	var escalatesToJSON, requiresEvidenceJSON, permittedToolsJSON string
 	var createdAt, updatedAt string
 	var lastValidatedStr *string
 	var isActive, isSystem, entryPoint int // SQLite stores bools as INTEGER; scan into int then convert
@@ -455,7 +467,7 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 		&pb.ProblemClass, &symptomsJSON, &pb.Guidance, &escalationJSON,
 		&relatedJSON, &pb.Author, &lastValidatedStr, &pb.Version,
 		&pb.SeriesID, &isActive, &isSystem, &pb.Source,
-		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode,
+		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode, &permittedToolsJSON,
 	); err != nil {
 		return nil, err
 	}
@@ -491,6 +503,11 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 	if requiresEvidenceJSON != "" && requiresEvidenceJSON != "null" {
 		if err := json.Unmarshal([]byte(requiresEvidenceJSON), &pb.RequiresEvidence); err != nil {
 			pb.RequiresEvidence = nil
+		}
+	}
+	if permittedToolsJSON != "" && permittedToolsJSON != "null" {
+		if err := json.Unmarshal([]byte(permittedToolsJSON), &pb.PermittedTools); err != nil {
+			pb.PermittedTools = nil
 		}
 	}
 

@@ -19,7 +19,8 @@ type ToolEntry struct {
 	Description   string         `json:"description"`
 	InputSchema   map[string]any `json:"input_schema,omitempty"` // JSON Schema properties
 	ActionClass   string         `json:"action_class"`           // "read", "write", "destructive"
-	FleetEligible bool           `json:"fleet_eligible"`         // hard gate: planner only sees these
+	FleetEligible              bool           `json:"fleet_eligible"`               // hard gate: planner only sees these
+	AutoRemediationEligible    bool           `json:"auto_remediation_eligible"`    // eligible for agent_auto playbooks
 	Capabilities  []string       `json:"capabilities,omitempty"` // controlled vocabulary (Cap* constants)
 	Supersedes    []string       `json:"supersedes,omitempty"`   // tool names this one makes redundant
 	// AgentVersion is the agent's version string at discovery time (from card.Version).
@@ -79,6 +80,26 @@ func (r *Registry) ListFleetEligible() []ToolEntry {
 		}
 	}
 	return result
+}
+
+// ListAutoRemediationEligible returns tools that may execute without per-step
+// approval in agent_auto playbooks (subject to customer policy and playbook
+// permitted_tools list).
+func (r *Registry) ListAutoRemediationEligible() []ToolEntry {
+	var result []ToolEntry
+	for _, e := range r.tools {
+		if e.AutoRemediationEligible {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// IsAutoRemediationEligible reports whether the named tool is eligible for
+// auto-remediation. Returns false for unknown tools.
+func (r *Registry) IsAutoRemediationEligible(name string) bool {
+	e, ok := r.byName[name]
+	return ok && e.AutoRemediationEligible
 }
 
 // ListByCapability returns all tools that declare the given capability.
@@ -192,6 +213,7 @@ var agentShortName = map[string]string{
 	"k8s_agent":               "k8s",
 	"incident_agent":          "incident",
 	"research_agent":          "research",
+	"sysadmin_agent":          "sysadmin",
 }
 
 // Build constructs a Registry from the gateway's discovered agents.
@@ -229,7 +251,7 @@ func Build(agentCards map[string]*a2a.AgentCard, agentSchemas map[string]map[str
 				desc = skill.Name
 			}
 
-			fleetEligible, caps, supersedes, schemaFingerprint := parseSkillTags(skill.Tags)
+			fleetEligible, autoRemediationEligible, caps, supersedes, schemaFingerprint := parseSkillTags(skill.Tags)
 
 			var inputSchema map[string]any
 			if agentSchemas != nil {
@@ -239,16 +261,17 @@ func Build(agentCards map[string]*a2a.AgentCard, agentSchemas map[string]map[str
 			}
 
 			entries = append(entries, ToolEntry{
-				Name:              toolName,
-				Agent:             shortName,
-				Description:       desc,
-				InputSchema:       inputSchema,
-				ActionClass:       actionClass,
-				FleetEligible:     fleetEligible,
-				Capabilities:      caps,
-				Supersedes:        supersedes,
-				AgentVersion:      card.Version,
-				SchemaFingerprint: schemaFingerprint,
+				Name:                    toolName,
+				Agent:                   shortName,
+				Description:             desc,
+				InputSchema:             inputSchema,
+				ActionClass:             actionClass,
+				FleetEligible:           fleetEligible,
+				AutoRemediationEligible: autoRemediationEligible,
+				Capabilities:            caps,
+				Supersedes:              supersedes,
+				AgentVersion:            card.Version,
+				SchemaFingerprint:       schemaFingerprint,
 			})
 		}
 	}
@@ -270,11 +293,13 @@ func extractToolName(agentName, skillID string) string {
 
 // parseSkillTags extracts typed taxonomy metadata from the key:value tag strings
 // that applyCardOptions serializes from the typed CardOptions fields.
-func parseSkillTags(tags []string) (fleetEligible bool, caps, supersedes []string, schemaFingerprint string) {
+func parseSkillTags(tags []string) (fleetEligible, autoRemediationEligible bool, caps, supersedes []string, schemaFingerprint string) {
 	for _, tag := range tags {
 		switch {
 		case tag == "fleet:true":
 			fleetEligible = true
+		case tag == "auto_remediation:true":
+			autoRemediationEligible = true
 		case strings.HasPrefix(tag, "cap:"):
 			caps = append(caps, strings.TrimPrefix(tag, "cap:"))
 		case strings.HasPrefix(tag, "supersedes:"):
@@ -283,5 +308,5 @@ func parseSkillTags(tags []string) (fleetEligible bool, caps, supersedes []strin
 			schemaFingerprint = strings.TrimPrefix(tag, "schema_hash:")
 		}
 	}
-	return fleetEligible, caps, supersedes, schemaFingerprint
+	return fleetEligible, autoRemediationEligible, caps, supersedes, schemaFingerprint
 }

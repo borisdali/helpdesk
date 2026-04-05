@@ -254,6 +254,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	if runID != "" {
 		extra["run_id"] = runID
 	}
+	if findings != "" {
+		extra["findings"] = findings
+	}
 	if len(warnings) > 0 {
 		extra["warnings"] = warnings
 	}

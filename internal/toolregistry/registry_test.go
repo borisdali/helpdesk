@@ -250,7 +250,7 @@ func TestParseSkillTags(t *testing.T) {
 		"supersedes:get_server_info",
 		"supersedes:get_connection_stats",
 	}
-	fleet, caps, supersedes, schemaFP := parseSkillTags(tags)
+	fleet, _, caps, supersedes, schemaFP := parseSkillTags(tags)
 	if !fleet {
 		t.Error("fleet = false, want true")
 	}
@@ -267,16 +267,111 @@ func TestParseSkillTags(t *testing.T) {
 
 func TestParseSkillTags_SchemaHash(t *testing.T) {
 	tags := []string{"fleet:true", "schema_hash:abc123def456"}
-	_, _, _, schemaFP := parseSkillTags(tags)
+	_, _, _, _, schemaFP := parseSkillTags(tags)
 	if schemaFP != "abc123def456" {
 		t.Errorf("schemaFingerprint = %q, want %q", schemaFP, "abc123def456")
 	}
 }
 
 func TestParseSkillTags_Empty(t *testing.T) {
-	fleet, caps, supersedes, schemaFP := parseSkillTags([]string{"postgresql", "database"})
+	fleet, _, caps, supersedes, schemaFP := parseSkillTags([]string{"postgresql", "database"})
 	if fleet || len(caps) != 0 || len(supersedes) != 0 || schemaFP != "" {
 		t.Errorf("parseSkillTags with no taxonomy tags: fleet=%v caps=%v supersedes=%v schemaFP=%q", fleet, caps, supersedes, schemaFP)
+	}
+}
+
+func TestParseSkillTags_AutoRemediation(t *testing.T) {
+	tags := []string{"host", "auto_remediation:true", "fleet:true"}
+	fleet, autoRemediation, _, _, _ := parseSkillTags(tags)
+	if !fleet {
+		t.Error("fleet = false, want true")
+	}
+	if !autoRemediation {
+		t.Error("autoRemediationEligible = false, want true")
+	}
+}
+
+func TestParseSkillTags_AutoRemediation_Absent(t *testing.T) {
+	_, autoRemediation, _, _, _ := parseSkillTags([]string{"fleet:true", "cap:uptime"})
+	if autoRemediation {
+		t.Error("autoRemediationEligible = true, want false when tag is absent")
+	}
+}
+
+func TestListAutoRemediationEligible(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "restart_container", Agent: "sysadmin", AutoRemediationEligible: true},
+		{Name: "restart_service", Agent: "sysadmin", AutoRemediationEligible: true},
+		{Name: "check_host", Agent: "sysadmin", AutoRemediationEligible: false},
+		{Name: "check_connection", Agent: "database"},
+	}
+	r := New(entries)
+
+	eligible := r.ListAutoRemediationEligible()
+	if len(eligible) != 2 {
+		t.Fatalf("ListAutoRemediationEligible() len = %d, want 2", len(eligible))
+	}
+	names := map[string]bool{eligible[0].Name: true, eligible[1].Name: true}
+	if !names["restart_container"] || !names["restart_service"] {
+		t.Errorf("ListAutoRemediationEligible() = %v, want [restart_container restart_service]", eligible)
+	}
+}
+
+func TestIsAutoRemediationEligible(t *testing.T) {
+	entries := []ToolEntry{
+		{Name: "restart_container", Agent: "sysadmin", AutoRemediationEligible: true},
+		{Name: "check_host", Agent: "sysadmin", AutoRemediationEligible: false},
+	}
+	r := New(entries)
+
+	if !r.IsAutoRemediationEligible("restart_container") {
+		t.Error("IsAutoRemediationEligible(restart_container) = false, want true")
+	}
+	if r.IsAutoRemediationEligible("check_host") {
+		t.Error("IsAutoRemediationEligible(check_host) = true, want false")
+	}
+	if r.IsAutoRemediationEligible("nonexistent") {
+		t.Error("IsAutoRemediationEligible(nonexistent) = true, want false")
+	}
+}
+
+func TestBuild_AutoRemediationEligible(t *testing.T) {
+	card := &a2a.AgentCard{
+		Name:    "sysadmin_agent",
+		Version: "1.0.0",
+		Skills: []a2a.AgentSkill{
+			{
+				ID:   "sysadmin_agent-restart_container",
+				Name: "restart_container",
+				Tags: []string{"auto_remediation:true"},
+			},
+			{
+				ID:   "sysadmin_agent-check_host",
+				Name: "check_host",
+				Tags: []string{},
+			},
+		},
+	}
+	reg := Build(
+		map[string]*a2a.AgentCard{"sysadmin_agent": card},
+		nil,
+		audit.ToolClassification,
+	)
+
+	restart, ok := reg.Get("restart_container")
+	if !ok {
+		t.Fatal("restart_container not found")
+	}
+	if !restart.AutoRemediationEligible {
+		t.Error("restart_container AutoRemediationEligible = false, want true")
+	}
+
+	check, ok := reg.Get("check_host")
+	if !ok {
+		t.Fatal("check_host not found")
+	}
+	if check.AutoRemediationEligible {
+		t.Error("check_host AutoRemediationEligible = true, want false")
 	}
 }
 

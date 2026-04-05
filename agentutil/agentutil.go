@@ -1125,6 +1125,11 @@ type CardOptions struct {
 	// SkillExamples maps a skill ID to example prompts/scenarios.
 	SkillExamples map[string][]string
 
+	// SkillAutoRemediationEligible declares which skills may execute without
+	// per-step approval in agent_auto playbooks (subject to customer policy
+	// and the playbook's permitted_tools list).
+	SkillAutoRemediationEligible map[string]bool
+
 	// SkillFleetEligible declares which skills are eligible for fleet jobs.
 	// Only fleet-eligible tools are shown to the fleet planner.
 	// Skill IDs that are absent or false are invisible to the planner.
@@ -1172,6 +1177,9 @@ func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
 		// compile-time type safety to agent authors.
 		if v, ok := opts.SkillFleetEligible[skill.ID]; ok && v {
 			skill.Tags = append(skill.Tags, "fleet:true")
+		}
+		if v, ok := opts.SkillAutoRemediationEligible[skill.ID]; ok && v {
+			skill.Tags = append(skill.Tags, "auto_remediation:true")
 		}
 		for _, cap := range opts.SkillCapabilities[skill.ID] {
 			skill.Tags = append(skill.Tags, "cap:"+cap)

@@ -451,7 +451,107 @@ func TestHandlePlaybookRun_FleetMode_RequiresEvidenceMatch(t *testing.T) {
 	}
 }
 
-// TestHandlePlaybookRun_FleetMode_NoLLM verifies that a fleet-mode playbook run
+// --- extractConclusionFallback ---
+
+func TestExtractConclusionFallback_InlineCONCLUSION(t *testing.T) {
+	text := "The database is running normally.\n\n**CONCLUSION:** Database is OPERATIONAL; no action required."
+	got := extractConclusionFallback(text)
+	if got != "Database is OPERATIONAL; no action required." {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExtractConclusionFallback_InlineCONCLUSION_PlainPrefix(t *testing.T) {
+	text := "Checked all connections.\nCONCLUSION: All connections healthy."
+	got := extractConclusionFallback(text)
+	if got != "All connections healthy." {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExtractConclusionFallback_SectionHeading(t *testing.T) {
+	text := "Investigated the issue.\n\n## Findings Summary\n\nDatabase is DOWN; restart required."
+	got := extractConclusionFallback(text)
+	if got != "Database is DOWN; restart required." {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExtractConclusionFallback_SectionHeading_BoldLine(t *testing.T) {
+	text := "Checked logs.\n\n## Summary\n\n**Database is UNREACHABLE — connection refused on port 5432.**"
+	got := extractConclusionFallback(text)
+	if got != "Database is UNREACHABLE — connection refused on port 5432." {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExtractConclusionFallback_StandaloneBoldStatusLine(t *testing.T) {
+	// Pass 3: bold line with status keyword in last third of response.
+	lines := make([]string, 12)
+	for i := range lines {
+		lines[i] = "Some analysis line."
+	}
+	lines[10] = "**Database is HEALTHY and accepting connections.**"
+	text := strings.Join(lines, "\n")
+	got := extractConclusionFallback(text)
+	if got != "Database is HEALTHY and accepting connections." {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExtractConclusionFallback_NoMatch(t *testing.T) {
+	text := "The database connection check returned an error. Please investigate further."
+	got := extractConclusionFallback(text)
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestExtractConclusionFallback_EmptyInput(t *testing.T) {
+	if got := extractConclusionFallback(""); got != "" {
+		t.Errorf("expected empty string for empty input, got %q", got)
+	}
+}
+
+// --- parseAgentEscalation edge cases ---
+
+func TestParseAgentEscalation_BoldFindings(t *testing.T) {
+	// LLM uses **FINDINGS:** instead of plain FINDINGS:
+	text := "Investigated the cluster.\n\n**FINDINGS:** WAL corruption on replica.\n**ESCALATE_TO:** pbs_pitr_recovery\n"
+	esc := parseAgentEscalation(text)
+	if esc.Findings != "WAL corruption on replica." {
+		t.Errorf("Findings = %q", esc.Findings)
+	}
+	if esc.EscalateTo != "pbs_pitr_recovery" {
+		t.Errorf("EscalateTo = %q", esc.EscalateTo)
+	}
+}
+
+func TestParseAgentEscalation_EscalateToNone(t *testing.T) {
+	// ESCALATE_TO: none must not populate EscalateTo.
+	text := "All checks passed.\n\nFINDINGS: Database is operational.\nESCALATE_TO: none\n"
+	esc := parseAgentEscalation(text)
+	if esc.EscalateTo != "" {
+		t.Errorf("EscalateTo = %q, want empty (none should be discarded)", esc.EscalateTo)
+	}
+	if esc.Findings != "Database is operational." {
+		t.Errorf("Findings = %q", esc.Findings)
+	}
+}
+
+func TestParseAgentEscalation_FallbackFromCleanText(t *testing.T) {
+	// No FINDINGS: line — fallback should extract from **CONCLUSION:** in clean text.
+	text := "The investigation is complete.\n\n**CONCLUSION:** Database is DOWN; container exited with code 1."
+	esc := parseAgentEscalation(text)
+	if esc.Findings == "" {
+		t.Error("expected fallback to extract findings from **CONCLUSION:**, got empty")
+	}
+	if !strings.Contains(esc.Findings, "DOWN") {
+		t.Errorf("Findings should mention DOWN, got %q", esc.Findings)
+	}
+}
+
+// --- TestHandlePlaybookRun_FleetMode_NoLLM verifies that a fleet-mode playbook run
 // returns 503 when the planner LLM is not configured.
 func TestHandlePlaybookRun_FleetMode_NoLLM(t *testing.T) {
 	pb := &audit.Playbook{

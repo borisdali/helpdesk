@@ -8,15 +8,29 @@ import (
 	"strings"
 )
 
+// HostConfig describes how the sysadmin agent can perform OS/runtime-level
+// operations on the host running this database server.
+type HostConfig struct {
+	// ContainerRuntime is the container runtime managing this database process.
+	// Supported values: "docker", "podman". Empty means not containerised.
+	ContainerRuntime string `json:"container_runtime,omitempty"`
+	// ContainerName is the container name or ID to target (Docker/Podman).
+	ContainerName string `json:"container_name,omitempty"`
+	// SystemdUnit is the systemd service unit name, e.g. "postgresql-16".
+	// Used when the database runs directly on the host via systemd.
+	SystemdUnit string `json:"systemd_unit,omitempty"`
+}
+
 // DBServer represents a managed database server (AlloyDB Omni, standalone PostgreSQL, etc.).
 type DBServer struct {
-	Name             string   `json:"name"`
-	ConnectionString string   `json:"connection_string"`
-	K8sCluster       string   `json:"k8s_cluster,omitempty"`
-	K8sNamespace     string   `json:"k8s_namespace,omitempty"`
-	VMName           string   `json:"vm_name,omitempty"`
-	Tags             []string `json:"tags,omitempty"`        // Tags for policy matching (e.g., "production", "staging")
-	Sensitivity      []string `json:"sensitivity,omitempty"` // Sensitivity classes (e.g., "pii", "critical")
+	Name             string      `json:"name"`
+	ConnectionString string      `json:"connection_string"`
+	K8sCluster       string      `json:"k8s_cluster,omitempty"`
+	K8sNamespace     string      `json:"k8s_namespace,omitempty"`
+	VMName           string      `json:"vm_name,omitempty"`
+	Tags             []string    `json:"tags,omitempty"`        // Tags for policy matching (e.g., "production", "staging")
+	Sensitivity      []string    `json:"sensitivity,omitempty"` // Sensitivity classes (e.g., "pii", "critical")
+	Host             *HostConfig `json:"host,omitempty"`        // OS/runtime-level restart config for sysadmin agent
 }
 
 // K8sCluster represents a managed Kubernetes cluster.
@@ -57,13 +71,14 @@ func Load(path string) (*Config, error) {
 
 // DBInfo returns a formatted description of a database server with its hosting info expanded.
 type DBInfo struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	ConnectionString string `json:"connection_string"`
-	Hosting          string `json:"hosting"`
-	K8sContext       string `json:"k8s_context,omitempty"`
-	K8sNamespace     string `json:"k8s_namespace,omitempty"`
-	VMHost           string `json:"vm_host,omitempty"`
+	ID               string      `json:"id"`
+	Name             string      `json:"name"`
+	ConnectionString string      `json:"connection_string"`
+	Hosting          string      `json:"hosting"`
+	K8sContext       string      `json:"k8s_context,omitempty"`
+	K8sNamespace     string      `json:"k8s_namespace,omitempty"`
+	VMHost           string      `json:"vm_host,omitempty"`
+	Host             *HostConfig `json:"host,omitempty"`
 }
 
 // ListDatabases returns a list of all database servers with expanded hosting info.
@@ -102,6 +117,7 @@ func (c *Config) ListDatabases() []DBInfo {
 			info.Hosting = "Standalone"
 		}
 
+		info.Host = db.Host
 		dbs = append(dbs, info)
 	}
 
@@ -121,7 +137,16 @@ func (c *Config) Summary() string {
 	if len(c.DBServers) > 0 {
 		sb.WriteString("\nDatabases:\n")
 		for _, db := range c.ListDatabases() {
-			sb.WriteString(fmt.Sprintf("  - %s (%s): %s\n", db.ID, db.Name, db.Hosting))
+			line := fmt.Sprintf("  - %s (%s): %s", db.ID, db.Name, db.Hosting)
+			if db.Host != nil {
+				switch {
+				case db.Host.ContainerRuntime != "" && db.Host.ContainerName != "":
+					line += fmt.Sprintf(" [%s container: %s]", db.Host.ContainerRuntime, db.Host.ContainerName)
+				case db.Host.SystemdUnit != "":
+					line += fmt.Sprintf(" [systemd: %s]", db.Host.SystemdUnit)
+				}
+			}
+			sb.WriteString(line + "\n")
 		}
 	}
 

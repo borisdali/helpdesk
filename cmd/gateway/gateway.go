@@ -38,6 +38,9 @@ const agentNameIncident = "incident_agent"
 // agentNameResearch is the expected name for the research agent.
 const agentNameResearch = "research_agent"
 
+// agentNameSysadmin is the expected name for the sysadmin agent.
+const agentNameSysadmin = "sysadmin_agent"
+
 // Gateway translates REST requests into A2A calls to sub-agents.
 type Gateway struct {
 	agents           map[string]*discovery.Agent
@@ -163,6 +166,8 @@ var agentAliases = map[string]string{
 	"k8s":      agentNameK8s,
 	"incident": agentNameIncident,
 	"research": agentNameResearch,
+	"sysadmin": agentNameSysadmin,
+	"host":     agentNameSysadmin,
 }
 
 // RegisterRoutes sets up the REST endpoint handlers.

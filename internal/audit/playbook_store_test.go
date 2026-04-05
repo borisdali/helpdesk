@@ -681,6 +681,42 @@ func TestPlaybookStore_NewFields_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestPlaybookStore_PermittedTools_RoundTrip(t *testing.T) {
+	ps := newPlaybookTestStore(t)
+	ctx := context.Background()
+
+	pb := &Playbook{
+		Name:          "Auto-restart triage",
+		Description:   "desc",
+		ExecutionMode: "agent_auto",
+		PermittedTools: []string{"restart_container", "check_host"},
+	}
+	if err := ps.Create(ctx, pb); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.PermittedTools) != 2 || got.PermittedTools[0] != "restart_container" || got.PermittedTools[1] != "check_host" {
+		t.Errorf("PermittedTools = %v, want [restart_container check_host]", got.PermittedTools)
+	}
+
+	// Update: clear the list.
+	got.PermittedTools = nil
+	if err := ps.Update(ctx, got); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	updated, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get after Update: %v", err)
+	}
+	if len(updated.PermittedTools) != 0 {
+		t.Errorf("PermittedTools after clear = %v, want []", updated.PermittedTools)
+	}
+}
+
 func TestPlaybookStore_EntryPoint(t *testing.T) {
 	ps := newPlaybookTestStore(t)
 	ctx := context.Background()
