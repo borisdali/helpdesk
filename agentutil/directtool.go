@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
@@ -134,14 +135,17 @@ func registerDirectToolRoutes(mux *http.ServeMux, registry *DirectToolRegistry, 
 			traceStore.Set(req.TraceID)
 		}
 
+		start := time.Now()
 		output, err := fn(ctx, req.Args)
+		ms := time.Since(start).Milliseconds()
 		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
-			slog.Warn("direct tool call failed", "tool", toolName, "err", err)
+			slog.Warn("direct tool call failed", "tool", toolName, "err", err, "ms", ms)
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			json.NewEncoder(w).Encode(DirectToolResponse{Error: err.Error()}) //nolint:errcheck
 			return
 		}
+		slog.Debug("direct tool: ok", "tool", toolName, "ms", ms)
 		json.NewEncoder(w).Encode(DirectToolResponse{Output: output}) //nolint:errcheck
 	})
 }
