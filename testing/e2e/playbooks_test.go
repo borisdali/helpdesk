@@ -678,6 +678,118 @@ func TestPlaybooks_GetRunByID(t *testing.T) {
 	t.Logf("GET run OK: run_id=%s playbook_id=%v outcome=%v", runID, run["playbook_id"], run["outcome"])
 }
 
+// TestPlaybooks_DBDownPlaybooksHaveAgentFields verifies that the three DB-down
+// system playbooks are seeded with the correct execution_mode, entry_point,
+// escalates_to, and requires_evidence values. Does not require an API key.
+func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+
+	// Build series_id → playbook_id map.
+	idBySeries := map[string]string{}
+	for _, pb := range playbooks {
+		if sid, ok := pb["series_id"].(string); ok {
+			if id, ok := pb["playbook_id"].(string); ok {
+				idBySeries[sid] = id
+			}
+		}
+	}
+
+	// Helper: fetch a playbook by series ID.
+	getBySeriesID := func(t *testing.T, sid string) map[string]any {
+		t.Helper()
+		pbID, ok := idBySeries[sid]
+		if !ok {
+			t.Skipf("series %q not found in playbook list — stack may not be seeded", sid)
+		}
+		pb, err := client.PlaybookGet(ctx, pbID)
+		if err != nil {
+			t.Fatalf("PlaybookGet(%s): %v", sid, err)
+		}
+		return pb
+	}
+
+	t.Run("restart_triage_is_entry_point_agent", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_db_restart_triage")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if ep, _ := pb["entry_point"].(bool); !ep {
+			t.Error("entry_point = false, want true")
+		}
+		escalates, _ := pb["escalates_to"].([]any)
+		if len(escalates) == 0 {
+			t.Error("escalates_to is empty, want at least one series ID")
+		}
+		t.Logf("restart_triage: execution_mode=agent entry_point=true escalates_to=%v", escalates)
+	})
+
+	t.Run("config_recovery_is_agent_with_evidence", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_db_config_recovery")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if ep, _ := pb["entry_point"].(bool); ep {
+			t.Error("entry_point = true, want false (config recovery is not an entry point)")
+		}
+		escalates, _ := pb["escalates_to"].([]any)
+		if len(escalates) == 0 {
+			t.Error("escalates_to is empty, want at least one series ID")
+		}
+		evidence, _ := pb["requires_evidence"].([]any)
+		if len(evidence) == 0 {
+			t.Error("requires_evidence is empty, want at least one pattern")
+		}
+		t.Logf("config_recovery: escalates_to=%v requires_evidence=%v", escalates, evidence)
+	})
+
+	t.Run("pitr_recovery_is_agent_with_evidence", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_db_pitr_recovery")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		evidence, _ := pb["requires_evidence"].([]any)
+		if len(evidence) == 0 {
+			t.Error("requires_evidence is empty, want at least one pattern")
+		}
+		t.Logf("pitr_recovery: requires_evidence=%v", evidence)
+	})
+
+	t.Run("operational_playbooks_are_fleet", func(t *testing.T) {
+		for _, sid := range []string{
+			"pbs_vacuum_triage",
+			"pbs_slow_query_triage",
+			"pbs_connection_triage",
+			"pbs_replication_lag",
+		} {
+			pbID, ok := idBySeries[sid]
+			if !ok {
+				t.Logf("series %q not found (skipping)", sid)
+				continue
+			}
+			pb, err := client.PlaybookGet(ctx, pbID)
+			if err != nil {
+				t.Errorf("PlaybookGet(%s): %v", sid, err)
+				continue
+			}
+			if mode, _ := pb["execution_mode"].(string); mode != "fleet" {
+				t.Errorf("%s: execution_mode = %q, want fleet", sid, mode)
+			}
+		}
+	})
+}
+
 // TestPlaybooks_RunAgentMode calls POST /run on an agent-mode system playbook
 // (Database Down — Restart Triage) and verifies the response has the agent shape.
 // Requires LLM + a running database agent.

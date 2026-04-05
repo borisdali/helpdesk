@@ -65,10 +65,15 @@ func TestSysadminDirectRegistry_CheckHost(t *testing.T) {
 			"prod_db": {
 				Name:             "prod_db",
 				ConnectionString: "host=localhost",
-				Host: &infra.HostConfig{
-					ContainerRuntime: "docker",
-					ContainerName:    "alloydb-omni",
-				},
+				VMName:           "prod-vm",
+				ContainerName:    "alloydb-omni",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"prod-vm": {
+				Name:    "prod-vm",
+				Address: "localhost",
+				Runtime: "docker",
 			},
 		},
 	}

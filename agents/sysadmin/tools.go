@@ -15,7 +15,6 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
-	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
 
@@ -55,11 +54,21 @@ func argsToStruct[T any](args map[string]any) (T, error) {
 	return result, json.Unmarshal(data, &result)
 }
 
-// resolveHost returns the HostConfig, tags, and sensitivity for a DB server ID.
-// Returns an error if infraConfig is not loaded or the server is unknown.
-func resolveHost(serverID string) (*infra.HostConfig, []string, []string, error) {
+// resolvedHost holds the operational properties of a DB server's host,
+// assembled by traversing DBServer → VM in the infrastructure config.
+type resolvedHost struct {
+	Runtime       string   // container runtime binary: "docker", "podman", or "" (systemd)
+	ContainerName string   // from DBServer.ContainerName (docker/podman only)
+	SystemdUnit   string   // from DBServer.SystemdUnit (systemd only)
+	Tags          []string // from DBServer.Tags
+	Sensitivity   []string // from DBServer.Sensitivity
+}
+
+// resolveHost looks up a DB server by ID, traverses to its VM, and assembles
+// the resolvedHost the sysadmin tools need to operate on the process.
+func resolveHost(serverID string) (resolvedHost, error) {
 	if infraConfig == nil {
-		return nil, nil, nil, fmt.Errorf("no infrastructure config loaded; set HELPDESK_INFRA_CONFIG")
+		return resolvedHost{}, fmt.Errorf("no infrastructure config loaded; set HELPDESK_INFRA_CONFIG")
 	}
 	serverID = strings.TrimSpace(serverID)
 	db, ok := infraConfig.DBServers[serverID]
@@ -69,29 +78,57 @@ func resolveHost(serverID string) (*infra.HostConfig, []string, []string, error)
 			known = append(known, id)
 		}
 		sort.Strings(known)
-		return nil, nil, nil, fmt.Errorf("server %q not found in infrastructure config. Known servers: %s",
+		return resolvedHost{}, fmt.Errorf("server %q not found in infrastructure config. Known servers: %s",
 			serverID, strings.Join(known, ", "))
 	}
-	if db.Host == nil {
-		return nil, db.Tags, db.Sensitivity, fmt.Errorf(
-			"server %q has no host config; add a 'host' block to infrastructure.json", serverID)
+	if db.VMName == "" {
+		return resolvedHost{}, fmt.Errorf(
+			"server %q has no vm_name; sysadmin operations require a VM entry in infrastructure.json", serverID)
 	}
-	return db.Host, db.Tags, db.Sensitivity, nil
+	vm, ok := infraConfig.VMs[db.VMName]
+	if !ok {
+		return resolvedHost{}, fmt.Errorf(
+			"server %q references VM %q which is not defined in infrastructure.json", serverID, db.VMName)
+	}
+
+	h := resolvedHost{
+		Runtime:       vm.Runtime,
+		ContainerName: db.ContainerName,
+		SystemdUnit:   db.SystemdUnit,
+		Tags:          db.Tags,
+		Sensitivity:   db.Sensitivity,
+	}
+
+	// Validate: must be configured for either a container runtime or systemd.
+	switch h.Runtime {
+	case "docker", "podman":
+		if h.ContainerName == "" {
+			return resolvedHost{}, fmt.Errorf(
+				"server %q: VM runtime is %q but no container_name is set on the db_server entry", serverID, h.Runtime)
+		}
+	case "":
+		if h.SystemdUnit == "" {
+			return resolvedHost{}, fmt.Errorf(
+				"server %q: VM has no runtime (systemd expected) but no systemd_unit is set on the db_server entry", serverID)
+		}
+	default:
+		return resolvedHost{}, fmt.Errorf(
+			"server %q: VM has unknown runtime %q (supported: docker, podman, or empty for systemd)", serverID, h.Runtime)
+	}
+
+	return h, nil
 }
 
 // containerRuntimeBin returns the container runtime binary ("docker" or "podman"),
-// or "" when the host uses systemd. Returns an error for unknown/unconfigured hosts.
-func containerRuntimeBin(host *infra.HostConfig) (string, error) {
-	switch host.ContainerRuntime {
+// or "" when the host uses systemd.
+func containerRuntimeBin(host resolvedHost) (string, error) {
+	switch host.Runtime {
 	case "docker", "podman":
-		return host.ContainerRuntime, nil
+		return host.Runtime, nil
 	case "":
-		if host.SystemdUnit != "" {
-			return "", nil // systemd path
-		}
-		return "", fmt.Errorf("host config has neither container_runtime nor systemd_unit configured")
+		return "", nil // systemd path
 	default:
-		return "", fmt.Errorf("unknown container_runtime %q (supported: docker, podman)", host.ContainerRuntime)
+		return "", fmt.Errorf("unknown runtime %q (supported: docker, podman, or empty for systemd)", host.Runtime)
 	}
 }
 
@@ -103,7 +140,7 @@ type CheckHostArgs struct {
 }
 
 func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, error) {
-	host, _, _, err := resolveHost(args.Target)
+	host, err := resolveHost(args.Target)
 	if err != nil {
 		return CheckHostResult{}, err
 	}
@@ -187,7 +224,7 @@ type GetHostLogsArgs struct {
 }
 
 func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult, error) {
-	host, _, _, err := resolveHost(args.Target)
+	host, err := resolveHost(args.Target)
 	if err != nil {
 		return HostLogsResult{}, err
 	}
@@ -304,11 +341,11 @@ type RestartContainerArgs struct {
 }
 
 func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (RestartResult, error) {
-	host, tags, sensitivity, err := resolveHost(args.Target)
+	host, err := resolveHost(args.Target)
 	if err != nil {
 		return RestartResult{}, err
 	}
-	if host.ContainerRuntime == "" {
+	if host.Runtime == "" {
 		return RestartResult{}, fmt.Errorf(
 			"server %q is managed via systemd, not a container runtime; use restart_service instead", args.Target)
 	}
@@ -321,7 +358,7 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 	if policyEnforcer != nil {
 		policyCtx := agentutil.WithToolName(ctx, "restart_container")
 		if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
-			policy.ActionDestructive, tags, "restart container: "+args.Reason, sensitivity); err != nil {
+			policy.ActionDestructive, host.Tags, "restart container: "+args.Reason, host.Sensitivity); err != nil {
 			slog.Warn("policy denied container restart", "target", args.Target, "err", err)
 			return RestartResult{}, err
 		}
@@ -375,7 +412,7 @@ type RestartServiceArgs struct {
 }
 
 func restartServiceImpl(ctx context.Context, args RestartServiceArgs) (RestartResult, error) {
-	host, tags, sensitivity, err := resolveHost(args.Target)
+	host, err := resolveHost(args.Target)
 	if err != nil {
 		return RestartResult{}, err
 	}
@@ -387,7 +424,7 @@ func restartServiceImpl(ctx context.Context, args RestartServiceArgs) (RestartRe
 	if policyEnforcer != nil {
 		policyCtx := agentutil.WithToolName(ctx, "restart_service")
 		if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
-			policy.ActionDestructive, tags, "restart service: "+args.Reason, sensitivity); err != nil {
+			policy.ActionDestructive, host.Tags, "restart service: "+args.Reason, host.Sensitivity); err != nil {
 			slog.Warn("policy denied service restart", "target", args.Target, "err", err)
 			return RestartResult{}, err
 		}

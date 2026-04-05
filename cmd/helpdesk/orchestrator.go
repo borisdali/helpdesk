@@ -62,8 +62,9 @@ type K8sCluster struct {
 
 // VM represents a virtual machine hosting infrastructure.
 type VM struct {
-	Name string `json:"name"`
-	Host string `json:"host"`
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	Runtime string `json:"runtime,omitempty"`
 }
 
 // InfraConfig holds the infrastructure inventory.
@@ -129,7 +130,7 @@ func buildInfraPromptSection(config *InfraConfig) string {
 		} else if db.VMName != "" {
 			// Expand the VM reference inline.
 			if vm, ok := config.VMs[db.VMName]; ok {
-				sb.WriteString(fmt.Sprintf("- Hosted on VM: %s (host: `%s`)\n", vm.Name, vm.Host))
+				sb.WriteString(fmt.Sprintf("- Hosted on VM: %s (address: `%s`)\n", vm.Name, vm.Address))
 			} else {
 				sb.WriteString(fmt.Sprintf("- Hosted on VM: %s (details not configured)\n", db.VMName))
 			}

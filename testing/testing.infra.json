@@ -7,6 +7,8 @@
       "connection_string": "host=localhost port=15432 dbname=testdb user=postgres password=testpass",
       "k8s_cluster": "faulttest-cluster",
       "k8s_namespace": "helpdesk-test",
+      "vm_name": "faulttest-vm",
+      "container_name": "helpdesk-test-pg",
       "tags": ["test"]
     }
   },
@@ -19,5 +21,11 @@
     }
   },
 
-  "vms": {}
+  "vms": {
+    "faulttest-vm": {
+      "name": "Fault Test VM",
+      "address": "localhost",
+      "runtime": "docker"
+    }
+  }
 }

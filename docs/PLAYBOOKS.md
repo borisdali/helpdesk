@@ -75,7 +75,7 @@ Seeding is idempotent — restarting auditd never duplicates system playbooks. I
 
 ## API
 
-All playbook endpoints are accessible via the gateway on port 8080. The gateway proxies CRUD and activation calls to auditd; the import endpoint is handled entirely within the gateway (no auditd round-trip for the LLM extraction path).
+All playbook endpoints are accessible via the Gateway on port 8080. The Gateway proxies CRUD and activation calls to auditd; the import endpoint is handled entirely within the Gateway (no auditd round-trip for the LLM extraction path).
 
 ### List playbooks
 
@@ -272,7 +272,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/r
   | jq .text
 ```
 
-**Run recording** — every `/run` call records a `PlaybookRun` entry in auditd before the LLM or agent is invoked. The run starts with `outcome=unknown`. For agent-mode runs the gateway parses the agent's structured response and updates the outcome automatically — see [Structured escalation signal](#structured-escalation-signal). Operators can always override the outcome via `PATCH /playbook-runs/{runID}`. See [Run tracking](#run-tracking) below.
+**Run recording** — every `/run` call records a `PlaybookRun` entry in auditd before the LLM or agent is invoked. The run starts with `outcome=unknown`. For agent-mode runs the Gateway parses the agent's structured response and updates the outcome automatically — see [Structured escalation signal](#structured-escalation-signal). Operators can always override the outcome via `PATCH /playbook-runs/{runID}`. See [Run tracking](#run-tracking) below.
 
 **Requires-evidence warnings** — if the playbook has `requires_evidence` patterns and the provided `context` does not contain matching log lines or error text, the response includes a `warnings` array:
 
@@ -317,9 +317,9 @@ POST /run → outcome=unknown (run recorded)
        operator reviews diagnosis — may patch outcome to correct it
 ```
 
-For agent-mode runs the gateway parses the agent's structured response (see [Structured escalation signal](#structured-escalation-signal)) and calls `PATCH /playbook-runs/{runID}` automatically once the agent session completes. `findings_summary` and `escalated_to` are populated from the agent's output. Operators can always override via a manual PATCH.
+For agent-mode runs the Gateway parses the agent's structured response (see [Structured escalation signal](#structured-escalation-signal)) and calls `PATCH /playbook-runs/{runID}` automatically once the agent session completes. `findings_summary` and `escalated_to` are populated from the agent's output. Operators can always override via a manual PATCH.
 
-The gateway records run start **synchronously** and run completion **asynchronously** (best-effort, 5 s timeout). If completion recording fails, the run remains at `outcome=unknown` — this is visible in `/stats` as the `abandoned` bucket if the operator patches it, or remains `unknown` until corrected.
+The Gateway records run start **synchronously** and run completion **asynchronously** (best-effort, 5 s timeout). If completion recording fails, the run remains at `outcome=unknown` — this is visible in `/stats` as the `abandoned` bucket if the operator patches it, or remains `unknown` until corrected.
 
 ### Get a specific run
 
@@ -492,14 +492,14 @@ Warnings never block execution — they are advisory.
 
 ### Structured escalation signal
 
-For agent-mode runs the gateway parses a structured signal from the agent's response before returning it to the caller. The agent is instructed to append two lines at the end of its response:
+For agent-mode runs the Gateway parses a structured signal from the agent's response before returning it to the caller. The agent is instructed to append two lines at the end of its response:
 
 ```
 FINDINGS: <one-sentence diagnosis and recommended action>
 ESCALATE_TO: <series_id>     # optional — only when a follow-on playbook is needed
 ```
 
-The gateway strips these lines from the visible `text` returned to the operator, then uses them to:
+The Gateway strips these lines from the visible `text` returned to the operator, then uses them to:
 
 - Set `outcome=resolved` when only `FINDINGS:` is present (root cause identified)
 - Set `outcome=escalated` and `escalated_to=<series_id>` when `ESCALATE_TO:` is present
@@ -528,7 +528,7 @@ fi
 
 ### Continuity threading
 
-When following an escalation path, pass the `prior_run_id` of the previous investigation in the request body. The gateway fetches the prior run's `findings_summary` from auditd and injects it into the agent prompt:
+When following an escalation path, pass the `prior_run_id` of the previous investigation in the request body. The Gateway fetches the prior run's `findings_summary` from auditd and injects it into the agent prompt:
 
 ```
 ## Prior Investigation Findings
@@ -626,7 +626,7 @@ POST /api/v1/fleet/playbooks/import
 | `rundeck` | Yes | Rundeck job definition XML/YAML — shell commands are translated into tool references |
 | `ansible` | Yes | Ansible playbook — tasks are translated into natural-language tool descriptions |
 
-LLM-backed formats require `HELPDESK_MODEL_VENDOR`, `HELPDESK_MODEL_NAME`, and `HELPDESK_API_KEY` to be configured on the gateway. The `yaml` format never calls the LLM and works without any API key.
+LLM-backed formats require `HELPDESK_MODEL_VENDOR`, `HELPDESK_MODEL_NAME`, and `HELPDESK_API_KEY` to be configured on the Gateway. The `yaml` format never calls the LLM and works without any API key.
 
 ### Response
 
@@ -812,8 +812,8 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `source` | string | `system` \| `imported` \| `manual` |
 | `entry_point` | bool | `true` marks this as the preferred starting playbook for its `problem_class`. Used by the planner to resolve "where do I start?" when multiple playbooks could apply. Only one playbook per problem class should have `entry_point=true`. |
 | `escalates_to` | []string | Series IDs (`pbs_*`) of playbooks to consider next if this playbook's hypothesis is disproven by the collected evidence. Injected into the agent prompt as escalation context. |
-| `requires_evidence` | []string | Log patterns or error signals expected to be present before this playbook is selected. Expressed as case-insensitive substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). At run time the gateway checks these patterns against the `context` field of the run request and emits `warnings` for any that are missing. Execution is never blocked — warnings are advisory only. |
-| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to the database agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. The gateway automatically parses the agent's structured response to set `outcome` and `findings_summary` on the run record. |
+| `requires_evidence` | []string | Log patterns or error signals expected to be present before this playbook is selected. Expressed as case-insensitive substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). At run time the Gateway checks these patterns against the `context` field of the run request and emits `warnings` for any that are missing. Execution is never blocked — warnings are advisory only. |
+| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to the database agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. The Gateway automatically parses the agent's structured response to set `outcome` and `findings_summary` on the run record. |
 | `stats` | object | Inline run statistics for the playbook's series. Populated by `GET /fleet/playbooks` (list); omitted when no runs have been recorded. See `PlaybookRunStats` below. Not persisted — computed on read. |
 | `created_at` | RFC3339 | Creation timestamp |
 | `updated_at` | RFC3339 | Last update timestamp |
@@ -837,8 +837,8 @@ Returned inline in `GET /fleet/playbooks` and by `GET /fleet/playbooks/{playbook
 
 | Outcome | How it gets recorded |
 |---|---|
-| `resolved` | Agent-mode: gateway parses a `FINDINGS:` line (or conclusion fallback) from the agent's response and no `ESCALATE_TO:` signal is present. Fleet-mode: operator PATCHes the run after confirming the plan resolved the issue. |
-| `escalated` | Agent-mode: gateway parses an `ESCALATE_TO: <series_id>` signal from the agent's response; `escalated_to` is set to that series ID. Fleet or agent: operator PATCHes with `outcome=escalated`. |
+| `resolved` | Agent-mode: Gateway parses a `FINDINGS:` line (or conclusion fallback) from the agent's response and no `ESCALATE_TO:` signal is present. Fleet-mode: operator PATCHes the run after confirming the plan resolved the issue. |
+| `escalated` | Agent-mode: Gateway parses an `ESCALATE_TO: <series_id>` signal from the agent's response; `escalated_to` is set to that series ID. Fleet or agent: operator PATCHes with `outcome=escalated`. |
 | `abandoned` | Operator explicitly PATCHes the run with `outcome=abandoned` — used when an investigation was started but not completed (e.g. alert cleared before diagnosis, wrong playbook selected). |
 | `unknown` | Default at run start. Remains `unknown` if the agent's response contained no parseable signal and the operator has not yet patched the run. Runs that stay `unknown` are **not counted** in `resolution_rate` or `escalation_rate` — only the denominator `total_runs` includes them. |
 

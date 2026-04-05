@@ -22,16 +22,16 @@ Sub-agents are standalone A2A servers. That means that if a provider with the de
              │                             │
              └──────────┬──────────────────┘
                         │  (A2A protocol)
-        ┌───────────────┼───────────────────┐
-        ▼               ▼                   ▼
-  ┌───────────┐   ┌───────────┐   ┌───────────────┐
-  │ database  │   │ k8s       │   │ incident      │
-  │ agent     │   │ agent     │   │ agent         │
-  │ :1100     │   │ :1102     │   │ :1104         │
-  │           │   │           │   │               │
-  │ 9 psql    │   │ 8 kubectl │   │ 2 bundle      │
-  │ tools     │   │ tools     │   │ tools         │
-  └───────────┘   └───────────┘   └───────────────┘
+        ┌───────────────┼───────────────────┬────────────────┐
+        ▼               ▼                   ▼                ▼
+  ┌───────────┐   ┌───────────┐   ┌─────────────┐   ┌────────────┐
+  │ database  │   │ k8s       │   │ sysadmin    │   │ incident   │
+  │ agent     │   │ agent     │   │ agent       │   │ agent      │
+  │ :1100     │   │ :1102     │   │ :1103       │   │ :1104      │
+  │           │   │           │   │             │   │            │
+  │ 9 psql    │   │ 8 kubectl │   │ 6 host/     │   │ 2 bundle   │
+  │ tools     │   │ tools     │   │ OS tools    │   │ tools      │
+  └───────────┘   └───────────┘   └─────────────┘   └────────────┘
 ```
 
 ## Table of Contents
@@ -150,7 +150,8 @@ or VM info to the sub-agent:
   "vms": {
     "vm-db-dev-01": {
       "name": "Dev Database VM",
-      "host": "db2.local.example.io"
+      "address": "db2.local.example.io",
+      "runtime": "docker"
     }
   }
 }
@@ -214,7 +215,7 @@ export HELPDESK_AGENT_URLS="http://host1:1100,http://host2:1102,http://host3:110
 export HELPDESK_GATEWAY_ADDR="0.0.0.0:8080"
 
 # Required: agent discovery (same as Orchestrator dynamic discovery)
-export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
+export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1103,http://localhost:1104"
 ```
 
 ### 4.4 Agent-specific
@@ -222,6 +223,9 @@ export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://l
 ```bash
 # Override default listen address for any agent
 export HELPDESK_AGENT_ADDR="0.0.0.0:1100"
+
+# SysAdmin agent: infrastructure config (required — agent needs the host block to resolve server IDs)
+export HELPDESK_INFRA_CONFIG="infrastructure.json"
 
 # Incident agent: output directory for bundles (defaults to current directory)
 export HELPDESK_INCIDENT_DIR="/path/to/incidents"
@@ -246,7 +250,10 @@ go run ./agents/database/
 # Terminal 2 — k8s agent (default :1102)
 go run ./agents/k8s/
 
-# Terminal 3 — incident agent (default :1104)
+# Terminal 3 — sysadmin agent (default :1103) — requires HELPDESK_INFRA_CONFIG
+HELPDESK_INFRA_CONFIG=infrastructure.json go run ./agents/sysadmin/
+
+# Terminal 4 — incident agent (default :1104)
 go run ./agents/incident/
 ```
 
@@ -304,7 +311,22 @@ works with the agents that are reachable.
 | `describe_pod` | Detailed pod info (conditions, events) |
 | `get_nodes` | List cluster nodes with status |
 
-### 6.3 Incident Agent (default :1104)
+### 6.3 SysAdmin Agent (default :1103)
+
+Operates at the OS and container-runtime level of the machines running your database services. Resolves a **server ID** by traversing `db_servers → vm_name → vms` to find the runtime (`docker`/`podman`/systemd) and process handle (`container_name` or `systemd_unit`). See [SYSADMIN_AGENT.md](SYSADMIN_AGENT.md) for full details.
+
+| Tool | Action class | Description |
+|------|-------------|-------------|
+| `check_host` | read | Inspect container/service running state (`running`, `stopped`, `restarting`) |
+| `get_host_logs` | read | Retrieve recent log output from the container or systemd journal |
+| `check_disk` | read | Report disk usage on the host |
+| `check_memory` | read | Report memory usage on the host |
+| `restart_container` | destructive | Restart the database container (Docker or Podman) |
+| `restart_service` | destructive | Restart the database systemd service |
+
+`restart_container` and `restart_service` require a policy pre-check and are flagged `auto_remediation_eligible: true` — meaning they can be called autonomously inside `agent_auto` playbooks when whitelisted in `permitted_tools`. The four R/O tools are always permitted.
+
+### 6.4 Incident Agent (default :1104)
 
 | Tool | Description |
 |------|-------------|
@@ -413,13 +435,17 @@ helpdesk/
 │   └── srebot/              # SRE bot demo (o11y watcher simulation)
 │       └── main.go          # Health check, AI diagnosis, incident + callback
 ├── agents/
-│   ├── database/            # PostgreSQL agent binary
+│   ├── database/            # PostgreSQL agent binary (port 1100)
 │   │   ├── main.go          # Entry point, uses agentutil SDK + audit
 │   │   └── tools.go         # 9 psql tools, runPsql, audit logging
-│   ├── k8s/                 # Kubernetes agent binary
+│   ├── k8s/                 # Kubernetes agent binary (port 1102)
 │   │   ├── main.go          # Entry point, uses agentutil SDK + audit
 │   │   └── tools.go         # 8 kubectl tools, runKubectl, audit logging
-│   └── incident/            # Incident diagnostic bundle agent binary
+│   ├── sysadmin/            # SysAdmin agent binary (port 1103)
+│   │   ├── main.go          # Entry point, uses agentutil SDK + audit; reads HELPDESK_INFRA_CONFIG
+│   │   ├── tools.go         # 6 host/OS tools, resolveHost, containerRuntimeBin, audit logging
+│   │   └── types.go         # Result types for all 6 tools
+│   └── incident/            # Incident diagnostic bundle agent binary (port 1104)
 │       ├── main.go          # Entry point, uses agentutil SDK
 │       ├── tools.go         # 2 tools, layer collectors, command helpers
 │       └── bundle.go        # Manifest, tarball assembly (archive/tar + gzip)
@@ -445,6 +471,7 @@ helpdesk/
 │   ├── orchestrator.txt
 │   ├── database.txt
 │   ├── k8s.txt
+│   ├── sysadmin.txt
 │   └── incident.txt
 ├── testing/                 # Failure injection testing framework
 │   ├── catalog/failures.yaml
@@ -638,7 +665,7 @@ See [API.md](API.md) for the complete reference including request/response shape
 
 Start the Gateway:
 ```bash
-HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104" \
+HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1103,http://localhost:1104" \
   go run ./cmd/gateway/
 ```
 

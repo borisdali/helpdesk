@@ -38,10 +38,15 @@ func withDockerInfra(t *testing.T) {
 			"prod_db": {
 				Name:             "prod_db",
 				ConnectionString: "host=localhost",
-				Host: &infra.HostConfig{
-					ContainerRuntime: "docker",
-					ContainerName:    "alloydb-omni",
-				},
+				VMName:           "prod-vm",
+				ContainerName:    "alloydb-omni",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"prod-vm": {
+				Name:    "prod-vm",
+				Address: "localhost",
+				Runtime: "docker",
 			},
 		},
 	}
@@ -56,9 +61,15 @@ func withSystemdInfra(t *testing.T) {
 			"prod_db": {
 				Name:             "prod_db",
 				ConnectionString: "host=localhost",
-				Host: &infra.HostConfig{
-					SystemdUnit: "postgresql-16",
-				},
+				VMName:           "prod-vm",
+				SystemdUnit:      "postgresql-16",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"prod-vm": {
+				Name:    "prod-vm",
+				Address: "localhost",
+				Runtime: "", // systemd
 			},
 		},
 	}
@@ -286,21 +297,21 @@ func TestRestartService_WrongType(t *testing.T) {
 
 // ── resolve_host ──────────────────────────────────────────────────────────────
 
-func TestResolveHost_NoHostConfig(t *testing.T) {
+func TestResolveHost_NoVMName(t *testing.T) {
 	infraConfig = &infra.Config{
 		DBServers: map[string]infra.DBServer{
 			"bare_db": {
 				Name:             "bare_db",
 				ConnectionString: "host=localhost",
-				// Host is nil
+				// VMName is empty — no VM configured
 			},
 		},
 	}
 	t.Cleanup(func() { infraConfig = nil })
 
-	_, _, _, err := resolveHost("bare_db")
+	_, err := resolveHost("bare_db")
 	if err == nil {
-		t.Error("expected error for server with nil Host, got nil")
+		t.Error("expected error for server with no vm_name, got nil")
 	}
 }
 
@@ -310,20 +321,25 @@ func TestResolveHost_PodmanRuntime(t *testing.T) {
 			"podman_db": {
 				Name:             "podman_db",
 				ConnectionString: "host=localhost",
-				Host: &infra.HostConfig{
-					ContainerRuntime: "podman",
-					ContainerName:    "pg16",
-				},
+				VMName:           "podman-vm",
+				ContainerName:    "pg16",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"podman-vm": {
+				Name:    "podman-vm",
+				Address: "localhost",
+				Runtime: "podman",
 			},
 		},
 	}
 	t.Cleanup(func() { infraConfig = nil })
 
-	host, _, _, err := resolveHost("podman_db")
+	host, err := resolveHost("podman_db")
 	if err != nil {
 		t.Fatalf("resolveHost: %v", err)
 	}
-	if host.ContainerRuntime != "podman" {
-		t.Errorf("ContainerRuntime = %q, want podman", host.ContainerRuntime)
+	if host.Runtime != "podman" {
+		t.Errorf("Runtime = %q, want podman", host.Runtime)
 	}
 }

@@ -148,7 +148,7 @@ func TestBuildInfraPromptSection_Full(t *testing.T) {
 			"prod-cluster": {Name: "Prod Cluster", Context: "gke_prod"},
 		},
 		VMs: map[string]VM{
-			"vm-1": {Name: "DB Host", Host: "10.0.0.5"},
+			"vm-1": {Name: "DB Host", Address: "10.0.0.5"},
 		},
 	}
 
@@ -200,7 +200,7 @@ func TestBuildInfraPromptSection_DBOnVM(t *testing.T) {
 			},
 		},
 		VMs: map[string]VM{
-			"vm-1": {Name: "DB Host", Host: "10.0.0.5"},
+			"vm-1": {Name: "DB Host", Address: "10.0.0.5"},
 		},
 	}
 

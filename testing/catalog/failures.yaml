@@ -713,6 +713,43 @@ failures:
         category: "disk_pressure"
     timeout: 60s
 
+  # ── Host failures (1) ──────────────────────────────────────────────────
+
+  - id: host-container-stopped
+    name: "Database container stopped"
+    category: host
+    severity: critical
+    description: >
+      The PostgreSQL container is stopped on the host. The database is
+      unreachable. The sysadmin agent must identify the stopped container
+      state and report on the last log output before shutdown.
+    inject:
+      type: docker
+      action: stop
+      service: postgres
+    teardown:
+      type: docker
+      action: start
+      service: postgres
+    prompt: >
+      The database server 'faulttest-db' is not responding. Please
+      check the host-level status of the server and investigate why
+      the database process is not running.
+    evaluation:
+      expected_tools:
+        - check_host
+        - get_host_logs
+      expected_keywords:
+        any_of:
+          - "stopped"
+          - "exited"
+          - "container"
+          - "not running"
+          - "offline"
+      expected_diagnosis:
+        category: "container_stopped"
+    timeout: 60s
+
   # ── Compound failures (2) ──────────────────────────────────────────────
 
   - id: compound-db-pod-crash
