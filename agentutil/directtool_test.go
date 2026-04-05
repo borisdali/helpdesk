@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 	"helpdesk/internal/identity"
 )
 
@@ -43,10 +46,29 @@ func TestDirectToolRegistry_GetUnknown(t *testing.T) {
 
 // --- registerDirectToolRoutes HTTP handler ---
 
-// makeDirectToolMux builds a ServeMux with the given registry wired in.
+// makeDirectToolMux builds a ServeMux with the given registry wired in (no auth).
 func makeDirectToolMux(r *DirectToolRegistry, ts *audit.CurrentTraceStore) *http.ServeMux {
 	mux := http.NewServeMux()
-	registerDirectToolRoutes(mux, r, ts)
+	idProvider := &identity.NoAuthProvider{}
+	authzr := authz.NewAuthorizer(authz.DefaultAgentPermissions, false) // not enforcing
+	registerDirectToolRoutes(mux, r, ts, idProvider, authzr)
+	return mux
+}
+
+// makeAuthToolMux builds a ServeMux with auth enforced using the given users.yaml content.
+func makeAuthToolMux(t *testing.T, r *DirectToolRegistry, usersYAML string) *http.ServeMux {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "users.yaml")
+	if err := os.WriteFile(path, []byte(usersYAML), 0600); err != nil {
+		t.Fatalf("write users.yaml: %v", err)
+	}
+	idProvider, err := identity.NewStaticProvider(path)
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
+	}
+	authzr := authz.NewAuthorizer(authz.DefaultAgentPermissions, true)
+	mux := http.NewServeMux()
+	registerDirectToolRoutes(mux, r, nil, idProvider, authzr)
 	return mux
 }
 
@@ -268,6 +290,31 @@ func TestDirectToolRoutes_PurposeNoteAndExplicitPropagated(t *testing.T) {
 	}
 }
 
+// TestDirectToolRoutes_FlatArgs verifies that a body without an "args" wrapper
+// is accepted as flat args, matching the shape advertised in input_schema.
+func TestDirectToolRoutes_FlatArgs(t *testing.T) {
+	var capturedArgs map[string]any
+
+	r := NewDirectToolRegistry()
+	r.Register("flat_tool", func(ctx context.Context, args map[string]any) (string, error) {
+		capturedArgs = args
+		return "ok", nil
+	})
+	mux := makeDirectToolMux(r, nil)
+
+	// Flat format — no "args" key, just the tool's own fields at the top level.
+	req := httptest.NewRequest(http.MethodPost, "/tool/flat_tool", strings.NewReader(`{"target":"prod-db"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if capturedArgs["target"] != "prod-db" {
+		t.Errorf("target = %v, want prod-db", capturedArgs["target"])
+	}
+}
+
 // TestDirectToolRoutes_ArgsPassedThrough verifies that complex nested args are
 // faithfully passed to the tool function without modification.
 func TestDirectToolRoutes_ArgsPassedThrough(t *testing.T) {
@@ -332,4 +379,88 @@ func TestDirectToolRoutes_ServicePrincipalPropagated(t *testing.T) {
 	if capturedPrincipal.UserID != "" {
 		t.Errorf("Principal.UserID = %q, want empty for service principal", capturedPrincipal.UserID)
 	}
+}
+
+// ── Auth enforcement tests ────────────────────────────────────────────────────
+
+const testUsersYAML = `
+service_accounts:
+  - id: gateway
+    roles: [service]
+    api_key_hash: "%s"
+`
+
+// TestDirectToolRoutes_Auth_ServiceAccountAllowed verifies that a valid
+// service-account Bearer token passes the auth gate.
+func TestDirectToolRoutes_Auth_ServiceAccountAllowed(t *testing.T) {
+	r := NewDirectToolRegistry()
+	r.Register("ok_tool", func(_ context.Context, _ map[string]any) (string, error) {
+		return "ok", nil
+	})
+
+	// Generate a test API key and its hash via the static provider helper.
+	apiKey, keyHash := mustGenerateAPIKey(t)
+	yaml := fmt.Sprintf(testUsersYAML, keyHash)
+	mux := makeAuthToolMux(t, r, yaml)
+
+	req := httptest.NewRequest(http.MethodPost, "/tool/ok_tool", strings.NewReader(`{"args":{}}`))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("valid service account: status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDirectToolRoutes_Auth_AnonymousRejected verifies that a request with no
+// credentials is rejected with 401 when auth is enforcing.
+func TestDirectToolRoutes_Auth_AnonymousRejected(t *testing.T) {
+	r := NewDirectToolRegistry()
+	r.Register("ok_tool", func(_ context.Context, _ map[string]any) (string, error) {
+		return "ok", nil
+	})
+	mux := makeAuthToolMux(t, r, "service_accounts: []\nusers: []\n")
+
+	req := httptest.NewRequest(http.MethodPost, "/tool/ok_tool", strings.NewReader(`{"args":{}}`))
+	// No Authorization header.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous caller: status = %d, want 401", rec.Code)
+	}
+}
+
+// TestDirectToolRoutes_Auth_HumanRejected verifies that a human X-User caller
+// is rejected with 403 (ServiceOnly endpoint).
+func TestDirectToolRoutes_Auth_HumanRejected(t *testing.T) {
+	r := NewDirectToolRegistry()
+	r.Register("ok_tool", func(_ context.Context, _ map[string]any) (string, error) {
+		return "ok", nil
+	})
+	yaml := "users:\n  - id: alice@example.com\n    roles: [dba]\n"
+	mux := makeAuthToolMux(t, r, yaml)
+
+	req := httptest.NewRequest(http.MethodPost, "/tool/ok_tool", strings.NewReader(`{"args":{}}`))
+	req.Header.Set("X-User", "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("human caller on ServiceOnly endpoint: status = %d, want 403", rec.Code)
+	}
+}
+
+// mustGenerateAPIKey creates a raw API key and its Argon2id hash suitable for
+// users.yaml, using the same HashAPIKey function as cmd/hashapikey.
+func mustGenerateAPIKey(t *testing.T) (rawKey, hash string) {
+	t.Helper()
+	rawKey = "test-gateway-key"
+	var err error
+	hash, err = identity.HashAPIKey(rawKey)
+	if err != nil {
+		t.Fatalf("HashAPIKey: %v", err)
+	}
+	return rawKey, hash
 }

@@ -52,6 +52,7 @@ type Gateway struct {
 	identityProvider identity.Provider       // resolves caller identity on every request
 	authzr           *authz.Authorizer       // central per-route authorizer (nil = no authz)
 	operatingMode    string                  // "readonly" or "fix"
+	agentAPIKey      string                  // Bearer token sent to agent POST /tool/{name} endpoints
 	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
 	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
@@ -95,6 +96,12 @@ func (g *Gateway) SetAuditURL(url string) {
 // SetAuditAPIKey sets the Bearer token used when proxying requests to auditd.
 func (g *Gateway) SetAuditAPIKey(key string) {
 	g.auditAPIKey = key
+}
+
+// SetAgentAPIKey sets the Bearer token sent to agent POST /tool/{name} endpoints.
+// Must match a service-account api_key_hash in the agents' users.yaml.
+func (g *Gateway) SetAgentAPIKey(key string) {
+	g.agentAPIKey = key
 }
 
 // SetIdentityProvider sets the identity provider used to resolve caller identity.
@@ -1316,6 +1323,9 @@ func (g *Gateway) dispatchDirectTool(w http.ResponseWriter, r *http.Request, age
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if g.agentAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.agentAPIKey)
+	}
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	httpResp, err := client.Do(req)

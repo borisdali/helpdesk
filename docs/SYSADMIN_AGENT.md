@@ -65,10 +65,8 @@ The SysAdmin agent requires each database server to reference a VM entry in `inf
     "prod-db": {
       "name": "Production Database",
       "connection_string": "host=db1.example.com port=5432 dbname=prod user=admin",
-      "k8s_cluster": "global-prod",
+      "k8s_cluster":   "global-prod",
       "k8s_namespace": "database",
-      "vm_name":        "prod-vm",
-      "container_name": "postgres",
       "tags": ["production", "critical"]
     },
     "staging-db": {
@@ -85,12 +83,14 @@ The SysAdmin agent requires each database server to reference a VM entry in `inf
     }
   },
 
+  "k8s_clusters": {
+    "global-prod": {
+      "name":    "Global Corp Production Cluster",
+      "context": "global-prod-cluster"
+    }
+  },
+
   "vms": {
-    "prod-vm": {
-      "name":    "Production DB Host",
-      "address": "db1.example.com",
-      "runtime": "docker"
-    },
     "staging-vm": {
       "name":    "Staging DB Host",
       "address": "staging.example.com",
@@ -105,11 +105,13 @@ The SysAdmin agent requires each database server to reference a VM entry in `inf
 }
 ```
 
+`k8s_cluster` and `vm_name` are mutually exclusive on a db_server — a database runs either on Kubernetes or on a VM, never both. The SysAdmin agent only operates on VM-hosted databases; `prod-db` above is K8s-hosted and is not reachable by SysAdmin tools (the K8s agent handles it instead).
+
 ### DB server fields for SysAdmin operations
 
 | Field | Type | Description |
 |---|---|---|
-| `vm_name` | string | **Required.** Key in the `vms` map. Identifies which machine hosts this database process. |
+| `vm_name` | string | **Required for SysAdmin.** Key in the `vms` map. Mutually exclusive with `k8s_cluster` — set one or the other, never both. |
 | `container_name` | string | The container name or ID to target. Required when the VM's `runtime` is `docker` or `podman`. |
 | `systemd_unit` | string | The systemd service unit name (e.g. `"postgresql-16"`). Required when the VM's `runtime` is `""`. |
 

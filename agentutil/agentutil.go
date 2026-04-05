@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/tool"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
 	"helpdesk/internal/model"
@@ -56,6 +57,11 @@ type Config struct {
 	PolicyFile    string // Path to policy YAML file (required when PolicyEnabled)
 	PolicyDryRun  bool   // Log policy decisions but don't enforce
 	DefaultPolicy string // "allow" or "deny" when no policy matches (default: "deny")
+
+	// Inbound authentication for agent endpoints.
+	// When set, POST /tool/{name} requires a valid service-account API key.
+	// Uses the same users.yaml format as auditd (HELPDESK_USERS_FILE).
+	UsersFile string
 
 	// Approval configuration
 	ApprovalEnabled bool          // Enable approval workflow
@@ -110,6 +116,7 @@ func MustLoadConfig(defaultAddr string) Config {
 		DefaultPolicy:   os.Getenv("HELPDESK_DEFAULT_POLICY"),
 		ApprovalEnabled: approvalEnabled == "true" || approvalEnabled == "1",
 		ApprovalTimeout: approvalTimeout,
+		UsersFile:       os.Getenv("HELPDESK_USERS_FILE"),
 	}
 
 	// Enable remote policy check mode: when HELPDESK_AUDIT_URL is set and policy is
@@ -1514,7 +1521,24 @@ func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Conf
 	mux.Handle(agentPath, tracedHandler)
 
 	if registry != nil {
-		registerDirectToolRoutes(mux, registry, traceStore)
+		// Build inbound auth for POST /tool/{name}.
+		// When HELPDESK_USERS_FILE is set, only service accounts with a valid
+		// Bearer API key are permitted. Otherwise logs a warning and leaves the
+		// endpoint open (dev/local mode, same behaviour as auditd with no users file).
+		var idProvider identity.Provider = &identity.NoAuthProvider{}
+		enforcing := cfg.UsersFile != ""
+		if cfg.UsersFile != "" {
+			p, err := identity.NewStaticProvider(cfg.UsersFile)
+			if err != nil {
+				return fmt.Errorf("agent inbound auth: failed to load users file %q: %w", cfg.UsersFile, err)
+			}
+			idProvider = p
+			slog.Info("agent inbound auth enabled", "users_file", cfg.UsersFile)
+		} else {
+			slog.Warn("POST /tool/{name} is unauthenticated — set HELPDESK_USERS_FILE to require service-account credentials")
+		}
+		authzr := authz.NewAuthorizer(authz.DefaultAgentPermissions, enforcing)
+		registerDirectToolRoutes(mux, registry, traceStore, idProvider, authzr)
 		slog.Info("direct tool dispatch enabled", "agent", a.Name(), "tools", len(registry.tools))
 	}
 
