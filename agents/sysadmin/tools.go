@@ -292,10 +292,26 @@ func getHostLogsTool(ctx tool.Context, args GetHostLogsArgs) (HostLogsResult, er
 
 // CheckDiskArgs defines arguments for check_disk.
 type CheckDiskArgs struct {
-	Target string `json:"target,omitempty" jsonschema:"Server ID for context and policy tagging (optional if running without infra config)."`
+	Target    string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. When omitted, runs df on the agent host."`
+	RunOnHost bool   `json:"run_on_host,omitempty" jsonschema:"If true, run df on the VM host OS instead of inside the container. Ignored for systemd targets."`
 }
 
 func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) {
+	// If a target is given and run_on_host is not set, try to exec inside the container.
+	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
+		host, err := resolveHost(args.Target)
+		if err != nil {
+			return DiskResult{}, err
+		}
+		if host.Runtime == "docker" || host.Runtime == "podman" {
+			out, runErr := cmdRunner.Run(ctx, host.Runtime, []string{"exec", host.ContainerName, "df", "-h"}, nil)
+			if runErr != nil {
+				return DiskResult{}, fmt.Errorf("check_disk (container): %w: %s", runErr, out)
+			}
+			return DiskResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
+		}
+		// Systemd target: fall through to local df below.
+	}
 	out, err := cmdRunner.Run(ctx, "df", []string{"-h"}, nil)
 	if err != nil {
 		return DiskResult{}, fmt.Errorf("check_disk: %w: %s", err, out)
@@ -314,10 +330,26 @@ func checkDiskTool(ctx tool.Context, args CheckDiskArgs) (DiskResult, error) {
 
 // CheckMemoryArgs defines arguments for check_memory.
 type CheckMemoryArgs struct {
-	Target string `json:"target,omitempty" jsonschema:"Server ID for context and policy tagging (optional if running without infra config)."`
+	Target    string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. When omitted, runs free on the agent host."`
+	RunOnHost bool   `json:"run_on_host,omitempty" jsonschema:"If true, run free on the VM host OS instead of inside the container. Ignored for systemd targets."`
 }
 
 func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, error) {
+	// If a target is given and run_on_host is not set, try to exec inside the container.
+	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
+		host, err := resolveHost(args.Target)
+		if err != nil {
+			return MemoryResult{}, err
+		}
+		if host.Runtime == "docker" || host.Runtime == "podman" {
+			out, runErr := cmdRunner.Run(ctx, host.Runtime, []string{"exec", host.ContainerName, "free", "-h"}, nil)
+			if runErr != nil {
+				return MemoryResult{}, fmt.Errorf("check_memory (container): %w: %s", runErr, out)
+			}
+			return MemoryResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
+		}
+		// Systemd target: fall through to local free below.
+	}
 	out, err := cmdRunner.Run(ctx, "free", []string{"-h"}, nil)
 	if err != nil {
 		return MemoryResult{}, fmt.Errorf("check_memory: %w: %s", err, out)

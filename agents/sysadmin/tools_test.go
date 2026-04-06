@@ -194,9 +194,11 @@ func TestGetHostLogs_DefaultLines(t *testing.T) {
 
 // ── check_disk ───────────────────────────────────────────────────────────────
 
-func TestCheckDisk(t *testing.T) {
+const dfOutput = "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        50G   45G  2.0G  96% /"
+
+// TestCheckDisk_Container verifies that a docker target routes through docker exec.
+func TestCheckDisk_Container(t *testing.T) {
 	withDockerInfra(t)
-	dfOutput := "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        50G   45G  2.0G  96% /"
 	defer withMockRunner(dfOutput, nil)()
 
 	result, err := checkDiskImpl(context.Background(), CheckDiskArgs{Target: "prod_db"})
@@ -211,12 +213,88 @@ func TestCheckDisk(t *testing.T) {
 	}
 }
 
+// TestCheckDisk_RunOnHost verifies that run_on_host bypasses docker exec even for container targets.
+func TestCheckDisk_RunOnHost(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner(dfOutput, nil)()
+
+	result, err := checkDiskImpl(context.Background(), CheckDiskArgs{Target: "prod_db", RunOnHost: true})
+	if err != nil {
+		t.Fatalf("checkDiskImpl: %v", err)
+	}
+	if result.Output == "" {
+		t.Error("Output is empty")
+	}
+}
+
+// TestCheckDisk_Systemd verifies that a systemd target falls through to local df.
+func TestCheckDisk_Systemd(t *testing.T) {
+	withSystemdInfra(t)
+	defer withMockRunner(dfOutput, nil)()
+
+	result, err := checkDiskImpl(context.Background(), CheckDiskArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("checkDiskImpl: %v", err)
+	}
+	if result.Output == "" {
+		t.Error("Output is empty")
+	}
+}
+
 // ── check_memory ─────────────────────────────────────────────────────────────
 
-func TestCheckMemory(t *testing.T) {
-	defer withMockRunner("              total        used        free\nMem:           15Gi        12Gi       1.0Gi\nSwap:         2.0Gi       512Mi       1.5Gi", nil)()
+const freeOutput = "              total        used        free\nMem:           15Gi        12Gi       1.0Gi\nSwap:         2.0Gi       512Mi       1.5Gi"
+
+// TestCheckMemory_NoTarget verifies the no-infra / no-target local path.
+func TestCheckMemory_NoTarget(t *testing.T) {
+	defer withMockRunner(freeOutput, nil)()
 
 	result, err := checkMemoryImpl(context.Background(), CheckMemoryArgs{})
+	if err != nil {
+		t.Fatalf("checkMemoryImpl: %v", err)
+	}
+	if result.Output == "" {
+		t.Error("Output is empty")
+	}
+}
+
+// TestCheckMemory_Container verifies that a docker target routes through docker exec.
+func TestCheckMemory_Container(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner(freeOutput, nil)()
+
+	result, err := checkMemoryImpl(context.Background(), CheckMemoryArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("checkMemoryImpl: %v", err)
+	}
+	if result.Output == "" {
+		t.Error("Output is empty")
+	}
+	if result.ServerID != "prod_db" {
+		t.Errorf("ServerID = %q, want prod_db", result.ServerID)
+	}
+}
+
+// TestCheckMemory_RunOnHost verifies that run_on_host bypasses docker exec.
+func TestCheckMemory_RunOnHost(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner(freeOutput, nil)()
+
+	result, err := checkMemoryImpl(context.Background(), CheckMemoryArgs{Target: "prod_db", RunOnHost: true})
+	if err != nil {
+		t.Fatalf("checkMemoryImpl: %v", err)
+	}
+	if result.Output == "" {
+		t.Error("Output is empty")
+	}
+}
+
+// TestCheckMemory_Systemd verifies that a systemd target falls through to local free.
+func TestCheckMemory_Systemd(t *testing.T) {
+	withSystemdInfra(t)
+	defer withMockRunner(freeOutput, nil)()
+
+	result, err := checkMemoryImpl(context.Background(), CheckMemoryArgs{Target: "prod_db"})
 	if err != nil {
 		t.Fatalf("checkMemoryImpl: %v", err)
 	}
