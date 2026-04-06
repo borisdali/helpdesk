@@ -310,7 +310,7 @@ Calls `docker restart <container_name>` (or `podman restart`) for the container 
 4. Record `RecordToolCall` in audit log with server ID, runtime, container name, duration, and outcome
 5. Return `RestartResult` with `success: true/false` and raw command output
 
-**Safeguards**: The agent's system prompt (`prompts/sysadmin.txt`) requires `check_host` and `get_host_logs` to be called before any restart recommendation. The agent is instructed to **not** recommend restarting when disk is full, when logs show data directory corruption, or when logs show `PANIC` on data files — in those cases it escalates to a human DBA instead. The policy pre-check is a hard enforcement layer independent of the agent's reasoning.
+**Safeguards**: The agent's system prompt (`prompts/sysadmin.txt`) requires `check_host` and `get_host_logs` to be called before any restart recommendation. When `get_host_logs` shows a crash signal but lacks PostgreSQL-level detail, the agent is additionally instructed to call `read_pg_log_file` to read the Postgres log file via container exec before forming a hypothesis. The agent is instructed to **not** recommend restarting when disk is full, when logs show data directory corruption, or when logs show `PANIC` on data files — in those cases it escalates to a human DBA instead. The policy pre-check is a hard enforcement layer independent of the agent's reasoning.
 
 **Policy note**: `restart_container` carries the `auto_remediation_eligible: true` flag. When a playbook uses `execution_mode: agent_auto` and lists `restart_container` in its `permitted_tools`, the agent may call this tool without a per-call approval gate. Policy rules still apply — the operating mode must be `fix` and any configured tag-based deny rules must not match.
 
@@ -1032,7 +1032,12 @@ structural guard for the k8s mutation tools makes this a gap: a misbehaving
 model could call `delete_pod` without first calling `describe_pod` and there is
 currently no automated test that would catch it.
 
-A `host` category fault scenario (`host-container-stopped`) exists for the SysAdmin agent and tests that `check_host` and `get_host_logs` are called before any restart recommendation is made. Run it with:
+Two `host` category fault scenarios exist for the SysAdmin agent:
+
+- **`host-container-stopped`**: tests that `check_host` and `get_host_logs` are called before any restart recommendation is made (container stopped cleanly with `exitcode=0`).
+- **`host-pg-crash`**: tests that when the container is alive but Postgres has crashed (`exitcode>0`), the agent calls `read_pg_log_file` to inspect the PostgreSQL log file after `get_host_logs` shows a crash signal. Injects via `docker exec kill -ABRT <postmaster_pid>`.
+
+Run them with:
 
 ```bash
 go run ./testing/cmd/faulttest run \

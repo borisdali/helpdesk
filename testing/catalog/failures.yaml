@@ -750,6 +750,46 @@ failures:
         category: "container_stopped"
     timeout: 60s
 
+  - id: host-pg-crash
+    name: "PostgreSQL process crash inside container"
+    category: host
+    severity: critical
+    description: >
+      The PostgreSQL postmaster is killed with SIGABRT via COPY TO PROGRAM,
+      simulating a process crash (assertion failure or fatal signal). Because
+      the postgres process is the container entrypoint, the container exits
+      with code 134 (SIGABRT). The sysadmin agent must distinguish this
+      abnormal exit (exitcode=134) from a clean stop (exitcode=0) and report
+      the crash as the root cause rather than a graceful shutdown.
+    inject:
+      type: docker_exec
+      script: sql/inject_pg_crash.sh
+    teardown:
+      type: docker
+      action: start
+      service: postgres
+    prompt: >
+      The database server 'faulttest-db' is not responding. Please
+      check the host-level status of the server and investigate why
+      the database process is not running.
+    evaluation:
+      expected_tools:
+        - check_host
+        - get_host_logs
+      expected_keywords:
+        any_of:
+          - "crashed"
+          - "crash"
+          - "signal"
+          - "aborted"
+          - "exit code"
+          - "exitcode"
+          - "killed"
+          - "abnormal"
+      expected_diagnosis:
+        category: "process_crash"
+    timeout: 60s
+
   # ── Compound failures (2) ──────────────────────────────────────────────
 
   - id: compound-db-pod-crash

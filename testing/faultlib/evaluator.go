@@ -41,10 +41,11 @@ var ToolPatterns = map[string][]string{
 	// scale_deployment is used in k8s-scale-to-zero; patterns reference output text.
 	"scale_deployment": {"scaled", "replicas", "scale"},
 	// Sysadmin agent tools.
-	"check_host":    {"status", "runtime", "container", "stopped", "running", "exited"},
-	"get_host_logs": {"log", "logs", "stderr", "stdout"},
-	"check_disk":    {"disk", "filesystem", "available", "used"},
-	"check_memory":  {"memory", "mem", "available", "used"},
+	"check_host":        {"status", "runtime", "container", "stopped", "running", "exited"},
+	"get_host_logs":     {"log", "logs", "stderr", "stdout"},
+	"check_disk":        {"disk", "filesystem", "available", "used"},
+	"check_memory":      {"memory", "mem", "available", "used"},
+	"read_pg_log_file":  {"postgresql", "log", "fatal", "panic", "crash", "error"},
 }
 
 // ToolOrderingPatterns overrides ToolPatterns for the tool-ordering check only.

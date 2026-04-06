@@ -321,10 +321,11 @@ Operates at the OS and container-runtime level of the machines running your data
 | `get_host_logs` | read | Retrieve recent log output from the container or systemd journal |
 | `check_disk` | read | Report disk usage on the host |
 | `check_memory` | read | Report memory usage on the host |
+| `read_pg_log_file` | read | Read the PostgreSQL log file via `docker/podman/kubectl exec` — works when Postgres is down |
 | `restart_container` | destructive | Restart the database container (Docker or Podman) |
 | `restart_service` | destructive | Restart the database systemd service |
 
-`restart_container` and `restart_service` require a policy pre-check and are flagged `auto_remediation_eligible: true` — meaning they can be called autonomously inside `agent_auto` playbooks when whitelisted in `permitted_tools`. The four R/O tools are always permitted.
+`restart_container` and `restart_service` require a policy pre-check and are flagged `auto_remediation_eligible: true` — meaning they can be called autonomously inside `agent_auto` playbooks when whitelisted in `permitted_tools`. The five R/O tools are always permitted.
 
 ### 6.4 Incident Agent (default :1104)
 

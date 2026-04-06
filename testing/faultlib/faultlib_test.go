@@ -23,8 +23,8 @@ func TestLoadCatalog_Valid(t *testing.T) {
 		t.Errorf("Version = %q, want %q", catalog.Version, "1")
 	}
 
-	if len(catalog.Failures) != 23 {
-		t.Errorf("Failures count = %d, want 23", len(catalog.Failures))
+	if len(catalog.Failures) != 24 {
+		t.Errorf("Failures count = %d, want 24", len(catalog.Failures))
 	}
 }
 

@@ -14,6 +14,7 @@ type DBServer struct {
 	ConnectionString string   `json:"connection_string"`
 	K8sCluster       string   `json:"k8s_cluster,omitempty"`
 	K8sNamespace     string   `json:"k8s_namespace,omitempty"`
+	K8sPodSelector   string   `json:"k8s_pod_selector,omitempty"` // label selector for kubectl exec (e.g. "app=postgres,instance=prod")
 	VMName           string   `json:"vm_name,omitempty"`
 	ContainerName    string   `json:"container_name,omitempty"` // container name when VM.Runtime is docker|podman
 	SystemdUnit      string   `json:"systemd_unit,omitempty"`   // unit name when VM.Runtime is ""

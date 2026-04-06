@@ -55,17 +55,25 @@ func argsToStruct[T any](args map[string]any) (T, error) {
 }
 
 // resolvedHost holds the operational properties of a DB server's host,
-// assembled by traversing DBServer → VM in the infrastructure config.
+// assembled by traversing DBServer → VM or DBServer → K8sCluster in the
+// infrastructure config.
 type resolvedHost struct {
-	Runtime       string   // container runtime binary: "docker", "podman", or "" (systemd)
-	ContainerName string   // from DBServer.ContainerName (docker/podman only)
-	SystemdUnit   string   // from DBServer.SystemdUnit (systemd only)
-	Tags          []string // from DBServer.Tags
-	Sensitivity   []string // from DBServer.Sensitivity
+	// VM / container fields
+	Runtime       string // container runtime binary: "docker", "podman", or "" (systemd/k8s)
+	ContainerName string // from DBServer.ContainerName (docker/podman only)
+	SystemdUnit   string // from DBServer.SystemdUnit (systemd only)
+	// Kubernetes fields
+	K8sContext     string // kubectl --context value
+	K8sNamespace   string // pod namespace
+	K8sPodSelector string // label selector used to locate the pod (e.g. "app=postgres")
+	// Policy fields
+	Tags        []string
+	Sensitivity []string
 }
 
-// resolveHost looks up a DB server by ID, traverses to its VM, and assembles
-// the resolvedHost the sysadmin tools need to operate on the process.
+// resolveHost looks up a DB server by ID and assembles the resolvedHost the
+// sysadmin tools need. It handles both VM-hosted (docker/podman/systemd) and
+// Kubernetes-hosted databases.
 func resolveHost(serverID string) (resolvedHost, error) {
 	if infraConfig == nil {
 		return resolvedHost{}, fmt.Errorf("no infrastructure config loaded; set HELPDESK_INFRA_CONFIG")
@@ -81,14 +89,40 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		return resolvedHost{}, fmt.Errorf("server %q not found in infrastructure config. Known servers: %s",
 			serverID, strings.Join(known, ", "))
 	}
+
+	// ── Kubernetes path ──────────────────────────────────────────────────────
+	if db.K8sCluster != "" {
+		k8s, ok := infraConfig.K8sClusters[db.K8sCluster]
+		if !ok {
+			return resolvedHost{}, fmt.Errorf(
+				"server %q references K8s cluster %q which is not defined in infrastructure config", serverID, db.K8sCluster)
+		}
+		if db.K8sPodSelector == "" {
+			return resolvedHost{}, fmt.Errorf(
+				"server %q has k8s_cluster but no k8s_pod_selector; add a label selector (e.g. \"app=postgres\") to locate the pod", serverID)
+		}
+		ns := db.K8sNamespace
+		if ns == "" {
+			ns = "default"
+		}
+		return resolvedHost{
+			K8sContext:     k8s.Context,
+			K8sNamespace:   ns,
+			K8sPodSelector: db.K8sPodSelector,
+			Tags:           db.Tags,
+			Sensitivity:    db.Sensitivity,
+		}, nil
+	}
+
+	// ── VM path ──────────────────────────────────────────────────────────────
 	if db.VMName == "" {
 		return resolvedHost{}, fmt.Errorf(
-			"server %q has no vm_name; sysadmin operations require a VM entry in infrastructure.json", serverID)
+			"server %q has neither vm_name nor k8s_cluster; sysadmin operations require one of these in infrastructure config", serverID)
 	}
 	vm, ok := infraConfig.VMs[db.VMName]
 	if !ok {
 		return resolvedHost{}, fmt.Errorf(
-			"server %q references VM %q which is not defined in infrastructure.json", serverID, db.VMName)
+			"server %q references VM %q which is not defined in infrastructure config", serverID, db.VMName)
 	}
 
 	h := resolvedHost{
@@ -117,6 +151,47 @@ func resolveHost(serverID string) (resolvedHost, error) {
 	}
 
 	return h, nil
+}
+
+// execInProcess runs cmd inside the process hosting the database — either via
+// "docker/podman exec <container>" or "kubectl exec <pod>". Returns an error
+// for systemd targets (no exec primitive available).
+func execInProcess(ctx context.Context, host resolvedHost, cmd []string) (string, error) {
+	switch {
+	case host.Runtime == "docker" || host.Runtime == "podman":
+		args := append([]string{"exec", host.ContainerName}, cmd...)
+		return cmdRunner.Run(ctx, host.Runtime, args, nil)
+
+	case host.K8sPodSelector != "":
+		// Resolve the pod name from the selector first.
+		getPodArgs := []string{
+			"get", "pod",
+			"-l", host.K8sPodSelector,
+			"-n", host.K8sNamespace,
+			"-o", "jsonpath={.items[0].metadata.name}",
+		}
+		if host.K8sContext != "" {
+			getPodArgs = append([]string{"--context", host.K8sContext}, getPodArgs...)
+		}
+		podName, err := cmdRunner.Run(ctx, "kubectl", getPodArgs, nil)
+		if err != nil {
+			return "", fmt.Errorf("kubectl get pod: %w: %s", err, podName)
+		}
+		podName = strings.TrimSpace(podName)
+		if podName == "" {
+			return "", fmt.Errorf("no pod found for selector %q in namespace %q", host.K8sPodSelector, host.K8sNamespace)
+		}
+		execArgs := []string{"exec", podName, "-n", host.K8sNamespace}
+		if host.K8sContext != "" {
+			execArgs = append([]string{"--context", host.K8sContext}, execArgs...)
+		}
+		execArgs = append(execArgs, "--")
+		execArgs = append(execArgs, cmd...)
+		return cmdRunner.Run(ctx, "kubectl", execArgs, nil)
+
+	default:
+		return "", fmt.Errorf("cannot exec into process: target uses systemd (no exec primitive)")
+	}
 }
 
 // containerRuntimeBin returns the container runtime binary ("docker" or "podman"),
@@ -297,20 +372,20 @@ type CheckDiskArgs struct {
 }
 
 func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) {
-	// If a target is given and run_on_host is not set, try to exec inside the container.
+	// If a target is given and run_on_host is not set, exec inside the process.
 	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
 		host, err := resolveHost(args.Target)
 		if err != nil {
 			return DiskResult{}, err
 		}
-		if host.Runtime == "docker" || host.Runtime == "podman" {
-			out, runErr := cmdRunner.Run(ctx, host.Runtime, []string{"exec", host.ContainerName, "df", "-h"}, nil)
-			if runErr != nil {
-				return DiskResult{}, fmt.Errorf("check_disk (container): %w: %s", runErr, out)
-			}
+		out, runErr := execInProcess(ctx, host, []string{"df", "-h"})
+		if runErr == nil {
 			return DiskResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
 		}
-		// Systemd target: fall through to local df below.
+		// Systemd targets return "cannot exec" — fall through to local df.
+		if !strings.Contains(runErr.Error(), "cannot exec into process") {
+			return DiskResult{}, fmt.Errorf("check_disk: %w: %s", runErr, out)
+		}
 	}
 	out, err := cmdRunner.Run(ctx, "df", []string{"-h"}, nil)
 	if err != nil {
@@ -335,20 +410,20 @@ type CheckMemoryArgs struct {
 }
 
 func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, error) {
-	// If a target is given and run_on_host is not set, try to exec inside the container.
+	// If a target is given and run_on_host is not set, exec inside the process.
 	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
 		host, err := resolveHost(args.Target)
 		if err != nil {
 			return MemoryResult{}, err
 		}
-		if host.Runtime == "docker" || host.Runtime == "podman" {
-			out, runErr := cmdRunner.Run(ctx, host.Runtime, []string{"exec", host.ContainerName, "free", "-h"}, nil)
-			if runErr != nil {
-				return MemoryResult{}, fmt.Errorf("check_memory (container): %w: %s", runErr, out)
-			}
+		out, runErr := execInProcess(ctx, host, []string{"free", "-h"})
+		if runErr == nil {
 			return MemoryResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
 		}
-		// Systemd target: fall through to local free below.
+		// Systemd targets return "cannot exec" — fall through to local free.
+		if !strings.Contains(runErr.Error(), "cannot exec into process") {
+			return MemoryResult{}, fmt.Errorf("check_memory: %w: %s", runErr, out)
+		}
 	}
 	out, err := cmdRunner.Run(ctx, "free", []string{"-h"}, nil)
 	if err != nil {
@@ -362,6 +437,96 @@ func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, e
 
 func checkMemoryTool(ctx tool.Context, args CheckMemoryArgs) (MemoryResult, error) {
 	return checkMemoryImpl(ctx, args)
+}
+
+// ── read_pg_log_file ──────────────────────────────────────────────────────────
+
+const pgLogDefaultDir = "/var/lib/postgresql/data/log"
+
+// ReadPgLogFileArgs defines arguments for read_pg_log_file.
+type ReadPgLogFileArgs struct {
+	Target  string `json:"target" jsonschema:"required,Server ID from infrastructure config."`
+	Lines   int    `json:"lines,omitempty" jsonschema:"Number of recent log lines to return (default 100)."`
+	Filter  string `json:"filter,omitempty" jsonschema:"Only return lines containing this string (case-insensitive). Useful for: ERROR, FATAL, PANIC, OOM, 'no space'."`
+	LogPath string `json:"log_path,omitempty" jsonschema:"Override the log directory path inside the container. Default: /var/lib/postgresql/data/log."`
+}
+
+func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileResult, error) {
+	host, err := resolveHost(args.Target)
+	if err != nil {
+		return PgLogFileResult{}, err
+	}
+
+	logDir := args.LogPath
+	if logDir == "" {
+		logDir = pgLogDefaultDir
+	}
+
+	lines := args.Lines
+	if lines <= 0 {
+		lines = 100
+	}
+
+	// Find the most recently modified log file.
+	lsOut, err := execInProcess(ctx, host, []string{"ls", "-t", logDir})
+	if err != nil {
+		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: cannot list %s: %w", logDir, err)
+	}
+	files := strings.Fields(strings.TrimSpace(lsOut))
+	if len(files) == 0 {
+		return PgLogFileResult{
+			ServerID: args.Target,
+			Runtime:  hostRuntimeLabel(host),
+			Logs:     fmt.Sprintf("no log files found in %s — logging_collector may not be enabled", logDir),
+		}, nil
+	}
+	latestFile := logDir + "/" + files[0]
+
+	// Read the last N lines.
+	tailOut, err := execInProcess(ctx, host, []string{"tail", "-n", fmt.Sprintf("%d", lines), latestFile})
+	if err != nil {
+		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: cannot read %s: %w", latestFile, err)
+	}
+	logOutput := strings.TrimSpace(tailOut)
+
+	// Apply filter (case-insensitive).
+	if args.Filter != "" {
+		lf := strings.ToLower(args.Filter)
+		var filtered []string
+		for _, line := range strings.Split(logOutput, "\n") {
+			if strings.Contains(strings.ToLower(line), lf) {
+				filtered = append(filtered, line)
+			}
+		}
+		logOutput = strings.Join(filtered, "\n")
+	}
+
+	linesReturned := 0
+	if logOutput != "" {
+		linesReturned = len(strings.Split(logOutput, "\n"))
+	}
+
+	return PgLogFileResult{
+		ServerID:      args.Target,
+		Runtime:       hostRuntimeLabel(host),
+		LinesReturned: linesReturned,
+		Logs:          logOutput,
+	}, nil
+}
+
+func readPgLogFileTool(ctx tool.Context, args ReadPgLogFileArgs) (PgLogFileResult, error) {
+	return readPgLogFileImpl(ctx, args)
+}
+
+// hostRuntimeLabel returns a human-readable label for the host's exec mechanism.
+func hostRuntimeLabel(host resolvedHost) string {
+	if host.Runtime != "" {
+		return host.Runtime
+	}
+	if host.K8sPodSelector != "" {
+		return "kubectl"
+	}
+	return "systemd"
 }
 
 // ── restart_container ────────────────────────────────────────────────────────
@@ -559,6 +724,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := checkMemoryImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("read_pg_log_file", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ReadPgLogFileArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := readPgLogFileImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

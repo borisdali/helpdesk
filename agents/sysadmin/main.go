@@ -129,9 +129,10 @@ func main() {
 			agentName:                         {"host", "infrastructure", "diagnostics"},
 			agentName + "-check_host":         {"host", "container", "status"},
 			agentName + "-get_host_logs":      {"host", "container", "logs"},
-			agentName + "-check_disk":         {"host", "storage", "diagnostics"},
-			agentName + "-check_memory":       {"host", "memory", "diagnostics"},
-			agentName + "-restart_container":  {"host", "container", "remediation"},
+			agentName + "-check_disk":          {"host", "storage", "diagnostics"},
+			agentName + "-check_memory":        {"host", "memory", "diagnostics"},
+			agentName + "-read_pg_log_file":    {"host", "postgres", "logs", "diagnostics"},
+			agentName + "-restart_container":   {"host", "container", "remediation"},
 			agentName + "-restart_service":    {"host", "systemd", "remediation"},
 		},
 		SkillExamples: map[string][]string{
@@ -186,6 +187,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	readPgLogFileToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "read_pg_log_file",
+		Description: "Read the PostgreSQL log file directly from inside the container or pod (via exec). Works when Postgres is down — does not require a live database connection. Use get_host_logs for process stdout/stderr; use this tool for the PostgreSQL log file written by logging_collector.",
+	}, readPgLogFileTool)
+	if err != nil {
+		return nil, err
+	}
+
 	restartContainerToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "restart_container",
 		Description: "Restart a Docker or Podman container hosting the database. Requires the server to have a container_runtime and container_name configured in infrastructure.json. Use restart_service for systemd-managed databases.",
@@ -207,6 +216,7 @@ func createTools() ([]tool.Tool, error) {
 		getHostLogsToolDef,
 		checkDiskToolDef,
 		checkMemoryToolDef,
+		readPgLogFileToolDef,
 		restartContainerToolDef,
 		restartServiceToolDef,
 	}, nil

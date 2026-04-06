@@ -14,6 +14,7 @@
 //   - E2E_GATEWAY_URL: Gateway REST API URL (default: http://localhost:8080)
 //   - E2E_DB_AGENT_URL: Database agent A2A URL (default: http://localhost:1100)
 //   - E2E_K8S_AGENT_URL: Kubernetes agent A2A URL (default: http://localhost:1102)
+//   - E2E_SYSADMIN_AGENT_URL: Sysadmin agent A2A URL (default: http://localhost:1103)
 //   - E2E_RESEARCH_AGENT_URL: Research agent A2A URL (default: http://localhost:1106)
 //   - E2E_ORCHESTRATOR_URL: Orchestrator A2A URL (optional)
 //   - E2E_CONN_STR: PostgreSQL connection string
@@ -40,6 +41,7 @@ type Config struct {
 	GatewayURL       string
 	DBAgentURL       string
 	K8sAgentURL      string
+	SysadminAgentURL string
 	ResearchAgentURL string
 	OrchestratorURL  string
 	AuditdURL        string
@@ -54,6 +56,7 @@ func LoadConfig() *Config {
 		GatewayURL:       getEnvDefault("E2E_GATEWAY_URL", "http://localhost:8080"),
 		DBAgentURL:       getEnvDefault("E2E_DB_AGENT_URL", "http://localhost:1100"),
 		K8sAgentURL:      getEnvDefault("E2E_K8S_AGENT_URL", "http://localhost:1102"),
+		SysadminAgentURL: getEnvDefault("E2E_SYSADMIN_AGENT_URL", "http://localhost:1103"),
 		ResearchAgentURL: getEnvDefault("E2E_RESEARCH_AGENT_URL", "http://localhost:1106"),
 		OrchestratorURL:  os.Getenv("E2E_ORCHESTRATOR_URL"),
 		AuditdURL:        getEnvDefault("E2E_AUDITD_URL", "http://localhost:1199"),

@@ -28,6 +28,14 @@ type MemoryResult struct {
 	Output   string `json:"output"`
 }
 
+// PgLogFileResult holds PostgreSQL log content read directly from the container filesystem.
+type PgLogFileResult struct {
+	ServerID      string `json:"server_id"`
+	Runtime       string `json:"runtime"` // "docker", "podman", "kubectl"
+	LinesReturned int    `json:"lines_returned"`
+	Logs          string `json:"logs"`
+}
+
 // RestartResult holds the outcome of a container or service restart.
 type RestartResult struct {
 	ServerID string `json:"server_id"`

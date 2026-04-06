@@ -131,7 +131,7 @@ Exactly one of `container_name` or `systemd_unit` must be set on the db_server, 
 
 Unlike the database agent (which takes a `connection_string`) or the K8s agent (which takes a `context`), the SysAdmin agent takes a **server ID** — the key in the `db_servers` map of your infrastructure config.
 
-All six tools accept a `target` argument that is the server ID. The agent resolves it by traversing `db_servers → vm_name → vms` at call time:
+All seven tools accept a `target` argument that is the server ID. The agent resolves it by traversing `db_servers → vm_name → vms` at call time:
 
 ```
 check_host(target="prod-db")
@@ -157,7 +157,7 @@ The agent is instructed to use the server's friendly name or the server ID from 
 
 ### 4.1 R/O tools (action class: `read`)
 
-These four tools never modify system state. They do not require policy pre-checks and are always permitted in any execution mode.
+These five tools never modify system state. They do not require policy pre-checks and are always permitted in any execution mode.
 
 #### `check_host`
 
@@ -215,6 +215,47 @@ target   string   required — server ID
 ```
 
 For container runtimes, executes `free -h` inside the container (or reads `/proc/meminfo`). For systemd hosts, executes `free -h`. Returns raw output. The agent looks for low available memory that could cause OOM kills or swap pressure.
+
+#### `read_pg_log_file`
+
+Read the PostgreSQL log file directly from inside the container, pod, or host process — without a live database connection.
+
+```
+target    string   required — server ID
+lines     int      optional — number of tail lines to return (default: 200)
+filter    string   optional — case-insensitive substring filter applied to each line
+log_dir   string   optional — override default log directory (default: /var/lib/postgresql/data/log)
+```
+
+**How it works:**
+
+1. Lists files in `log_dir` sorted by modification time (`ls -t`) and selects the most-recently-modified file.
+2. Reads the tail of that file via `tail -n <lines>`.
+3. If `filter` is set, returns only lines containing the filter string (case-insensitive).
+
+The exec path depends on the server's runtime:
+
+| Runtime | Command |
+|---|---|
+| `docker` | `docker exec <container> sh -c "ls -t <log_dir> | head -1"` then `docker exec <container> tail -n N <file>` |
+| `podman` | Same as docker with `podman` binary |
+| `kubectl` (k8s) | Two-step: `kubectl get pod -l <selector> -n <ns>` to resolve pod name, then `kubectl exec <pod> -n <ns> -- tail ...` |
+| systemd (host) | Reads the log file directly on the local filesystem |
+
+**Key distinction from DB agent's `read_pg_log`:** The DB agent tool uses `pg_read_file()` SQL and requires a live Postgres connection. This tool uses process exec (`docker exec` / `kubectl exec`) and works when Postgres is completely down — including after a crash, failed startup, or OOM kill.
+
+Returns:
+
+```json
+{
+  "server_id":     "prod-db",
+  "runtime":       "docker",
+  "lines_returned": 47,
+  "logs":          "2026-04-05 03:12:44 UTC [1] PANIC: could not locate a valid checkpoint record\n..."
+}
+```
+
+The agent uses this tool when `get_host_logs` shows a non-zero exit code or crash signal but lacks PostgreSQL-level detail (e.g., the container stdout only shows the kernel kill message, not the Postgres `FATAL`/`PANIC` that preceded it).
 
 ---
 
@@ -297,7 +338,7 @@ The flag marks a tool as safe for autonomous execution when:
 
 Tools without `auto_remediation_eligible` are never called without an approval gate, regardless of `execution_mode`.
 
-The four R/O tools (`check_host`, `get_host_logs`, `check_disk`, `check_memory`) do not have this flag — they are always permitted without approval.
+The five R/O tools (`check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`) do not have this flag — they are always permitted without approval.
 
 ### Policy interaction
 
@@ -317,12 +358,13 @@ The SysAdmin agent registers its skills in the agent card with the following tax
 | `get_host_logs` | `"host"`, `"cap:logs"` | no | no |
 | `check_disk` | `"host"`, `"cap:disk"` | no | no |
 | `check_memory` | `"host"`, `"cap:memory"` | no | no |
+| `read_pg_log_file` | `"host"`, `"postgres"`, `"logs"`, `"diagnostics"` | no | no |
 | `restart_container` | `"host"`, `"auto_remediation:true"` | no | **yes** |
 | `restart_service` | `"host"`, `"auto_remediation:true"` | no | **yes** |
 
 The SysAdmin tools are not fleet-eligible — they are not included in fleet job plans because they operate on a single server's process, not on a fleet of database targets. They are invoked exclusively via agentic playbook sessions.
 
-The tool registry exposes all six tools under `GET /api/v1/tools`. To list only auto-remediation-eligible tools:
+The tool registry exposes all seven tools under `GET /api/v1/tools`. To list only auto-remediation-eligible tools:
 
 ```bash
 curl -s http://localhost:8080/api/v1/tools \
@@ -337,9 +379,12 @@ curl -s http://localhost:8080/api/v1/tools \
 The SysAdmin agent's system prompt (`prompts/sysadmin.txt`) instructs it to:
 
 1. Always call `check_host` first to confirm the container/service state before any other action
-2. Always call `get_host_logs` after `check_host` to read the failure reason from logs
-3. Call `check_disk` and `check_memory` only when disk pressure or OOM is suspected from the logs
-4. **Never** recommend restarting when:
+2. If `exitcode=0`: report a clean stop — do not speculate about disk or OOM without evidence
+3. If `exitcode>0` or `oomkilled=true`: call `get_host_logs` to read the failure reason from logs
+4. If `get_host_logs` lacks PostgreSQL-level detail (e.g. shows only a kernel signal, not the Postgres error): call `read_pg_log_file` to read the PostgreSQL log file directly from inside the container
+5. Call `check_disk` only when logs contain explicit evidence of disk exhaustion ("No space left on device", "disk full")
+6. Call `check_memory` only when `oomkilled=true`
+7. **Never** recommend restarting when:
    - Disk is full (a restart will fail immediately)
    - Logs show data directory corruption or `PANIC` on data files
    - Logs show `invalid_page` or storage-level errors
@@ -363,7 +408,7 @@ The agent is also instructed to emit `ROOT_CAUSE:` and `ACTION_TAKEN:` lines for
 
 ## 9. Fault injection test
 
-The fault catalog (`testing/catalog/failures.yaml`) includes a `host` category test:
+The fault catalog (`testing/catalog/failures.yaml`) includes two `host` category tests:
 
 ### `host-container-stopped`
 
@@ -381,7 +426,29 @@ The fault catalog (`testing/catalog/failures.yaml`) includes a `host` category t
 
 **Expected diagnosis category:** `container_stopped`
 
-To run the host fault test:
+---
+
+### `host-pg-crash`
+
+**What it tests:** The SysAdmin agent's ability to diagnose a PostgreSQL process crash where the container is still alive but Postgres is not running. Specifically verifies that the agent calls `read_pg_log_file` to inspect the PostgreSQL log file (not just container stdout) when the container logs show a signal/crash rather than a clean stop.
+
+**Inject:** `docker_exec` — runs `kill -ABRT $(head -1 /var/run/postgresql/postmaster.pid)` inside the container, sending SIGABRT to the Postgres postmaster. The container stays running; Postgres exits with a non-zero code.
+
+**Teardown:** `docker compose start postgres` — restarts the container after the test.
+
+**Prompt:** `"The database server 'faulttest-db' is not responding. The container appears to still be running but the database process may have crashed. Please investigate and report what happened."`
+
+**Expected tools:** `check_host`, `get_host_logs`, `read_pg_log_file`
+
+**Expected keywords:** `crashed`, `crash`, `fatal`, `panic`, `aborted`, `signal`, `killed`, or `terminated`
+
+**Expected diagnosis category:** `process_crash`
+
+**Timeout:** 90s (longer than `host-container-stopped` to allow the agent time to call all three tools)
+
+---
+
+To run the host fault tests:
 
 ```bash
 go run ./testing/cmd/faulttest run \

@@ -5,19 +5,18 @@
     "faulttest-db": {
       "name": "Fault Test Database",
       "connection_string": "host=localhost port=15432 dbname=testdb user=postgres password=testpass",
-      "k8s_cluster": "faulttest-cluster",
       "k8s_namespace": "helpdesk-test",
       "vm_name": "faulttest-vm",
       "container_name": "helpdesk-test-pg",
-      "tags": ["test"]
+      "tags": ["development"]
     }
   },
 
   "k8s_clusters": {
     "faulttest-cluster": {
       "name": "Local Fault Test Cluster",
-      "context": "",
-      "tags": ["test"]
+      "context": "minikube",
+      "tags": ["development"]
     }
   },
 

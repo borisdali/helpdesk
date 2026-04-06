@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"helpdesk/internal/infra"
@@ -420,4 +421,267 @@ func TestResolveHost_PodmanRuntime(t *testing.T) {
 	if host.Runtime != "podman" {
 		t.Errorf("Runtime = %q, want podman", host.Runtime)
 	}
+}
+
+// withK8sInfra sets up a fake infraConfig with a Kubernetes-hosted DB.
+func withK8sInfra(t *testing.T) {
+	t.Helper()
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod_db": {
+				Name:             "prod_db",
+				ConnectionString: "host=pg-service.prod.svc.cluster.local",
+				K8sCluster:       "prod-cluster",
+				K8sNamespace:     "prod",
+				K8sPodSelector:   "app=postgres,instance=prod-db",
+			},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"prod-cluster": {
+				Name:    "prod-cluster",
+				Context: "gke_project_region_prod-cluster",
+			},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+// ── read_pg_log_file ─────────────────────────────────────────────────────────
+
+const pgLogContent = "2026-04-05 18:00:01 UTC [1] LOG:  database system is ready to accept connections\n2026-04-05 18:05:00 UTC [42] FATAL:  could not open file"
+
+// TestReadPgLogFile_Docker verifies the docker exec path (ls then tail).
+func TestReadPgLogFile_Docker(t *testing.T) {
+	withDockerInfra(t)
+	// Mock runner returns log filename on first call (ls -t), log content on second (tail).
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "postgresql-2026-04-05.log\n", err: nil},
+		{output: pgLogContent, err: nil},
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := readPgLogFileImpl(context.Background(), ReadPgLogFileArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("readPgLogFileImpl: %v", err)
+	}
+	if result.Logs == "" {
+		t.Error("Logs is empty")
+	}
+	if result.ServerID != "prod_db" {
+		t.Errorf("ServerID = %q, want prod_db", result.ServerID)
+	}
+	if result.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker", result.Runtime)
+	}
+}
+
+// TestReadPgLogFile_K8s verifies the kubectl exec path.
+func TestReadPgLogFile_K8s(t *testing.T) {
+	withK8sInfra(t)
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "pg-prod-db-0\n", err: nil},                               // kubectl get pod
+		{output: "postgresql-2026-04-05.log\n", err: nil},                  // kubectl exec ls
+		{output: "pg-prod-db-0\n", err: nil},                               // kubectl get pod (for tail)
+		{output: pgLogContent, err: nil},                                    // kubectl exec tail
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := readPgLogFileImpl(context.Background(), ReadPgLogFileArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("readPgLogFileImpl: %v", err)
+	}
+	if result.Runtime != "kubectl" {
+		t.Errorf("Runtime = %q, want kubectl", result.Runtime)
+	}
+	if result.Logs == "" {
+		t.Error("Logs is empty")
+	}
+}
+
+// TestReadPgLogFile_Filter verifies case-insensitive line filtering.
+func TestReadPgLogFile_Filter(t *testing.T) {
+	withDockerInfra(t)
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "postgresql-2026-04-05.log\n", err: nil},
+		{output: pgLogContent, err: nil},
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := readPgLogFileImpl(context.Background(), ReadPgLogFileArgs{
+		Target: "prod_db",
+		Filter: "FATAL",
+	})
+	if err != nil {
+		t.Fatalf("readPgLogFileImpl: %v", err)
+	}
+	if result.LinesReturned != 1 {
+		t.Errorf("LinesReturned = %d, want 1", result.LinesReturned)
+	}
+}
+
+// TestResolveHost_K8s verifies the k8s resolution path.
+func TestResolveHost_K8s(t *testing.T) {
+	withK8sInfra(t)
+	host, err := resolveHost("prod_db")
+	if err != nil {
+		t.Fatalf("resolveHost: %v", err)
+	}
+	if host.K8sPodSelector != "app=postgres,instance=prod-db" {
+		t.Errorf("K8sPodSelector = %q", host.K8sPodSelector)
+	}
+	if host.K8sNamespace != "prod" {
+		t.Errorf("K8sNamespace = %q, want prod", host.K8sNamespace)
+	}
+	if host.K8sContext != "gke_project_region_prod-cluster" {
+		t.Errorf("K8sContext = %q", host.K8sContext)
+	}
+}
+
+// TestResolveHost_K8s_MissingSelector verifies that k8s without pod selector errors.
+func TestResolveHost_K8s_MissingSelector(t *testing.T) {
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"k8s_db": {K8sCluster: "prod-cluster"},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"prod-cluster": {Context: "ctx"},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+
+	_, err := resolveHost("k8s_db")
+	if err == nil {
+		t.Error("expected error for missing k8s_pod_selector")
+	}
+}
+
+// TestResolveHost_K8s_UnknownCluster verifies that an unresolved cluster reference errors.
+func TestResolveHost_K8s_UnknownCluster(t *testing.T) {
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"k8s_db": {K8sCluster: "nonexistent", K8sPodSelector: "app=pg"},
+		},
+		K8sClusters: map[string]infra.K8sCluster{},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+
+	_, err := resolveHost("k8s_db")
+	if err == nil {
+		t.Error("expected error for unknown k8s cluster")
+	}
+}
+
+// TestCheckDisk_K8s verifies that a k8s target routes through kubectl exec.
+func TestCheckDisk_K8s(t *testing.T) {
+	withK8sInfra(t)
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "pg-prod-db-0", err: nil}, // kubectl get pod
+		{output: dfOutput, err: nil},       // kubectl exec df
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := checkDiskImpl(context.Background(), CheckDiskArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("checkDiskImpl (k8s): %v", err)
+	}
+	if result.Output == "" {
+		t.Error("Output is empty")
+	}
+}
+
+// TestCheckMemory_K8s verifies that a k8s target routes through kubectl exec.
+func TestCheckMemory_K8s(t *testing.T) {
+	withK8sInfra(t)
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "pg-prod-db-0", err: nil}, // kubectl get pod
+		{output: freeOutput, err: nil},     // kubectl exec free
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := checkMemoryImpl(context.Background(), CheckMemoryArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("checkMemoryImpl (k8s): %v", err)
+	}
+	if result.Output == "" {
+		t.Error("Output is empty")
+	}
+}
+
+// TestReadPgLogFile_NoLogFiles verifies the graceful response when the log directory is empty.
+func TestReadPgLogFile_NoLogFiles(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner("", nil)() // ls returns empty
+
+	result, err := readPgLogFileImpl(context.Background(), ReadPgLogFileArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("readPgLogFileImpl: %v", err)
+	}
+	if result.LinesReturned != 0 {
+		t.Errorf("LinesReturned = %d, want 0", result.LinesReturned)
+	}
+	if !strings.Contains(result.Logs, "no log files found") {
+		t.Errorf("expected 'no log files found' message, got: %q", result.Logs)
+	}
+}
+
+// TestReadPgLogFile_CustomLogPath verifies that log_path overrides the default directory.
+func TestReadPgLogFile_CustomLogPath(t *testing.T) {
+	withDockerInfra(t)
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "pg.log\n", err: nil},
+		{output: pgLogContent, err: nil},
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := readPgLogFileImpl(context.Background(), ReadPgLogFileArgs{
+		Target:  "prod_db",
+		LogPath: "/var/log/postgresql",
+	})
+	if err != nil {
+		t.Fatalf("readPgLogFileImpl: %v", err)
+	}
+	if result.Logs == "" {
+		t.Error("Logs is empty")
+	}
+}
+
+// TestExecInProcess_K8s_NoPodFound verifies the error when the selector matches no pods.
+func TestExecInProcess_K8s_NoPodFound(t *testing.T) {
+	defer withMockRunner("", nil)() // kubectl get pod returns empty
+
+	host := resolvedHost{
+		K8sContext:     "ctx",
+		K8sNamespace:   "prod",
+		K8sPodSelector: "app=postgres",
+	}
+	_, err := execInProcess(context.Background(), host, []string{"df", "-h"})
+	if err == nil {
+		t.Error("expected error when no pod found")
+	}
+}
+
+// multiMockRunner returns pre-configured responses in order.
+type mockResponse struct {
+	output string
+	err    error
+}
+
+type multiMockRunner struct {
+	responses []mockResponse
+	idx       int
+}
+
+func (m *multiMockRunner) Run(_ context.Context, _ string, _ []string, _ []string) (string, error) {
+	if m.idx >= len(m.responses) {
+		return "", nil
+	}
+	r := m.responses[m.idx]
+	m.idx++
+	return r.output, r.err
 }

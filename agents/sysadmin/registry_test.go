@@ -14,6 +14,7 @@ var expectedSysadminTools = []string{
 	"get_host_logs",
 	"check_disk",
 	"check_memory",
+	"read_pg_log_file",
 	"restart_container",
 	"restart_service",
 }
