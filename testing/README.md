@@ -5,194 +5,48 @@
 ```
 [boris@ ~/helpdesk]$ make test-nocache
 go test --count=1 ./...
-ok  	helpdesk/agents/database	0.494s
-ok  	helpdesk/agents/incident	0.788s
-ok  	helpdesk/agents/k8s	0.479s
+ok  	helpdesk/agents/database	0.437s
+ok  	helpdesk/agents/incident	0.707s
+ok  	helpdesk/agents/k8s	0.899s
 ?   	helpdesk/agents/research	[no test files]
-ok  	helpdesk/agentutil	0.824s
+ok  	helpdesk/agents/sysadmin	0.315s
+ok  	helpdesk/agentutil	1.568s
+ok  	helpdesk/agentutil/retryutil	2.197s
 ?   	helpdesk/cmd/approvals	[no test files]
-ok  	helpdesk/cmd/auditd	1.074s
+ok  	helpdesk/cmd/auditd	2.458s
 ?   	helpdesk/cmd/auditor	[no test files]
-ok  	helpdesk/cmd/gateway	1.303s
-ok  	helpdesk/cmd/govbot	1.592s
+ok  	helpdesk/cmd/fleet-runner	3.071s
+ok  	helpdesk/cmd/gateway	1.548s
+ok  	helpdesk/cmd/govbot	2.209s
 ?   	helpdesk/cmd/govexplain	[no test files]
-ok  	helpdesk/cmd/helpdesk	1.681s
+?   	helpdesk/cmd/hashapikey	[no test files]
+ok  	helpdesk/cmd/helpdesk	1.994s
+ok  	helpdesk/cmd/helpdesk-client	2.144s
+?   	helpdesk/cmd/jwttest	[no test files]
 ?   	helpdesk/cmd/secbot	[no test files]
-ok  	helpdesk/cmd/srebot	1.863s
-ok  	helpdesk/internal/audit	2.423s
-ok  	helpdesk/internal/discovery	2.176s
+ok  	helpdesk/cmd/srebot	2.232s
+ok  	helpdesk/internal/audit	3.065s
+ok  	helpdesk/internal/authz	1.895s
+?   	helpdesk/internal/buildinfo	[no test files]
+ok  	helpdesk/internal/client	2.363s
+ok  	helpdesk/internal/discovery	1.555s
+?   	helpdesk/internal/fleet	[no test files]
+ok  	helpdesk/internal/identity	2.547s
 ?   	helpdesk/internal/infra	[no test files]
 ?   	helpdesk/internal/logging	[no test files]
 ?   	helpdesk/internal/model	[no test files]
-ok  	helpdesk/internal/policy	2.261s
-ok  	helpdesk/prompts	2.320s
-ok  	helpdesk/testing/cmd/faulttest	2.072s
-ok  	helpdesk/testing/faultlib	2.005s
-ok  	helpdesk/testing/helm	2.458s
-ok  	helpdesk/testing/testutil	1.864s
-
-
-[boris@ ~/helpdesk]$ make integration
-Starting test infrastructure...
-docker compose -f testing/docker/docker-compose.yaml up -d --wait
-[+] Running 4/4
- ✔ Network docker_default            Created                                                                                                                                                                                                 0.0s
- ✔ Volume "docker_pgdata"            Created                                                                                                                                                                                                 0.0s
- ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 6.4s
- ✔ Container helpdesk-test-pgloader  Healthy                                                                                                                                                                                                 6.3s
-Running integration tests...
-go test -tags integration -timeout 120s ./testing/integration/...
-ok  	helpdesk/testing/integration	(cached)
-Stopping test infrastructure...
-docker compose -f testing/docker/docker-compose.yaml down -v
-[+] Running 4/4
- ✔ Container helpdesk-test-pgloader  Removed                                                                                                                                                                                                10.2s
- ✔ Container helpdesk-test-pg        Removed                                                                                                                                                                                                 0.1s
- ✔ Volume docker_pgdata              Removed                                                                                                                                                                                                 0.0s
- ✔ Network docker_default            Removed                                                                                                                                                                                                 0.2s
-
-
-[boris@ ~/helpdesk]$ FAULTTEST_DB_AGENT_URL=http://localhost:1100 FAULTTEST_CONN_STR="host=localhost port=5432 dbname=postgres user=postgres" FAULTTEST_IDS=db-idle-in-transaction make faulttest
-Starting test infrastructure...
-docker compose -f testing/docker/docker-compose.yaml up -d --wait
-[+] Running 2/2
- ✔ Container helpdesk-test-pg        Healthy                                                                                                                                                                                                 1.0s
- ✔ Container helpdesk-test-pgloader  Healthy                                                                                                                                                                                                 1.0s
-Running fault tests...
-go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
-=== RUN   TestFaultInjection
-    faulttest_test.go:129: Running 1 fault injection tests
-=== RUN   TestFaultInjection/db-idle-in-transaction
-    faulttest_test.go:163: Injecting failure...
-2026/03/03 19:02:19 INFO executing injection spec type=docker_exec phase=inject
-    faulttest_test.go:178: Sending prompt to agent...
-    faulttest_test.go:190: Agent responded in 8.632011458s (2293 chars)
-    faulttest_test.go:195: Evaluation: score=85%, keywords=true, diagnosis=true, tools=true
-    faulttest_test.go:170: Tearing down...
-2026/03/03 19:02:30 INFO executing injection spec type=docker_exec phase=teardown
---- PASS: TestFaultInjection (10.95s)
-    --- PASS: TestFaultInjection/db-idle-in-transaction (10.94s)
-=== RUN   TestDatabaseFailures
-    faulttest_test.go:236: Found 11 database failures
-    faulttest_test.go:239:   - db-max-connections: Max connections exhausted
-    faulttest_test.go:239:   - db-long-running-query: Long-running query blocking
-    faulttest_test.go:239:   - db-lock-contention: Lock contention / deadlock
-    faulttest_test.go:239:   - db-table-bloat: Table bloat / dead tuples
-    faulttest_test.go:239:   - db-high-cache-miss: High cache miss ratio
-    faulttest_test.go:239:   - db-connection-refused: Database connection refused
-    faulttest_test.go:239:   - db-auth-failure: Authentication failure
-    faulttest_test.go:239:   - db-not-exist: Database does not exist
-    faulttest_test.go:239:   - db-replication-lag: Replication lag
-    faulttest_test.go:239:   - db-idle-in-transaction: Session stuck with uncommitted writes
-    faulttest_test.go:239:   - db-terminate-direct-command: Direct terminate — inspect-first check
---- PASS: TestDatabaseFailures (0.00s)
-=== RUN   TestKubernetesFailures
-    faulttest_test.go:248: FAULTTEST_K8S_AGENT_URL not set
---- SKIP: TestKubernetesFailures (0.00s)
-=== RUN   TestCatalogLoading
-    faulttest_test.go:290: Catalog: version=1, failures=19
-    faulttest_test.go:298:   kubernetes: 6
-    faulttest_test.go:298:   compound: 2
-    faulttest_test.go:298:   database: 11
---- PASS: TestCatalogLoading (0.00s)
-=== RUN   TestEvaluatorSmokeTest
-    faulttest_test.go:338: Evaluator test: score=1.00, passed=true
---- PASS: TestEvaluatorSmokeTest (0.00s)
-PASS
-ok  	helpdesk/testing/faulttest	11.304s
-Stopping test infrastructure...
-docker compose -f testing/docker/docker-compose.yaml down -v
-[+] Running 4/4
- ✔ Container helpdesk-test-pgloader  Removed                                                                                                                                                                                                10.2s
- ✔ Container helpdesk-test-pg        Removed                                                                                                                                                                                                 0.2s
- ✔ Volume docker_pgdata              Removed                                                                                                                                                                                                 0.0s
- ✔ Network docker_default            Removed                                                                                                                                                                                                 0.2s
-
-
-[boris@ ~/helpdesk]$ make e2e
-Starting full stack...
-docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
-WARN[0000] Found orphan containers ([docker-compose-orchestrator-run-99b1ef4892c5 docker-compose-orchestrator-run-296f690d90bf docker-compose-orchestrator-run-6d987d8ddd8d docker-compose-orchestrator-run-c7adaf6e28cb docker-compose-orchestrator-run-512a3586c5d0 docker-compose-orchestrator-run-f64674e022dc docker-compose-orchestrator-run-ed295ecc6bbf docker-compose-orchestrator-run-626c276b2cbd docker-compose-orchestrator-run-51d7fe36fe77 docker-compose-orchestrator-run-b4b14664980c docker-compose-orchestrator-run-3c37c363f25e docker-compose-orchestrator-run-41c75715fe0a docker-compose-orchestrator-run-372c4614d7b2 docker-compose-orchestrator-run-b0bcea4f740a]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up.
-[+] Running 6/6
- ✔ Network docker-compose_default             Created                                                                                                                                                                                        0.0s
- ✔ Volume "docker-compose_incidents"          Created                                                                                                                                                                                        0.0s
- ✔ Container docker-compose-database-agent-1  Healthy                                                                                                                                                                                        1.0s
- ✔ Container docker-compose-k8s-agent-1       Healthy                                                                                                                                                                                        1.0s
- ✔ Container docker-compose-incident-agent-1  Healthy                                                                                                                                                                                        1.0s
- ✔ Container docker-compose-gateway-1         Healthy                                                                                                                                                                                        0.9s
-Running E2E tests...
-go test -tags e2e -timeout 300s -v ./testing/e2e/...
-=== RUN   TestGatewayDiscovery
-    gateway_test.go:42: Discovered 3 agents:
-    gateway_test.go:44:   - postgres_database_agent
-    gateway_test.go:44:   - k8s_agent
-    gateway_test.go:44:   - incident_agent
---- PASS: TestGatewayDiscovery (0.01s)
-=== RUN   TestGatewayHealthCheck
-    gateway_test.go:84: Response (1073 chars): ---
-        ERROR — check_connection failed for host=localhost port=15432 dbname=testdb user=postgres password=testpass
-
-        connection failed: Connection refused. The PostgreSQL server may not be running, or t...
---- PASS: TestGatewayHealthCheck (2.70s)
-=== RUN   TestGatewayAIDiagnosis
-    gateway_test.go:111: Sending diagnosis prompt to database agent...
-    gateway_test.go:118: Agent response (1963 chars)
---- PASS: TestGatewayAIDiagnosis (6.13s)
-=== RUN   TestGatewayQueryUnknownAgent
---- PASS: TestGatewayQueryUnknownAgent (0.00s)
-=== RUN   TestGatewayIncidentBundle
-    gateway_test.go:196: Creating incident bundle with callback: http://127.0.0.1:51055/callback
-    gateway_test.go:208: Incident agent responded (700 chars)
-    gateway_test.go:221: Warning: No callback received within 60s (may be expected if incident agent not configured)
---- PASS: TestGatewayIncidentBundle (63.77s)
-=== RUN   TestSREBotWorkflow
-=== RUN   TestSREBotWorkflow/Phase1_Discovery
-    gateway_test.go:250: Found 3 agents
-=== RUN   TestSREBotWorkflow/Phase2_HealthCheck
-    gateway_test.go:274: Anomaly detected in health check response
-=== RUN   TestSREBotWorkflow/Phase3_AIDiagnosis
-    gateway_test.go:298: Diagnosis response (2307 chars)
---- PASS: TestSREBotWorkflow (8.00s)
-    --- PASS: TestSREBotWorkflow/Phase1_Discovery (0.00s)
-    --- PASS: TestSREBotWorkflow/Phase2_HealthCheck (2.62s)
-    --- PASS: TestSREBotWorkflow/Phase3_AIDiagnosis (5.37s)
-=== RUN   TestMultiAgentIncidentResponse
-    multi_agent_test.go:32: E2E_ORCHESTRATOR_URL not set
---- SKIP: TestMultiAgentIncidentResponse (0.00s)
-=== RUN   TestFaultInjectionE2E
-    multi_agent_test.go:129: Test infrastructure not running (need testing/docker/docker-compose.yaml with pgloader)
---- SKIP: TestFaultInjectionE2E (0.16s)
-=== RUN   TestOrchestratorDelegation
-    orchestrator_test.go:21: E2E_ORCHESTRATOR_URL not set
---- SKIP: TestOrchestratorDelegation (0.00s)
-=== RUN   TestOrchestratorCompoundPrompt
-    orchestrator_test.go:86: E2E_ORCHESTRATOR_URL not set
---- SKIP: TestOrchestratorCompoundPrompt (0.00s)
-=== RUN   TestDirectAgentCall
-    orchestrator_test.go:141: Note: Direct A2A calls may return empty if agent requires specific session context
-=== RUN   TestDirectAgentCall/database_agent_direct
-    orchestrator_test.go:184: Response (0 chars, 4.69650775s)
-    orchestrator_test.go:189: Warning: Agent returned empty response (may be expected for direct A2A without session)
-    orchestrator_test.go:190: Empty response from direct A2A call - use gateway tests for reliable E2E testing
-=== RUN   TestDirectAgentCall/k8s_agent_direct
-    orchestrator_test.go:169: Agent URL or required config not set
---- PASS: TestDirectAgentCall (4.70s)
-    --- SKIP: TestDirectAgentCall/database_agent_direct (4.70s)
-    --- SKIP: TestDirectAgentCall/k8s_agent_direct (0.00s)
-PASS
-ok  	helpdesk/testing/e2e	85.983s
-Stopping full stack...
-docker compose -f deploy/docker-compose/docker-compose.yaml down -v
-[+] Running 6/6
- ✔ Container docker-compose-gateway-1         Removed                                                                                                                                                                                        0.2s
- ✔ Container docker-compose-k8s-agent-1       Removed                                                                                                                                                                                        0.2s
- ✔ Container docker-compose-incident-agent-1  Removed                                                                                                                                                                                        0.1s
- ✔ Container docker-compose-database-agent-1  Removed                                                                                                                                                                                        0.1s
- ✔ Volume docker-compose_incidents            Removed                                                                                                                                                                                        0.0s
- ✔ Network docker-compose_default             Removed                                                                                                                                                                                        0.1s
-
-
+ok  	helpdesk/internal/policy	1.605s
+ok  	helpdesk/internal/toolregistry	1.456s
+ok  	helpdesk/playbooks	1.743s
+ok  	helpdesk/prompts	1.404s
+ok  	helpdesk/testing/cmd/faulttest	1.782s
+ok  	helpdesk/testing/faultlib	1.625s
+ok  	helpdesk/testing/helm	2.138s
+ok  	helpdesk/testing/testutil	1.471s
 ```
+
+Other than the basic unit tests, the other tests are (much) longer (in time it takes to finish them and in the rather verbose output), so they are stored in separate sample log files. Please see a sample integration test run [here](INTEGRATION_LOG.md), a sample e2e test run [here](E2E.md) and a sample fault injection run [here](FAULT_INJECTION_TESTING_LOG.md).
+
 
 aiHelpDesk offers a comprehensive testing strategy that is broken into five distinct layers as follows:
 
