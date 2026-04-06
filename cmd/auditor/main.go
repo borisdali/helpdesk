@@ -1053,9 +1053,13 @@ func (a *Auditor) checkLongDuration(event *audit.Event) {
 	}
 
 	if duration > critThreshold {
+		agent := ""
+		if event.Decision != nil {
+			agent = event.Decision.Agent
+		}
 		a.alert(AlertCritical, "very long delegation duration", event,
 			"duration", duration.String(),
-			"agent", event.Decision.Agent)
+			"agent", agent)
 	} else if duration > warnThreshold {
 		a.alert(AlertWarning, "long delegation duration", event,
 			"duration", duration.String())

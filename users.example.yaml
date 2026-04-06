@@ -79,7 +79,7 @@ service_accounts:
   - id: sysadmin-agent
     roles: [sre-automation]
     # Hash of example key "sysadmin-agent-api-key" (set SYSADMIN_AGENT_API_KEY in .env)
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$c3lzYWRtaW5hZ2VudA$placeholder-replace-with-real-hash"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$804rAgqchW/C7l4q27HIEA$vpZDu/4FbiX/WaxlLou7lOElw/KcjzLkedLr/GT/vr8"
 
   - id: incident-agent
     roles: [sre-automation]

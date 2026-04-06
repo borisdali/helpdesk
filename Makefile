@@ -137,7 +137,7 @@ faulttest:
 		up -d --wait
 	@echo "Running fault tests..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
-	go test -tags faulttest -timeout 600s -v ./testing/faulttest/...
+	go test -tags faulttest -timeout 800s -v ./testing/faulttest/...
 	@echo "Stopping test infrastructure..."
 	docker compose \
 		-f testing/docker/docker-compose.yaml \

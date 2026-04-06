@@ -48,6 +48,7 @@ type InjectSpec struct {
 	ExecVia      string            `yaml:"exec_via,omitempty"`
 	Action       string            `yaml:"action,omitempty"`
 	Service      string            `yaml:"service,omitempty"`
+	Signal       string            `yaml:"signal,omitempty"`
 	Overlay      string            `yaml:"overlay,omitempty"`
 	Restore      interface{}       `yaml:"restore,omitempty"`
 	Target       string            `yaml:"target,omitempty"`

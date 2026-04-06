@@ -7,7 +7,9 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -41,7 +43,12 @@ func main() {
 		if err != nil {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
-			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers))
+			dbKeys := make([]string, 0, len(infraConfig.DBServers))
+		for k := range infraConfig.DBServers {
+			dbKeys = append(dbKeys, k)
+		}
+		sort.Strings(dbKeys)
+		slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
 		}
 	}
 

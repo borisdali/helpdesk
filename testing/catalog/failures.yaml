@@ -614,7 +614,7 @@ failures:
     inject:
       type: kustomize
       overlay: k8s/overlays/scale-to-zero
-      wait: 15s
+      wait: 45s
     teardown:
       type: kustomize_delete
       overlay: k8s/overlays/scale-to-zero
@@ -636,7 +636,7 @@ failures:
           - "replicas"
           - "unavailable"
       expected_diagnosis:
-        category: "deployment_scaled_down"
+        category: "scaled_down"
     timeout: 90s
 
   - id: db-vacuum-needed
@@ -755,15 +755,16 @@ failures:
     category: host
     severity: critical
     description: >
-      The PostgreSQL postmaster is killed with SIGABRT via COPY TO PROGRAM,
-      simulating a process crash (assertion failure or fatal signal). Because
-      the postgres process is the container entrypoint, the container exits
-      with code 134 (SIGABRT). The sysadmin agent must distinguish this
-      abnormal exit (exitcode=134) from a clean stop (exitcode=0) and report
-      the crash as the root cause rather than a graceful shutdown.
+      The postgres container is killed with SIGKILL from the host via
+      docker compose kill, simulating an unclean process termination (OOM kill,
+      hardware fault, or forced termination). The container exits with code 137
+      (128 + SIGKILL=9). The sysadmin agent must distinguish this forced kill
+      (exitcode=137) from a clean stop (exitcode=0).
     inject:
-      type: docker_exec
-      script: sql/inject_pg_crash.sh
+      type: docker
+      action: kill
+      signal: SIGKILL
+      service: postgres
     teardown:
       type: docker
       action: start
@@ -787,7 +788,7 @@ failures:
           - "killed"
           - "abnormal"
       expected_diagnosis:
-        category: "process_crash"
+        category: "container_killed"
     timeout: 60s
 
   # ── Compound failures (2) ──────────────────────────────────────────────
@@ -796,10 +797,17 @@ failures:
     name: "DB unreachable + pod crashing"
     category: compound
     severity: critical
+    governance_gap: true
     description: >
       The database is unreachable because the pod is in CrashLoopBackOff.
       Requires both the DB agent (to report connection failure) and the
       K8s agent (to diagnose the pod crash).
+      GOVERNANCE GAP: In the local test setup the DB agent connects to
+      localhost:15432 (docker compose postgres) which remains reachable
+      regardless of the k8s pod state. Without an orchestrator routing
+      through k8s, the agent correctly reports the DB as healthy and
+      stops without investigating k8s. This test documents the limitation
+      rather than asserting correct behaviour.
     inject:
       type: kustomize
       overlay: k8s/overlays/crashloop

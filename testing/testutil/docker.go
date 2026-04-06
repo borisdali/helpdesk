@@ -43,6 +43,15 @@ func DockerComposeStart(ctx context.Context, service string) error {
 	return err
 }
 
+// DockerComposeKill sends a signal to a specific service in the compose stack.
+// Uses docker compose kill which sends the signal from the host — this bypasses
+// the Linux PID-1 signal immunity that applies to signals sent from within the
+// container's own PID namespace.
+func DockerComposeKill(ctx context.Context, signal, service string) error {
+	_, err := DockerCompose(ctx, "kill", "--signal="+signal, service)
+	return err
+}
+
 // DockerExec runs a command inside a running container.
 func DockerExec(ctx context.Context, container string, cmd ...string) (string, error) {
 	args := append([]string{"exec", "-i", container}, cmd...)
