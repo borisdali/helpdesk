@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sysadmin-agent
+spec:
+  replicas: {{ .Values.agents.sysadmin.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: sysadmin-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: sysadmin-agent
+    spec:
+      containers:
+        - name: sysadmin-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/sysadmin-agent"]
+          env:
+            - name: HELPDESK_AGENT_ADDR
+              value: "0.0.0.0:{{ .Values.agents.sysadmin.port }}"
+            - name: HELPDESK_AGENT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-sysadmin-agent:{{ .Values.agents.sysadmin.port }}"
+            {{- if .Values.infrastructure }}
+            - name: HELPDESK_INFRA_CONFIG
+              value: /etc/helpdesk/infrastructure.json
+            {{- end }}
+            {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- if .Values.governance.auditd.enabled }}
+            - name: HELPDESK_AUDIT_ENABLED
+              value: "true"
+            - name: HELPDESK_AUDIT_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+            {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: HELPDESK_POLICY_ENABLED
+              value: "true"
+            - name: HELPDESK_POLICY_FILE
+              value: /etc/helpdesk/policies.yaml
+            {{- end }}
+            {{- if .Values.governance.approvals.enabled }}
+            - name: HELPDESK_APPROVAL_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if .Values.governance.approvals.timeout }}
+            - name: HELPDESK_APPROVAL_TIMEOUT
+              value: "{{ .Values.governance.approvals.timeout }}"
+            {{- end }}
+            {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.infrastructure }}
+            - name: infra-config
+              mountPath: /etc/helpdesk/infrastructure.json
+              subPath: infrastructure.json
+              readOnly: true
+            {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            - name: policy-config
+              mountPath: /etc/helpdesk/policies.yaml
+              subPath: policies.yaml
+              readOnly: true
+            {{- end }}
+            {{- if .Values.agents.sysadmin.dockerSocket.enabled }}
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            {{- end }}
+          ports:
+            - name: a2a
+              containerPort: {{ .Values.agents.sysadmin.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: a2a
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: a2a
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        {{- if .Values.infrastructure }}
+        - name: infra-config
+          configMap:
+            name: {{ include "helpdesk.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.governance.policy.enabled }}
+        - name: policy-config
+          configMap:
+            name: {{ required "governance.policy.configMap must be set when governance.policy.enabled is true" .Values.governance.policy.configMap }}
+        {{- end }}
+        {{- if .Values.agents.sysadmin.dockerSocket.enabled }}
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sysadmin-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.agents.sysadmin.port }}
+      targetPort: a2a
+      protocol: TCP
+      name: a2a
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: sysadmin-agent

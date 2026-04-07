@@ -54,6 +54,15 @@ agents:
       # K8s agent can query cluster resources via in-cluster kubectl.
       create: true
 
+  sysadmin:
+    replicas: 1
+    port: 1103
+    # Mount the host Docker socket so the agent can inspect and manage containers.
+    # Required for databases managed via Docker/Podman on the same node.
+    # Grants the pod access to the host Docker daemon — use with care.
+    dockerSocket:
+      enabled: false
+
   incident:
     replicas: 1
     port: 1104

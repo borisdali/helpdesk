@@ -128,6 +128,40 @@ services:
     depends_on:
       - auditd
 
+  sysadmin-agent:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
+    image: helpdesk:latest
+    command: ["/usr/local/bin/sysadmin-agent"]
+    environment:
+      HELPDESK_AGENT_ADDR: "0.0.0.0:1103"
+      HELPDESK_AGENT_URL: "http://sysadmin-agent:1103"
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
+      # AI Governance
+      HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
+      HELPDESK_AUDIT_ENABLED: "true"
+      HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${SYSADMIN_AGENT_API_KEY:-}
+      HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
+      HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+    volumes:
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
+      - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      # Mount the Docker socket so the agent can inspect and manage containers on the host.
+      # Required for databases managed via Docker/Podman. Remove if not applicable.
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "1103:1103"
+    restart: unless-stopped
+    depends_on:
+      - auditd
+
   incident-agent:
     build:
       context: ../../..
@@ -200,7 +234,7 @@ services:
     command: ["/usr/local/bin/gateway"]
     environment:
       HELPDESK_GATEWAY_ADDR: "0.0.0.0:8080"
-      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://sysadmin-agent:1103,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
@@ -232,6 +266,7 @@ services:
       - auditd
       - database-agent
       - k8s-agent
+      - sysadmin-agent
       - incident-agent
       - research-agent
 
@@ -242,7 +277,7 @@ services:
     image: helpdesk:latest
     command: ["/usr/local/bin/helpdesk"]
     environment:
-      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://sysadmin-agent:1103,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
@@ -268,6 +303,7 @@ services:
     depends_on:
       - database-agent
       - k8s-agent
+      - sysadmin-agent
       - incident-agent
       - research-agent
 
