@@ -313,6 +313,7 @@ services:
   helpdesk-client:
     image: helpdesk:latest
     entrypoint: ["/usr/local/bin/helpdesk-client"]
+    working_dir: /jobs
     environment:
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_GATEWAY_URL: http://gateway:8080
@@ -321,6 +322,8 @@ services:
       HELPDESK_SESSION_PURPOSE: ${HELPDESK_SESSION_PURPOSE:-}
       HELPDESK_SESSION_PURPOSE_NOTE: ${HELPDESK_SESSION_PURPOSE_NOTE:-}
       HELPDESK_CLIENT_AGENT: ${HELPDESK_CLIENT_AGENT:-database}
+    volumes:
+      - ${FLEET_JOBS_DIR:-./jobs}:/jobs
     stdin_open: true
     tty: true
     profiles:
@@ -329,11 +332,14 @@ services:
       - gateway
 
   # Fleet runner: applies a single change across infrastructure targets with staged rollout.
-  # Usage: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json
-  # Dry-run: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json --dry-run
+  # Usage: docker compose --profile fleet run --rm fleet-runner --job-file health-check.json
+  # Dry-run: docker compose --profile fleet run --rm fleet-runner --job-file health-check.json --dry-run
+  # Job files are read from ./jobs/ (or $FLEET_JOBS_DIR) on the host, which is also
+  # where --plan-fleet-job writes them from the helpdesk-client container.
   fleet-runner:
     image: helpdesk:latest
     entrypoint: ["/usr/local/bin/fleet-runner"]
+    working_dir: /jobs
     environment:
       HELPDESK_GATEWAY_URL: http://gateway:8080
       HELPDESK_AUDIT_URL: http://auditd:1199
@@ -342,7 +348,7 @@ services:
       HELPDESK_SESSION_PURPOSE: fleet_rollout
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
-      - ${FLEET_JOBS_DIR:-./jobs}:/jobs:ro
+      - ${FLEET_JOBS_DIR:-./jobs}:/jobs
     profiles:
       - fleet
     depends_on:
