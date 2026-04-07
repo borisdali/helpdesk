@@ -14,7 +14,7 @@ to proceed.
   go run ./testing/cmd/faulttest list
 ```
 
-Abridged sample log of running the above command (see the [full log](FAULT_INJECTION_TESTING_LOG.md) for details):
+Abridged sample log of running the above command (see the [full log](FAULT_INJECTION_TESTING_SAMPLE.md) for details):
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest list

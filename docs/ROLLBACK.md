@@ -8,7 +8,8 @@ it goes through the same policy check, approval gate, and audit trail as the
 original mutation.
 
 This page covers the full rollback lifecycle for single-event rollbacks and
-fleet-job rollbacks.
+fleet-job rollbacks. Feel free to jump to a [sample rollback run](ROLLBACK_SAMPLE.md) to see all
+of this in action.
 
 ---
 

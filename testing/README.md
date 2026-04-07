@@ -45,7 +45,7 @@ ok  	helpdesk/testing/helm	2.138s
 ok  	helpdesk/testing/testutil	1.471s
 ```
 
-Other than the basic unit tests, the other tests are (much) longer (in time it takes to finish them and in the rather verbose output), so they are stored in separate sample log files. Please see a sample integration test run [here](INTEGRATION_LOG.md), a sample e2e test run [here](E2E.md) and a sample fault injection run [here](FAULT_INJECTION_TESTING_LOG.md).
+Other than the basic unit tests, the other tests are (much) longer (in time it takes to finish them and in the rather verbose output), so they are stored in separate sample log files. Please see a sample integration test run [here](INTEGRATION_SAMPLE.md), a sample e2e test run [here](E2E_SAMPLE.md) and a sample fault injection run [here](FAULT_INJECTION_TESTING_SAMPLE.md).
 
 
 aiHelpDesk offers a comprehensive testing strategy that is broken into five distinct layers as follows:
