@@ -30,6 +30,7 @@ RUN go mod edit -replace google.golang.org/adk=/src/adk-go
 RUN go mod download
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/database-agent  ./agents/database/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/k8s-agent       ./agents/k8s/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/sysadmin-agent ./agents/sysadmin/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/incident-agent  ./agents/incident/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/research-agent  ./agents/research/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/gateway         ./cmd/gateway/
@@ -81,6 +82,7 @@ RUN ARCH=$(dpkg --print-architecture) \
 # Copy binaries from builder.
 COPY --from=builder /out/database-agent  /usr/local/bin/database-agent
 COPY --from=builder /out/k8s-agent       /usr/local/bin/k8s-agent
+COPY --from=builder /out/sysadmin-agent /usr/local/bin/sysadmin-agent
 COPY --from=builder /out/incident-agent  /usr/local/bin/incident-agent
 COPY --from=builder /out/research-agent  /usr/local/bin/research-agent
 COPY --from=builder /out/gateway         /usr/local/bin/gateway
