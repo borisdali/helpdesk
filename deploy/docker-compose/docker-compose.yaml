@@ -267,6 +267,8 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${GATEWAY_API_KEY:-}
+      # Bearer token sent to agent /tool/{name} endpoints (required when agents enforce inbound auth)
+      HELPDESK_AGENT_API_KEY: ${HELPDESK_AGENT_API_KEY:-}
       # Identity & access (optional; defaults to "none" — unverified X-User headers)
       HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml

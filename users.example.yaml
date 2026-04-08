@@ -84,9 +84,14 @@ service_accounts:
   - id: incident-agent
     roles: [sre-automation]
     # Hash of example key "incident-agent-api-key" (set INCIDENT_AGENT_API_KEY in .env)
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$rU4keWOcSSgW5UavhPsAgw$oP2ftRUZiYjMY/KpCoA0+FpR3CkVsu4QdVWdvtEM73Y"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$xCxOxnLUjTSmsYtYuSRrJw$G8DN6ciDpYlkGzqB4382JpO9yY8bZCYvMRV7dzO550A"
 
   - id: research-agent
     roles: [sre-automation]
     # Hash of example key "research-agent-api-key" (set RESEARCH_AGENT_API_KEY in .env)
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$NP22K/x2QGQYUF8WknzwRg$u3EXWsELOPIGvM7/1YgQjBydewYe/cn/NBz6P9MAnNg"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$RSZbxW4nv43nf3aNupeyog$d6JTZeEm3L0NYLQVbR1T+SmIhNZB3ASexbj5aRd7a4A"
+
+  - id: orchestrator
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$uVY1WcteI2paQl7jOqviLg$80ES5qGJvrcH7nCmgCWrIvE03WvVELJX/8f05aBK/qs"
+

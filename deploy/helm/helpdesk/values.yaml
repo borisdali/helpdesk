@@ -83,6 +83,12 @@ gateway:
   port: 8080
   service:
     type: ClusterIP       # set to LoadBalancer for external access
+  # Secret containing the Bearer token the gateway sends to agent /tool/{name} endpoints.
+  # Required when agents enforce inbound auth (HELPDESK_USERS_FILE is set on agents).
+  # Create with: kubectl create secret generic helpdesk-agent-api-key --from-literal=api-key=<key>
+  # Add a "gateway" entry to your users.yaml with the Argon2id hash of the same key.
+  agentAPIKeySecret: ""
+  agentAPIKeyKey: "api-key"
   identity:
     # Identity provider: none (default), static, or jwt.
     # "none"   = accept X-User / X-Roles headers without verification (dev only).
