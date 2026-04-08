@@ -89,7 +89,7 @@ if ! kubectl -n "$NAMESPACE" get pods | grep -q "Running"; then
 fi
 
 # Kill any existing port-forwards on these ports
-for port in 1100 1102 1104; do
+for port in 1100 1102 1103 1104; do
     if lsof -i ":$port" >/dev/null 2>&1; then
         log "Killing existing process on port $port..."
         lsof -ti ":$port" | xargs kill -9 2>/dev/null || true
@@ -108,13 +108,17 @@ kubectl -n "$NAMESPACE" port-forward svc/helpdesk-k8s-agent 1102:1102 &
 PF_K8S=$!
 sleep 0.5
 
+kubectl -n "$NAMESPACE" port-forward svc/helpdesk-sysadmin-agent 1103:1103 &
+PF_SYS=$!
+sleep 0.5
+
 kubectl -n "$NAMESPACE" port-forward svc/helpdesk-incident-agent 1104:1104 &
 PF_INC=$!
 sleep 0.5
 
 # Verify port-forwards are running
 sleep 1
-for pid in $PF_DB $PF_K8S $PF_INC; do
+for pid in $PF_DB $PF_K8S $PF_SYS $PF_INC; do
     if ! kill -0 $pid 2>/dev/null; then
         err "Port-forward failed to start (PID $pid)"
         exit 1
@@ -124,10 +128,11 @@ done
 log "Port-forwards active:"
 log "  - Database agent: localhost:1100"
 log "  - K8s agent:      localhost:1102"
+log "  - Sysadmin agent: localhost:1103"
 log "  - Incident agent: localhost:1104"
 
 # Set agent URLs for local orchestrator (comma-separated list)
-export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
+export HELPDESK_AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1103,http://localhost:1104"
 
 # Copy infrastructure config from ConfigMap if not present locally
 if [[ -z "$HELPDESK_INFRA_CONFIG" ]]; then

@@ -26,6 +26,19 @@
     ]
   },
   {
+    "name": "sysadmin_agent",
+    "url": "http://localhost:1103",
+    "description": "Host-level sysadmin agent for diagnosing and remediating infrastructure issues: Docker/Podman container crashes, systemd service failures, disk exhaustion, OOM kills, and reading PostgreSQL log files directly from containers.",
+    "use_cases": [
+      "Restarting a Docker or Podman container",
+      "Restarting a systemd service",
+      "Checking container status and exit codes",
+      "Reading host and container logs",
+      "Disk and memory utilization on VMs",
+      "Reading PostgreSQL log files when the database is down"
+    ]
+  },
+  {
     "name": "incident_agent",
     "url": "http://localhost:1104",
     "description": "Incident diagnostic bundle agent that collects fresh data from database, Kubernetes, OS, and storage layers and packages it into a .tar.gz bundle for vendor support.",
