@@ -71,9 +71,10 @@ func main() {
 		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
 
-	// Store audit URL + key so read_uploaded_file can fetch operator uploads.
+	// Store audit URL + key so read_uploaded_file and persistToolResult can reach auditd.
 	auditBaseURL = cfg.AuditURL
 	auditAPIKey = cfg.AuditAPIKey
+	currentTraceStore = traceStore
 
 	// Initialize policy engine if configured
 	policyEngine, err := agentutil.InitPolicyEngine(cfg)

@@ -3431,6 +3431,24 @@ func TestGetPgLogTool_ConnectionError(t *testing.T) {
 	}
 }
 
+func TestGetPgLogTool_PermissionDeniedPgLsLogdir(t *testing.T) {
+	// Simulate psql returning the pg_ls_logdir permission error (k8s postgres without superuser).
+	pgErr := errors.New("ERROR:  permission denied for function pg_ls_logdir\nexit status 1")
+	defer withMockRunner("", pgErr)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{ConnectionString: "host=pg-cluster-minkube"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "pg_read_server_files") {
+		t.Errorf("getPgLogTool() output = %q, want privilege hint", result.Output)
+	}
+	if !strings.Contains(result.Output, "get_pod_logs") {
+		t.Errorf("getPgLogTool() output = %q, want k8s alternative hint", result.Output)
+	}
+}
+
 func TestRunPsqlTuples_UsesTupleFlags(t *testing.T) {
 	capture := &capturingRunner{}
 	old := cmdRunner

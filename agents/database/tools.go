@@ -33,6 +33,10 @@ var policyEnforcer *agentutil.PolicyEnforcer
 var auditBaseURL string
 var auditAPIKey string
 
+// currentTraceStore is set during initialization so snapshot tools can include
+// the current trace ID when persisting results to the ToolResultStore.
+var currentTraceStore *audit.CurrentTraceStore
+
 // verifyRetryConfig controls the re-check retry loop for Level 2 post-mutation
 // verification (cancel_query). Overridable in tests to use zero delays.
 var verifyRetryConfig = retryutil.Default
@@ -1563,7 +1567,19 @@ func getBaselineImpl(ctx context.Context, args GetBaselineArgs) (PsqlResult, err
 }
 
 func getBaselineTool(ctx tool.Context, args GetBaselineArgs) (PsqlResult, error) {
-	return getBaselineImpl(ctx, args)
+	result, err := getBaselineImpl(ctx, args)
+	if err == nil && result.Output != "" {
+		// Persist the result so get_saved_snapshots can retrieve it later.
+		// This covers the A2A/LLM path; the direct-tool path is persisted by the gateway.
+		dbInfo, _ := resolveDatabaseInfo(args.ConnectionString)
+		serverName := dbInfo.Name
+		if serverName == "" {
+			serverName = args.ConnectionString
+		}
+		argsJSON, _ := json.Marshal(args)
+		go persistToolResult(context.WithoutCancel(ctx), "get_baseline", serverName, string(argsJSON), result.Output)
+	}
+	return result, err
 }
 
 // ---------------------------------------------------------------------------
@@ -1893,6 +1909,10 @@ FROM latest;`, pgLogReadBytes, pgLogReadBytes)
 
 	raw, err := runPsqlTuples(ctx, args.ConnectionString, query, "read_pg_log")
 	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "pg_ls_logdir") && strings.Contains(errStr, "permission denied") {
+			return PsqlResult{Output: "read_pg_log: permission denied for pg_ls_logdir — the database user lacks the pg_read_server_files privilege or superuser role.\n\nFor Kubernetes-managed PostgreSQL, use the k8s agent's get_pod_logs tool on the postgres pod instead (e.g. kubectl logs <pod> -n <namespace>)."}, nil
+		}
 		return errorResult("read_pg_log", args.ConnectionString, err), nil
 	}
 
@@ -2088,6 +2108,63 @@ func readUploadedFileImpl(ctx context.Context, args ReadUploadedFileArgs) (PsqlR
 
 func readUploadedFileTool(ctx tool.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
 	return readUploadedFileImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// persistToolResult — best-effort persistence for snapshot tools
+// ---------------------------------------------------------------------------
+
+// persistToolResult posts a tool result to auditd's /v1/tool-results endpoint
+// so it is available to get_saved_snapshots. Intended for the A2A path where
+// the gateway's recordToolResult is not called. Fire-and-forget: failures are
+// logged but do not affect the tool response.
+func persistToolResult(ctx context.Context, toolName, serverName, argsJSON, output string) {
+	if auditBaseURL == "" {
+		return
+	}
+	traceID := ""
+	if currentTraceStore != nil {
+		traceID = currentTraceStore.Get()
+	}
+	recordedBy := audit.PrincipalFromContext(ctx).EffectiveID()
+	if recordedBy == "" {
+		recordedBy = "database-agent"
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"server_name": serverName,
+		"tool_name":   toolName,
+		"tool_args":   argsJSON,
+		"output":      output,
+		"trace_id":    traceID,
+		"recorded_by": recordedBy,
+		"success":     true,
+	})
+	if err != nil {
+		slog.Warn("persistToolResult: marshal failed", "tool", toolName, "err", err)
+		return
+	}
+
+	url := strings.TrimSuffix(auditBaseURL, "/") + "/v1/tool-results"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		slog.Warn("persistToolResult: build request failed", "tool", toolName, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("persistToolResult: request failed", "tool", toolName, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		slog.Warn("persistToolResult: unexpected status", "tool", toolName, "status", resp.StatusCode)
+	}
 }
 
 // ---------------------------------------------------------------------------
