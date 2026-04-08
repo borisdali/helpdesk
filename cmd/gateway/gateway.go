@@ -753,6 +753,9 @@ func (g *Gateway) handleFleetCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -859,6 +862,9 @@ func (g *Gateway) proxyFleetRequest(w http.ResponseWriter, r *http.Request, path
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
