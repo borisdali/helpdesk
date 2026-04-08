@@ -24,6 +24,7 @@ func main() {
 		gatewayURL           = flag.String("gateway", envOrDefault("HELPDESK_GATEWAY_URL", "http://localhost:8080"), "Gateway URL")
 		auditURL             = flag.String("audit-url", envOrDefault("HELPDESK_AUDIT_URL", "http://localhost:1199"), "Auditd URL for job tracking")
 		apiKey               = flag.String("api-key", envOrDefault("HELPDESK_CLIENT_API_KEY", ""), "Service account API key")
+		auditAPIKey          = flag.String("audit-api-key", envOrDefault("HELPDESK_AUDIT_API_KEY", ""), "Bearer token for direct auditd calls")
 		infraPath            = flag.String("infra", envOrDefault("HELPDESK_INFRA_CONFIG", "infrastructure.json"), "Path to infrastructure.json")
 		dryRun               = flag.Bool("dry-run", false, "Print plan without contacting gateway or auditd")
 		canaryOverride       = flag.Int("canary", 0, "Override strategy.canary_count")
@@ -285,7 +286,7 @@ func main() {
 	submittedBy := envOrDefault("HELPDESK_CLIENT_USER", "fleet-runner")
 
 	// Create the job record via the gateway (records journey anchor event).
-	jobID, err := submitJob(ctx, *gatewayURL, *auditURL, *apiKey, submittedBy, &def, servers, assignments)
+	jobID, err := submitJob(ctx, *gatewayURL, *auditURL, *apiKey, *auditAPIKey, submittedBy, &def, servers, assignments)
 	if err != nil {
 		slog.Error("failed to create fleet job record", "err", err)
 		// Non-fatal: continue without job tracking.
@@ -299,6 +300,7 @@ func main() {
 		gatewayURL:           *gatewayURL,
 		auditURL:             *auditURL,
 		apiKey:               *apiKey,
+		auditAPIKey:          *auditAPIKey,
 		jobID:                jobID,
 		submittedBy:          submittedBy,
 		approvalPollInterval: *approvalPollInterval,
@@ -314,7 +316,7 @@ func main() {
 		summary = fmt.Sprintf("Failed: %v", runErr)
 	}
 	if jobID != "" {
-		if err := finalizeJob(ctx, *auditURL, jobID, status, summary); err != nil {
+		if err := finalizeJob(ctx, *auditURL, *auditAPIKey, jobID, status, summary); err != nil {
 			slog.Warn("failed to finalize fleet job", "err", err)
 		}
 	}

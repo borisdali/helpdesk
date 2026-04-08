@@ -39,9 +39,23 @@ spec:
                 {{- end }}
               env:
                 {{- include "helpdesk.logLevelEnv" . | nindent 16 }}
+                {{- if .Values.governance.govbot.apiKeySecret }}
+                - name: HELPDESK_CLIENT_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.governance.govbot.apiKeySecret }}
+                      key: {{ .Values.governance.govbot.apiKeyKey }}
+                {{- end }}
                 {{- if not .Values.governance.govbot.historyDB }}
                 # Compliance history: govbot POSTs run snapshots to auditd (no PVC needed).
                 - name: HELPDESK_AUDIT_URL
                   value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
+                {{- if .Values.governance.govbot.auditAPIKeySecret }}
+                - name: HELPDESK_AUDIT_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.governance.govbot.auditAPIKeySecret }}
+                      key: {{ .Values.governance.govbot.auditAPIKeyKey }}
+                {{- end }}
                 {{- end }}
 {{- end }}

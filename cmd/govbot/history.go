@@ -292,16 +292,18 @@ func (h *localHistoryStore) close() {
 type remoteHistoryClient struct {
 	auditURL   string // trimmed, no trailing slash
 	gatewayURL string
+	apiKey     string // Bearer token for auditd authentication
 	client     *http.Client
 }
 
 // openRemoteHistory creates a remoteHistoryClient targeting auditURL. gatewayURL
 // is the govbot's own gateway base URL and is included in query filters so that
 // a central IT deployment can distinguish runs from different teams.
-func openRemoteHistory(auditURL, gatewayURL string) *remoteHistoryClient {
+func openRemoteHistory(auditURL, gatewayURL, apiKey string) *remoteHistoryClient {
 	return &remoteHistoryClient{
 		auditURL:   strings.TrimRight(auditURL, "/"),
 		gatewayURL: gatewayURL,
+		apiKey:     apiKey,
 		client:     &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -318,7 +320,15 @@ func (r *remoteHistoryClient) save(snap runSnapshot, retain int) error {
 	if retain > 0 {
 		saveURL += fmt.Sprintf("?retain=%d", retain)
 	}
-	resp, err := r.client.Post(saveURL, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, saveURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("POST /v1/govbot/runs: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if r.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.apiKey)
+	}
+	resp, err := r.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST /v1/govbot/runs: %w", err)
 	}
@@ -340,7 +350,14 @@ func (r *remoteHistoryClient) recent(window string, n int) ([]runSnapshot, error
 	if r.gatewayURL != "" {
 		u += "&gateway=" + url.QueryEscape(r.gatewayURL)
 	}
-	resp, err := r.client.Get(u)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("GET /v1/govbot/runs: %w", err)
+	}
+	if r.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.apiKey)
+	}
+	resp, err := r.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET /v1/govbot/runs: %w", err)
 	}

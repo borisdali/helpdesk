@@ -895,8 +895,18 @@ func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request,
 		targetURL += "?" + q
 	}
 
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	if err != nil {
+		slog.Error("failed to build governance request", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(targetURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		slog.Error("failed to query governance service", "err", err)
 		writeError(w, http.StatusBadGateway, "governance service unavailable")

@@ -16,7 +16,7 @@ import (
 // submitJob creates the fleet job record via the gateway (which proxies to
 // auditd and records a journey anchor event) then registers all target servers
 // as pending directly in auditd. Returns the generated job ID.
-func submitJob(ctx context.Context, gatewayURL, auditURL, apiKey, submittedBy string, def *fleet.JobDef, servers []string, stages []stageAssignment) (string, error) {
+func submitJob(ctx context.Context, gatewayURL, auditURL, apiKey, auditAPIKey, submittedBy string, def *fleet.JobDef, servers []string, stages []stageAssignment) (string, error) {
 	if gatewayURL == "" {
 		return "", fmt.Errorf("gateway URL not configured (set HELPDESK_GATEWAY_URL)")
 	}
@@ -66,7 +66,7 @@ func submitJob(ctx context.Context, gatewayURL, auditURL, apiKey, submittedBy st
 			Status:     "pending",
 		}
 		srvBody, _ := json.Marshal(srv)
-		if _, err := auditPost(ctx, fmt.Sprintf("%s/v1/fleet/jobs/%s/servers", auditURL, created.JobID), srvBody); err != nil {
+		if _, err := auditPost(ctx, fmt.Sprintf("%s/v1/fleet/jobs/%s/servers", auditURL, created.JobID), auditAPIKey, srvBody); err != nil {
 			// Non-fatal: job is created; server record is best-effort.
 			_ = err
 		}
@@ -77,7 +77,7 @@ func submitJob(ctx context.Context, gatewayURL, auditURL, apiKey, submittedBy st
 	for _, sa := range stages {
 		serverNames = append(serverNames, sa.server)
 	}
-	if err := registerJobSteps(ctx, auditURL, created.JobID, serverNames, def.Change.Steps); err != nil {
+	if err := registerJobSteps(ctx, auditURL, auditAPIKey, created.JobID, serverNames, def.Change.Steps); err != nil {
 		// Non-fatal: step records are best-effort.
 		_ = err
 	}
@@ -86,7 +86,7 @@ func submitJob(ctx context.Context, gatewayURL, auditURL, apiKey, submittedBy st
 }
 
 // registerJobSteps registers a pending step record for every (server, step) combination.
-func registerJobSteps(ctx context.Context, auditURL, jobID string, servers []string, steps []fleet.Step) error {
+func registerJobSteps(ctx context.Context, auditURL, apiKey, jobID string, servers []string, steps []fleet.Step) error {
 	for _, serverName := range servers {
 		for idx, step := range steps {
 			type stepReq struct {
@@ -104,7 +104,7 @@ func registerJobSteps(ctx context.Context, auditURL, jobID string, servers []str
 				return err
 			}
 			url := fmt.Sprintf("%s/v1/fleet/jobs/%s/servers/%s/steps", auditURL, jobID, serverName)
-			if _, err := auditPost(ctx, url, body); err != nil {
+			if _, err := auditPost(ctx, url, apiKey, body); err != nil {
 				// Non-fatal per server/step.
 				_ = err
 			}
@@ -116,7 +116,7 @@ func registerJobSteps(ctx context.Context, auditURL, jobID string, servers []str
 // finalizeJob updates the job status to completed/failed/aborted with an
 // optional summary, and records a terminal audit event when the job did not
 // complete successfully so that QueryJourneys reflects the real outcome.
-func finalizeJob(ctx context.Context, auditURL, jobID, status, summary string) error {
+func finalizeJob(ctx context.Context, auditURL, auditAPIKey, jobID, status, summary string) error {
 	if auditURL == "" {
 		return nil
 	}
@@ -127,6 +127,9 @@ func finalizeJob(ctx context.Context, auditURL, jobID, status, summary string) e
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -138,7 +141,7 @@ func finalizeJob(ctx context.Context, auditURL, jobID, status, summary string) e
 	// with outcome_status="error" so QueryJourneys elevates the journey outcome
 	// from "success" (the anchor event) to "error".
 	if status != "completed" {
-		recordJobOutcome(ctx, auditURL, jobID, summary)
+		recordJobOutcome(ctx, auditURL, auditAPIKey, jobID, summary)
 	}
 	return nil
 }
@@ -147,7 +150,7 @@ func finalizeJob(ctx context.Context, auditURL, jobID, status, summary string) e
 // QueryJourneys computes the correct journey outcome for a failed job.
 // The event shares the job's trace ID (tr_<jobID>) and has no tool_name,
 // so it does not create a spurious tool entry in the journey.
-func recordJobOutcome(ctx context.Context, auditURL, jobID, errMsg string) {
+func recordJobOutcome(ctx context.Context, auditURL, auditAPIKey, jobID, errMsg string) {
 	if auditURL == "" {
 		return
 	}
@@ -163,7 +166,7 @@ func recordJobOutcome(ctx context.Context, auditURL, jobID, errMsg string) {
 		},
 	}
 	body, _ := json.Marshal(event)
-	auditPost(ctx, auditURL+"/v1/events", body) //nolint:errcheck
+	auditPost(ctx, auditURL+"/v1/events", auditAPIKey, body) //nolint:errcheck
 }
 
 // gatewayPost sends a JSON POST to the gateway with the optional API key.
@@ -190,12 +193,15 @@ func gatewayPost(ctx context.Context, url, apiKey string, body []byte) ([]byte, 
 }
 
 // auditPost sends a JSON POST to auditd and returns the response body.
-func auditPost(ctx context.Context, url string, body []byte) ([]byte, error) {
+func auditPost(ctx context.Context, url, apiKey string, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {

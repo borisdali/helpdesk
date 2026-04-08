@@ -376,6 +376,7 @@ services:
       HELPDESK_GATEWAY_URL: http://gateway:8080
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_CLIENT_API_KEY: ${FLEET_RUNNER_API_KEY:-}
+      HELPDESK_AUDIT_API_KEY: ${FLEET_RUNNER_API_KEY:-}
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       HELPDESK_SESSION_PURPOSE: fleet_rollout
     volumes:
@@ -432,6 +433,7 @@ services:
     environment:
       # Compliance history: govbot POSTs run snapshots to auditd so no PVC is needed.
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${GOVBOT_API_KEY:-}
       HELPDESK_CLIENT_API_KEY: ${GOVBOT_API_KEY:-}
     profiles:
       - governance

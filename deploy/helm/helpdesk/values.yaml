@@ -202,6 +202,15 @@ governance:
     # Maximum number of runs to keep when using a local -history-db.
     # Ignored when posting to auditd (the default).
     historyRetain: 365
+    # Secret containing the Bearer token govbot sends to the gateway (HELPDESK_CLIENT_API_KEY).
+    # Create with: kubectl create secret generic helpdesk-govbot-key --from-literal=api-key=<key>
+    # Add a "govbot" entry to your users.yaml with the Argon2id hash of the same key.
+    apiKeySecret: ""
+    apiKeyKey: "api-key"
+    # Secret containing the Bearer token govbot sends directly to auditd (HELPDESK_AUDIT_API_KEY).
+    # Can reuse the same secret and key as apiKeySecret if govbot's users.yaml entry covers auditd too.
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   # Policy configuration
   policy:
@@ -283,6 +292,12 @@ fleetRunner:
   # Leave empty to run without authentication.
   apiKeySecret: ""
   apiKeyKey: "api-key"
+  # Secret containing the Bearer token fleet-runner sends directly to auditd
+  # (HELPDESK_AUDIT_API_KEY). Used for job/server/step status patches and job
+  # finalization. Can reuse the same secret as apiKeySecret if fleet-runner's
+  # users.yaml entry covers both gateway and auditd.
+  auditAPIKeySecret: ""
+  auditAPIKeyKey: "api-key"
   # List of scheduled fleet jobs. Each entry generates a ConfigMap + CronJob pair.
   # See example above for the full schema.
   scheduledJobs: []

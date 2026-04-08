@@ -13,6 +13,7 @@
 #   --dry-run                  Pass --dry-run to fleet-runner (plan only, no execution)
 #   --api-key         KEY      API key plaintext (sets HELPDESK_CLIENT_API_KEY directly)
 #   --api-key-secret  SECRET   Name of K8s Secret with an "api-key" key (alternative to --api-key)
+#   --audit-api-key-secret SECRET  K8s Secret for HELPDESK_AUDIT_API_KEY (defaults to --api-key-secret)
 #   --canary          N        Override strategy.canary_count
 #   --wave-size       N        Override strategy.wave_size
 #   --pause           N        Override strategy.wave_pause_seconds
@@ -38,6 +39,7 @@ JOB_FILE=""
 DRY_RUN=false
 API_KEY=""
 API_KEY_SECRET=""
+AUDIT_API_KEY_SECRET=""
 CANARY=0
 WAVE_SIZE=0
 PAUSE_SECS=-1
@@ -47,8 +49,9 @@ while [[ $# -gt 0 ]]; do
     -n|--namespace)   NAMESPACE="$2";    shift 2 ;;
     -r|--release)     RELEASE="$2";      shift 2 ;;
     --dry-run)        DRY_RUN=true;      shift   ;;
-    --api-key)        API_KEY="$2";      shift 2 ;;
-    --api-key-secret) API_KEY_SECRET="$2"; shift 2 ;;
+    --api-key)               API_KEY="$2";           shift 2 ;;
+    --api-key-secret)        API_KEY_SECRET="$2";    shift 2 ;;
+    --audit-api-key-secret)  AUDIT_API_KEY_SECRET="$2"; shift 2 ;;
     --canary)         CANARY="$2";       shift 2 ;;
     --wave-size)      WAVE_SIZE="$2";    shift 2 ;;
     --pause)          PAUSE_SECS="$2";   shift 2 ;;
@@ -124,8 +127,14 @@ ENV_JSON='[{"name":"HELPDESK_SESSION_PURPOSE","value":"fleet_rollout"}]'
 
 if [[ -n "$API_KEY" ]]; then
   ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_CLIENT_API_KEY","value":"'"$API_KEY"'"}]' <<<"$ENV_JSON")
+  ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_AUDIT_API_KEY","value":"'"$API_KEY"'"}]' <<<"$ENV_JSON")
 elif [[ -n "$API_KEY_SECRET" ]]; then
   ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_CLIENT_API_KEY","valueFrom":{"secretKeyRef":{"name":"'"$API_KEY_SECRET"'","key":"api-key"}}}]' <<<"$ENV_JSON")
+  # Default audit key to the same secret unless a dedicated one was supplied.
+  AUDIT_SECRET="${AUDIT_API_KEY_SECRET:-$API_KEY_SECRET}"
+  ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_AUDIT_API_KEY","valueFrom":{"secretKeyRef":{"name":"'"$AUDIT_SECRET"'","key":"api-key"}}}]' <<<"$ENV_JSON")
+elif [[ -n "$AUDIT_API_KEY_SECRET" ]]; then
+  ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_AUDIT_API_KEY","valueFrom":{"secretKeyRef":{"name":"'"$AUDIT_API_KEY_SECRET"'","key":"api-key"}}}]' <<<"$ENV_JSON")
 fi
 
 # Convert FLEET_CMD array to JSON array.

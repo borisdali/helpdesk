@@ -19,7 +19,8 @@ import (
 type runnerConfig struct {
 	gatewayURL           string
 	auditURL             string
-	apiKey               string
+	apiKey               string // Bearer token for gateway calls
+	auditAPIKey          string // Bearer token for auditd calls
 	jobID                string
 	submittedBy          string
 	approvalPollInterval time.Duration
@@ -270,6 +271,9 @@ func patchServerStatus(ctx context.Context, cfg runnerConfig, serverName, status
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if cfg.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -342,6 +346,9 @@ func patchStepStatus(ctx context.Context, cfg runnerConfig, serverName string, s
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if cfg.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
