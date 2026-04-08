@@ -54,10 +54,15 @@ type a2aResponse struct {
 	Artifacts []any  `json:"artifacts,omitempty"`
 }
 
+// gatewayAPIKey is the Bearer token sent to all gateway requests.
+// Set via -api-key flag or HELPDESK_CLIENT_API_KEY env var.
+var gatewayAPIKey string
+
 func main() {
 	socketPath := flag.String("socket", "/tmp/helpdesk-audit.sock", "Path to audit Unix socket")
 	auditServiceURL := flag.String("audit-service", "", "URL of audit HTTP service for polling mode (alternative to Unix socket)")
 	gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
+	apiKey := flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Bearer token for gateway authentication")
 	listen := flag.String("listen", ":9091", "Callback listener address")
 	infraKey := flag.String("infra-key", "security-incident", "Infrastructure identifier for incident bundles")
 	cooldown := flag.Duration("cooldown", 5*time.Minute, "Minimum time between incident creations")
@@ -65,6 +70,7 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "Log alerts but don't create incidents")
 	verbose := flag.Bool("verbose", false, "Log all received events")
 	flag.Parse()
+	gatewayAPIKey = *apiKey
 
 	// Initialize volume tracker
 	volTracker := &volumeTracker{
@@ -300,8 +306,16 @@ func gatewayPOST(baseURL, path string, payload map[string]any) (*a2aResponse, er
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
+	req, err := http.NewRequest(http.MethodPost, baseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if gatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+gatewayAPIKey)
+	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Post(baseURL+path, "application/json", bytes.NewReader(data))
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", path, err)
 	}
