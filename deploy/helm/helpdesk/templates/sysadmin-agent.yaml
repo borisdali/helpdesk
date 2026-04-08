@@ -52,6 +52,7 @@ spec:
             - name: HELPDESK_APPROVAL_TIMEOUT
               value: "{{ .Values.governance.approvals.timeout }}"
             {{- end }}
+            {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           volumeMounts:
@@ -71,6 +72,7 @@ spec:
             - name: docker-sock
               mountPath: /var/run/docker.sock
             {{- end }}
+            {{- include "helpdesk.usersVolumeMount" . | nindent 12 }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.sysadmin.port }}
@@ -104,6 +106,7 @@ spec:
             path: /var/run/docker.sock
             type: Socket
         {{- end }}
+        {{- include "helpdesk.usersVolume" . | nindent 8 }}
 ---
 apiVersion: v1
 kind: Service

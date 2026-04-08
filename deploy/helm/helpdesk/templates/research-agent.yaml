@@ -56,6 +56,7 @@ spec:
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
+            {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           ports:
@@ -74,7 +75,7 @@ spec:
               port: a2a
             initialDelaySeconds: 3
             periodSeconds: 10
-          {{- if or .Values.infrastructure .Values.governance.policy.enabled }}
+          {{- if or .Values.infrastructure (or .Values.governance.policy.enabled (or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret)) }}
           volumeMounts:
             {{- if .Values.infrastructure }}
             - name: infra-config
@@ -88,8 +89,9 @@ spec:
               subPath: policies.yaml
               readOnly: true
             {{- end }}
+            {{- include "helpdesk.usersVolumeMount" . | nindent 12 }}
           {{- end }}
-      {{- if or .Values.infrastructure .Values.governance.policy.enabled }}
+      {{- if or .Values.infrastructure (or .Values.governance.policy.enabled (or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret)) }}
       volumes:
         {{- if .Values.infrastructure }}
         - name: infra-config
@@ -101,6 +103,7 @@ spec:
           configMap:
             name: {{ required "governance.policy.configMap must be set when governance.policy.enabled is true" .Values.governance.policy.configMap }}
         {{- end }}
+        {{- include "helpdesk.usersVolume" . | nindent 8 }}
       {{- end }}
 ---
 apiVersion: v1

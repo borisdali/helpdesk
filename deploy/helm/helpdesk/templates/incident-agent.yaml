@@ -58,6 +58,7 @@ spec:
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
+            {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
           ports:
@@ -93,6 +94,7 @@ spec:
               subPath: policies.yaml
               readOnly: true
             {{- end }}
+            {{- include "helpdesk.usersVolumeMount" . | nindent 12 }}
       volumes:
         {{- if .Values.agents.incident.persistence.enabled }}
         - name: incidents
@@ -109,6 +111,7 @@ spec:
           configMap:
             name: {{ required "governance.policy.configMap must be set when governance.policy.enabled is true" .Values.governance.policy.configMap }}
         {{- end }}
+        {{- include "helpdesk.usersVolume" . | nindent 8 }}
 ---
 apiVersion: v1
 kind: Service
