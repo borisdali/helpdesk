@@ -59,6 +59,13 @@ spec:
                   name: {{ .Values.gateway.auditAPIKeySecret }}
                   key: {{ .Values.gateway.auditAPIKeyKey }}
             {{- end }}
+            {{- if .Values.gateway.clientAPIKeySecret }}
+            - name: HELPDESK_CLIENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.clientAPIKeySecret }}
+                  key: {{ .Values.gateway.clientAPIKeyKey }}
+            {{- end }}
             {{- if ne .Values.gateway.identity.provider "none" }}
             - name: HELPDESK_IDENTITY_PROVIDER
               value: {{ .Values.gateway.identity.provider | quote }}

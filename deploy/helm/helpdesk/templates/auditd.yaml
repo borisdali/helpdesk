@@ -45,6 +45,20 @@ spec:
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             - name: HELPDESK_AUDIT_URL
               value: "http://localhost:{{ .Values.governance.auditd.port }}"
+            {{- if .Values.governance.auditd.approvalKeySecret }}
+            - name: HELPDESK_APPROVAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.auditd.approvalKeySecret }}
+                  key: {{ .Values.governance.auditd.approvalKeyKey }}
+            {{- end }}
+            {{- if .Values.governance.auditd.clientAPIKeySecret }}
+            - name: HELPDESK_CLIENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.auditd.clientAPIKeySecret }}
+                  key: {{ .Values.governance.auditd.clientAPIKeyKey }}
+            {{- end }}
             {{- if .Values.governance.policy.configMap }}
             # Mount policy file so govexplain hypothetical checks work even when
             # agent enforcement (governance.policy.enabled) is disabled.

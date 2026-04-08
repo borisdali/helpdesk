@@ -47,6 +47,7 @@ var anomalyKeywords = []string{
 func main() {
 	gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
 	conn := flag.String("conn", "", "PostgreSQL libpq connection string (required, e.g. host=db port=5432 dbname=mydb user=... password=...)")
+	apiKey := flag.String("api-key", envOrDefault("HELPDESK_CLIENT_API_KEY", ""), "Bearer token for gateway authentication")
 	listen := flag.String("listen", ":9090", "Callback listener address")
 	infraKey := flag.String("infra-key", "srebot-demo", "Infrastructure identifier for incident bundles")
 	cbTimeout := flag.Duration("timeout", 120*time.Second, "How long to wait for the callback")
@@ -68,7 +69,7 @@ func main() {
 	logPhase(1, "Agent Discovery")
 	logf("GET /api/v1/agents")
 
-	body, err := gatewayGET(*gateway, "/api/v1/agents")
+	body, err := gatewayGET(*gateway, "/api/v1/agents", *apiKey)
 	if err != nil {
 		logf("FATAL: %v", err)
 		os.Exit(1)
@@ -93,7 +94,7 @@ func main() {
 	logPhase(2, "Health Check")
 	logf("POST /api/v1/db/check_connection")
 
-	resp, err := gatewayPOST(*gateway, "/api/v1/db/check_connection", map[string]any{
+	resp, err := gatewayPOST(*gateway, "/api/v1/db/check_connection", *apiKey, map[string]any{
 		"connection_string": *conn,
 	})
 	if err != nil {
@@ -139,7 +140,7 @@ func main() {
 	logf("POST /api/v1/query  agent=database")
 	logf("Prompt: %q", truncate(prompt, 120))
 
-	diagResp, err := gatewayPOST(*gateway, "/api/v1/query", map[string]any{
+	diagResp, err := gatewayPOST(*gateway, "/api/v1/query", *apiKey, map[string]any{
 		"agent":   "database",
 		"message": prompt,
 	})
@@ -167,7 +168,7 @@ func main() {
 	logf("  infra_key:    %s", *infraKey)
 	logf("  callback_url: %s", callbackURL)
 
-	incResp, err := gatewayPOST(*gateway, "/api/v1/incidents", map[string]any{
+	incResp, err := gatewayPOST(*gateway, "/api/v1/incidents", *apiKey, map[string]any{
 		"infra_key":         *infraKey,
 		"description":       fmt.Sprintf("SRE bot auto-investigation (anomaly=%v)", anomaly),
 		"connection_string": *conn,
@@ -205,8 +206,15 @@ func main() {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
-func gatewayGET(baseURL, path string) ([]byte, error) {
-	resp, err := http.Get(baseURL + path)
+func gatewayGET(baseURL, path, apiKey string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", path, err)
 	}
@@ -218,13 +226,21 @@ func gatewayGET(baseURL, path string) ([]byte, error) {
 	return body, nil
 }
 
-func gatewayPOST(baseURL, path string, payload map[string]any) (*a2aResponse, error) {
+func gatewayPOST(baseURL, path, apiKey string, payload map[string]any) (*a2aResponse, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	resp, err := http.Post(baseURL+path, "application/json", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, baseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", path, err)
 	}
@@ -371,6 +387,13 @@ func wrapText(text string, maxWidth int) []string {
 // for ASCII-dominant agent output).
 func displayWidth(s string) int {
 	return len(s)
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func truncate(s string, n int) string {

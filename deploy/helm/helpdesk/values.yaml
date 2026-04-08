@@ -95,6 +95,11 @@ gateway:
   # Add a "gateway" entry to your users.yaml with the Argon2id hash of the same key.
   auditAPIKeySecret: ""
   auditAPIKeyKey: "api-key"
+  # Secret containing the Bearer token for operator CLIs exec'd inside the gateway pod.
+  # HELPDESK_CLIENT_API_KEY — used by `govexplain --list` (via gateway) and `srebot`.
+  # Can reuse agentAPIKeySecret if the same key covers gateway inbound auth.
+  clientAPIKeySecret: ""
+  clientAPIKeyKey: "api-key"
   identity:
     # Identity provider: none (default), static, or jwt.
     # "none"   = accept X-User / X-Roles headers without verification (dev only).
@@ -168,6 +173,14 @@ governance:
       enabled: true
       size: 5Gi
       storageClass: ""
+    # Secret containing the Bearer token for operator CLIs exec'd inside the auditd pod.
+    # HELPDESK_APPROVAL_KEY  — used by `approvals list/approve/deny`
+    # HELPDESK_CLIENT_API_KEY — used by `govexplain --auditd ...` (direct mode)
+    # Both can point to the same secret if a single operator key covers both.
+    approvalKeySecret: ""
+    approvalKeyKey: "api-key"
+    clientAPIKeySecret: ""
+    clientAPIKeyKey: "api-key"
 
   # Real-time audit monitoring and alerting
   auditor:

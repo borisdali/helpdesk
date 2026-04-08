@@ -17,6 +17,8 @@ services:
       # Set so that approvals/govexplain binaries exec'd inside this container
       # can find auditd without requiring -e or an explicit --url flag.
       HELPDESK_AUDIT_URL: http://localhost:1199
+      # API key for the `approvals` CLI (docker compose exec auditd approvals ...).
+      HELPDESK_APPROVAL_KEY: ${HELPDESK_APPROVAL_KEY:-}
       # Policy (for governance info / govexplain endpoint).
       # Empty default: auditd loads the mounted policy file unconditionally so
       # that govexplain hypothetical checks work out of the box.
@@ -269,6 +271,8 @@ services:
       HELPDESK_AUDIT_API_KEY: ${GATEWAY_API_KEY:-}
       # Bearer token sent to agent /tool/{name} endpoints (required when agents enforce inbound auth)
       HELPDESK_AGENT_API_KEY: ${HELPDESK_AGENT_API_KEY:-}
+      # API key for operator CLIs exec'd inside this container (govexplain, srebot).
+      HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
       # Identity & access (optional; defaults to "none" — unverified X-User headers)
       HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
