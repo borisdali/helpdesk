@@ -75,6 +75,7 @@ spec:
             {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
+            {{- include "helpdesk.auditAPIKeyEnv" (dict "secret" .Values.agents.database.auditAPIKeySecret "key" .Values.agents.database.auditAPIKeyKey) | nindent 12 }}
           volumeMounts:
             {{- if .Values.infrastructure }}
             - name: infra-config

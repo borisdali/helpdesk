@@ -38,6 +38,10 @@ agents:
       maxAttempts: ""
       initialDelayS: ""
       maxDelayS: ""
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    # Required when auditd enforces inbound auth (HELPDESK_IDENTITY_PROVIDER=static).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   k8s:
     replicas: 1
@@ -49,6 +53,9 @@ agents:
       maxAttempts: ""
       initialDelayS: ""
       maxDelayS: ""
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
     rbac:
       # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so the
       # K8s agent can query cluster resources via in-cluster kubectl.
@@ -62,6 +69,9 @@ agents:
     # Grants the pod access to the host Docker daemon — use with care.
     dockerSocket:
       enabled: false
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   incident:
     replicas: 1
@@ -70,6 +80,9 @@ agents:
       enabled: true
       size: 10Gi
       storageClass: ""    # empty string = use cluster default
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   # Research agent for Gemini models - provides web search via GoogleSearch.
   # GoogleSearch cannot be combined with function declarations, so this agent
@@ -77,6 +90,9 @@ agents:
   research:
     replicas: 1
     port: 1106
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
 gateway:
   replicas: 1
@@ -141,6 +157,10 @@ orchestrator:
   # if not needed. Common values: diagnostic, remediation, compliance, emergency.
   # sessionPurpose: "diagnostic"
   sessionPurpose: ""
+  # Secret containing the Bearer token the orchestrator sends to auditd (HELPDESK_AUDIT_API_KEY).
+  # Required when auditd enforces inbound auth (HELPDESK_IDENTITY_PROVIDER=static).
+  auditAPIKeySecret: ""
+  auditAPIKeyKey: "api-key"
 
 # Infrastructure inventory — database servers, K8s clusters, and VMs the
 # orchestrator knows about. Passed to the LLM so it can pick the right
@@ -196,6 +216,10 @@ governance:
     cooldown: "5m"
     # Max events per minute before high-volume alert
     maxEventsPerMinute: 100
+    # Secret containing the Bearer token secbot sends to the gateway (HELPDESK_CLIENT_API_KEY).
+    # Required when gateway enforces inbound auth (HELPDESK_IDENTITY_PROVIDER=static).
+    apiKeySecret: ""
+    apiKeyKey: "api-key"
 
   # Governance compliance reporter (runs as a Kubernetes CronJob)
   govbot:

@@ -59,6 +59,7 @@ spec:
             {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
+            {{- include "helpdesk.auditAPIKeyEnv" (dict "secret" .Values.agents.research.auditAPIKeySecret "key" .Values.agents.research.auditAPIKeyKey) | nindent 12 }}
           ports:
             - name: a2a
               containerPort: {{ .Values.agents.research.port }}

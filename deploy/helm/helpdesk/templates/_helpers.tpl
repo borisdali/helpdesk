@@ -86,6 +86,20 @@ Users volume — include in volumes when identity is configured.
 {{- end -}}
 
 {{/*
+HELPDESK_AUDIT_API_KEY env block — emitted when a per-component secret is configured.
+Usage: {{- include "helpdesk.auditAPIKeyEnv" (dict "secret" .Values.agents.database.auditAPIKeySecret "key" .Values.agents.database.auditAPIKeyKey) | nindent 12 }}
+*/}}
+{{- define "helpdesk.auditAPIKeyEnv" -}}
+{{- if .secret }}
+- name: HELPDESK_AUDIT_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .secret }}
+      key: {{ .key | default "api-key" }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Common model environment variables injected into every agent/orchestrator pod.
 */}}
 {{- define "helpdesk.modelEnv" -}}
