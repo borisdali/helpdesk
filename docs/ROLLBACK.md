@@ -1,5 +1,7 @@
 # aiHelpDesk Rollback & Undo
 
+This is a sub-module of aiHelpDesk [AI Governance](AIGOVERNANCE.md).
+
 When an agent-initiated mutation turns out to be wrong — a deployment scaled to
 the wrong replica count, rows updated with bad values, a pod deleted before its
 work was finished — aiHelpDesk can generate and execute the compensating
