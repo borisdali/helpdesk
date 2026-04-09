@@ -524,6 +524,120 @@ func TestExecuteSteps_VerifiedFieldPopulated(t *testing.T) {
 	}
 }
 
+// --- recordToolResult ---
+
+// TestRecordToolResult_PostsCorrectPayload verifies that a successful step causes
+// a POST to /v1/tool-results with the expected fields.
+func TestRecordToolResult_PostsCorrectPayload(t *testing.T) {
+	var gotBody map[string]any
+	var gotPath string
+	var gotAuth string
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tool-results") {
+			gotPath = r.URL.Path
+			gotAuth = r.Header.Get("Authorization")
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotBody) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer auditSrv.Close()
+
+	cfg := runnerConfig{
+		auditURL:    auditSrv.URL,
+		jobID:       "flj_rec1",
+		submittedBy: "alice",
+		apiKey:      "test-key",
+	}
+	step := fleet.Step{
+		Agent: "database",
+		Tool:  "get_vacuum_status",
+		Args:  map[string]any{"min_dead_ratio": 0.1},
+	}
+	recordToolResult(context.Background(), cfg, "prod-db-3", step, "vacuum output")
+
+	if gotPath != "/v1/tool-results" {
+		t.Errorf("path = %q, want /v1/tool-results", gotPath)
+	}
+	if gotBody["server_name"] != "prod-db-3" {
+		t.Errorf("server_name = %v, want prod-db-3", gotBody["server_name"])
+	}
+	if gotBody["tool_name"] != "get_vacuum_status" {
+		t.Errorf("tool_name = %v, want get_vacuum_status", gotBody["tool_name"])
+	}
+	if gotBody["job_id"] != "flj_rec1" {
+		t.Errorf("job_id = %v, want flj_rec1", gotBody["job_id"])
+	}
+	if gotBody["trace_id"] != "tr_flj_flj_rec1" {
+		t.Errorf("trace_id = %v, want tr_flj_flj_rec1", gotBody["trace_id"])
+	}
+	if gotBody["recorded_by"] != "alice" {
+		t.Errorf("recorded_by = %v, want alice", gotBody["recorded_by"])
+	}
+	if success, _ := gotBody["success"].(bool); !success {
+		t.Errorf("success = %v, want true", gotBody["success"])
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
+	}
+}
+
+// TestRecordToolResult_NoAuditURL verifies that recordToolResult is a no-op when
+// auditURL is not configured (no panic, no HTTP call).
+func TestRecordToolResult_NoAuditURL(t *testing.T) {
+	cfg := runnerConfig{auditURL: "", jobID: "flj_noaudit"}
+	step := fleet.Step{Agent: "database", Tool: "run_sql", Args: map[string]any{}}
+	// Should not panic and should not make any HTTP call.
+	recordToolResult(context.Background(), cfg, "db-1", step, "output")
+}
+
+// TestExecuteSteps_RecordsToolResultOnSuccess verifies that executeSteps posts to
+// /v1/tool-results for each successfully completed step.
+func TestExecuteSteps_RecordsToolResultOnSuccess(t *testing.T) {
+	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"text": "done"}) //nolint:errcheck
+	}))
+	defer gatewaySrv.Close()
+
+	toolResultCount := 0
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tool-results") {
+			toolResultCount++
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]")) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer auditSrv.Close()
+
+	cfg := runnerConfig{
+		gatewayURL: gatewaySrv.URL,
+		auditURL:   auditSrv.URL,
+		jobID:      "flj_rec2",
+	}
+	steps := []fleet.Step{
+		{Agent: "database", Tool: "get_vacuum_status", Args: map[string]any{}},
+		{Agent: "database", Tool: "get_disk_usage", Args: map[string]any{}},
+	}
+
+	res := executeSteps(context.Background(), cfg, "db-2", "canary", steps)
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if toolResultCount != 2 {
+		t.Errorf("tool-results POSTed = %d, want 2 (one per successful step)", toolResultCount)
+	}
+}
+
 // --- logStepVerification ---
 
 func TestLogStepVerification_NoPanic(t *testing.T) {

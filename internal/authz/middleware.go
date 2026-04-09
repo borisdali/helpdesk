@@ -29,10 +29,13 @@ func (a *Authorizer) Middleware(provider identity.Provider) func(http.Handler) h
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Step 1: resolve identity. A hard error means bad credentials (wrong
 			// API key, invalid JWT) — never occurs with NoAuthProvider.
+			// On error: fall through as anonymous and let Authorize decide.
+			// AllowAnonymous routes pass; protected routes get 401 from Authorize.
 			principal, err := provider.Resolve(r)
 			if err != nil {
-				http.Error(w, "authentication failed: "+err.Error(), http.StatusUnauthorized)
-				return
+				slog.Debug("authz: unrecognized credential, treating as anonymous",
+					"pattern", r.Pattern, "err", err)
+				principal = identity.ResolvedPrincipal{AuthMethod: "header"}
 			}
 
 			// Step 2: authorize against the route pattern.

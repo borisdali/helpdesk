@@ -49,8 +49,26 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"POST /v1/govbot/runs": {ServiceOnly: true, AdminBypass: true},
 
 	// Playbook writes
-	"POST /v1/fleet/playbooks":                {AdminBypass: true},
-	"DELETE /v1/fleet/playbooks/{playbookID}": {AdminBypass: true},
+	"POST /v1/fleet/playbooks":                         {AdminBypass: true},
+	"PUT /v1/fleet/playbooks/{playbookID}":             {AdminBypass: true},
+	"DELETE /v1/fleet/playbooks/{playbookID}":          {AdminBypass: true},
+	"POST /v1/fleet/playbooks/{playbookID}/activate":   {AdminBypass: true},
+
+	// Playbook run tracking (recording called by gateway service account; reads open to any authenticated user)
+	"POST /v1/fleet/playbooks/{playbookID}/runs": {ServiceOnly: true, AdminBypass: true},
+	"GET /v1/fleet/playbooks/{playbookID}/runs":  {AdminBypass: true},
+	"GET /v1/fleet/playbooks/{playbookID}/stats": {AdminBypass: true},
+	"PATCH /v1/fleet/playbook-runs/{runID}":      {AdminBypass: true},
+	"GET /v1/fleet/playbook-runs/{runID}":        {AdminBypass: true},
+
+	// Upload endpoints (operator file uploads, e.g. PostgreSQL log files)
+	"POST /v1/uploads":                     {AdminBypass: true},
+	"GET /v1/uploads/{uploadID}":           {AdminBypass: true},
+	"GET /v1/uploads/{uploadID}/content":   {AdminBypass: true},
+
+	// Tool result endpoints
+	"POST /v1/tool-results": {ServiceOnly: true, AdminBypass: true},
+	"GET /v1/tool-results":  {AdminBypass: true},
 
 	// Fleet-runner lifecycle writes
 	"POST /v1/fleet/jobs":                                                   {ServiceOnly: true, AdminBypass: true},

@@ -38,6 +38,10 @@ agents:
       maxAttempts: ""
       initialDelayS: ""
       maxDelayS: ""
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    # Required when auditd enforces inbound auth (HELPDESK_IDENTITY_PROVIDER=static).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   k8s:
     replicas: 1
@@ -49,10 +53,25 @@ agents:
       maxAttempts: ""
       initialDelayS: ""
       maxDelayS: ""
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
     rbac:
       # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so the
       # K8s agent can query cluster resources via in-cluster kubectl.
       create: true
+
+  sysadmin:
+    replicas: 1
+    port: 1103
+    # Mount the host Docker socket so the agent can inspect and manage containers.
+    # Required for databases managed via Docker/Podman on the same node.
+    # Grants the pod access to the host Docker daemon — use with care.
+    dockerSocket:
+      enabled: false
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   incident:
     replicas: 1
@@ -61,6 +80,9 @@ agents:
       enabled: true
       size: 10Gi
       storageClass: ""    # empty string = use cluster default
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   # Research agent for Gemini models - provides web search via GoogleSearch.
   # GoogleSearch cannot be combined with function declarations, so this agent
@@ -68,12 +90,32 @@ agents:
   research:
     replicas: 1
     port: 1106
+    # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
 gateway:
   replicas: 1
   port: 8080
   service:
     type: ClusterIP       # set to LoadBalancer for external access
+  # Secret containing the Bearer token the gateway sends to agent /tool/{name} endpoints.
+  # Required when agents enforce inbound auth (HELPDESK_USERS_FILE is set on agents).
+  # Create with: kubectl create secret generic helpdesk-agent-api-key --from-literal=api-key=<key>
+  # Add a "gateway" entry to your users.yaml with the Argon2id hash of the same key.
+  agentAPIKeySecret: ""
+  agentAPIKeyKey: "api-key"
+  # Secret containing the Bearer token the gateway sends to auditd (HELPDESK_AUDIT_API_KEY).
+  # Required when auditd enforces inbound auth (HELPDESK_USERS_FILE is set on auditd).
+  # Create with: kubectl create secret generic helpdesk-gateway-audit-key --from-literal=api-key=<key>
+  # Add a "gateway" entry to your users.yaml with the Argon2id hash of the same key.
+  auditAPIKeySecret: ""
+  auditAPIKeyKey: "api-key"
+  # Secret containing the Bearer token for operator CLIs exec'd inside the gateway pod.
+  # HELPDESK_CLIENT_API_KEY — used by `govexplain --list` (via gateway) and `srebot`.
+  # Can reuse agentAPIKeySecret if the same key covers gateway inbound auth.
+  clientAPIKeySecret: ""
+  clientAPIKeyKey: "api-key"
   identity:
     # Identity provider: none (default), static, or jwt.
     # "none"   = accept X-User / X-Roles headers without verification (dev only).
@@ -115,6 +157,10 @@ orchestrator:
   # if not needed. Common values: diagnostic, remediation, compliance, emergency.
   # sessionPurpose: "diagnostic"
   sessionPurpose: ""
+  # Secret containing the Bearer token the orchestrator sends to auditd (HELPDESK_AUDIT_API_KEY).
+  # Required when auditd enforces inbound auth (HELPDESK_IDENTITY_PROVIDER=static).
+  auditAPIKeySecret: ""
+  auditAPIKeyKey: "api-key"
 
 # Infrastructure inventory — database servers, K8s clusters, and VMs the
 # orchestrator knows about. Passed to the LLM so it can pick the right
@@ -147,10 +193,20 @@ governance:
       enabled: true
       size: 5Gi
       storageClass: ""
+    # Secret containing the Bearer token for operator CLIs exec'd inside the auditd pod.
+    # HELPDESK_APPROVAL_KEY  — used by `approvals list/approve/deny`
+    # HELPDESK_CLIENT_API_KEY — used by `govexplain --auditd ...` (direct mode)
+    # Both can point to the same secret if a single operator key covers both.
+    approvalKeySecret: ""
+    approvalKeyKey: "api-key"
+    clientAPIKeySecret: ""
+    clientAPIKeyKey: "api-key"
 
   # Real-time audit monitoring and alerting
   auditor:
     enabled: false
+    # Log every audit event to the pod log (not just alerts). Equivalent to HELPDESK_AUDITOR_LOG_ALL=true.
+    logAll: false
     # Webhook URL for alerts (Slack, etc.)
     alertWebhook: ""
 
@@ -162,6 +218,10 @@ governance:
     cooldown: "5m"
     # Max events per minute before high-volume alert
     maxEventsPerMinute: 100
+    # Secret containing the Bearer token secbot sends to the gateway (HELPDESK_CLIENT_API_KEY).
+    # Required when gateway enforces inbound auth (HELPDESK_IDENTITY_PROVIDER=static).
+    apiKeySecret: ""
+    apiKeyKey: "api-key"
 
   # Governance compliance reporter (runs as a Kubernetes CronJob)
   govbot:
@@ -181,6 +241,15 @@ governance:
     # Maximum number of runs to keep when using a local -history-db.
     # Ignored when posting to auditd (the default).
     historyRetain: 365
+    # Secret containing the Bearer token govbot sends to the gateway (HELPDESK_CLIENT_API_KEY).
+    # Create with: kubectl create secret generic helpdesk-govbot-key --from-literal=api-key=<key>
+    # Add a "govbot" entry to your users.yaml with the Argon2id hash of the same key.
+    apiKeySecret: ""
+    apiKeyKey: "api-key"
+    # Secret containing the Bearer token govbot sends directly to auditd (HELPDESK_AUDIT_API_KEY).
+    # Can reuse the same secret and key as apiKeySecret if govbot's users.yaml entry covers auditd too.
+    auditAPIKeySecret: ""
+    auditAPIKeyKey: "api-key"
 
   # Policy configuration
   policy:
@@ -262,6 +331,12 @@ fleetRunner:
   # Leave empty to run without authentication.
   apiKeySecret: ""
   apiKeyKey: "api-key"
+  # Secret containing the Bearer token fleet-runner sends directly to auditd
+  # (HELPDESK_AUDIT_API_KEY). Used for job/server/step status patches and job
+  # finalization. Can reuse the same secret as apiKeySecret if fleet-runner's
+  # users.yaml entry covers both gateway and auditd.
+  auditAPIKeySecret: ""
+  auditAPIKeyKey: "api-key"
   # List of scheduled fleet jobs. Each entry generates a ConfigMap + CronJob pair.
   # See example above for the full schema.
   scheduledJobs: []

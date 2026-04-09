@@ -38,6 +38,13 @@ spec:
             {{- end }}
           env:
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
+            {{- if .Values.governance.secbot.apiKeySecret }}
+            - name: HELPDESK_CLIENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.secbot.apiKeySecret }}
+                  key: {{ .Values.governance.secbot.apiKeyKey | default "api-key" }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.governance.secbot.port }}

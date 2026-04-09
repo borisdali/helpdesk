@@ -42,7 +42,7 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     exit 1
 fi
 
-AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1104"
+AGENT_URLS="http://localhost:1100,http://localhost:1102,http://localhost:1103,http://localhost:1104"
 
 # Add research agent for Gemini models (GoogleSearch can't be combined with
 # function declarations, so we need a dedicated agent for web search)
@@ -86,7 +86,7 @@ READONLY_GOVERNED=false
 for arg in "$@"; do
     case "$arg" in
         --stop)
-            for name in auditd database-agent k8s-agent incident-agent research-agent gateway auditor secbot; do
+            for name in auditd database-agent k8s-agent sysadmin-agent incident-agent research-agent gateway auditor secbot; do
                 pkill -f "helpdesk.*${name}\|${SCRIPT_DIR}/${name}" 2>/dev/null || true
             done
             echo "Sent stop signal to helpdesk services."
@@ -218,6 +218,7 @@ fi
 
 HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg database-agent "$SCRIPT_DIR/database-agent"
 HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg sysadmin-agent "$SCRIPT_DIR/sysadmin-agent"
 HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
 
 # Start research agent for Gemini models
@@ -231,6 +232,7 @@ sleep 2
 HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" \
 HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" \
 HELPDESK_AGENT_URLS="$AGENT_URLS" \
+HELPDESK_AGENT_API_KEY="${HELPDESK_AGENT_API_KEY:-}" \
 HELPDESK_GATEWAY_ADDR="0.0.0.0:8080" \
     start_bg gateway "$SCRIPT_DIR/gateway"
 

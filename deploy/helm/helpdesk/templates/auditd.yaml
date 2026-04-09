@@ -45,12 +45,27 @@ spec:
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             - name: HELPDESK_AUDIT_URL
               value: "http://localhost:{{ .Values.governance.auditd.port }}"
+            {{- if .Values.governance.auditd.approvalKeySecret }}
+            - name: HELPDESK_APPROVAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.auditd.approvalKeySecret }}
+                  key: {{ .Values.governance.auditd.approvalKeyKey }}
+            {{- end }}
+            {{- if .Values.governance.auditd.clientAPIKeySecret }}
+            - name: HELPDESK_CLIENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.auditd.clientAPIKeySecret }}
+                  key: {{ .Values.governance.auditd.clientAPIKeyKey }}
+            {{- end }}
             {{- if .Values.governance.policy.configMap }}
             # Mount policy file so govexplain hypothetical checks work even when
             # agent enforcement (governance.policy.enabled) is disabled.
             - name: HELPDESK_POLICY_FILE
               value: /etc/helpdesk/policies.yaml
             {{- end }}
+            {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- if and .Values.governance.email.enabled .Values.governance.email.smtpSecret }}
             - name: SMTP_USER
               valueFrom:
@@ -72,6 +87,7 @@ spec:
               subPath: policies.yaml
               readOnly: true
             {{- end }}
+            {{- include "helpdesk.usersVolumeMount" . | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.governance.auditd.port }}
@@ -101,6 +117,7 @@ spec:
           configMap:
             name: {{ .Values.governance.policy.configMap }}
         {{- end }}
+        {{- include "helpdesk.usersVolume" . | nindent 8 }}
 ---
 apiVersion: v1
 kind: Service

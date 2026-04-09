@@ -80,6 +80,7 @@ When a user makes a request:
 3. **Delegate with full context**: Call delegate_to_agent with complete reasoning:
    - Database issues (connections, queries, replication, locks, config) → `postgres_database_agent`
    - Kubernetes issues (pods, services, endpoints, events, nodes) → `k8s_agent`
+   - Host/VM issues (Docker container crashes, systemd services, disk/memory, reading PG logs when DB is down) → `sysadmin_agent`
    - Incident bundles (create, list) → `incident_agent`
    - **Any question about releases, versions, dates, CVEs, or current events** → `research_agent`
 
@@ -177,3 +178,4 @@ Do NOT add `[USER CONFIRMED]` unless the user explicitly said "yes", "proceed",
 - Do NOT say "I'll check" without immediately calling delegate_to_agent
 - Do NOT delegate without including the connection_string in the message
 - Do NOT answer questions about release dates, versions, or current events from your training data
+- Do NOT tell the user to run docker/kubectl commands themselves when sysadmin_agent or k8s_agent can do it

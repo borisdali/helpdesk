@@ -32,6 +32,7 @@ databases or your infra.
 1. [Tools](#1-tools)
    - [Database agent (1.1–1.4)](#database-agent)
    - [Kubernetes agent (1.5–1.8)](#kubernetes-agent)
+   - [SysAdmin agent (1.9–1.10)](#sysadmin-agent)
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm-process)
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
 4. [Safeguards and Automatic Recovery](#4-safeguards-and-automatic-recovery)
@@ -285,7 +286,53 @@ touching running pods.
 
 ---
 
-## 1.9 Rollback capability per tool
+---
+
+### SysAdmin agent
+
+The SysAdmin agent operates at the OS and container-runtime level. Its two mutation tools restart a database process rather than operating on data. The severity is different from database mutations — a restart is recoverable and leaves data intact — but the policy and audit enforcement is identical. See [SYSADMIN_AGENT.md](SYSADMIN_AGENT.md) for the agent's full documentation including the server ID resolution model and the remediation permission tiers.
+
+#### 1.9 `restart_container` — container restart
+
+**Action class**: `destructive` (policy pre-check, full audit record)
+
+```
+target   string   required — server ID from infrastructure config (e.g. "prod-db")
+```
+
+Calls `docker restart <container_name>` (or `podman restart`) for the container associated with the given server ID in `infrastructure.json`. The container name is resolved from `host.container_name` — never taken directly from the user.
+
+**Execution sequence**:
+
+1. Resolve server ID → `HostConfig` (fails immediately if server ID not in config or has no `host` block)
+2. Policy pre-check (`CheckTool` with `ActionDestructive`) — enforces operating mode, tag-based rules, and any configured blast-radius bounds. May trigger an approval request if the playbook mode requires it.
+3. Execute `docker restart <container_name>` (or `podman restart`)
+4. Record `RecordToolCall` in audit log with server ID, runtime, container name, duration, and outcome
+5. Return `RestartResult` with `success: true/false` and raw command output
+
+**Safeguards**: The agent's system prompt (`prompts/sysadmin.txt`) requires `check_host` and `get_host_logs` to be called before any restart recommendation. When `get_host_logs` shows a crash signal but lacks PostgreSQL-level detail, the agent is additionally instructed to call `read_pg_log_file` to read the Postgres log file via container exec before forming a hypothesis. The agent is instructed to **not** recommend restarting when disk is full, when logs show data directory corruption, or when logs show `PANIC` on data files — in those cases it escalates to a human DBA instead. The policy pre-check is a hard enforcement layer independent of the agent's reasoning.
+
+**Policy note**: `restart_container` carries the `auto_remediation_eligible: true` flag. When a playbook uses `execution_mode: agent_auto` and lists `restart_container` in its `permitted_tools`, the agent may call this tool without a per-call approval gate. Policy rules still apply — the operating mode must be `fix` and any configured tag-based deny rules must not match.
+
+---
+
+#### 1.10 `restart_service` — systemd service restart
+
+**Action class**: `destructive` (policy pre-check, full audit record)
+
+```
+target   string   required — server ID from infrastructure config
+```
+
+Calls `systemctl restart <systemd_unit>` for the systemd unit associated with the given server ID. The unit name is resolved from `host.systemd_unit` in the infrastructure config.
+
+Applies only to hosts where the database runs directly under systemd (not containerised). If the server's `host` block has `container_runtime` set, this tool returns an error — use `restart_container` instead.
+
+**Execution sequence**: identical to `restart_container` (§1.9) with `systemctl restart` substituted for `docker restart`. The same safeguards, policy pre-check, audit recording, and `auto_remediation_eligible` flag apply.
+
+---
+
+## 1.11 Rollback capability per tool
 
 Every mutation tool captures state before it executes so the operation can be reversed via the rollback API. Reversibility depends on the tool. Here are a few examples:
 
@@ -297,6 +344,8 @@ Every mutation tool captures state before it executes so the operation can be re
 | `cancel_query` | **No** | Query cancellation is instantaneous; `get_session_info` pre-flight surfaces cost before execution |
 | `terminate_connection` | **No** | Connection closure is irreversible; `get_session_info` pre-flight surfaces cost before execution |
 | `terminate_idle_connections` | **No** | Same as above — pre-flight assessment is the control |
+| `restart_container` | **No** | Restart is instantaneous; pre-flight `check_host`/`get_host_logs` is the control |
+| `restart_service` | **No** | Same as above |
 
 Future DML tools (`exec_update`, `exec_delete`, `exec_insert`) will capture row-level pre-state using a two-tier model (bounded SELECT or WAL decoding depending on target capabilities).
 
@@ -982,6 +1031,19 @@ No equivalent k8s fault scenario exists yet. The absence of a Mechanism B
 structural guard for the k8s mutation tools makes this a gap: a misbehaving
 model could call `delete_pod` without first calling `describe_pod` and there is
 currently no automated test that would catch it.
+
+Two `host` category fault scenarios exist for the SysAdmin agent:
+
+- **`host-container-stopped`**: tests that `check_host` and `get_host_logs` are called before any restart recommendation is made (container stopped cleanly with `exitcode=0`).
+- **`host-pg-crash`**: tests that when the container is alive but Postgres has crashed (`exitcode>0`), the agent calls `read_pg_log_file` to inspect the PostgreSQL log file after `get_host_logs` shows a crash signal. Injects via `docker exec kill -ABRT <postmaster_pid>`.
+
+Run them with:
+
+```bash
+go run ./testing/cmd/faulttest run \
+  --sysadmin-agent http://localhost:1103 \
+  --categories host
+```
 
 
 **Failure mode being tested**: an agent that calls `terminate_connection`

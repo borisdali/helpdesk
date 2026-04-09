@@ -293,7 +293,8 @@ func makeTestRequest(method, path, pattern string) *http.Request {
 	return captured
 }
 
-func TestMiddleware_ProviderError(t *testing.T) {
+func TestMiddleware_ProviderError_ProtectedRoute_Returns401(t *testing.T) {
+	// Bad credential on a protected route → 401 (from Authorize, not from Resolve).
 	a := NewAuthorizer(DefaultGatewayPermissions, true)
 	provider := &fakeProvider{err: errors.New("bad token")}
 
@@ -301,15 +302,38 @@ func TestMiddleware_ProviderError(t *testing.T) {
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { nextCalled = true })
 
 	handler := a.Middleware(provider)(next)
-	r := makeTestRequest("GET", "/api/v1/agents", "GET /api/v1/agents")
+	r := makeTestRequest("POST", "/api/v1/query", "POST /api/v1/query")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
 	if nextCalled {
-		t.Error("next should not be called when provider returns error")
+		t.Error("next should not be called when auth fails on a protected route")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestMiddleware_ProviderError_PublicRoute_PassesThrough(t *testing.T) {
+	// Bad credential on an AllowAnonymous route → falls through as anonymous → 200.
+	// This is the probe-startup scenario: agent sends a wrong API key to
+	// GET /v1/governance/info (AllowAnonymous) and should still get a valid response.
+	a := NewAuthorizer(DefaultGatewayPermissions, true)
+	provider := &fakeProvider{err: errors.New("invalid API key")}
+
+	nextCalled := false
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { nextCalled = true })
+
+	handler := a.Middleware(provider)(next)
+	r := makeTestRequest("GET", "/health", "GET /health")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if !nextCalled {
+		t.Error("next should be called: bad credential on AllowAnonymous route should fall through as anonymous")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
 	}
 }
 
@@ -427,6 +451,9 @@ var gatewayRoutes = []string{
 	"POST /api/v1/fleet/plan",
 	"POST /api/v1/fleet/snapshot",
 	"POST /api/v1/fleet/review",
+	"POST /api/v1/fleet/uploads",
+	"GET /api/v1/fleet/uploads/{uploadID}",
+	"GET /api/v1/fleet/uploads/{uploadID}/content",
 	"POST /api/v1/fleet/jobs",
 	"GET /api/v1/fleet/jobs",
 	"GET /api/v1/fleet/jobs/{jobID}",
@@ -437,8 +464,14 @@ var gatewayRoutes = []string{
 	"POST /api/v1/fleet/playbooks",
 	"GET /api/v1/fleet/playbooks",
 	"GET /api/v1/fleet/playbooks/{playbookID}",
+	"PUT /api/v1/fleet/playbooks/{playbookID}",
 	"DELETE /api/v1/fleet/playbooks/{playbookID}",
 	"POST /api/v1/fleet/playbooks/{playbookID}/run",
+	"GET /api/v1/fleet/playbooks/{playbookID}/runs",
+	"GET /api/v1/fleet/playbooks/{playbookID}/stats",
+	"PATCH /api/v1/fleet/playbook-runs/{runID}",
+	"GET /api/v1/fleet/playbook-runs/{runID}",
+	"GET /api/v1/tool-results",
 	"GET /api/v1/roles",
 }
 
@@ -481,7 +514,19 @@ var auditdRoutes = []string{
 	"POST /v1/fleet/playbooks",
 	"GET /v1/fleet/playbooks",
 	"GET /v1/fleet/playbooks/{playbookID}",
+	"PUT /v1/fleet/playbooks/{playbookID}",
 	"DELETE /v1/fleet/playbooks/{playbookID}",
+	"POST /v1/fleet/playbooks/{playbookID}/activate",
+	"POST /v1/fleet/playbooks/{playbookID}/runs",
+	"GET /v1/fleet/playbooks/{playbookID}/runs",
+	"GET /v1/fleet/playbooks/{playbookID}/stats",
+	"PATCH /v1/fleet/playbook-runs/{runID}",
+	"GET /v1/fleet/playbook-runs/{runID}",
+	"POST /v1/uploads",
+	"GET /v1/uploads/{uploadID}",
+	"GET /v1/uploads/{uploadID}/content",
+	"POST /v1/tool-results",
+	"GET /v1/tool-results",
 	"GET /health",
 	// Rollback & Undo
 	"POST /v1/rollbacks",

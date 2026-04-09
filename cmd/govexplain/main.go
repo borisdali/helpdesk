@@ -51,6 +51,7 @@ func main() {
 	role := flag.String("role", "", "Evaluate with a specific role")
 	purpose := flag.String("purpose", "", "Declared purpose: diagnostic, remediation, maintenance, compliance, emergency")
 	sensitivity := flag.String("sensitivity", "", "Comma-separated sensitivity classes (e.g. pii,critical)")
+	apiKey := flag.String("api-key", envOrDefault("HELPDESK_CLIENT_API_KEY", ""), "Bearer token for gateway/auditd authentication (or set HELPDESK_CLIENT_API_KEY)")
 	asJSON := flag.Bool("json", false, "Output raw JSON instead of human-readable text")
 
 	// List mode flags
@@ -80,6 +81,9 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	if *apiKey != "" {
+		client.Transport = &bearerTransport{base: http.DefaultTransport, token: *apiKey}
+	}
 
 	// --auditd bypasses the gateway and talks directly to auditd.
 	// auditd exposes /v1/governance/explain and /v1/events/{id} natively.
@@ -610,6 +614,18 @@ func runLocalExplain(policyFile, resourceType, resourceName, action, tagsStr, us
 		fmt.Println(string(out))
 	}
 	return effectToCode(string(trace.Decision.Effect))
+}
+
+// bearerTransport injects a Bearer token into every outgoing request.
+type bearerTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
 }
 
 func envOrDefault(key, def string) string {

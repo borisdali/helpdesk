@@ -99,6 +99,9 @@ func requestFleetJobApproval(ctx context.Context, rcfg runnerConfig, def *fleet.
 		return "", fmt.Errorf("create approval request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if rcfg.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+rcfg.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -175,6 +178,10 @@ func getApprovalStatus(ctx context.Context, rcfg runnerConfig, approvalID string
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("create status request: %w", err)
+	}
+
+	if rcfg.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+rcfg.auditAPIKey)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}

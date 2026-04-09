@@ -72,16 +72,17 @@ type DiagnosisSpec struct {
 
 // HarnessConfig holds runtime configuration for the test harness.
 type HarnessConfig struct {
-	CatalogPath    string
-	TestingDir     string
-	ConnStr        string
-	ReplicaConnStr string
-	DBAgentURL     string
-	K8sAgentURL    string
-	OrchestratorURL string
-	KubeContext    string
-	Categories     []string
-	FailureIDs     []string
+	CatalogPath      string
+	TestingDir       string
+	ConnStr          string
+	ReplicaConnStr   string
+	DBAgentURL       string
+	K8sAgentURL      string
+	SysadminAgentURL string
+	OrchestratorURL  string
+	KubeContext      string
+	Categories       []string
+	FailureIDs       []string
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.

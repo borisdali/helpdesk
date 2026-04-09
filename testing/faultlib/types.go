@@ -48,6 +48,7 @@ type InjectSpec struct {
 	ExecVia      string            `yaml:"exec_via,omitempty"`
 	Action       string            `yaml:"action,omitempty"`
 	Service      string            `yaml:"service,omitempty"`
+	Signal       string            `yaml:"signal,omitempty"`
 	Overlay      string            `yaml:"overlay,omitempty"`
 	Restore      interface{}       `yaml:"restore,omitempty"`
 	Target       string            `yaml:"target,omitempty"`
@@ -82,16 +83,17 @@ type DiagnosisSpec struct {
 
 // HarnessConfig holds runtime configuration for the test harness.
 type HarnessConfig struct {
-	CatalogPath     string
-	TestingDir      string
-	ConnStr         string
-	ReplicaConnStr  string
-	DBAgentURL      string
-	K8sAgentURL     string
-	OrchestratorURL string
-	KubeContext     string
-	Categories      []string
-	FailureIDs      []string
+	CatalogPath      string
+	TestingDir       string
+	ConnStr          string
+	ReplicaConnStr   string
+	DBAgentURL       string
+	K8sAgentURL      string
+	SysadminAgentURL string
+	OrchestratorURL  string
+	KubeContext      string
+	Categories       []string
+	FailureIDs       []string
 }
 
 // EvalResult contains the evaluation outcome for a single failure test.

@@ -22,6 +22,7 @@ import (
 	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
+	"helpdesk/playbooks"
 )
 
 type config struct {
@@ -105,6 +106,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Seed system playbooks (idempotent; non-fatal if it fails).
+	if err := playbooks.SeedSystemPlaybooks(context.Background(), playbookStore); err != nil {
+		slog.Warn("failed to seed system playbooks", "err", err)
+	}
+
+	// Create upload store (shares the same database connection)
+	uploadStore, err := audit.NewUploadStore(store.DB())
+	if err != nil {
+		slog.Error("failed to create upload store", "err", err)
+		os.Exit(1)
+	}
+
+	// Create tool result store (shares the same database connection)
+	toolResultStore, err := audit.NewToolResultStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create tool result store", "err", err)
+		os.Exit(1)
+	}
+
+	// Create playbook run store (shares the same database connection)
+	playbookRunStore, err := audit.NewPlaybookRunStore(store.DB())
+	if err != nil {
+		slog.Error("failed to create playbook run store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create rollback store (shares the same database connection)
 	rollbackStore, err := audit.NewRollbackStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -163,8 +190,12 @@ func main() {
 		return func(w http.ResponseWriter, r *http.Request) {
 			principal, err := idProvider.Resolve(r)
 			if err != nil {
-				http.Error(w, "authentication failed: "+err.Error(), http.StatusUnauthorized)
-				return
+				// Bad or unrecognized credential: fall through as anonymous and
+				// let Authorize decide. AllowAnonymous routes pass; protected
+				// routes still get 401 from the Authorize block below.
+				slog.Debug("auth: unrecognized credential, treating as anonymous",
+					"pattern", pattern, "err", err)
+				principal = identity.ResolvedPrincipal{AuthMethod: "header"}
 			}
 			if authErr := authzr.Authorize(pattern, principal); authErr != nil {
 				status := http.StatusForbidden
@@ -188,7 +219,10 @@ func main() {
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
-	playbookSrv := &playbookServer{store: playbookStore}
+	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore}
+	uploadSrv := &uploadServer{store: uploadStore}
+	toolResultSrv := &toolResultServer{store: toolResultStore}
+	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
@@ -240,7 +274,23 @@ func main() {
 	mux.HandleFunc("POST /v1/fleet/playbooks", auth("POST /v1/fleet/playbooks", playbookSrv.handleCreate))
 	mux.HandleFunc("GET /v1/fleet/playbooks", auth("GET /v1/fleet/playbooks", playbookSrv.handleList))
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}", auth("GET /v1/fleet/playbooks/{playbookID}", playbookSrv.handleGet))
+	mux.HandleFunc("PUT /v1/fleet/playbooks/{playbookID}", auth("PUT /v1/fleet/playbooks/{playbookID}", playbookSrv.handleUpdate))
 	mux.HandleFunc("DELETE /v1/fleet/playbooks/{playbookID}", auth("DELETE /v1/fleet/playbooks/{playbookID}", playbookSrv.handleDelete))
+	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/activate", auth("POST /v1/fleet/playbooks/{playbookID}/activate", playbookSrv.handleActivate))
+	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/runs", auth("POST /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleRecord))
+	mux.HandleFunc("PATCH /v1/fleet/playbook-runs/{runID}", auth("PATCH /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleUpdate))
+	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/runs", auth("GET /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleList))
+	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/stats", auth("GET /v1/fleet/playbooks/{playbookID}/stats", playbookRunSrv.handleStats))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}", auth("GET /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleGetRun))
+
+	// Tool result endpoints
+	// Upload endpoints
+	mux.HandleFunc("POST /v1/uploads", auth("POST /v1/uploads", uploadSrv.handleCreate))
+	mux.HandleFunc("GET /v1/uploads/{uploadID}", auth("GET /v1/uploads/{uploadID}", uploadSrv.handleGet))
+	mux.HandleFunc("GET /v1/uploads/{uploadID}/content", auth("GET /v1/uploads/{uploadID}/content", uploadSrv.handleGetContent))
+
+	mux.HandleFunc("POST /v1/tool-results", auth("POST /v1/tool-results", toolResultSrv.handleRecord))
+	mux.HandleFunc("GET /v1/tool-results", auth("GET /v1/tool-results", toolResultSrv.handleList))
 
 	// Fleet job approval endpoints
 	mux.HandleFunc("POST /v1/fleet/jobs/{jobID}/approval", auth("POST /v1/fleet/jobs/{jobID}/approval", fleetSrv.handleCreateJobApproval))

@@ -1035,13 +1035,32 @@ func (a *Auditor) checkLongDuration(event *audit.Event) {
 		return
 	}
 
+	// Playbook /run calls are agentic triage sessions that legitimately take
+	// 20–120 s. Use a higher threshold so routine agent-mode runs don't fire.
+	intent := ""
+	if event.Decision != nil {
+		intent = event.Decision.UserIntent
+	}
+	isPlaybookRun := strings.Contains(intent, "/fleet/playbooks") && strings.HasSuffix(strings.TrimRight(intent, "/"), "/run")
+
 	duration := event.Outcome.Duration
 
-	if duration > 30*time.Second {
+	warnThreshold := 15 * time.Second
+	critThreshold := 30 * time.Second
+	if isPlaybookRun {
+		warnThreshold = 120 * time.Second
+		critThreshold = 300 * time.Second
+	}
+
+	if duration > critThreshold {
+		agent := ""
+		if event.Decision != nil {
+			agent = event.Decision.Agent
+		}
 		a.alert(AlertCritical, "very long delegation duration", event,
 			"duration", duration.String(),
-			"agent", event.Decision.Agent)
-	} else if duration > 15*time.Second {
+			"agent", agent)
+	} else if duration > warnThreshold {
 		a.alert(AlertWarning, "long delegation duration", event,
 			"duration", duration.String())
 	}
@@ -1049,9 +1068,9 @@ func (a *Auditor) checkLongDuration(event *audit.Event) {
 
 // checkRepeatedQueries alerts on potential loops or stuck behavior.
 func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
-	// Fleet job traces legitimately repeat the same query across N servers —
-	// suppress loop detection for them.
-	if strings.HasPrefix(event.TraceID, "tr_flj_") {
+	// Fleet job traces and direct tool calls legitimately repeat the same
+	// query across N servers or in polling loops — suppress loop detection.
+	if strings.HasPrefix(event.TraceID, "tr_flj_") || strings.HasPrefix(event.TraceID, "dt_") {
 		return
 	}
 
@@ -1259,12 +1278,26 @@ func (a *Auditor) checkTimestampGap(event *audit.Event) {
 
 	gap := event.Timestamp.Sub(a.lastEventTime)
 
-	// Negative gap indicates time manipulation or out-of-order events
-	if gap < -time.Second {
-		a.recordSecurityAlert("timestamp_anomaly", AlertCritical,
-			"Event timestamp is before previous event - possible manipulation", event,
-			"gap", gap.String(),
-			"previous_time", a.lastEventTime.Format(time.RFC3339))
+	// Negative gap indicates time manipulation or out-of-order events.
+	// Allow up to 5 s of clock skew between services (NTP drift); beyond that
+	// treat as a genuine anomaly.
+	//
+	// Exception: long-running events (e.g. agent-mode playbook runs) are
+	// timestamped at request arrival but inserted into the chain at completion.
+	// Other events inserted during execution will have later timestamps, so the
+	// chain will naturally contain this event "out of order". If the magnitude
+	// of the negative gap is less than the event's own duration, the ordering
+	// is explained by execution time — not manipulation.
+	const clockSkewTolerance = -5 * time.Second
+	if gap < clockSkewTolerance {
+		if event.Outcome != nil && gap+event.Outcome.Duration >= clockSkewTolerance {
+			// Gap fully explained by how long this event ran — not anomalous.
+		} else {
+			a.recordSecurityAlert("timestamp_anomaly", AlertCritical,
+				"Event timestamp is before previous event - possible manipulation", event,
+				"gap", gap.String(),
+				"previous_time", a.lastEventTime.Format(time.RFC3339))
+		}
 	}
 
 	// Large gap might indicate deleted events (only flag if > 1 hour and during business hours)

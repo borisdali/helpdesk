@@ -1,7 +1,7 @@
 version: "1"
 
 failures:
-  # ── Database failures (9) ──────────────────────────────────────────────
+  # ── Database failures (13) ─────────────────────────────────────────────
 
   - id: db-max-connections
     name: "Max connections exhausted"
@@ -99,6 +99,8 @@ failures:
       expected_tools:
         - get_lock_info
         - get_active_connections
+        - get_wait_events
+        - get_blocking_queries
       expected_keywords:
         any_of:
           - "deadlock"
@@ -161,6 +163,7 @@ failures:
     evaluation:
       expected_tools:
         - get_database_stats
+        - get_slow_queries
       expected_keywords:
         any_of:
           - "cache hit"
@@ -392,7 +395,7 @@ failures:
     # known behaviour gap, not a test assertion — the suite should still pass.
     governance_gap: true
 
-  # ── Kubernetes failures (6) ────────────────────────────────────────────
+  # ── Kubernetes failures (7) ────────────────────────────────────────────
 
   - id: k8s-crashloop
     name: "CrashLoopBackOff"
@@ -450,6 +453,7 @@ failures:
       expected_tools:
         - get_pods
         - get_events
+        - get_pod_resources
       expected_keywords:
         any_of:
           - "Pending"
@@ -586,6 +590,7 @@ failures:
       expected_tools:
         - get_pods
         - get_events
+        - get_pod_resources
       expected_keywords:
         any_of:
           - "OOMKilled"
@@ -609,7 +614,7 @@ failures:
     inject:
       type: kustomize
       overlay: k8s/overlays/scale-to-zero
-      wait: 15s
+      wait: 45s
     teardown:
       type: kustomize_delete
       overlay: k8s/overlays/scale-to-zero
@@ -631,8 +636,160 @@ failures:
           - "replicas"
           - "unavailable"
       expected_diagnosis:
-        category: "deployment_scaled_down"
+        category: "scaled_down"
     timeout: 90s
+
+  - id: db-vacuum-needed
+    name: "Tables needing vacuum (dead tuple bloat)"
+    category: database
+    severity: medium
+    description: >
+      Several tables have accumulated a large number of dead tuples with
+      autovacuum disabled, degrading query performance and wasting disk space.
+    inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS vacuum_bloat (id SERIAL PRIMARY KEY, val TEXT);
+        INSERT INTO vacuum_bloat (val) SELECT 'row' || g FROM generate_series(1, 5000) g;
+        ALTER TABLE vacuum_bloat SET (autovacuum_enabled = false);
+        DELETE FROM vacuum_bloat WHERE id % 2 = 0;
+    teardown:
+      type: sql
+      script_inline: "DROP TABLE IF EXISTS vacuum_bloat;"
+    prompt: >
+      A DBA reports that queries on several tables are getting slower and
+      autovacuum has not run recently. The connection_string is
+      `{{connection_string}}` — use it verbatim for all tool calls.
+      Check which tables need vacuuming.
+    evaluation:
+      expected_tools:
+        - get_vacuum_status
+      expected_keywords:
+        any_of:
+          - "dead tuples"
+          - "dead_ratio"
+          - "autovacuum"
+          - "vacuum"
+          - "bloat"
+      expected_diagnosis:
+        category: "vacuum_needed"
+    timeout: 60s
+
+  - id: db-disk-pressure
+    name: "Disk usage — large table growth"
+    category: database
+    severity: medium
+    description: >
+      A table has grown very large, consuming significant disk space. The
+      operator needs to identify which tables and databases are using the most
+      storage.
+    inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS disk_pressure_data (id SERIAL PRIMARY KEY, payload TEXT);
+        INSERT INTO disk_pressure_data (payload)
+          SELECT repeat('x', 2000) FROM generate_series(1, 10000);
+    teardown:
+      type: sql
+      script_inline: "DROP TABLE IF EXISTS disk_pressure_data;"
+    prompt: >
+      The database server is reporting low disk space alerts. The
+      connection_string is `{{connection_string}}` — use it verbatim for all
+      tool calls. Identify which databases and tables are consuming the most
+      storage.
+    evaluation:
+      expected_tools:
+        - get_disk_usage
+      expected_keywords:
+        any_of:
+          - "disk"
+          - "table size"
+          - "database size"
+          - "storage"
+          - "bytes"
+          - "MiB"
+          - "GiB"
+      expected_diagnosis:
+        category: "disk_pressure"
+    timeout: 60s
+
+  # ── Host failures (1) ──────────────────────────────────────────────────
+
+  - id: host-container-stopped
+    name: "Database container stopped"
+    category: host
+    severity: critical
+    description: >
+      The PostgreSQL container is stopped on the host. The database is
+      unreachable. The sysadmin agent must identify the stopped container
+      state and report on the last log output before shutdown.
+    inject:
+      type: docker
+      action: stop
+      service: postgres
+    teardown:
+      type: docker
+      action: start
+      service: postgres
+    prompt: >
+      The database server 'faulttest-db' is not responding. Please
+      check the host-level status of the server and investigate why
+      the database process is not running.
+    evaluation:
+      expected_tools:
+        - check_host
+        - get_host_logs
+      expected_keywords:
+        any_of:
+          - "stopped"
+          - "exited"
+          - "container"
+          - "not running"
+          - "offline"
+      expected_diagnosis:
+        category: "container_stopped"
+    timeout: 60s
+
+  - id: host-pg-crash
+    name: "PostgreSQL process crash inside container"
+    category: host
+    severity: critical
+    description: >
+      The postgres container is killed with SIGKILL from the host via
+      docker compose kill, simulating an unclean process termination (OOM kill,
+      hardware fault, or forced termination). The container exits with code 137
+      (128 + SIGKILL=9). The sysadmin agent must distinguish this forced kill
+      (exitcode=137) from a clean stop (exitcode=0).
+    inject:
+      type: docker
+      action: kill
+      signal: SIGKILL
+      service: postgres
+    teardown:
+      type: docker
+      action: start
+      service: postgres
+    prompt: >
+      The database server 'faulttest-db' is not responding. Please
+      check the host-level status of the server and investigate why
+      the database process is not running.
+    evaluation:
+      expected_tools:
+        - check_host
+        - get_host_logs
+      expected_keywords:
+        any_of:
+          - "crashed"
+          - "crash"
+          - "signal"
+          - "aborted"
+          - "exit code"
+          - "exitcode"
+          - "killed"
+          - "abnormal"
+      expected_diagnosis:
+        category: "container_killed"
+    timeout: 60s
 
   # ── Compound failures (2) ──────────────────────────────────────────────
 
@@ -640,10 +797,17 @@ failures:
     name: "DB unreachable + pod crashing"
     category: compound
     severity: critical
+    governance_gap: true
     description: >
       The database is unreachable because the pod is in CrashLoopBackOff.
       Requires both the DB agent (to report connection failure) and the
       K8s agent (to diagnose the pod crash).
+      GOVERNANCE GAP: In the local test setup the DB agent connects to
+      localhost:15432 (docker compose postgres) which remains reachable
+      regardless of the k8s pod state. Without an orchestrator routing
+      through k8s, the agent correctly reports the DB as healthy and
+      stops without investigating k8s. This test documents the limitation
+      rather than asserting correct behaviour.
     inject:
       type: kustomize
       overlay: k8s/overlays/crashloop

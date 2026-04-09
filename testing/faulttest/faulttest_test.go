@@ -13,6 +13,7 @@
 // Environment variables:
 //   - FAULTTEST_DB_AGENT_URL: Database agent A2A URL (e.g., http://localhost:1100)
 //   - FAULTTEST_K8S_AGENT_URL: Kubernetes agent A2A URL (e.g., http://localhost:1102)
+//   - FAULTTEST_SYSADMIN_AGENT_URL: SysAdmin agent A2A URL (e.g., http://localhost:1103)
 //   - FAULTTEST_ORCHESTRATOR_URL: Orchestrator A2A URL (optional)
 //   - FAULTTEST_CONN_STR: PostgreSQL connection string
 //   - FAULTTEST_KUBE_CONTEXT: Kubernetes context (optional)
@@ -36,12 +37,13 @@ import (
 
 func loadConfigFromEnv() *faultlib.HarnessConfig {
 	cfg := &faultlib.HarnessConfig{
-		ConnStr:         os.Getenv("FAULTTEST_CONN_STR"),
-		ReplicaConnStr:  os.Getenv("FAULTTEST_REPLICA_CONN_STR"),
-		DBAgentURL:      os.Getenv("FAULTTEST_DB_AGENT_URL"),
-		K8sAgentURL:     os.Getenv("FAULTTEST_K8S_AGENT_URL"),
-		OrchestratorURL: os.Getenv("FAULTTEST_ORCHESTRATOR_URL"),
-		KubeContext:     os.Getenv("FAULTTEST_KUBE_CONTEXT"),
+		ConnStr:          os.Getenv("FAULTTEST_CONN_STR"),
+		ReplicaConnStr:   os.Getenv("FAULTTEST_REPLICA_CONN_STR"),
+		DBAgentURL:       os.Getenv("FAULTTEST_DB_AGENT_URL"),
+		K8sAgentURL:      os.Getenv("FAULTTEST_K8S_AGENT_URL"),
+		SysadminAgentURL: os.Getenv("FAULTTEST_SYSADMIN_AGENT_URL"),
+		OrchestratorURL:  os.Getenv("FAULTTEST_ORCHESTRATOR_URL"),
+		KubeContext:      os.Getenv("FAULTTEST_KUBE_CONTEXT"),
 	}
 
 	if categories := os.Getenv("FAULTTEST_CATEGORIES"); categories != "" {
@@ -82,6 +84,8 @@ func agentURL(cfg *faultlib.HarnessConfig, category string) string {
 		return cfg.DBAgentURL
 	case "kubernetes":
 		return cfg.K8sAgentURL
+	case "host":
+		return cfg.SysadminAgentURL
 	case "compound":
 		if cfg.OrchestratorURL != "" {
 			return cfg.OrchestratorURL

@@ -250,6 +250,40 @@ curl -s -X POST http://localhost:8080/api/v1/db/check_replication_lag \
   -d '{"host": "prod-db.example.com", "port": 5432}'
 ```
 
+#### Database tool quick reference
+
+All tools accept `connection_string` (PostgreSQL DSN; falls back to `HELPDESK_DB_URL` env). Action class is `read` unless noted.
+
+| Tool | Key parameters | What it returns |
+|------|----------------|----------------|
+| `check_connection` | — | Connectivity and server version |
+| `get_server_info` | — | Version, uptime, PG settings summary |
+| `get_status_summary` | — | Compact health snapshot (supersedes server_info + connection_stats) |
+| `get_database_stats` | — | Cache hit ratio, buffer and tuple counts |
+| `get_connection_stats` | — | Active/idle/waiting connection counts by state |
+| `get_active_connections` | — | `pg_stat_activity` snapshot |
+| `get_session_info` | `pid` (required) | Detailed session state, lock holds, uncommitted write estimate |
+| `get_lock_info` | — | Lock grants and waits from `pg_locks` |
+| `get_replication_status` | — | Streaming replica lag and WAL position |
+| `get_table_stats` | `schema` | Dead tuple counts, autovacuum timestamps per table |
+| `get_config_parameter` | `parameter` (required) | Single GUC value and source |
+| `get_database_info` | — | Database list with sizes and owner |
+| `get_pg_settings` | `category`, `show_all` | Non-default GUC values, grouped by category |
+| `get_extensions` | — | Installed extensions with versions |
+| `get_baseline` | — | Combined report: server info + settings + extensions + disk usage |
+| `get_slow_queries` | `limit` | Top-N queries by total execution time from `pg_stat_statements` |
+| `get_vacuum_status` | `min_dead_ratio` | Tables with high dead-tuple ratio, last autovacuum timestamps |
+| `get_disk_usage` | `top_n` | Database sizes (`pg_database_size`) + largest tables (`pg_total_relation_size`) |
+| `get_wait_events` | — | Aggregated wait event types from `pg_stat_activity` |
+| `get_blocking_queries` | — | Blocking/blocked session pairs with lock type and relation |
+| `explain_query` | `query` (required), `allow_dml` | `EXPLAIN (ANALYZE, BUFFERS)` output; DML wrapped in BEGIN/ROLLBACK when `allow_dml=true` |
+| `cancel_query` | `pid` (required) | `pg_cancel_backend` — **write** |
+| `terminate_connection` | `pid` (required) | `pg_terminate_backend` — **destructive** |
+| `kill_idle_connections` | `idle_threshold_seconds` | Terminate all idle connections older than threshold — **destructive** |
+| `read_pg_log` | `lines`, `filter` | Read the tail of the most-recently-modified PostgreSQL log file via `pg_read_file()`. Requires a live DB connection and `pg_read_server_files` privilege or superuser. Returns up to 128 KB (last ~1000 lines). Use `filter` (case-insensitive substring) to focus on errors. |
+| `read_uploaded_file` | `upload_id` (required), `filter` | Read the content of a file previously uploaded by an operator via `POST /api/v1/fleet/uploads`. Use this when `read_pg_log` is not available (e.g. DB is completely down). Requires `HELPDESK_AUDIT_URL` to be configured. |
+| `get_saved_snapshots` | `tool_name` (required), `server_name`, `limit`, `since` | Retrieve previously recorded outputs of a tool from the audit history. Use when the DB is unreachable and you need a value captured in a prior run — e.g. `config_file` path or `data_directory` from a past `get_baseline`. Also useful for diffing two snapshots ("what changed?") or finding when a setting last changed. Returns up to 3 snapshots by default (max 10), capped at 32 KB total. Requires `HELPDESK_AUDIT_URL`. |
+
 ---
 
 ### `POST /api/v1/k8s/{tool}`
@@ -261,6 +295,24 @@ curl -s -X POST http://localhost:8080/api/v1/k8s/get_pod_logs \
   -H "Content-Type: application/json" \
   -d '{"namespace": "default", "pod": "my-pod-abc123"}'
 ```
+
+#### Kubernetes tool quick reference
+
+All tools accept `context` (kubeconfig context name; defaults to current context).
+
+| Tool | Key parameters | What it returns |
+|------|----------------|----------------|
+| `get_pods` | `namespace` (required), `pod_name` | Pod list with status, restarts, age |
+| `get_pod_logs` | `namespace` (required), `pod_name` (required), `lines` | Container log tail |
+| `get_events` | `namespace` (required), `resource_name` | K8s events (warnings + normals) |
+| `describe_pod` | `namespace` (required), `pod_name` (required) | Full pod describe output |
+| `get_service` | `namespace` (required), `service_name` | Service spec with ClusterIP, ports, selector |
+| `get_endpoints` | `namespace` (required), `service_name` | Endpoint addresses for a service |
+| `get_pod_resources` | `namespace` (required), `pod_name` | CPU/memory requests + limits; live usage via `kubectl top` when metrics-server is available |
+| `get_node_status` | `node_name` | Node conditions (Ready, MemoryPressure, DiskPressure, PIDPressure), allocatable vs capacity resources |
+| `scale_deployment` | `namespace` (required), `deployment_name` (required), `replicas` (required) | Scale a deployment — **destructive** |
+| `restart_deployment` | `namespace` (required), `deployment_name` (required) | Rolling restart — **destructive** |
+| `delete_pod` | `namespace` (required), `pod_name` (required) | Delete a pod — **destructive** |
 
 ---
 
@@ -530,6 +582,281 @@ curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123/approval/apr_xyz789 | jq
 ```
 
 To approve or deny, use the auditd approval endpoints directly (see below) — the gateway does not proxy write operations on approvals.
+
+---
+
+#### Playbook endpoints
+
+Playbooks are saved runbook artifacts combining a natural-language fleet intent with expert triage knowledge. aiHelpDesk ships 7 system playbooks out of the box (4 operational + 3 Database Down triage), with adaptive escalation across the triage graph. Operators create, version, and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
+
+#### `GET /api/v1/fleet/playbooks`
+
+List playbooks. Returns the active version of every playbook by default. Each entry includes an inline `stats` object (series-wide run history) when at least one run exists.
+
+Query params: `active_only` (default `true`), `include_system` (default `true`), `series_id` (filter to one series).
+
+```bash
+curl http://localhost:8080/api/v1/fleet/playbooks | jq .playbooks
+
+# All versions of a series
+curl "http://localhost:8080/api/v1/fleet/playbooks?series_id=pbs_vacuum_triage&active_only=false"
+```
+
+#### `GET /api/v1/fleet/playbooks/{playbookID}`
+
+Get a single playbook by ID. Returns `404` if not found.
+
+#### `POST /api/v1/fleet/playbooks`
+
+Create a new playbook. `name` and `description` are required. Supply `series_id` to add a version to an existing series (new version starts inactive); omit it to start a new series (starts active).
+
+Response: `201 Created` with the full playbook object. See [PLAYBOOKS.md — field reference](PLAYBOOKS.md#playbook-schema-reference) for all fields.
+
+#### `PUT /api/v1/fleet/playbooks/{playbookID}`
+
+Replace a playbook's fields. All fields overwritten; omitting a field clears it. Returns `404` if not found, `400` for system playbooks.
+
+#### `POST /api/v1/fleet/playbooks/{playbookID}/activate`
+
+Atomically promotes a version to active within its series, deactivating all others. Idempotent. Returns `404` if not found, `400` for system playbooks.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_v2id/activate | jq .is_active
+```
+
+#### `DELETE /api/v1/fleet/playbooks/{playbookID}`
+
+Delete a playbook. Returns `204 No Content`, `404` if not found, `400` for system playbooks.
+
+#### `POST /api/v1/fleet/playbooks/{playbookID}/run`
+
+Runs a playbook. Behaviour depends on the playbook's `execution_mode`.
+
+**`execution_mode: fleet` (default)** — calls the fleet planner and returns a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The playbook's `description`, `guidance`, and `target_hints` are injected into the planner prompt. Requires LLM configuration.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
+  | jq -r '.job_def_raw' > /tmp/plan.json
+./fleet-runner --job-file /tmp/plan.json --dry-run
+```
+
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms and tests hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`. Used by the Database Down playbooks. The gateway parses a structured signal from the agent's response to automatically set `outcome`, `findings_summary`, and `escalated_to` on the run record.
+
+Optional request body:
+
+| Field | Description |
+|---|---|
+| `connection_string` | PostgreSQL DSN for the target database |
+| `context` | Free-form operator context: server name, symptoms, log lines, recent changes. Used to evaluate `requires_evidence` patterns. |
+| `context_id` | A2A session ID to resume a multi-turn session |
+| `prior_run_id` | `plr_*` run ID of a prior investigation; its `findings_summary` is injected into the prompt for continuity |
+
+Response fields (in addition to the standard `text`, `agent`, `task_id`, `context_id`):
+
+| Field | When present | Description |
+|---|---|---|
+| `warnings` | `requires_evidence` patterns absent from `context` | Advisory list of missing evidence patterns. Execution is not blocked. |
+| `escalation_hint` | Agent signalled escalation | Series ID (`pbs_*`) of the recommended follow-on playbook |
+
+```bash
+# First investigation — entry-point playbook
+RESP=$(curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string":"postgres://prod-db.example.com/app","context":"pod CrashLoopBackOff; logs show FATAL: invalid value for parameter max_connections"}')
+echo "$RESP" | jq .text
+
+# Follow-on investigation using escalation hint and prior run ID
+RUN_ID=$(curl -s http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/runs | jq -r '.runs[0].run_id')
+NEXT_SERIES=$(echo "$RESP" | jq -r '.escalation_hint // empty')
+if [ -n "$NEXT_SERIES" ]; then
+  NEXT_PB=$(curl -s "http://localhost:8080/api/v1/fleet/playbooks?series_id=$NEXT_SERIES" \
+    | jq -r '.playbooks[0].playbook_id')
+  curl -s -X POST "http://localhost:8080/api/v1/fleet/playbooks/$NEXT_PB/run" \
+    -H "Content-Type: application/json" \
+    -d "{\"connection_string\":\"postgres://prod-db.example.com/app\",\"prior_run_id\":\"$RUN_ID\"}" \
+    | jq .text
+fi
+```
+
+See [PLAYBOOKS.md — Adaptive triage](PLAYBOOKS.md#adaptive-triage) for the full escalation graph, requires-evidence system, and continuity threading details.
+
+#### `GET /api/v1/fleet/playbooks/{playbookID}/runs`
+
+List recorded runs for a playbook, most recent first. Default limit 20, maximum 100.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/runs | jq '{count: .count, last_outcome: .runs[0].outcome}'
+```
+
+Response: `{ "runs": [...], "count": N }`. Each run object includes `run_id`, `playbook_id`, `series_id`, `execution_mode`, `outcome`, `escalated_to`, `findings_summary`, `operator`, `started_at`, `completed_at`.
+
+#### `GET /api/v1/fleet/playbook-runs/{runID}`
+
+Fetch a single run by its `run_id`. Useful for retrieving the `findings_summary` and `escalated_to` fields that are populated automatically after an agent-mode run completes.
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
+  | jq '{outcome, findings_summary, escalated_to}'
+```
+
+Returns `404` if the run ID is not found.
+
+#### `GET /api/v1/fleet/playbooks/{playbookID}/stats`
+
+Aggregated outcome statistics for the **series** the playbook belongs to (all versions combined). Returns `404` if the playbook is not found.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/stats | jq '{total_runs, resolution_rate, escalation_rate}'
+```
+
+Response: `{ "series_id", "total_runs", "resolved", "escalated", "abandoned", "resolution_rate", "escalation_rate", "last_run_at" }`.
+
+#### `PATCH /api/v1/fleet/playbook-runs/{runID}`
+
+Record or correct the final outcome of a run. For agent-mode runs the outcome is set automatically from the agent's structured response; this endpoint lets operators override it after reviewing.
+
+| Field | Required | Description |
+|---|---|---|
+| `outcome` | yes | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `escalated_to` | no | Series ID (`pbs_*`) of the next playbook when `outcome=escalated` |
+| `findings_summary` | no | Summary of what was found and what action was taken |
+
+Returns `204 No Content`. See [PLAYBOOKS.md — Run tracking](PLAYBOOKS.md#run-tracking) for the full lifecycle and field reference.
+
+```bash
+curl -s -X PATCH http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
+  -H "Content-Type: application/json" \
+  -d '{"outcome":"resolved","findings_summary":"Autovacuum disabled on accounts table; re-enabled and ran VACUUM ANALYZE."}'
+```
+
+#### `POST /api/v1/fleet/playbooks/import`
+
+Convert an existing runbook into a playbook draft without persisting it. The caller reviews the draft and saves it via `POST /api/v1/fleet/playbooks`.
+
+| Field | Required | Description |
+|---|---|---|
+| `text` | yes | Raw runbook content |
+| `format` | no | `yaml` \| `text` \| `markdown` \| `rundeck` \| `ansible` (default: `text`) |
+| `hints.name` | no | Pre-filled name (used when LLM cannot extract one) |
+| `hints.problem_class` | no | Pre-filled problem class |
+| `hints.series_id` | no | Target series for the imported draft |
+
+`format=yaml` uses a direct parse (no LLM, `confidence=1.0`). Other formats require LLM configuration. See [PLAYBOOKS.md — importing playbooks](PLAYBOOKS.md#importing-playbooks) for format details and the YAML schema.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/import \
+  -H "Content-Type: application/json" \
+  -d '{"text": "<runbook yaml>", "format": "yaml"}' | jq '{draft: .draft.name, confidence: .confidence}'
+```
+
+---
+
+### Operator file uploads
+
+Operators upload files (typically PostgreSQL log files retrieved from a remote host) so that agents can analyse them when the database is unreachable. The `read_uploaded_file` database tool reads uploaded content by `upload_id`.
+
+Uploads are stored in auditd's SQLite database, expire after **24 hours**, and are capped at **50 MB** per file.
+
+#### `POST /api/v1/fleet/uploads`
+
+Upload a file as `multipart/form-data` with a single `file` field. Returns `201 Created` with upload metadata.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/uploads \
+  -F "file=@/var/log/postgresql/postgresql-2024.log" | jq '{upload_id, filename, size, expires_at}'
+```
+
+Response:
+
+```json
+{
+  "upload_id":   "ul_3f7a2b1c",
+  "filename":    "postgresql-2024.log",
+  "size":        94208,
+  "uploaded_at": "2024-01-15T10:00:00Z",
+  "expires_at":  "2024-01-16T10:00:00Z"
+}
+```
+
+#### `GET /api/v1/fleet/uploads/{uploadID}`
+
+Get upload metadata (no content). Returns `404` if not found or expired.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/uploads/ul_3f7a2b1c | jq .
+```
+
+#### `GET /api/v1/fleet/uploads/{uploadID}/content`
+
+Return the raw file content (`text/plain`). Returns `404` if not found or expired.
+
+```bash
+curl http://localhost:8080/api/v1/fleet/uploads/ul_3f7a2b1c
+```
+
+**Typical workflow for DB-down log analysis:**
+
+```bash
+# 1. Retrieve the log from the remote host however you can (scp, jump host, etc.)
+scp ops@db-host:/var/log/postgresql/postgresql.log /tmp/pg.log
+
+# 2. Upload it to aiHelpDesk
+UPLOAD_ID=$(curl -s -X POST http://localhost:8080/api/v1/fleet/uploads \
+  -F "file=@/tmp/pg.log" | jq -r .upload_id)
+
+# 3. Ask the database agent to analyse it
+curl -s -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d "{\"agent\":\"database\",\"message\":\"Analyse the uploaded log (upload_id: $UPLOAD_ID). Look for FATAL errors and the likely root cause.\"}"
+```
+
+---
+
+#### `GET /api/v1/tool-results`
+
+Query the persistent tool result log — a record of every tool execution written by fleet-runner jobs and direct tool calls (when `HELPDESK_AUDIT_URL` is configured). Useful for post-incident triage and auditing what was collected during a job.
+
+The database agent's `get_saved_snapshots` tool uses this endpoint internally to retrieve prior outputs during triage (e.g. recovering a `config_file` path when the DB is down, or diffing two baselines).
+
+| Parameter | Description |
+|---|---|
+| `server` | Filter by server name |
+| `tool` | Filter by tool name |
+| `job_id` | Filter by fleet job ID (`flj_*`) |
+| `since` | Duration string: `7d`, `24h`, `30m` (results newer than this window) |
+| `limit` | Max results (default 100, max 1000) |
+
+```bash
+# Last 7 days of vacuum status results on prod-db-1
+curl "http://localhost:8080/api/v1/tool-results?server=prod-db-1&tool=get_vacuum_status&since=7d"
+
+# All results from a specific fleet job
+curl "http://localhost:8080/api/v1/tool-results?job_id=flj_abc123"
+```
+
+Response:
+
+```json
+{
+  "count": 3,
+  "results": [
+    {
+      "result_id":    "res_a1b2c3d4",
+      "server_name":  "prod-db-1",
+      "tool_name":    "get_vacuum_status",
+      "tool_args":    "{\"connection_string\":\"...\"}",
+      "output":       "...",
+      "job_id":       "flj_abc123",
+      "trace_id":     "tr_flj_abc123",
+      "recorded_by":  "fleet-runner",
+      "recorded_at":  "2026-03-30T02:01:00Z",
+      "success":      true
+    }
+  ]
+}
+```
+
+Results are ordered most-recent first.
 
 ---
 

@@ -19,6 +19,8 @@ var expectedK8sTools = []string{
 	"delete_pod",
 	"restart_deployment",
 	"scale_deployment",
+	"get_pod_resources",
+	"get_node_status",
 }
 
 func TestK8sDirectRegistry_AllToolsRegistered(t *testing.T) {

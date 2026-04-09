@@ -547,22 +547,74 @@ ORDER BY e1.id;
 
 ---
 
-## 11. Troubleshooting
+## 11. Tool Result Store
 
-### 11.1 Events not appearing in auditd
+The Tool Result Store is a persistent log of individual tool executions — separate from the hash-chained audit trail. While the audit trail records *that* a tool ran (for tamper evidence), the Tool Result Store retains the full output for trend queries and post-incident triage.
+
+### 11.1 What gets recorded
+
+Fleet-runner writes a result record after every successful step. Direct tool calls through the gateway (`POST /api/v1/db/{tool}`, `POST /api/v1/k8s/{tool}`) also write a record when `HELPDESK_AUDIT_URL` is configured. Write failures are logged but non-fatal — they do not abort the tool call.
+
+### 11.2 Schema
+
+```
+tool_results
+├── result_id    TEXT  PK    "res_" + uuid[:8]
+├── server_name  TEXT        target server
+├── tool_name    TEXT        tool name (e.g. "get_vacuum_status")
+├── tool_args    TEXT        JSON-encoded tool arguments
+├── output       TEXT        raw tool output text
+├── trace_id     TEXT        audit trace_id, if available
+├── job_id       TEXT        fleet job ID (flj_*), if from fleet-runner
+├── recorded_by  TEXT        "fleet-runner" or gateway principal
+├── recorded_at  DATETIME    UTC timestamp
+└── success      INTEGER     1 = success, 0 = failure
+```
+
+Two indexes: `(server_name, tool_name, recorded_at)` for time-series queries and `(job_id)` for job-scoped lookups.
+
+### 11.3 Querying via the gateway
+
+```bash
+# Vacuum status trend for prod-db-1 over the past 30 days
+curl "http://localhost:8080/api/v1/tool-results?server=prod-db-1&tool=get_vacuum_status&since=30d"
+
+# All tool results from a fleet job
+curl "http://localhost:8080/api/v1/tool-results?job_id=flj_abc123"
+
+# Last 50 disk usage checks across any server
+curl "http://localhost:8080/api/v1/tool-results?tool=get_disk_usage&limit=50"
+```
+
+See [`GET /api/v1/tool-results`](API.md#get-apiv1tool-results) for the full parameter reference.
+
+### 11.4 auditd direct endpoints
+
+The gateway proxy is read-only. Writing results goes directly to auditd (done automatically by fleet-runner).
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `POST /v1/tool-results` | service account only | Record a tool result |
+| `GET /v1/tool-results` | authenticated | Query with same parameters as the gateway proxy |
+
+---
+
+## 12. Troubleshooting
+
+### 12.1 Events not appearing in auditd
 
 1. Confirm auditd is reachable: `curl http://localhost:1199/health`
 2. Confirm `HELPDESK_AUDIT_URL` is set on the agent and `HELPDESK_AUDIT_ENABLED=true`
 3. Check auditd logs for HTTP errors from agent connections
 
-### 11.2 auditor not receiving events
+### 12.2 auditor not receiving events
 
 1. Confirm `--socket` path matches `HELPDESK_AUDIT_SOCKET` in auditd
 2. Check the socket file exists: `ls -la /tmp/helpdesk-audit.sock`
 3. The auditor must connect before events are emitted — events are not replayed
    to late subscribers
 
-### 11.3 Chain integrity failure
+### 12.3 Chain integrity failure
 
 1. Find the first broken event with `GET /v1/verify`
 2. Possible causes: direct database modification (tampering), database
@@ -570,7 +622,7 @@ ORDER BY e1.id;
 3. If tampering is suspected, treat the log as potentially compromised and
    preserve a copy before any remediation
 
-### 11.4 Events with empty trace_id
+### 12.4 Events with empty trace_id
 
 Direct tool calls via `POST /api/v1/db/{tool}` and direct A2A calls to agents
 without `trace_id` in message metadata produce events with no `trace_id`. These

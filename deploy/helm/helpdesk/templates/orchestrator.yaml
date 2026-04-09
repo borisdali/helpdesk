@@ -41,6 +41,7 @@ spec:
             {{- end }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
+            {{- include "helpdesk.auditAPIKeyEnv" (dict "secret" .Values.orchestrator.auditAPIKeySecret "key" .Values.orchestrator.auditAPIKeyKey) | nindent 12 }}
             {{- if .Values.infrastructure }}
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json

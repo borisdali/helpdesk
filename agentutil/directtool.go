@@ -3,11 +3,14 @@ package agentutil
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
 	"helpdesk/internal/identity"
 )
 
@@ -57,8 +60,29 @@ type DirectToolResponse struct {
 // registerDirectToolRoutes adds POST /tool/{name} routes to mux.
 // The traceStore is updated for each request so that policy checks inside
 // tool implementations can correlate events to the originating trace.
-func registerDirectToolRoutes(mux *http.ServeMux, registry *DirectToolRegistry, traceStore *audit.CurrentTraceStore) {
-	mux.HandleFunc("POST /tool/{name}", func(w http.ResponseWriter, r *http.Request) {
+// idProvider and authzr enforce inbound auth when enforcing mode is active.
+func registerDirectToolRoutes(mux *http.ServeMux, registry *DirectToolRegistry, traceStore *audit.CurrentTraceStore, idProvider identity.Provider, authzr *authz.Authorizer) {
+	const pattern = "POST /tool/{name}"
+	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		// Resolve caller identity and enforce authorization.
+		principal, err := idProvider.Resolve(r)
+		if err != nil {
+			// Unrecognized credential — treat as anonymous and let Authorize decide.
+			principal = identity.ResolvedPrincipal{AuthMethod: "header"}
+		}
+		if authErr := authzr.Authorize(pattern, principal); authErr != nil {
+			status := http.StatusForbidden
+			if errors.Is(authErr, authz.ErrUnauthorized) {
+				status = http.StatusUnauthorized
+			}
+			slog.Info("direct tool: request denied",
+				"principal", principal.EffectiveID(),
+				"err", authErr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			fmt.Fprintf(w, `{"error":%q}`, authErr.Error()) //nolint:errcheck
+			return
+		}
 		toolName := r.PathValue("name")
 		fn, ok := registry.Get(toolName)
 		if !ok {
@@ -68,12 +92,27 @@ func registerDirectToolRoutes(mux *http.ServeMux, registry *DirectToolRegistry, 
 			return
 		}
 
-		var req DirectToolRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Decode body as a raw map first. If the map contains an "args" key
+		// (fleet-runner envelope format), unwrap it and extract trace context.
+		// Otherwise treat the entire body as the flat args — matching the shape
+		// advertised in input_schema and the tool registry.
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, `{"error":"invalid JSON body"}`) //nolint:errcheck
 			return
+		}
+
+		var req DirectToolRequest
+		if _, ok := body["args"]; ok {
+			// Envelope format: {"args": {...}, "trace_id": "...", ...}
+			// Re-marshal and unmarshal to populate the typed fields.
+			data, _ := json.Marshal(body)
+			_ = json.Unmarshal(data, &req)
+		} else {
+			// Flat format: {"target": "...", ...} — body IS the args.
+			req.Args = body
 		}
 
 		// Propagate trace context (principal, purpose, trace ID) into the
@@ -96,14 +135,19 @@ func registerDirectToolRoutes(mux *http.ServeMux, registry *DirectToolRegistry, 
 			traceStore.Set(req.TraceID)
 		}
 
+		target, _ := req.Args["target"].(string)
+
+		start := time.Now()
 		output, err := fn(ctx, req.Args)
+		ms := time.Since(start).Milliseconds()
 		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
-			slog.Warn("direct tool call failed", "tool", toolName, "err", err)
+			slog.Warn("direct tool call failed", "tool", toolName, "target", target, "err", err, "ms", ms)
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			json.NewEncoder(w).Encode(DirectToolResponse{Error: err.Error()}) //nolint:errcheck
 			return
 		}
+		slog.Debug("direct tool: ok", "tool", toolName, "target", target, "ms", ms)
 		json.NewEncoder(w).Encode(DirectToolResponse{Output: output}) //nolint:errcheck
 	})
 }

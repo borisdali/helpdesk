@@ -40,6 +40,18 @@ var ToolClassification = map[string]ActionClass{
 	"cancel_query":                ActionWrite,
 	"terminate_connection":        ActionDestructive,
 	"terminate_idle_connections":  ActionDestructive,
+	"get_status_summary":          ActionRead,
+	"get_pg_settings":             ActionRead,
+	"get_extensions":              ActionRead,
+	"get_baseline":                ActionRead,
+	"get_slow_queries":            ActionRead,
+	"get_vacuum_status":           ActionRead,
+	"get_disk_usage":              ActionRead,
+	"get_wait_events":             ActionRead,
+	"get_blocking_queries":        ActionRead,
+	"explain_query":               ActionRead,
+	"read_pg_log":                 ActionRead,
+	"read_uploaded_file":          ActionRead,
 
 	// Kubernetes agent tools
 	"get_pods":           ActionRead,
@@ -50,6 +62,8 @@ var ToolClassification = map[string]ActionClass{
 	"get_nodes":          ActionRead,
 	"get_events":         ActionRead,
 	"describe_pod":       ActionRead,
+	"get_pod_resources": ActionRead,
+	"get_node_status":   ActionRead,
 	"scale_deployment":   ActionDestructive,
 	"restart_deployment": ActionDestructive,
 	"delete_pod":         ActionDestructive,
@@ -66,6 +80,14 @@ var ToolClassification = map[string]ActionClass{
 
 	// Research agent tools
 	"web_search": ActionRead,
+
+	// Sysadmin agent tools
+	"check_host":        ActionRead,
+	"get_host_logs":     ActionRead,
+	"check_disk":        ActionRead,
+	"check_memory":      ActionRead,
+	"restart_container": ActionDestructive,
+	"restart_service":   ActionDestructive,
 }
 
 // ClassifyTool returns the action class for a given tool name.
@@ -97,6 +119,15 @@ func ClassifyEndpoint(method, path string) ActionClass {
 		return ActionUnknown // Depends on the specific tool
 	case contains(path, "/query"):
 		return ActionUnknown // Generic query endpoint
+	// Playbook endpoints
+	case contains(path, "/fleet/playbooks") && contains(path, "/run"):
+		return ActionRead // Playbook run: fleet plan or agent diagnostic session — no mutations
+	case contains(path, "/fleet/playbooks") && contains(path, "/import"):
+		return ActionRead // Import returns a draft; nothing is persisted
+	case contains(path, "/fleet/playbooks") && (method == "POST" || method == "PUT"):
+		return ActionWrite // Create / update / activate a playbook
+	case contains(path, "/fleet/playbooks") && method == "DELETE":
+		return ActionDestructive
 	default:
 		return ActionUnknown
 	}

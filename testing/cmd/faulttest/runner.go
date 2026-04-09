@@ -49,6 +49,8 @@ func (r *Runner) agentURL(category string) string {
 		return r.cfg.DBAgentURL
 	case "kubernetes":
 		return r.cfg.K8sAgentURL
+	case "host":
+		return r.cfg.SysadminAgentURL
 	case "compound":
 		if r.cfg.OrchestratorURL != "" {
 			return r.cfg.OrchestratorURL

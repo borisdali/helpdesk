@@ -19,7 +19,8 @@ import (
 type runnerConfig struct {
 	gatewayURL           string
 	auditURL             string
-	apiKey               string
+	apiKey               string // Bearer token for gateway calls
+	auditAPIKey          string // Bearer token for auditd calls
 	jobID                string
 	submittedBy          string
 	approvalPollInterval time.Duration
@@ -92,6 +93,7 @@ func executeSteps(ctx context.Context, cfg runnerConfig, serverName, stage strin
 		}
 
 		patchStepStatus(ctx, cfg, serverName, idx, "success", output)
+		recordToolResult(ctx, cfg, serverName, step, output)
 	}
 
 	// All steps completed. Determine final server status.
@@ -269,6 +271,9 @@ func patchServerStatus(ctx context.Context, cfg runnerConfig, serverName, status
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if cfg.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -277,6 +282,47 @@ func patchServerStatus(ctx context.Context, cfg runnerConfig, serverName, status
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// recordToolResult persists a successful fleet step result to the ToolResultStore.
+// Best-effort: failures are logged, not fatal.
+func recordToolResult(ctx context.Context, cfg runnerConfig, serverName string, step fleet.Step, output string) {
+	if cfg.auditURL == "" {
+		return
+	}
+	toolArgsJSON, _ := json.Marshal(step.Args)
+	body, err := json.Marshal(map[string]any{
+		"server_name": serverName,
+		"tool_name":   step.Tool,
+		"tool_args":   string(toolArgsJSON),
+		"output":      output,
+		"trace_id":    "tr_flj_" + cfg.jobID,
+		"job_id":      cfg.jobID,
+		"recorded_by": cfg.submittedBy,
+		"success":     true,
+	})
+	if err != nil {
+		slog.Warn("fleet: failed to marshal tool result", "tool", step.Tool, "err", err)
+		return
+	}
+	url := cfg.auditURL + "/v1/tool-results"
+	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		slog.Warn("fleet: failed to record tool result", "tool", step.Tool, "err", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		slog.Warn("fleet: unexpected status recording tool result", "tool", step.Tool, "status", resp.StatusCode)
+	}
 }
 
 // patchStepStatus updates an individual step record in auditd via PATCH.
@@ -300,6 +346,9 @@ func patchStepStatus(ctx context.Context, cfg runnerConfig, serverName string, s
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if cfg.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

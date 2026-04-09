@@ -17,6 +17,8 @@ services:
       # Set so that approvals/govexplain binaries exec'd inside this container
       # can find auditd without requiring -e or an explicit --url flag.
       HELPDESK_AUDIT_URL: http://localhost:1199
+      # API key for the `approvals` CLI (docker compose exec auditd approvals ...).
+      HELPDESK_APPROVAL_KEY: ${HELPDESK_APPROVAL_KEY:-}
       # Policy (for governance info / govexplain endpoint).
       # Empty default: auditd loads the mounted policy file unconditionally so
       # that govexplain hypothetical checks work out of the box.
@@ -26,6 +28,9 @@ services:
       # Infrastructure config — enables tag/sensitivity resolution in the
       # /v1/governance/explain endpoint without relying on caller-supplied values.
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      # Identity & access control for auditd endpoints (agents authenticate here)
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       # Approval notification (optional)
       HELPDESK_APPROVAL_WEBHOOK: ${HELPDESK_APPROVAL_WEBHOOK:-}
       HELPDESK_APPROVAL_BASE_URL: ${HELPDESK_APPROVAL_BASE_URL:-http://localhost:1199}
@@ -38,6 +43,7 @@ services:
       HELPDESK_EMAIL_TO: ${HELPDESK_EMAIL_TO:-}
     volumes:
       - audit-data:/data/audit
+      - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
     ports:
@@ -67,6 +73,8 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${DB_AGENT_API_KEY:-}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
@@ -82,6 +90,7 @@ services:
       # For per-host credentials mount a .pgpass file via PGPASSFILE below.
       PGPASSWORD: ${PGPASSWORD:-}
     volumes:
+      - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
       - ${PGPASSFILE:-./.pgpass}:/root/.pgpass:ro
@@ -89,7 +98,8 @@ services:
       - "1100:1100"
     restart: unless-stopped
     depends_on:
-      - auditd
+      auditd:
+        condition: service_healthy
 
   k8s-agent:
     build:
@@ -109,6 +119,8 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${K8S_AGENT_API_KEY:-}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
@@ -119,6 +131,7 @@ services:
       HELPDESK_VERIFY_INITIAL_DELAY_S: ${HELPDESK_VERIFY_INITIAL_DELAY_S:-}
       HELPDESK_VERIFY_MAX_DELAY_S: ${HELPDESK_VERIFY_MAX_DELAY_S:-}
     volumes:
+      - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
@@ -126,7 +139,46 @@ services:
       - "1102:1102"
     restart: unless-stopped
     depends_on:
-      - auditd
+      auditd:
+        condition: service_healthy
+
+  sysadmin-agent:
+    build:
+      context: ../../..
+      dockerfile: helpdesk/Dockerfile
+    image: helpdesk:latest
+    command: ["/usr/local/bin/sysadmin-agent"]
+    environment:
+      HELPDESK_AGENT_ADDR: "0.0.0.0:1103"
+      HELPDESK_AGENT_URL: "http://sysadmin-agent:1103"
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
+      # AI Governance
+      HELPDESK_OPERATING_MODE: ${HELPDESK_OPERATING_MODE:-}
+      HELPDESK_AUDIT_ENABLED: "true"
+      HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${SYSADMIN_AGENT_API_KEY:-}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
+      HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
+      HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+    volumes:
+      - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
+      - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
+      - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      # Mount the Docker socket so the agent can inspect and manage containers on the host.
+      # Required for databases managed via Docker/Podman. Remove if not applicable.
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "1103:1103"
+    restart: unless-stopped
+    depends_on:
+      auditd:
+        condition: service_healthy
 
   incident-agent:
     build:
@@ -146,19 +198,23 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${INCIDENT_AGENT_API_KEY:-}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
       - incidents:/data/incidents
+      - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1104:1104"
     restart: unless-stopped
     depends_on:
-      - auditd
+      auditd:
+        condition: service_healthy
 
   # Research agent for Gemini models - provides web search via GoogleSearch.
   # GoogleSearch cannot be combined with function declarations, so this agent
@@ -180,17 +236,21 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${RESEARCH_AGENT_API_KEY:-}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
     volumes:
+      - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
     ports:
       - "1106:1106"
     restart: unless-stopped
     depends_on:
-      - auditd
+      auditd:
+        condition: service_healthy
 
   gateway:
     build:
@@ -200,7 +260,7 @@ services:
     command: ["/usr/local/bin/gateway"]
     environment:
       HELPDESK_GATEWAY_ADDR: "0.0.0.0:8080"
-      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://sysadmin-agent:1103,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
@@ -209,6 +269,10 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${GATEWAY_API_KEY:-}
+      # Bearer token sent to agent /tool/{name} endpoints (required when agents enforce inbound auth)
+      HELPDESK_AGENT_API_KEY: ${HELPDESK_AGENT_API_KEY:-}
+      # API key for operator CLIs exec'd inside this container (govexplain, srebot).
+      HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
       # Identity & access (optional; defaults to "none" — unverified X-User headers)
       HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
@@ -229,11 +293,18 @@ services:
       timeout: 5s
       retries: 3
     depends_on:
-      - auditd
-      - database-agent
-      - k8s-agent
-      - incident-agent
-      - research-agent
+      auditd:
+        condition: service_healthy
+      database-agent:
+        condition: service_started
+      k8s-agent:
+        condition: service_started
+      sysadmin-agent:
+        condition: service_started
+      incident-agent:
+        condition: service_started
+      research-agent:
+        condition: service_started
 
   orchestrator:
     build:
@@ -242,7 +313,7 @@ services:
     image: helpdesk:latest
     command: ["/usr/local/bin/helpdesk"]
     environment:
-      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://incident-agent:1104,http://research-agent:1106"
+      HELPDESK_AGENT_URLS: "http://database-agent:1100,http://k8s-agent:1102,http://sysadmin-agent:1103,http://incident-agent:1104,http://research-agent:1106"
       HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR}
       HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-}}
@@ -268,6 +339,7 @@ services:
     depends_on:
       - database-agent
       - k8s-agent
+      - sysadmin-agent
       - incident-agent
       - research-agent
 
@@ -277,6 +349,7 @@ services:
   helpdesk-client:
     image: helpdesk:latest
     entrypoint: ["/usr/local/bin/helpdesk-client"]
+    working_dir: /jobs
     environment:
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_GATEWAY_URL: http://gateway:8080
@@ -285,6 +358,8 @@ services:
       HELPDESK_SESSION_PURPOSE: ${HELPDESK_SESSION_PURPOSE:-}
       HELPDESK_SESSION_PURPOSE_NOTE: ${HELPDESK_SESSION_PURPOSE_NOTE:-}
       HELPDESK_CLIENT_AGENT: ${HELPDESK_CLIENT_AGENT:-database}
+    volumes:
+      - ${FLEET_JOBS_DIR:-./jobs}:/jobs
     stdin_open: true
     tty: true
     profiles:
@@ -293,20 +368,24 @@ services:
       - gateway
 
   # Fleet runner: applies a single change across infrastructure targets with staged rollout.
-  # Usage: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json
-  # Dry-run: docker compose --profile fleet run --rm fleet-runner --job-file /jobs/vacuum-prod.json --dry-run
+  # Usage: docker compose --profile fleet run --rm fleet-runner --job-file health-check.json
+  # Dry-run: docker compose --profile fleet run --rm fleet-runner --job-file health-check.json --dry-run
+  # Job files are read from ./jobs/ (or $FLEET_JOBS_DIR) on the host, which is also
+  # where --plan-fleet-job writes them from the helpdesk-client container.
   fleet-runner:
     image: helpdesk:latest
     entrypoint: ["/usr/local/bin/fleet-runner"]
+    working_dir: /jobs
     environment:
       HELPDESK_GATEWAY_URL: http://gateway:8080
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_CLIENT_API_KEY: ${FLEET_RUNNER_API_KEY:-}
+      HELPDESK_AUDIT_API_KEY: ${FLEET_RUNNER_API_KEY:-}
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       HELPDESK_SESSION_PURPOSE: fleet_rollout
     volumes:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
-      - ${FLEET_JOBS_DIR:-./jobs}:/jobs:ro
+      - ${FLEET_JOBS_DIR:-./jobs}:/jobs
     profiles:
       - fleet
     depends_on:
@@ -340,7 +419,8 @@ services:
       - governance
     restart: unless-stopped
     depends_on:
-      - auditd
+      auditd:
+        condition: service_healthy
 
   # AI Governance: Compliance reporter (one-shot, run with: docker compose run govbot)
   # Enable with: docker compose --profile governance run govbot
@@ -357,11 +437,15 @@ services:
     environment:
       # Compliance history: govbot POSTs run snapshots to auditd so no PVC is needed.
       HELPDESK_AUDIT_URL: http://auditd:1199
+      HELPDESK_AUDIT_API_KEY: ${GOVBOT_API_KEY:-}
+      HELPDESK_CLIENT_API_KEY: ${GOVBOT_API_KEY:-}
     profiles:
       - governance
     depends_on:
-      - auditd
-      - gateway
+      auditd:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
 
   # AI Governance: Security responder bot
   # Enable with: docker compose --profile governance up -d
@@ -374,6 +458,8 @@ services:
       - /usr/local/bin/secbot
       - -socket=/data/audit/audit.sock
       - -gateway=http://gateway:8080
+    environment:
+      HELPDESK_CLIENT_API_KEY: ${SECBOT_API_KEY:-}
     volumes:
       - audit-data:/data/audit:ro
     ports:
@@ -382,8 +468,10 @@ services:
       - governance
     restart: unless-stopped
     depends_on:
-      - auditd
-      - gateway
+      auditd:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
 
 volumes:
   incidents:

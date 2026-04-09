@@ -13,6 +13,7 @@
 #   --dry-run                  Pass --dry-run to fleet-runner (plan only, no execution)
 #   --api-key         KEY      API key plaintext (sets HELPDESK_CLIENT_API_KEY directly)
 #   --api-key-secret  SECRET   Name of K8s Secret with an "api-key" key (alternative to --api-key)
+#   --audit-api-key-secret SECRET  K8s Secret for HELPDESK_AUDIT_API_KEY (defaults to --api-key-secret)
 #   --canary          N        Override strategy.canary_count
 #   --wave-size       N        Override strategy.wave_size
 #   --pause           N        Override strategy.wave_pause_seconds
@@ -38,6 +39,7 @@ JOB_FILE=""
 DRY_RUN=false
 API_KEY=""
 API_KEY_SECRET=""
+AUDIT_API_KEY_SECRET=""
 CANARY=0
 WAVE_SIZE=0
 PAUSE_SECS=-1
@@ -47,8 +49,9 @@ while [[ $# -gt 0 ]]; do
     -n|--namespace)   NAMESPACE="$2";    shift 2 ;;
     -r|--release)     RELEASE="$2";      shift 2 ;;
     --dry-run)        DRY_RUN=true;      shift   ;;
-    --api-key)        API_KEY="$2";      shift 2 ;;
-    --api-key-secret) API_KEY_SECRET="$2"; shift 2 ;;
+    --api-key)               API_KEY="$2";           shift 2 ;;
+    --api-key-secret)        API_KEY_SECRET="$2";    shift 2 ;;
+    --audit-api-key-secret)  AUDIT_API_KEY_SECRET="$2"; shift 2 ;;
     --canary)         CANARY="$2";       shift 2 ;;
     --wave-size)      WAVE_SIZE="$2";    shift 2 ;;
     --pause)          PAUSE_SECS="$2";   shift 2 ;;
@@ -124,8 +127,14 @@ ENV_JSON='[{"name":"HELPDESK_SESSION_PURPOSE","value":"fleet_rollout"}]'
 
 if [[ -n "$API_KEY" ]]; then
   ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_CLIENT_API_KEY","value":"'"$API_KEY"'"}]' <<<"$ENV_JSON")
+  ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_AUDIT_API_KEY","value":"'"$API_KEY"'"}]' <<<"$ENV_JSON")
 elif [[ -n "$API_KEY_SECRET" ]]; then
   ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_CLIENT_API_KEY","valueFrom":{"secretKeyRef":{"name":"'"$API_KEY_SECRET"'","key":"api-key"}}}]' <<<"$ENV_JSON")
+  # Default audit key to the same secret unless a dedicated one was supplied.
+  AUDIT_SECRET="${AUDIT_API_KEY_SECRET:-$API_KEY_SECRET}"
+  ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_AUDIT_API_KEY","valueFrom":{"secretKeyRef":{"name":"'"$AUDIT_SECRET"'","key":"api-key"}}}]' <<<"$ENV_JSON")
+elif [[ -n "$AUDIT_API_KEY_SECRET" ]]; then
+  ENV_JSON=$(jq -c '. + [{"name":"HELPDESK_AUDIT_API_KEY","valueFrom":{"secretKeyRef":{"name":"'"$AUDIT_API_KEY_SECRET"'","key":"api-key"}}}]' <<<"$ENV_JSON")
 fi
 
 # Convert FLEET_CMD array to JSON array.
@@ -220,6 +229,20 @@ kubectl -n "$NAMESPACE" wait job/"$JOB_NAME" \
 JOB_ID=$(kubectl -n "$NAMESPACE" logs "$POD" 2>/dev/null \
   | grep 'fleet job created' | grep -o 'job_id=[^ ]*' | cut -d= -f2)
 
+# Resolve the API key for curl auth against auditd (uses audit key if available).
+CURL_API_KEY=""
+if [[ -n "$API_KEY" ]]; then
+  CURL_API_KEY="$API_KEY"
+elif [[ -n "$AUDIT_API_KEY_SECRET" ]]; then
+  CURL_API_KEY=$(kubectl -n "$NAMESPACE" get secret "$AUDIT_API_KEY_SECRET" \
+    -o jsonpath='{.data.api-key}' 2>/dev/null | base64 -d 2>/dev/null) || CURL_API_KEY=""
+elif [[ -n "$API_KEY_SECRET" ]]; then
+  CURL_API_KEY=$(kubectl -n "$NAMESPACE" get secret "$API_KEY_SECRET" \
+    -o jsonpath='{.data.api-key}' 2>/dev/null | base64 -d 2>/dev/null) || CURL_API_KEY=""
+fi
+CURL_AUTH=()
+[[ -n "$CURL_API_KEY" ]] && CURL_AUTH=(-H "Authorization: Bearer ${CURL_API_KEY}")
+
 if [[ -n "$JOB_ID" ]]; then
   # Port-forward auditd on a random local port, fetch results, then kill it.
   AUDITD_SVC="${RELEASE}-auditd"
@@ -232,7 +255,8 @@ if [[ -n "$JOB_ID" ]]; then
   PF_PID=$!
   sleep 1  # give port-forward a moment to connect
 
-  SERVERS=$(curl -sf "http://localhost:${LOCAL_PORT}/v1/fleet/jobs/${JOB_ID}/servers" 2>/dev/null \
+  SERVERS=$(curl -sf "${CURL_AUTH[@]}" \
+    "http://localhost:${LOCAL_PORT}/v1/fleet/jobs/${JOB_ID}/servers" 2>/dev/null \
     | jq -r '.[].server_name' 2>/dev/null) || SERVERS=""
 
   if [[ -n "$SERVERS" ]]; then
@@ -244,7 +268,7 @@ if [[ -n "$JOB_ID" ]]; then
     # Collect all steps into a single JSON array: [{server, steps:[...]}, ...]
     ALL_RESULTS="[]"
     while IFS= read -r server; do
-      STEPS=$(curl -sf \
+      STEPS=$(curl -sf "${CURL_AUTH[@]}" \
         "http://localhost:${LOCAL_PORT}/v1/fleet/jobs/${JOB_ID}/servers/${server}/steps" \
         2>/dev/null) || STEPS="[]"
       ALL_RESULTS=$(echo "$ALL_RESULTS" \

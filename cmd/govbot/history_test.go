@@ -271,7 +271,7 @@ func TestHistory_RemoteClient(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	rc := openRemoteHistory(srv.URL, "http://gateway:8080")
+	rc := openRemoteHistory(srv.URL, "http://gateway:8080", "")
 
 	snap := makeSnap("healthy", "24h", 3, 15, true)
 	if err := rc.save(snap, 0); err != nil {
@@ -325,7 +325,7 @@ func TestHistory_RemoteClient_Retain(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	rc := openRemoteHistory(srv.URL, "http://gateway:8080")
+	rc := openRemoteHistory(srv.URL, "http://gateway:8080", "")
 	snap := makeSnap("healthy", "24h", 0, 0, true)
 	if err := rc.save(snap, 30); err != nil {
 		t.Fatalf("save: %v", err)

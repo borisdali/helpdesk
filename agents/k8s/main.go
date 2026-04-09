@@ -7,7 +7,9 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -41,7 +43,12 @@ func main() {
 		if err != nil {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
-			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers))
+			dbKeys := make([]string, 0, len(infraConfig.DBServers))
+		for k := range infraConfig.DBServers {
+			dbKeys = append(dbKeys, k)
+		}
+		sort.Strings(dbKeys)
+		slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
 		}
 	}
 
@@ -259,6 +266,22 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getPodResourcesToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_pod_resources",
+		Description: "Show CPU and memory requests, limits, and live usage (from metrics-server) for containers in a namespace. Use to identify over- or under-provisioned workloads.",
+	}, getPodResourcesTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getNodeStatusToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_node_status",
+		Description: "Show node health conditions (MemoryPressure, DiskPressure, PIDPressure, Ready) and allocatable vs capacity CPU/memory. Use to diagnose scheduling failures or resource exhaustion.",
+	}, getNodeStatusTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		getPodsToolDef,
 		getServiceToolDef,
@@ -271,6 +294,8 @@ func createTools() ([]tool.Tool, error) {
 		deletePodToolDef,
 		restartDeploymentToolDef,
 		scaleDeploymentToolDef,
+		getPodResourcesToolDef,
+		getNodeStatusToolDef,
 	}, nil
 }
 

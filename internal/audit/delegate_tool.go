@@ -20,10 +20,10 @@ import (
 // DelegateArgs contains the structured reasoning for a delegation decision.
 type DelegateArgs struct {
 	// Agent is the name of the agent to delegate to.
-	Agent string `json:"agent" jsonschema:"Name of the agent to delegate to (e.g. postgres_database_agent, k8s_agent, incident_agent, or research_agent)"`
+	Agent string `json:"agent" jsonschema:"Name of the agent to delegate to (e.g. postgres_database_agent, k8s_agent, sysadmin_agent, incident_agent, or research_agent)"`
 
 	// RequestCategory classifies the type of request.
-	RequestCategory string `json:"request_category" jsonschema:"Category of the request: database, kubernetes, incident, or research"`
+	RequestCategory string `json:"request_category" jsonschema:"Category of the request: database, kubernetes, sysadmin, incident, or research"`
 
 	// Confidence is the confidence level (0.0 to 1.0) in this routing decision.
 	Confidence float64 `json:"confidence" jsonschema:"Confidence level in this routing decision from 0.0 to 1.0"`

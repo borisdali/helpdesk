@@ -45,6 +45,27 @@ spec:
             - name: HELPDESK_AUDIT_URL
               value: "http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
             {{- end }}
+            {{- if .Values.gateway.agentAPIKeySecret }}
+            - name: HELPDESK_AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.agentAPIKeySecret }}
+                  key: {{ .Values.gateway.agentAPIKeyKey }}
+            {{- end }}
+            {{- if .Values.gateway.auditAPIKeySecret }}
+            - name: HELPDESK_AUDIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.auditAPIKeySecret }}
+                  key: {{ .Values.gateway.auditAPIKeyKey }}
+            {{- end }}
+            {{- if .Values.gateway.clientAPIKeySecret }}
+            - name: HELPDESK_CLIENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.clientAPIKeySecret }}
+                  key: {{ .Values.gateway.clientAPIKeyKey }}
+            {{- end }}
             {{- if ne .Values.gateway.identity.provider "none" }}
             - name: HELPDESK_IDENTITY_PROVIDER
               value: {{ .Values.gateway.identity.provider | quote }}

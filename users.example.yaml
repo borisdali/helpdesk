@@ -53,13 +53,17 @@ service_accounts:
     roles: [sre-automation]
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$cHJldm1vbml0b3I$placeholder-replace-with-real-hash"
 
-  # Internal service accounts for agents and gateway writing to auditd.
-  # Each component authenticates via HELPDESK_AUDIT_API_KEY in its env.
+  # Internal service accounts for agents and the gateway.
+  # These serve two purposes:
+  #   1. Agents writing to auditd: set HELPDESK_AUDIT_API_KEY on each agent.
+  #   2. Gateway calling agent POST /tool/{name}: set HELPDESK_AGENT_API_KEY on the gateway.
+  #      The gateway authenticates as "gateway" to all agents — use the same key/hash.
   # The hashes below match the example keys in .env.example — replace in production:
   #   openssl rand -hex 32 | go run ./cmd/hashapikey
   - id: gateway
     roles: [sre-automation]
-    # Hash of example key "gateway-api-key" (set GATEWAY_API_KEY in .env)
+    # Hash of example key "gateway-api-key"
+    # Used for: HELPDESK_AUDIT_API_KEY (gateway → auditd) and HELPDESK_AGENT_API_KEY (gateway → agents)
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$/bPWZM4dqQrmNv64WR86Sg$JV1zASaI2s8Uh7OpAlhncKpUYYJGX5zYsLsyfU+qFvE"
 
   - id: db-agent
@@ -72,12 +76,30 @@ service_accounts:
     # Hash of example key "k8s-agent-api-key" (set K8S_AGENT_API_KEY in .env)
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$yGl5jb9zMbaRwLDEDngLSg$fl5RDnQiqd5h9zoHzqL2RcEJ3952r/FypK7v+41kTKY"
 
+  - id: sysadmin-agent
+    roles: [sre-automation]
+    # Hash of example key "sysadmin-agent-api-key" (set SYSADMIN_AGENT_API_KEY in .env)
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$804rAgqchW/C7l4q27HIEA$vpZDu/4FbiX/WaxlLou7lOElw/KcjzLkedLr/GT/vr8"
+
   - id: incident-agent
     roles: [sre-automation]
     # Hash of example key "incident-agent-api-key" (set INCIDENT_AGENT_API_KEY in .env)
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$rU4keWOcSSgW5UavhPsAgw$oP2ftRUZiYjMY/KpCoA0+FpR3CkVsu4QdVWdvtEM73Y"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$xCxOxnLUjTSmsYtYuSRrJw$G8DN6ciDpYlkGzqB4382JpO9yY8bZCYvMRV7dzO550A"
 
   - id: research-agent
     roles: [sre-automation]
     # Hash of example key "research-agent-api-key" (set RESEARCH_AGENT_API_KEY in .env)
-    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$NP22K/x2QGQYUF8WknzwRg$u3EXWsELOPIGvM7/1YgQjBydewYe/cn/NBz6P9MAnNg"
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$RSZbxW4nv43nf3aNupeyog$d6JTZeEm3L0NYLQVbR1T+SmIhNZB3ASexbj5aRd7a4A"
+
+  - id: orchestrator
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$uVY1WcteI2paQl7jOqviLg$80ES5qGJvrcH7nCmgCWrIvE03WvVELJX/8f05aBK/qs"
+
+  - id: govbot
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$hUG1jy/aKPFZRAiiO2oV4g$sT1424cHR7OVGxlXhiqp7kz4AnUAet89hQRXn4DSq4k"
+
+  - id: secbot
+    roles: [sre-automation]
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$BEcHY8UvVbYfeBg86LSU4Q$Uar1wecHDNkfSqj9LcjCZLZ4VggbMrVscwPUZii7l2c"
+

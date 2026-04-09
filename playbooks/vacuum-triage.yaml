@@ -1,0 +1,37 @@
+series_id: pbs_vacuum_triage
+name: Vacuum & Bloat Triage
+version: "1.0"
+execution_mode: fleet
+problem_class: capacity
+author: aiHelpDesk
+description: |
+  Investigate tables with high dead tuple ratios and autovacuum lag.
+  Check disk usage trends and identify tables that need immediate attention.
+  Review non-default autovacuum settings that may be contributing to bloat.
+symptoms:
+  - "table bloat increasing"
+  - "autovacuum not keeping up"
+  - "slow queries on large tables"
+  - "pg_stat_user_tables shows high n_dead_tup"
+  - "dead_ratio trending up in monitoring"
+guidance: |
+  Start with get_vacuum_status filtered to min_dead_ratio=0.1 to surface the most
+  bloated tables first. A dead_ratio above 0.2 (20%) warrants urgent attention;
+  above 0.5 (50%) requires immediate manual VACUUM.
+
+  Cross-reference with get_disk_usage to understand total capacity impact —
+  bloat on small tables is less urgent than bloat on 100GB+ tables.
+
+  Use get_pg_settings with category="autovacuum" to check if autovacuum is
+  configured too conservatively. Common culprits: autovacuum_vacuum_scale_factor
+  set too high (default 0.2 is often too aggressive for large tables),
+  autovacuum_cost_delay set too high (slows vacuum I/O).
+
+  If autovacuum_count has not changed in the last check and dead_ratio keeps
+  growing, autovacuum may be blocked by a long-running transaction — check
+  get_blocking_queries.
+escalation:
+  - "dead_ratio > 0.5 on any table larger than 1GB"
+  - "autovacuum_count has not increased over two consecutive checks"
+  - "table_bloat estimated > 50% of total disk used"
+target_hints: []

@@ -14,9 +14,12 @@ type DBServer struct {
 	ConnectionString string   `json:"connection_string"`
 	K8sCluster       string   `json:"k8s_cluster,omitempty"`
 	K8sNamespace     string   `json:"k8s_namespace,omitempty"`
+	K8sPodSelector   string   `json:"k8s_pod_selector,omitempty"` // label selector for kubectl exec (e.g. "app=postgres,instance=prod")
 	VMName           string   `json:"vm_name,omitempty"`
-	Tags             []string `json:"tags,omitempty"`        // Tags for policy matching (e.g., "production", "staging")
-	Sensitivity      []string `json:"sensitivity,omitempty"` // Sensitivity classes (e.g., "pii", "critical")
+	ContainerName    string   `json:"container_name,omitempty"` // container name when VM.Runtime is docker|podman
+	SystemdUnit      string   `json:"systemd_unit,omitempty"`   // unit name when VM.Runtime is ""
+	Tags             []string `json:"tags,omitempty"`           // Tags for policy matching (e.g., "production", "staging")
+	Sensitivity      []string `json:"sensitivity,omitempty"`    // Sensitivity classes (e.g., "pii", "critical")
 }
 
 // K8sCluster represents a managed Kubernetes cluster.
@@ -27,10 +30,12 @@ type K8sCluster struct {
 	Sensitivity []string `json:"sensitivity,omitempty"` // Sensitivity classes (e.g., "critical")
 }
 
-// VM represents a virtual machine hosting infrastructure.
+// VM represents a physical or virtual machine hosting one or more database services.
+// It is the operational unit for the sysadmin agent.
 type VM struct {
-	Name string `json:"name"`
-	Host string `json:"host"`
+	Name    string `json:"name"`
+	Address string `json:"address"`          // hostname or IP address
+	Runtime string `json:"runtime,omitempty"` // container runtime: "docker", "podman", or "" (systemd/direct)
 }
 
 // Config holds the infrastructure inventory.
@@ -63,7 +68,10 @@ type DBInfo struct {
 	Hosting          string `json:"hosting"`
 	K8sContext       string `json:"k8s_context,omitempty"`
 	K8sNamespace     string `json:"k8s_namespace,omitempty"`
-	VMHost           string `json:"vm_host,omitempty"`
+	VMAddress        string `json:"vm_address,omitempty"`
+	VMRuntime        string `json:"vm_runtime,omitempty"`
+	ContainerName    string `json:"container_name,omitempty"`
+	SystemdUnit      string `json:"systemd_unit,omitempty"`
 }
 
 // ListDatabases returns a list of all database servers with expanded hosting info.
@@ -78,6 +86,8 @@ func (c *Config) ListDatabases() []DBInfo {
 			ID:               id,
 			Name:             db.Name,
 			ConnectionString: db.ConnectionString,
+			ContainerName:    db.ContainerName,
+			SystemdUnit:      db.SystemdUnit,
 		}
 
 		if db.K8sCluster != "" {
@@ -94,7 +104,8 @@ func (c *Config) ListDatabases() []DBInfo {
 		} else if db.VMName != "" {
 			if vm, ok := c.VMs[db.VMName]; ok {
 				info.Hosting = fmt.Sprintf("VM: %s", vm.Name)
-				info.VMHost = vm.Host
+				info.VMAddress = vm.Address
+				info.VMRuntime = vm.Runtime
 			} else {
 				info.Hosting = fmt.Sprintf("VM: %s (not configured)", db.VMName)
 			}
@@ -121,7 +132,14 @@ func (c *Config) Summary() string {
 	if len(c.DBServers) > 0 {
 		sb.WriteString("\nDatabases:\n")
 		for _, db := range c.ListDatabases() {
-			sb.WriteString(fmt.Sprintf("  - %s (%s): %s\n", db.ID, db.Name, db.Hosting))
+			line := fmt.Sprintf("  - %s (%s): %s", db.ID, db.Name, db.Hosting)
+			switch {
+			case db.VMRuntime != "" && db.ContainerName != "":
+				line += fmt.Sprintf(" [%s container: %s]", db.VMRuntime, db.ContainerName)
+			case db.SystemdUnit != "":
+				line += fmt.Sprintf(" [systemd: %s]", db.SystemdUnit)
+			}
+			sb.WriteString(line + "\n")
 		}
 	}
 

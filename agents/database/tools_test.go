@@ -331,6 +331,10 @@ server_started     | 2024-01-15 08:30:00+00
 uptime             | 3 days 14:25:33
 data_directory     | /var/lib/postgresql/16/main
 config_file        | /etc/postgresql/16/main/postgresql.conf
+hba_file           | /etc/postgresql/16/main/pg_hba.conf
+ident_file         | /etc/postgresql/16/main/pg_ident.conf
+log_directory      | /var/log/postgresql
+log_filename       | postgresql-%Y-%m-%d_%H%M%S.log
 current_db_size    | 250 MB
 role               | primary
 total_connections  | 15
@@ -349,6 +353,18 @@ max_connections    | 100
 	}
 	if !strings.Contains(result.Output, "primary") {
 		t.Errorf("getServerInfoTool() output = %q, want to contain 'primary'", result.Output)
+	}
+	if !strings.Contains(result.Output, "pg_hba.conf") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'pg_hba.conf'", result.Output)
+	}
+	if !strings.Contains(result.Output, "pg_ident.conf") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'pg_ident.conf'", result.Output)
+	}
+	if !strings.Contains(result.Output, "log_directory") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'log_directory'", result.Output)
+	}
+	if !strings.Contains(result.Output, "log_filename") {
+		t.Errorf("getServerInfoTool() output = %q, want to contain 'log_filename'", result.Output)
 	}
 }
 
@@ -2763,5 +2779,891 @@ func TestTerminateIdleConnectionsTool_ToolPatternPolicyDenied(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "policy denied") {
 		t.Errorf("terminateIdleConnectionsTool() output = %q, want 'policy denied'", result.Output)
+	}
+}
+
+// =============================================================================
+// get_pg_settings
+// =============================================================================
+
+func TestGetPgSettingsTool_NonDefaultSettings(t *testing.T) {
+	mockOutput := `  category  |         name          | setting | unit | default_value | source | short_desc
+------------+-----------------------+---------+------+---------------+--------+------------------------------
+ Autovacuum | autovacuum_max_workers| 5       |      | 3             | file   | Sets the maximum number of...`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgSettingsTool(ctx, GetPgSettingsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgSettingsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "autovacuum_max_workers") {
+		t.Errorf("getPgSettingsTool() output = %q, want autovacuum_max_workers", result.Output)
+	}
+}
+
+func TestGetPgSettingsTool_AllDefaultsReturnsMessage(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getPgSettingsTool(ctx, GetPgSettingsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgSettingsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "default values") {
+		t.Errorf("getPgSettingsTool() output = %q, want default values message", result.Output)
+	}
+}
+
+func TestGetPgSettingsTool_CategoryFilter(t *testing.T) {
+	mockOutput := ` category   |       name       | setting | unit | default_value | source | short_desc
+-------------+------------------+---------+------+---------------+--------+-------
+ Autovacuum  | autovacuum       | on      |      | on            | file   | Enables autovacuum.`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgSettingsTool(ctx, GetPgSettingsArgs{
+		ConnectionString: "host=localhost",
+		Category:         "autovacuum",
+	})
+	if err != nil {
+		t.Fatalf("getPgSettingsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Autovacuum") {
+		t.Errorf("getPgSettingsTool() output = %q, want Autovacuum", result.Output)
+	}
+}
+
+// =============================================================================
+// get_extensions
+// =============================================================================
+
+func TestGetExtensionsTool_WithExtensions(t *testing.T) {
+	mockOutput := `   name    | installed_version | default_version |           comment
+-----------+-------------------+-----------------+------------------------------
+ pg_stat_statements | 1.10    | 1.10            | track planning and execution statistics`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getExtensionsTool(ctx, GetExtensionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getExtensionsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "pg_stat_statements") {
+		t.Errorf("getExtensionsTool() output = %q, want pg_stat_statements", result.Output)
+	}
+}
+
+func TestGetExtensionsTool_NoExtensions(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getExtensionsTool(ctx, GetExtensionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getExtensionsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No extensions") {
+		t.Errorf("getExtensionsTool() output = %q, want 'No extensions'", result.Output)
+	}
+}
+
+// =============================================================================
+// get_baseline
+// =============================================================================
+
+func TestGetBaselineTool_Success(t *testing.T) {
+	// Each sub-tool call returns non-empty output. withMockRunner returns the
+	// same value for all calls, which is fine — baseline just concatenates sections.
+	mockOutput := `-[ RECORD 1 ]---+---
+version | PostgreSQL 16.3`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getBaselineTool(ctx, GetBaselineArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBaselineTool() error = %v", err)
+	}
+	// All four section headers should appear
+	for _, section := range []string{"Server Info", "PG Settings", "Extensions", "Disk Usage"} {
+		if !strings.Contains(result.Output, section) {
+			t.Errorf("getBaselineTool() output missing section %q\noutput: %s", section, result.Output)
+		}
+	}
+}
+
+func TestGetBaselineTool_PartialFailure(t *testing.T) {
+	// All calls fail — baseline still returns output; sub-tool errors appear as ERROR text.
+	defer withMockRunner("", errors.New("connection refused"))()
+
+	ctx := newTestContext()
+	result, err := getBaselineTool(ctx, GetBaselineArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBaselineTool() unexpected Go error: %v", err)
+	}
+	// At least one ERROR section from a failed sub-tool should appear
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("getBaselineTool() output = %q, want ERROR text from failed sub-tools", result.Output)
+	}
+}
+
+// =============================================================================
+// get_slow_queries
+// =============================================================================
+
+func TestGetSlowQueriesTool_WithResults(t *testing.T) {
+	mockOutput := ` query                                | calls | total_ms | mean_ms | max_ms | rows
+--------------------------------------+-------+----------+---------+--------+------
+ SELECT * FROM users WHERE id = $1    |  1250 |  3500.00 |    2.80 |  42.00 | 1250`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getSlowQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "total_ms") {
+		t.Errorf("getSlowQueriesTool() output = %q, want total_ms", result.Output)
+	}
+}
+
+func TestGetSlowQueriesTool_ExtensionMissing(t *testing.T) {
+	defer withMockRunner("", fmt.Errorf("exit status 1: ERROR:  relation \"pg_stat_statements\" does not exist"))()
+
+	ctx := newTestContext()
+	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getSlowQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "pg_stat_statements extension is not installed") {
+		t.Errorf("getSlowQueriesTool() output = %q, want extension-not-installed message", result.Output)
+	}
+}
+
+func TestGetSlowQueriesTool_NoResults(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getSlowQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No queries recorded") {
+		t.Errorf("getSlowQueriesTool() output = %q, want no-queries message", result.Output)
+	}
+}
+
+// =============================================================================
+// get_vacuum_status
+// =============================================================================
+
+func TestGetVacuumStatusTool_WithResults(t *testing.T) {
+	mockOutput := ` schemaname | table_name | live_rows | dead_rows | dead_ratio | last_autovacuum
+------------+------------+-----------+-----------+------------+-------------------
+ public     | orders     | 500000    | 50000     | 9.09       | 2026-03-29 10:00`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getVacuumStatusTool(ctx, GetVacuumStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getVacuumStatusTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "dead_ratio") {
+		t.Errorf("getVacuumStatusTool() output = %q, want dead_ratio", result.Output)
+	}
+}
+
+func TestGetVacuumStatusTool_NoResults(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getVacuumStatusTool(ctx, GetVacuumStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getVacuumStatusTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No tables") {
+		t.Errorf("getVacuumStatusTool() output = %q, want 'No tables' message", result.Output)
+	}
+}
+
+// =============================================================================
+// get_disk_usage
+// =============================================================================
+
+func TestGetDiskUsageTool_WithResults(t *testing.T) {
+	mockOutput := ` db_name | size
+---------+-------
+ prod    | 5 GB`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getDiskUsageTool(ctx, GetDiskUsageArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getDiskUsageTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "size") {
+		t.Errorf("getDiskUsageTool() output = %q, want size", result.Output)
+	}
+}
+
+// =============================================================================
+// get_wait_events
+// =============================================================================
+
+func TestGetWaitEventsTool_WithEvents(t *testing.T) {
+	mockOutput := ` wait_event_type | wait_event | count
+-----------------+------------+-------
+ Lock            | relation   |     8
+ IO              | DataFileRead|    3`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getWaitEventsTool(ctx, GetWaitEventsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getWaitEventsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "wait_event") {
+		t.Errorf("getWaitEventsTool() output = %q, want wait_event", result.Output)
+	}
+}
+
+func TestGetWaitEventsTool_NoWaits(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getWaitEventsTool(ctx, GetWaitEventsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getWaitEventsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No sessions currently waiting") {
+		t.Errorf("getWaitEventsTool() output = %q, want 'No wait events'", result.Output)
+	}
+}
+
+// =============================================================================
+// get_blocking_queries
+// =============================================================================
+
+func TestGetBlockingQueriesTool_WithBlocks(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]------+-------------------------------
+blocked_pid        | 1234
+blocked_user       | app
+blocking_pid       | 5678
+blocking_user      | admin
+wait_event_type    | Lock
+lock_mode          | ShareLock
+relation_name      | users
+duration           | 00:00:45.123`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getBlockingQueriesTool(ctx, GetBlockingQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBlockingQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "blocked_pid") {
+		t.Errorf("getBlockingQueriesTool() output = %q, want blocked_pid", result.Output)
+	}
+}
+
+func TestGetBlockingQueriesTool_NoBlocking(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getBlockingQueriesTool(ctx, GetBlockingQueriesArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBlockingQueriesTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "No blocking queries") {
+		t.Errorf("getBlockingQueriesTool() output = %q, want 'No blocking queries'", result.Output)
+	}
+}
+
+// =============================================================================
+// explain_query
+// =============================================================================
+
+func TestExplainQueryTool_SelectQuery(t *testing.T) {
+	mockOutput := `Seq Scan on users  (cost=0.00..15.00 rows=500 width=40) (actual time=0.012..0.123 rows=500 loops=1)
+Planning Time: 0.1 ms
+Execution Time: 0.2 ms`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "SELECT * FROM users",
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Seq Scan") {
+		t.Errorf("explainQueryTool() output = %q, want Seq Scan plan", result.Output)
+	}
+}
+
+func TestExplainQueryTool_DMLRejectedByDefault(t *testing.T) {
+	// DML without allow_dml=true should be rejected without calling psql.
+	defer withMockRunner("should not be called", nil)()
+
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "UPDATE users SET active = false WHERE last_login < '2020-01-01'",
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "allow_dml=true") {
+		t.Errorf("explainQueryTool() output = %q, want allow_dml hint", result.Output)
+	}
+}
+
+func TestExplainQueryTool_DMLAllowedWithFlag(t *testing.T) {
+	mockOutput := `Update on users  (cost=0.00..25.00 rows=100 width=40)
+Planning Time: 0.3 ms
+Execution Time: 0.5 ms`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "UPDATE users SET active = false WHERE last_login < '2020-01-01'",
+		AllowDML:         true,
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Planning Time") {
+		t.Errorf("explainQueryTool() output = %q, want plan output", result.Output)
+	}
+}
+
+func TestExplainQueryTool_EmptyQuery(t *testing.T) {
+	ctx := newTestContext()
+	result, err := explainQueryTool(ctx, ExplainQueryArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "query is required") {
+		t.Errorf("explainQueryTool() output = %q, want 'query is required'", result.Output)
+	}
+}
+
+// capturingRunner is a CommandRunner that records the args from the last Run call.
+type capturingRunner struct {
+	lastArgs []string
+}
+
+func (c *capturingRunner) Run(_ context.Context, _ string, args []string, _ []string) (string, error) {
+	c.lastArgs = args
+	return `Update on users  (cost=0.00..25.00 rows=1 width=40)
+Planning Time: 0.2 ms
+Execution Time: 0.3 ms`, nil
+}
+
+func TestExplainQueryTool_DMLWrappedInTransaction(t *testing.T) {
+	capture := &capturingRunner{}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := newTestContext()
+	_, err := explainQueryTool(ctx, ExplainQueryArgs{
+		ConnectionString: "host=localhost",
+		Query:            "UPDATE users SET active = false WHERE id = 1",
+		AllowDML:         true,
+	})
+	if err != nil {
+		t.Fatalf("explainQueryTool() error = %v", err)
+	}
+
+	// The -c argument passed to psql must contain BEGIN and ROLLBACK.
+	foundBEGIN := false
+	foundROLLBACK := false
+	for _, arg := range capture.lastArgs {
+		if strings.Contains(arg, "BEGIN") {
+			foundBEGIN = true
+		}
+		if strings.Contains(arg, "ROLLBACK") {
+			foundROLLBACK = true
+		}
+	}
+	if !foundBEGIN {
+		t.Errorf("expected psql args to contain BEGIN; got %v", capture.lastArgs)
+	}
+	if !foundROLLBACK {
+		t.Errorf("expected psql args to contain ROLLBACK; got %v", capture.lastArgs)
+	}
+}
+
+// =============================================================================
+// read_uploaded_file
+// =============================================================================
+
+// withMockAuditServer starts an httptest.Server that serves the given body/status
+// at GET /v1/uploads/{id}/content, sets auditBaseURL to point at it, and returns
+// a cleanup function. The upload_id in the URL is ignored — any ID returns the
+// same response (sufficient for unit tests).
+func withMockAuditServer(status int, body string) func() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		w.Write([]byte(body)) //nolint:errcheck
+	}))
+	old := auditBaseURL
+	auditBaseURL = srv.URL
+	return func() {
+		auditBaseURL = old
+		srv.Close()
+	}
+}
+
+func TestReadUploadedFileTool_Success(t *testing.T) {
+	logContent := "2024-01-15 10:00:00 UTC: LOG: connection received\n" +
+		"2024-01-15 10:00:01 UTC: FATAL: invalid value for parameter \"max_connections\"\n" +
+		"2024-01-15 10:00:02 UTC: LOG: database system is shut down\n"
+	defer withMockAuditServer(http.StatusOK, logContent)()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{UploadID: "ul_abc123"})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "Uploaded File") {
+		t.Errorf("output = %q, want header", result.Output)
+	}
+	if !strings.Contains(result.Output, "FATAL") {
+		t.Errorf("output = %q, want FATAL line present", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_WithFilter(t *testing.T) {
+	logContent := "2024-01-15 10:00:00 UTC: LOG: connection received\n" +
+		"2024-01-15 10:00:01 UTC: FATAL: invalid value for parameter \"max_connections\"\n" +
+		"2024-01-15 10:00:02 UTC: LOG: database system is shut down\n"
+	defer withMockAuditServer(http.StatusOK, logContent)()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{
+		UploadID: "ul_abc123",
+		Filter:   "FATAL",
+	})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "FATAL") {
+		t.Errorf("output = %q, want FATAL line", result.Output)
+	}
+	if strings.Contains(result.Output, "connection received") {
+		t.Errorf("output should not contain non-FATAL lines")
+	}
+}
+
+func TestReadUploadedFileTool_NotFound(t *testing.T) {
+	defer withMockAuditServer(http.StatusNotFound, "upload not found or expired")()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{UploadID: "ul_gone"})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "not found or expired") {
+		t.Errorf("output = %q, want not-found message", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_NoAuditURL(t *testing.T) {
+	old := auditBaseURL
+	auditBaseURL = ""
+	defer func() { auditBaseURL = old }()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{UploadID: "ul_abc123"})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "HELPDESK_AUDIT_URL") {
+		t.Errorf("output = %q, want HELPDESK_AUDIT_URL hint", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_EmptyUploadID(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, "irrelevant")()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "upload_id is required") {
+		t.Errorf("output = %q, want upload_id required message", result.Output)
+	}
+}
+
+func TestReadUploadedFileTool_FilterNoMatch(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, "LOG: autovacuum running\n")()
+
+	ctx := newTestContext()
+	result, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{
+		UploadID: "ul_abc123",
+		Filter:   "PANIC",
+	})
+	if err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no lines matched") {
+		t.Errorf("output = %q, want no-match message", result.Output)
+	}
+}
+
+// =============================================================================
+// read_pg_log
+// =============================================================================
+
+func TestGetPgLogTool_ReturnsLastNLines(t *testing.T) {
+	// Simulate a log file with 200 lines; mock returns them as raw text
+	// (as runPsqlTuples would with -t -A flags).
+	var sb strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&sb, "2024-01-15 10:%02d:00 UTC [1234]: LOG: line %d\n", i%60, i)
+	}
+	defer withMockRunner(sb.String(), nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{
+		ConnectionString: "host=localhost",
+		Lines:            50,
+	})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "last 50 lines") {
+		t.Errorf("getPgLogTool() output = %q, want '50 lines' in header", result.Output)
+	}
+	// Should contain the last line but not early lines.
+	if !strings.Contains(result.Output, "line 200") {
+		t.Errorf("getPgLogTool() output does not contain last log line")
+	}
+	if strings.Contains(result.Output, "line 1\n") {
+		t.Errorf("getPgLogTool() output should not contain early lines when truncated to 50")
+	}
+}
+
+func TestGetPgLogTool_WithFilter(t *testing.T) {
+	mockOutput := `2024-01-15 10:00:00 UTC [1]: LOG: connection received
+2024-01-15 10:00:01 UTC [1]: FATAL: invalid value for parameter "max_connections": "unlimited"
+2024-01-15 10:00:02 UTC [1]: LOG: database system is shut down
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{
+		ConnectionString: "host=localhost",
+		Filter:           "FATAL",
+	})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "FATAL") {
+		t.Errorf("getPgLogTool() output = %q, want FATAL line", result.Output)
+	}
+	if strings.Contains(result.Output, "connection received") {
+		t.Errorf("getPgLogTool() output should not contain non-FATAL lines")
+	}
+	if strings.Contains(result.Output, "shut down") {
+		t.Errorf("getPgLogTool() output should not contain non-FATAL lines")
+	}
+}
+
+func TestGetPgLogTool_FilterCaseInsensitive(t *testing.T) {
+	mockOutput := "2024-01-15 10:00:00 UTC: PANIC: could not locate a valid checkpoint record\n"
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{Filter: "panic"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "PANIC") {
+		t.Errorf("getPgLogTool() filter should be case-insensitive; output = %q", result.Output)
+	}
+}
+
+func TestGetPgLogTool_EmptyLog(t *testing.T) {
+	defer withMockRunner("", nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no log content") {
+		t.Errorf("getPgLogTool() output = %q, want 'no log content' message", result.Output)
+	}
+}
+
+func TestGetPgLogTool_FilterNoMatch(t *testing.T) {
+	mockOutput := "2024-01-15 10:00:00 UTC: LOG: autovacuum: processing table\n"
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{Filter: "PANIC"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no log lines matched") {
+		t.Errorf("getPgLogTool() output = %q, want no-match message", result.Output)
+	}
+}
+
+func TestGetPgLogTool_ConnectionError(t *testing.T) {
+	defer withMockRunner("connection refused", errors.New("exit status 1"))()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("getPgLogTool() output = %q, want ERROR on connection failure", result.Output)
+	}
+	if !strings.Contains(result.Output, "read_pg_log") {
+		t.Errorf("getPgLogTool() output = %q, want tool name in error", result.Output)
+	}
+}
+
+func TestGetPgLogTool_PermissionDeniedPgLsLogdir(t *testing.T) {
+	// Simulate psql returning the pg_ls_logdir permission error (k8s postgres without superuser).
+	pgErr := errors.New("ERROR:  permission denied for function pg_ls_logdir\nexit status 1")
+	defer withMockRunner("", pgErr)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{ConnectionString: "host=pg-cluster-minkube"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "pg_read_server_files") {
+		t.Errorf("getPgLogTool() output = %q, want privilege hint", result.Output)
+	}
+	if !strings.Contains(result.Output, "get_pod_logs") {
+		t.Errorf("getPgLogTool() output = %q, want k8s alternative hint", result.Output)
+	}
+}
+
+func TestRunPsqlTuples_UsesTupleFlags(t *testing.T) {
+	capture := &capturingRunner{}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := newTestContext()
+	_, _ = runPsqlTuples(ctx, "", "SELECT 1", "test_tool")
+
+	foundT := false
+	foundA := false
+	for _, arg := range capture.lastArgs {
+		if arg == "-t" {
+			foundT = true
+		}
+		if arg == "-A" {
+			foundA = true
+		}
+	}
+	if !foundT {
+		t.Errorf("runPsqlTuples: expected -t flag in psql args; got %v", capture.lastArgs)
+	}
+	if !foundA {
+		t.Errorf("runPsqlTuples: expected -A flag in psql args; got %v", capture.lastArgs)
+	}
+	// Must NOT use expanded mode (-x).
+	for _, arg := range capture.lastArgs {
+		if arg == "-x" {
+			t.Errorf("runPsqlTuples: must not use -x (expanded) flag; got %v", capture.lastArgs)
+		}
+	}
+}
+
+// =============================================================================
+// get_saved_snapshots
+// =============================================================================
+
+// mockToolResultsResponse builds a JSON body in the shape auditd returns for
+// GET /v1/tool-results.
+func mockToolResultsResponse(results []map[string]any) string {
+	body, _ := json.Marshal(map[string]any{
+		"results": results,
+		"count":   len(results),
+	})
+	return string(body)
+}
+
+func TestGetSavedSnapshots_Success(t *testing.T) {
+	body := mockToolResultsResponse([]map[string]any{
+		{
+			"result_id":   "res_aaa",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_baseline",
+			"tool_args":   "{}",
+			"output":      "config_file | /etc/postgresql/14/main/postgresql.conf\ndata_directory | /var/lib/postgresql/14/main\n",
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-15T10:23:00Z",
+			"success":     true,
+		},
+	})
+	defer withMockAuditServer(http.StatusOK, body)()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName:   "get_baseline",
+		ServerName: "prod-db-1",
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "prod-db-1") {
+		t.Errorf("output missing server name: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "config_file") {
+		t.Errorf("output missing snapshot content: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "alice@example.com") {
+		t.Errorf("output missing recorded_by: %s", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_MultipleSnapshots(t *testing.T) {
+	body := mockToolResultsResponse([]map[string]any{
+		{
+			"result_id":   "res_bbb",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_pg_settings",
+			"tool_args":   "{}",
+			"output":      "work_mem | 64MB\n",
+			"recorded_by": "bob@example.com",
+			"recorded_at": "2026-03-20T08:00:00Z",
+			"success":     true,
+		},
+		{
+			"result_id":   "res_aaa",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_pg_settings",
+			"tool_args":   "{}",
+			"output":      "work_mem | 4MB\n",
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-10T12:00:00Z",
+			"success":     true,
+		},
+	})
+	defer withMockAuditServer(http.StatusOK, body)()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName: "get_pg_settings",
+		Limit:    2,
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	// Both snapshots should appear so the agent can diff them.
+	if !strings.Contains(result.Output, "Snapshot 1") {
+		t.Errorf("output missing Snapshot 1: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "Snapshot 2") {
+		t.Errorf("output missing Snapshot 2: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "64MB") || !strings.Contains(result.Output, "4MB") {
+		t.Errorf("output missing both work_mem values: %s", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_Empty(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, mockToolResultsResponse(nil))()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName:   "get_baseline",
+		ServerName: "prod-db-1",
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "no saved results") {
+		t.Errorf("output = %q, want no-results message", result.Output)
+	}
+	if !strings.Contains(result.Output, "get_baseline") {
+		t.Errorf("output should mention the tool name: %s", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_NoAuditURL(t *testing.T) {
+	old := auditBaseURL
+	auditBaseURL = ""
+	defer func() { auditBaseURL = old }()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{ToolName: "get_baseline"})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "HELPDESK_AUDIT_URL") {
+		t.Errorf("output = %q, want HELPDESK_AUDIT_URL hint", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_NoToolName(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, "irrelevant")()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "tool_name is required") {
+		t.Errorf("output = %q, want tool_name required message", result.Output)
+	}
+}
+
+func TestGetSavedSnapshots_Truncation(t *testing.T) {
+	// Build a snapshot whose output exceeds the 32 KB cap.
+	largeOutput := strings.Repeat("x", maxSnapshotOutputBytes+1)
+	body := mockToolResultsResponse([]map[string]any{
+		{
+			"result_id":   "res_big",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_baseline",
+			"output":      largeOutput,
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-15T10:00:00Z",
+			"success":     true,
+		},
+		{
+			"result_id":   "res_big2",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_baseline",
+			"output":      "second snapshot — should not appear",
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-14T10:00:00Z",
+			"success":     true,
+		},
+	})
+	defer withMockAuditServer(http.StatusOK, body)()
+
+	ctx := newTestContext()
+	result, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{
+		ToolName: "get_baseline",
+		Limit:    2,
+	})
+	if err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "truncated") {
+		preview := result.Output
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		t.Errorf("output should contain truncation notice: %s", preview)
+	}
+	if strings.Contains(result.Output, "second snapshot") {
+		t.Errorf("truncated output should not include second snapshot")
 	}
 }

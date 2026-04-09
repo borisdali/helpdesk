@@ -113,7 +113,11 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 		// required.  DELETE mode ensures every committed transaction is flushed
 		// to the main .db file immediately; FULL sync prevents data loss on
 		// power failure.
-		sqliteDSN := "file:" + dsn + "?_pragma=journal_mode(delete)&_pragma=synchronous(full)"
+		// busy_timeout=5000ms: SQLite waits up to 5 s for a write lock rather
+		// than returning SQLITE_BUSY immediately.  Required because recordPlaybookRunComplete
+		// goroutines can hold the write lock while a new recordPlaybookRunStart
+		// INSERT arrives on a concurrent HTTP request.
+		sqliteDSN := "file:" + dsn + "?_pragma=journal_mode(delete)&_pragma=synchronous(full)&_pragma=busy_timeout(5000)"
 		db, err = sql.Open("sqlite", sqliteDSN)
 		if err != nil {
 			return nil, fmt.Errorf("open audit database: %w", err)

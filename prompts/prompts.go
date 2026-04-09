@@ -20,3 +20,6 @@ var Incident string
 
 //go:embed research.txt
 var Research string
+
+//go:embed sysadmin.txt
+var Sysadmin string

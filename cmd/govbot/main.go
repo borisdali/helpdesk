@@ -25,6 +25,10 @@ import (
 	"helpdesk/internal/audit"
 )
 
+// gatewayAPIKey is the Bearer token sent to all gateway requests.
+// Set via -api-key flag or HELPDESK_CLIENT_API_KEY env var.
+var gatewayAPIKey string
+
 // ── Response types mirroring the gateway/auditd JSON shapes ──────────────────
 
 type governanceInfo struct {
@@ -84,6 +88,8 @@ type integrityStatus struct {
 
 func main() {
 	gateway       := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
+	apiKey        := flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Bearer token for gateway authentication")
+	auditAPIKey   := flag.String("audit-api-key", os.Getenv("HELPDESK_AUDIT_API_KEY"), "Bearer token for auditd authentication (used with -audit-url)")
 	sinceStr      := flag.String("since", "24h", "Look-back window for audit events (e.g. 24h, 7d, 2w)")
 	webhook       := flag.String("webhook", "", "Slack webhook URL for posting report summary")
 	dryRun        := flag.Bool("dry-run", false, "Collect and print report but do not post to webhook")
@@ -92,6 +98,7 @@ func main() {
 	showHistory   := flag.Int("show-history", 0, "Print last N compliance runs and exit (requires -audit-url or -history-db)")
 	historyRetain := flag.Int("history-retain", 365, "Maximum number of runs to keep in local history database (ignored when -audit-url is set)")
 	flag.Parse()
+	gatewayAPIKey = *apiKey
 
 	// ── History: --show-history short-circuit ────────────────────────────────
 	// Reads and prints stored runs without contacting the gateway.
@@ -99,7 +106,7 @@ func main() {
 		var sh historyClient
 		switch {
 		case *auditURL != "":
-			sh = openRemoteHistory(*auditURL, "") // no gateway filter: show all runs
+			sh = openRemoteHistory(*auditURL, "", *auditAPIKey) // no gateway filter: show all runs
 		case *historyDB != "":
 			lh, err := openHistory(*historyDB)
 			if err != nil {
@@ -123,7 +130,7 @@ func main() {
 	var hist historyClient
 	switch {
 	case *auditURL != "":
-		hist = openRemoteHistory(*auditURL, *gateway)
+		hist = openRemoteHistory(*auditURL, *gateway, *auditAPIKey)
 	case *historyDB != "":
 		lh, herr := openHistory(*historyDB)
 		if herr != nil {
@@ -1285,8 +1292,15 @@ func getChainIntegrity(gateway string) (*integrityStatus, error) {
 }
 
 func gatewayGET(baseURL, path string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	if gatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+gatewayAPIKey)
+	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(baseURL + path)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", path, err)
 	}

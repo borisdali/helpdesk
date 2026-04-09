@@ -31,6 +31,9 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/governance/journeys":          {AdminBypass: true},
 	"GET /api/v1/governance/govbot/runs":       {AdminBypass: true},
 
+	// Tool result query
+	"GET /api/v1/tool-results": {AdminBypass: true},
+
 	// Fleet reads and plan (plan is a dry-run — any authenticated user may preview)
 	"POST /api/v1/fleet/plan":                                   {AdminBypass: true},
 	"POST /api/v1/fleet/snapshot":                               {AdminBypass: true},
@@ -42,12 +45,22 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/fleet/jobs/{jobID}/servers/{serverName}/steps": {AdminBypass: true},
 	"GET /api/v1/fleet/jobs/{jobID}/approval/{approvalID}":      {AdminBypass: true},
 
+	// Uploads: operator file uploads for agent analysis (e.g. PostgreSQL log files)
+	"POST /api/v1/fleet/uploads":                       {AdminBypass: true},
+	"GET /api/v1/fleet/uploads/{uploadID}":             {AdminBypass: true},
+	"GET /api/v1/fleet/uploads/{uploadID}/content":     {AdminBypass: true},
+
 	// Fleet playbooks: CRUD + run (any authenticated user; same as /fleet/plan)
 	"GET /api/v1/fleet/playbooks":                      {AdminBypass: true},
 	"GET /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},
 	"POST /api/v1/fleet/playbooks":                     {AdminBypass: true},
+	"PUT /api/v1/fleet/playbooks/{playbookID}":         {AdminBypass: true},
 	"DELETE /api/v1/fleet/playbooks/{playbookID}":      {AdminBypass: true},
 	"POST /api/v1/fleet/playbooks/{playbookID}/run":    {AdminBypass: true},
+	"GET /api/v1/fleet/playbooks/{playbookID}/runs":    {AdminBypass: true},
+	"GET /api/v1/fleet/playbooks/{playbookID}/stats":   {AdminBypass: true},
+	"PATCH /api/v1/fleet/playbook-runs/{runID}":        {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}":          {AdminBypass: true},
 
 	// ── Role-required ─────────────────────────────────────────────────────────
 

@@ -14,6 +14,7 @@
 //   - E2E_GATEWAY_URL: Gateway REST API URL (default: http://localhost:8080)
 //   - E2E_DB_AGENT_URL: Database agent A2A URL (default: http://localhost:1100)
 //   - E2E_K8S_AGENT_URL: Kubernetes agent A2A URL (default: http://localhost:1102)
+//   - E2E_SYSADMIN_AGENT_URL: Sysadmin agent A2A URL (default: http://localhost:1103)
 //   - E2E_RESEARCH_AGENT_URL: Research agent A2A URL (default: http://localhost:1106)
 //   - E2E_ORCHESTRATOR_URL: Orchestrator A2A URL (optional)
 //   - E2E_CONN_STR: PostgreSQL connection string
@@ -27,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"strings"
@@ -39,6 +41,7 @@ type Config struct {
 	GatewayURL       string
 	DBAgentURL       string
 	K8sAgentURL      string
+	SysadminAgentURL string
 	ResearchAgentURL string
 	OrchestratorURL  string
 	AuditdURL        string
@@ -53,6 +56,7 @@ func LoadConfig() *Config {
 		GatewayURL:       getEnvDefault("E2E_GATEWAY_URL", "http://localhost:8080"),
 		DBAgentURL:       getEnvDefault("E2E_DB_AGENT_URL", "http://localhost:1100"),
 		K8sAgentURL:      getEnvDefault("E2E_K8S_AGENT_URL", "http://localhost:1102"),
+		SysadminAgentURL: getEnvDefault("E2E_SYSADMIN_AGENT_URL", "http://localhost:1103"),
 		ResearchAgentURL: getEnvDefault("E2E_RESEARCH_AGENT_URL", "http://localhost:1106"),
 		OrchestratorURL:  os.Getenv("E2E_ORCHESTRATOR_URL"),
 		AuditdURL:        getEnvDefault("E2E_AUDITD_URL", "http://localhost:1199"),
@@ -195,6 +199,223 @@ func (c *GatewayClient) Research(ctx context.Context, query string) (*A2ARespons
 	return c.post(ctx, "/api/v1/research", map[string]any{
 		"query": query,
 	})
+}
+
+// PlaybookCreate calls POST /api/v1/fleet/playbooks and returns the created playbook.
+func (c *GatewayClient) PlaybookCreate(ctx context.Context, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks", body)
+}
+
+// PlaybookGet calls GET /api/v1/fleet/playbooks/{id}.
+func (c *GatewayClient) PlaybookGet(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook: %w", err)
+	}
+	return result, nil
+}
+
+// PlaybookList calls GET /api/v1/fleet/playbooks with optional query params (e.g. "active_only=false").
+func (c *GatewayClient) PlaybookList(ctx context.Context, query string) ([]map[string]any, error) {
+	path := "/api/v1/fleet/playbooks"
+	if query != "" {
+		path += "?" + query
+	}
+	raw, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Playbooks []map[string]any `json:"playbooks"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, fmt.Errorf("decode playbook list: %w", err)
+	}
+	return wrapper.Playbooks, nil
+}
+
+// PlaybookActivate calls POST /api/v1/fleet/playbooks/{id}/activate.
+func (c *GatewayClient) PlaybookActivate(ctx context.Context, id string) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks/"+id+"/activate", nil)
+}
+
+// PlaybookImport calls POST /api/v1/fleet/playbooks/import.
+func (c *GatewayClient) PlaybookImport(ctx context.Context, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks/import", body)
+}
+
+// PlaybookRun calls POST /api/v1/fleet/playbooks/{id}/run with an optional body.
+// Returns the raw response map (either a FleetPlanResponse for fleet-mode playbooks
+// or an a2aResponse for agent-mode playbooks).
+func (c *GatewayClient) PlaybookRun(ctx context.Context, id string, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbooks/"+id+"/run", body)
+}
+
+// PlaybookDelete calls DELETE /api/v1/fleet/playbooks/{id} and returns the HTTP status code.
+func (c *GatewayClient) PlaybookDelete(ctx context.Context, id string) (int, error) {
+	return c.rawDo(ctx, http.MethodDelete, "/api/v1/fleet/playbooks/"+id, nil)
+}
+
+// PlaybookUpdate calls PUT /api/v1/fleet/playbooks/{id} and returns the HTTP status code.
+func (c *GatewayClient) PlaybookUpdate(ctx context.Context, id string, body map[string]any) (int, error) {
+	return c.rawDo(ctx, http.MethodPut, "/api/v1/fleet/playbooks/"+id, body)
+}
+
+// PlaybookRuns calls GET /api/v1/fleet/playbooks/{id}/runs and returns the response map.
+func (c *GatewayClient) PlaybookRuns(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id+"/runs")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook runs: %w", err)
+	}
+	return result, nil
+}
+
+// PlaybookRunGet calls GET /api/v1/fleet/playbook-runs/{runID} and returns the run map.
+func (c *GatewayClient) PlaybookRunGet(ctx context.Context, runID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook run: %w", err)
+	}
+	return result, nil
+}
+
+// PlaybookStats calls GET /api/v1/fleet/playbooks/{id}/stats and returns the response map.
+func (c *GatewayClient) PlaybookStats(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id+"/stats")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode playbook stats: %w", err)
+	}
+	return result, nil
+}
+
+// UploadCreate posts filename/content as multipart/form-data to POST /api/v1/fleet/uploads.
+// Returns the decoded Upload metadata map on success.
+func (c *GatewayClient) UploadCreate(ctx context.Context, filename, content string) (map[string]any, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, fmt.Errorf("CreateFormFile: %w", err)
+	}
+	if _, err := fw.Write([]byte(content)); err != nil {
+		return nil, fmt.Errorf("write form file: %w", err)
+	}
+	mw.Close()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/fleet/uploads", &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST /api/v1/fleet/uploads: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("POST /api/v1/fleet/uploads: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode upload: %w", err)
+	}
+	return result, nil
+}
+
+// UploadGet calls GET /api/v1/fleet/uploads/{id} and returns the upload metadata.
+func (c *GatewayClient) UploadGet(ctx context.Context, id string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/uploads/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode upload: %w", err)
+	}
+	return result, nil
+}
+
+// UploadGetContent calls GET /api/v1/fleet/uploads/{id}/content and returns the raw bytes.
+func (c *GatewayClient) UploadGetContent(ctx context.Context, id string) ([]byte, error) {
+	return c.get(ctx, "/api/v1/fleet/uploads/"+id+"/content")
+}
+
+// rawDo executes an HTTP request and returns the response status code.
+// body may be nil (sends no body). The response body is drained and discarded.
+func (c *GatewayClient) rawDo(ctx context.Context, method, path string, body map[string]any) (int, error) {
+	var reqBody *bytes.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return 0, fmt.Errorf("marshal: %w", err)
+		}
+		reqBody = bytes.NewReader(data)
+	} else {
+		reqBody = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reqBody)
+	if err != nil {
+		return 0, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body) //nolint:errcheck
+	return resp.StatusCode, nil
+}
+
+// postJSON is like post but returns a raw map[string]any instead of A2AResponse,
+// and accepts a nil payload (sends an empty JSON object).
+func (c *GatewayClient) postJSON(ctx context.Context, path string, payload map[string]any) (map[string]any, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("POST %s: HTTP %d: %s", path, resp.StatusCode, string(body))
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("POST %s: decode: %w", path, err)
+	}
+	return result, nil
 }
 
 func (c *GatewayClient) get(ctx context.Context, path string) ([]byte, error) {

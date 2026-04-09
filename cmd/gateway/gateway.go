@@ -38,6 +38,9 @@ const agentNameIncident = "incident_agent"
 // agentNameResearch is the expected name for the research agent.
 const agentNameResearch = "research_agent"
 
+// agentNameSysadmin is the expected name for the sysadmin agent.
+const agentNameSysadmin = "sysadmin_agent"
+
 // Gateway translates REST requests into A2A calls to sub-agents.
 type Gateway struct {
 	agents           map[string]*discovery.Agent
@@ -45,9 +48,11 @@ type Gateway struct {
 	infra            *infra.Config
 	auditor          *audit.GatewayAuditor
 	auditURL         string                  // URL to auditd service for governance queries
+	auditAPIKey      string                  // Bearer token for authenticating proxy requests to auditd
 	identityProvider identity.Provider       // resolves caller identity on every request
 	authzr           *authz.Authorizer       // central per-route authorizer (nil = no authz)
 	operatingMode    string                  // "readonly" or "fix"
+	agentAPIKey      string                  // Bearer token sent to agent POST /tool/{name} endpoints
 	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
 	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
@@ -86,6 +91,17 @@ func (g *Gateway) SetAuditor(auditor *audit.GatewayAuditor) {
 // SetAuditURL sets the auditd service URL for governance queries.
 func (g *Gateway) SetAuditURL(url string) {
 	g.auditURL = url
+}
+
+// SetAuditAPIKey sets the Bearer token used when proxying requests to auditd.
+func (g *Gateway) SetAuditAPIKey(key string) {
+	g.auditAPIKey = key
+}
+
+// SetAgentAPIKey sets the Bearer token sent to agent POST /tool/{name} endpoints.
+// Must match a service-account api_key_hash in the agents' users.yaml.
+func (g *Gateway) SetAgentAPIKey(key string) {
+	g.agentAPIKey = key
 }
 
 // SetIdentityProvider sets the identity provider used to resolve caller identity.
@@ -157,6 +173,8 @@ var agentAliases = map[string]string{
 	"k8s":      agentNameK8s,
 	"incident": agentNameIncident,
 	"research": agentNameResearch,
+	"sysadmin": agentNameSysadmin,
+	"host":     agentNameSysadmin,
 }
 
 // RegisterRoutes sets up the REST endpoint handlers.
@@ -176,19 +194,12 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 				var err error
 				principal, err = g.identityProvider.Resolve(r)
 				if err != nil {
-					g.recordAudit(r.Context(), &audit.GatewayRequest{
-						TraceID:   traceID,
-						Endpoint:  r.URL.Path,
-						Method:    r.Method,
-						Agent:     patternAgent(pattern),
-						StartTime: start,
-						Duration:  time.Since(start),
-						Status:    "error",
-						Error:     "authentication failed: " + err.Error(),
-						HTTPCode:  http.StatusUnauthorized,
-					})
-					writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
-					return
+					// Bad or unrecognized credential: fall through as anonymous and
+					// let Authorize decide. AllowAnonymous routes pass; protected
+					// routes still get 401 from the Authorize block below.
+					slog.Debug("auth: unrecognized credential, treating as anonymous",
+						"pattern", pattern, "err", err)
+					principal = identity.ResolvedPrincipal{AuthMethod: "header"}
 				}
 			}
 			if g.authzr != nil {
@@ -254,11 +265,39 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/fleet/plan", auth("POST /api/v1/fleet/plan", g.handleFleetPlan))
 	mux.HandleFunc("POST /api/v1/fleet/snapshot", auth("POST /api/v1/fleet/snapshot", g.handleFleetSnapshot))
 	mux.HandleFunc("POST /api/v1/fleet/review", auth("POST /api/v1/fleet/review", g.handleFleetReview))
+	// Upload endpoints (operator file uploads for agent analysis, e.g. PostgreSQL log files)
+	mux.HandleFunc("POST /api/v1/fleet/uploads", auth("POST /api/v1/fleet/uploads", g.handleUploadCreate))
+	mux.HandleFunc("GET /api/v1/fleet/uploads/{uploadID}", auth("GET /api/v1/fleet/uploads/{uploadID}", g.handleUploadGet))
+	mux.HandleFunc("GET /api/v1/fleet/uploads/{uploadID}/content", auth("GET /api/v1/fleet/uploads/{uploadID}/content", g.handleUploadGetContent))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks/import", auth("POST /api/v1/fleet/playbooks/import", g.handlePlaybookImport))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks", auth("POST /api/v1/fleet/playbooks", g.handlePlaybookCreate))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks", auth("GET /api/v1/fleet/playbooks", g.handlePlaybookList))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}", auth("GET /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookGet))
+	mux.HandleFunc("PUT /api/v1/fleet/playbooks/{playbookID}", auth("PUT /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookUpdate))
 	mux.HandleFunc("DELETE /api/v1/fleet/playbooks/{playbookID}", auth("DELETE /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookDelete))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/activate", auth("POST /api/v1/fleet/playbooks/{playbookID}/activate", g.handlePlaybookActivate))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/run", auth("POST /api/v1/fleet/playbooks/{playbookID}/run", g.handlePlaybookRun))
+	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}/runs", auth("GET /api/v1/fleet/playbooks/{playbookID}/runs", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("playbookID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/runs?"+r.URL.RawQuery)
+	}))
+	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}/stats", auth("GET /api/v1/fleet/playbooks/{playbookID}/stats", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("playbookID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/stats")
+	}))
+	mux.HandleFunc("PATCH /api/v1/fleet/playbook-runs/{runID}", auth("PATCH /api/v1/fleet/playbook-runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id)
+	}))
+	mux.HandleFunc("GET /api/v1/fleet/playbook-runs/{runID}", auth("GET /api/v1/fleet/playbook-runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id)
+	}))
+
+	// Tool result query endpoint (read-only proxy to auditd)
+	mux.HandleFunc("GET /api/v1/tool-results", auth("GET /api/v1/tool-results", func(w http.ResponseWriter, r *http.Request) {
+		g.proxyToAuditd(w, r, "/v1/tool-results?"+r.URL.RawQuery)
+	}))
 
 	// Fleet runner job visibility endpoints
 	mux.HandleFunc("POST /api/v1/fleet/jobs", auth("POST /api/v1/fleet/jobs", g.handleFleetCreateJob))
@@ -714,6 +753,9 @@ func (g *Gateway) handleFleetCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -820,6 +862,9 @@ func (g *Gateway) proxyFleetRequest(w http.ResponseWriter, r *http.Request, path
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -850,8 +895,18 @@ func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request,
 		targetURL += "?" + q
 	}
 
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	if err != nil {
+		slog.Error("failed to build governance request", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(targetURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		slog.Error("failed to query governance service", "err", err)
 		writeError(w, http.StatusBadGateway, "governance service unavailable")
@@ -1124,6 +1179,63 @@ func (g *Gateway) recordAudit(ctx context.Context, req *audit.GatewayRequest) {
 	}
 }
 
+// serverNameFromArgs derives a human-readable server identifier from tool args.
+// Checks connection_string (DB tools), context (K8s tools), then namespace,
+// in priority order. Returns "unknown" when none are present.
+func serverNameFromArgs(args map[string]any) string {
+	for _, key := range []string{"connection_string", "context", "namespace"} {
+		if v, ok := args[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return "unknown"
+}
+
+// recordToolResult persists a successful direct tool execution to the
+// ToolResultStore via auditd. Best-effort: failures are logged, not fatal.
+func (g *Gateway) recordToolResult(ctx context.Context, toolName string, args map[string]any, output, traceID, recordedBy string) {
+	serverName := serverNameFromArgs(args)
+
+	toolArgsJSON, _ := json.Marshal(args)
+
+	body, err := json.Marshal(map[string]any{
+		"server_name": serverName,
+		"tool_name":   toolName,
+		"tool_args":   string(toolArgsJSON),
+		"output":      output,
+		"trace_id":    traceID,
+		"recorded_by": recordedBy,
+		"success":     true,
+	})
+	if err != nil {
+		slog.Warn("recordToolResult: failed to marshal", "tool", toolName, "err", err)
+		return
+	}
+
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/tool-results"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("recordToolResult: failed to build request", "tool", toolName, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("recordToolResult: request failed", "tool", toolName, "err", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		slog.Warn("recordToolResult: unexpected status", "tool", toolName, "status", resp.StatusCode)
+	}
+}
+
 // directToolReq is the JSON body sent to POST /tool/{name} on an agent.
 type directToolReq struct {
 	TraceID         string                     `json:"trace_id,omitempty"`
@@ -1227,6 +1339,9 @@ func (g *Gateway) dispatchDirectTool(w http.ResponseWriter, r *http.Request, age
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if g.agentAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.agentAPIKey)
+	}
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	httpResp, err := client.Do(req)
@@ -1347,6 +1462,11 @@ func (g *Gateway) dispatchDirectTool(w http.ResponseWriter, r *http.Request, age
 		Purpose:           purpose,
 		PurposeNote:       purposeNote,
 	})
+
+	// Persist the tool result for historical trend queries (best-effort).
+	if g.auditURL != "" {
+		go g.recordToolResult(context.WithoutCancel(r.Context()), toolName, args, text, traceID, principalStr)
+	}
 
 	// Return the same a2aResponse structure as the NL path for client compatibility.
 	writeJSON(w, http.StatusOK, a2aResponse{

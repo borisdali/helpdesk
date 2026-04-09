@@ -488,67 +488,36 @@ Issue codes:
 
 ### Playbooks
 
-A **playbook** is a saved NL intent — a name, description, and optional target hints — stored in auditd. Running a playbook calls the planner fresh, always producing a plan against the current tool catalog and infrastructure state.
+A **playbook** is a saved runbook artifact that combines a natural-language fleet intent with expert triage knowledge. Running a playbook calls the planner fresh every time, producing a plan against the current tool catalog and live infrastructure state.
 
-**Create a playbook:**
+aiHelpDesk ships 4 expert-authored system playbooks out of the box (vacuum triage, slow query triage, connection triage, replication lag triage). Operators can author custom playbooks from scratch or import existing runbooks from Markdown, plain text, YAML, Rundeck, or Ansible formats. Playbooks support versioning: a series can hold multiple versions, with exactly one active at any time — upgrades are staged and promoted explicitly.
 
-```bash
-curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "weekly-staging-health",
-    "description": "Check connection health and table statistics on all staging databases",
-    "target_hints": ["staging"],
-    "created_by": "alice@example.com"
-  }'
-```
+See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference: versioning model, system playbooks, import endpoint, authoring guidance, and the complete field schema.
 
-Response: `{"playbook_id": "pb_a1b2c3d4", "name": "weekly-staging-health", ...}`
-
-**List playbooks:**
+**Quick start:**
 
 ```bash
-curl -s http://localhost:8080/api/v1/fleet/playbooks | jq .playbooks
-```
+# List all playbooks (system + user)
+curl http://localhost:8080/api/v1/fleet/playbooks | jq .playbooks
 
-**Run a playbook (generates a fresh plan):**
-
-```bash
+# Run a system playbook
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
-  -H "Content-Type: application/json" | jq '.job_def_raw' -r > /tmp/plan.json
-
-# Review, then run:
+  | jq -r '.job_def_raw' > /tmp/plan.json
 ./fleet-runner --job-file /tmp/plan.json --dry-run
-./fleet-runner --job-file /tmp/plan.json
+
+# Import an existing runbook (YAML format, no LLM needed)
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/import \
+  -H "Content-Type: application/json" \
+  -d '{"text": "<yaml content>", "format": "yaml"}' | jq .draft
 ```
 
-`/run` returns the same `FleetPlanResponse` as `/api/v1/fleet/plan`. The returned job def includes fresh `tool_snapshots` and `plan_description` so `--replan` and `--refresh-snapshots` work as expected.
-
-**For scheduled execution** (CronJob), combine playbooks with `--plan-description`:
-
-```bash
-# CronJob command — always fresh plan, never a stale file:
-./fleet-runner \
-  --plan-description "Check connection health on all staging databases" \
-  --plan-target-hints "staging" \
-  --replan=auto
-```
-
-Or call the playbook run endpoint and pipe the result directly to fleet-runner:
+For scheduled execution via CronJob, pipe a playbook run directly to fleet-runner:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
   | jq -r '.job_def_raw' \
   | fleet-runner --job-file /dev/stdin
 ```
-
-**Delete a playbook:**
-
-```bash
-curl -X DELETE http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4
-```
-
-Playbooks are stored in auditd's SQLite/Postgres database and are accessible directly via `GET /v1/fleet/playbooks` on the auditd service.
 
 ### Using the helpdesk client
 

@@ -249,8 +249,17 @@ func recordGovernanceViolationEvent(ctx context.Context, auditURL, componentName
 		return
 	}
 
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(auditURL, "/")+"/v1/events", bytes.NewReader(data))
+	if err != nil {
+		slog.Warn("failed to build governance violation request", "module", v.Module, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey := os.Getenv("HELPDESK_AUDIT_API_KEY"); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(strings.TrimRight(auditURL, "/")+"/v1/events", "application/json", bytes.NewReader(data))
+	resp, err := client.Do(req)
 	if err != nil {
 		slog.Warn("failed to send governance violation to auditd", "module", v.Module, "err", err)
 		return

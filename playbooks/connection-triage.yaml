@@ -1,0 +1,41 @@
+series_id: pbs_connection_triage
+name: Connection & Lock Triage
+version: "1.0"
+execution_mode: fleet
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Investigate high connection counts, connection pool saturation, or lock
+  contention that may be causing availability degradation. Identify idle
+  connections, blocking transactions, and sessions holding long-running locks.
+symptoms:
+  - "connection pool exhausted"
+  - "FATAL: remaining connection slots are reserved"
+  - "application cannot connect to database"
+  - "active_connections / max_connections > 0.8"
+  - "long-running transactions visible in monitoring"
+guidance: |
+  Start with get_server_info to check active_connections vs max_connections.
+  If active_connections > 80% of max_connections, the system is at risk of
+  connection exhaustion.
+
+  Use get_blocking_queries to surface any blocking chains. A single idle
+  transaction holding a lock can block dozens of application requests. Pay
+  attention to wait_duration — any lock held > 5 minutes is a candidate for
+  investigation.
+
+  Use get_session_info (if available) on sessions with long durations to
+  determine if they have uncommitted writes (has_writes=true). These are the
+  most dangerous to terminate and should be escalated before action.
+
+  Use get_lock_info to see the full lock table. Filter for AccessExclusiveLock —
+  these block even reads and are the most disruptive.
+
+  Common misdiagnosis: blaming connection count when the real issue is a single
+  long-running transaction preventing autovacuum from reclaiming connection slots
+  (wraparound risk). Check transaction age alongside connection count.
+escalation:
+  - "active_connections >= max_connections (no slots remaining)"
+  - "blocking chain involves a transaction open > 30 minutes"
+  - "session with uncommitted writes (has_writes=true) open > 10 minutes"
+target_hints: []

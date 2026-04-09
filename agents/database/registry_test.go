@@ -23,6 +23,15 @@ var expectedDBTools = []string{
 	"terminate_connection",
 	"terminate_idle_connections",
 	"get_status_summary",
+	"get_pg_settings",
+	"get_extensions",
+	"get_baseline",
+	"get_slow_queries",
+	"get_vacuum_status",
+	"get_disk_usage",
+	"get_wait_events",
+	"get_blocking_queries",
+	"explain_query",
 }
 
 func TestDatabaseDirectRegistry_AllToolsRegistered(t *testing.T) {

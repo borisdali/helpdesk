@@ -1,0 +1,90 @@
+series_id: pbs_db_config_recovery
+name: Database Down — Configuration Recovery
+version: "1.1"
+execution_mode: agent
+escalates_to:
+  - pbs_db_pitr_recovery
+requires_evidence:
+  - "FATAL.*invalid value for parameter"
+  - "FATAL.*configuration file"
+  - "FATAL.*could not open file"
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Recover a PostgreSQL instance that fails to start due to an invalid or
+  incompatible configuration parameter in postgresql.conf. Identify the
+  offending parameter from pod logs, locate the configuration file using
+  stored baseline data, and guide the operator through reverting the change
+  so the database can restart cleanly.
+symptoms:
+  - "database will not start after a configuration change"
+  - "pod in CrashLoopBackOff; logs show FATAL configuration error"
+  - "PostgreSQL log: 'invalid value for parameter' or 'unrecognized configuration parameter'"
+  - "PostgreSQL log: 'configuration file error' at startup"
+  - "database was reachable before a recent postgresql.conf or ALTER SYSTEM change"
+guidance: |
+  IMPORTANT: The database is not running, so psql tools will fail. This
+  playbook relies on pod logs to identify the error and on ToolResultStore
+  baseline history to locate the configuration files.
+
+  Step 1 — Confirm it is a config error, not a data error:
+  Use get_pod_logs to retrieve the startup output. A configuration error
+  produces a clean FATAL message near the top of the log, before PostgreSQL
+  attempts to open any data files. Typical messages:
+    FATAL: invalid value for parameter "max_connections": "unlimited"
+    FATAL: unrecognized configuration parameter "wal_compression_level"
+    FATAL: parameter "shared_buffers" cannot be changed without restarting the server
+    ERROR: could not open configuration file "/etc/postgresql/postgresql.conf"
+  If the FATAL message references a data file, checksum, or WAL segment instead,
+  stop here and use the data recovery playbook.
+
+  Step 2 — Extract the parameter name:
+  The log line usually names the parameter directly. Note both the parameter
+  name and the invalid value. If the log shows a syntax error (missing quotes,
+  wrong type), the fix is a typo correction rather than a value revert.
+
+  Step 3 — Locate the configuration file:
+  If get_server_info was run while the database was healthy, ToolResultStore
+  history will contain the config_file path (e.g. /var/lib/postgresql/data/
+  postgresql.conf or /etc/postgresql/16/main/postgresql.conf). Use this path
+  to guide the operator to the correct file. Also note the data_directory —
+  postgresql.conf is always inside it for default installations.
+
+  Step 4 — Identify the source of the change:
+  If ALTER SYSTEM was used, the offending line is in postgresql.auto.conf
+  (same directory as postgresql.conf), not in postgresql.conf itself.
+  ALTER SYSTEM writes to auto.conf and these settings override postgresql.conf.
+  To clear a bad ALTER SYSTEM value: remove or comment the line in
+  postgresql.auto.conf, or (if the DB can be started in single-user mode)
+  run ALTER SYSTEM RESET <parameter>.
+
+  Step 5 — Revert the change:
+  For postgresql.conf: open the file, find the offending parameter, and
+  either comment it out (prefix with #) or reset it to the previously known
+  good value. Do not guess a value — check the PostgreSQL documentation for
+  the valid range and type for this parameter.
+  For postgresql.auto.conf: remove the parameter line entirely. PostgreSQL
+  will then fall back to the value in postgresql.conf.
+
+  Step 6 — Restart and verify:
+  Use restart_deployment (K8s) to start the pod. Watch get_pod_logs for
+  "database system is ready to accept connections". Then use check_connection
+  and get_server_info to confirm the database is healthy.
+
+  Step 7 — Verify the parameter (if DB comes back):
+  Use get_pg_settings to confirm the parameter now has its previous safe value.
+  Retrieve from ToolResultStore baseline history if you need the prior value
+  for comparison.
+
+  Common misdiagnosis: assuming postgresql.conf when the change was made via
+  ALTER SYSTEM — always check postgresql.auto.conf first, as it has higher
+  precedence. A change in auto.conf overrides the same parameter in
+  postgresql.conf, so fixing only postgresql.conf will have no effect.
+escalation:
+  - "pod logs show PANIC (not FATAL) — indicates data-level corruption, use data recovery playbook"
+  - "pod logs reference missing or unreadable data files — use data recovery playbook"
+  - "unable to locate postgresql.conf or postgresql.auto.conf path"
+  - "parameter is a compile-time constant that requires a full PostgreSQL reinstall to change"
+  - "database does not start after config revert — additional config errors or data issue"
+  - "config_file path is on a read-only or unavailable volume"
+target_hints: []

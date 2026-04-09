@@ -61,6 +61,13 @@ spec:
                       name: {{ $.Values.fleetRunner.apiKeySecret }}
                       key: {{ $.Values.fleetRunner.apiKeyKey }}
                 {{- end }}
+                {{- if $.Values.fleetRunner.auditAPIKeySecret }}
+                - name: HELPDESK_AUDIT_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $.Values.fleetRunner.auditAPIKeySecret }}
+                      key: {{ $.Values.fleetRunner.auditAPIKeyKey }}
+                {{- end }}
               volumeMounts:
                 - name: infra-config
                   mountPath: /etc/helpdesk/infrastructure.json

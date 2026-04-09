@@ -106,6 +106,15 @@ func main() {
 		gw.SetAuditURL(auditURL)
 		slog.Info("governance queries enabled", "url", auditURL)
 	}
+	if auditAPIKey != "" {
+		gw.SetAuditAPIKey(auditAPIKey)
+	}
+	if agentAPIKey := os.Getenv("HELPDESK_AGENT_API_KEY"); agentAPIKey != "" {
+		gw.SetAgentAPIKey(agentAPIKey)
+		slog.Info("agent inbound auth configured (HELPDESK_AGENT_API_KEY set)")
+	} else {
+		slog.Warn("HELPDESK_AGENT_API_KEY not set — gateway will not authenticate to agent /tool/{name} endpoints")
+	}
 
 	if auditEnabled {
 		var auditor audit.Auditor

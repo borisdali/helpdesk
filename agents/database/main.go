@@ -7,7 +7,9 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -42,7 +44,12 @@ func main() {
 		if err != nil {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
-			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers))
+			dbKeys := make([]string, 0, len(infraConfig.DBServers))
+		for k := range infraConfig.DBServers {
+			dbKeys = append(dbKeys, k)
+		}
+		sort.Strings(dbKeys)
+		slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
 		}
 	}
 
@@ -63,6 +70,11 @@ func main() {
 		toolAuditor = audit.NewToolAuditorWithTraceStore(auditStore, "postgres_database_agent", sessionID, traceStore)
 		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
+
+	// Store audit URL + key so read_uploaded_file and persistToolResult can reach auditd.
+	auditBaseURL = cfg.AuditURL
+	auditAPIKey = cfg.AuditAPIKey
+	currentTraceStore = traceStore
 
 	// Initialize policy engine if configured
 	policyEngine, err := agentutil.InitPolicyEngine(cfg)
@@ -173,6 +185,13 @@ func main() {
 			"postgres_database_agent-get_status_summary": true,
 		},
 		SkillCapabilities: map[string][]string{
+			"postgres_database_agent-get_baseline": {
+				toolregistry.CapUptime,
+				toolregistry.CapVersion,
+				toolregistry.CapConfig,
+				toolregistry.CapDiskUsage,
+				toolregistry.CapExtensions,
+			},
 			"postgres_database_agent-get_status_summary": {
 				toolregistry.CapUptime,
 				toolregistry.CapVersion,
@@ -212,6 +231,12 @@ func main() {
 			},
 		},
 		SkillSupersedes: map[string][]string{
+			"postgres_database_agent-get_baseline": {
+				"get_server_info",
+				"get_pg_settings",
+				"get_extensions",
+				"get_disk_usage",
+			},
 			"postgres_database_agent-get_status_summary": {
 				"get_server_info",
 				"get_connection_stats",
@@ -348,6 +373,102 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getPgSettingsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_pg_settings",
+		Description: "Show PostgreSQL configuration settings that differ from defaults, grouped by category. Use category filter (e.g. 'autovacuum', 'memory') to focus on a specific area. Set show_all=true to return all settings.",
+	}, getPgSettingsTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getExtensionsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_extensions",
+		Description: "List all installed PostgreSQL extensions with their installed and available default versions.",
+	}, getExtensionsTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getBaselineToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_baseline",
+		Description: "Collect a comprehensive server baseline: server info, non-default PostgreSQL settings, installed extensions, and disk usage. Useful for initial assessment, capacity planning, and scheduled health snapshots.",
+	}, getBaselineTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getSlowQueriesToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_slow_queries",
+		Description: "Show the top-N slowest queries by total execution time from pg_stat_statements. Requires the pg_stat_statements extension. Use for performance triage and identifying optimization targets.",
+	}, getSlowQueriesTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getVacuumStatusToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_vacuum_status",
+		Description: "Show vacuum and autovacuum health for all user tables: dead row ratios, last vacuum/analyze times, and autovacuum counts. Use min_dead_ratio to filter to tables needing attention.",
+	}, getVacuumStatusTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getDiskUsageToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_disk_usage",
+		Description: "Show disk usage at two levels: all databases by size, and the top-N largest tables (with table vs index breakdown). Use for capacity planning and identifying space hogs.",
+	}, getDiskUsageTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getWaitEventsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_wait_events",
+		Description: "Show a snapshot of current wait events aggregated by type and name from pg_stat_activity. Useful for diagnosing contention: Lock, LWLock, IO, Client, and other wait categories.",
+	}, getWaitEventsTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getBlockingQueriesToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_blocking_queries",
+		Description: "Find blocked queries and their blockers with extended detail: wait event type, lock mode, relation name, and how long the blocked query has been waiting. More detailed than get_lock_info.",
+	}, getBlockingQueriesTool)
+	if err != nil {
+		return nil, err
+	}
+
+	explainQueryToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "explain_query",
+		Description: "Run EXPLAIN (ANALYZE, BUFFERS) on a SQL query and return the full execution plan. By default only SELECT/WITH statements are accepted. Set allow_dml=true to explain DML statements (they are wrapped in BEGIN/ROLLBACK and never committed).",
+	}, explainQueryTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getPgLogToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "read_pg_log",
+		Description: "Read recent lines from the PostgreSQL server log file using pg_read_file(). Requires superuser or pg_read_server_files privilege. Use the filter parameter to focus on errors (e.g. filter=FATAL). Only works when the database is running — for a completely down database use get_pod_logs (Kubernetes) or check the log path from ToolResultStore baseline data.",
+	}, getPgLogTool)
+	if err != nil {
+		return nil, err
+	}
+
+	readUploadedFileToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "read_uploaded_file",
+		Description: "Read a file that an operator has uploaded via POST /api/v1/fleet/uploads. Use this when read_pg_log cannot reach the database (e.g. DB is down) — ask the operator to upload the log file and provide the upload_id. Applies the same line filtering as read_pg_log. Uploads expire after 24 hours.",
+	}, readUploadedFileTool)
+	if err != nil {
+		return nil, err
+	}
+
+	getSavedSnapshotsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_saved_snapshots",
+		Description: "Retrieve previously recorded outputs of a tool from the audit history. Use this when the database is unreachable and you need a value that was captured in a prior baseline (e.g. config_file path, data_directory, postgresql.conf location). Also use it to diff two snapshots ('what changed since the baseline?') or to find when a setting last changed ('when was work_mem modified?'). Common tool_name values: 'get_baseline', 'get_pg_settings', 'get_server_info'.",
+	}, getSavedSnapshotsTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -364,6 +485,18 @@ func createTools() ([]tool.Tool, error) {
 		terminateConnectionToolDef,
 		terminateIdleConnectionsToolDef,
 		getStatusSummaryToolDef,
+		getPgSettingsToolDef,
+		getExtensionsToolDef,
+		getBaselineToolDef,
+		getSlowQueriesToolDef,
+		getVacuumStatusToolDef,
+		getDiskUsageToolDef,
+		getWaitEventsToolDef,
+		getBlockingQueriesToolDef,
+		explainQueryToolDef,
+		getPgLogToolDef,
+		readUploadedFileToolDef,
+		getSavedSnapshotsToolDef,
 	}, nil
 }
 

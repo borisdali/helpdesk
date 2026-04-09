@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -25,6 +27,15 @@ var toolAuditor *audit.ToolAuditor
 
 // policyEnforcer is set during initialization for policy enforcement.
 var policyEnforcer *agentutil.PolicyEnforcer
+
+// auditBaseURL and auditAPIKey are set during initialization and used by
+// read_uploaded_file to retrieve operator-uploaded files from auditd.
+var auditBaseURL string
+var auditAPIKey string
+
+// currentTraceStore is set during initialization so snapshot tools can include
+// the current trace ID when persisting results to the ToolResultStore.
+var currentTraceStore *audit.CurrentTraceStore
 
 // verifyRetryConfig controls the re-check retry loop for Level 2 post-mutation
 // verification (cancel_query). Overridable in tests to use zero delays.
@@ -717,6 +728,10 @@ func getServerInfoImpl(ctx context.Context, args GetServerInfoArgs) (PsqlResult,
 		now() - pg_postmaster_start_time() as uptime,
 		current_setting('data_directory') as data_directory,
 		current_setting('config_file') as config_file,
+		current_setting('hba_file') as hba_file,
+		current_setting('ident_file') as ident_file,
+		current_setting('log_directory') as log_directory,
+		current_setting('log_filename') as log_filename,
 		pg_size_pretty(pg_database_size(current_database())) as current_db_size,
 		CASE WHEN pg_is_in_recovery() THEN 'replica' ELSE 'primary' END as role,
 		(SELECT count(*) FROM pg_stat_activity) as total_connections,
@@ -1421,6 +1436,843 @@ func argsToStruct[T any](args map[string]any) (T, error) {
 // NewDatabaseDirectRegistry builds a DirectToolRegistry for all database tools.
 // These handlers are invoked via POST /tool/{name} on the agent HTTP server,
 // bypassing the LLM layer for deterministic fleet job execution.
+// ---------------------------------------------------------------------------
+// get_pg_settings
+// ---------------------------------------------------------------------------
+
+// GetPgSettingsArgs defines arguments for the get_pg_settings tool.
+type GetPgSettingsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Category         string `json:"category,omitempty" jsonschema:"Filter by settings category (e.g. 'autovacuum', 'memory'). Empty returns all non-default settings."`
+	ShowAll          bool   `json:"show_all,omitempty" jsonschema:"If true, return all settings not just non-default ones. Can produce large output."`
+}
+
+func getPgSettingsImpl(ctx context.Context, args GetPgSettingsArgs) (PsqlResult, error) {
+	var where string
+	if args.ShowAll {
+		where = "1=1"
+	} else {
+		where = "source NOT IN ('default', 'override')"
+	}
+	categoryFilter := ""
+	if args.Category != "" {
+		categoryFilter = fmt.Sprintf(" AND category ILIKE '%%%s%%'", strings.ReplaceAll(args.Category, "'", "''"))
+	}
+	query := fmt.Sprintf(`SELECT
+		category,
+		name,
+		setting,
+		unit,
+		boot_val as default_value,
+		source,
+		short_desc
+	FROM pg_settings
+	WHERE %s%s
+	ORDER BY category, name;`, where, categoryFilter)
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_pg_settings")
+	if err != nil {
+		return errorResult("get_pg_settings", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		msg := "All settings are at their default values."
+		if args.Category != "" {
+			msg = fmt.Sprintf("All %q category settings are at their default values.", args.Category)
+		}
+		return PsqlResult{Output: msg}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getPgSettingsTool(ctx tool.Context, args GetPgSettingsArgs) (PsqlResult, error) {
+	return getPgSettingsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_extensions
+// ---------------------------------------------------------------------------
+
+// GetExtensionsArgs defines arguments for the get_extensions tool.
+type GetExtensionsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getExtensionsImpl(ctx context.Context, args GetExtensionsArgs) (PsqlResult, error) {
+	query := `SELECT
+		name,
+		installed_version,
+		default_version,
+		comment
+	FROM pg_available_extensions
+	WHERE installed_version IS NOT NULL
+	ORDER BY name;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_extensions")
+	if err != nil {
+		return errorResult("get_extensions", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No extensions installed."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getExtensionsTool(ctx tool.Context, args GetExtensionsArgs) (PsqlResult, error) {
+	return getExtensionsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_baseline
+// ---------------------------------------------------------------------------
+
+// GetBaselineArgs defines arguments for the get_baseline tool.
+type GetBaselineArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getBaselineImpl(ctx context.Context, args GetBaselineArgs) (PsqlResult, error) {
+	conn := args.ConnectionString
+	sections := []struct {
+		name string
+		fn   func() (PsqlResult, error)
+	}{
+		{"Server Info", func() (PsqlResult, error) {
+			return getServerInfoImpl(ctx, GetServerInfoArgs{ConnectionString: conn})
+		}},
+		{"PG Settings (non-default)", func() (PsqlResult, error) {
+			return getPgSettingsImpl(ctx, GetPgSettingsArgs{ConnectionString: conn})
+		}},
+		{"Extensions", func() (PsqlResult, error) {
+			return getExtensionsImpl(ctx, GetExtensionsArgs{ConnectionString: conn})
+		}},
+		{"Disk Usage", func() (PsqlResult, error) {
+			return getDiskUsageImpl(ctx, GetDiskUsageArgs{ConnectionString: conn})
+		}},
+	}
+
+	var sb strings.Builder
+	for _, s := range sections {
+		sb.WriteString("══════════════════════════════════════════\n")
+		sb.WriteString("  " + s.name + "\n")
+		sb.WriteString("══════════════════════════════════════════\n")
+		result, err := s.fn()
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("  WARNING: failed to collect %s: %v\n\n", s.name, err))
+			continue
+		}
+		sb.WriteString(result.Output)
+		sb.WriteString("\n")
+	}
+	return PsqlResult{Output: sb.String()}, nil
+}
+
+func getBaselineTool(ctx tool.Context, args GetBaselineArgs) (PsqlResult, error) {
+	result, err := getBaselineImpl(ctx, args)
+	if err == nil && result.Output != "" {
+		// Persist the result so get_saved_snapshots can retrieve it later.
+		// This covers the A2A/LLM path; the direct-tool path is persisted by the gateway.
+		dbInfo, _ := resolveDatabaseInfo(args.ConnectionString)
+		serverName := dbInfo.Name
+		if serverName == "" {
+			serverName = args.ConnectionString
+		}
+		argsJSON, _ := json.Marshal(args)
+		go persistToolResult(context.WithoutCancel(ctx), "get_baseline", serverName, string(argsJSON), result.Output)
+	}
+	return result, err
+}
+
+// ---------------------------------------------------------------------------
+// get_slow_queries
+// ---------------------------------------------------------------------------
+
+// GetSlowQueriesArgs defines arguments for the get_slow_queries tool.
+type GetSlowQueriesArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Limit            int    `json:"limit,omitempty" jsonschema:"Number of top queries to return by total execution time (default 10)."`
+}
+
+func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResult, error) {
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	query := fmt.Sprintf(`SELECT
+		LEFT(query, 120) as query,
+		calls,
+		ROUND(total_exec_time::numeric, 2) as total_ms,
+		ROUND(mean_exec_time::numeric, 2) as mean_ms,
+		ROUND(max_exec_time::numeric, 2) as max_ms,
+		rows
+	FROM pg_stat_statements
+	ORDER BY total_exec_time DESC
+	LIMIT %d;`, limit)
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_slow_queries")
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "42883") || strings.Contains(msg, "42P01") ||
+			strings.Contains(msg, "pg_stat_statements") {
+			return PsqlResult{Output: "pg_stat_statements extension is not installed. Enable it with: CREATE EXTENSION pg_stat_statements; and add it to shared_preload_libraries in postgresql.conf."}, nil
+		}
+		return errorResult("get_slow_queries", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No queries recorded yet. pg_stat_statements resets on server restart."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getSlowQueriesTool(ctx tool.Context, args GetSlowQueriesArgs) (PsqlResult, error) {
+	return getSlowQueriesImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_vacuum_status
+// ---------------------------------------------------------------------------
+
+// GetVacuumStatusArgs defines arguments for the get_vacuum_status tool.
+type GetVacuumStatusArgs struct {
+	ConnectionString string  `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	MinDeadRatio     float64 `json:"min_dead_ratio,omitempty" jsonschema:"Only show tables with a dead row ratio >= this value (0–100). Default 0 returns all tables."`
+}
+
+func getVacuumStatusImpl(ctx context.Context, args GetVacuumStatusArgs) (PsqlResult, error) {
+	query := fmt.Sprintf(`SELECT
+		schemaname,
+		relname as table_name,
+		n_live_tup as live_rows,
+		n_dead_tup as dead_rows,
+		ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) as dead_ratio_pct,
+		last_vacuum,
+		last_autovacuum,
+		last_analyze,
+		last_autoanalyze,
+		autovacuum_count,
+		autoanalyze_count
+	FROM pg_stat_user_tables
+	WHERE ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) >= %g
+	ORDER BY n_dead_tup DESC
+	LIMIT 30;`, args.MinDeadRatio)
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_vacuum_status")
+	if err != nil {
+		return errorResult("get_vacuum_status", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: fmt.Sprintf("No tables with dead row ratio >= %.0f%%. Vacuum health looks good.", args.MinDeadRatio)}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getVacuumStatusTool(ctx tool.Context, args GetVacuumStatusArgs) (PsqlResult, error) {
+	return getVacuumStatusImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_disk_usage
+// ---------------------------------------------------------------------------
+
+// GetDiskUsageArgs defines arguments for the get_disk_usage tool.
+type GetDiskUsageArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	TopN             int    `json:"top_n,omitempty" jsonschema:"Number of largest tables to include (default 10)."`
+}
+
+func getDiskUsageImpl(ctx context.Context, args GetDiskUsageArgs) (PsqlResult, error) {
+	topN := args.TopN
+	if topN <= 0 {
+		topN = 10
+	}
+	// Part 1: database-level sizes
+	dbQuery := `SELECT
+		datname as database,
+		pg_size_pretty(pg_database_size(datname)) as size,
+		pg_database_size(datname) as size_bytes
+	FROM pg_database
+	WHERE datistemplate = false
+	ORDER BY pg_database_size(datname) DESC;`
+
+	dbOut, err := runPsqlWithToolName(ctx, args.ConnectionString, dbQuery, "get_disk_usage")
+	if err != nil {
+		return errorResult("get_disk_usage", args.ConnectionString, err), nil
+	}
+
+	// Part 2: top-N tables across all schemas
+	tableQuery := fmt.Sprintf(`SELECT
+		schemaname,
+		relname as table_name,
+		pg_size_pretty(pg_total_relation_size(relid)) as total_size,
+		pg_size_pretty(pg_relation_size(relid)) as table_size,
+		pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) as index_size
+	FROM pg_stat_user_tables
+	ORDER BY pg_total_relation_size(relid) DESC
+	LIMIT %d;`, topN)
+
+	tableOut, err := runPsqlWithToolName(ctx, args.ConnectionString, tableQuery, "get_disk_usage")
+	if err != nil {
+		return errorResult("get_disk_usage", args.ConnectionString, err), nil
+	}
+
+	return PsqlResult{Output: "-- Database Sizes --\n" + dbOut + "\n-- Top " + strconv.Itoa(topN) + " Tables by Disk Usage --\n" + tableOut}, nil
+}
+
+func getDiskUsageTool(ctx tool.Context, args GetDiskUsageArgs) (PsqlResult, error) {
+	return getDiskUsageImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_wait_events
+// ---------------------------------------------------------------------------
+
+// GetWaitEventsArgs defines arguments for the get_wait_events tool.
+type GetWaitEventsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getWaitEventsImpl(ctx context.Context, args GetWaitEventsArgs) (PsqlResult, error) {
+	query := `SELECT
+		wait_event_type,
+		wait_event,
+		count(*) as sessions,
+		string_agg(state, ', ' ORDER BY state) as states
+	FROM pg_stat_activity
+	WHERE wait_event IS NOT NULL
+	  AND pid <> pg_backend_pid()
+	GROUP BY wait_event_type, wait_event
+	ORDER BY sessions DESC;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_wait_events")
+	if err != nil {
+		return errorResult("get_wait_events", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No sessions currently waiting."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getWaitEventsTool(ctx tool.Context, args GetWaitEventsArgs) (PsqlResult, error) {
+	return getWaitEventsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// get_blocking_queries
+// ---------------------------------------------------------------------------
+
+// GetBlockingQueriesArgs defines arguments for the get_blocking_queries tool.
+type GetBlockingQueriesArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getBlockingQueriesImpl(ctx context.Context, args GetBlockingQueriesArgs) (PsqlResult, error) {
+	query := `SELECT
+		blocked_locks.pid AS blocked_pid,
+		blocked_activity.usename AS blocked_user,
+		blocked_activity.application_name AS blocked_app,
+		blocked_activity.wait_event_type AS wait_type,
+		blocked_activity.wait_event,
+		blocking_locks.pid AS blocking_pid,
+		blocking_activity.usename AS blocking_user,
+		blocking_locks.mode AS lock_mode,
+		COALESCE(rel.relname, '(relation unknown)') AS relation,
+		now() - blocked_activity.xact_start AS blocked_duration,
+		LEFT(blocked_activity.query, 100) AS blocked_query,
+		LEFT(blocking_activity.query, 100) AS blocking_query
+	FROM pg_catalog.pg_locks blocked_locks
+	JOIN pg_catalog.pg_stat_activity blocked_activity
+		ON blocked_activity.pid = blocked_locks.pid
+	JOIN pg_catalog.pg_locks blocking_locks
+		ON blocking_locks.locktype = blocked_locks.locktype
+		AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+		AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+		AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+		AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+		AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+		AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+		AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+		AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+		AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+		AND blocking_locks.pid != blocked_locks.pid
+	JOIN pg_catalog.pg_stat_activity blocking_activity
+		ON blocking_activity.pid = blocking_locks.pid
+	LEFT JOIN pg_catalog.pg_class rel
+		ON rel.oid = blocked_locks.relation
+	WHERE NOT blocked_locks.granted
+	ORDER BY blocked_duration DESC NULLS LAST;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_blocking_queries")
+	if err != nil {
+		return errorResult("get_blocking_queries", args.ConnectionString, err), nil
+	}
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
+		return PsqlResult{Output: "No blocking queries found."}, nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getBlockingQueriesTool(ctx tool.Context, args GetBlockingQueriesArgs) (PsqlResult, error) {
+	return getBlockingQueriesImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// explain_query
+// ---------------------------------------------------------------------------
+
+// ExplainQueryArgs defines arguments for the explain_query tool.
+type ExplainQueryArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Query            string `json:"query" jsonschema:"required,SQL query to explain. Must be a SELECT/WITH statement unless allow_dml is true."`
+	AllowDML         bool   `json:"allow_dml,omitempty" jsonschema:"If false (default), rejects non-SELECT/WITH statements. If true, runs EXPLAIN ANALYZE inside BEGIN/ROLLBACK so DML executes but is never committed."`
+}
+
+func explainQueryImpl(ctx context.Context, args ExplainQueryArgs) (PsqlResult, error) {
+	if args.Query == "" {
+		return PsqlResult{Output: "explain_query: query is required"}, nil
+	}
+
+	trimmed := strings.TrimSpace(strings.ToUpper(args.Query))
+	isDML := !strings.HasPrefix(trimmed, "SELECT") &&
+		!strings.HasPrefix(trimmed, "WITH") &&
+		!strings.HasPrefix(trimmed, "EXPLAIN") &&
+		!strings.HasPrefix(trimmed, "TABLE")
+
+	if isDML && !args.AllowDML {
+		return PsqlResult{Output: "explain_query: only SELECT/WITH queries are allowed by default. Set allow_dml=true to EXPLAIN DML statements (they will be wrapped in BEGIN/ROLLBACK and not committed)."}, nil
+	}
+
+	var psqlQuery string
+	if isDML && args.AllowDML {
+		// Wrap in transaction so DML is rolled back after EXPLAIN ANALYZE.
+		psqlQuery = fmt.Sprintf("BEGIN; EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) %s; ROLLBACK;", args.Query)
+	} else {
+		psqlQuery = fmt.Sprintf("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) %s", args.Query)
+	}
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, psqlQuery, "explain_query")
+	if err != nil {
+		return errorResult("explain_query", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func explainQueryTool(ctx tool.Context, args ExplainQueryArgs) (PsqlResult, error) {
+	return explainQueryImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// read_pg_log
+// ---------------------------------------------------------------------------
+
+const (
+	pgLogReadBytes    = 131072 // 128 KB — enough for ~1000 typical log lines
+	pgLogDefaultLines = 100
+	pgLogMaxLines     = 500
+)
+
+// GetPgLogArgs defines arguments for the read_pg_log tool.
+type GetPgLogArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+	Lines            int    `json:"lines,omitempty" jsonschema:"Number of recent log lines to return (default 100, max 500)."`
+	Filter           string `json:"filter,omitempty" jsonschema:"Only return lines containing this string (case-insensitive). Useful for: ERROR, FATAL, PANIC, or a specific parameter name."`
+}
+
+func getPgLogImpl(ctx context.Context, args GetPgLogArgs) (PsqlResult, error) {
+	lines := args.Lines
+	if lines <= 0 {
+		lines = pgLogDefaultLines
+	}
+	if lines > pgLogMaxLines {
+		lines = pgLogMaxLines
+	}
+
+	// pg_ls_logdir() + pg_read_file() require PostgreSQL ≥ 10 and superuser or
+	// pg_read_server_files. log_directory may be absolute (/var/log/postgresql)
+	// or relative to data_directory (pg_log) — handle both.
+	query := fmt.Sprintf(`
+WITH latest AS (
+  SELECT
+    CASE WHEN current_setting('log_directory') LIKE '/%%'
+      THEN current_setting('log_directory') || '/' || name
+      ELSE current_setting('data_directory') || '/' || current_setting('log_directory') || '/' || name
+    END AS path,
+    size
+  FROM pg_ls_logdir()
+  ORDER BY modification DESC
+  LIMIT 1
+)
+SELECT COALESCE(
+  pg_read_file(path, GREATEST(0, size - %d), LEAST(size, %d)),
+  ''
+)
+FROM latest;`, pgLogReadBytes, pgLogReadBytes)
+
+	raw, err := runPsqlTuples(ctx, args.ConnectionString, query, "read_pg_log")
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "pg_ls_logdir") && strings.Contains(errStr, "permission denied") {
+			return PsqlResult{Output: "read_pg_log: permission denied for pg_ls_logdir — the database user lacks the pg_read_server_files privilege or superuser role.\n\nFor Kubernetes-managed PostgreSQL, use the k8s agent's get_pod_logs tool on the postgres pod instead (e.g. kubectl logs <pod> -n <namespace>)."}, nil
+		}
+		return errorResult("read_pg_log", args.ConnectionString, err), nil
+	}
+
+	content := strings.TrimRight(raw, "\n")
+	if content == "" {
+		return PsqlResult{Output: "read_pg_log: no log content found. Check that logging_collector=on and log_destination includes stderr or csvlog."}, nil
+	}
+
+	allLines := strings.Split(content, "\n")
+
+	filterLower := strings.ToLower(strings.TrimSpace(args.Filter))
+	if filterLower != "" {
+		filtered := allLines[:0]
+		for _, l := range allLines {
+			if strings.Contains(strings.ToLower(l), filterLower) {
+				filtered = append(filtered, l)
+			}
+		}
+		allLines = filtered
+		if len(allLines) == 0 {
+			return PsqlResult{Output: fmt.Sprintf("read_pg_log: no log lines matched filter %q.", args.Filter)}, nil
+		}
+	}
+
+	if len(allLines) > lines {
+		allLines = allLines[len(allLines)-lines:]
+	}
+
+	header := fmt.Sprintf("=== PostgreSQL Log (last %d lines", len(allLines))
+	if filterLower != "" {
+		header += fmt.Sprintf(", filter=%q", args.Filter)
+	}
+	header += ") ===\n"
+
+	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
+}
+
+func getPgLogTool(ctx tool.Context, args GetPgLogArgs) (PsqlResult, error) {
+	return getPgLogImpl(ctx, args)
+}
+
+// runPsqlTuples executes a read-only psql query and returns the raw column
+// value without any formatting (-t -A flags, tuples-only unaligned output).
+// Use this instead of runPsqlWithToolName when the result is large text that
+// would be corrupted by psql's expanded (-x) column wrapping, e.g. pg_read_file.
+func runPsqlTuples(ctx context.Context, connStr string, query string, toolName string) (string, error) {
+	dbInfo, err := resolveDatabaseInfo(connStr)
+	if err != nil {
+		return "", err
+	}
+
+	if policyEnforcer != nil {
+		note := ""
+		if !dbInfo.IsFromInfraConfig {
+			note = "connection string not found in infraConfig; no tags available for policy matching"
+		}
+		policyCtx := agentutil.WithToolName(ctx, toolName)
+		if err := policyEnforcer.CheckDatabase(policyCtx, dbInfo.Name, policy.ActionRead, dbInfo.Tags, note, dbInfo.Sensitivity); err != nil {
+			slog.Warn("policy denied database access", "tool", toolName, "database", dbInfo.Name, "err", err)
+			return "", fmt.Errorf("policy denied: %w", err)
+		}
+	}
+
+	start := time.Now()
+	psqlArgs := []string{"-w", "-t", "-A", "-c", query}
+	if dbInfo.ConnectionStr != "" {
+		psqlArgs = append([]string{dbInfo.ConnectionStr}, psqlArgs...)
+	}
+	output, err := cmdRunner.Run(ctx, "psql", psqlArgs, []string{"PGCONNECT_TIMEOUT=10"})
+	duration := time.Since(start)
+
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       toolName,
+			Parameters: map[string]any{"connection_string": maskPassword(connStr)},
+			RawCommand: query,
+		}, audit.ToolResult{
+			Output: truncateForAudit(output, 500),
+			Error:  errMsg,
+		}, duration)
+	}
+
+	if err != nil {
+		out := strings.TrimSpace(output)
+		if out == "" {
+			out = "(no output from psql)"
+		}
+		slog.Error("psql command failed", "tool", toolName, "ms", duration.Milliseconds(), "err", err, "output", out)
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("psql timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
+		}
+		if diagnosis := diagnosePsqlError(out); diagnosis != "" {
+			return "", fmt.Errorf("%s\n\nRaw error: %s", diagnosis, out)
+		}
+		return "", fmt.Errorf("psql failed: %v\nOutput: %s", err, out)
+	}
+
+	slog.Info("tool ok", "name", toolName, "ms", duration.Milliseconds())
+	return output, nil
+}
+
+// ---------------------------------------------------------------------------
+// read_uploaded_file
+// ---------------------------------------------------------------------------
+
+// ReadUploadedFileArgs defines arguments for the read_uploaded_file tool.
+type ReadUploadedFileArgs struct {
+	UploadID string `json:"upload_id" jsonschema:"Upload ID returned by the POST /api/v1/fleet/uploads endpoint (ul_ prefix)."`
+	Lines    int    `json:"lines,omitempty" jsonschema:"Number of recent lines to return (default 100, max 500)."`
+	Filter   string `json:"filter,omitempty" jsonschema:"Only return lines containing this string (case-insensitive). Useful for: ERROR, FATAL, PANIC, or a specific parameter name."`
+}
+
+func readUploadedFileImpl(ctx context.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
+	if auditBaseURL == "" {
+		return PsqlResult{Output: "read_uploaded_file: HELPDESK_AUDIT_URL is not configured — cannot retrieve uploads"}, nil
+	}
+	if args.UploadID == "" {
+		return PsqlResult{Output: "read_uploaded_file: upload_id is required"}, nil
+	}
+
+	lines := args.Lines
+	if lines <= 0 {
+		lines = pgLogDefaultLines
+	}
+	if lines > pgLogMaxLines {
+		lines = pgLogMaxLines
+	}
+
+	url := strings.TrimSuffix(auditBaseURL, "/") + "/v1/uploads/" + args.UploadID + "/content"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: failed to build request: %v", err)}, nil
+	}
+	if auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: auditd unreachable: %v", err)}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file: upload %q not found or expired (uploads expire after 24 hours)", args.UploadID)}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: auditd returned status %d", resp.StatusCode)}, nil
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, pgLogReadBytes))
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("read_uploaded_file ERROR: failed to read response: %v", err)}, nil
+	}
+
+	content := strings.TrimRight(string(raw), "\n")
+	if content == "" {
+		return PsqlResult{Output: "read_uploaded_file: the uploaded file is empty."}, nil
+	}
+
+	allLines := strings.Split(content, "\n")
+
+	filterLower := strings.ToLower(strings.TrimSpace(args.Filter))
+	if filterLower != "" {
+		filtered := allLines[:0]
+		for _, l := range allLines {
+			if strings.Contains(strings.ToLower(l), filterLower) {
+				filtered = append(filtered, l)
+			}
+		}
+		allLines = filtered
+		if len(allLines) == 0 {
+			return PsqlResult{Output: fmt.Sprintf("read_uploaded_file: no lines matched filter %q.", args.Filter)}, nil
+		}
+	}
+
+	if len(allLines) > lines {
+		allLines = allLines[len(allLines)-lines:]
+	}
+
+	header := fmt.Sprintf("=== Uploaded File (last %d lines", len(allLines))
+	if filterLower != "" {
+		header += fmt.Sprintf(", filter=%q", args.Filter)
+	}
+	header += ") ===\n"
+
+	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
+}
+
+func readUploadedFileTool(ctx tool.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
+	return readUploadedFileImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
+// persistToolResult — best-effort persistence for snapshot tools
+// ---------------------------------------------------------------------------
+
+// persistToolResult posts a tool result to auditd's /v1/tool-results endpoint
+// so it is available to get_saved_snapshots. Intended for the A2A path where
+// the gateway's recordToolResult is not called. Fire-and-forget: failures are
+// logged but do not affect the tool response.
+func persistToolResult(ctx context.Context, toolName, serverName, argsJSON, output string) {
+	if auditBaseURL == "" {
+		return
+	}
+	traceID := ""
+	if currentTraceStore != nil {
+		traceID = currentTraceStore.Get()
+	}
+	recordedBy := audit.PrincipalFromContext(ctx).EffectiveID()
+	if recordedBy == "" {
+		recordedBy = "database-agent"
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"server_name": serverName,
+		"tool_name":   toolName,
+		"tool_args":   argsJSON,
+		"output":      output,
+		"trace_id":    traceID,
+		"recorded_by": recordedBy,
+		"success":     true,
+	})
+	if err != nil {
+		slog.Warn("persistToolResult: marshal failed", "tool", toolName, "err", err)
+		return
+	}
+
+	url := strings.TrimSuffix(auditBaseURL, "/") + "/v1/tool-results"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		slog.Warn("persistToolResult: build request failed", "tool", toolName, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("persistToolResult: request failed", "tool", toolName, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		slog.Warn("persistToolResult: unexpected status", "tool", toolName, "status", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// get_saved_snapshots
+// ---------------------------------------------------------------------------
+
+// maxSnapshotOutputBytes caps the total output returned to avoid filling the
+// context window when multiple large baselines are fetched at once.
+const maxSnapshotOutputBytes = 32 * 1024 // 32 KB total
+
+// GetSavedSnapshotsArgs defines arguments for the get_saved_snapshots tool.
+type GetSavedSnapshotsArgs struct {
+	ToolName   string `json:"tool_name" jsonschema:"Name of the tool whose saved outputs to retrieve (e.g. 'get_baseline', 'get_pg_settings')."`
+	ServerName string `json:"server_name,omitempty" jsonschema:"Filter to a specific server name. If omitted, results for all servers are returned."`
+	Limit      int    `json:"limit,omitempty" jsonschema:"Number of snapshots to return, most recent first (default 3, max 10). Use 1 to extract a value; use 2 to diff; use 5–10 to find when something changed."`
+	Since      string `json:"since,omitempty" jsonschema:"How far back to search, e.g. '7d', '30d', '90d' (default '90d')."`
+}
+
+func getSavedSnapshotsImpl(ctx context.Context, args GetSavedSnapshotsArgs) (PsqlResult, error) {
+	if auditBaseURL == "" {
+		return PsqlResult{Output: "get_saved_snapshots: HELPDESK_AUDIT_URL is not configured — snapshot history is unavailable"}, nil
+	}
+	if args.ToolName == "" {
+		return PsqlResult{Output: "get_saved_snapshots: tool_name is required"}, nil
+	}
+
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 3
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	since := args.Since
+	if since == "" {
+		since = "90d"
+	}
+
+	u := strings.TrimSuffix(auditBaseURL, "/") + "/v1/tool-results"
+	u += fmt.Sprintf("?tool=%s&limit=%d&since=%s", args.ToolName, limit, since)
+	if args.ServerName != "" {
+		u += "&server=" + args.ServerName
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: failed to build request: %v", err)}, nil
+	}
+	if auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: auditd unreachable: %v", err)}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: auditd returned status %d", resp.StatusCode)}, nil
+	}
+
+	var body struct {
+		Results []*audit.PersistedToolResult `json:"results"`
+		Count   int                          `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return PsqlResult{Output: fmt.Sprintf("get_saved_snapshots ERROR: failed to parse response: %v", err)}, nil
+	}
+
+	if body.Count == 0 {
+		msg := fmt.Sprintf("get_saved_snapshots: no saved results found for tool %q", args.ToolName)
+		if args.ServerName != "" {
+			msg += fmt.Sprintf(" on server %q", args.ServerName)
+		}
+		msg += fmt.Sprintf(" in the last %s", since)
+		return PsqlResult{Output: msg}, nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "=== %d saved snapshot(s) for tool %q", body.Count, args.ToolName)
+	if args.ServerName != "" {
+		fmt.Fprintf(&sb, " on %q", args.ServerName)
+	}
+	fmt.Fprintf(&sb, " (most recent first) ===\n\n")
+
+	for i, r := range body.Results {
+		fmt.Fprintf(&sb, "── Snapshot %d ─ recorded: %s UTC ─ server: %s ─ by: %s ──\n",
+			i+1, r.RecordedAt.UTC().Format("2006-01-02 15:04:05"), r.ServerName, r.RecordedBy)
+		sb.WriteString(r.Output)
+		if !strings.HasSuffix(r.Output, "\n") {
+			sb.WriteByte('\n')
+		}
+		sb.WriteByte('\n')
+
+		if sb.Len() > maxSnapshotOutputBytes {
+			fmt.Fprintf(&sb, "[output truncated — %d of %d snapshots shown]\n", i+1, body.Count)
+			break
+		}
+	}
+
+	return PsqlResult{Output: sb.String()}, nil
+}
+
+func getSavedSnapshotsTool(ctx tool.Context, args GetSavedSnapshotsArgs) (PsqlResult, error) {
+	return getSavedSnapshotsImpl(ctx, args)
+}
+
 func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 	r := agentutil.NewDirectToolRegistry()
 	r.Register("check_connection", func(ctx context.Context, args map[string]any) (string, error) {
@@ -1541,6 +2393,102 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := getStatusSummaryImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_pg_settings", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetPgSettingsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getPgSettingsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_extensions", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetExtensionsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getExtensionsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_baseline", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetBaselineArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getBaselineImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_slow_queries", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetSlowQueriesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getSlowQueriesImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_vacuum_status", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetVacuumStatusArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getVacuumStatusImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_disk_usage", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetDiskUsageArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getDiskUsageImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_wait_events", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetWaitEventsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getWaitEventsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_blocking_queries", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetBlockingQueriesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getBlockingQueriesImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("explain_query", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ExplainQueryArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := explainQueryImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("read_pg_log", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetPgLogArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getPgLogImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("read_uploaded_file", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ReadUploadedFileArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := readUploadedFileImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_saved_snapshots", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetSavedSnapshotsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getSavedSnapshotsImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r
