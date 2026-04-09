@@ -205,6 +205,8 @@ governance:
   # Real-time audit monitoring and alerting
   auditor:
     enabled: false
+    # Log every audit event to the pod log (not just alerts). Equivalent to HELPDESK_AUDITOR_LOG_ALL=true.
+    logAll: false
     # Webhook URL for alerts (Slack, etc.)
     alertWebhook: ""
 
