@@ -27,6 +27,7 @@ LDFLAGS   := -s -w -X helpdesk/internal/buildinfo.Version=$(IMAGE_TAG)
 BIN_PKGS := \
 	database-agent:./agents/database/ \
 	k8s-agent:./agents/k8s/ \
+	sysadmin-agent:./agents/sysadmin/ \
 	incident-agent:./agents/incident/ \
 	research-agent:./agents/research/ \
 	gateway:./cmd/gateway/ \
@@ -227,7 +228,7 @@ binaries:
 		done; \
 		cp deploy/host/startall.sh $$outdir/; \
 		cp deploy/host/README.md $$outdir/; \
-		cp deploy/docker-compose/.env.example $$outdir/; \
+		cp deploy/host/.env.example $$outdir/; \
 		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
 		cp policies.example.yaml $$outdir/; \
 		cp users.example.yaml $$outdir/; \
@@ -268,7 +269,7 @@ bundle:
 	echo "==> host deploy files"; \
 	cp deploy/host/startall.sh $$bundledir/host/; \
 	cp deploy/host/README.md $$bundledir/host/; \
-	cp deploy/docker-compose/.env.example $$bundledir/host/; \
+	cp deploy/host/.env.example $$bundledir/host/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/host/; \
 	cp policies.example.yaml $$bundledir/host/; \
 	chmod +x $$bundledir/host/startall.sh; \
