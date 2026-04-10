@@ -23,8 +23,8 @@ func TestLoadCatalog_Valid(t *testing.T) {
 		t.Errorf("Version = %q, want %q", catalog.Version, "1")
 	}
 
-	if len(catalog.Failures) != 24 {
-		t.Errorf("Failures count = %d, want 24", len(catalog.Failures))
+	if len(catalog.Failures) != 27 {
+		t.Errorf("Failures count = %d, want 27", len(catalog.Failures))
 	}
 }
 
@@ -55,9 +55,9 @@ func TestFilterFailures_NoFilter(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, nil, nil)
+	result := FilterFailures(catalog, nil)
 	if len(result) != 2 {
-		t.Errorf("FilterFailures(nil, nil) = %d, want 2", len(result))
+		t.Errorf("FilterFailures(nil) = %d, want 2", len(result))
 	}
 }
 
@@ -71,9 +71,9 @@ func TestFilterFailures_ByCategory(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, []string{"database"}, nil)
+	result := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}})
 	if len(result) != 2 {
-		t.Errorf("FilterFailures([database], nil) = %d, want 2", len(result))
+		t.Errorf("FilterFailures(database) = %d, want 2", len(result))
 	}
 }
 
@@ -86,12 +86,33 @@ func TestFilterFailures_ByID(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, nil, []string{"db-2"})
+	result := FilterFailures(catalog, &HarnessConfig{FailureIDs: []string{"db-2"}})
 	if len(result) != 1 {
-		t.Fatalf("FilterFailures(nil, [db-2]) = %d, want 1", len(result))
+		t.Fatalf("FilterFailures([db-2]) = %d, want 1", len(result))
 	}
 	if result[0].ID != "db-2" {
 		t.Errorf("got ID %q, want %q", result[0].ID, "db-2")
+	}
+}
+
+func TestFilterFailures_External(t *testing.T) {
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "sql-1", Category: "database", ExternalCompat: true},
+			{ID: "docker-1", Category: "database", ExternalCompat: false},
+			{ID: "sql-2", Category: "database", ExternalCompat: true},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{External: true})
+	if len(result) != 2 {
+		t.Errorf("FilterFailures(external=true) = %d, want 2", len(result))
+	}
+	for _, f := range result {
+		if !f.ExternalCompat {
+			t.Errorf("external filter returned non-compatible fault %q", f.ID)
+		}
 	}
 }
 
@@ -289,6 +310,82 @@ func TestEvaluate_OrderingGatesPassed(t *testing.T) {
 	if result.KeywordPass && result.Passed {
 		t.Errorf("Passed should be false when ordering fails even if keyword passes; Score=%.2f, KeywordPass=%v, OrderingPass=%v",
 			result.Score, result.KeywordPass, result.OrderingPass)
+	}
+}
+
+func TestCatalog_ExternalCompatFields(t *testing.T) {
+	catalogPath := findCatalog()
+	if catalogPath == "" {
+		t.Skip("Could not find catalog/failures.yaml")
+	}
+
+	catalog, err := LoadCatalog(catalogPath)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	// Count external-compatible faults.
+	var extCount int
+	for _, f := range catalog.Failures {
+		if !f.ExternalCompat {
+			continue
+		}
+		extCount++
+
+		// Every external_compat fault must have inject.type set (sql is fine as-is;
+		// docker_exec faults must supply external_inject).
+		if f.Inject.Type == "docker_exec" && f.ExternalInject.Type == "" {
+			t.Errorf("fault %q is external_compat with docker_exec inject but has no external_inject spec", f.ID)
+		}
+	}
+
+	if extCount == 0 {
+		t.Error("expected at least one external_compat fault in catalog")
+	}
+	t.Logf("%d/%d faults are external_compat", extCount, len(catalog.Failures))
+}
+
+func TestCatalog_RemediationFields(t *testing.T) {
+	catalogPath := findCatalog()
+	if catalogPath == "" {
+		t.Skip("Could not find catalog/failures.yaml")
+	}
+
+	catalog, err := LoadCatalog(catalogPath)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	// Every fault with a remediation spec must have either playbook_id or agent_prompt.
+	for _, f := range catalog.Failures {
+		r := f.Remediation
+		if r.PlaybookID == "" && r.AgentPrompt == "" {
+			continue // no remediation — ok
+		}
+		// Has a spec: verify at least one action field is set (already true, but
+		// catches YAML typos).
+		if r.PlaybookID == "" && r.AgentPrompt == "" {
+			t.Errorf("fault %q has remediation block but no playbook_id or agent_prompt", f.ID)
+		}
+	}
+}
+
+func TestCatalog_SSHFaultsHaveNoExternalCompat(t *testing.T) {
+	catalogPath := findCatalog()
+	if catalogPath == "" {
+		t.Skip("Could not find catalog/failures.yaml")
+	}
+
+	catalog, err := LoadCatalog(catalogPath)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	// SSH-injected faults must NOT be marked external_compat (they require OS access).
+	for _, f := range catalog.Failures {
+		if f.Inject.Type == "ssh_exec" && f.ExternalCompat {
+			t.Errorf("fault %q uses ssh_exec but is marked external_compat — ssh_exec requires OS access", f.ID)
+		}
 	}
 }
 

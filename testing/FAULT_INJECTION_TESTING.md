@@ -1,12 +1,16 @@
-# aiHelpDesk: Fault Injection Testing
+# aiHelpDesk: Fault Injection Testing (Internal / Docker-compose)
 
-This page outlines the Failure Testing Framework included
-with aiHelpDesk. There's a list of currated failure modes,
-the injection mechanism and the way to inject failures
+> **Customer-facing guide:** If you want to validate aiHelpDesk agents against your own staging or canary database — without Docker or cluster access — see **[docs/FAULTTEST.md](../docs/FAULTTEST.md)**. That guide covers external (SQL-only) injection, SSH injection, remediation verification, and the policy safety guard.
+
+This page covers the **internal engineering harness**: running the full fault catalog against the Docker-compose test stack, wiring faulttest into CI/CD, and developing or extending failure modes.
+
+There's a curated list of failure modes, the injection mechanism and the way to inject failures
 manually or automatically (e.g. as part of the CI/CD pipeline).
 Once a failure occurs, use aiHelpDesk to see if it can rectify
 a failure automatically or at least provide guidance on how
 to proceed.
+
+The catalog currently contains **27 failure modes** (16 database, 7 Kubernetes, 2 host, 2 compound). The sample log below predates several additions and shows an earlier count — it is kept for reference.
 
 ## Manual Testing: List available fault injection tests
 

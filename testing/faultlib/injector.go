@@ -1,11 +1,14 @@
 package faultlib
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"helpdesk/testing/testutil"
@@ -21,14 +24,22 @@ func NewInjector(cfg *HarnessConfig) *Injector {
 	return &Injector{cfg: cfg}
 }
 
-// Inject applies a failure mode.
+// Inject applies a failure mode. In external mode, ExternalInject is used when set.
 func (i *Injector) Inject(ctx context.Context, f Failure) error {
-	return i.exec(ctx, f.Inject, "inject")
+	spec := f.Inject
+	if i.cfg.External && f.ExternalInject.Type != "" {
+		spec = f.ExternalInject
+	}
+	return i.exec(ctx, spec, "inject")
 }
 
-// Teardown removes a failure mode.
+// Teardown removes a failure mode. In external mode, ExternalTeardown is used when set.
 func (i *Injector) Teardown(ctx context.Context, f Failure) error {
-	return i.exec(ctx, f.Teardown, "teardown")
+	spec := f.Teardown
+	if i.cfg.External && f.ExternalTeardown.Type != "" {
+		spec = f.ExternalTeardown
+	}
+	return i.exec(ctx, spec, "teardown")
 }
 
 func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) error {
@@ -50,6 +61,8 @@ func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) erro
 		err = i.execKustomizeDelete(ctx, spec)
 	case "config":
 		err = i.execConfig(ctx, spec)
+	case "ssh_exec":
+		err = i.execSSH(ctx, spec)
 	default:
 		return fmt.Errorf("unknown inject type: %s", spec.Type)
 	}
@@ -149,5 +162,52 @@ func (i *Injector) execConfig(ctx context.Context, spec InjectSpec) error {
 	if newConn, ok := spec.Override["connection_string"]; ok {
 		i.cfg.ConnStr = newConn
 	}
+	return nil
+}
+
+// execSSH runs a script on a remote host via SSH.
+// spec.ExecVia is the target in "user@host" or "host" form; the SSH user from
+// HarnessConfig is used as a fallback when ExecVia has no user prefix.
+// The script content is streamed via stdin: ssh ... 'bash -s' < scriptContent.
+func (i *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
+	target := spec.ExecVia
+	if target == "" {
+		return fmt.Errorf("ssh_exec: exec_via (remote host) is required")
+	}
+
+	// If ExecVia has no "@", prepend the configured SSH user.
+	if !strings.Contains(target, "@") && i.cfg.SSHUser != "" {
+		target = i.cfg.SSHUser + "@" + target
+	}
+
+	// Resolve script content.
+	var scriptContent []byte
+	switch {
+	case spec.ScriptInline != "":
+		scriptContent = []byte(spec.ScriptInline)
+	case spec.Script != "":
+		scriptPath := filepath.Join(i.cfg.TestingDir, spec.Script)
+		var err error
+		scriptContent, err = os.ReadFile(scriptPath)
+		if err != nil {
+			return fmt.Errorf("ssh_exec: reading script %s: %v", scriptPath, err)
+		}
+	default:
+		return fmt.Errorf("ssh_exec: script or script_inline is required")
+	}
+
+	args := []string{"-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"}
+	if i.cfg.SSHKeyPath != "" {
+		args = append(args, "-i", i.cfg.SSHKeyPath)
+	}
+	args = append(args, target, "bash -s")
+
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdin = bytes.NewReader(scriptContent)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ssh_exec on %s: %v\n%s", target, err, output)
+	}
+	slog.Info("ssh_exec completed", "target", target, "output", strings.TrimSpace(string(output)))
 	return nil
 }

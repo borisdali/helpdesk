@@ -29,6 +29,33 @@ type Failure struct {
 	// so the suite still passes.  Use this for tests whose purpose is to show
 	// *where* the agent falls short, not to enforce that it passes.
 	GovernanceGap bool `yaml:"governance_gap,omitempty"`
+
+	// ExternalCompat marks faults that work against any PostgreSQL instance over
+	// libpq (no Docker/OS access required). Used to filter the catalog when
+	// --external is set.
+	ExternalCompat bool `yaml:"external_compat,omitempty"`
+	// ExternalInject/ExternalTeardown override Inject/Teardown when running in
+	// external mode. Use these to provide SQL-based equivalents for faults that
+	// are normally injected via docker_exec or ssh_exec.
+	ExternalInject   InjectSpec `yaml:"external_inject,omitempty"`
+	ExternalTeardown InjectSpec `yaml:"external_teardown,omitempty"`
+	// Remediation defines end-to-end recovery testing: after inject+diagnose,
+	// trigger a playbook or agent and verify the database recovers.
+	Remediation RemediationSpec `yaml:"remediation,omitempty"`
+}
+
+// RemediationSpec describes how to remediate a fault and verify recovery.
+type RemediationSpec struct {
+	// PlaybookID triggers a fleet playbook: POST /api/v1/fleet/playbooks/{id}/run
+	PlaybookID string `yaml:"playbook_id,omitempty"`
+	// AgentName is the agent to use for agent-mode remediation (default: "database").
+	AgentName string `yaml:"agent_name,omitempty"`
+	// AgentPrompt is the prompt sent to the agent for remediation.
+	AgentPrompt string `yaml:"agent_prompt,omitempty"`
+	// VerifySQL is the SQL query run to confirm recovery (default: "SELECT 1").
+	VerifySQL string `yaml:"verify_sql,omitempty"`
+	// VerifyTimeout is the max time to wait for recovery (default: "120s").
+	VerifyTimeout string `yaml:"verify_timeout,omitempty"`
 }
 
 // TimeoutDuration parses the timeout string into a time.Duration.
@@ -45,6 +72,8 @@ type InjectSpec struct {
 	Type         string            `yaml:"type"`
 	Script       string            `yaml:"script,omitempty"`
 	ScriptInline string            `yaml:"script_inline,omitempty"`
+	// ExecVia is the container/host target for docker_exec and ssh_exec types.
+	// For ssh_exec it is the remote host in "user@host" or "host" form.
 	ExecVia      string            `yaml:"exec_via,omitempty"`
 	Action       string            `yaml:"action,omitempty"`
 	Service      string            `yaml:"service,omitempty"`
@@ -94,6 +123,24 @@ type HarnessConfig struct {
 	KubeContext      string
 	Categories       []string
 	FailureIDs       []string
+
+	// External enables external PG mode: only external_compat faults are run,
+	// and ExternalInject/ExternalTeardown specs are used instead of Inject/Teardown.
+	External bool
+	// RemediateEnabled runs the remediation phase after injection + diagnosis.
+	RemediateEnabled bool
+	// GatewayURL is the helpdesk gateway base URL for playbook/agent remediation.
+	GatewayURL string
+	// GatewayAPIKey is the Bearer token for gateway/auditd auth during remediation.
+	GatewayAPIKey string
+	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
+	// When set, the harness refuses to inject faults unless the target has a
+	// "test" or "chaos" tag.
+	InfraConfigPath string
+	// SSHUser is the SSH username for ssh_exec faults (default: current user).
+	SSHUser string
+	// SSHKeyPath is the SSH private key path for ssh_exec faults.
+	SSHKeyPath string
 }
 
 // EvalResult contains the evaluation outcome for a single failure test.
@@ -113,4 +160,10 @@ type EvalResult struct {
 	ResponseText string  `json:"response_text"`
 	Duration     string  `json:"duration"`
 	Error        string  `json:"error,omitempty"`
+
+	// Remediation outcome fields (populated only when RemediateEnabled=true).
+	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
+	RemediationPassed    bool    `json:"remediation_passed,omitempty"`
+	RecoveryTimeSecs     float64 `json:"recovery_time_seconds,omitempty"`
+	RemediationError     string  `json:"remediation_error,omitempty"`
 }

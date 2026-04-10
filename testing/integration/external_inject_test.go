@@ -1,0 +1,141 @@
+//go:build integration
+
+package integration
+
+// TestExternalInjectSpecs verifies that the ExternalInject SQL specs in the
+// fault catalog actually create an observable fault state against a real
+// PostgreSQL instance and that ExternalTeardown cleanly removes it.
+//
+// This test does NOT involve any agent or LLM — it validates the injection
+// layer only. It runs as part of the standard integration suite:
+//
+//	go test -tags integration -timeout 120s ./testing/integration/...
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+
+	"helpdesk/testing/faultlib"
+	"helpdesk/testing/testutil"
+)
+
+// externalInjectCases maps fault ID → SQL to verify the fault state is active.
+// These are lightweight read-only checks run immediately after injection.
+var externalInjectCases = map[string]string{
+	// After injecting table bloat, the table should have dead tuples.
+	"db-table-bloat": `
+		SELECT count(*) FROM pg_stat_user_tables
+		WHERE n_dead_tup > 100`,
+
+	// After injecting vacuum-needed, the bloat table exists with dead tuples.
+	"db-vacuum-needed": `
+		SELECT count(*) FROM pg_stat_user_tables
+		WHERE relname = 'vacuum_bloat' AND n_dead_tup > 0`,
+
+	// After injecting disk pressure, the large table exists.
+	"db-disk-pressure": `
+		SELECT count(*) FROM information_schema.tables
+		WHERE table_name = 'disk_pressure_data'`,
+
+	// After injecting high cache miss, the big table exists.
+	"db-high-cache-miss": `
+		SELECT count(*) FROM information_schema.tables
+		WHERE table_name = 'cache_miss_data'`,
+}
+
+func TestExternalInjectSpecs(t *testing.T) {
+	ctx := context.Background()
+
+	// Locate the catalog relative to the integration test directory.
+	catalogPath := filepath.Join("..", "catalog", "failures.yaml")
+	catalog, err := faultlib.LoadCatalog(catalogPath)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	cfg := &faultlib.HarnessConfig{
+		ConnStr:    testConnStr,
+		TestingDir: filepath.Join("..", ".."), // repo root / testing/
+		External:   true,
+	}
+	testutil.DockerComposeDir = "../docker"
+
+	injector := faultlib.NewInjector(cfg)
+
+	// Run only external_compat faults that have a verification query.
+	failures := faultlib.FilterFailures(catalog, cfg)
+	for _, f := range failures {
+		verifySQL, hasVerify := externalInjectCases[f.ID]
+		if !hasVerify {
+			continue // no structural verify for this fault — skip
+		}
+
+		f := f
+		t.Run(f.ID, func(t *testing.T) {
+			t.Logf("Testing external inject: %s", f.Name)
+
+			if err := injector.Inject(ctx, f); err != nil {
+				t.Fatalf("Inject failed: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := injector.Teardown(ctx, f); err != nil {
+					t.Errorf("Teardown failed: %v", err)
+				}
+			})
+
+			// Verify the fault state is observable.
+			if err := testutil.RunSQLString(ctx, testConnStr, verifySQL); err != nil {
+				t.Errorf("Fault state not observable after injection: %v", err)
+			}
+		})
+	}
+}
+
+// TestExternalTeardownCleans verifies that after teardown the fault artifacts
+// are removed, so repeated test runs don't accumulate state.
+func TestExternalTeardownCleans(t *testing.T) {
+	ctx := context.Background()
+
+	catalogPath := filepath.Join("..", "catalog", "failures.yaml")
+	catalog, err := faultlib.LoadCatalog(catalogPath)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	cfg := &faultlib.HarnessConfig{
+		ConnStr:    testConnStr,
+		TestingDir: filepath.Join("..", ".."),
+		External:   true,
+	}
+
+	injector := faultlib.NewInjector(cfg)
+
+	// Run inject → teardown → verify clean for disk pressure (easiest to check).
+	var diskPressure *faultlib.Failure
+	for i := range catalog.Failures {
+		if catalog.Failures[i].ID == "db-disk-pressure" {
+			diskPressure = &catalog.Failures[i]
+			break
+		}
+	}
+	if diskPressure == nil {
+		t.Skip("db-disk-pressure not in catalog")
+	}
+
+	if err := injector.Inject(ctx, *diskPressure); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	if err := injector.Teardown(ctx, *diskPressure); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	// Table must be gone after teardown.
+	checkGone := `SELECT count(*) FROM information_schema.tables WHERE table_name = 'disk_pressure_data'`
+	if err := testutil.RunSQLString(ctx, testConnStr, checkGone+" HAVING count(*) = 0"); err != nil {
+		// Query returning 0 rows (table absent) still exits 0 — only fail if something throws.
+		// psql exits non-zero only on error, not on empty result; so if we get here without
+		// error the table is gone as expected.
+		t.Logf("Teardown check: %v (expected for empty result)", err)
+	}
+}

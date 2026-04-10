@@ -226,7 +226,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 
   ### Layer 4: Fault Injection Tests (with the wired faulttest into go test)
 
-  Goal: Run failure scenarios from failures.yaml (presently 17 of them, still missing SSL mismatch, DNS resolution failure, read-only replica queries, K8s RBAC denial, etc.) as Go tests, producing standard `go test` output alongside the existing JSON report.
+  Goal: Run failure scenarios from failures.yaml (currently 27: 16 database, 7 Kubernetes, 2 host, 2 compound) as Go tests, producing standard `go test` output alongside the existing JSON report.
 
   Approach: Create a Go test file that loads the catalog and runs each failure as a subtest:
 
@@ -264,7 +264,7 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
       docker compose -f testing/docker/docker-compose.yaml down -v
 ```
 
-See [Fault Injection](FAULT_INJECTION_TESTING.md) for details of the aiHelpDesk fault injection mechanism.
+See [Fault Injection](FAULT_INJECTION_TESTING.md) for the internal Docker-compose harness details. For the customer-facing external injection guide (SQL-only, SSH, remediation), see [docs/FAULTTEST.md](../docs/FAULTTEST.md).
 
 
   ### Layer 5: End-to-End Tests

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"helpdesk/testing/testutil"
 )
@@ -19,16 +23,25 @@ func NewInjector(cfg *HarnessConfig) *Injector {
 	return &Injector{cfg: cfg}
 }
 
-// Inject activates a failure mode.
+// Inject activates a failure mode. In external mode, ExternalInject is used when set.
 func (inj *Injector) Inject(ctx context.Context, f Failure) error {
-	slog.Info("injecting failure", "id", f.ID, "type", f.Inject.Type)
-	return inj.exec(ctx, f.Inject, f)
+	spec := f.Inject
+	if inj.cfg.External && f.ExternalInject.Type != "" {
+		spec = f.ExternalInject
+	}
+	slog.Info("injecting failure", "id", f.ID, "type", spec.Type)
+	return inj.exec(ctx, spec, f)
 }
 
-// Teardown deactivates a failure mode and restores normal state.
+// Teardown deactivates a failure mode and restores normal state. In external mode,
+// ExternalTeardown is used when set.
 func (inj *Injector) Teardown(ctx context.Context, f Failure) error {
-	slog.Info("tearing down failure", "id", f.ID, "type", f.Teardown.Type)
-	return inj.exec(ctx, f.Teardown, f)
+	spec := f.Teardown
+	if inj.cfg.External && f.ExternalTeardown.Type != "" {
+		spec = f.ExternalTeardown
+	}
+	slog.Info("tearing down failure", "id", f.ID, "type", spec.Type)
+	return inj.exec(ctx, spec, f)
 }
 
 func (inj *Injector) exec(ctx context.Context, spec InjectSpec, f Failure) error {
@@ -45,6 +58,8 @@ func (inj *Injector) exec(ctx context.Context, spec InjectSpec, f Failure) error
 		return inj.execKustomizeDelete(ctx, spec)
 	case "config":
 		return inj.execConfig(ctx, spec)
+	case "ssh_exec":
+		return inj.execSSH(ctx, spec)
 	case "":
 		return nil
 	default:
@@ -127,5 +142,50 @@ func (inj *Injector) execConfig(_ context.Context, spec InjectSpec) error {
 	}
 
 	// Restore is handled by the caller resetting HarnessConfig.
+	return nil
+}
+
+// execSSH runs a script on a remote host via SSH.
+// spec.ExecVia is the target in "user@host" or "host" form; the SSH user from
+// HarnessConfig is used as a fallback when ExecVia has no user prefix.
+// The script content is streamed via stdin: ssh ... 'bash -s' < scriptContent.
+func (inj *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
+	target := spec.ExecVia
+	if target == "" {
+		return fmt.Errorf("ssh_exec: exec_via (remote host) is required")
+	}
+
+	if !strings.Contains(target, "@") && inj.cfg.SSHUser != "" {
+		target = inj.cfg.SSHUser + "@" + target
+	}
+
+	var scriptContent []byte
+	switch {
+	case spec.ScriptInline != "":
+		scriptContent = []byte(spec.ScriptInline)
+	case spec.Script != "":
+		scriptPath := filepath.Join(inj.cfg.TestingDir, spec.Script)
+		var err error
+		scriptContent, err = os.ReadFile(scriptPath)
+		if err != nil {
+			return fmt.Errorf("ssh_exec: reading script %s: %v", scriptPath, err)
+		}
+	default:
+		return fmt.Errorf("ssh_exec: script or script_inline is required")
+	}
+
+	args := []string{"-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"}
+	if inj.cfg.SSHKeyPath != "" {
+		args = append(args, "-i", inj.cfg.SSHKeyPath)
+	}
+	args = append(args, target, "bash -s")
+
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdin = bytes.NewReader(scriptContent)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ssh_exec on %s: %v\n%s", target, err, output)
+	}
+	slog.Info("ssh_exec completed", "target", target, "output", strings.TrimSpace(string(output)))
 	return nil
 }

@@ -80,6 +80,21 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&categories, "categories", "", "Comma-separated categories to test (database,kubernetes,compound)")
 	fs.StringVar(&ids, "ids", "", "Comma-separated failure IDs to test")
 
+	// External PG mode.
+	fs.BoolVar(&cfg.External, "external", false, "Only run external_compat faults using libpq (no Docker/OS access needed)")
+
+	// SSH injection backend.
+	fs.StringVar(&cfg.SSHUser, "ssh-user", os.Getenv("USER"), "SSH username for ssh_exec faults")
+	fs.StringVar(&cfg.SSHKeyPath, "ssh-key", "", "SSH private key path for ssh_exec faults")
+
+	// Remediation phase.
+	fs.BoolVar(&cfg.RemediateEnabled, "remediate", false, "Run remediation phase after injection+diagnosis")
+	fs.StringVar(&cfg.GatewayURL, "gateway", "http://localhost:8080", "Gateway URL for playbook/agent remediation")
+	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
+
+	// Policy safety check.
+	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -110,12 +125,16 @@ func cmdList(args []string) {
 		os.Exit(1)
 	}
 
-	failures := FilterFailures(catalog, cfg.Categories, cfg.FailureIDs)
+	failures := FilterFailures(catalog, cfg)
 
-	fmt.Printf("%-30s %-12s %-10s %s\n", "ID", "CATEGORY", "SEVERITY", "NAME")
-	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("%-30s %-12s %-10s %-8s %s\n", "ID", "CATEGORY", "SEVERITY", "EXTERNAL", "NAME")
+	fmt.Println(strings.Repeat("-", 90))
 	for _, f := range failures {
-		fmt.Printf("%-30s %-12s %-10s %s\n", f.ID, f.Category, f.Severity, f.Name)
+		ext := ""
+		if f.ExternalCompat {
+			ext = "yes"
+		}
+		fmt.Printf("%-30s %-12s %-10s %-8s %s\n", f.ID, f.Category, f.Severity, ext, f.Name)
 	}
 	fmt.Printf("\nTotal: %d failure modes\n", len(failures))
 }
@@ -132,15 +151,22 @@ func cmdRun(args []string) {
 		os.Exit(1)
 	}
 
-	failures := FilterFailures(catalog, cfg.Categories, cfg.FailureIDs)
+	failures := FilterFailures(catalog, cfg)
 	if len(failures) == 0 {
 		fmt.Fprintln(os.Stderr, "No failures match the specified filters.")
+		os.Exit(1)
+	}
+
+	// Policy safety check: verify the target has a test/chaos tag.
+	if err := checkTargetSafety(cfg.InfraConfigPath, cfg.ConnStr); err != nil {
+		fmt.Fprintf(os.Stderr, "Safety check failed: %v\n", err)
 		os.Exit(1)
 	}
 
 	ctx := context.Background()
 	injector := NewInjector(cfg)
 	runner := NewRunner(cfg)
+	remediator := NewRemediator(cfg)
 
 	runID := uuid.New().String()[:8]
 	var results []EvalResult
@@ -182,9 +208,26 @@ func cmdRun(args []string) {
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
 		}
+
+		// 4. Remediation phase (optional).
+		if cfg.RemediateEnabled && f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "" {
+			remResult := remediator.Remediate(ctx, f)
+			evalResult.RemediationAttempted = true
+			evalResult.RemediationPassed = remResult.Passed
+			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
+			if remResult.Err != nil {
+				evalResult.RemediationError = remResult.Err.Error()
+			}
+			if remResult.Passed {
+				fmt.Printf("Remediation: RECOVERED in %.1fs\n", remResult.RecoveryTimeSecs)
+			} else {
+				fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
+			}
+		}
+
 		results = append(results, evalResult)
 
-		// 4. Teardown.
+		// 5. Teardown.
 		cfg.ConnStr = origConn
 		if err := injector.Teardown(ctx, f); err != nil {
 			slog.Error("teardown failed", "id", f.ID, "err", err)

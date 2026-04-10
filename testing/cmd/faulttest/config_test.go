@@ -19,9 +19,9 @@ func TestLoadCatalog_Valid(t *testing.T) {
 		t.Errorf("Version = %q, want %q", catalog.Version, "1")
 	}
 
-	// The real catalog has 24 failures: 13 database, 7 kubernetes, 2 host, 2 compound.
-	if len(catalog.Failures) != 24 {
-		t.Errorf("Failures count = %d, want 24", len(catalog.Failures))
+	// The real catalog has 27 failures: 16 database, 7 kubernetes, 2 host, 2 compound.
+	if len(catalog.Failures) != 27 {
+		t.Errorf("Failures count = %d, want 27", len(catalog.Failures))
 	}
 
 	// Spot-check a known failure.
@@ -87,9 +87,9 @@ func TestFilterFailures_NoFilter(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, nil, nil)
+	result := FilterFailures(catalog, &HarnessConfig{})
 	if len(result) != 3 {
-		t.Errorf("FilterFailures(nil, nil) = %d failures, want 3", len(result))
+		t.Errorf("FilterFailures(nil) = %d failures, want 3", len(result))
 	}
 }
 
@@ -103,9 +103,9 @@ func TestFilterFailures_ByCategory(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, []string{"database"}, nil)
+	result := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}})
 	if len(result) != 2 {
-		t.Errorf("FilterFailures([database], nil) = %d failures, want 2", len(result))
+		t.Errorf("FilterFailures([database]) = %d failures, want 2", len(result))
 	}
 	for _, f := range result {
 		if f.Category != "database" {
@@ -124,9 +124,9 @@ func TestFilterFailures_ByID(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, nil, []string{"db-2"})
+	result := FilterFailures(catalog, &HarnessConfig{FailureIDs: []string{"db-2"}})
 	if len(result) != 1 {
-		t.Fatalf("FilterFailures(nil, [db-2]) = %d failures, want 1", len(result))
+		t.Fatalf("FilterFailures([db-2]) = %d failures, want 1", len(result))
 	}
 	if result[0].ID != "db-2" {
 		t.Errorf("got ID %q, want %q", result[0].ID, "db-2")
@@ -144,9 +144,25 @@ func TestFilterFailures_ByCategoryAndID(t *testing.T) {
 	}
 
 	// ID filter takes precedence; category also matches.
-	result := FilterFailures(catalog, []string{"database"}, []string{"k8s-1"})
+	result := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}, FailureIDs: []string{"k8s-1"}})
 	if len(result) != 3 {
 		t.Errorf("FilterFailures([database], [k8s-1]) = %d failures, want 3", len(result))
+	}
+}
+
+func TestFilterFailures_External(t *testing.T) {
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "sql-1", Category: "database", ExternalCompat: true},
+			{ID: "docker-1", Category: "database", ExternalCompat: false},
+			{ID: "sql-2", Category: "database", ExternalCompat: true},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{External: true})
+	if len(result) != 2 {
+		t.Errorf("FilterFailures(external=true) = %d, want 2", len(result))
 	}
 }
 
@@ -157,28 +173,36 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 		t.Fatalf("LoadCatalog error: %v", err)
 	}
 
-	// Filter by database category should return 13 failures.
-	dbFailures := FilterFailures(catalog, []string{"database"}, nil)
-	if len(dbFailures) != 13 {
-		t.Errorf("database category count = %d, want 13", len(dbFailures))
+	// Filter by database category should return 16 failures.
+	dbFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}})
+	if len(dbFailures) != 16 {
+		t.Errorf("database category count = %d, want 16", len(dbFailures))
 	}
 
 	// Filter by kubernetes category should return 7 failures.
-	k8sFailures := FilterFailures(catalog, []string{"kubernetes"}, nil)
+	k8sFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"kubernetes"}})
 	if len(k8sFailures) != 7 {
 		t.Errorf("kubernetes category count = %d, want 7", len(k8sFailures))
 	}
 
 	// Filter by host category should return 2 failures.
-	hostFailures := FilterFailures(catalog, []string{"host"}, nil)
+	hostFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"host"}})
 	if len(hostFailures) != 2 {
 		t.Errorf("host category count = %d, want 2", len(hostFailures))
 	}
 
 	// Filter by compound category should return 2 failures.
-	compoundFailures := FilterFailures(catalog, []string{"compound"}, nil)
+	compoundFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"compound"}})
 	if len(compoundFailures) != 2 {
 		t.Errorf("compound category count = %d, want 2", len(compoundFailures))
+	}
+
+	// External filter: only external_compat faults.
+	extFailures := FilterFailures(catalog, &HarnessConfig{External: true})
+	for _, f := range extFailures {
+		if !f.ExternalCompat {
+			t.Errorf("external filter returned non-compatible fault %q", f.ID)
+		}
 	}
 }
 

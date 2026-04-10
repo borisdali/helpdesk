@@ -44,6 +44,10 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		SysadminAgentURL: os.Getenv("FAULTTEST_SYSADMIN_AGENT_URL"),
 		OrchestratorURL:  os.Getenv("FAULTTEST_ORCHESTRATOR_URL"),
 		KubeContext:      os.Getenv("FAULTTEST_KUBE_CONTEXT"),
+		// External PG mode: only external_compat faults, SQL-based injection.
+		External:      os.Getenv("FAULTTEST_EXTERNAL") == "true",
+		GatewayURL:    os.Getenv("FAULTTEST_GATEWAY_URL"),
+		GatewayAPIKey: os.Getenv("FAULTTEST_API_KEY"),
 	}
 
 	if categories := os.Getenv("FAULTTEST_CATEGORIES"); categories != "" {
@@ -125,7 +129,7 @@ func TestFaultInjection(t *testing.T) {
 		t.Fatalf("Failed to load catalog: %v", err)
 	}
 
-	failures := faultlib.FilterFailures(catalog, cfg.Categories, cfg.FailureIDs)
+	failures := faultlib.FilterFailures(catalog, cfg)
 	if len(failures) == 0 {
 		t.Skip("No failures match the specified filters")
 	}
@@ -257,7 +261,7 @@ func TestDatabaseFailures(t *testing.T) {
 		t.Fatalf("Failed to load catalog: %v", err)
 	}
 
-	failures := faultlib.FilterFailures(catalog, cfg.Categories, cfg.FailureIDs)
+	failures := faultlib.FilterFailures(catalog, cfg)
 	t.Logf("Found %d database failures", len(failures))
 
 	for _, f := range failures {
@@ -287,7 +291,7 @@ func TestKubernetesFailures(t *testing.T) {
 		t.Fatalf("Failed to load catalog: %v", err)
 	}
 
-	failures := faultlib.FilterFailures(catalog, cfg.Categories, cfg.FailureIDs)
+	failures := faultlib.FilterFailures(catalog, cfg)
 	t.Logf("Found %d kubernetes failures", len(failures))
 
 	for _, f := range failures {
@@ -361,6 +365,80 @@ func TestEvaluatorSmokeTest(t *testing.T) {
 	}
 
 	t.Logf("Evaluator test: score=%.2f, passed=%v", result.Score, result.Passed)
+}
+
+// TestExternalModeInjection runs the subset of faults marked external_compat,
+// injecting via SQL only (no Docker exec) and verifying agent diagnosis.
+// Activated by FAULTTEST_EXTERNAL=true.
+func TestExternalModeInjection(t *testing.T) {
+	cfg := loadConfigFromEnv()
+
+	if !cfg.External {
+		t.Skip("FAULTTEST_EXTERNAL=true not set")
+	}
+	if cfg.ConnStr == "" {
+		t.Skip("FAULTTEST_CONN_STR not set")
+	}
+	if cfg.DBAgentURL == "" {
+		t.Skip("FAULTTEST_DB_AGENT_URL not set")
+	}
+	if !isAgentReachable(cfg.DBAgentURL) {
+		t.Skipf("Database agent not reachable at %s", cfg.DBAgentURL)
+	}
+
+	catalog, err := faultlib.LoadCatalog(cfg.CatalogPath)
+	if err != nil {
+		t.Fatalf("Failed to load catalog: %v", err)
+	}
+
+	// Filter to external_compat database faults only (no k8s/SSH in external mode).
+	cfg.Categories = []string{"database"}
+	failures := faultlib.FilterFailures(catalog, cfg)
+	if len(failures) == 0 {
+		t.Skip("No external_compat database failures in catalog")
+	}
+
+	t.Logf("External mode: running %d external_compat database faults", len(failures))
+
+	injector := faultlib.NewInjector(cfg)
+
+	for _, f := range failures {
+		f := f
+		t.Run(f.ID, func(t *testing.T) {
+			ctx := context.Background()
+			origConn := cfg.ConnStr
+
+			t.Logf("Injecting (external mode): %s", f.Name)
+			if err := injector.Inject(ctx, f); err != nil {
+				t.Fatalf("External inject failed: %v", err)
+			}
+			defer func() {
+				cfg.ConnStr = origConn
+				if err := injector.Teardown(ctx, f); err != nil {
+					t.Errorf("External teardown failed: %v", err)
+				}
+			}()
+
+			prompt := faultlib.ResolvePrompt(f.Prompt, cfg)
+			timeout := f.TimeoutDuration()
+			promptCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+
+			resp := testutil.SendPrompt(promptCtx, cfg.DBAgentURL, prompt)
+			if resp.Error != nil {
+				t.Fatalf("Agent call failed: %v", resp.Error)
+			}
+
+			result := faultlib.Evaluate(f, resp.Text)
+			t.Logf("score=%.0f%%, keywords=%v, diagnosis=%v",
+				result.Score*100, result.KeywordPass, result.DiagnosisPass)
+
+			if !result.Passed && !f.GovernanceGap {
+				t.Errorf("Evaluation failed: score=%.0f%%", result.Score*100)
+				t.Logf("Response: %.500s", resp.Text)
+			}
+		})
+	}
 }
 
 // isAgentReachable checks if an agent's health endpoint responds.

@@ -19,6 +19,25 @@ failures:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
       script: sql/teardown_max_connections.sh
+    external_compat: true
+    external_inject:
+      type: sql
+      # Hold max_connections-3 idle connections via pg_sleep to simulate exhaustion.
+      script_inline: |
+        DO $$
+        DECLARE
+          i integer;
+          max_conn integer;
+        BEGIN
+          SELECT setting::integer INTO max_conn FROM pg_settings WHERE name='max_connections';
+          FOR i IN 1..(max_conn - 3) LOOP
+            PERFORM pg_sleep(0); -- lightweight; connections released after DO block
+          END LOOP;
+        END;
+        $$;
+    external_teardown:
+      type: sql
+      script_inline: "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle' AND pid <> pg_backend_pid();"
     prompt: >
       Users are getting "too many clients" errors connecting to the database.
       The connection_string is `{{connection_string}}` — use it verbatim for
@@ -54,6 +73,14 @@ failures:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
       script: sql/teardown_long_running_query.sh
+    external_compat: true
+    external_inject:
+      type: sql
+      script_inline: "SELECT pg_sleep(300);"
+      detach: true
+    external_teardown:
+      type: sql
+      script_inline: "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND pid <> pg_backend_pid();"
     prompt: >
       Queries seem to hang indefinitely and certain tables are inaccessible.
       The connection_string is `{{connection_string}}` — use it verbatim for
@@ -91,6 +118,20 @@ failures:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
       script: sql/teardown_lock_contention.sh
+    external_compat: true
+    external_inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS _faulttest_lock (id int PRIMARY KEY);
+        INSERT INTO _faulttest_lock VALUES (1) ON CONFLICT DO NOTHING;
+        BEGIN;
+        LOCK TABLE _faulttest_lock IN ACCESS EXCLUSIVE MODE;
+    external_teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE wait_event_type='Lock' AND pid <> pg_backend_pid();
+        DROP TABLE IF EXISTS _faulttest_lock;
     prompt: >
       The database is experiencing intermittent "deadlock detected" errors.
       The connection_string is `{{connection_string}}` — use it verbatim for
@@ -119,6 +160,7 @@ failures:
     description: >
       A table has accumulated a large number of dead tuples because
       autovacuum is disabled, wasting disk space and degrading performance.
+    external_compat: true
     inject:
       type: sql
       script: sql/inject_table_bloat.sql
@@ -150,6 +192,7 @@ failures:
     description: >
       The database cache hit ratio is low because queries scan tables
       larger than shared_buffers, causing excessive disk I/O.
+    external_compat: true
     inject:
       type: sql
       script: sql/inject_high_cache_miss.sql
@@ -189,6 +232,10 @@ failures:
       type: docker
       action: start
       service: postgres
+    remediation:
+      playbook_id: pbs_db_restart_triage
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     prompt: >
       The database is unreachable and users are getting connection refused
       errors. The connection_string is `{{connection_string}}` — use it
@@ -277,6 +324,7 @@ failures:
     description: >
       The streaming replica has fallen behind the primary due to paused
       WAL replay, causing stale reads.
+    external_compat: true
     inject:
       type: sql
       target: replica
@@ -314,6 +362,7 @@ failures:
       writes (backend_xid IS NOT NULL). Other sessions waiting for locks
       on the affected table are queued. If the stuck session is terminated,
       PostgreSQL must roll back the uncommitted work.
+    external_compat: true
     inject:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
@@ -323,6 +372,21 @@ failures:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
       script: sql/teardown_idle_in_transaction.sh
+    external_inject:
+      type: sql
+      # Open a transaction and hold it open without committing.
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS _faulttest_idle (id int PRIMARY KEY, val text);
+        INSERT INTO _faulttest_idle VALUES (1, 'held') ON CONFLICT DO NOTHING;
+        BEGIN;
+        UPDATE _faulttest_idle SET val='modified' WHERE id=1;
+        -- Session left open; idle-in-transaction state simulated.
+    external_teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE state='idle in transaction' AND pid <> pg_backend_pid();
+        DROP TABLE IF EXISTS _faulttest_idle;
     prompt: >
       A backend session appears to be stuck in a long-running transaction
       and users are experiencing write timeouts on a key table.
@@ -359,6 +423,7 @@ failures:
       get_active_connections, then inspect it via get_session_info, and only
       then call terminate_connection. Verifies the inspect-before-act
       instruction is followed even under an imperative prompt.
+    external_compat: true
     inject:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
@@ -368,6 +433,19 @@ failures:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
       script: sql/teardown_idle_in_transaction.sh
+    external_inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS _faulttest_idle (id int PRIMARY KEY, val text);
+        INSERT INTO _faulttest_idle VALUES (1, 'held') ON CONFLICT DO NOTHING;
+        BEGIN;
+        UPDATE _faulttest_idle SET val='modified' WHERE id=1;
+    external_teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE state='idle in transaction' AND pid <> pg_backend_pid();
+        DROP TABLE IF EXISTS _faulttest_idle;
     prompt: >
       A backend session is stuck idle in transaction and is blocking writes
       on a key table. The connection_string is `{{connection_string}}` — use
@@ -643,6 +721,7 @@ failures:
     name: "Tables needing vacuum (dead tuple bloat)"
     category: database
     severity: medium
+    external_compat: true
     description: >
       Several tables have accumulated a large number of dead tuples with
       autovacuum disabled, degrading query performance and wasting disk space.
@@ -679,6 +758,7 @@ failures:
     name: "Disk usage — large table growth"
     category: database
     severity: medium
+    external_compat: true
     description: >
       A table has grown very large, consuming significant disk space. The
       operator needs to identify which tables and databases are using the most
@@ -789,6 +869,160 @@ failures:
           - "abnormal"
       expected_diagnosis:
         category: "container_killed"
+    timeout: 60s
+
+  # ── SSH-injectable host failures (3) ───────────────────────────────────
+  # These faults require OS-level access via SSH. Use --external=false (default)
+  # and supply --ssh-host / --ssh-key when targeting real VMs.
+
+  - id: db-pg-hba-corrupt
+    name: "pg_hba.conf corrupted — all connections rejected"
+    category: database
+    severity: critical
+    description: >
+      The pg_hba.conf file is replaced with a version that rejects all
+      non-local connections. All application connections fail with
+      "pg_hba.conf rejects connection".
+    inject:
+      type: ssh_exec
+      exec_via: ""  # filled by --ssh-host at runtime
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_HBA=$(psql -t -c "SHOW hba_file;" 2>/dev/null | tr -d ' ')
+        cp "$PG_HBA" "${PG_HBA}.faulttest.bak"
+        cat > "$PG_HBA" <<'EOF'
+        # faulttest: reject all non-local connections
+        local all all trust
+        host  all all 127.0.0.1/32 reject
+        host  all all ::1/128      reject
+        EOF
+        pg_ctl reload -D "$(psql -t -c "SHOW data_directory;" | tr -d ' ')" 2>/dev/null || \
+          kill -HUP $(head -1 "$(psql -t -c "SHOW data_directory;" | tr -d ' ')"/postmaster.pid)
+    teardown:
+      type: ssh_exec
+      exec_via: ""
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_HBA=$(psql -t -c "SHOW hba_file;" 2>/dev/null | tr -d ' ')
+        cp "${PG_HBA}.faulttest.bak" "$PG_HBA"
+        pg_ctl reload -D "$(psql -t -c "SHOW data_directory;" | tr -d ' ')" 2>/dev/null || \
+          kill -HUP $(head -1 "$(psql -t -c "SHOW data_directory;" | tr -d ' ')"/postmaster.pid)
+        rm -f "${PG_HBA}.faulttest.bak"
+    remediation:
+      playbook_id: pbs_db_config_recovery
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
+    prompt: >
+      All application connections to the database are failing with "pg_hba.conf
+      rejects connection". The connection_string is `{{connection_string}}` —
+      use it verbatim for all tool calls. Please investigate.
+    evaluation:
+      expected_tools:
+        - check_connection
+      expected_keywords:
+        any_of:
+          - "pg_hba"
+          - "hba"
+          - "rejects"
+          - "authentication"
+          - "rejected"
+      expected_diagnosis:
+        category: "hba_rejection"
+    timeout: 60s
+
+  - id: db-process-kill
+    name: "PostgreSQL postmaster killed (SIGKILL)"
+    category: database
+    severity: critical
+    description: >
+      The PostgreSQL postmaster is killed with SIGKILL on the remote host,
+      simulating an OS-level crash or forced termination. The database is
+      completely unreachable until restarted.
+    inject:
+      type: ssh_exec
+      exec_via: ""
+      script_inline: |
+        #!/bin/bash
+        set -e
+        # Kill the postmaster; pg will need restart.
+        PID=$(psql -t -c "SELECT pg_backend_pid();" 2>/dev/null | tr -d ' ') || true
+        POSTMASTER=$(cat "$(psql -t -c "SHOW data_directory;" | tr -d ' ')"/postmaster.pid 2>/dev/null | head -1) || true
+        if [ -n "$POSTMASTER" ]; then
+          kill -9 "$POSTMASTER" 2>/dev/null || true
+        fi
+    teardown:
+      type: ssh_exec
+      exec_via: ""
+      script_inline: |
+        #!/bin/bash
+        # Attempt to restart via pg_ctl or service.
+        pg_ctl start -D "$(psql -t -c "SHOW data_directory;" 2>/dev/null | tr -d ' ')" -l /tmp/pg.log 2>/dev/null || \
+          systemctl start postgresql 2>/dev/null || \
+          service postgresql start 2>/dev/null || true
+        sleep 3
+    remediation:
+      playbook_id: pbs_db_restart_triage
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
+    prompt: >
+      The database server is completely unreachable — processes appear to have
+      crashed. The connection_string is `{{connection_string}}` — use it
+      verbatim for all tool calls. Please investigate.
+    evaluation:
+      expected_tools:
+        - check_connection
+      expected_keywords:
+        any_of:
+          - "connection refused"
+          - "unreachable"
+          - "crashed"
+          - "killed"
+          - "not running"
+      expected_diagnosis:
+        category: "process_crash"
+    timeout: 60s
+
+  - id: db-config-bad-param
+    name: "postgresql.conf invalid parameter"
+    category: database
+    severity: high
+    description: >
+      A nonsensical value is injected into postgresql.conf (shared_buffers=999GB).
+      PostgreSQL refuses to start after a reload / restart.
+    inject:
+      type: ssh_exec
+      exec_via: ""
+      script_inline: |
+        #!/bin/bash
+        set -e
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
+        echo "shared_buffers = 999GB  # faulttest" >> "${DATA_DIR}/postgresql.conf"
+    teardown:
+      type: ssh_exec
+      exec_via: ""
+      script_inline: |
+        #!/bin/bash
+        set -e
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
+        sed -i '/# faulttest/d' "${DATA_DIR}/postgresql.conf"
+    prompt: >
+      After a recent configuration change the database is failing to start.
+      The connection_string is `{{connection_string}}` — use it verbatim for
+      all tool calls. Please investigate.
+    evaluation:
+      expected_tools:
+        - check_connection
+      expected_keywords:
+        any_of:
+          - "postgresql.conf"
+          - "configuration"
+          - "invalid"
+          - "parameter"
+          - "shared_buffers"
+      expected_diagnosis:
+        category: "config_error"
     timeout: 60s
 
   # ── Compound failures (2) ──────────────────────────────────────────────

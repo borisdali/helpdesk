@@ -17,6 +17,12 @@ type EvalResult struct {
 	ResponseText string  `json:"response_text"`
 	Duration     string  `json:"duration"`
 	Error        string  `json:"error,omitempty"`
+
+	// Remediation outcome (populated only when --remediate is set).
+	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
+	RemediationPassed    bool    `json:"remediation_passed,omitempty"`
+	RecoveryTimeSecs     float64 `json:"recovery_time_seconds,omitempty"`
+	RemediationError     string  `json:"remediation_error,omitempty"`
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.

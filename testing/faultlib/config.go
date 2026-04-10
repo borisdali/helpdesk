@@ -28,10 +28,13 @@ func LoadCatalog(path string) (*Catalog, error) {
 }
 
 // FilterFailures returns failures matching the given categories and/or IDs.
-func FilterFailures(catalog *Catalog, categories, ids []string) []Failure {
-	if len(categories) == 0 && len(ids) == 0 {
-		return catalog.Failures
+// When cfg.External is true, only faults marked external_compat are included.
+func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
+	if cfg == nil {
+		cfg = &HarnessConfig{}
 	}
+	categories := cfg.Categories
+	ids := cfg.FailureIDs
 
 	catSet := make(map[string]bool, len(categories))
 	for _, c := range categories {
@@ -45,6 +48,15 @@ func FilterFailures(catalog *Catalog, categories, ids []string) []Failure {
 
 	var result []Failure
 	for _, f := range catalog.Failures {
+		// External mode: skip faults that don't work without Docker/OS access.
+		if cfg.External && !f.ExternalCompat {
+			continue
+		}
+
+		if len(categories) == 0 && len(ids) == 0 {
+			result = append(result, f)
+			continue
+		}
 		if len(idSet) > 0 && idSet[f.ID] {
 			result = append(result, f)
 			continue
