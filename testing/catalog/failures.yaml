@@ -99,7 +99,7 @@ failures:
           - "blocked"
       expected_diagnosis:
         category: "lock_blocking"
-    timeout: 180s
+    timeout: 90s
 
   - id: db-lock-contention
     name: "Lock contention / deadlock"
@@ -897,6 +897,12 @@ failures:
       expected_diagnosis:
         category: "container_killed"
     timeout: 60s
+    # GOVERNANCE GAP: the sysadmin agent cannot distinguish a SIGKILL (exit 137)
+    # from a clean stop (exit 0) — both appear as "container stopped" in tool output.
+    # The agent diagnoses both as "clean shutdown / administrator command" when it
+    # should detect the abnormal exit code. Fix requires the check_host tool to
+    # expose the container exit code and the agent to reason about it.
+    governance_gap: true
 
   # ── SSH-injectable host failures (3) ───────────────────────────────────
   # These faults require OS-level access via SSH. Use --external=false (default)
