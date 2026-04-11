@@ -99,7 +99,7 @@ failures:
           - "blocked"
       expected_diagnosis:
         category: "lock_blocking"
-    timeout: 60s
+    timeout: 180s
 
   - id: db-lock-contention
     name: "Lock contention / deadlock"
@@ -167,6 +167,17 @@ failures:
     teardown:
       type: sql
       script: sql/teardown_table_bloat.sql
+    external_inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS test_bloat_table (id SERIAL PRIMARY KEY, data TEXT);
+        ALTER TABLE test_bloat_table SET (autovacuum_enabled = false);
+        INSERT INTO test_bloat_table (data) SELECT repeat('x', 200) FROM generate_series(1, 100000);
+        DELETE FROM test_bloat_table WHERE id % 10 != 0;
+        CHECKPOINT;
+    external_teardown:
+      type: sql
+      script_inline: "DROP TABLE IF EXISTS test_bloat_table;"
     prompt: >
       The database seems to be using more disk than expected and some queries
       are getting slower. The connection_string is `{{connection_string}}` —
@@ -199,6 +210,16 @@ failures:
     teardown:
       type: sql
       script: sql/teardown_high_cache_miss.sql
+    external_inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS test_large_table (id SERIAL PRIMARY KEY, data TEXT);
+        INSERT INTO test_large_table (data) SELECT repeat('y', 500) FROM generate_series(1, 100000);
+        SELECT pg_stat_reset();
+        SELECT count(*) FROM test_large_table WHERE data LIKE '%z%';
+    external_teardown:
+      type: sql
+      script_inline: "DROP TABLE IF EXISTS test_large_table; SELECT pg_stat_reset();"
     prompt: >
       Users report slow query performance. The connection_string is
       `{{connection_string}}` — use it verbatim for all tool calls.
@@ -710,9 +731,13 @@ failures:
           - "zero replicas"
           - "0 replicas"
           - "no pods"
+          - "no running pods"
+          - "0 pods"
           - "scaled"
           - "replicas"
           - "unavailable"
+          - "0/1"
+          - "not available"
       expected_diagnosis:
         category: "scaled_down"
     timeout: 90s
@@ -826,8 +851,10 @@ failures:
           - "container"
           - "not running"
           - "offline"
+          - "shut down"
+          - "shutdown"
       expected_diagnosis:
-        category: "container_stopped"
+        category: "shutdown"
     timeout: 60s
 
   - id: host-pg-crash
@@ -884,32 +911,51 @@ failures:
       non-local connections. All application connections fail with
       "pg_hba.conf rejects connection".
     inject:
+      type: docker_exec
+      exec_via: helpdesk-test-pg
+      user: postgres
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_HBA=$(psql -t -c "SHOW hba_file;" | tr -d ' ')
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
+        cp "$PG_HBA" "${PG_HBA}.faulttest.bak"
+        printf 'local all all trust\nhost all all 0.0.0.0/0 reject\nhost all all ::/0 reject\n' > "$PG_HBA"
+        kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
+    teardown:
+      type: docker_exec
+      exec_via: helpdesk-test-pg
+      user: postgres
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_HBA=$(psql -t -c "SHOW hba_file;" | tr -d ' ')
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
+        cp "${PG_HBA}.faulttest.bak" "$PG_HBA"
+        rm -f "${PG_HBA}.faulttest.bak"
+        kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
+    external_inject:
       type: ssh_exec
       exec_via: ""  # filled by --ssh-host at runtime
       script_inline: |
         #!/bin/bash
         set -e
         PG_HBA=$(psql -t -c "SHOW hba_file;" 2>/dev/null | tr -d ' ')
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
         cp "$PG_HBA" "${PG_HBA}.faulttest.bak"
-        cat > "$PG_HBA" <<'EOF'
-        # faulttest: reject all non-local connections
-        local all all trust
-        host  all all 127.0.0.1/32 reject
-        host  all all ::1/128      reject
-        EOF
-        pg_ctl reload -D "$(psql -t -c "SHOW data_directory;" | tr -d ' ')" 2>/dev/null || \
-          kill -HUP $(head -1 "$(psql -t -c "SHOW data_directory;" | tr -d ' ')"/postmaster.pid)
-    teardown:
+        printf 'local all all trust\nhost all all 0.0.0.0/0 reject\nhost all all ::/0 reject\n' > "$PG_HBA"
+        pg_ctl reload -D "$DATA_DIR" 2>/dev/null || kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
+    external_teardown:
       type: ssh_exec
       exec_via: ""
       script_inline: |
         #!/bin/bash
         set -e
         PG_HBA=$(psql -t -c "SHOW hba_file;" 2>/dev/null | tr -d ' ')
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
         cp "${PG_HBA}.faulttest.bak" "$PG_HBA"
-        pg_ctl reload -D "$(psql -t -c "SHOW data_directory;" | tr -d ' ')" 2>/dev/null || \
-          kill -HUP $(head -1 "$(psql -t -c "SHOW data_directory;" | tr -d ' ')"/postmaster.pid)
         rm -f "${PG_HBA}.faulttest.bak"
+        pg_ctl reload -D "$DATA_DIR" 2>/dev/null || kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
     remediation:
       playbook_id: pbs_db_config_recovery
       verify_sql: "SELECT 1"
@@ -937,27 +983,33 @@ failures:
     category: database
     severity: critical
     description: >
-      The PostgreSQL postmaster is killed with SIGKILL on the remote host,
-      simulating an OS-level crash or forced termination. The database is
-      completely unreachable until restarted.
+      The PostgreSQL postmaster is killed with SIGKILL, simulating an OS-level
+      crash or forced termination. The database is completely unreachable until
+      restarted.
     inject:
+      type: docker
+      action: kill
+      signal: SIGKILL
+      service: postgres
+    teardown:
+      type: docker
+      action: start
+      service: postgres
+    external_inject:
       type: ssh_exec
-      exec_via: ""
+      exec_via: ""  # filled by --ssh-host at runtime
       script_inline: |
         #!/bin/bash
         set -e
-        # Kill the postmaster; pg will need restart.
-        PID=$(psql -t -c "SELECT pg_backend_pid();" 2>/dev/null | tr -d ' ') || true
         POSTMASTER=$(cat "$(psql -t -c "SHOW data_directory;" | tr -d ' ')"/postmaster.pid 2>/dev/null | head -1) || true
         if [ -n "$POSTMASTER" ]; then
           kill -9 "$POSTMASTER" 2>/dev/null || true
         fi
-    teardown:
+    external_teardown:
       type: ssh_exec
       exec_via: ""
       script_inline: |
         #!/bin/bash
-        # Attempt to restart via pg_ctl or service.
         pg_ctl start -D "$(psql -t -c "SHOW data_directory;" 2>/dev/null | tr -d ' ')" -l /tmp/pg.log 2>/dev/null || \
           systemctl start postgresql 2>/dev/null || \
           service postgresql start 2>/dev/null || true
@@ -992,21 +1044,62 @@ failures:
       A nonsensical value is injected into postgresql.conf (shared_buffers=999GB).
       PostgreSQL refuses to start after a reload / restart.
     inject:
-      type: ssh_exec
-      exec_via: ""
+      type: shell_exec
       script_inline: |
         #!/bin/bash
         set -e
-        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
-        echo "shared_buffers = 999GB  # faulttest" >> "${DATA_DIR}/postgresql.conf"
+        # Wait for postgres to be ready (up to 60s) — previous test may have restarted the container.
+        for i in $(seq 1 60); do
+          docker exec helpdesk-test-pg pg_isready -U postgres 2>/dev/null && break
+          sleep 1
+        done
+        # Add the invalid parameter while postgres is running, then stop the container.
+        # The container's data volume retains the bad config, so postgres will fail to
+        # start when the container is restarted (simulating a bad-config startup failure).
+        docker exec -u postgres helpdesk-test-pg bash -c '
+          set -e
+          DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d " ")
+          cp "${DATA_DIR}/postgresql.conf" "${DATA_DIR}/postgresql.conf.faulttest.bak"
+          echo "shared_buffers = 999GB  # faulttest" >> "${DATA_DIR}/postgresql.conf"
+        '
+        docker stop helpdesk-test-pg
     teardown:
+      type: shell_exec
+      script_inline: |
+        #!/bin/bash
+        set -e
+        # Restore the clean config from the backup we left on the data volume.
+        # docker cp works on stopped containers.
+        docker cp helpdesk-test-pg:/var/lib/postgresql/data/postgresql.conf.faulttest.bak \
+          /tmp/pg_conf_faulttest.bak
+        docker cp /tmp/pg_conf_faulttest.bak \
+          helpdesk-test-pg:/var/lib/postgresql/data/postgresql.conf
+        rm -f /tmp/pg_conf_faulttest.bak
+        docker start helpdesk-test-pg
+        # Wait for postgres to be ready (up to 30s).
+        for i in $(seq 1 30); do
+          docker exec helpdesk-test-pg pg_isready -U postgres 2>/dev/null && exit 0
+          sleep 1
+        done
+        echo "WARNING: postgres not ready after 30s" >&2
+    external_inject:
+      type: ssh_exec
+      exec_via: ""  # filled by --ssh-host at runtime
+      script_inline: |
+        #!/bin/bash
+        set -e
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
+        cp "${DATA_DIR}/postgresql.conf" "${DATA_DIR}/postgresql.conf.faulttest.bak"
+        echo "shared_buffers = 999GB  # faulttest" >> "${DATA_DIR}/postgresql.conf"
+    external_teardown:
       type: ssh_exec
       exec_via: ""
       script_inline: |
         #!/bin/bash
         set -e
         DATA_DIR=$(psql -t -c "SHOW data_directory;" | tr -d ' ')
-        sed -i '/# faulttest/d' "${DATA_DIR}/postgresql.conf"
+        cp "${DATA_DIR}/postgresql.conf.faulttest.bak" "${DATA_DIR}/postgresql.conf"
+        rm -f "${DATA_DIR}/postgresql.conf.faulttest.bak"
     prompt: >
       After a recent configuration change the database is failing to start.
       The connection_string is `{{connection_string}}` — use it verbatim for

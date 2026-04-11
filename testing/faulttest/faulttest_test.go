@@ -46,6 +46,10 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		KubeContext:      os.Getenv("FAULTTEST_KUBE_CONTEXT"),
 		// External PG mode: only external_compat faults, SQL-based injection.
 		External:      os.Getenv("FAULTTEST_EXTERNAL") == "true",
+		// SSH mode: set FAULTTEST_SSH_HOST to route ssh_exec faults via ExternalInject.
+		SSHHost:       os.Getenv("FAULTTEST_SSH_HOST"),
+		SSHUser:       os.Getenv("FAULTTEST_SSH_USER"),
+		SSHKeyPath:    os.Getenv("FAULTTEST_SSH_KEY"),
 		GatewayURL:    os.Getenv("FAULTTEST_GATEWAY_URL"),
 		GatewayAPIKey: os.Getenv("FAULTTEST_API_KEY"),
 	}
@@ -160,9 +164,18 @@ func TestFaultInjection(t *testing.T) {
 				t.Skip("FAULTTEST_CONN_STR not set")
 			}
 
-			// Check kubernetes context for kubernetes failures.
-			if f.Category == "kubernetes" && cfg.KubeContext == "" {
+			// Check kubernetes context for kubernetes failures and any fault
+			// whose inject uses kustomize (which requires kubectl + a valid context).
+			needsKube := f.Category == "kubernetes" ||
+				f.Inject.Type == "kustomize" || f.Inject.Type == "kustomize_delete"
+			if needsKube && cfg.KubeContext == "" {
 				t.Skip("FAULTTEST_KUBE_CONTEXT not set")
+			}
+
+			// Skip ssh_exec faults when no target host is configured.
+			// These faults require a real remote host (exec_via filled at runtime).
+			if f.Inject.Type == "ssh_exec" && f.Inject.ExecVia == "" {
+				t.Skip("ssh_exec fault requires a target host; set FAULTTEST_SSH_HOST or exec_via in catalog")
 			}
 
 			ctx := context.Background()

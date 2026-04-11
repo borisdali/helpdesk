@@ -23,21 +23,22 @@ func NewInjector(cfg *HarnessConfig) *Injector {
 	return &Injector{cfg: cfg}
 }
 
-// Inject activates a failure mode. In external mode, ExternalInject is used when set.
+// Inject activates a failure mode. In external mode or when SSHHost is configured,
+// ExternalInject is used when set.
 func (inj *Injector) Inject(ctx context.Context, f Failure) error {
 	spec := f.Inject
-	if inj.cfg.External && f.ExternalInject.Type != "" {
+	if (inj.cfg.External || inj.cfg.SSHHost != "") && f.ExternalInject.Type != "" {
 		spec = f.ExternalInject
 	}
 	slog.Info("injecting failure", "id", f.ID, "type", spec.Type)
 	return inj.exec(ctx, spec, f)
 }
 
-// Teardown deactivates a failure mode and restores normal state. In external mode,
-// ExternalTeardown is used when set.
+// Teardown deactivates a failure mode and restores normal state. In external mode
+// or when SSHHost is configured, ExternalTeardown is used when set.
 func (inj *Injector) Teardown(ctx context.Context, f Failure) error {
 	spec := f.Teardown
-	if inj.cfg.External && f.ExternalTeardown.Type != "" {
+	if (inj.cfg.External || inj.cfg.SSHHost != "") && f.ExternalTeardown.Type != "" {
 		spec = f.ExternalTeardown
 	}
 	slog.Info("tearing down failure", "id", f.ID, "type", spec.Type)
@@ -60,6 +61,8 @@ func (inj *Injector) exec(ctx context.Context, spec InjectSpec, f Failure) error
 		return inj.execConfig(ctx, spec)
 	case "ssh_exec":
 		return inj.execSSH(ctx, spec)
+	case "shell_exec":
+		return inj.execShell(ctx, spec)
 	case "":
 		return nil
 	default:
@@ -95,23 +98,27 @@ func (inj *Injector) execDocker(ctx context.Context, spec InjectSpec) error {
 		return testutil.DockerComposeStop(ctx, spec.Service)
 	case "start":
 		return testutil.DockerComposeStart(ctx, spec.Service)
+	case "kill":
+		sig := spec.Signal
+		if sig == "" {
+			sig = "SIGKILL"
+		}
+		return testutil.DockerComposeKill(ctx, sig, spec.Service)
 	default:
 		return fmt.Errorf("unknown docker action: %s", spec.Action)
 	}
 }
 
 func (inj *Injector) execDockerExec(ctx context.Context, spec InjectSpec) error {
-	scriptPath := filepath.Join(inj.cfg.TestingDir, spec.Script)
 	container := spec.ExecVia
 	if container == "" {
 		container = "helpdesk-test-pgloader"
 	}
-
-	// Copy script into container and execute it.
-	if err := testutil.DockerCopyAndExec(ctx, container, scriptPath, spec.Detach); err != nil {
-		return fmt.Errorf("docker exec in %s: %v", container, err)
+	if spec.ScriptInline != "" {
+		return testutil.DockerExecInlineScript(ctx, container, []byte(spec.ScriptInline), spec.User, spec.Detach)
 	}
-	return nil
+	scriptPath := filepath.Join(inj.cfg.TestingDir, spec.Script)
+	return testutil.DockerCopyAndExec(ctx, container, scriptPath, spec.Detach)
 }
 
 func (inj *Injector) execKustomize(ctx context.Context, spec InjectSpec) error {
@@ -145,14 +152,43 @@ func (inj *Injector) execConfig(_ context.Context, spec InjectSpec) error {
 	return nil
 }
 
+// execShell runs an inline bash script or script file on the local host.
+// Useful for multi-step inject/teardown that mix docker exec, docker cp, etc.
+func (inj *Injector) execShell(ctx context.Context, spec InjectSpec) error {
+	var scriptContent []byte
+	if spec.ScriptInline != "" {
+		scriptContent = []byte(spec.ScriptInline)
+	} else if spec.Script != "" {
+		path := filepath.Join(inj.cfg.TestingDir, spec.Script)
+		var err error
+		scriptContent, err = os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("shell_exec: reading %s: %v", path, err)
+		}
+	} else {
+		return fmt.Errorf("shell_exec: script or script_inline is required")
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-s")
+	cmd.Stdin = bytes.NewReader(scriptContent)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("shell_exec: %v\n%s", err, output)
+	}
+	slog.Info("shell_exec completed", "output", strings.TrimSpace(string(output)))
+	return nil
+}
+
 // execSSH runs a script on a remote host via SSH.
-// spec.ExecVia is the target in "user@host" or "host" form; the SSH user from
-// HarnessConfig is used as a fallback when ExecVia has no user prefix.
-// The script content is streamed via stdin: ssh ... 'bash -s' < scriptContent.
+// spec.ExecVia is the target in "user@host" or "host" form; cfg.SSHHost is used
+// as fallback when ExecVia is empty. The SSH user from HarnessConfig is prepended
+// when no "@" is present. Script content is streamed via stdin.
 func (inj *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
 	target := spec.ExecVia
 	if target == "" {
-		return fmt.Errorf("ssh_exec: exec_via (remote host) is required")
+		target = inj.cfg.SSHHost
+	}
+	if target == "" {
+		return fmt.Errorf("ssh_exec: exec_via (remote host) is required; pass --ssh-host or set exec_via in the catalog")
 	}
 
 	if !strings.Contains(target, "@") && inj.cfg.SSHUser != "" {

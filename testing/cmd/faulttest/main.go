@@ -84,7 +84,8 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.BoolVar(&cfg.External, "external", false, "Only run external_compat faults using libpq (no Docker/OS access needed)")
 
 	// SSH injection backend.
-	fs.StringVar(&cfg.SSHUser, "ssh-user", os.Getenv("USER"), "SSH username for ssh_exec faults")
+	fs.StringVar(&cfg.SSHHost, "ssh-host", "", "SSH target for ssh_exec faults (user@host or host); triggers ExternalInject mode")
+	fs.StringVar(&cfg.SSHUser, "ssh-user", os.Getenv("USER"), "SSH username for ssh_exec faults (prepended to host when no @ in --ssh-host)")
 	fs.StringVar(&cfg.SSHKeyPath, "ssh-key", "", "SSH private key path for ssh_exec faults")
 
 	// Remediation phase.

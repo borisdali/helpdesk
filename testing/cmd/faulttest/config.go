@@ -65,6 +65,8 @@ type InjectSpec struct {
 	// ExecVia is the container/host target for docker_exec and ssh_exec types.
 	// For ssh_exec it is the remote host in "user@host" or "host" form.
 	ExecVia      string            `yaml:"exec_via,omitempty"`
+	// User is the OS user to run the script as in docker_exec mode (e.g., "postgres").
+	User         string            `yaml:"user,omitempty"`
 	Action       string            `yaml:"action,omitempty"`
 	Service      string            `yaml:"service,omitempty"`
 	Signal       string            `yaml:"signal,omitempty"`
@@ -118,6 +120,10 @@ type HarnessConfig struct {
 	GatewayAPIKey string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
 	InfraConfigPath string
+	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty
+	// (e.g., "ubuntu@customer-vm.example.com" or just "customer-vm").
+	// When set, ExternalInject/ExternalTeardown are used instead of Inject/Teardown.
+	SSHHost string
 	// SSHUser is the SSH username for ssh_exec faults.
 	SSHUser string
 	// SSHKeyPath is the SSH private key path for ssh_exec faults.
