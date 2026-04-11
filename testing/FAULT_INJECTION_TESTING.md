@@ -10,7 +10,11 @@ Once a failure occurs, use aiHelpDesk to see if it can rectify
 a failure automatically or at least provide guidance on how
 to proceed.
 
-The catalog currently contains **27 failure modes** (16 database, 7 Kubernetes, 2 host, 2 compound) and is embedded into the `faulttest` binary at build time — the binary works without the source tree present. Customers can layer their own fault files on top via `--catalog`; see [docs/FAULTTEST.md](../docs/FAULTTEST.md#9-customer-fault-catalogs) for details. The sample log below predates several additions and shows an earlier count — it is kept for reference.
+The catalog currently contains **27 failure modes** (16 database, 7 Kubernetes, 2 host, 2 compound) and is embedded into the `faulttest` binary at build time — the binary works without the source tree present. Customers can layer their own fault files on top via `--catalog`; see [docs/FAULTTEST.md](../docs/FAULTTEST.md#9-customer-fault-catalogs) for details.
+
+> **Important**: when running the standalone binary (no source tree), `--external` defaults to `true` automatically. This prevents customers from seeing injection failures on Docker/kustomize faults that require the internal test stack. Running from the source tree (`go run ./testing/cmd/faulttest`) keeps the original default of all 27 faults. Pass `--external=false` to the standalone binary to override.
+
+The sample log below predates several additions and shows an earlier count — it is kept for reference.
 
 ## Manual Testing: List available fault injection tests
 

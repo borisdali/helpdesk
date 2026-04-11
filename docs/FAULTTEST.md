@@ -102,6 +102,8 @@ Alternatively, point directly at the database agent's A2A port (default 1100).
 
 **Database access**: the tool needs a libpq connection string to inject and tear down SQL faults. The same connection string is embedded in the prompt so the agent uses it for all tool calls.
 
+> **Out-of-the-box behavior**: the standalone binary (downloaded from the release bundle) automatically defaults to external / SQL-only mode. You do not need to pass `--external` — it is implied unless you explicitly set `--external=false`. This means the binary works safely against any PostgreSQL instance with no Docker or cluster access required.
+
 ---
 
 ## 3. Modes of operation
@@ -110,7 +112,15 @@ Alternatively, point directly at the database agent's A2A port (default 1100).
 
 `--external` restricts the run to faults marked `external_compat: true` in the catalog. These faults are injected and torn down purely through SQL — no Docker access, no OS shell, no cluster control plane required. Anything injectable over a standard PostgreSQL connection qualifies.
 
+**This is the default when running the standalone binary.** The binary detects at startup that the internal Docker test infrastructure is not present and enables external mode automatically, so customers never see a flood of "injection failed" errors from faults that require our internal Docker stack. You can disable this with `--external=false` if you are deliberately running the full suite against the Docker compose test environment.
+
 ```bash
+# Standalone binary — --external is implied, these are equivalent:
+faulttest run \
+  --conn "host=staging-db port=5432 dbname=mydb user=myuser password=..." \
+  --db-agent http://gateway:8080 \
+  --infra-config infrastructure.json
+
 faulttest run --external \
   --conn "host=staging-db port=5432 dbname=mydb user=myuser password=..." \
   --db-agent http://gateway:8080 \
@@ -246,7 +256,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--context` | — | — | Kubernetes context |
 | `--categories` | — | all | Comma-separated categories: `database,kubernetes,host,compound` |
 | `--ids` | — | all | Comma-separated fault IDs to run |
-| `--external` | — | false | Only external_compat faults; SQL injection only |
+| `--external` | — | true¹ | Only external_compat faults; SQL injection only |
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
@@ -254,6 +264,10 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--infra-config` | — | — | Path to `infrastructure.json` for safety check |
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
+| `--catalog` | — | — | Additional customer catalog file (repeatable) |
+| `--source` | — | all | Filter by source: `builtin` or `custom` |
+
+¹ Default is `true` when running the standalone binary (no source tree detected). Default is `false` when running from the source tree (e.g. `go run ./testing/cmd/faulttest`). Override explicitly with `--external=false`.
 
 ### 5.3 inject / teardown
 
@@ -367,7 +381,8 @@ The playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYB
 Run the full external-compatible suite against a staging database to confirm the database agent gives correct diagnoses. Takes roughly 10–20 minutes (one fault at a time, LLM calls included).
 
 ```bash
-faulttest run --external \
+# --external is the default for the standalone binary; omit or include, same result
+faulttest run \
   --conn "host=staging-db.internal port=5432 dbname=myapp user=dbuser password=$(cat .pgpass)" \
   --db-agent http://helpdesk-gateway:8080 \
   --api-key $HELPDESK_API_KEY \
@@ -381,7 +396,7 @@ The report is written to `faulttest-<run-id>.json`.
 Same as above, but also trigger playbook-based recovery for faults that have a `remediation` spec and verify the database comes back:
 
 ```bash
-faulttest run --external --remediate \
+faulttest run --remediate \
   --conn "host=staging-db.internal port=5432 dbname=myapp user=dbuser" \
   --db-agent http://helpdesk-gateway:8080 \
   --gateway http://helpdesk-gateway:8080 \

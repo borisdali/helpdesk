@@ -118,6 +118,10 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 		os.Exit(1)
 	}
 
+	// Track which flags were explicitly set by the caller.
+	explicitFlags := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+
 	cfg.CustomCatalogs = []string(extraCatalogs)
 
 	if categories != "" {
@@ -133,6 +137,15 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	if _, err := os.Stat(detectedPath); err == nil {
 		cfg.CatalogPath = detectedPath
 	}
+
+	// In embedded mode (standalone binary, no source tree) the internal Docker
+	// and kustomize injection infrastructure is unavailable. Default --external
+	// to true so customers don't get a flood of "injection failed" errors from
+	// non-SQL faults. The caller can still override with --external=false.
+	if cfg.CatalogPath == "" && !explicitFlags["external"] {
+		cfg.External = true
+	}
+
 	testutil.DockerComposeDir = filepath.Join(cfg.TestingDir, "docker")
 
 	return cfg
