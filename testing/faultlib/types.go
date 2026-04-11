@@ -42,6 +42,10 @@ type Failure struct {
 	// Remediation defines end-to-end recovery testing: after inject+diagnose,
 	// trigger a playbook or agent and verify the database recovers.
 	Remediation RemediationSpec `yaml:"remediation,omitempty"`
+
+	// Source is set programmatically to "builtin" or "custom". It is never
+	// read from or written to YAML — the yaml:"-" tag ensures that.
+	Source string `yaml:"-"`
 }
 
 // RemediationSpec describes how to remediate a fault and verify recovery.
@@ -147,6 +151,12 @@ type HarnessConfig struct {
 	SSHUser string
 	// SSHKeyPath is the SSH private key path for ssh_exec faults.
 	SSHKeyPath string
+
+	// CustomCatalogs is the list of additional customer catalog file paths,
+	// populated by repeated --catalog flags.
+	CustomCatalogs []string
+	// SourceFilter restricts which faults are run: "" (all), "builtin", or "custom".
+	SourceFilter string
 }
 
 // EvalResult contains the evaluation outcome for a single failure test.

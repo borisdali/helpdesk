@@ -6,25 +6,86 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"helpdesk/testing/catalog"
 )
 
 // LoadCatalog reads and parses the failure catalog YAML file.
+// The source field on each failure is set to "custom".
 func LoadCatalog(path string) (*Catalog, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading catalog: %v", err)
 	}
+	return LoadCatalogFromBytes(data, "custom")
+}
 
-	var catalog Catalog
-	if err := yaml.Unmarshal(data, &catalog); err != nil {
+// LoadBuiltinCatalog parses the embedded built-in catalog.
+// Each failure's Source is stamped as "builtin".
+func LoadBuiltinCatalog() (*Catalog, error) {
+	return LoadCatalogFromBytes(catalog.BuiltinYAML, "builtin")
+}
+
+// LoadCatalogFromBytes parses YAML bytes and stamps each failure with the given
+// source label ("builtin" or "custom"). The version field check is skipped for
+// custom catalogs so customers may omit it.
+func LoadCatalogFromBytes(data []byte, source string) (*Catalog, error) {
+	var c Catalog
+	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parsing catalog: %v", err)
 	}
+	if source == "builtin" && c.Version == "" {
+		return nil, fmt.Errorf("built-in catalog missing version field")
+	}
+	for i := range c.Failures {
+		c.Failures[i].Source = source
+	}
+	return &c, nil
+}
 
-	if catalog.Version == "" {
-		return nil, fmt.Errorf("catalog missing version field")
+// LoadAndMergeCatalogs loads the built-in catalog and appends each custom
+// catalog file. All duplicate-ID errors are collected before returning (fail-all,
+// not fail-fast). A duplicate is any ID that appears more than once across the
+// combined set.
+func LoadAndMergeCatalogs(customPaths []string) (*Catalog, error) {
+	base, err := LoadBuiltinCatalog()
+	if err != nil {
+		return nil, err
+	}
+	return mergeCustomInto(base, customPaths)
+}
+
+// mergeCustomInto appends faults from each custom file into base and returns
+// the merged catalog. All duplicate-ID errors are collected before returning.
+func mergeCustomInto(base *Catalog, paths []string) (*Catalog, error) {
+	seen := make(map[string]string) // id → source label
+	for i := range base.Failures {
+		seen[base.Failures[i].ID] = base.Failures[i].Source
 	}
 
-	return &catalog, nil
+	var errs []string
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading custom catalog %s: %v", path, err)
+		}
+		custom, err := LoadCatalogFromBytes(data, "custom")
+		if err != nil {
+			return nil, fmt.Errorf("parsing custom catalog %s: %v", path, err)
+		}
+		for _, f := range custom.Failures {
+			if prev, dup := seen[f.ID]; dup {
+				errs = append(errs, fmt.Sprintf("duplicate fault ID %q (first seen in %s, also in %s)", f.ID, prev, path))
+				continue
+			}
+			seen[f.ID] = path
+			base.Failures = append(base.Failures, f)
+		}
+	}
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("catalog merge errors:\n  %s", strings.Join(errs, "\n  "))
+	}
+	return base, nil
 }
 
 // FilterFailures returns failures matching the given categories and/or IDs.
@@ -50,6 +111,10 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 	for _, f := range catalog.Failures {
 		// External mode: skip faults that don't work without Docker/OS access.
 		if cfg.External && !f.ExternalCompat {
+			continue
+		}
+		// Source filter: "builtin" or "custom".
+		if cfg.SourceFilter != "" && f.Source != cfg.SourceFilter {
 			continue
 		}
 

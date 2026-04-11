@@ -1,13 +1,15 @@
 # aiHelpDesk Fault Injection Testing
 
+The two cornerstones of aiHelpDesk's SRE/DBA Flywheel are the comprehensive built-in Fault Injection Testing and Playbooks.
+
+This page covers the former, or to be more precise, the customer-facing, external-mode use case of fault testing. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md) and for the wider aiHelpDesk testing strategy see [here](../testing/README.md).
+
 `faulttest` is a CLI tool that validates how well your aiHelpDesk agents diagnose and recover from real database and infrastructure failures. You inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords and tool usage, and optionally trigger a remediation playbook and confirm recovery — all without touching your production systems.
 
 The tool was designed for two complementary use cases:
 
 - **Internal QA** — engineers run the full catalog against Docker-compose or Kubernetes stacks to prevent regressions in agent behavior before shipping
 - **Customer validation** — operators run a safe subset of SQL-based faults against a staging or canary database they already own, confirming the agents behave correctly in their specific environment before going to production
-
-This page covers the customer-facing, external-mode use case. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md) and for the wider aiHelpDesk testing strategy see [here](../testing/README.md).
 
 ---
 
@@ -24,6 +26,8 @@ This page covers the customer-facing, external-mode use case. For the internal D
    - [list](#51-list)
    - [run](#52-run)
    - [inject / teardown](#53-inject--teardown)
+   - [validate](#54-validate)
+   - [example](#55-example)
 6. [Fault catalog](#6-fault-catalog)
    - [External-compatible faults](#61-external-compatible-faults)
    - [SSH-injectable faults](#62-ssh-injectable-faults)
@@ -33,7 +37,13 @@ This page covers the customer-facing, external-mode use case. For the internal D
    - [Full run with remediation](#72-full-run-with-remediation)
    - [Interactive single-fault injection](#73-interactive-single-fault-injection)
 8. [Interpreting results](#8-interpreting-results)
-9. [Extending the catalog](#9-extending-the-catalog)
+9. [Customer fault catalogs](#9-customer-fault-catalogs)
+   - [Overview](#91-overview)
+   - [Writing a catalog file](#92-writing-a-catalog-file)
+   - [Validating before running](#93-validating-before-running)
+   - [Running with a custom catalog](#94-running-with-a-custom-catalog)
+   - [Filtering by source](#95-filtering-by-source)
+10. [Extending the built-in catalog](#10-extending-the-built-in-catalog)
 
 ---
 
@@ -213,7 +223,9 @@ faulttest list --external
 faulttest list --categories database
 ```
 
-Output columns: `ID`, `CATEGORY`, `SEVERITY`, `EXTERNAL` (yes/blank), `NAME`.
+Output columns: `ID`, `CATEGORY`, `SEVERITY`, `EXTERNAL` (yes/blank), `SOURCE` (builtin/custom), `NAME`.
+
+Add `--source builtin` or `--source custom` to restrict output to faults from one catalog only.
 
 ### 5.2 run
 
@@ -258,6 +270,48 @@ faulttest teardown --id db-table-bloat \
 ```
 
 Both commands print the suggested prompt for the agent after injection, so you can manually paste it into `helpdesk-client` for an interactive session.
+
+### 5.4 validate
+
+```
+faulttest validate --catalog <file> [--catalog <file> ...] [--testing-dir .]
+```
+
+Validates one or more customer catalog files before running them. Errors (exit 1) block any run; warnings are informational only.
+
+| Severity | Condition |
+|----------|-----------|
+| **Error** | Missing `id`, `name`, `category`, or `inject.type` |
+| **Error** | `inject.type` is not a known type |
+| **Error** | Duplicate ID — conflicts with built-in catalog or another custom file |
+| **Error** | `script:` file referenced and `--testing-dir` set but file not found |
+| **Warning** | `category` is not one of `database`, `kubernetes`, `host`, `compound` |
+| **Warning** | `script:` file referenced but no `--testing-dir` — cannot verify existence |
+| **Warning** | No `expected_keywords` — scoring will be unreliable |
+
+```bash
+faulttest validate --catalog my-faults.yaml
+
+# Validating my-faults.yaml (3 entries):
+#   [OK]   my-slow-query
+#   [WARN] my-custom-fault: no expected_keywords; scoring will be unreliable
+#   [ERR]  my-bad-fault: inject.type "unknown" is not a known type
+#
+# 1 error(s), 1 warning(s).
+```
+
+### 5.5 example
+
+```
+faulttest example [--category database|kubernetes|host|compound]
+```
+
+Prints an annotated YAML template to stdout covering every field with inline comments. Pipe it to a file and edit. Default category: `database`.
+
+```bash
+faulttest example > my-faults.yaml
+faulttest example --category kubernetes > k8s-faults.yaml
+```
 
 ---
 
@@ -427,9 +481,168 @@ The JSON report contains one entry per fault:
 
 ---
 
-## 9. Extending the catalog
+## 9. Customer fault catalogs
 
-The catalog (`testing/catalog/failures.yaml`) is a YAML file versioned with the project. Each fault follows this schema:
+### 9.1 Overview
+
+Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 27 built-in faults. Customer catalog files layer on top of this without modifying the binary.
+
+A customer catalog is a plain YAML file you author, validate with `faulttest validate`, and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
+
+The workflow is:
+
+```
+faulttest example > my-faults.yaml   # start from an annotated template
+# edit my-faults.yaml
+faulttest validate --catalog my-faults.yaml  # check for errors/warnings
+faulttest list    --catalog my-faults.yaml   # preview merged catalog
+faulttest run     --catalog my-faults.yaml --external --conn "host=..."
+```
+
+### 9.2 Writing a catalog file
+
+Generate a fully annotated template for any category:
+
+```bash
+faulttest example                       # database template (default)
+faulttest example --category kubernetes
+faulttest example --category host
+faulttest example --category compound
+```
+
+Every field supported in the built-in catalog is supported in customer catalogs. The `version` field is optional in customer files (it is required in the built-in catalog). The `source` field is set automatically by `faulttest` — never write it in YAML.
+
+**Minimal example (SQL fault):**
+
+```yaml
+failures:
+  - id: my-slow-query-storm          # must not clash with built-in IDs
+    name: "Custom: Slow query storm"
+    category: database
+    severity: high
+    description: >
+      Simulates a storm of long-running queries. The agent should detect
+      blocked sessions and recommend termination.
+    inject:
+      type: sql
+      script_inline: |
+        SELECT pg_sleep(300);        -- run in a background session
+    teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_terminate_backend(pid)
+        FROM pg_stat_activity
+        WHERE state = 'active' AND query LIKE '%pg_sleep%'
+          AND pid <> pg_backend_pid();
+    prompt: |
+      There seems to be a performance problem on {{connection_string}}.
+      Can you investigate?
+    timeout: "120s"
+    evaluation:
+      expected_tools:
+        - list_long_running_queries
+        - terminate_connection
+      expected_keywords:
+        any_of:
+          - "long-running"
+          - "pg_sleep"
+          - "terminate"
+      expected_diagnosis:
+        category: performance
+```
+
+**Known inject types** (same as built-in catalog):
+
+| Type | Description |
+|------|-------------|
+| `sql` | SQL via psql; `script_inline` or `script` (file path relative to `--testing-dir`) |
+| `docker` | `docker compose stop/start/kill` on a named service |
+| `docker_exec` | Run a script inside a container via `docker exec` |
+| `shell_exec` | Run a bash script on the local host |
+| `ssh_exec` | Run a bash script on a remote host via SSH |
+| `kustomize` | Apply a kustomize overlay (`kubectl apply -k`) |
+| `kustomize_delete` | Delete a kustomize overlay and optionally re-apply a base |
+| `config` | Override a connection string in the harness config |
+
+### 9.3 Validating before running
+
+```bash
+faulttest validate --catalog my-faults.yaml [--catalog second.yaml]
+```
+
+The validate subcommand checks every entry and prints a per-fault verdict. Exit code is 1 if any errors are found; warnings do not affect the exit code.
+
+```
+Validating my-faults.yaml (2 entries):
+  [OK]   my-slow-query-storm
+  [WARN] my-other-fault: no expected_keywords; scoring will be unreliable
+
+0 error(s), 1 warning(s).
+```
+
+To also verify that `script:` file references exist on disk, pass `--testing-dir`:
+
+```bash
+faulttest validate --catalog my-faults.yaml --testing-dir /path/to/testing
+```
+
+### 9.4 Running with a custom catalog
+
+Pass `--catalog` to any subcommand. The built-in faults are always included unless you filter them out with `--source`:
+
+```bash
+# Run all built-in + custom faults
+faulttest run --catalog my-faults.yaml --external \
+  --conn "host=staging-db port=5432 ..."
+
+# Run only your custom faults
+faulttest run --catalog my-faults.yaml --source custom --external \
+  --conn "host=staging-db port=5432 ..."
+
+# Inject a single custom fault interactively
+faulttest inject --catalog my-faults.yaml --id my-slow-query-storm \
+  --conn "host=staging-db port=5432 ..."
+
+# List everything with source column
+faulttest list --catalog my-faults.yaml
+```
+
+Multiple `--catalog` flags are merged in order. IDs must be unique across all files:
+
+```bash
+faulttest run \
+  --catalog db-custom.yaml \
+  --catalog k8s-custom.yaml \
+  --conn "host=staging-db port=5432 ..."
+```
+
+### 9.5 Filtering by source
+
+`--source` restricts which faults are acted on:
+
+| Value | Meaning |
+|-------|---------|
+| _(omitted)_ | All faults — built-in and custom |
+| `builtin` | Only the faults shipped with `faulttest` |
+| `custom` | Only the faults from your `--catalog` files |
+
+`--source` combines with all other filters (`--categories`, `--ids`, `--external`):
+
+```bash
+# Only my custom database faults
+faulttest list --catalog my-faults.yaml --source custom --categories database
+
+# Validate the built-in catalog passes all checks (should always be true)
+faulttest list --source builtin
+```
+
+---
+
+## 10. Extending the built-in catalog
+
+> This section is for contributors adding faults to the catalog shipped with `faulttest`. To add faults for your own environment without modifying source, see [section 9](#9-customer-fault-catalogs) above.
+
+The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled into the `faulttest` binary via `//go:embed`. Each fault follows this schema:
 
 ```yaml
 - id: db-my-new-fault           # unique, lowercase, hyphenated
@@ -488,9 +701,4 @@ The catalog (`testing/catalog/failures.yaml`) is a YAML file versioned with the 
   governance_gap: false          # true = known gap; failure is logged, not asserted
 ```
 
-After adding a fault, update the count assertions in both test files:
-
-- `testing/faultlib/faultlib_test.go` — `want 27` → new total
-- `testing/cmd/faulttest/config_test.go` — same; also update per-category counts
-
-Run `go test ./testing/faultlib/... ./testing/cmd/faulttest/...` to confirm.
+After adding a fault, the test count floor checks in both test files will still pass (they assert `>= 27`, not exactly 27), so no test edits are required for additions. Run `go test ./testing/faultlib/... ./testing/cmd/faulttest/...` to confirm.

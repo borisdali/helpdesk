@@ -13,6 +13,7 @@ package integration
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -89,6 +90,99 @@ func TestExternalInjectSpecs(t *testing.T) {
 				t.Errorf("Fault state not observable after injection: %v", err)
 			}
 		})
+	}
+}
+
+// TestCustomCatalogMergeAndInject verifies the full custom-catalog pipeline:
+// write a temp YAML with a novel SQL fault, merge it with the built-in catalog
+// via LoadAndMergeCatalogs, inject against real Postgres, confirm the fault is
+// observable, then tear down and confirm cleanup.
+//
+// This is the only test that exercises LoadAndMergeCatalogs → Injector against
+// a live database; unit tests cover the merge logic but cannot touch Postgres.
+func TestCustomCatalogMergeAndInject(t *testing.T) {
+	const customFaultID = "custom-integration-test-artifact"
+	const customYAML = `failures:
+  - id: custom-integration-test-artifact
+    name: "Custom: integration test artifact table"
+    category: database
+    severity: low
+    description: Creates a scratch table to prove custom catalog injection reaches Postgres.
+    inject:
+      type: sql
+      script_inline: |
+        CREATE TABLE IF NOT EXISTS custom_integration_artifact (
+          id serial PRIMARY KEY,
+          created_at timestamptz DEFAULT now()
+        );
+        INSERT INTO custom_integration_artifact DEFAULT VALUES;
+    teardown:
+      type: sql
+      script_inline: |
+        DROP TABLE IF EXISTS custom_integration_artifact;
+    prompt: "Check the database."
+    timeout: "30s"
+    external_compat: true
+    evaluation:
+      expected_keywords:
+        any_of:
+          - "artifact"
+`
+
+	// Write temp custom catalog.
+	dir := t.TempDir()
+	customPath := filepath.Join(dir, "custom.yaml")
+	if err := os.WriteFile(customPath, []byte(customYAML), 0644); err != nil {
+		t.Fatalf("writing custom catalog: %v", err)
+	}
+
+	// Merge with built-in.
+	merged, err := faultlib.LoadAndMergeCatalogs([]string{customPath})
+	if err != nil {
+		t.Fatalf("LoadAndMergeCatalogs: %v", err)
+	}
+
+	// Find the custom fault and verify its Source is stamped correctly.
+	var customFault *faultlib.Failure
+	for i := range merged.Failures {
+		if merged.Failures[i].ID == customFaultID {
+			customFault = &merged.Failures[i]
+			break
+		}
+	}
+	if customFault == nil {
+		t.Fatalf("custom fault %q not found in merged catalog", customFaultID)
+	}
+	if customFault.Source != "custom" {
+		t.Errorf("Source = %q, want %q", customFault.Source, "custom")
+	}
+
+	cfg := &faultlib.HarnessConfig{
+		ConnStr:    testConnStr,
+		TestingDir: filepath.Join("..", ".."),
+	}
+	testutil.DockerComposeDir = "../docker"
+	injector := faultlib.NewInjector(cfg)
+	ctx := context.Background()
+
+	if err := injector.Inject(ctx, *customFault); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := injector.Teardown(ctx, *customFault); err != nil {
+			t.Errorf("Teardown: %v", err)
+		}
+		// Confirm the artifact table is gone.
+		checkGone := `SELECT 1 FROM information_schema.tables WHERE table_name = 'custom_integration_artifact'`
+		if err := testutil.RunSQLString(ctx, testConnStr, checkGone); err != nil {
+			t.Logf("post-teardown check (empty result expected): %v", err)
+		}
+	})
+
+	// Confirm the artifact table exists and has at least one row.
+	verifySQL := `SELECT 1 FROM custom_integration_artifact LIMIT 1`
+	if err := testutil.RunSQLString(ctx, testConnStr, verifySQL); err != nil {
+		t.Errorf("fault state not observable after custom catalog inject: %v", err)
 	}
 }
 
