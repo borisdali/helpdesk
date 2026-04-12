@@ -2244,6 +2244,52 @@ func TestResolveDatabaseInfo_InfraPermissive_UnknownConnString(t *testing.T) {
 	}
 }
 
+func TestResolveDatabaseInfo_PasswordEnv_ByName(t *testing.T) {
+	// password_env is set; env var present → resolved conn string includes password.
+	t.Setenv("TEST_DB_PW", "secret123")
+	defer withInfraConfig(&infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"secured-db": {
+				Name:             "secured-db",
+				ConnectionString: "host=db.example.com dbname=app user=postgres",
+				PasswordEnv:      "TEST_DB_PW",
+				Tags:             []string{"development"},
+			},
+		},
+	})()
+
+	info, err := resolveDatabaseInfo("secured-db")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil", err)
+	}
+	if info.ConnectionStr != "host=db.example.com dbname=app user=postgres password=secret123" {
+		t.Errorf("resolveDatabaseInfo() ConnectionStr = %q, want password appended", info.ConnectionStr)
+	}
+}
+
+func TestResolveDatabaseInfo_PasswordEnv_Missing(t *testing.T) {
+	// password_env is set but env var absent → base connection string returned without error.
+	t.Setenv("TEST_DB_PW_MISSING", "")
+	defer withInfraConfig(&infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"secured-db": {
+				Name:             "secured-db",
+				ConnectionString: "host=db.example.com dbname=app user=postgres",
+				PasswordEnv:      "TEST_DB_PW_MISSING",
+				Tags:             []string{"development"},
+			},
+		},
+	})()
+
+	info, err := resolveDatabaseInfo("secured-db")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil", err)
+	}
+	if info.ConnectionStr != "host=db.example.com dbname=app user=postgres" {
+		t.Errorf("resolveDatabaseInfo() ConnectionStr = %q, want base string when env var absent", info.ConnectionStr)
+	}
+}
+
 func TestCheckConnectionTool_InfraEnforced_Rejected(t *testing.T) {
 	// infraConfig is set but connection string is not registered → tool returns ERROR.
 	defer withInfraConfig(makeTestInfraConfig())()

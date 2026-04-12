@@ -12,6 +12,7 @@ import (
 type DBServer struct {
 	Name             string   `json:"name"`
 	ConnectionString string   `json:"connection_string"`
+	PasswordEnv      string   `json:"password_env,omitempty"`   // env var holding the password; appended at runtime
 	K8sCluster       string   `json:"k8s_cluster,omitempty"`
 	K8sNamespace     string   `json:"k8s_namespace,omitempty"`
 	K8sPodSelector   string   `json:"k8s_pod_selector,omitempty"` // label selector for kubectl exec (e.g. "app=postgres,instance=prod")
@@ -20,6 +21,20 @@ type DBServer struct {
 	SystemdUnit      string   `json:"systemd_unit,omitempty"`   // unit name when VM.Runtime is ""
 	Tags             []string `json:"tags,omitempty"`           // Tags for policy matching (e.g., "production", "staging")
 	Sensitivity      []string `json:"sensitivity,omitempty"`    // Sensitivity classes (e.g., "pii", "critical")
+}
+
+// ResolvedConnectionString returns ConnectionString with the password appended when
+// PasswordEnv is set and the named environment variable is non-empty.
+// ConnectionString itself is never modified — the password lives only in the process env.
+func (db DBServer) ResolvedConnectionString() string {
+	if db.PasswordEnv == "" {
+		return db.ConnectionString
+	}
+	pw := os.Getenv(db.PasswordEnv)
+	if pw == "" {
+		return db.ConnectionString
+	}
+	return db.ConnectionString + " password=" + pw
 }
 
 // K8sCluster represents a managed Kubernetes cluster.

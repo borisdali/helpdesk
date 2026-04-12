@@ -86,7 +86,7 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 					slog.Debug("reverse resolved connection string to database", "id", id, "tags", db.Tags)
 					return databaseInfo{
 						Name:              id,
-						ConnectionStr:     connStrOrName,
+						ConnectionStr:     db.ResolvedConnectionString(),
 						Tags:              db.Tags,
 						Sensitivity:       db.Sensitivity,
 						IsFromInfraConfig: true,
@@ -122,7 +122,7 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 			slog.Info("resolved database name to connection string", "name", connStrOrName)
 			return databaseInfo{
 				Name:              connStrOrName,
-				ConnectionStr:     db.ConnectionString,
+				ConnectionStr:     db.ResolvedConnectionString(),
 				Tags:              db.Tags,
 				Sensitivity:       db.Sensitivity,
 				IsFromInfraConfig: true,
