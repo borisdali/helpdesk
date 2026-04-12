@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -144,6 +145,84 @@ func extractText(result a2a.SendMessageResult) string {
 		return partsText(v.Parts)
 	}
 	return ""
+}
+
+// IsGatewayURL probes whether url is a helpdesk gateway by checking whether
+// GET {url}/api/v1/agents returns a recognisable HTTP status (200 or 401).
+// A 404 (or connection error) means it is an A2A agent endpoint instead.
+func IsGatewayURL(ctx context.Context, baseURL string) bool {
+	probeURL := strings.TrimSuffix(baseURL, "/") + "/api/v1/agents"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized
+}
+
+// SendPromptViaGateway sends a prompt to a helpdesk gateway via
+// POST /api/v1/query and returns the agent's response text.
+// agentName should be "database", "kubernetes", "sysadmin", etc.
+// apiKey is the Bearer token for gateway auth (may be empty for unauthenticated gateways).
+// purpose is the declared access purpose (e.g. "diagnostic"); an empty string omits the field.
+func SendPromptViaGateway(ctx context.Context, gatewayURL, apiKey, agentName, prompt, purpose string) AgentResponse {
+	start := time.Now()
+
+	reqBody := map[string]string{
+		"agent":   agentName,
+		"message": prompt,
+	}
+	if purpose != "" {
+		reqBody["purpose"] = purpose
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("marshalling query: %v", err)}
+	}
+
+	queryURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/query"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, queryURL, bytes.NewReader(body))
+	if err != nil {
+		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("building gateway request: %v", err)}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("POST %s: %v", queryURL, err)}
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("reading gateway response: %v", err)}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return AgentResponse{
+			Duration: time.Since(start),
+			Error:    fmt.Errorf("gateway returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody))),
+		}
+	}
+
+	var result struct {
+		Text  string `json:"text"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("decoding gateway response: %v", err)}
+	}
+	if result.Error != "" {
+		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("gateway error: %s", result.Error)}
+	}
+	return AgentResponse{Text: result.Text, Duration: time.Since(start)}
 }
 
 func partsText(parts a2a.ContentParts) string {

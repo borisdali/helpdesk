@@ -80,8 +80,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	cfg := &HarnessConfig{}
 
 	fs.StringVar(&cfg.TestingDir, "testing-dir", defaultTestingDir(), "Path to the testing/ directory")
-	fs.StringVar(&cfg.ConnStr, "conn", "", "PostgreSQL connection string")
+	fs.StringVar(&cfg.ConnStr, "conn", "", "PostgreSQL connection string (used for injection)")
 	fs.StringVar(&cfg.ReplicaConnStr, "replica-conn", "", "Replica PostgreSQL connection string")
+	fs.StringVar(&cfg.AgentConnStr, "agent-conn", "", "Connection string or alias sent to the agent in prompts (defaults to --conn)")
 	fs.StringVar(&cfg.DBAgentURL, "db-agent", "", "Database agent A2A URL")
 	fs.StringVar(&cfg.K8sAgentURL, "k8s-agent", "", "Kubernetes agent A2A URL")
 	fs.StringVar(&cfg.SysadminAgentURL, "sysadmin-agent", "", "Sysadmin agent A2A URL")
@@ -104,6 +105,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.BoolVar(&cfg.RemediateEnabled, "remediate", false, "Run remediation phase after injection+diagnosis")
 	fs.StringVar(&cfg.GatewayURL, "gateway", "http://localhost:8080", "Gateway URL for playbook/agent remediation")
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
+	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 
 	// Policy safety check.
 	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")

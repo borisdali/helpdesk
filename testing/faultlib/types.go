@@ -122,6 +122,7 @@ type HarnessConfig struct {
 	TestingDir       string
 	ConnStr          string
 	ReplicaConnStr   string
+	AgentConnStr     string // overrides ConnStr in prompt {{connection_string}} when set
 	DBAgentURL       string
 	K8sAgentURL      string
 	SysadminAgentURL string
@@ -139,6 +140,8 @@ type HarnessConfig struct {
 	GatewayURL string
 	// GatewayAPIKey is the Bearer token for gateway/auditd auth during remediation.
 	GatewayAPIKey string
+	// GatewayPurpose is the declared purpose sent in gateway requests (default: "diagnostic").
+	GatewayPurpose string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
 	// When set, the harness refuses to inject faults unless the target has a
 	// "test" or "chaos" tag.

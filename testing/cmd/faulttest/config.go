@@ -107,6 +107,7 @@ type HarnessConfig struct {
 	TestingDir       string
 	ConnStr          string
 	ReplicaConnStr   string
+	AgentConnStr     string // overrides ConnStr in prompt {{connection_string}} when set
 	DBAgentURL       string
 	K8sAgentURL      string
 	SysadminAgentURL string
@@ -124,6 +125,8 @@ type HarnessConfig struct {
 	GatewayURL string
 	// GatewayAPIKey is the Bearer token for gateway/auditd auth during remediation.
 	GatewayAPIKey string
+	// GatewayPurpose is the declared purpose sent in gateway requests (default: "diagnostic").
+	GatewayPurpose string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
 	InfraConfigPath string
 	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty
@@ -261,9 +264,16 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 }
 
 // ResolvePrompt replaces template variables in the failure prompt.
+// {{connection_string}} resolves to AgentConnStr when set, falling back to ConnStr.
+// This allows --agent-conn to decouple the injection DSN (used by psql) from
+// the identifier sent to the agent (which may be a registered alias like "test-db").
 func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
+	connStr := cfg.ConnStr
+	if cfg.AgentConnStr != "" {
+		connStr = cfg.AgentConnStr
+	}
 	r := strings.NewReplacer(
-		"{{connection_string}}", cfg.ConnStr,
+		"{{connection_string}}", connStr,
 		"{{replica_connection_string}}", cfg.ReplicaConnStr,
 		"{{kube_context}}", cfg.KubeContext,
 	)
