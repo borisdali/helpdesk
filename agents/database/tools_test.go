@@ -2960,7 +2960,11 @@ func TestGetSlowQueriesTool_WithResults(t *testing.T) {
 	mockOutput := ` query                                | calls | total_ms | mean_ms | max_ms | rows
 --------------------------------------+-------+----------+---------+--------+------
  SELECT * FROM users WHERE id = $1    |  1250 |  3500.00 |    2.80 |  42.00 | 1250`
-	defer withMockRunner(mockOutput, nil)()
+	// Pre-check (pg_extension) confirms extension present, then main query runs.
+	defer withMockRunnerSequence(
+		psqlResponse{out: " 1\n(1 row)", err: nil},
+		psqlResponse{out: mockOutput, err: nil},
+	)()
 
 	ctx := newTestContext()
 	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
@@ -2973,7 +2977,10 @@ func TestGetSlowQueriesTool_WithResults(t *testing.T) {
 }
 
 func TestGetSlowQueriesTool_ExtensionMissing(t *testing.T) {
-	defer withMockRunner("", fmt.Errorf("exit status 1: ERROR:  relation \"pg_stat_statements\" does not exist"))()
+	// Pre-check (pg_extension) returns 0 rows → extension absent; main query never called.
+	defer withMockRunnerSequence(
+		psqlResponse{out: "(0 rows)", err: nil},
+	)()
 
 	ctx := newTestContext()
 	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
@@ -2986,7 +2993,11 @@ func TestGetSlowQueriesTool_ExtensionMissing(t *testing.T) {
 }
 
 func TestGetSlowQueriesTool_NoResults(t *testing.T) {
-	defer withMockRunner("(0 rows)", nil)()
+	// Pre-check succeeds (extension present), main query returns 0 rows.
+	defer withMockRunnerSequence(
+		psqlResponse{out: " 1\n(1 row)", err: nil},
+		psqlResponse{out: "(0 rows)", err: nil},
+	)()
 
 	ctx := newTestContext()
 	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})

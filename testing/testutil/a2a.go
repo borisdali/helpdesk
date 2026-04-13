@@ -142,12 +142,13 @@ func extractResponse(result a2a.SendMessageResult) (text string, toolCalls []Too
 		// ADK agents emit artifact update events; text and the tool-call DataPart
 		// live in Artifacts. Scan all artifacts: collect text from TextParts and
 		// tool call names from the summary DataPart.
+		var textParts []string
 		for _, artifact := range v.Artifacts {
 			for _, part := range artifact.Parts {
 				switch p := part.(type) {
 				case a2a.TextPart:
-					if text == "" {
-						text = p.Text
+					if p.Text != "" {
+						textParts = append(textParts, p.Text)
 					}
 				case a2a.DataPart:
 					meta, _ := p.Metadata["helpdesk_type"].(string)
@@ -162,6 +163,10 @@ func extractResponse(result a2a.SendMessageResult) (text string, toolCalls []Too
 					}
 				}
 			}
+		}
+
+		if len(textParts) > 0 {
+			text = strings.Join(textParts, "\n")
 		}
 
 		// Non-ADK agents or error responses may use Status.Message.

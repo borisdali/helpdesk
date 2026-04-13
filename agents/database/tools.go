@@ -1597,6 +1597,19 @@ func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResul
 	if limit <= 0 {
 		limit = 10
 	}
+
+	// Pre-check: verify pg_stat_statements is installed before querying it.
+	// This avoids a noisy ERROR log from a known-benign missing-extension case.
+	checkOut, err := runPsqlWithToolName(ctx, args.ConnectionString,
+		`SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements';`,
+		"get_slow_queries")
+	if err != nil {
+		return errorResult("get_slow_queries", args.ConnectionString, err), nil
+	}
+	if !strings.Contains(checkOut, "1") {
+		return PsqlResult{Output: "pg_stat_statements extension is not installed. Enable it with: CREATE EXTENSION pg_stat_statements; and add it to shared_preload_libraries in postgresql.conf."}, nil
+	}
+
 	query := fmt.Sprintf(`SELECT
 		LEFT(query, 120) as query,
 		calls,
@@ -1610,11 +1623,6 @@ func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResul
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_slow_queries")
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "42883") || strings.Contains(msg, "42P01") ||
-			strings.Contains(msg, "pg_stat_statements") {
-			return PsqlResult{Output: "pg_stat_statements extension is not installed. Enable it with: CREATE EXTENSION pg_stat_statements; and add it to shared_preload_libraries in postgresql.conf."}, nil
-		}
 		return errorResult("get_slow_queries", args.ConnectionString, err), nil
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
