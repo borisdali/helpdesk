@@ -108,9 +108,9 @@ Alternatively, point directly at the database agent's A2A port (default 1100).
 
 ## 3. Modes of operation
 
-### 3.1 External mode (SQL only)
+### 3.1 External mode
 
-`--external` restricts the run to faults marked `external_compat: true` in the catalog. These faults are injected and torn down purely through SQL — no Docker access, no OS shell, no cluster control plane required. Anything injectable over a standard PostgreSQL connection qualifies.
+`--external` restricts the run to faults marked `external_compat: true` in the catalog. These faults use either `sql` or `shell_exec` injection — no Docker daemon, no Kubernetes control plane, and no internal Docker Compose stack required. Anything reachable from the machine running faulttest qualifies.
 
 **This is the default when running the standalone binary.** The binary detects at startup that the internal Docker test infrastructure is not present and enables external mode automatically, so customers never see a flood of "injection failed" errors from faults that require our internal Docker stack. You can disable this with `--external=false` if you are deliberately running the full suite against the Docker compose test environment.
 
@@ -710,16 +710,35 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
     type: sql
     script_inline: "DROP TABLE IF EXISTS my_fault_table;"
 
-  # Mark as externally injectable (SQL only, no Docker/OS needed).
+  # Mark as externally injectable (no Docker/OS infrastructure needed).
   external_compat: true
 
   # Optional: override inject/teardown for --external mode.
+  # Use type: sql for stateless DDL/DML (CREATE TABLE, INSERT, etc.).
+  # Use type: shell_exec for anything that must hold state across calls
+  # (open transactions, held locks) — run psql in the background with &.
+  # The env var $FAULTTEST_CONN holds the resolved connection string from --conn.
   external_inject:
     type: sql
-    script_inline: "..."
+    script_inline: "CREATE TABLE IF NOT EXISTS my_fault_table (id int);"
   external_teardown:
     type: sql
-    script_inline: "..."
+    script_inline: "DROP TABLE IF EXISTS my_fault_table;"
+
+  # Example: holding an open transaction requires shell_exec + background psql:
+  # external_inject:
+  #   type: shell_exec
+  #   script_inline: |
+  #     psql "$FAULTTEST_CONN" -c "CREATE TABLE IF NOT EXISTS t (id int);"
+  #     psql "$FAULTTEST_CONN" -c "BEGIN; LOCK TABLE t IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(600);" &
+  #     echo $! > /tmp/faulttest_myfault_pid.txt
+  #     sleep 1
+  # external_teardown:
+  #   type: shell_exec
+  #   script_inline: |
+  #     kill "$(cat /tmp/faulttest_myfault_pid.txt)" 2>/dev/null || true
+  #     rm -f /tmp/faulttest_myfault_pid.txt
+  #     psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS t;"
 
   # Optional: trigger playbook remediation when --remediate is set.
   remediation:

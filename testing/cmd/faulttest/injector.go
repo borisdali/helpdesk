@@ -170,6 +170,9 @@ func (inj *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	}
 	cmd := exec.CommandContext(ctx, "bash", "-s")
 	cmd.Stdin = bytes.NewReader(scriptContent)
+	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN
+	// without hardcoding credentials.
+	cmd.Env = append(os.Environ(), "FAULTTEST_CONN="+inj.cfg.ConnStr)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("shell_exec: %v\n%s", err, output)
