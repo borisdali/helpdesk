@@ -3506,6 +3506,22 @@ func TestGetPgLogTool_PermissionDeniedPgLsLogdir(t *testing.T) {
 	}
 }
 
+func TestGetPgLogTool_LoggingCollectorDisabled(t *testing.T) {
+	// Simulate postgres with logging_collector=off — pg_ls_logdir fails with ENOENT.
+	pgErr := errors.New(`ERROR:  could not open directory "log": No such file or directory
+exit status 1`)
+	defer withMockRunner("", pgErr)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "logging_collector") {
+		t.Errorf("getPgLogTool() output = %q, want logging_collector hint", result.Output)
+	}
+}
+
 func TestRunPsqlTuples_UsesTupleFlags(t *testing.T) {
 	capture := &capturingRunner{}
 	old := cmdRunner

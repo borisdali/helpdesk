@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 
 	"helpdesk/testing/testutil"
 )
@@ -43,6 +44,8 @@ func main() {
 		cmdValidate(os.Args[2:])
 	case "example":
 		cmdExample(os.Args[2:])
+	case "show":
+		cmdShow(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -60,6 +63,7 @@ Commands:
   teardown   Tear down a specific failure (interactive mode)
   validate   Validate a customer catalog file for errors and warnings
   example    Print an annotated example customer catalog entry to stdout
+  show       Print a fault definition as YAML (pipe to a file to customize it)
 `)
 }
 
@@ -432,6 +436,9 @@ func cmdValidate(args []string) {
 
 	totalErrors, totalWarnings := 0, 0
 
+	// seenIDs accumulates across all custom files to detect cross-file duplicates.
+	seenIDs := make(map[string]string) // id → first file that defined it
+
 	for _, path := range cfg.CustomCatalogs {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -446,7 +453,6 @@ func cmdValidate(args []string) {
 
 		fmt.Printf("Validating %s (%d entries):\n", path, len(custom.Failures))
 
-		seenIDs := make(map[string]bool)
 		fileErrors, fileWarnings := 0, 0
 
 		for _, f := range custom.Failures {
@@ -471,14 +477,19 @@ func cmdValidate(args []string) {
 				errs = append(errs, fmt.Sprintf("inject.type %q is not a known type", f.Inject.Type))
 			}
 
-			// Duplicate ID check.
+			// Duplicate ID check — within this file and across all custom files.
 			if f.ID != "" {
 				if builtinIDs[f.ID] {
 					errs = append(errs, fmt.Sprintf("duplicate ID %q conflicts with built-in catalog", f.ID))
-				} else if seenIDs[f.ID] {
-					errs = append(errs, fmt.Sprintf("duplicate ID %q within this file", f.ID))
+				} else if prev, ok := seenIDs[f.ID]; ok {
+					if prev == path {
+						errs = append(errs, fmt.Sprintf("duplicate ID %q within this file", f.ID))
+					} else {
+						errs = append(errs, fmt.Sprintf("duplicate ID %q already defined in %s", f.ID, prev))
+					}
+				} else {
+					seenIDs[f.ID] = path
 				}
-				seenIDs[f.ID] = true
 			}
 
 			// Script file existence check (only when testing-dir is set).
@@ -753,4 +764,49 @@ func findFailure(cat *Catalog, id string) *Failure {
 		}
 	}
 	return nil
+}
+
+// ── show ─────────────────────────────────────────────────────────────────
+
+// cmdShow prints a fault definition as YAML so customers can clone and
+// modify it. The output is a valid single-entry catalog that passes validate.
+func cmdShow(args []string) {
+	fs := flag.NewFlagSet("show", flag.ExitOnError)
+	var failureID string
+	fs.StringVar(&failureID, "id", "", "Fault ID to show")
+	cfg := loadConfig(fs, args)
+
+	if failureID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --id is required")
+		os.Exit(1)
+	}
+
+	cat, err := loadActiveCatalog(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	f := findFailure(cat, failureID)
+	if f == nil {
+		fmt.Fprintf(os.Stderr, "Error: fault %q not found\n", failureID)
+		os.Exit(1)
+	}
+
+	// Wrap in a minimal catalog structure so the output is directly usable
+	// as a --catalog file after the customer assigns a new ID.
+	type catalogOut struct {
+		Version  string    `yaml:"version"`
+		Failures []Failure `yaml:"failures"`
+	}
+	out := catalogOut{Version: "1", Failures: []Failure{*f}}
+
+	data, err := yaml.Marshal(out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error serializing fault: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("# Cloned from built-in fault %q. Change the id before using as a custom catalog.\n", failureID)
+	fmt.Print(string(data))
 }

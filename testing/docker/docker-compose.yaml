@@ -16,6 +16,12 @@ services:
       - shared_buffers=32MB
       - -c
       - log_statement=all
+      - -c
+      - logging_collector=on
+      - -c
+      - log_directory=log
+      - -c
+      - log_filename=postgresql.log
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

@@ -1921,6 +1921,9 @@ FROM latest;`, pgLogReadBytes, pgLogReadBytes)
 		if strings.Contains(errStr, "pg_ls_logdir") && strings.Contains(errStr, "permission denied") {
 			return PsqlResult{Output: "read_pg_log: permission denied for pg_ls_logdir — the database user lacks the pg_read_server_files privilege or superuser role.\n\nFor Kubernetes-managed PostgreSQL, use the k8s agent's get_pod_logs tool on the postgres pod instead (e.g. kubectl logs <pod> -n <namespace>)."}, nil
 		}
+		if strings.Contains(errStr, "could not open directory") || strings.Contains(errStr, "No such file or directory") {
+			return PsqlResult{Output: "read_pg_log: log directory does not exist — logging_collector is likely disabled on this server. Enable it by setting logging_collector=on and log_destination=stderr in postgresql.conf, then restart PostgreSQL."}, nil
+		}
 		return errorResult("read_pg_log", args.ConnectionString, err), nil
 	}
 

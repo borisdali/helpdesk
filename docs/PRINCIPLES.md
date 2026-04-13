@@ -14,9 +14,12 @@ we stop and don't ship until we do.
 
 We believe in open source.
 
-We don't like black boxes where we need to take somebody else's word for what's
+As they say, open source is a baseline for innovation, a collaborative foundation
+that drives technological advancement. We believe that.
+
+We also don't like black boxes where we need to take somebody else's word for what's
 (hidden) inside. We don't think our customers should do that either. They deserve
-better than just running vulnerability scanning on our images and testing our
+better than just running vulnerability scans on our images and testing our
 software in the hope that they are thorough enough to cover all the edge cases.
 We prefer aiHelpDesk to be open to customers and to anybody else to review,
 comment, send suggestions and PRs.
