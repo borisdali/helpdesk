@@ -183,7 +183,7 @@ The JSON report includes `remediation_attempted`, `remediation_passed`, and `rec
 
 ## 4. Policy safety: the infra-config guard
 
-Before injecting any fault, `faulttest` optionally checks that the target PostgreSQL host is present in your `infrastructure.json` and is tagged `test` or `chaos`. This prevents accidental injection against production databases.
+Before injecting any fault, `faulttest` optionally checks that the target PostgreSQL host is present in your `infrastructure.json` and is tagged `test` or `chaos`. This prevents accidental injection against production databases. The check applies to all three injection subcommands: `run`, `inject`, and `teardown`.
 
 ```json
 {
@@ -730,7 +730,7 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
   #   type: shell_exec
   #   script_inline: |
   #     psql "$FAULTTEST_CONN" -c "CREATE TABLE IF NOT EXISTS t (id int);"
-  #     psql "$FAULTTEST_CONN" -c "BEGIN; LOCK TABLE t IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(600);" &
+  #     { { printf "BEGIN;\nLOCK TABLE t IN ACCESS EXCLUSIVE MODE;\n"; sleep 600; } | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
   #     echo $! > /tmp/faulttest_myfault_pid.txt
   #     sleep 1
   # external_teardown:

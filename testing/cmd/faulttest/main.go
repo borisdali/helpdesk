@@ -338,6 +338,11 @@ func cmdInject(args []string) {
 		os.Exit(1)
 	}
 
+	if err := checkTargetSafety(cfg.InfraConfigPath, cfg.ConnStr); err != nil {
+		fmt.Fprintf(os.Stderr, "Safety check failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	ctx := context.Background()
 	injector := NewInjector(cfg)
 
@@ -374,6 +379,11 @@ func cmdTeardown(args []string) {
 	f := findFailure(cat, failureID)
 	if f == nil {
 		fmt.Fprintf(os.Stderr, "Error: failure %q not found\n", failureID)
+		os.Exit(1)
+	}
+
+	if err := checkTargetSafety(cfg.InfraConfigPath, cfg.ConnStr); err != nil {
+		fmt.Fprintf(os.Stderr, "Safety check failed: %v\n", err)
 		os.Exit(1)
 	}
 

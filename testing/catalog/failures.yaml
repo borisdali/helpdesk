@@ -40,7 +40,7 @@ failures:
       script_inline: "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle' AND pid <> pg_backend_pid();"
     prompt: >
       Users are getting "too many clients" errors connecting to the database.
-      The connection_string is `{{connection_string}}` — use it verbatim for
+      The connection_string is "{{connection_string}}" — use it verbatim for
       all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -83,7 +83,7 @@ failures:
       script_inline: "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND pid <> pg_backend_pid();"
     prompt: >
       Queries seem to hang indefinitely and certain tables are inaccessible.
-      The connection_string is `{{connection_string}}` — use it verbatim for
+      The connection_string is "{{connection_string}}" — use it verbatim for
       all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -128,8 +128,8 @@ failures:
           CREATE TABLE IF NOT EXISTS _faulttest_lock (id int PRIMARY KEY);
           INSERT INTO _faulttest_lock VALUES (1) ON CONFLICT DO NOTHING;
         "
-        psql "$FAULTTEST_CONN" \
-          -c "BEGIN; LOCK TABLE _faulttest_lock IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(600);" &
+        { { printf "BEGIN;\nLOCK TABLE _faulttest_lock IN ACCESS EXCLUSIVE MODE;\n"; sleep 600; } \
+          | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
         echo $! > /tmp/faulttest_lock_pid.txt
         sleep 1
         echo "Injected: ACCESS EXCLUSIVE lock held by pid=$(cat /tmp/faulttest_lock_pid.txt)"
@@ -143,7 +143,7 @@ failures:
         psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS _faulttest_lock;"
     prompt: >
       The database is experiencing intermittent "deadlock detected" errors.
-      The connection_string is `{{connection_string}}` — use it verbatim for
+      The connection_string is "{{connection_string}}" — use it verbatim for
       all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -189,7 +189,7 @@ failures:
       script_inline: "DROP TABLE IF EXISTS test_bloat_table;"
     prompt: >
       The database seems to be using more disk than expected and some queries
-      are getting slower. The connection_string is `{{connection_string}}` —
+      are getting slower. The connection_string is "{{connection_string}}" —
       use it verbatim for all tool calls. Please investigate table health.
     evaluation:
       expected_tools:
@@ -231,7 +231,7 @@ failures:
       script_inline: "DROP TABLE IF EXISTS test_large_table; SELECT pg_stat_reset();"
     prompt: >
       Users report slow query performance. The connection_string is
-      `{{connection_string}}` — use it verbatim for all tool calls.
+      "{{connection_string}}" — use it verbatim for all tool calls.
       Please check database health and performance metrics.
     evaluation:
       expected_tools:
@@ -268,7 +268,7 @@ failures:
       verify_timeout: "120s"
     prompt: >
       The database is unreachable and users are getting connection refused
-      errors. The connection_string is `{{connection_string}}` — use it
+      errors. The connection_string is "{{connection_string}}" — use it
       verbatim for all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -300,7 +300,7 @@ failures:
       restore: true
     prompt: >
       The database is returning authentication errors. The connection_string
-      is `{{connection_string}}` — use it verbatim for all tool calls.
+      is "{{connection_string}}" — use it verbatim for all tool calls.
       Please investigate.
     evaluation:
       expected_tools:
@@ -332,7 +332,7 @@ failures:
       restore: true
     prompt: >
       Applications are getting errors when connecting to the database.
-      The connection_string is `{{connection_string}}` — use it verbatim
+      The connection_string is "{{connection_string}}" — use it verbatim
       for all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -366,7 +366,7 @@ failures:
     prompt: >
       The replica seems to be returning stale data — recent writes on the
       primary are not visible. The primary connection_string is
-      `{{connection_string}}` — use it verbatim for all tool calls.
+      "{{connection_string}}" — use it verbatim for all tool calls.
       Please investigate replication status.
     evaluation:
       expected_tools:
@@ -404,15 +404,17 @@ failures:
       script: sql/teardown_idle_in_transaction.sh
     external_inject:
       type: shell_exec
-      # Run psql in the background holding an open transaction.
+      # Create a genuine idle-in-transaction session by piping BEGIN+UPDATE to
+      # psql and then holding stdin open with sleep — psql executes the DML and
+      # waits for the next command, producing state='idle in transaction'.
       # $FAULTTEST_CONN is injected by faulttest from the --conn flag.
       script_inline: |
         psql "$FAULTTEST_CONN" -c "
           CREATE TABLE IF NOT EXISTS _faulttest_idle (id int PRIMARY KEY, val text);
           INSERT INTO _faulttest_idle VALUES (1, 'held') ON CONFLICT DO NOTHING;
         "
-        psql "$FAULTTEST_CONN" \
-          -c "BEGIN; UPDATE _faulttest_idle SET val='modified' WHERE id=1; SELECT pg_sleep(600);" &
+        { { printf "BEGIN;\nUPDATE _faulttest_idle SET val='modified' WHERE id=1;\n"; sleep 600; } \
+          | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
         echo $! > /tmp/faulttest_iit_pid.txt
         sleep 1
         echo "Injected: idle-in-transaction session (pid=$(cat /tmp/faulttest_iit_pid.txt))"
@@ -422,16 +424,17 @@ failures:
         if [ -f /tmp/faulttest_iit_pid.txt ]; then
           kill "$(cat /tmp/faulttest_iit_pid.txt)" 2>/dev/null || true
           rm -f /tmp/faulttest_iit_pid.txt
+          sleep 1
         fi
         psql "$FAULTTEST_CONN" -c "
           SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-            WHERE state='idle in transaction' AND pid <> pg_backend_pid();
+            WHERE backend_xid IS NOT NULL AND pid <> pg_backend_pid();
           DROP TABLE IF EXISTS _faulttest_idle;
         "
     prompt: >
       A backend session appears to be stuck in a long-running transaction
       and users are experiencing write timeouts on a key table.
-      The connection_string is `{{connection_string}}` — use it verbatim
+      The connection_string is "{{connection_string}}" — use it verbatim
       for all tool calls. Investigate the stuck session, assess how much
       uncommitted work it holds, and determine whether it is safe to
       terminate it.
@@ -483,8 +486,8 @@ failures:
           CREATE TABLE IF NOT EXISTS _faulttest_idle (id int PRIMARY KEY, val text);
           INSERT INTO _faulttest_idle VALUES (1, 'held') ON CONFLICT DO NOTHING;
         "
-        psql "$FAULTTEST_CONN" \
-          -c "BEGIN; UPDATE _faulttest_idle SET val='modified' WHERE id=1; SELECT pg_sleep(600);" &
+        { { printf "BEGIN;\nUPDATE _faulttest_idle SET val='modified' WHERE id=1;\n"; sleep 600; } \
+          | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
         echo $! > /tmp/faulttest_iit2_pid.txt
         sleep 1
         echo "Injected: idle-in-transaction session (pid=$(cat /tmp/faulttest_iit2_pid.txt))"
@@ -494,15 +497,16 @@ failures:
         if [ -f /tmp/faulttest_iit2_pid.txt ]; then
           kill "$(cat /tmp/faulttest_iit2_pid.txt)" 2>/dev/null || true
           rm -f /tmp/faulttest_iit2_pid.txt
+          sleep 1
         fi
         psql "$FAULTTEST_CONN" -c "
           SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-            WHERE state='idle in transaction' AND pid <> pg_backend_pid();
+            WHERE backend_xid IS NOT NULL AND pid <> pg_backend_pid();
           DROP TABLE IF EXISTS _faulttest_idle;
         "
     prompt: >
       A backend session is stuck idle in transaction and is blocking writes
-      on a key table. The connection_string is `{{connection_string}}` — use
+      on a key table. The connection_string is "{{connection_string}}" — use
       it verbatim for all tool calls. Find the blocking session and terminate
       it immediately.
     evaluation:
@@ -796,7 +800,7 @@ failures:
     prompt: >
       A DBA reports that queries on several tables are getting slower and
       autovacuum has not run recently. The connection_string is
-      `{{connection_string}}` — use it verbatim for all tool calls.
+      "{{connection_string}}" — use it verbatim for all tool calls.
       Check which tables need vacuuming.
     evaluation:
       expected_tools:
@@ -832,7 +836,7 @@ failures:
       script_inline: "DROP TABLE IF EXISTS disk_pressure_data;"
     prompt: >
       The database server is reporting low disk space alerts. The
-      connection_string is `{{connection_string}}` — use it verbatim for all
+      connection_string is "{{connection_string}}" — use it verbatim for all
       tool calls. Identify which databases and tables are consuming the most
       storage.
     evaluation:
@@ -1001,7 +1005,7 @@ failures:
       verify_timeout: "120s"
     prompt: >
       All application connections to the database are failing with "pg_hba.conf
-      rejects connection". The connection_string is `{{connection_string}}` —
+      rejects connection". The connection_string is "{{connection_string}}" —
       use it verbatim for all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -1059,7 +1063,7 @@ failures:
       verify_timeout: "120s"
     prompt: >
       The database server is completely unreachable — processes appear to have
-      crashed. The connection_string is `{{connection_string}}` — use it
+      crashed. The connection_string is "{{connection_string}}" — use it
       verbatim for all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -1141,7 +1145,7 @@ failures:
         rm -f "${DATA_DIR}/postgresql.conf.faulttest.bak"
     prompt: >
       After a recent configuration change the database is failing to start.
-      The connection_string is `{{connection_string}}` — use it verbatim for
+      The connection_string is "{{connection_string}}" — use it verbatim for
       all tool calls. Please investigate.
     evaluation:
       expected_tools:
@@ -1185,7 +1189,7 @@ failures:
     prompt: >
       The database is completely unreachable. It's running in Kubernetes
       namespace helpdesk-test. The connection_string is
-      `{{connection_string}}` — use it verbatim for all tool calls.
+      "{{connection_string}}" — use it verbatim for all tool calls.
       Please investigate both the database connectivity and the
       Kubernetes infrastructure.
     evaluation:
@@ -1219,7 +1223,7 @@ failures:
       restore: k8s/base
     prompt: >
       The database is timing out. It's running in Kubernetes namespace
-      helpdesk-test. The connection_string is `{{connection_string}}` —
+      helpdesk-test. The connection_string is "{{connection_string}}" —
       use it verbatim for all tool calls. Please investigate both the
       database connectivity and the Kubernetes service configuration.
     evaluation:

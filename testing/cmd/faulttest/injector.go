@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"helpdesk/internal/infra"
 	"helpdesk/testing/testutil"
 )
 
@@ -27,10 +28,12 @@ func NewInjector(cfg *HarnessConfig) *Injector {
 // ExternalInject is used when set.
 func (inj *Injector) Inject(ctx context.Context, f Failure) error {
 	spec := f.Inject
+	mode := "internal"
 	if (inj.cfg.External || inj.cfg.SSHHost != "") && f.ExternalInject.Type != "" {
 		spec = f.ExternalInject
+		mode = "external"
 	}
-	slog.Info("injecting failure", "id", f.ID, "type", spec.Type)
+	slog.Info("injecting failure", "id", f.ID, "type", spec.Type, "mode", mode)
 	return inj.exec(ctx, spec, f)
 }
 
@@ -71,11 +74,12 @@ func (inj *Injector) exec(ctx context.Context, spec InjectSpec, f Failure) error
 }
 
 func (inj *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
+	connStr := inj.resolvedConnStr()
+	if spec.Target == "replica" {
+		connStr = inj.cfg.ReplicaConnStr
+	}
+
 	if spec.ScriptInline != "" {
-		connStr := inj.cfg.ConnStr
-		if spec.Target == "replica" {
-			connStr = inj.cfg.ReplicaConnStr
-		}
 		return testutil.RunSQLString(ctx, connStr, spec.ScriptInline)
 	}
 
@@ -85,11 +89,12 @@ func (inj *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
 		return testutil.RunSQLViaPgloader(ctx, scriptPath)
 	}
 
-	connStr := inj.cfg.ConnStr
-	if spec.Target == "replica" {
-		connStr = inj.cfg.ReplicaConnStr
-	}
 	return testutil.RunSQL(ctx, connStr, scriptPath)
+}
+
+func (inj *Injector) resolvedConnStr() string {
+	connStr, _ := inj.resolvedConnEnv()
+	return connStr
 }
 
 func (inj *Injector) execDocker(ctx context.Context, spec InjectSpec) error {
@@ -168,17 +173,43 @@ func (inj *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	} else {
 		return fmt.Errorf("shell_exec: script or script_inline is required")
 	}
+	connStr, pgpassword := inj.resolvedConnEnv()
 	cmd := exec.CommandContext(ctx, "bash", "-s")
 	cmd.Stdin = bytes.NewReader(scriptContent)
-	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN
-	// without hardcoding credentials.
-	cmd.Env = append(os.Environ(), "FAULTTEST_CONN="+inj.cfg.ConnStr)
+	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN.
+	// Also set PGPASSWORD when the infra config supplies a password via
+	// password_env, preventing psql from opening /dev/tty and hanging.
+	env := append(os.Environ(), "FAULTTEST_CONN="+connStr)
+	if pgpassword != "" {
+		env = append(env, "PGPASSWORD="+pgpassword)
+	}
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("shell_exec: %v\n%s", err, output)
 	}
 	slog.Info("shell_exec completed", "output", strings.TrimSpace(string(output)))
 	return nil
+}
+
+// resolvedConnEnv returns the libpq connection string and, separately, the
+// password to set as PGPASSWORD. When cfg.ConnStr is a named infra key, the
+// entry's ResolvedConnectionString() is used and its password_env value is
+// read from the environment. Falls back to cfg.ConnStr / "" when the key is
+// not found or no infra config is configured.
+func (inj *Injector) resolvedConnEnv() (connStr, pgpassword string) {
+	if inj.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(inj.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[inj.cfg.ConnStr]; ok {
+				pw := ""
+				if db.PasswordEnv != "" {
+					pw = os.Getenv(db.PasswordEnv)
+				}
+				return db.ResolvedConnectionString(), pw
+			}
+		}
+	}
+	return inj.cfg.ConnStr, ""
 }
 
 // execSSH runs a script on a remote host via SSH.

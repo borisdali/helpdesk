@@ -308,6 +308,18 @@ func checkTargetSafety(infraConfigPath, connStr string) error {
 		return fmt.Errorf("parsing infra config: %v", err)
 	}
 
+	// Fast path: connStr may be a named infra key (e.g. "alloydb-on-vm").
+	// Look it up directly before falling back to host-based matching.
+	if srv, ok := cfg.DBServers[connStr]; ok {
+		for _, tag := range srv.Tags {
+			if tag == "test" || tag == "chaos" {
+				return nil
+			}
+		}
+		return fmt.Errorf("server %q does not have a 'test' or 'chaos' tag — "+
+			"refusing to inject faults. Add tag in infrastructure.json to opt-in", connStr)
+	}
+
 	// Extract host from the connection string.
 	// Handles both DSN ("host=... port=...") and URL ("postgres://host:port/db") formats.
 	targetHost := connStrHost(connStr)

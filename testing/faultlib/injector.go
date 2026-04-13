@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"helpdesk/internal/infra"
 	"helpdesk/testing/testutil"
 )
 
@@ -91,7 +92,7 @@ func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) erro
 }
 
 func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
-	connStr := i.cfg.ConnStr
+	connStr := i.resolvedConnStr()
 	if spec.Target == "replica" {
 		connStr = i.cfg.ReplicaConnStr
 	}
@@ -104,6 +105,11 @@ func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
 		return testutil.RunSQL(ctx, connStr, scriptPath)
 	}
 	return nil
+}
+
+func (i *Injector) resolvedConnStr() string {
+	connStr, _ := i.resolvedConnEnv()
+	return connStr
 }
 
 func (i *Injector) execDocker(ctx context.Context, spec InjectSpec) error {
@@ -188,17 +194,43 @@ func (i *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	} else {
 		return fmt.Errorf("shell_exec: script or script_inline is required")
 	}
+	connStr, pgpassword := i.resolvedConnEnv()
 	cmd := exec.CommandContext(ctx, "bash", "-s")
 	cmd.Stdin = bytes.NewReader(scriptContent)
-	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN
-	// without hardcoding credentials.
-	cmd.Env = append(os.Environ(), "FAULTTEST_CONN="+i.cfg.ConnStr)
+	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN.
+	// Also set PGPASSWORD when the infra config supplies a password via
+	// password_env, preventing psql from opening /dev/tty and hanging.
+	env := append(os.Environ(), "FAULTTEST_CONN="+connStr)
+	if pgpassword != "" {
+		env = append(env, "PGPASSWORD="+pgpassword)
+	}
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("shell_exec: %v\n%s", err, output)
 	}
 	slog.Info("shell_exec completed", "output", strings.TrimSpace(string(output)))
 	return nil
+}
+
+// resolvedConnEnv returns the libpq connection string and, separately, the
+// password to set as PGPASSWORD. When cfg.ConnStr is a named infra key, the
+// entry's ResolvedConnectionString() is used and its password_env value is
+// read from the environment. Falls back to cfg.ConnStr / "" when the key is
+// not found or no infra config is configured.
+func (i *Injector) resolvedConnEnv() (connStr, pgpassword string) {
+	if i.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[i.cfg.ConnStr]; ok {
+				pw := ""
+				if db.PasswordEnv != "" {
+					pw = os.Getenv(db.PasswordEnv)
+				}
+				return db.ResolvedConnectionString(), pw
+			}
+		}
+	}
+	return i.cfg.ConnStr, ""
 }
 
 // execSSH runs a script on a remote host via SSH.
