@@ -144,10 +144,11 @@ func TestFaultInjectionE2E(t *testing.T) {
 
 	// Filter to just database failures for E2E (faster, more reliable).
 	// Only use failures that don't require docker_exec (those need test infra).
-	failures := faultlib.FilterFailures(catalog, []string{"database"}, nil)
+	categories := []string{"database"}
 	if len(cfg.Categories) > 0 {
-		failures = faultlib.FilterFailures(catalog, cfg.Categories, nil)
+		categories = cfg.Categories
 	}
+	failures := faultlib.FilterFailures(catalog, &faultlib.HarnessConfig{Categories: categories})
 
 	// Filter out failures that require docker_exec (need test infrastructure).
 	var filteredFailures []faultlib.Failure

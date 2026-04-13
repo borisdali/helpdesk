@@ -17,9 +17,18 @@ import (
 
 // AgentResponse captures the result of sending a prompt to an agent.
 type AgentResponse struct {
-	Text     string
-	Duration time.Duration
-	Error    error
+	Text      string
+	ToolCalls []ToolCallResult // nil when structured data is unavailable (gateway path)
+	Duration  time.Duration
+	Error     error
+}
+
+// ToolCallResult records one tool invocation observed in a structured A2A response.
+// Success is determined by whether an "ERROR — {Name}" sentinel appears in the
+// surrounding response text (set by the caller after text extraction).
+type ToolCallResult struct {
+	Name    string
+	Success bool
 }
 
 // SendPrompt sends a text prompt to an A2A agent and returns the response.
@@ -63,10 +72,11 @@ func SendPrompt(ctx context.Context, agentURL, prompt string) AgentResponse {
 		}
 	}
 
-	text := extractText(result)
+	text, toolCalls := extractResponse(result)
 	return AgentResponse{
-		Text:     text,
-		Duration: time.Since(start),
+		Text:      text,
+		ToolCalls: toolCalls,
+		Duration:  time.Since(start),
 	}
 }
 
@@ -115,36 +125,78 @@ func fetchCard(ctx context.Context, cardURL string) (*a2a.AgentCard, error) {
 	return &card, nil
 }
 
-// extractText pulls the response text from a SendMessageResult.
-// ADK-based agents store their response in Artifacts; other agents may use
-// History or Status.Message. We check all three locations.
-func extractText(result a2a.SendMessageResult) string {
+// extractResponse pulls the response text and structured tool call list from a
+// SendMessageResult. ADK-based agents (via agentutil) emit a DataPart with
+// metadata helpdesk_type="tool_call_summary" carrying the list of tool names
+// invoked during the request. When present, ToolCalls is populated with exact
+// names; Success is derived by checking whether an error sentinel for that name
+// appears in the response text.
+//
+// When the DataPart is absent (non-ADK agents, gateway path), toolCalls is nil
+// and the evaluator falls back to section-aware text matching with a warning.
+func extractResponse(result a2a.SendMessageResult) (text string, toolCalls []ToolCallResult) {
 	switch v := result.(type) {
 	case *a2a.Task:
-		// ADK agents emit artifact update events; text lives in Artifacts.
+		var summaryNames []string
+
+		// ADK agents emit artifact update events; text and the tool-call DataPart
+		// live in Artifacts. Scan all artifacts: collect text from TextParts and
+		// tool call names from the summary DataPart.
 		for _, artifact := range v.Artifacts {
-			if t := partsText(artifact.Parts); t != "" {
-				return t
-			}
-		}
-		// Non-ADK agents or error responses may use Status.Message.
-		if v.Status.Message != nil {
-			if t := partsText(v.Status.Message.Parts); t != "" {
-				return t
-			}
-		}
-		// Some implementations populate History.
-		for i := len(v.History) - 1; i >= 0; i-- {
-			if v.History[i].Role == a2a.MessageRoleAgent {
-				if t := partsText(v.History[i].Parts); t != "" {
-					return t
+			for _, part := range artifact.Parts {
+				switch p := part.(type) {
+				case a2a.TextPart:
+					if text == "" {
+						text = p.Text
+					}
+				case a2a.DataPart:
+					meta, _ := p.Metadata["helpdesk_type"].(string)
+					if meta == "tool_call_summary" {
+						if names, ok := p.Data["tool_calls"].([]any); ok {
+							for _, n := range names {
+								if s, ok := n.(string); ok {
+									summaryNames = append(summaryNames, s)
+								}
+							}
+						}
+					}
 				}
 			}
 		}
+
+		// Non-ADK agents or error responses may use Status.Message.
+		if text == "" && v.Status.Message != nil {
+			text = partsText(v.Status.Message.Parts)
+		}
+		// Some implementations populate History.
+		if text == "" {
+			for i := len(v.History) - 1; i >= 0; i-- {
+				if v.History[i].Role == a2a.MessageRoleAgent {
+					if t := partsText(v.History[i].Parts); t != "" {
+						text = t
+						break
+					}
+				}
+			}
+		}
+
+		if len(summaryNames) > 0 {
+			lower := strings.ToLower(text)
+			toolCalls = make([]ToolCallResult, len(summaryNames))
+			for i, name := range summaryNames {
+				// A tool failed when the agent emits "ERROR — {name} failed".
+				sentinel := strings.ToLower("ERROR — " + name + " failed")
+				toolCalls[i] = ToolCallResult{
+					Name:    name,
+					Success: !strings.Contains(lower, sentinel),
+				}
+			}
+		}
+
 	case *a2a.Message:
-		return partsText(v.Parts)
+		text = partsText(v.Parts)
 	}
-	return ""
+	return text, toolCalls
 }
 
 // IsGatewayURL probes whether url is a helpdesk gateway by checking whether

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -905,6 +906,92 @@ func toolNameFromContext(ctx context.Context) string {
 	return ""
 }
 
+// =============================================================================
+// Tool-call tracking — injects structured tool call data into the A2A response
+// so faulttest (and other evaluation clients) can use exact tool-name matching
+// instead of brittle output-text heuristics.
+// =============================================================================
+
+// toolCallStoreKey is the unexported context key for the per-request store.
+type toolCallStoreKey struct{}
+
+// toolCallStore accumulates tool names seen during one A2A request.
+type toolCallStore struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (s *toolCallStore) add(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.names = append(s.names, name)
+}
+
+func (s *toolCallStore) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.names) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.names))
+	copy(out, s.names)
+	return out
+}
+
+// toolCallStoreFromContext returns the store injected by newToolCallBeforeCallback,
+// or nil when the callbacks are not installed (e.g. in tests).
+func toolCallStoreFromContext(ctx context.Context) *toolCallStore {
+	s, _ := ctx.Value(toolCallStoreKey{}).(*toolCallStore)
+	return s
+}
+
+// HelpdeskToolCallSummaryMetaKey is the DataPart metadata key used to mark the
+// tool-call-summary artifact part emitted at the end of every A2A response.
+// testutil.extractResponse looks for this key to populate AgentResponse.ToolCalls.
+const HelpdeskToolCallSummaryMetaKey = "helpdesk_type"
+
+// HelpdeskToolCallSummaryMetaValue is the value of HelpdeskToolCallSummaryMetaKey.
+const HelpdeskToolCallSummaryMetaValue = "tool_call_summary"
+
+// newToolCallCallbacks returns the BeforeExecuteCallback and AfterEventCallback
+// pair that tracks tool invocations and injects a DataPart summary into the
+// final A2A artifact. Wire both into every adka2a.ExecutorConfig.
+func newToolCallCallbacks() (adka2a.BeforeExecuteCallback, adka2a.AfterEventCallback) {
+	before := func(ctx context.Context, _ *a2asrv.RequestContext) (context.Context, error) {
+		return context.WithValue(ctx, toolCallStoreKey{}, &toolCallStore{}), nil
+	}
+
+	after := func(ctx adka2a.ExecutorContext, adkEvent *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+		// Collect FunctionCall names from this ADK event.
+		if adkEvent.LLMResponse.Content != nil {
+			if store := toolCallStoreFromContext(ctx); store != nil {
+				for _, part := range adkEvent.LLMResponse.Content.Parts {
+					if part.FunctionCall != nil && part.FunctionCall.Name != "" {
+						store.add(part.FunctionCall.Name)
+					}
+				}
+			}
+		}
+
+		// On the final response event, append the summary DataPart to the artifact.
+		if adkEvent.IsFinalResponse() && processed != nil && processed.Artifact != nil {
+			if store := toolCallStoreFromContext(ctx); store != nil {
+				if names := store.snapshot(); len(names) > 0 {
+					processed.Artifact.Parts = append(processed.Artifact.Parts, a2a.DataPart{
+						Data: map[string]any{"tool_calls": names},
+						Metadata: map[string]any{
+							HelpdeskToolCallSummaryMetaKey: HelpdeskToolCallSummaryMetaValue,
+						},
+					})
+				}
+			}
+		}
+		return nil
+	}
+
+	return before, after
+}
+
 // policyCheckReq is the body sent to POST /v1/governance/check.
 // Field names match PolicyCheckRequest in cmd/auditd/governance_handlers.go.
 type policyCheckReq struct {
@@ -1348,12 +1435,15 @@ func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) 
 	}
 	registerSchemasHandler(mux, toolSchemas)
 
+	toolCallBefore, toolCallAfter := newToolCallCallbacks()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:        a.Name(),
 			Agent:          a,
 			SessionService: session.InMemoryService(),
 		},
+		BeforeExecuteCallback: toolCallBefore,
+		AfterEventCallback:    toolCallAfter,
 	})
 	requestHandler := a2asrv.NewHandler(executor)
 	mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
@@ -1441,12 +1531,15 @@ func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore
 	}
 	registerSchemasHandler(mux, toolSchemas)
 
+	toolCallBefore, toolCallAfter := newToolCallCallbacks()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:        a.Name(),
 			Agent:          a,
 			SessionService: session.InMemoryService(),
 		},
+		BeforeExecuteCallback: toolCallBefore,
+		AfterEventCallback:    toolCallAfter,
 	})
 	requestHandler := a2asrv.NewHandler(executor)
 
@@ -1508,12 +1601,15 @@ func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Conf
 	}
 	registerSchemasHandler(mux, toolSchemas)
 
+	toolCallBefore, toolCallAfter := newToolCallCallbacks()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:        a.Name(),
 			Agent:          a,
 			SessionService: session.InMemoryService(),
 		},
+		BeforeExecuteCallback: toolCallBefore,
+		AfterEventCallback:    toolCallAfter,
 	})
 	requestHandler := a2asrv.NewHandler(executor)
 

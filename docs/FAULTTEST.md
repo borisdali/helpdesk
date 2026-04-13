@@ -208,6 +208,37 @@ faulttest run --external \
 # ✗ prod-db has no "test" or "chaos" tag — injection refused
 ```
 
+### Storing the password outside the config file
+
+Plain-text passwords in `infrastructure.json` are not acceptable in most environments. Use `password_env` to store the password in an environment variable instead:
+
+```json
+{
+  "db_servers": {
+    "staging-db": {
+      "connection_string": "host=staging-db port=5432 dbname=mydb user=myuser",
+      "password_env": "STAGING_DB_PASSWORD",
+      "tags": ["staging", "test"]
+    }
+  }
+}
+```
+
+At runtime the gateway (and any other component reading `infrastructure.json`) appends `password=<value>` to the connection string from the named environment variable. The file itself never contains the password.
+
+```bash
+# Pass the password via environment variable — the gateway resolves it at call time
+export STAGING_DB_PASSWORD="$(vault read -field=password secret/staging-db)"
+
+# Use the alias in --agent-conn so the gateway finds the registered entry;
+# use --conn with the full DSN for injection (faulttest resolves its own connection)
+faulttest run --external \
+  --conn "host=staging-db port=5432 dbname=mydb user=myuser password=$STAGING_DB_PASSWORD" \
+  --agent-conn staging-db \
+  --infra-config infrastructure.json \
+  --db-agent http://helpdesk-gateway:8080
+```
+
 If `--infra-config` is omitted the check is skipped. This is intentional for air-gapped or single-tenant setups where the operator knows their target. The flag is strongly recommended in any shared environment.
 
 ---
@@ -247,7 +278,8 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--conn` | — | — | PostgreSQL connection string |
+| `--conn` | — | — | PostgreSQL connection string used for fault injection and teardown |
+| `--agent-conn` | — | `--conn` | Connection identifier sent to the agent in prompts. Defaults to `--conn`. Use this when the agent should see a registered alias from `infrastructure.json` (e.g. `staging-db`) while `--conn` holds the full DSN with password for injection. |
 | `--replica-conn` | — | — | Replica connection string (replication-lag fault) |
 | `--db-agent` | — | — | Database agent A2A URL or gateway URL |
 | `--k8s-agent` | — | — | Kubernetes agent A2A URL |
@@ -262,6 +294,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--remediate` | — | false | Run remediation phase after diagnosis |
 | `--gateway` | — | `http://localhost:8080` | Gateway URL for playbook/agent remediation |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
+| `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
 | `--infra-config` | — | — | Path to `infrastructure.json` for safety check |
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
@@ -477,7 +510,8 @@ The JSON report contains one entry per fault:
 |-------|---------|
 | `keyword_pass` | At least one expected keyword found in agent response |
 | `diagnosis_pass` | Agent response contains terms from the expected diagnosis category |
-| `tool_evidence` | Agent response mentions at least one expected tool |
+| `tool_evidence` | Agent called at least one expected tool. |
+| `tool_evidence_mode` | How tool evidence was determined: `structured` (exact name matching from a `tool_call_summary` DataPart — ADK agents via A2A) or `text_fallback` (keyword matching against response text — non-ADK agents or gateway path). Omitted when no tools were expected. A `text_fallback` score is less reliable: it passes if the right words appear in the text, not if the tool was actually called. |
 | `ordering_pass` | Tool ordering constraints satisfied (e.g., inspect before terminate) |
 | `score` | Weighted combination: 50% keywords + 30% diagnosis + 20% tools |
 | `passed` | `score >= 0.6` **and** `ordering_pass = true` |

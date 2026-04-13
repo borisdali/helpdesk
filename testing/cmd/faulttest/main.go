@@ -266,7 +266,7 @@ func cmdRun(args []string) {
 				Duration:    resp.Duration.String(),
 			}
 		} else {
-			evalResult = Evaluate(f, resp.Text)
+			evalResult = Evaluate(f, resp)
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
 		}

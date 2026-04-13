@@ -170,6 +170,13 @@ test-environment database.  `testing/testing.policy.yaml` grants unrestricted
 read/write/destructive access to resources tagged `test`.  **Do not use these
 files in production.**
 
+> **`password_env` entries:** if your `infrastructure.json` uses `"password_env": "MY_DB_PW"` instead of a plain-text password in `connection_string`, set that variable in the agent's environment before starting it. For example:
+> ```bash
+> export TEST_DB_PASSWORD=testpass
+> HELPDESK_INFRA_CONFIG=claude/infrastructure.json go run ./agents/database &
+> ```
+> The agent resolves the password at each tool call by reading the named env var. The variable must be present in the agent process — it is not read from the caller's shell after startup.
+
 ## Manual Testing: Inject/teardown manually (no agents needed)
 
   ### Inject a failure#1: table bloat

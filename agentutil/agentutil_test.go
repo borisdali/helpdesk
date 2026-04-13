@@ -13,6 +13,9 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/adk/server/adka2a"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 	adktool "google.golang.org/adk/tool"
 
@@ -1474,6 +1477,197 @@ func TestApplyCardOptions_SkillSchemaHash(t *testing.T) {
 		if strings.HasPrefix(tag, "schema_hash:") {
 			t.Errorf("unexpected schema_hash tag on skill without hash: %q", tag)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tool call tracking (newToolCallCallbacks)
+// ---------------------------------------------------------------------------
+
+// mockExecutorContext wraps a context.Context to satisfy adka2a.ExecutorContext.
+// Only the context embedding is used by our callback; all other methods return zero values.
+type mockExecutorContext struct {
+	context.Context
+}
+
+func (m mockExecutorContext) SessionID() string                        { return "" }
+func (m mockExecutorContext) UserID() string                           { return "" }
+func (m mockExecutorContext) AgentName() string                        { return "" }
+func (m mockExecutorContext) ReadonlyState() session.ReadonlyState     { return nil }
+func (m mockExecutorContext) Events() session.Events                   { return nil }
+func (m mockExecutorContext) UserContent() *genai.Content              { return nil }
+func (m mockExecutorContext) RequestContext() *a2asrv.RequestContext    { return nil }
+
+var _ adka2a.ExecutorContext = mockExecutorContext{}
+
+func TestToolCallStore_AddSnapshot(t *testing.T) {
+	s := &toolCallStore{}
+	if got := s.snapshot(); got != nil {
+		t.Errorf("snapshot of empty store = %v, want nil", got)
+	}
+
+	s.add("check_connection")
+	s.add("get_table_stats")
+	s.add("get_table_stats") // duplicate — order preserved, deduplication not expected
+
+	got := s.snapshot()
+	want := []string{"check_connection", "get_table_stats", "get_table_stats"}
+	if len(got) != len(want) {
+		t.Fatalf("snapshot = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("snapshot[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestToolCallStore_SnapshotIsACopy(t *testing.T) {
+	s := &toolCallStore{}
+	s.add("tool-a")
+	snap := s.snapshot()
+	snap[0] = "mutated"
+	// Original store should be unaffected.
+	if s.names[0] != "tool-a" {
+		t.Error("snapshot mutation affected the underlying store")
+	}
+}
+
+func TestToolCallStoreFromContext_Present(t *testing.T) {
+	store := &toolCallStore{}
+	ctx := context.WithValue(context.Background(), toolCallStoreKey{}, store)
+	got := toolCallStoreFromContext(ctx)
+	if got != store {
+		t.Error("toolCallStoreFromContext did not return the injected store")
+	}
+}
+
+func TestToolCallStoreFromContext_Absent(t *testing.T) {
+	got := toolCallStoreFromContext(context.Background())
+	if got != nil {
+		t.Errorf("toolCallStoreFromContext with no store = %v, want nil", got)
+	}
+}
+
+func TestNewToolCallCallbacks_BeforeInjectsStore(t *testing.T) {
+	before, _ := newToolCallCallbacks()
+	ctx, err := before(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("before callback error: %v", err)
+	}
+	store := toolCallStoreFromContext(ctx)
+	if store == nil {
+		t.Fatal("before callback did not inject a toolCallStore into context")
+	}
+}
+
+// makeFunctionCallEvent returns a session.Event whose LLMResponse contains
+// one FunctionCall with the given name. Such events are NOT final responses.
+func makeFunctionCallEvent(name string) *session.Event {
+	evt := &session.Event{}
+	evt.LLMResponse.Content = &genai.Content{
+		Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: name}},
+		},
+	}
+	return evt
+}
+
+// makeFinalResponseEvent returns a session.Event with plain text and no
+// FunctionCalls, so IsFinalResponse() returns true.
+func makeFinalResponseEvent(text string) *session.Event {
+	evt := &session.Event{}
+	evt.LLMResponse.Content = &genai.Content{
+		Parts: []*genai.Part{{Text: text}},
+	}
+	return evt
+}
+
+func TestNewToolCallCallbacks_AfterCollectsNames(t *testing.T) {
+	before, after := newToolCallCallbacks()
+	ctx, _ := before(context.Background(), nil)
+	execCtx := mockExecutorContext{ctx}
+
+	// Two tool call events.
+	if err := after(execCtx, makeFunctionCallEvent("check_connection"), nil); err != nil {
+		t.Fatalf("after callback error: %v", err)
+	}
+	if err := after(execCtx, makeFunctionCallEvent("get_table_stats"), nil); err != nil {
+		t.Fatalf("after callback error: %v", err)
+	}
+
+	store := toolCallStoreFromContext(ctx)
+	got := store.snapshot()
+	if len(got) != 2 || got[0] != "check_connection" || got[1] != "get_table_stats" {
+		t.Errorf("store after two tool events = %v, want [check_connection get_table_stats]", got)
+	}
+}
+
+func TestNewToolCallCallbacks_AfterInjectsSummaryOnFinalResponse(t *testing.T) {
+	before, after := newToolCallCallbacks()
+	ctx, _ := before(context.Background(), nil)
+	execCtx := mockExecutorContext{ctx}
+
+	// One tool call event followed by a final response.
+	_ = after(execCtx, makeFunctionCallEvent("get_database_stats"), nil)
+
+	artifact := &a2a.Artifact{ID: "art-1"}
+	processed := &a2a.TaskArtifactUpdateEvent{Artifact: artifact}
+	if err := after(execCtx, makeFinalResponseEvent("summary text"), processed); err != nil {
+		t.Fatalf("after callback error on final response: %v", err)
+	}
+
+	// Artifact should now have a DataPart with the tool call summary.
+	if len(artifact.Parts) == 0 {
+		t.Fatal("no parts injected into artifact")
+	}
+	dp, ok := artifact.Parts[len(artifact.Parts)-1].(a2a.DataPart)
+	if !ok {
+		t.Fatalf("last artifact part is %T, want a2a.DataPart", artifact.Parts[len(artifact.Parts)-1])
+	}
+	if dp.Metadata[HelpdeskToolCallSummaryMetaKey] != HelpdeskToolCallSummaryMetaValue {
+		t.Errorf("DataPart metadata[%q] = %q, want %q",
+			HelpdeskToolCallSummaryMetaKey, dp.Metadata[HelpdeskToolCallSummaryMetaKey], HelpdeskToolCallSummaryMetaValue)
+	}
+	names, ok := dp.Data["tool_calls"].([]string)
+	if !ok {
+		t.Fatalf("DataPart data[tool_calls] is %T, want []string", dp.Data["tool_calls"])
+	}
+	if len(names) != 1 || names[0] != "get_database_stats" {
+		t.Errorf("tool_calls = %v, want [get_database_stats]", names)
+	}
+}
+
+func TestNewToolCallCallbacks_AfterNoSummaryWhenNoToolCalls(t *testing.T) {
+	before, after := newToolCallCallbacks()
+	ctx, _ := before(context.Background(), nil)
+	execCtx := mockExecutorContext{ctx}
+
+	// Final response with no prior tool calls — no DataPart should be injected.
+	artifact := &a2a.Artifact{ID: "art-empty"}
+	processed := &a2a.TaskArtifactUpdateEvent{Artifact: artifact}
+	if err := after(execCtx, makeFinalResponseEvent("no tools used"), processed); err != nil {
+		t.Fatalf("after callback error: %v", err)
+	}
+
+	for _, p := range artifact.Parts {
+		if dp, ok := p.(a2a.DataPart); ok {
+			if dp.Metadata[HelpdeskToolCallSummaryMetaKey] == HelpdeskToolCallSummaryMetaValue {
+				t.Error("unexpected tool_call_summary DataPart when no tool calls were made")
+			}
+		}
+	}
+}
+
+func TestNewToolCallCallbacks_AfterNoSummaryWhenProcessedNil(t *testing.T) {
+	before, after := newToolCallCallbacks()
+	ctx, _ := before(context.Background(), nil)
+	execCtx := mockExecutorContext{ctx}
+
+	_ = after(execCtx, makeFunctionCallEvent("check_connection"), nil)
+	// processed=nil on final response — should not panic.
+	if err := after(execCtx, makeFinalResponseEvent("done"), nil); err != nil {
+		t.Fatalf("after callback error: %v", err)
 	}
 }
 

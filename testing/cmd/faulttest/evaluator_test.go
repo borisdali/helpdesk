@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"helpdesk/testing/testutil"
 )
 
 func TestSplitCategory(t *testing.T) {
@@ -47,7 +49,7 @@ func TestEvaluate_AllPass(t *testing.T) {
 	// and tool evidence for check_connection (contains "connect").
 	response := "The connection was refused. Cannot connect to the server."
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if !result.Passed {
 		t.Errorf("Evaluate should pass, got Passed=%v, Score=%.2f", result.Passed, result.Score)
@@ -79,7 +81,7 @@ func TestEvaluate_KeywordFail(t *testing.T) {
 	// Response missing all expected keywords.
 	response := "The database is healthy and running normally."
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if result.KeywordPass {
 		t.Error("KeywordPass should be false")
@@ -101,7 +103,7 @@ func TestEvaluate_NoKeywords(t *testing.T) {
 
 	response := "Any response text"
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if !result.KeywordPass {
 		t.Error("KeywordPass should be true by default when no keywords specified")
@@ -121,7 +123,7 @@ func TestEvaluate_DiagnosisPartial(t *testing.T) {
 	// Response has "connection" but not "exhaustion" - 50% match.
 	response := "The connection pool is having issues."
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	// 1/2 words = 0.5 ratio, which is >= 0.5 threshold.
 	if !result.DiagnosisPass {
@@ -142,7 +144,7 @@ func TestEvaluate_DiagnosisFail(t *testing.T) {
 	// Response has 0/3 words.
 	response := "The connection is working fine."
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if result.DiagnosisPass {
 		t.Error("DiagnosisPass should be false for 0% match")
@@ -162,7 +164,7 @@ func TestEvaluate_ToolEvidence(t *testing.T) {
 	// Response contains patterns from get_pods ("Running") and get_events ("Warning").
 	response := "Pod is in Running state. Warning: high memory usage detected."
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if !result.ToolEvidence {
 		t.Error("ToolEvidence should be true when tool patterns are found")
@@ -182,7 +184,7 @@ func TestEvaluate_ToolEvidencePartial(t *testing.T) {
 	// Response has patterns for only 1/4 tools (get_pods: "Running").
 	response := "The pod is Running."
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	// 1/4 = 0.25 < 0.5 threshold.
 	if result.ToolEvidence {
@@ -202,7 +204,7 @@ func TestEvaluate_NoTools(t *testing.T) {
 
 	response := "Any response"
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if !result.ToolEvidence {
 		t.Error("ToolEvidence should be true by default when no tools specified")
@@ -222,7 +224,7 @@ func TestEvaluate_CaseInsensitive(t *testing.T) {
 	// Lowercase in response, uppercase in expected.
 	response := "connection refused by server"
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if !result.KeywordPass {
 		t.Error("Keyword matching should be case-insensitive")
@@ -246,7 +248,7 @@ func TestEvaluate_ScoreWeighting(t *testing.T) {
 
 	response := "test connection check"
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if result.Score != 1.0 {
 		t.Errorf("Perfect score = %.2f, want 1.0", result.Score)
@@ -273,7 +275,7 @@ func TestEvaluate_PassThreshold(t *testing.T) {
 	// Score = 1.0*0.5 + 0.0*0.3 + 0.0*0.2 = 0.5
 	response := "match only text"
 
-	result := Evaluate(f, response)
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
 
 	if result.Score != 0.5 {
 		t.Errorf("Score = %.2f, want 0.5", result.Score)
@@ -290,7 +292,7 @@ func TestEvaluate_ResultFields(t *testing.T) {
 		Category: "database",
 	}
 
-	result := Evaluate(f, "response")
+	result := Evaluate(f, testutil.AgentResponse{Text: "response"})
 
 	if result.FailureID != "db-test-id" {
 		t.Errorf("FailureID = %q, want %q", result.FailureID, "db-test-id")
@@ -300,5 +302,102 @@ func TestEvaluate_ResultFields(t *testing.T) {
 	}
 	if result.Category != "database" {
 		t.Errorf("Category = %q, want %q", result.Category, "database")
+	}
+}
+
+func TestEvaluate_StructuredToolCalls(t *testing.T) {
+	// When ToolCalls is populated (Option C path), exact name matching is used.
+	f := Failure{
+		ID:       "test-12",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"vacuum"}},
+			ExpectedTools:    []string{"get_table_stats", "get_database_stats"},
+		},
+	}
+
+	resp := testutil.AgentResponse{
+		Text: "The table has dead tuples and needs vacuum.",
+		ToolCalls: []testutil.ToolCallResult{
+			{Name: "get_table_stats", Success: true},
+			{Name: "get_database_stats", Success: true},
+		},
+	}
+
+	result := Evaluate(f, resp)
+
+	if !result.ToolEvidence {
+		t.Error("ToolEvidence should be true with exact structured tool matches")
+	}
+	if result.ToolEvidenceMode != "structured" {
+		t.Errorf("ToolEvidenceMode = %q, want %q", result.ToolEvidenceMode, "structured")
+	}
+}
+
+func TestEvaluate_StructuredToolCallsFailedTool(t *testing.T) {
+	// A tool call that failed (Success=false) should not count toward tool evidence.
+	f := Failure{
+		ID:       "test-13",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedTools: []string{"get_table_stats", "get_database_stats"},
+		},
+	}
+
+	resp := testutil.AgentResponse{
+		Text: "Could not retrieve table stats.",
+		ToolCalls: []testutil.ToolCallResult{
+			{Name: "get_table_stats", Success: false},
+			{Name: "get_database_stats", Success: false},
+		},
+	}
+
+	result := Evaluate(f, resp)
+
+	// 0/2 successful → toolScore=0.0 → ToolEvidence=false
+	if result.ToolEvidence {
+		t.Error("ToolEvidence should be false when all tool calls failed")
+	}
+	if result.ToolEvidenceMode != "structured" {
+		t.Errorf("ToolEvidenceMode = %q, want %q", result.ToolEvidenceMode, "structured")
+	}
+}
+
+func TestEvaluate_TextFallbackMode(t *testing.T) {
+	// When ToolCalls is nil (Option B path), mode should be "text_fallback".
+	f := Failure{
+		ID:       "test-14",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedTools: []string{"get_pods"},
+		},
+	}
+
+	// ToolCalls is nil → Option B path
+	result := Evaluate(f, testutil.AgentResponse{Text: "Pod is in Running state."})
+
+	if result.ToolEvidenceMode != "text_fallback" {
+		t.Errorf("ToolEvidenceMode = %q, want %q", result.ToolEvidenceMode, "text_fallback")
+	}
+}
+
+func TestEvaluate_NoToolsModeEmpty(t *testing.T) {
+	// When no tools are expected, ToolEvidenceMode should be empty.
+	f := Failure{
+		ID:       "test-15",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedTools: []string{},
+		},
+	}
+
+	result := Evaluate(f, testutil.AgentResponse{Text: "Any response"})
+
+	if result.ToolEvidenceMode != "" {
+		t.Errorf("ToolEvidenceMode = %q, want empty when no tools expected", result.ToolEvidenceMode)
 	}
 }
