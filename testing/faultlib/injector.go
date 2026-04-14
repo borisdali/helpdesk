@@ -94,7 +94,10 @@ func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) erro
 func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
 	connStr := i.resolvedConnStr()
 	if spec.Target == "replica" {
-		connStr = i.cfg.ReplicaConnStr
+		if i.cfg.ReplicaConnStr == "" {
+			return fmt.Errorf("this fault targets the replica but --replica-conn is not set; provide a replica connection string to run it")
+		}
+		connStr = i.resolvedReplicaConnStr()
 	}
 
 	if spec.ScriptInline != "" {
@@ -110,6 +113,20 @@ func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
 func (i *Injector) resolvedConnStr() string {
 	connStr, _ := i.resolvedConnEnv()
 	return connStr
+}
+
+// resolvedReplicaConnStr resolves cfg.ReplicaConnStr through the infra config
+// the same way resolvedConnStr resolves the primary, so callers can pass an
+// infra key (e.g. "alloydb-replica") instead of a raw DSN.
+func (i *Injector) resolvedReplicaConnStr() string {
+	if i.cfg.InfraConfigPath != "" && i.cfg.ReplicaConnStr != "" {
+		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[i.cfg.ReplicaConnStr]; ok {
+				return db.ResolvedConnectionString()
+			}
+		}
+	}
+	return i.cfg.ReplicaConnStr
 }
 
 func (i *Injector) execDocker(ctx context.Context, spec InjectSpec) error {

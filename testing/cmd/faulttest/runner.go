@@ -50,6 +50,9 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 
 	if r.isGateway(ctx, agentURL) {
 		agentName := categoryToGatewayAgent(f.Category)
+		if r.cfg.GatewayAPIKey == "" {
+			slog.Warn("gateway detected but no API key set — requests may return 401; pass --api-key or set HELPDESK_CLIENT_API_KEY")
+		}
 		slog.Info("using gateway REST API", "agent_name", agentName, "purpose", r.cfg.GatewayPurpose)
 		return testutil.SendPromptViaGateway(ctx, agentURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose)
 	}

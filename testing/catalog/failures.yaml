@@ -136,11 +136,21 @@ failures:
     external_teardown:
       type: shell_exec
       script_inline: |
+        # Kill the local background process (best-effort; psql may outlive the subshell).
         if [ -f /tmp/faulttest_lock_pid.txt ]; then
           kill "$(cat /tmp/faulttest_lock_pid.txt)" 2>/dev/null || true
           rm -f /tmp/faulttest_lock_pid.txt
         fi
-        psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS _faulttest_lock;"
+        # Terminate the session holding the ACCESS EXCLUSIVE lock on _faulttest_lock
+        # so DROP TABLE doesn't block if the local kill didn't propagate to psql.
+        # LOCK TABLE doesn't set backend_xid, so we target via pg_locks instead.
+        psql "$FAULTTEST_CONN" -c "
+          SELECT pg_terminate_backend(l.pid)
+          FROM pg_locks l
+          JOIN pg_class c ON l.relation = c.oid
+          WHERE c.relname = '_faulttest_lock' AND l.granted AND l.pid <> pg_backend_pid();
+          DROP TABLE IF EXISTS _faulttest_lock;
+        "
     prompt: >
       The database is experiencing intermittent "deadlock detected" errors.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -160,7 +170,7 @@ failures:
           - "lock"
       expected_diagnosis:
         category: "deadlock"
-    timeout: 60s
+    timeout: 120s
 
   - id: db-table-bloat
     name: "Table bloat / dead tuples"
