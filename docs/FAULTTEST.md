@@ -36,6 +36,8 @@ The tool was designed for two complementary use cases:
    - [Smoke test a staging database](#71-smoke-test-a-staging-database)
    - [Full run with remediation](#72-full-run-with-remediation)
    - [Interactive single-fault injection](#73-interactive-single-fault-injection)
+   - [Running from Docker](#74-running-from-docker)
+   - [Running from Kubernetes (Helm)](#75-running-from-kubernetes-helm)
 8. [Interpreting results](#8-interpreting-results)
 9. [Customer fault catalogs](#9-customer-fault-catalogs)
    - [Overview](#91-overview)
@@ -85,11 +87,28 @@ A fault passes when the weighted score reaches 60% or higher. Ordering assertion
 
 ## 2. Prerequisites
 
-**Binary**: build `faulttest` from source or download from the release bundle:
+**Deployment platform**: `faulttest` is a client-side test runner — it connects to your aiHelpDesk deployment over HTTP and to your database over a PostgreSQL connection string. It does not need to run inside your cluster or on the same host as the agents. How you obtain the binary depends on your deployment platform:
+
+| Platform | How to get `faulttest` | Deployment guide |
+|----------|------------------------|------------------|
+| **Host (binary tarball)** | Included in the platform tarball (`helpdesk-vX.Y.Z-linux-amd64.tar.gz`). Run it directly alongside the other binaries. | [deploy/host/README.md](../deploy/host/README.md) — agents run directly on a Linux or macOS host, no Docker or K8s required |
+| **Docker Compose** | Use the same helpdesk Docker image your stack already pulls. Run `docker run ... faulttest` or add a one-off `docker compose run` service. | [deploy/docker-compose/README.md](../deploy/docker-compose/README.md) — agents run in Docker containers on a VM, orchestrated via Compose |
+| **Kubernetes / Helm** | Use `kubectl run` with the same image referenced in your Helm values. No separate image pull needed. | [deploy/helm/README.md](../deploy/helm/README.md) — agents deployed as Kubernetes workloads via the included Helm chart |
 
 ```bash
-go build -o faulttest ./testing/cmd/faulttest/
+# Host tarball — faulttest is already in the extracted directory
+./faulttest run --conn "host=staging-db ..." --db-agent http://gateway:8080
+
+# Docker Compose — use the running image
+docker run --rm --network helpdesk_default \
+  ghcr.io/org/helpdesk:v0.8.0 faulttest --help
+
+# Kubernetes — spin up a short-lived pod
+kubectl run faulttest --image=ghcr.io/org/helpdesk:v0.8.0 --rm -it \
+  -- faulttest --help
 ```
+
+The `faulttest` binary is self-contained: the built-in catalog is compiled into it. No source tree or extra files are required at runtime.
 
 **Database agent running**: `faulttest` sends prompts over the A2A protocol to whichever agent you point it at. The gateway is the most convenient entry point for authenticated queries:
 
@@ -477,6 +496,64 @@ helpdesk-client \
 # Step 3: tear down
 faulttest teardown --id db-idle-in-transaction \
   --conn "host=staging-db port=5432 dbname=myapp user=dbuser"
+```
+
+### 7.4 Running from Docker
+
+`faulttest` is included in the standard helpdesk Docker image. Docker Compose users can run it without downloading a separate binary by using `docker run` or `docker compose run` against the same image their deployment uses.
+
+```bash
+# One-off run against a staging database (gateway on the same Docker network)
+docker run --rm \
+  --network helpdesk_default \
+  ghcr.io/org/helpdesk:v0.8.0 \
+  faulttest run \
+    --conn "host=staging-db port=5432 dbname=myapp user=dbuser password=$PGPASSWORD" \
+    --db-agent http://gateway:8080 \
+    --api-key $HELPDESK_API_KEY \
+    --infra-config /dev/stdin <<< "$INFRA_JSON"
+```
+
+If the gateway is reachable on the host network:
+
+```bash
+docker run --rm --network host \
+  ghcr.io/org/helpdesk:v0.8.0 \
+  faulttest run \
+    --conn "host=localhost port=5432 dbname=myapp user=dbuser" \
+    --db-agent http://localhost:8080 \
+    --api-key $HELPDESK_API_KEY
+```
+
+### 7.5 Running from Kubernetes (Helm)
+
+For Helm deployments, use `kubectl run` to spin up a short-lived pod with the same image. The gateway and database are reachable via in-cluster DNS.
+
+```bash
+# Interactive one-off run (deleted automatically on exit)
+kubectl run faulttest --rm -it \
+  --image=ghcr.io/org/helpdesk:v0.8.0 \
+  --restart=Never \
+  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_API_KEY" \
+  -- faulttest run \
+       --conn "host=staging-db.default.svc.cluster.local port=5432 dbname=myapp user=dbuser password=$PGPASSWORD" \
+       --db-agent http://helpdesk-gateway.default.svc.cluster.local:8080 \
+       --external
+```
+
+To save the JSON report, mount a volume or pipe via `kubectl logs`:
+
+```bash
+kubectl run faulttest --rm \
+  --image=ghcr.io/org/helpdesk:v0.8.0 \
+  --restart=Never \
+  --attach \
+  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_API_KEY" \
+  -- faulttest run \
+       --conn "host=staging-db..." \
+       --db-agent http://helpdesk-gateway:8080 \
+       --external 2>/dev/null \
+  | tee faulttest-report.json
 ```
 
 ---

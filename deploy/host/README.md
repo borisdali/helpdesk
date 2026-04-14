@@ -28,7 +28,8 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── govbot                      # AI Governance: compliance reporter
 ├── approvals                   # AI Governance: approval management CLI
 ├── govexplain                  # AI Governance: policy explainability CLI
-└── hashapikey                  # Identity: generate Argon2id hashes for service account API keys
+├── hashapikey                  # Identity: generate Argon2id hashes for service account API keys
+└── faulttest                   # Fault injection test runner (see §8)
 ```
 
 ## 2. Quick Start
@@ -552,7 +553,29 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
 
 See [docs/FLEET.md](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details.
 
-## 8. Troubleshooting
+## 8. Fault Injection Testing (faulttest)
+
+`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response — confirming the agents behave correctly in your specific environment before going to production.
+
+The binary is included in the tarball. With the stack running, point it at your staging database and gateway:
+
+```bash
+./faulttest run \
+  --conn "host=staging-db port=5432 dbname=myapp user=dbuser" \
+  --db-agent http://localhost:8080 \
+  --api-key $HELPDESK_CLIENT_API_KEY \
+  --infra-config infrastructure.json
+```
+
+List available built-in faults:
+
+```bash
+./faulttest list
+```
+
+See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
+
+## 9. Troubleshooting
 
 ### Port already in use
 

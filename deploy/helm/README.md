@@ -997,7 +997,44 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
 
 See [here](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details. Also, the full `run-fleet-job.sh` script reference is available [here](../../scripts/README.md#run-fleet-jobsh).
 
-## 10. Troubleshooting
+## 10. Fault Injection Testing (faulttest)
+
+`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response — confirming the agents behave correctly in your specific environment before going to production.
+
+The binary is baked into the same Docker image as the agents. Use `kubectl run` to spin up a short-lived pod and point it at your staging database and gateway (reachable via in-cluster DNS):
+
+```bash
+kubectl -n helpdesk-system run faulttest --rm -it \
+  --image=ghcr.io/borisdali/helpdesk:latest \
+  --restart=Never \
+  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_API_KEY" \
+  -- faulttest run \
+       --conn "host=staging-db.default.svc.cluster.local port=5432 dbname=myapp user=dbuser password=$PGPASSWORD" \
+       --db-agent http://helpdesk-gateway.helpdesk-system.svc.cluster.local:8080 \
+       --external
+```
+
+If the gateway is only reachable from your workstation via port-forward:
+
+```bash
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
+./faulttest run \       # or: docker run --rm --network host ghcr.io/borisdali/helpdesk:latest faulttest run \
+  --conn "host=staging-db port=5432 dbname=myapp user=dbuser" \
+  --db-agent http://localhost:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+List available built-in faults without running anything:
+
+```bash
+kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:latest \
+  -- faulttest list
+```
+
+See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
+
+## 11. Troubleshooting
 
 ### 10.1 Interactive REPL Shows Empty Responses
 

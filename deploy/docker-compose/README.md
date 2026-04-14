@@ -576,7 +576,40 @@ The Gateway API is useful for:
 - Integration with monitoring/alerting systems (see [srebot example](../../cmd/srebot/README.md))
 - Environments where interactive TTY access is limited
 
-## 5. Troubleshooting
+## 5. Fault Injection Testing (faulttest)
+
+`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response — confirming the agents behave correctly in your specific environment before going to production.
+
+The binary is baked into the Docker image. With the stack running, use `docker run` against the same image to execute a test run. The gateway and database must be reachable from within the Docker network:
+
+```bash
+# Using the Compose network (container names resolve via DNS)
+docker run --rm \
+  --network helpdesk_default \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest run \
+    --conn "host=host.docker.internal port=5432 dbname=myapp user=dbuser" \
+    --db-agent http://gateway:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY
+
+# Or via localhost if the gateway is port-forwarded to the host
+docker run --rm --network host \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest run \
+    --conn "host=localhost port=5432 dbname=myapp user=dbuser" \
+    --db-agent http://localhost:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY
+```
+
+List available built-in faults without running anything:
+
+```bash
+docker run --rm ghcr.io/borisdali/helpdesk:latest faulttest list
+```
+
+See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
+
+## 6. Troubleshooting
 
 ### Interactive REPL Shows Empty Responses
 
