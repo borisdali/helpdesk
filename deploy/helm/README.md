@@ -1001,36 +1001,107 @@ See [here](../../docs/FLEET.md) for the full job definition schema, multi-step e
 
 `faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response — confirming the agents behave correctly in your specific environment before going to production.
 
-The binary is baked into the same Docker image as the agents. Use `kubectl run` to spin up a short-lived pod and point it at your staging database and gateway (reachable via in-cluster DNS):
+The binary is baked into the same Docker image as the agents. The recommended way to run it in-cluster is a one-off Job that mounts the ConfigMap and Secrets the chart already created, so `infrastructure.json` and database passwords are available without duplicating credentials.
+
+### Step 1 — Find your infrastructure ConfigMap name
+
+The chart stores `infrastructure.json` in a ConfigMap alongside other config files. Find it by checking how the database-agent mounts its infra volume:
 
 ```bash
-kubectl -n helpdesk-system run faulttest --rm -it \
-  --image=ghcr.io/borisdali/helpdesk:latest \
-  --restart=Never \
-  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_API_KEY" \
-  -- faulttest run \
-       --conn "host=staging-db.default.svc.cluster.local port=5432 dbname=myapp user=dbuser password=$PGPASSWORD" \
-       --db-agent http://helpdesk-gateway.helpdesk-system.svc.cluster.local:8080 \
-       --external
+kubectl -n helpdesk-system get deploy helpdesk-database-agent \
+  -o jsonpath='{.spec.template.spec.volumes}' | jq '.[] | select(.name=="infra-config")'
+# → "name": "helpdesk-config"  (the ConfigMap name to use below)
 ```
 
-If the gateway is only reachable from your workstation via port-forward:
+Typically the ConfigMap is named `helpdesk-config`.
+
+### Step 2 — Run the Job
+
+The Job reuses:
+- the `pgpass` Secret already mounted into the database-agent (no separate password Secret needed)
+- the Secret referenced by `gateway.clientAPIKeySecret` in your `values.yaml` for the gateway client API key
+
+Find the Secret name configured in `values.yaml`:
 
 ```bash
-kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
-./faulttest run \       # or: docker run --rm --network host ghcr.io/borisdali/helpdesk:latest faulttest run \
-  --conn "host=staging-db port=5432 dbname=myapp user=dbuser" \
-  --db-agent http://localhost:8080 \
-  --api-key $HELPDESK_API_KEY
+grep clientAPIKeySecret values.yaml
+# e.g.   clientAPIKeySecret: "gateway-api-key"
 ```
 
-List available built-in faults without running anything:
+Apply the Job, substituting that name below:
+
+```bash
+kubectl -n helpdesk-system apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: faulttest
+  namespace: helpdesk-system
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: faulttest
+        image: ghcr.io/borisdali/helpdesk:latest
+        args:
+          - faulttest
+          - run
+          - --conn=alloydb-on-vm
+          - --db-agent=http://helpdesk-gateway:8080
+          - --api-key=$(HELPDESK_CLIENT_API_KEY)
+          - --infra-config=/etc/helpdesk/infrastructure.json
+          - --report-dir=/reports
+        env:
+        - name: HELPDESK_CLIENT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: <your-gateway.clientAPIKeySecret value>  # same Secret the gateway uses
+              key: api-key
+        - name: HOME
+          value: /home/helpdesk             # so psql finds /home/helpdesk/.pgpass
+        volumeMounts:
+        - name: infra-config
+          mountPath: /etc/helpdesk/infrastructure.json
+          subPath: infrastructure.json
+          readOnly: true
+        - name: pgpass
+          mountPath: /home/helpdesk/.pgpass
+          subPath: .pgpass
+          readOnly: true
+        - name: reports
+          mountPath: /reports
+      volumes:
+      - name: infra-config
+        configMap:
+          name: helpdesk-config             # ConfigMap name from Step 1
+      - name: pgpass
+        secret:
+          secretName: pgpass                # same Secret the database-agent uses
+          defaultMode: 0600
+      - name: reports
+        emptyDir: {}
+EOF
+
+# Stream the logs, then copy the report out before the pod is cleaned up
+kubectl -n helpdesk-system logs -f job/faulttest
+kubectl -n helpdesk-system cp \
+  $(kubectl -n helpdesk-system get pod -l job-name=faulttest -o jsonpath='{.items[0].metadata.name}'):/reports \
+  ./faulttest-reports/
+```
+
+### Listing faults without a full run
+
+To list the built-in catalog without mounting anything:
 
 ```bash
 kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
   --image=ghcr.io/borisdali/helpdesk:latest \
   -- faulttest list
 ```
+
+> **`kubectl run` pitfalls:** `--env` flags must appear *before* `--` (they are kubectl flags, not container args). Always pass `--api-key` explicitly and `--infra-config` pointing to a mounted path — omitting either produces 401 errors or psql falling back to the local Unix socket.
 
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
 

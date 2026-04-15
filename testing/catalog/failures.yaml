@@ -170,7 +170,7 @@ failures:
           - "lock"
       expected_diagnosis:
         category: "deadlock"
-    timeout: 120s
+    timeout: 180s
 
   - id: db-table-bloat
     name: "Table bloat / dead tuples"

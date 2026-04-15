@@ -118,6 +118,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	var extraCatalogs stringSliceFlag
 	fs.Var(&extraCatalogs, "catalog", "Additional customer catalog file (repeatable)")
 	fs.StringVar(&cfg.SourceFilter, "source", "", "Filter faults by source: builtin or custom")
+	fs.StringVar(&cfg.ReportDir, "report-dir", ".", "Directory to write the JSON report (default: current directory)")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -317,7 +318,7 @@ func cmdRun(args []string) {
 	report := BuildReport(runID, results)
 	report.PrintSummary()
 
-	reportFile := fmt.Sprintf("faulttest-%s.json", runID)
+	reportFile := fmt.Sprintf("%s/faulttest-%s.json", cfg.ReportDir, runID)
 	if err := report.WriteJSON(reportFile); err != nil {
 		slog.Error("failed to write report", "err", err)
 	} else {

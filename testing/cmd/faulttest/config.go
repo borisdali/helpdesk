@@ -143,6 +143,8 @@ type HarnessConfig struct {
 	CustomCatalogs []string
 	// SourceFilter restricts which faults are run: "" (all), "builtin", or "custom".
 	SourceFilter string
+	// ReportDir is the directory where the JSON report is written (default: ".").
+	ReportDir string
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.

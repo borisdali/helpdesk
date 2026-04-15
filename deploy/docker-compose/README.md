@@ -583,22 +583,30 @@ The Gateway API is useful for:
 The binary is baked into the Docker image. With the stack running, use `docker run` against the same image to execute a test run. The gateway and database must be reachable from within the Docker network:
 
 ```bash
-# Using the Compose network (container names resolve via DNS)
+# Using the Compose network (container names resolve via DNS).
+# -v $(pwd):/output -w /output writes the JSON report to the host's current directory.
+# Forward any password_env variables referenced in infrastructure.json via -e.
 docker run --rm \
   --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" -w /output \
+  -e DEV_DB_PASSWORD \
   ghcr.io/borisdali/helpdesk:latest \
   faulttest run \
-    --conn "host=host.docker.internal port=5432 dbname=myapp user=dbuser" \
+    --conn "alloydb-on-vm" \
     --db-agent http://gateway:8080 \
-    --api-key $HELPDESK_CLIENT_API_KEY
+    --api-key $HELPDESK_CLIENT_API_KEY \
+    --infra-config /infrastructure.json
 
 # Or via localhost if the gateway is port-forwarded to the host
 docker run --rm --network host \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
   ghcr.io/borisdali/helpdesk:latest \
   faulttest run \
     --conn "host=localhost port=5432 dbname=myapp user=dbuser" \
     --db-agent http://localhost:8080 \
-    --api-key $HELPDESK_CLIENT_API_KEY
+    --api-key $HELPDESK_CLIENT_API_KEY \
+    --infra-config /infrastructure.json
 ```
 
 List available built-in faults without running anything:

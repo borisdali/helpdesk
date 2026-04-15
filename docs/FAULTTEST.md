@@ -318,6 +318,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
 | `--source` | — | all | Filter by source: `builtin` or `custom` |
+| `--report-dir` | — | `.` | Directory to write the JSON report (useful when running in a container with a mounted volume) |
 
 ¹ Default is `true` when running the standalone binary (no source tree detected). Default is `false` when running from the source tree (e.g. `go run ./testing/cmd/faulttest`). Override explicitly with `--external=false`.
 
@@ -503,57 +504,94 @@ faulttest teardown --id db-idle-in-transaction \
 `faulttest` is included in the standard helpdesk Docker image. Docker Compose users can run it without downloading a separate binary by using `docker run` or `docker compose run` against the same image their deployment uses.
 
 ```bash
-# One-off run against a staging database (gateway on the same Docker network)
+# One-off run against a staging database (gateway on the same Docker network).
+# -v $(pwd):/output -w /output writes the JSON report to the host's current directory.
+# Add -e for each password_env variable referenced in infrastructure.json.
 docker run --rm \
   --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" -w /output \
+  -e DEV_DB_PASSWORD \
   ghcr.io/org/helpdesk:v0.8.0 \
   faulttest run \
-    --conn "host=staging-db port=5432 dbname=myapp user=dbuser password=$PGPASSWORD" \
+    --conn "host=localhost port=5432 dbname=myapp user=dbuser" \
     --db-agent http://gateway:8080 \
     --api-key $HELPDESK_API_KEY \
-    --infra-config /dev/stdin <<< "$INFRA_JSON"
+    --infra-config /infrastructure.json
 ```
 
 If the gateway is reachable on the host network:
 
 ```bash
 docker run --rm --network host \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" -w /output \
+  -e DEV_DB_PASSWORD \
   ghcr.io/org/helpdesk:v0.8.0 \
   faulttest run \
     --conn "host=localhost port=5432 dbname=myapp user=dbuser" \
     --db-agent http://localhost:8080 \
-    --api-key $HELPDESK_API_KEY
+    --api-key $HELPDESK_API_KEY \
+    --infra-config /infrastructure.json
 ```
 
 ### 7.5 Running from Kubernetes (Helm)
 
-For Helm deployments, use `kubectl run` to spin up a short-lived pod with the same image. The gateway and database are reachable via in-cluster DNS.
+For Helm deployments the recommended approach is a one-off Job rather than `kubectl run`, because a Job can mount the ConfigMap and Secrets that the chart already created — giving `faulttest` access to `infrastructure.json` and any `password_env` variables without duplicating credentials:
 
 ```bash
-# Interactive one-off run (deleted automatically on exit)
-kubectl run faulttest --rm -it \
-  --image=ghcr.io/org/helpdesk:v0.8.0 \
-  --restart=Never \
-  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_API_KEY" \
-  -- faulttest run \
-       --conn "host=staging-db.default.svc.cluster.local port=5432 dbname=myapp user=dbuser password=$PGPASSWORD" \
-       --db-agent http://helpdesk-gateway.default.svc.cluster.local:8080 \
-       --external
+kubectl -n helpdesk-system apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: faulttest
+  namespace: helpdesk-system
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: faulttest
+        image: ghcr.io/org/helpdesk:v0.8.0
+        args:
+          - faulttest
+          - run
+          - --conn=host=localhost port=5432 dbname=myapp user=dbuser
+          - --db-agent=http://helpdesk-gateway:8080
+          - --api-key=$(HELPDESK_CLIENT_API_KEY)
+          - --infra-config=/etc/helpdesk/infrastructure.json
+        env:
+        - name: HELPDESK_CLIENT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: helpdesk-api-key       # same Secret the chart already creates
+              key: api-key
+        - name: DEV_DB_PASSWORD            # add one entry per password_env var
+          valueFrom:
+            secretKeyRef:
+              name: helpdesk-db-passwords
+              key: dev-db-password
+        volumeMounts:
+        - name: infra-config
+          mountPath: /etc/helpdesk/infrastructure.json
+          subPath: infrastructure.json
+          readOnly: true
+      volumes:
+      - name: infra-config
+        configMap:
+          name: helpdesk-infra-config      # same ConfigMap the chart already creates
+EOF
+
+kubectl -n helpdesk-system logs -f job/faulttest
 ```
 
-To save the JSON report, mount a volume or pipe via `kubectl logs`:
+For a quick one-liner when you only need to list faults or have no `infrastructure.json`:
 
 ```bash
-kubectl run faulttest --rm \
+kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
   --image=ghcr.io/org/helpdesk:v0.8.0 \
-  --restart=Never \
-  --attach \
-  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_API_KEY" \
-  -- faulttest run \
-       --conn "host=staging-db..." \
-       --db-agent http://helpdesk-gateway:8080 \
-       --external 2>/dev/null \
-  | tee faulttest-report.json
+  -- faulttest list
 ```
 
 ---
