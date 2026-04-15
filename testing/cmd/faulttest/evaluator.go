@@ -1,7 +1,10 @@
 package main
 
 import (
+	"log/slog"
 	"strings"
+
+	"helpdesk/testing/testutil"
 )
 
 // EvalResult contains the evaluation outcome for a single failure test.
@@ -14,9 +17,20 @@ type EvalResult struct {
 	KeywordPass  bool    `json:"keyword_pass"`
 	DiagnosisPass bool   `json:"diagnosis_pass"`
 	ToolEvidence bool    `json:"tool_evidence"`
+	// ToolEvidenceMode records how tool evidence was determined:
+	//   "structured"   — exact name matching from the tool_call_summary DataPart (Option C, ADK agents)
+	//   "text_fallback" — keyword matching against response text (Option B, non-ADK or gateway path)
+	//   ""              — no expected tools; field not applicable
+	ToolEvidenceMode string `json:"tool_evidence_mode,omitempty"`
 	ResponseText string  `json:"response_text"`
 	Duration     string  `json:"duration"`
 	Error        string  `json:"error,omitempty"`
+
+	// Remediation outcome (populated only when --remediate is set).
+	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
+	RemediationPassed    bool    `json:"remediation_passed,omitempty"`
+	RecoveryTimeSecs     float64 `json:"recovery_time_seconds,omitempty"`
+	RemediationError     string  `json:"remediation_error,omitempty"`
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.
@@ -38,13 +52,17 @@ var toolPatterns = map[string][]string{
 }
 
 // Evaluate scores the agent's response against the failure's evaluation criteria.
-func Evaluate(f Failure, responseText string) EvalResult {
+// When resp.ToolCalls is non-nil (structured data from agentutil), tool evidence
+// uses exact name matching. When nil (gateway path or non-ADK agent), falls back
+// to section-aware text matching with a warning logged.
+func Evaluate(f Failure, resp testutil.AgentResponse) EvalResult {
 	result := EvalResult{
 		FailureID:   f.ID,
 		FailureName: f.Name,
 		Category:    f.Category,
 	}
 
+	responseText := resp.Text
 	lower := strings.ToLower(responseText)
 
 	// 1. Keyword check (50% weight).
@@ -58,7 +76,6 @@ func Evaluate(f Failure, responseText string) EvalResult {
 			}
 		}
 	} else {
-		// No keywords specified — pass by default.
 		keywordScore = 1.0
 		result.KeywordPass = true
 	}
@@ -88,21 +105,53 @@ func Evaluate(f Failure, responseText string) EvalResult {
 	// 3. Tool evidence check (20% weight).
 	toolScore := 0.0
 	if len(f.Evaluation.ExpectedTools) > 0 {
-		toolsFound := 0
-		for _, tool := range f.Evaluation.ExpectedTools {
-			patterns, ok := toolPatterns[tool]
-			if !ok {
-				continue
-			}
-			for _, p := range patterns {
-				if strings.Contains(lower, strings.ToLower(p)) {
-					toolsFound++
-					break
+		if resp.ToolCalls != nil {
+			// Structured path (Option C): exact name matching against the tool call
+			// summary DataPart emitted by agentutil.
+			toolsFound := 0
+			for _, expected := range f.Evaluation.ExpectedTools {
+				for _, tc := range resp.ToolCalls {
+					if tc.Name == expected && tc.Success {
+						toolsFound++
+						break
+					}
 				}
 			}
+			toolScore = float64(toolsFound) / float64(len(f.Evaluation.ExpectedTools))
+			result.ToolEvidence = toolScore > 0.5
+			result.ToolEvidenceMode = "structured"
+		} else {
+			// Fallback path (Option B): section-aware text matching.
+			// Fires for gateway responses and non-ADK agents.
+			slog.Warn("tool evidence using text-based detection; structured tool call data unavailable",
+				"failure", f.ID,
+				"reason", "agent did not emit tool_call_summary DataPart (gateway path or non-ADK agent)",
+			)
+			sections := strings.Split(responseText, "\n---\n")
+			toolsFound := 0
+			for _, expected := range f.Evaluation.ExpectedTools {
+				patterns, ok := toolPatterns[expected]
+				if !ok {
+					continue
+				}
+				for _, section := range sections {
+					if strings.HasPrefix(strings.TrimSpace(section), "ERROR") {
+						continue // skip error sections
+					}
+					sectionLower := strings.ToLower(section)
+					for _, p := range patterns {
+						if strings.Contains(sectionLower, strings.ToLower(p)) {
+							toolsFound++
+							goto nextTool
+						}
+					}
+				}
+			nextTool:
+			}
+			toolScore = float64(toolsFound) / float64(len(f.Evaluation.ExpectedTools))
+			result.ToolEvidence = toolScore > 0.5
+			result.ToolEvidenceMode = "text_fallback"
 		}
-		toolScore = float64(toolsFound) / float64(len(f.Evaluation.ExpectedTools))
-		result.ToolEvidence = toolScore > 0.5
 	} else {
 		toolScore = 1.0
 		result.ToolEvidence = true

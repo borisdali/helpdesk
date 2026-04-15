@@ -335,7 +335,7 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	agentName, ok := agentAliases[req.Agent]
 	if !ok {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, incident, research)", req.Agent))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, sysadmin, host, incident, research)", req.Agent))
 		return
 	}
 

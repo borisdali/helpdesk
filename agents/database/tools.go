@@ -86,7 +86,7 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 					slog.Debug("reverse resolved connection string to database", "id", id, "tags", db.Tags)
 					return databaseInfo{
 						Name:              id,
-						ConnectionStr:     connStrOrName,
+						ConnectionStr:     db.ResolvedConnectionString(),
 						Tags:              db.Tags,
 						Sensitivity:       db.Sensitivity,
 						IsFromInfraConfig: true,
@@ -122,7 +122,7 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 			slog.Info("resolved database name to connection string", "name", connStrOrName)
 			return databaseInfo{
 				Name:              connStrOrName,
-				ConnectionStr:     db.ConnectionString,
+				ConnectionStr:     db.ResolvedConnectionString(),
 				Tags:              db.Tags,
 				Sensitivity:       db.Sensitivity,
 				IsFromInfraConfig: true,
@@ -1597,6 +1597,19 @@ func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResul
 	if limit <= 0 {
 		limit = 10
 	}
+
+	// Pre-check: verify pg_stat_statements is installed before querying it.
+	// This avoids a noisy ERROR log from a known-benign missing-extension case.
+	checkOut, err := runPsqlWithToolName(ctx, args.ConnectionString,
+		`SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements';`,
+		"get_slow_queries")
+	if err != nil {
+		return errorResult("get_slow_queries", args.ConnectionString, err), nil
+	}
+	if !strings.Contains(checkOut, "1") {
+		return PsqlResult{Output: "pg_stat_statements extension is not installed. Enable it with: CREATE EXTENSION pg_stat_statements; and add it to shared_preload_libraries in postgresql.conf."}, nil
+	}
+
 	query := fmt.Sprintf(`SELECT
 		LEFT(query, 120) as query,
 		calls,
@@ -1610,11 +1623,6 @@ func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResul
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_slow_queries")
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "42883") || strings.Contains(msg, "42P01") ||
-			strings.Contains(msg, "pg_stat_statements") {
-			return PsqlResult{Output: "pg_stat_statements extension is not installed. Enable it with: CREATE EXTENSION pg_stat_statements; and add it to shared_preload_libraries in postgresql.conf."}, nil
-		}
 		return errorResult("get_slow_queries", args.ConnectionString, err), nil
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
@@ -1912,6 +1920,9 @@ FROM latest;`, pgLogReadBytes, pgLogReadBytes)
 		errStr := err.Error()
 		if strings.Contains(errStr, "pg_ls_logdir") && strings.Contains(errStr, "permission denied") {
 			return PsqlResult{Output: "read_pg_log: permission denied for pg_ls_logdir — the database user lacks the pg_read_server_files privilege or superuser role.\n\nFor Kubernetes-managed PostgreSQL, use the k8s agent's get_pod_logs tool on the postgres pod instead (e.g. kubectl logs <pod> -n <namespace>)."}, nil
+		}
+		if strings.Contains(errStr, "could not open directory") || strings.Contains(errStr, "No such file or directory") {
+			return PsqlResult{Output: "read_pg_log: log directory does not exist — logging_collector is likely disabled on this server. Enable it by setting logging_collector=on and log_destination=stderr in postgresql.conf, then restart PostgreSQL."}, nil
 		}
 		return errorResult("read_pg_log", args.ConnectionString, err), nil
 	}

@@ -83,6 +83,7 @@ func (r Report) WriteJSON(path string) error {
 func (r Report) PrintSummary() {
 	fmt.Printf("\n=== Fault Test Report: %s ===\n\n", r.ID)
 
+	textFallbackCount := 0
 	for _, res := range r.Results {
 		status := "PASS"
 		if !res.Passed {
@@ -90,7 +91,14 @@ func (r Report) PrintSummary() {
 		}
 		scorePercent := int(res.Score * 100)
 
-		fmt.Printf("[%s] %s (%s) - score: %d%%\n", status, res.FailureName, res.FailureID, scorePercent)
+		// Append a visible marker when tool evidence relied on text matching.
+		toolNote := ""
+		if res.ToolEvidenceMode == "text_fallback" {
+			toolNote = " [tool evidence: text match]"
+			textFallbackCount++
+		}
+
+		fmt.Printf("[%s] %s (%s) - score: %d%%%s\n", status, res.FailureName, res.FailureID, scorePercent, toolNote)
 
 		if !res.Passed {
 			var details []string
@@ -119,6 +127,13 @@ func (r Report) PrintSummary() {
 
 	for name, stat := range r.Summary.Categories {
 		fmt.Printf("  %s: %d/%d (%d%%)\n", name, stat.Passed, stat.Total, int(stat.Rate*100))
+	}
+
+	if textFallbackCount > 0 {
+		fmt.Printf("\nNote: %d fault(s) used text-based tool evidence scoring (agent did not emit\n", textFallbackCount)
+		fmt.Printf("structured tool call data). These scores may be less reliable. For precise\n")
+		fmt.Printf("tool evidence, point --db-agent directly at the agent A2A URL rather than\n")
+		fmt.Printf("the gateway, or use an ADK-based agent.\n")
 	}
 	fmt.Println()
 }

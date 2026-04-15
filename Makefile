@@ -27,6 +27,7 @@ LDFLAGS   := -s -w -X helpdesk/internal/buildinfo.Version=$(IMAGE_TAG)
 BIN_PKGS := \
 	database-agent:./agents/database/ \
 	k8s-agent:./agents/k8s/ \
+	sysadmin-agent:./agents/sysadmin/ \
 	incident-agent:./agents/incident/ \
 	research-agent:./agents/research/ \
 	gateway:./cmd/gateway/ \
@@ -40,7 +41,8 @@ BIN_PKGS := \
 	govbot:./cmd/govbot/ \
 	govexplain:./cmd/govexplain/ \
 	hashapikey:./cmd/hashapikey/ \
-	fleet-runner:./cmd/fleet-runner/
+	fleet-runner:./cmd/fleet-runner/ \
+	faulttest:./testing/cmd/faulttest/
 
 .PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey fleet-runner
 
@@ -137,7 +139,7 @@ faulttest:
 		up -d --wait
 	@echo "Running fault tests..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
-	go test -tags faulttest -timeout 800s -v ./testing/faulttest/...
+	go test -tags faulttest -timeout 1000s -v ./testing/faulttest/...
 	@echo "Stopping test infrastructure..."
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
@@ -227,10 +229,11 @@ binaries:
 		done; \
 		cp deploy/host/startall.sh $$outdir/; \
 		cp deploy/host/README.md $$outdir/; \
-		cp deploy/docker-compose/.env.example $$outdir/; \
+		cp deploy/host/.env.example $$outdir/; \
 		cp deploy/docker-compose/infrastructure.json.example $$outdir/; \
 		cp policies.example.yaml $$outdir/; \
 		cp users.example.yaml $$outdir/; \
+		cp agents.json $$outdir/; \
 		tar -czf $(DIST)/helpdesk-$(VERSION)-$$os-$$arch.tar.gz \
 			-C $(DIST) helpdesk-$(VERSION)-$$os-$$arch; \
 		rm -rf $$outdir; \
@@ -268,7 +271,7 @@ bundle:
 	echo "==> host deploy files"; \
 	cp deploy/host/startall.sh $$bundledir/host/; \
 	cp deploy/host/README.md $$bundledir/host/; \
-	cp deploy/docker-compose/.env.example $$bundledir/host/; \
+	cp deploy/host/.env.example $$bundledir/host/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/host/; \
 	cp policies.example.yaml $$bundledir/host/; \
 	chmod +x $$bundledir/host/startall.sh; \

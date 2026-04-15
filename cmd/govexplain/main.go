@@ -175,11 +175,15 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  Hypothetical (via gateway):  govexplain --resource TYPE:NAME --action ACTION [--tags TAG,…]")
 	fmt.Fprintln(os.Stderr, "  Hypothetical (direct):       govexplain --auditd http://localhost:1199 --resource TYPE:NAME --action ACTION")
+	fmt.Fprintln(os.Stderr, "  Hypothetical (local):        govexplain --policy-file policies.yaml --resource TYPE:NAME --action ACTION")
 	fmt.Fprintln(os.Stderr, "  Retrospective (via gateway): govexplain --event EVENT_ID")
 	fmt.Fprintln(os.Stderr, "  Retrospective (direct):      govexplain --auditd http://localhost:1199 --event EVENT_ID")
 	fmt.Fprintln(os.Stderr, "  List (direct):               govexplain --auditd http://localhost:1199 --list [--since 1h] [--effect deny]")
 	fmt.Fprintln(os.Stderr, "  List (via gateway):          govexplain --list [--since 1h] [--session ID] [--limit 50]")
 	fmt.Fprintln(os.Stderr, "  List by trace prefix:        govexplain --auditd http://localhost:1199 --list --trace-prefix chk_")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Authentication:")
+	fmt.Fprintln(os.Stderr, "  --api-key KEY   Bearer token for gateway/auditd (or set HELPDESK_CLIENT_API_KEY)")
 }
 
 // parsedEvent holds a decoded audit event alongside its extracted effect string.

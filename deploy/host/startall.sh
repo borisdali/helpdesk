@@ -7,6 +7,22 @@
 #       HELPDESK_MODEL_VENDOR, HELPDESK_MODEL_NAME, HELPDESK_API_KEY
 #   - Optionally: HELPDESK_INFRA_CONFIG pointing to an infrastructure.json
 #
+# Authentication (optional but recommended for governed deployments):
+#   By default all service endpoints are open (no Bearer token required).
+#   To enable auth, copy .env.example to .env and configure:
+#
+#     HELPDESK_IDENTITY_PROVIDER=static        # enable Bearer token auth on all services
+#     HELPDESK_USERS_FILE=/path/to/users.yaml  # copy users.example.yaml and edit
+#     HELPDESK_AUDIT_API_KEY=<key>             # shared fallback: all agents → auditd
+#     DB_AGENT_API_KEY=<key>                   # per-service (overrides shared fallback)
+#     K8S_AGENT_API_KEY=<key>                  # per-service keys match Docker/Helm convention
+#     GATEWAY_API_KEY=<key>                    # gateway → auditd
+#     HELPDESK_AGENT_API_KEY=<key>             # gateway → agents (inbound auth)
+#
+#   Each key needs a matching Argon2id hash in users.yaml.
+#   Use `go run ./cmd/hashapikey` (or the hashapikey binary) to generate hashes.
+#   See .env.example for all available vars and users.example.yaml for the format.
+#
 # Usage:
 #   ./startall.sh                                   # start agents + gateway, then launch orchestrator
 #   ./startall.sh --services-only                   # start agents + gateway only (headless/enterprise)
@@ -192,19 +208,38 @@ fi
 # overridden to "false" in .env or the shell to disable audit logging entirely.
 AUDIT_ENABLED=""
 AUDIT_URL=""
-AUDIT_API_KEY="${HELPDESK_AUDIT_API_KEY:-}"
 if [[ -x "$SCRIPT_DIR/auditd" ]]; then
     AUDIT_ENABLED="${HELPDESK_AUDIT_ENABLED:-true}"
     AUDIT_URL="http://localhost:1199"
 fi
 
-# Warn when governance is active but no API key is set for agent→auditd auth.
-if [[ "$AUDIT_ENABLED" == "true" && -z "$AUDIT_API_KEY" ]]; then
-    OP_MODE="${HELPDESK_OPERATING_MODE:-}"
-    if [[ "$OP_MODE" == "fix" || "$OP_MODE" == "readonly-governed" || "$POLICY_ENABLED" == "true" ]]; then
-        echo "WARN: HELPDESK_AUDIT_API_KEY is not set — agents cannot authenticate to auditd." >&2
-        echo "      Policy checks and approval requests will fail with 401." >&2
-        echo "      Set HELPDESK_AUDIT_API_KEY in .env or your shell to fix this." >&2
+# Per-service audit API keys — each service authenticates to auditd independently.
+# Matches Docker Compose convention (DB_AGENT_API_KEY, K8S_AGENT_API_KEY, etc.).
+# Falls back to the shared HELPDESK_AUDIT_API_KEY when a per-service key is not set.
+DB_AGENT_AUDIT_KEY="${DB_AGENT_API_KEY:-${HELPDESK_AUDIT_API_KEY:-}}"
+K8S_AGENT_AUDIT_KEY="${K8S_AGENT_API_KEY:-${HELPDESK_AUDIT_API_KEY:-}}"
+SYSADMIN_AGENT_AUDIT_KEY="${SYSADMIN_AGENT_API_KEY:-${HELPDESK_AUDIT_API_KEY:-}}"
+INCIDENT_AGENT_AUDIT_KEY="${INCIDENT_AGENT_API_KEY:-${HELPDESK_AUDIT_API_KEY:-}}"
+RESEARCH_AGENT_AUDIT_KEY="${RESEARCH_AGENT_API_KEY:-${HELPDESK_AUDIT_API_KEY:-}}"
+GATEWAY_AUDIT_KEY="${GATEWAY_API_KEY:-${HELPDESK_AUDIT_API_KEY:-}}"
+ORCHESTRATOR_AUDIT_KEY="${ORCHESTRATOR_API_KEY:-${HELPDESK_AUDIT_API_KEY:-}}"
+
+# Warn when auth is enforced but no keys are configured at all.
+# auditd only enforces authentication when HELPDESK_USERS_FILE is set.
+if [[ "$AUDIT_ENABLED" == "true" && -n "${HELPDESK_USERS_FILE:-}" ]]; then
+    HAS_ANY_KEY=false
+    [[ -n "${HELPDESK_AUDIT_API_KEY:-}" || -n "${DB_AGENT_API_KEY:-}" || \
+       -n "${K8S_AGENT_API_KEY:-}" || -n "${SYSADMIN_AGENT_API_KEY:-}" || \
+       -n "${INCIDENT_AGENT_API_KEY:-}" || -n "${GATEWAY_API_KEY:-}" || \
+       -n "${ORCHESTRATOR_API_KEY:-}" ]] && HAS_ANY_KEY=true
+    if [[ "$HAS_ANY_KEY" == "false" ]]; then
+        OP_MODE="${HELPDESK_OPERATING_MODE:-}"
+        if [[ "$OP_MODE" == "fix" || "$OP_MODE" == "readonly-governed" || "$POLICY_ENABLED" == "true" ]]; then
+            echo "WARN: No audit API keys configured — agents cannot authenticate to auditd." >&2
+            echo "      Policy checks and approval requests will fail with 401." >&2
+            echo "      Set HELPDESK_AUDIT_API_KEY (shared) or per-service keys" >&2
+            echo "      (DB_AGENT_API_KEY, K8S_AGENT_API_KEY, etc.) in .env." >&2
+        fi
     fi
 fi
 
@@ -212,27 +247,29 @@ fi
 if [[ -x "$SCRIPT_DIR/auditd" ]]; then
     HELPDESK_AUDIT_SOCKET="${HELPDESK_AUDIT_SOCKET:-/tmp/helpdesk-audit.sock}" \
     HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" \
+    HELPDESK_APPROVAL_KEY="${HELPDESK_APPROVAL_KEY:-}" \
         start_bg auditd "$SCRIPT_DIR/auditd"
     sleep 1
 fi
 
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg database-agent "$SCRIPT_DIR/database-agent"
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg sysadmin-agent "$SCRIPT_DIR/sysadmin-agent"
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$DB_AGENT_AUDIT_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg database-agent "$SCRIPT_DIR/database-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$K8S_AGENT_AUDIT_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg k8s-agent      "$SCRIPT_DIR/k8s-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$SYSADMIN_AGENT_AUDIT_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg sysadmin-agent "$SCRIPT_DIR/sysadmin-agent"
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$INCIDENT_AGENT_AUDIT_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg incident-agent "$SCRIPT_DIR/incident-agent"
 
 # Start research agent for Gemini models
 if [[ "$VENDOR_LC" == "gemini" || "$VENDOR_LC" == "google" ]]; then
-    HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg research-agent "$SCRIPT_DIR/research-agent"
+    HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$RESEARCH_AGENT_AUDIT_KEY" HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" HELPDESK_APPROVAL_ENABLED="${HELPDESK_APPROVAL_ENABLED:-}" HELPDESK_APPROVAL_TIMEOUT="${HELPDESK_APPROVAL_TIMEOUT:-5m}" start_bg research-agent "$SCRIPT_DIR/research-agent"
 fi
 
 # Give agents a moment to bind their ports.
 sleep 2
 
-HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$AUDIT_API_KEY" \
+HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" HELPDESK_AUDIT_URL="$AUDIT_URL" HELPDESK_AUDIT_API_KEY="$GATEWAY_AUDIT_KEY" \
 HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" \
 HELPDESK_AGENT_URLS="$AGENT_URLS" \
 HELPDESK_AGENT_API_KEY="${HELPDESK_AGENT_API_KEY:-}" \
+HELPDESK_CLIENT_API_KEY="${HELPDESK_CLIENT_API_KEY:-}" \
 HELPDESK_GATEWAY_ADDR="0.0.0.0:8080" \
     start_bg gateway "$SCRIPT_DIR/gateway"
 
@@ -279,6 +316,7 @@ else
     HELPDESK_AGENT_URLS="$AGENT_URLS" \
     HELPDESK_AUDIT_ENABLED="$AUDIT_ENABLED" \
     HELPDESK_AUDIT_URL="$AUDIT_URL" \
+    HELPDESK_AUDIT_API_KEY="$ORCHESTRATOR_AUDIT_KEY" \
     HELPDESK_POLICY_ENABLED="$POLICY_ENABLED" \
     HELPDESK_INFRA_CONFIG="${HELPDESK_INFRA_CONFIG:-}" \
         "$SCRIPT_DIR/helpdesk"

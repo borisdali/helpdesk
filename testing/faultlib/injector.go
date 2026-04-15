@@ -1,13 +1,17 @@
 package faultlib
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"helpdesk/internal/infra"
 	"helpdesk/testing/testutil"
 )
 
@@ -21,14 +25,24 @@ func NewInjector(cfg *HarnessConfig) *Injector {
 	return &Injector{cfg: cfg}
 }
 
-// Inject applies a failure mode.
+// Inject applies a failure mode. In external mode or when SSHHost is configured,
+// ExternalInject is used when set.
 func (i *Injector) Inject(ctx context.Context, f Failure) error {
-	return i.exec(ctx, f.Inject, "inject")
+	spec := f.Inject
+	if (i.cfg.External || i.cfg.SSHHost != "") && f.ExternalInject.Type != "" {
+		spec = f.ExternalInject
+	}
+	return i.exec(ctx, spec, "inject")
 }
 
-// Teardown removes a failure mode.
+// Teardown removes a failure mode. In external mode or when SSHHost is configured,
+// ExternalTeardown is used when set.
 func (i *Injector) Teardown(ctx context.Context, f Failure) error {
-	return i.exec(ctx, f.Teardown, "teardown")
+	spec := f.Teardown
+	if (i.cfg.External || i.cfg.SSHHost != "") && f.ExternalTeardown.Type != "" {
+		spec = f.ExternalTeardown
+	}
+	return i.exec(ctx, spec, "teardown")
 }
 
 func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) error {
@@ -50,6 +64,10 @@ func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) erro
 		err = i.execKustomizeDelete(ctx, spec)
 	case "config":
 		err = i.execConfig(ctx, spec)
+	case "ssh_exec":
+		err = i.execSSH(ctx, spec)
+	case "shell_exec":
+		err = i.execShell(ctx, spec)
 	default:
 		return fmt.Errorf("unknown inject type: %s", spec.Type)
 	}
@@ -74,9 +92,12 @@ func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) erro
 }
 
 func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
-	connStr := i.cfg.ConnStr
+	connStr := i.resolvedConnStr()
 	if spec.Target == "replica" {
-		connStr = i.cfg.ReplicaConnStr
+		if i.cfg.ReplicaConnStr == "" {
+			return fmt.Errorf("this fault targets the replica but --replica-conn is not set; provide a replica connection string to run it")
+		}
+		connStr = i.resolvedReplicaConnStr()
 	}
 
 	if spec.ScriptInline != "" {
@@ -87,6 +108,25 @@ func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
 		return testutil.RunSQL(ctx, connStr, scriptPath)
 	}
 	return nil
+}
+
+func (i *Injector) resolvedConnStr() string {
+	connStr, _ := i.resolvedConnEnv()
+	return connStr
+}
+
+// resolvedReplicaConnStr resolves cfg.ReplicaConnStr through the infra config
+// the same way resolvedConnStr resolves the primary, so callers can pass an
+// infra key (e.g. "alloydb-replica") instead of a raw DSN.
+func (i *Injector) resolvedReplicaConnStr() string {
+	if i.cfg.InfraConfigPath != "" && i.cfg.ReplicaConnStr != "" {
+		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[i.cfg.ReplicaConnStr]; ok {
+				return db.ResolvedConnectionString()
+			}
+		}
+	}
+	return i.cfg.ReplicaConnStr
 }
 
 func (i *Injector) execDocker(ctx context.Context, spec InjectSpec) error {
@@ -107,11 +147,14 @@ func (i *Injector) execDocker(ctx context.Context, spec InjectSpec) error {
 }
 
 func (i *Injector) execDockerExec(ctx context.Context, spec InjectSpec) error {
-	scriptPath := filepath.Join(i.cfg.TestingDir, spec.Script)
 	container := spec.ExecVia
 	if container == "" {
 		container = "helpdesk-test-pgloader"
 	}
+	if spec.ScriptInline != "" {
+		return testutil.DockerExecInlineScript(ctx, container, []byte(spec.ScriptInline), spec.User, spec.Detach)
+	}
+	scriptPath := filepath.Join(i.cfg.TestingDir, spec.Script)
 	return testutil.DockerCopyAndExec(ctx, container, scriptPath, spec.Detach)
 }
 
@@ -149,5 +192,110 @@ func (i *Injector) execConfig(ctx context.Context, spec InjectSpec) error {
 	if newConn, ok := spec.Override["connection_string"]; ok {
 		i.cfg.ConnStr = newConn
 	}
+	return nil
+}
+
+// execShell runs an inline bash script or script file on the local host.
+// Useful for multi-step inject/teardown that mix docker exec, docker cp, etc.
+func (i *Injector) execShell(ctx context.Context, spec InjectSpec) error {
+	var scriptContent []byte
+	if spec.ScriptInline != "" {
+		scriptContent = []byte(spec.ScriptInline)
+	} else if spec.Script != "" {
+		path := filepath.Join(i.cfg.TestingDir, spec.Script)
+		var err error
+		scriptContent, err = os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("shell_exec: reading %s: %v", path, err)
+		}
+	} else {
+		return fmt.Errorf("shell_exec: script or script_inline is required")
+	}
+	connStr, pgpassword := i.resolvedConnEnv()
+	cmd := exec.CommandContext(ctx, "bash", "-s")
+	cmd.Stdin = bytes.NewReader(scriptContent)
+	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN.
+	// Also set PGPASSWORD when the infra config supplies a password via
+	// password_env, preventing psql from opening /dev/tty and hanging.
+	env := append(os.Environ(), "FAULTTEST_CONN="+connStr)
+	if pgpassword != "" {
+		env = append(env, "PGPASSWORD="+pgpassword)
+	}
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("shell_exec: %v\n%s", err, output)
+	}
+	slog.Info("shell_exec completed", "output", strings.TrimSpace(string(output)))
+	return nil
+}
+
+// resolvedConnEnv returns the libpq connection string and, separately, the
+// password to set as PGPASSWORD. When cfg.ConnStr is a named infra key, the
+// entry's ResolvedConnectionString() is used and its password_env value is
+// read from the environment. Falls back to cfg.ConnStr / "" when the key is
+// not found or no infra config is configured.
+func (i *Injector) resolvedConnEnv() (connStr, pgpassword string) {
+	if i.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[i.cfg.ConnStr]; ok {
+				pw := ""
+				if db.PasswordEnv != "" {
+					pw = os.Getenv(db.PasswordEnv)
+				}
+				return db.ResolvedConnectionString(), pw
+			}
+		}
+	}
+	return i.cfg.ConnStr, ""
+}
+
+// execSSH runs a script on a remote host via SSH.
+// spec.ExecVia is the target in "user@host" or "host" form; cfg.SSHHost is used
+// as fallback when ExecVia is empty. The SSH user from HarnessConfig is prepended
+// when no "@" is present. Script content is streamed via stdin.
+func (i *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
+	target := spec.ExecVia
+	if target == "" {
+		target = i.cfg.SSHHost
+	}
+	if target == "" {
+		return fmt.Errorf("ssh_exec: exec_via (remote host) is required; pass --ssh-host or set exec_via in the catalog")
+	}
+
+	// If ExecVia has no "@", prepend the configured SSH user.
+	if !strings.Contains(target, "@") && i.cfg.SSHUser != "" {
+		target = i.cfg.SSHUser + "@" + target
+	}
+
+	// Resolve script content.
+	var scriptContent []byte
+	switch {
+	case spec.ScriptInline != "":
+		scriptContent = []byte(spec.ScriptInline)
+	case spec.Script != "":
+		scriptPath := filepath.Join(i.cfg.TestingDir, spec.Script)
+		var err error
+		scriptContent, err = os.ReadFile(scriptPath)
+		if err != nil {
+			return fmt.Errorf("ssh_exec: reading script %s: %v", scriptPath, err)
+		}
+	default:
+		return fmt.Errorf("ssh_exec: script or script_inline is required")
+	}
+
+	args := []string{"-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"}
+	if i.cfg.SSHKeyPath != "" {
+		args = append(args, "-i", i.cfg.SSHKeyPath)
+	}
+	args = append(args, target, "bash -s")
+
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdin = bytes.NewReader(scriptContent)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ssh_exec on %s: %v\n%s", target, err, output)
+	}
+	slog.Info("ssh_exec completed", "target", target, "output", strings.TrimSpace(string(output)))
 	return nil
 }

@@ -1,7 +1,7 @@
 # aiHelpDesk Identity & Access
 
 This document covers the Identity & Access sub-module of
-[aiHelpDesk AI Governance](AIGOVERNANCE.md). See that document for context
+aiHelpDesk [AI Governance](AIGOVERNANCE.md). See that document for context
 on how Identity & Access fits into the broader governance architecture.
 
 ## 1. Why Role-Based Access (RBAC) Alone Is Insufficient

@@ -2244,6 +2244,52 @@ func TestResolveDatabaseInfo_InfraPermissive_UnknownConnString(t *testing.T) {
 	}
 }
 
+func TestResolveDatabaseInfo_PasswordEnv_ByName(t *testing.T) {
+	// password_env is set; env var present → resolved conn string includes password.
+	t.Setenv("TEST_DB_PW", "secret123")
+	defer withInfraConfig(&infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"secured-db": {
+				Name:             "secured-db",
+				ConnectionString: "host=db.example.com dbname=app user=postgres",
+				PasswordEnv:      "TEST_DB_PW",
+				Tags:             []string{"development"},
+			},
+		},
+	})()
+
+	info, err := resolveDatabaseInfo("secured-db")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil", err)
+	}
+	if info.ConnectionStr != "host=db.example.com dbname=app user=postgres password=secret123" {
+		t.Errorf("resolveDatabaseInfo() ConnectionStr = %q, want password appended", info.ConnectionStr)
+	}
+}
+
+func TestResolveDatabaseInfo_PasswordEnv_Missing(t *testing.T) {
+	// password_env is set but env var absent → base connection string returned without error.
+	t.Setenv("TEST_DB_PW_MISSING", "")
+	defer withInfraConfig(&infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"secured-db": {
+				Name:             "secured-db",
+				ConnectionString: "host=db.example.com dbname=app user=postgres",
+				PasswordEnv:      "TEST_DB_PW_MISSING",
+				Tags:             []string{"development"},
+			},
+		},
+	})()
+
+	info, err := resolveDatabaseInfo("secured-db")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil", err)
+	}
+	if info.ConnectionStr != "host=db.example.com dbname=app user=postgres" {
+		t.Errorf("resolveDatabaseInfo() ConnectionStr = %q, want base string when env var absent", info.ConnectionStr)
+	}
+}
+
 func TestCheckConnectionTool_InfraEnforced_Rejected(t *testing.T) {
 	// infraConfig is set but connection string is not registered → tool returns ERROR.
 	defer withInfraConfig(makeTestInfraConfig())()
@@ -2914,7 +2960,11 @@ func TestGetSlowQueriesTool_WithResults(t *testing.T) {
 	mockOutput := ` query                                | calls | total_ms | mean_ms | max_ms | rows
 --------------------------------------+-------+----------+---------+--------+------
  SELECT * FROM users WHERE id = $1    |  1250 |  3500.00 |    2.80 |  42.00 | 1250`
-	defer withMockRunner(mockOutput, nil)()
+	// Pre-check (pg_extension) confirms extension present, then main query runs.
+	defer withMockRunnerSequence(
+		psqlResponse{out: " 1\n(1 row)", err: nil},
+		psqlResponse{out: mockOutput, err: nil},
+	)()
 
 	ctx := newTestContext()
 	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
@@ -2927,7 +2977,10 @@ func TestGetSlowQueriesTool_WithResults(t *testing.T) {
 }
 
 func TestGetSlowQueriesTool_ExtensionMissing(t *testing.T) {
-	defer withMockRunner("", fmt.Errorf("exit status 1: ERROR:  relation \"pg_stat_statements\" does not exist"))()
+	// Pre-check (pg_extension) returns 0 rows → extension absent; main query never called.
+	defer withMockRunnerSequence(
+		psqlResponse{out: "(0 rows)", err: nil},
+	)()
 
 	ctx := newTestContext()
 	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
@@ -2940,7 +2993,11 @@ func TestGetSlowQueriesTool_ExtensionMissing(t *testing.T) {
 }
 
 func TestGetSlowQueriesTool_NoResults(t *testing.T) {
-	defer withMockRunner("(0 rows)", nil)()
+	// Pre-check succeeds (extension present), main query returns 0 rows.
+	defer withMockRunnerSequence(
+		psqlResponse{out: " 1\n(1 row)", err: nil},
+		psqlResponse{out: "(0 rows)", err: nil},
+	)()
 
 	ctx := newTestContext()
 	result, err := getSlowQueriesTool(ctx, GetSlowQueriesArgs{ConnectionString: "host=localhost"})
@@ -3446,6 +3503,22 @@ func TestGetPgLogTool_PermissionDeniedPgLsLogdir(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "get_pod_logs") {
 		t.Errorf("getPgLogTool() output = %q, want k8s alternative hint", result.Output)
+	}
+}
+
+func TestGetPgLogTool_LoggingCollectorDisabled(t *testing.T) {
+	// Simulate postgres with logging_collector=off — pg_ls_logdir fails with ENOENT.
+	pgErr := errors.New(`ERROR:  could not open directory "log": No such file or directory
+exit status 1`)
+	defer withMockRunner("", pgErr)()
+
+	ctx := newTestContext()
+	result, err := getPgLogTool(ctx, GetPgLogArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getPgLogTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "logging_collector") {
+		t.Errorf("getPgLogTool() output = %q, want logging_collector hint", result.Output)
 	}
 }
 

@@ -1,12 +1,20 @@
-# aiHelpDesk: Fault Injection Testing
+# aiHelpDesk: Fault Injection Testing (Internal / Docker-compose)
 
-This page outlines the Failure Testing Framework included
-with aiHelpDesk. There's a list of currated failure modes,
-the injection mechanism and the way to inject failures
+> **Customer-facing guide:** If you want to validate aiHelpDesk agents against your own staging or canary database — without Docker or cluster access — see **[docs/FAULTTEST.md](../docs/FAULTTEST.md)**. That guide covers external (SQL-only) injection, SSH injection, remediation verification, and the policy safety guard.
+
+This page covers the **internal engineering harness**: running the full fault catalog against the Docker-compose test stack, wiring faulttest into CI/CD, and developing or extending failure modes.
+
+There's a curated list of failure modes, the injection mechanism and the way to inject failures
 manually or automatically (e.g. as part of the CI/CD pipeline).
 Once a failure occurs, use aiHelpDesk to see if it can rectify
 a failure automatically or at least provide guidance on how
 to proceed.
+
+The catalog currently contains **27 failure modes** (16 database, 7 Kubernetes, 2 host, 2 compound) and is embedded into the `faulttest` binary at build time — the binary works without the source tree present. Customers can layer their own fault files on top via `--catalog`; see [docs/FAULTTEST.md](../docs/FAULTTEST.md#9-customer-fault-catalogs) for details.
+
+> **Important**: when running the standalone binary (no source tree), `--external` defaults to `true` automatically. This prevents customers from seeing injection failures on Docker/kustomize faults that require the internal test stack. Running from the source tree (`go run ./testing/cmd/faulttest`) keeps the original default of all 27 faults. Pass `--external=false` to the standalone binary to override.
+
+The sample log below predates several additions and shows an earlier count — it is kept for reference.
 
 ## Manual Testing: List available fault injection tests
 
@@ -14,33 +22,41 @@ to proceed.
   go run ./testing/cmd/faulttest list
 ```
 
-Abridged sample log of running the above command (see the [full log](FAULT_INJECTION_TESTING_SAMPLE.md) for details):
+The output now includes a `SOURCE` column (`builtin` for catalog entries, `custom` for entries added via `--catalog`). Pass `--source builtin` or `--source custom` to filter. Abridged sample log (see the [full log](FAULT_INJECTION_TESTING_SAMPLE.md) for details — note the sample predates the SOURCE column):
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest list
-ID                             CATEGORY     SEVERITY   NAME
---------------------------------------------------------------------------------
-db-max-connections             database     high       Max connections exhausted
-db-long-running-query          database     high       Long-running query blocking
-db-lock-contention             database     high       Lock contention / deadlock
-db-table-bloat                 database     medium     Table bloat / dead tuples
-db-high-cache-miss             database     medium     High cache miss ratio
-db-connection-refused          database     critical   Database connection refused
-db-auth-failure                database     critical   Authentication failure
-db-not-exist                   database     critical   Database does not exist
-db-replication-lag             database     high       Replication lag
-db-idle-in-transaction         database     high       Session stuck with uncommitted writes
-db-terminate-direct-command    database     high       Direct terminate — inspect-first check
-k8s-crashloop                  kubernetes   critical   CrashLoopBackOff
-k8s-pending                    kubernetes   critical   Pending pod (unschedulable)
-k8s-image-pull                 kubernetes   critical   ImagePullBackOff
-k8s-no-endpoints               kubernetes   high       Service with no endpoints
-k8s-pvc-pending                kubernetes   critical   PVC pending (bad StorageClass)
-k8s-oomkilled                  kubernetes   critical   OOMKilled
-compound-db-pod-crash          compound     critical   DB unreachable + pod crashing
-compound-db-no-endpoints       compound     critical   DB timeout + no endpoints
+ID                             CATEGORY     SEVERITY   EXTERNAL SOURCE   NAME
+----------------------------------------------------------------------------------------------------
+db-max-connections             database     high       yes      builtin  Max connections exhausted
+db-long-running-query          database     high       yes      builtin  Long-running query blocking
+db-lock-contention             database     high       yes      builtin  Lock contention / deadlock
+db-table-bloat                 database     medium     yes      builtin  Table bloat / dead tuples
+db-high-cache-miss             database     medium     yes      builtin  High cache miss ratio
+db-connection-refused          database     critical            builtin  Database connection refused
+db-auth-failure                database     critical            builtin  Authentication failure
+db-not-exist                   database     critical            builtin  Database does not exist
+db-replication-lag             database     high       yes      builtin  Replication lag
+db-idle-in-transaction         database     high       yes      builtin  Session stuck with uncommitted writes
+db-terminate-direct-command    database     high       yes      builtin  Direct terminate — inspect-first check
+k8s-crashloop                  kubernetes   critical            builtin  CrashLoopBackOff
+k8s-pending                    kubernetes   critical            builtin  Pending pod (unschedulable)
+k8s-image-pull                 kubernetes   critical            builtin  ImagePullBackOff
+k8s-no-endpoints               kubernetes   high                builtin  Service with no endpoints
+k8s-pvc-pending                kubernetes   critical            builtin  PVC pending (bad StorageClass)
+k8s-oomkilled                  kubernetes   critical            builtin  OOMKilled
+k8s-scale-to-zero              kubernetes   high                builtin  Deployment scaled to zero replicas
+db-vacuum-needed               database     medium     yes      builtin  Tables needing vacuum (dead tuple bloat)
+db-disk-pressure               database     medium     yes      builtin  Disk usage — large table growth
+host-container-stopped         host         critical            builtin  Database container stopped
+host-pg-crash                  host         critical            builtin  PostgreSQL process crash inside container
+db-pg-hba-corrupt              database     critical            builtin  pg_hba.conf corrupted — all connections rejected
+db-process-kill                database     critical            builtin  PostgreSQL postmaster killed (SIGKILL)
+db-config-bad-param            database     high                builtin  postgresql.conf invalid parameter
+compound-db-pod-crash          compound     critical            builtin  DB unreachable + pod crashing
+compound-db-no-endpoints       compound     critical            builtin  DB timeout + no endpoints
 
-Total: 19 failure modes
+Total: 27 failure modes
 ```
 
 This is a good start because in this step we verify the
@@ -153,6 +169,13 @@ HELPDESK_POLICY_ENABLED=true \
 test-environment database.  `testing/testing.policy.yaml` grants unrestricted
 read/write/destructive access to resources tagged `test`.  **Do not use these
 files in production.**
+
+> **`password_env` entries:** if your `infrastructure.json` uses `"password_env": "MY_DB_PW"` instead of a plain-text password in `connection_string`, set that variable in the agent's environment before starting it. For example:
+> ```bash
+> export TEST_DB_PASSWORD=testpass
+> HELPDESK_INFRA_CONFIG=claude/infrastructure.json go run ./agents/database &
+> ```
+> The agent resolves the password at each tool call by reading the named env var. The variable must be present in the agent process — it is not read from the caller's shell after startup.
 
 ## Manual Testing: Inject/teardown manually (no agents needed)
 

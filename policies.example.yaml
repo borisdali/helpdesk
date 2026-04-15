@@ -42,6 +42,9 @@ policies:
       - type: kubernetes
         match:
           tags: [production]
+      - type: host
+        match:
+          tags: [production]
 
     rules:
       - action: [write, destructive]
@@ -109,6 +112,9 @@ policies:
       - type: kubernetes
         match:
           tags: [staging]
+      - type: host
+        match:
+          tags: [staging]
 
     rules:
       - action: [read, write, destructive]
@@ -124,6 +130,9 @@ policies:
         match:
           tags: [development]
       - type: kubernetes
+        match:
+          tags: [development]
+      - type: host
         match:
           tags: [development]
 
@@ -176,6 +185,7 @@ policies:
     resources:
       - type: database
       - type: kubernetes
+      - type: host
 
     rules:
       - action: read
@@ -238,6 +248,9 @@ policies:
       - type: kubernetes
         match:
           sensitivity: [critical]
+      - type: host
+        match:
+          sensitivity: [critical]
 
     rules:
       - action: read
@@ -277,6 +290,7 @@ policies:
     resources:
       - type: database
       - type: kubernetes
+      - type: host
 
     rules:
       - action: read
@@ -299,6 +313,7 @@ policies:
     resources:
       - type: database
       - type: kubernetes
+      - type: host
 
     rules:
       - action: write
@@ -330,6 +345,7 @@ policies:
     resources:
       - type: database
       - type: kubernetes
+      - type: host
 
     rules:
       - action: [read, write, destructive]
@@ -348,6 +364,7 @@ policies:
     resources:
       - type: database
       - type: kubernetes
+      - type: host
 
     rules:
       - action: [read, write]
@@ -417,6 +434,7 @@ policies:
     resources:
       - type: database
       - type: kubernetes
+      - type: host
 
     rules:
       - action: [write, destructive]

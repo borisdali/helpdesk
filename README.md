@@ -6,15 +6,15 @@
 
 # aiHelpDesk: AI DB SRE in a box
 
-A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and its derivative databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. The key features are:
+A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and its derivative databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. aiHelpDesk links the reasoning power of the frontier models to your specific environment, your databases, and your proprietary data. This, combined with the strictly governed execution arm to actually remedy the database problems --not just provide a general advise-- is what sets aiHelPDesk apart from the competion. The key features are:
 
 * aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
-* aiHelpDesk is designed for human operators as well as for the upstream agents, which are treated as the first class citizens.
+* aiHelpDesk is designed from the ground up for both the human operators as well as for the upstream agents, which are treated as the first class citizens.
 * aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
 * aiHelpDesk offers not only the reasoning layer specific to your database inventory, but it also features the actuation arm to optionally make the remediation changes to restore service or optimize its use.
 * aiHelpDesk includes a comprehensive eight-module AI Governance framework with the tamper-proof audit as the cornerstone of safe, responsible and transparent remedial adjustments.
 * aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
-* aiHelpDesk features a built-in fault injection framework. 
+* aiHelpDesk features a built-in fault injection framework for both internal QA and customer-side validation against any PostgreSQL instance.
 * aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those shipped with aiHelpDesk out of the box.
 
 aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs. For the upstream agents, including agentic full-featured SRE systems, aiHelpDesk can be thought of as the database reasoning layer that aggregates the myriad of signals emitted by a database (statistics, metrics, wait events, logs, traces, etc.) into a coherent story and offers a way to repair any of the problems found.
@@ -82,7 +82,10 @@ configuration (static users file, JWT/OIDC, service accounts) is in
 [IDENTITY.md](docs/IDENTITY.md).
 
 ## Testing
-aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework, see [here](testing/FAULT_INJECTION_TESTING.md).
+aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework. Two guides cover this:
+
+- **[Fault Injection Testing](docs/FAULTTEST.md)** — customer-facing guide: validate agent behavior against your own staging database using SQL-only injection, SSH-level fault injection, and automated remediation verification; no Docker or cluster access required
+- **[Internal fault injection harness](testing/FAULT_INJECTION_TESTING.md)** — engineer-facing guide: Docker-compose test stack, full catalog of 27 failure modes, CI/CD integration
 
 ## Gateway REST API
 In addition to the interactive Orchestrator, aiHelpDesk provides a Gateway REST API for programmatic access:

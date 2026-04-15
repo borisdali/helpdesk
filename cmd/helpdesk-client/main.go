@@ -43,7 +43,7 @@ func main() {
 		apiKey       = flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "API key (Authorization: Bearer; service accounts)")
 		purpose      = flag.String("purpose", envOrDefault("HELPDESK_SESSION_PURPOSE", ""), "Session `purpose`: diagnostic, remediation, compliance, emergency")
 		purposeNote  = flag.String("purpose-note", os.Getenv("HELPDESK_SESSION_PURPOSE_NOTE"), "Purpose note (e.g. incident ticket number)")
-		agentName    = flag.String("agent", envOrDefault("HELPDESK_CLIENT_AGENT", "database"), "Target `agent`: database, k8s, incident, research")
+		agentName    = flag.String("agent", envOrDefault("HELPDESK_CLIENT_AGENT", "database"), "Target `agent`: database, k8s, sysadmin, incident, research")
 		message      = flag.String("message", "", "One-shot `message` — runs a single query and exits")
 		timeout      = flag.Duration("timeout", 5*time.Minute, "Per-request `timeout`")
 		showVersion  = flag.Bool("version", false, "Print version and exit")

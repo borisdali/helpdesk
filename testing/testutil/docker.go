@@ -2,6 +2,7 @@
 package testutil
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -62,6 +63,46 @@ func DockerExec(ctx context.Context, container string, cmd ...string) (string, e
 			container, strings.Join(cmd, " "), err, output)
 	}
 	return string(output), nil
+}
+
+// DockerExecInlineScript runs an inline bash script inside a running container via stdin.
+// If user is non-empty, the script is run as that OS user (docker exec -u).
+// If detach is true, the script is first written to a temp file inside the container,
+// then launched in the background (docker exec -d).
+func DockerExecInlineScript(ctx context.Context, container string, script []byte, user string, detach bool) error {
+	if detach {
+		// Write the script into the container via stdin, then run it in the background.
+		writeArgs := []string{"exec", "-i", container, "bash", "-c",
+			"cat > /tmp/faulttest_inline.sh && chmod +x /tmp/faulttest_inline.sh"}
+		writeCmd := exec.CommandContext(ctx, "docker", writeArgs...)
+		writeCmd.Stdin = bytes.NewReader(script)
+		if out, err := writeCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("writing inline script to %s: %v\n%s", container, err, out)
+		}
+		detachArgs := []string{"exec", "-d"}
+		if user != "" {
+			detachArgs = append(detachArgs, "-u", user)
+		}
+		detachArgs = append(detachArgs, container, "bash", "/tmp/faulttest_inline.sh")
+		if out, err := exec.CommandContext(ctx, "docker", detachArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("docker exec -d inline script in %s: %v\n%s", container, err, out)
+		}
+		time.Sleep(2 * time.Second)
+		return nil
+	}
+
+	args := []string{"exec", "-i"}
+	if user != "" {
+		args = append(args, "-u", user)
+	}
+	args = append(args, container, "bash", "-s")
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdin = bytes.NewReader(script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker exec inline script in %s: %v\n%s", container, err, output)
+	}
+	return nil
 }
 
 // DockerCopyAndExec copies a script into a container and executes it.
