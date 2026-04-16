@@ -1,6 +1,7 @@
 package faultlib
 
 import (
+	"context"
 	"strings"
 )
 
@@ -66,34 +67,39 @@ var ToolOrderingPatterns = map[string][]string{
 	"get_session_info": {"client_addr", "backend_xid", "idle in transaction"},
 }
 
-// Evaluate scores the agent's response against the failure's evaluation criteria.
-func Evaluate(f Failure, responseText string) EvalResult {
-	result := EvalResult{
-		FailureID:   f.ID,
-		FailureName: f.Name,
-		Category:    f.Category,
-	}
+// evalComponents holds the raw component scores from evaluating a response.
+type evalComponents struct {
+	keywordScore  float64
+	diagnosisScore float64
+	toolScore     float64
+	keywordPass   bool
+	diagnosisPass bool
+	toolEvidence  bool
+	orderingPass  bool
+}
 
+// computeComponents runs the keyword, diagnosis, and tool checks and returns
+// raw component scores. This is shared by Evaluate and EvaluateWithJudge.
+func computeComponents(f Failure, responseText string) evalComponents {
 	lower := strings.ToLower(responseText)
+	var c evalComponents
 
-	// 1. Keyword check (50% weight).
-	keywordScore := 0.0
+	// 1. Keyword check.
 	if len(f.Evaluation.ExpectedKeywords.AnyOf) > 0 {
 		for _, kw := range f.Evaluation.ExpectedKeywords.AnyOf {
 			if strings.Contains(lower, strings.ToLower(kw)) {
-				keywordScore = 1.0
-				result.KeywordPass = true
+				c.keywordScore = 1.0
+				c.keywordPass = true
 				break
 			}
 		}
 	} else {
 		// No keywords specified — pass by default.
-		keywordScore = 1.0
-		result.KeywordPass = true
+		c.keywordScore = 1.0
+		c.keywordPass = true
 	}
 
-	// 2. Diagnosis category check (30% weight).
-	diagnosisScore := 0.0
+	// 2. Diagnosis category check.
 	if f.Evaluation.ExpectedDiagnosis.Category != "" {
 		words := SplitCategory(f.Evaluation.ExpectedDiagnosis.Category)
 		matched := 0
@@ -105,17 +111,16 @@ func Evaluate(f Failure, responseText string) EvalResult {
 		if len(words) > 0 {
 			ratio := float64(matched) / float64(len(words))
 			if ratio >= 0.5 {
-				diagnosisScore = ratio
-				result.DiagnosisPass = true
+				c.diagnosisScore = ratio
+				c.diagnosisPass = true
 			}
 		}
 	} else {
-		diagnosisScore = 1.0
-		result.DiagnosisPass = true
+		c.diagnosisScore = 1.0
+		c.diagnosisPass = true
 	}
 
-	// 3. Tool evidence check (20% weight).
-	toolScore := 0.0
+	// 3. Tool evidence check.
 	if len(f.Evaluation.ExpectedTools) > 0 {
 		toolsFound := 0
 		for _, tool := range f.Evaluation.ExpectedTools {
@@ -130,20 +135,77 @@ func Evaluate(f Failure, responseText string) EvalResult {
 				}
 			}
 		}
-		toolScore = float64(toolsFound) / float64(len(f.Evaluation.ExpectedTools))
-		result.ToolEvidence = toolScore > 0.5
+		c.toolScore = float64(toolsFound) / float64(len(f.Evaluation.ExpectedTools))
+		c.toolEvidence = c.toolScore > 0.5
 	} else {
-		toolScore = 1.0
-		result.ToolEvidence = true
+		c.toolScore = 1.0
+		c.toolEvidence = true
 	}
 
-	// Weighted total.
-	result.Score = keywordScore*0.5 + diagnosisScore*0.3 + toolScore*0.2
-
-	// 4. Tool ordering check (does not affect Score; gates Passed when configured).
-	result.OrderingPass = true
+	// 4. Tool ordering check.
+	c.orderingPass = true
 	if len(f.Evaluation.ExpectedToolOrder) > 0 {
-		result.OrderingPass = checkToolOrdering(f.Evaluation.ExpectedToolOrder, lower)
+		c.orderingPass = checkToolOrdering(f.Evaluation.ExpectedToolOrder, lower)
+	}
+
+	return c
+}
+
+// Evaluate scores the agent's response against the failure's evaluation criteria.
+func Evaluate(f Failure, responseText string) EvalResult {
+	result := EvalResult{
+		FailureID:   f.ID,
+		FailureName: f.Name,
+		Category:    f.Category,
+	}
+
+	c := computeComponents(f, responseText)
+	result.KeywordPass = c.keywordPass
+	result.DiagnosisPass = c.diagnosisPass
+	result.DiagnosisScore = c.diagnosisScore
+	result.ToolEvidence = c.toolEvidence
+	result.OrderingPass = c.orderingPass
+
+	// Backward-compat weights: keyword*0.50 + diagnosis*0.30 + tool*0.20
+	result.Score = c.keywordScore*0.5 + c.diagnosisScore*0.3 + c.toolScore*0.2
+
+	// Pass criteria: score >= 0.6 AND keyword check passes AND ordering holds.
+	result.Passed = result.Score >= 0.6 && result.KeywordPass && result.OrderingPass
+
+	return result
+}
+
+// EvaluateWithJudge runs the standard evaluation and then applies the LLM judge
+// for diagnosis scoring when completer is non-nil and the fault has a narrative.
+// When judge is enabled, weights shift to: tool*0.40 + judge*0.40 + keyword*0.20.
+// Falls back to standard scoring when judge is skipped (no narrative or nil completer).
+func EvaluateWithJudge(ctx context.Context, f Failure, responseText string, completer TextCompleter, model string) EvalResult {
+	result := EvalResult{
+		FailureID:   f.ID,
+		FailureName: f.Name,
+		Category:    f.Category,
+	}
+
+	c := computeComponents(f, responseText)
+	result.KeywordPass = c.keywordPass
+	result.ToolEvidence = c.toolEvidence
+	result.OrderingPass = c.orderingPass
+
+	judgeResult := Judge(ctx, f, responseText, completer, model)
+	result.JudgeSkipped = judgeResult.Skipped
+	result.JudgeReasoning = judgeResult.Reasoning
+	result.JudgeModel = judgeResult.Model
+
+	if judgeResult.Skipped {
+		// Backward-compat weights: keyword*0.50 + diagnosis*0.30 + tool*0.20
+		result.DiagnosisScore = c.diagnosisScore
+		result.DiagnosisPass = c.diagnosisPass
+		result.Score = c.keywordScore*0.5 + c.diagnosisScore*0.3 + c.toolScore*0.2
+	} else {
+		// Judge-enabled weights: tool*0.40 + judge*0.40 + keyword*0.20
+		result.DiagnosisScore = judgeResult.Score
+		result.DiagnosisPass = judgeResult.Score >= 0.5
+		result.Score = c.toolScore*0.40 + judgeResult.Score*0.40 + c.keywordScore*0.20
 	}
 
 	// Pass criteria: score >= 0.6 AND keyword check passes AND ordering holds.

@@ -1,15 +1,15 @@
 # aiHelpDesk Fault Injection Testing
 
-The two cornerstones of aiHelpDesk's SRE/DBA Flywheel are the comprehensive built-in Fault Injection Testing and Playbooks.
+The two cornerstones of aiHelpDesk's **Operational SRE/DBA Flywheel** are the comprehensive, built-in, customer-facing Fault Injection Testing and Playbooks.
 
-This page covers the former, or to be more precise, the customer-facing, external-mode use case of fault testing. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md) and for the wider aiHelpDesk testing strategy see [here](../testing/README.md).
+This page covers the former, or to be more precise, the customer-facing, external fault injection testing against customer's own, BYO databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md) and for the wider aiHelpDesk testing strategy see [here](../testing/README.md).
 
-`faulttest` is a CLI tool that validates how well your aiHelpDesk agents diagnose and recover from real database and infrastructure failures. You inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords and tool usage, and optionally trigger a remediation playbook and confirm recovery — all without touching your production systems.
+`faulttest` is a CLI tool that validates how well your aiHelpDesk agents diagnose and recover from real database and infrastructure failures. You bring your own database server, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords and tool usage, and optionally trigger a remediation playbook and confirm recovery — all without touching your production systems.
 
 The tool was designed for two complementary use cases:
 
 - **Internal QA** — engineers run the full catalog against Docker-compose or Kubernetes stacks to prevent regressions in agent behavior before shipping
-- **Customer validation** — operators run a safe subset of SQL-based faults against a staging or canary database they already own, confirming the agents behave correctly in their specific environment before going to production
+- **External Customer Validation** — operators run a safe subset of SQL-based faults against a staging or canary database they already own, confirming the agents behave correctly in their specific environment before going to production
 
 ---
 

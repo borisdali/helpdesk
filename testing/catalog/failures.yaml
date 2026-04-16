@@ -55,6 +55,12 @@ failures:
           - "exhausted"
       expected_diagnosis:
         category: "connection_exhaustion"
+        narrative: "The agent should identify that the PostgreSQL max_connections limit has been reached due to idle or sleeping sessions consuming all available connection slots, and recommend either terminating idle connections or increasing max_connections."
+    remediation:
+      agent_name: database
+      agent_prompt: "There are too many idle connections on {{connection_string}}. Please terminate idle connections to free up connection slots."
+      verify_sql: "SELECT count(*) < current_setting('max_connections')::int - 5 FROM pg_stat_activity WHERE state = 'idle'"
+      verify_timeout: "60s"
     timeout: 60s
 
   - id: db-long-running-query
@@ -99,6 +105,7 @@ failures:
           - "blocked"
       expected_diagnosis:
         category: "lock_blocking"
+        narrative: "The agent should identify a long-running query holding an ACCESS EXCLUSIVE lock that is blocking other sessions from accessing the table, and recommend canceling or terminating the blocking query."
     timeout: 90s
 
   - id: db-lock-contention
@@ -170,6 +177,12 @@ failures:
           - "lock"
       expected_diagnosis:
         category: "deadlock"
+        narrative: "The agent should identify lock contention or a deadlock situation where transactions are waiting on locks held by other sessions, and recommend resolving the blocking sessions or reviewing transaction patterns."
+    remediation:
+      agent_name: database
+      agent_prompt: "There is lock contention on {{connection_string}}. Please identify and terminate the blocking session to clear the deadlock."
+      verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
+      verify_timeout: "60s"
     timeout: 180s
 
   - id: db-table-bloat
@@ -213,6 +226,7 @@ failures:
           - "n_dead_tup"
       expected_diagnosis:
         category: "table_bloat"
+        narrative: "The agent should identify that a table has accumulated excessive dead tuples because autovacuum is disabled or not keeping up, causing disk bloat and query slowdowns, and recommend running VACUUM or re-enabling autovacuum."
     timeout: 60s
 
   - id: db-high-cache-miss
@@ -256,6 +270,7 @@ failures:
           - "blks_read"
       expected_diagnosis:
         category: "cache_performance"
+        narrative: "The agent should identify a low buffer cache hit ratio indicating that queries are reading data from disk rather than shared_buffers, and recommend increasing shared_buffers or optimizing query access patterns."
     timeout: 60s
 
   - id: db-connection-refused
@@ -292,6 +307,7 @@ failures:
           - "not accepting"
       expected_diagnosis:
         category: "connection_refused"
+        narrative: "The agent should identify that the PostgreSQL server is not running or not accepting connections, and recommend starting or restarting the database service."
     timeout: 30s
 
   - id: db-auth-failure
@@ -324,6 +340,7 @@ failures:
           - "failed"
       expected_diagnosis:
         category: "authentication_failure"
+        narrative: "The agent should identify that the database connection is failing due to incorrect credentials or an authentication error, and recommend verifying the username and password in the connection string."
     timeout: 30s
 
   - id: db-not-exist
@@ -355,6 +372,7 @@ failures:
           - "nonexistent"
       expected_diagnosis:
         category: "database_not_found"
+        narrative: "The agent should identify that the database name specified in the connection string does not exist on the server, and recommend verifying the database name or creating it."
     timeout: 30s
 
   - id: db-replication-lag
@@ -391,6 +409,7 @@ failures:
           - "lag"
       expected_diagnosis:
         category: "replication_lag"
+        narrative: "The agent should identify that the streaming replica has fallen behind the primary due to paused or stalled WAL replay, and recommend resuming WAL replay or investigating the replica's replication slot."
     timeout: 60s
 
   - id: db-idle-in-transaction
@@ -464,6 +483,12 @@ failures:
           - "locked"
       expected_diagnosis:
         category: "uncommitted_transaction"
+        narrative: "The agent should identify a session stuck in idle-in-transaction state with uncommitted writes (backend_xid set), assess the rollback cost, and recommend terminating it after confirming it is safe to do so."
+    remediation:
+      agent_name: database
+      agent_prompt: "There is a session stuck in idle-in-transaction on {{connection_string}} blocking other writes. Please terminate the stuck session to clear the transaction."
+      verify_sql: "SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'"
+      verify_timeout: "60s"
     timeout: 90s
 
   - id: db-terminate-direct-command
@@ -533,6 +558,7 @@ failures:
           - "pid"
       expected_diagnosis:
         category: "session_termination"
+        narrative: "The agent should discover the blocking session PID via get_active_connections, inspect it via get_session_info to assess uncommitted work, and then call terminate_connection — following the inspect-before-act policy."
       expected_tool_order:
         - [get_session_info, terminate_connection]
     timeout: 90s
@@ -824,6 +850,7 @@ failures:
           - "bloat"
       expected_diagnosis:
         category: "vacuum_needed"
+        narrative: "The agent should identify tables with high dead tuple ratios indicating they need VACUUM, and recommend running VACUUM on the affected tables or re-enabling autovacuum."
     timeout: 60s
 
   - id: db-disk-pressure
@@ -863,6 +890,7 @@ failures:
           - "GiB"
       expected_diagnosis:
         category: "disk_pressure"
+        narrative: "The agent should identify which databases or tables are consuming the most disk space and report on the storage situation, recommending cleanup or capacity planning."
     timeout: 60s
 
   # ── Host failures (1) ──────────────────────────────────────────────────
@@ -902,6 +930,7 @@ failures:
           - "shutdown"
       expected_diagnosis:
         category: "shutdown"
+        narrative: "The agent should identify that the PostgreSQL container or process has been stopped and is not running, and recommend restarting it."
     timeout: 60s
 
   - id: host-pg-crash
@@ -943,6 +972,7 @@ failures:
           - "abnormal"
       expected_diagnosis:
         category: "container_killed"
+        narrative: "The agent should identify that the PostgreSQL process was forcibly killed (SIGKILL / exit code 137) rather than cleanly stopped, distinguishing it from a normal shutdown, and recommend restarting the database."
     timeout: 60s
     # GOVERNANCE GAP: the sysadmin agent cannot distinguish a SIGKILL (exit 137)
     # from a clean stop (exit 0) — both appear as "container stopped" in tool output.
@@ -1034,6 +1064,7 @@ failures:
           - "rejected"
       expected_diagnosis:
         category: "hba_rejection"
+        narrative: "The agent should identify that pg_hba.conf is rejecting connections from the client address, and recommend reviewing and correcting the pg_hba.conf rules to allow the appropriate connections."
     timeout: 60s
 
   - id: db-process-kill
@@ -1092,6 +1123,7 @@ failures:
           - "not running"
       expected_diagnosis:
         category: "process_crash"
+        narrative: "The agent should identify that the PostgreSQL postmaster process has crashed or been killed and is not accepting connections, and recommend restarting the PostgreSQL service."
     timeout: 60s
 
   - id: db-config-bad-param
@@ -1174,6 +1206,7 @@ failures:
           - "shared_buffers"
       expected_diagnosis:
         category: "config_error"
+        narrative: "The agent should identify that PostgreSQL cannot start due to an invalid configuration parameter in postgresql.conf (such as an out-of-range shared_buffers value), and recommend correcting or reverting the configuration file."
     timeout: 60s
 
   # ── Compound failures (2) ──────────────────────────────────────────────

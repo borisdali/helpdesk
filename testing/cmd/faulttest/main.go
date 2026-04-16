@@ -4,16 +4,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
+	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
 
@@ -119,6 +123,15 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.Var(&extraCatalogs, "catalog", "Additional customer catalog file (repeatable)")
 	fs.StringVar(&cfg.SourceFilter, "source", "", "Filter faults by source: builtin or custom")
 	fs.StringVar(&cfg.ReportDir, "report-dir", ".", "Directory to write the JSON report (default: current directory)")
+
+	// LLM judge options.
+	fs.BoolVar(&cfg.JudgeEnabled, "judge", false, "Enable LLM-as-judge for semantic diagnosis scoring")
+	fs.StringVar(&cfg.JudgeModel, "judge-model", "", "Model name for judge (default: HELPDESK_MODEL_NAME env var)")
+	fs.StringVar(&cfg.JudgeVendor, "judge-vendor", "", "Model vendor for judge: anthropic or google (default: HELPDESK_MODEL_VENDOR env var)")
+	fs.StringVar(&cfg.JudgeAPIKey, "judge-api-key", "", "API key for judge (default: HELPDESK_API_KEY env var)")
+
+	// Audit-based tool evidence.
+	fs.StringVar(&cfg.AuditURL, "audit-url", "", "Audit service base URL (e.g. http://localhost:7070); when set, tool evidence uses audit trail")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -235,6 +248,23 @@ func cmdRun(args []string) {
 	runner := NewRunner(cfg)
 	remediator := NewRemediator(cfg)
 
+	// Initialize LLM judge completer if enabled.
+	var judgeCompleter faultlib.TextCompleter
+	var judgeModel string
+	if cfg.JudgeEnabled {
+		var err error
+		judgeCompleter, err = newJudgeCompleter(ctx, cfg)
+		if err != nil {
+			slog.Warn("LLM judge disabled: could not initialize", "err", err)
+		} else {
+			judgeModel = cfg.JudgeModel
+			if judgeModel == "" {
+				judgeModel = os.Getenv("HELPDESK_MODEL_NAME")
+			}
+			slog.Info("LLM judge enabled", "vendor", cfg.JudgeVendor, "model", judgeModel)
+		}
+	}
+
 	runID := uuid.New().String()[:8]
 	var results []EvalResult
 
@@ -264,8 +294,18 @@ func cmdRun(args []string) {
 			continue
 		}
 
-		// 2. Run agent.
+		// 2. Run agent (record call start for audit window).
+		callStart := time.Now()
 		resp := runner.Run(ctx, f)
+
+		// Query audit trail for tool evidence if --audit-url is set.
+		var auditTools []string
+		if cfg.AuditURL != "" {
+			auditTools = auditQueryTools(ctx, cfg.AuditURL, callStart)
+			if len(auditTools) > 0 {
+				slog.Info("audit evidence", "failure", f.ID, "tools", auditTools)
+			}
+		}
 
 		// 3. Evaluate.
 		var evalResult EvalResult
@@ -279,25 +319,36 @@ func cmdRun(args []string) {
 				Duration:    resp.Duration.String(),
 			}
 		} else {
-			evalResult = Evaluate(f, resp)
+			if judgeCompleter != nil {
+				evalResult = EvaluateWithJudge(ctx, f, resp, judgeCompleter, judgeModel, auditTools)
+			} else {
+				evalResult = Evaluate(f, resp, auditTools)
+			}
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
 		}
 
 		// 4. Remediation phase (optional).
-		if cfg.RemediateEnabled && f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "" {
+		if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
 			remResult := remediator.Remediate(ctx, f)
 			evalResult.RemediationAttempted = true
 			evalResult.RemediationPassed = remResult.Passed
 			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
+			evalResult.RemediationScore = remResult.Score
+			evalResult.RemediationMethod = remResult.Method
 			if remResult.Err != nil {
 				evalResult.RemediationError = remResult.Err.Error()
 			}
+			// OverallScore: 60% diagnosis + 40% remediation when remediation attempted.
+			evalResult.OverallScore = evalResult.DiagnosisScore*0.6 + remResult.Score*0.4
 			if remResult.Passed {
-				fmt.Printf("Remediation: RECOVERED in %.1fs\n", remResult.RecoveryTimeSecs)
+				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 			} else {
 				fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
 			}
+		} else {
+			// No remediation attempted: overall score equals diagnosis score.
+			evalResult.OverallScore = evalResult.Score
 		}
 
 		results = append(results, evalResult)
@@ -519,6 +570,13 @@ func cmdValidate(args []string) {
 				warns = append(warns, "no expected_keywords; scoring will be unreliable")
 			}
 
+			// Playbook existence check (when --gateway is set).
+			if cfg.GatewayURL != "" && f.Remediation.PlaybookID != "" {
+				if !validatePlaybookExists(cfg.GatewayURL, cfg.GatewayAPIKey, f.Remediation.PlaybookID) {
+					warns = append(warns, fmt.Sprintf("playbook %q not found at gateway %s", f.Remediation.PlaybookID, cfg.GatewayURL))
+				}
+			}
+
 			label := f.ID
 			if label == "" {
 				label = "(no id)"
@@ -552,6 +610,46 @@ func cmdValidate(args []string) {
 	if totalErrors > 0 {
 		os.Exit(1)
 	}
+}
+
+// validatePlaybookExists checks whether a playbook with the given series_id exists
+// on the gateway. Returns true when the playbook is found, false otherwise.
+// Network failures or unexpected status codes are treated as "not found" (returns false).
+func validatePlaybookExists(gatewayURL, apiKey, playbookID string) bool {
+	reqURL := gatewayURL + "/api/v1/fleet/playbooks?series_id=" + playbookID
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		slog.Warn("playbook check: failed to build request", "playbook_id", playbookID, "err", err)
+		return false
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("playbook check: HTTP request failed", "playbook_id", playbookID, "err", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return false
+	}
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("playbook check: unexpected status", "playbook_id", playbookID, "status", resp.StatusCode)
+		return false
+	}
+
+	// Parse the response: it should be a non-empty list.
+	var result []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		slog.Warn("playbook check: failed to decode response", "err", err)
+		return false
+	}
+	return len(result) > 0
 }
 
 // ── example ──────────────────────────────────────────────────────────────

@@ -84,6 +84,13 @@ func (r Report) PrintSummary() {
 	fmt.Printf("\n=== Fault Test Report: %s ===\n\n", r.ID)
 
 	textFallbackCount := 0
+	judgeCount := 0
+	for _, res := range r.Results {
+		if !res.JudgeSkipped && res.JudgeModel != "" {
+			judgeCount++
+		}
+	}
+
 	for _, res := range r.Results {
 		status := "PASS"
 		if !res.Passed {
@@ -98,7 +105,31 @@ func (r Report) PrintSummary() {
 			textFallbackCount++
 		}
 
-		fmt.Printf("[%s] %s (%s) - score: %d%%%s\n", status, res.FailureName, res.FailureID, scorePercent, toolNote)
+		// Append judge indicator when diagnosis was scored by the LLM judge.
+		judgeNote := ""
+		if !res.JudgeSkipped && res.JudgeModel != "" {
+			judgeNote = fmt.Sprintf(" [judge: %.0f%%]", res.DiagnosisScore*100)
+		}
+
+		fmt.Printf("[%s] %s (%s) - score: %d%%%s%s\n", status, res.FailureName, res.FailureID, scorePercent, toolNote, judgeNote)
+
+		// Show dual-score line when remediation was attempted and produced a distinct overall score.
+		if res.RemediationAttempted && res.OverallScore > 0 {
+			diagPct := int(res.DiagnosisScore * 100)
+			remPct := int(res.RemediationScore * 100)
+			overallPct := int(res.OverallScore * 100)
+			method := res.RemediationMethod
+			if method == "" {
+				method = "unknown"
+			}
+			if res.RemediationPassed {
+				fmt.Printf("       Diagnosis: %d%% | Remediation: %d%% (%.1fs, %s) | Overall: %d%%\n",
+					diagPct, remPct, res.RecoveryTimeSecs, method, overallPct)
+			} else {
+				fmt.Printf("       Diagnosis: %d%% | Remediation: FAILED (%s) | Overall: %d%%\n",
+					diagPct, method, overallPct)
+			}
+		}
 
 		if !res.Passed {
 			var details []string
@@ -118,6 +149,11 @@ func (r Report) PrintSummary() {
 				fmt.Printf("       %s\n", strings.Join(details, " | "))
 			}
 		}
+
+		// Show judge reasoning when available.
+		if res.JudgeReasoning != "" && !res.JudgeSkipped {
+			fmt.Printf("       Diagnosis: %q\n", res.JudgeReasoning)
+		}
 	}
 
 	fmt.Printf("\n--- Summary ---\n")
@@ -134,6 +170,9 @@ func (r Report) PrintSummary() {
 		fmt.Printf("structured tool call data). These scores may be less reliable. For precise\n")
 		fmt.Printf("tool evidence, point --db-agent directly at the agent A2A URL rather than\n")
 		fmt.Printf("the gateway, or use an ADK-based agent.\n")
+	}
+	if judgeCount > 0 {
+		fmt.Printf("\nLLM judge scored diagnosis for %d fault(s). Weights: tool*0.40 + judge*0.40 + keyword*0.20.\n", judgeCount)
 	}
 	fmt.Println()
 }

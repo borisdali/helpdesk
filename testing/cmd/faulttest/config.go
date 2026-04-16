@@ -98,7 +98,8 @@ type KeywordSpec struct {
 
 // DiagnosisSpec defines the expected diagnosis category.
 type DiagnosisSpec struct {
-	Category string `yaml:"category"`
+	Category  string `yaml:"category"`
+	Narrative string `yaml:"narrative,omitempty"`
 }
 
 // HarnessConfig holds runtime configuration for the test harness.
@@ -145,6 +146,20 @@ type HarnessConfig struct {
 	SourceFilter string
 	// ReportDir is the directory where the JSON report is written (default: ".").
 	ReportDir string
+
+	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
+	JudgeEnabled bool
+	// JudgeModel is the model name for the LLM judge (default: HELPDESK_MODEL_NAME).
+	JudgeModel string
+	// JudgeVendor is the model vendor for the LLM judge (default: HELPDESK_MODEL_VENDOR).
+	JudgeVendor string
+	// JudgeAPIKey is the API key for the LLM judge (default: HELPDESK_API_KEY).
+	JudgeAPIKey string
+
+	// AuditURL is the base URL of the audit service (e.g. "http://localhost:7070").
+	// When set, the harness queries tool execution events after each agent call
+	// to get structured tool evidence from the audit trail.
+	AuditURL string
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.

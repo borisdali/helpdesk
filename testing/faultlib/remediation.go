@@ -18,6 +18,11 @@ type RemediationResult struct {
 	Passed           bool
 	RecoveryTimeSecs float64
 	Err              error
+	// Score is 0.0-1.0: 1.0 if recovered within half the verify timeout,
+	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
+	Score  float64
+	// Method records how remediation was triggered: "playbook", "agent_prompt", or "none".
+	Method string
 }
 
 // Remediator triggers playbook or agent remediation and polls for recovery.
@@ -41,22 +46,25 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 	slog.Info("starting remediation", "failure", f.ID,
 		"playbook", spec.PlaybookID, "agent_prompt", spec.AgentPrompt != "")
 
-	// Trigger remediation.
+	// Determine method.
+	var method string
 	var triggerErr error
 	if spec.PlaybookID != "" {
+		method = "playbook"
 		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID)
 	} else if spec.AgentPrompt != "" {
+		method = "agent_prompt"
 		agentName := spec.AgentName
 		if agentName == "" {
 			agentName = "database"
 		}
 		triggerErr = r.triggerAgent(ctx, agentName, spec.AgentPrompt)
 	} else {
-		return RemediationResult{Err: fmt.Errorf("no remediation action configured (playbook_id or agent_prompt required)")}
+		return RemediationResult{Err: fmt.Errorf("no remediation action configured (playbook_id or agent_prompt required)"), Method: "none"}
 	}
 
 	if triggerErr != nil {
-		return RemediationResult{Err: fmt.Errorf("remediation trigger: %w", triggerErr)}
+		return RemediationResult{Err: fmt.Errorf("remediation trigger: %w", triggerErr), Method: method}
 	}
 
 	// Poll for recovery.
@@ -74,12 +82,21 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 
 	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
 	if err != nil {
-		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err)}
+		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
+	}
+
+	// Score: 1.0 if recovered within half the timeout, 0.75 if within the full timeout.
+	score := 0.75
+	halfTimeout := timeout.Seconds() / 2
+	if recoverySecs <= halfTimeout {
+		score = 1.0
 	}
 
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
+		Score:            score,
+		Method:           method,
 	}
 }
 
