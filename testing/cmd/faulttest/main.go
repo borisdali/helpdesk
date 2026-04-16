@@ -114,7 +114,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	// Remediation phase.
 	fs.BoolVar(&cfg.RemediateEnabled, "remediate", false, "Run remediation phase after injection+diagnosis")
-	fs.StringVar(&cfg.GatewayURL, "gateway", "http://localhost:8080", "Gateway URL for playbook/agent remediation")
+	fs.StringVar(&cfg.GatewayURL, "gateway", "", "Gateway URL for playbook/agent remediation and vault playbook checks")
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 

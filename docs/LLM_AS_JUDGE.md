@@ -139,7 +139,7 @@ Out-of-range scores (not in `[0, 3]`) are treated as `0.0`. Parse errors set
 
 ## 5. Current use: faulttest diagnosis scoring
 
-`faulttest` is the first consumer of LLM-as-judge. It uses the judge to replace
+aiHelpDesk Fault Injection Testing (aka `faulttest`) is the first consumer of LLM-as-judge. It uses the judge to replace
 the brittle category string-match that previously contributed 30% of the
 diagnosis score.
 

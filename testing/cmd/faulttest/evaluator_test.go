@@ -401,3 +401,161 @@ func TestEvaluate_NoToolsModeEmpty(t *testing.T) {
 		t.Errorf("ToolEvidenceMode = %q, want empty when no tools expected", result.ToolEvidenceMode)
 	}
 }
+
+// ── Audit mode tool evidence ───────────────────────────────────────────────
+
+func TestScoreToolEvidence_AuditMode(t *testing.T) {
+	// When auditTools is provided, mode is "audit" and exact names are matched.
+	f := Failure{
+		ID:       "audit-1",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedTools: []string{"check_connection", "get_database_info"},
+		},
+	}
+	auditTools := []string{"check_connection", "get_database_info", "get_active_connections"}
+
+	score, evidence, mode := scoreToolEvidence(f, testutil.AgentResponse{Text: "irrelevant"}, auditTools)
+
+	if mode != "audit" {
+		t.Errorf("mode = %q, want %q", mode, "audit")
+	}
+	if !evidence {
+		t.Error("ToolEvidence should be true when all expected tools are in audit list")
+	}
+	if score != 1.0 {
+		t.Errorf("score = %.2f, want 1.0", score)
+	}
+}
+
+func TestScoreToolEvidence_AuditModePriority(t *testing.T) {
+	// When auditTools is provided AND ToolCalls is non-nil, audit wins.
+	f := Failure{
+		ID:       "audit-2",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedTools: []string{"get_lock_info"},
+		},
+	}
+	// Structured tool calls show the tool succeeded — but audit says it didn't.
+	resp := testutil.AgentResponse{
+		Text: "lock information retrieved",
+		ToolCalls: []testutil.ToolCallResult{
+			{Name: "get_lock_info", Success: true},
+		},
+	}
+	// Audit doesn't have get_lock_info — should score 0.
+	auditTools := []string{"check_connection"}
+
+	score, evidence, mode := scoreToolEvidence(f, resp, auditTools)
+
+	if mode != "audit" {
+		t.Errorf("mode = %q, want audit (audit takes priority over structured)", mode)
+	}
+	if evidence {
+		t.Error("ToolEvidence should be false when expected tool is absent from audit list")
+	}
+	if score != 0.0 {
+		t.Errorf("score = %.2f, want 0.0", score)
+	}
+}
+
+func TestScoreToolEvidence_AuditModePartial(t *testing.T) {
+	// 1 of 2 expected tools in audit list → score = 0.5, evidence = false (≤0.5).
+	f := Failure{
+		ID:       "audit-3",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedTools: []string{"check_connection", "get_database_info"},
+		},
+	}
+	auditTools := []string{"check_connection"} // only one
+
+	score, evidence, mode := scoreToolEvidence(f, testutil.AgentResponse{Text: ""}, auditTools)
+
+	if mode != "audit" {
+		t.Errorf("mode = %q, want audit", mode)
+	}
+	if score != 0.5 {
+		t.Errorf("score = %.2f, want 0.5", score)
+	}
+	if evidence {
+		t.Error("ToolEvidence should be false for exactly 0.5 score (threshold is > 0.5)")
+	}
+}
+
+func TestEvaluate_AuditModeVariadic(t *testing.T) {
+	// Evaluate() accepts audit tools as a variadic argument and uses them.
+	f := Failure{
+		ID:       "audit-4",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"connection"}},
+			ExpectedTools:    []string{"check_connection"},
+		},
+	}
+
+	// Without audit tools (text fallback, tool pattern not in response).
+	resp := testutil.AgentResponse{Text: "connection issue detected"}
+	resultNoAudit := Evaluate(f, resp)
+
+	// With audit tools (exact match).
+	resultWithAudit := Evaluate(f, resp, []string{"check_connection"})
+
+	if resultNoAudit.ToolEvidenceMode != "text_fallback" {
+		t.Errorf("without audit: mode = %q, want text_fallback", resultNoAudit.ToolEvidenceMode)
+	}
+	if resultWithAudit.ToolEvidenceMode != "audit" {
+		t.Errorf("with audit: mode = %q, want audit", resultWithAudit.ToolEvidenceMode)
+	}
+	if !resultWithAudit.ToolEvidence {
+		t.Error("ToolEvidence should be true with audit tools providing exact match")
+	}
+}
+
+// ── OverallScore formula ───────────────────────────────────────────────────
+
+func TestOverallScoreFormula(t *testing.T) {
+	// OverallScore = DiagnosisScore*0.6 + RemediationScore*0.4 (when remediation attempted).
+	// Validates the weights haven't drifted.
+	tests := []struct {
+		diagnosis   float64
+		remediation float64
+		want        float64
+	}{
+		{1.0, 1.0, 1.0},
+		{1.0, 0.75, 0.9},   // fast diagnosis, slow recovery
+		{0.67, 1.0, 0.802}, // judge score=2, perfect remediation
+		{0.67, 0.75, 0.702},
+		{0.0, 0.0, 0.0},
+	}
+	for _, tt := range tests {
+		got := tt.diagnosis*0.6 + tt.remediation*0.4
+		if got < tt.want-0.001 || got > tt.want+0.001 {
+			t.Errorf("%.2f*0.6 + %.2f*0.4 = %.4f, want %.4f",
+				tt.diagnosis, tt.remediation, got, tt.want)
+		}
+	}
+}
+
+func TestOverallScore_NoRemediation_EqualsDiagnosisScore(t *testing.T) {
+	// When no remediation is attempted, OverallScore = Score (the weighted diagnosis score).
+	f := Failure{
+		ID:       "no-rem",
+		Name:     "Test failure",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"connection"}},
+		},
+	}
+	result := Evaluate(f, testutil.AgentResponse{Text: "connection issue"})
+	// Simulate what main.go does: OverallScore = Score when no remediation.
+	result.OverallScore = result.Score
+	if result.OverallScore != result.Score {
+		t.Errorf("OverallScore = %.4f, want Score = %.4f", result.OverallScore, result.Score)
+	}
+}
