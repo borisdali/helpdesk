@@ -50,6 +50,8 @@ func main() {
 		cmdExample(os.Args[2:])
 	case "show":
 		cmdShow(os.Args[2:])
+	case "vault":
+		cmdVault(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -68,6 +70,7 @@ Commands:
   validate   Validate a customer catalog file for errors and warnings
   example    Print an annotated example customer catalog entry to stdout
   show       Print a fault definition as YAML (pipe to a file to customize it)
+  vault      Fault↔playbook pairing table, pass rate trends, drift detection
 `)
 }
 
@@ -374,6 +377,11 @@ func cmdRun(args []string) {
 		slog.Error("failed to write report", "err", err)
 	} else {
 		fmt.Printf("Report written to %s\n", reportFile)
+	}
+
+	// Append run to persistent history for vault commands.
+	if err := appendHistory(report); err != nil {
+		slog.Warn("failed to append to run history", "err", err, "path", historyFilePath())
 	}
 }
 

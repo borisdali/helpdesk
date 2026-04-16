@@ -269,6 +269,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/fleet/uploads", auth("POST /api/v1/fleet/uploads", g.handleUploadCreate))
 	mux.HandleFunc("GET /api/v1/fleet/uploads/{uploadID}", auth("GET /api/v1/fleet/uploads/{uploadID}", g.handleUploadGet))
 	mux.HandleFunc("GET /api/v1/fleet/uploads/{uploadID}/content", auth("GET /api/v1/fleet/uploads/{uploadID}/content", g.handleUploadGetContent))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks/from-trace", auth("POST /api/v1/fleet/playbooks/from-trace", g.handlePlaybookFromTrace))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/import", auth("POST /api/v1/fleet/playbooks/import", g.handlePlaybookImport))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks", auth("POST /api/v1/fleet/playbooks", g.handlePlaybookCreate))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks", auth("GET /api/v1/fleet/playbooks", g.handlePlaybookList))
