@@ -1,8 +1,10 @@
 # aiHelpDesk Playbooks
 
-A **playbook** is a saved runbook artifact that combines a natural-language fleet intent with expert triage knowledge. Running a playbook calls the fleet planner fresh every time, producing a plan against the current tool catalog and live infrastructure state — never a stale script.
+A **playbook** is a strategic feature in aiHelpDesk. It can be thought of as a saved runbook (or a set of runbooks) artifact that combines a natural-language fleet intent with expert triage knowledge. Running a playbook calls the fleet planner fresh every time, producing a plan against the current tool catalog and live infrastructure state — never a stale script.
 
 Playbooks are the primary authoring unit for fleet operations. System playbooks ship with aiHelpDesk and cover the most common database triage scenarios out of the box. Operators can author custom playbooks from scratch or import existing runbooks from Markdown, plain text, YAML, Rundeck, or Ansible formats.
+
+See playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk recommends making use of the playbook feature.
 
 ---
 

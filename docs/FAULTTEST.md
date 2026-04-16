@@ -1,6 +1,6 @@
-# aiHelpDesk Fault Injection Testing
+# aiHelpDesk Fault Injection Testing (external)
 
-The two cornerstones of aiHelpDesk's **Operational SRE/DBA Flywheel** are the comprehensive, built-in, customer-facing Fault Injection Testing and Playbooks.
+The two cornerstones of aiHelpDesk's **Operational SRE/DBA Flywheel** are the comprehensive, built-in, customer-facing Fault Injection Testing and [Playbooks](PLAYBOOKS.md).
 
 This page covers the former, or to be more precise, the customer-facing, external fault injection testing against customer's own, BYO databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md) and for the wider aiHelpDesk testing strategy see [here](../testing/README.md).
 
@@ -38,7 +38,7 @@ The tool was designed for two complementary use cases:
    - [Interactive single-fault injection](#73-interactive-single-fault-injection)
    - [Running from Docker](#74-running-from-docker)
    - [Running from Kubernetes (Helm)](#75-running-from-kubernetes-helm)
-8. [Interpreting results](#8-interpreting-results)
+8. [Interpreting results](#8-interpreting-results) — including [LLM-as-judge fields](LLM_AS_JUDGE.md)
 9. [Customer fault catalogs](#9-customer-fault-catalogs)
    - [Overview](#91-overview)
    - [Writing a catalog file](#92-writing-a-catalog-file)
@@ -73,15 +73,18 @@ faulttest run --external --conn "host=staging-db port=5432 ..."
   JSON report written to faulttest-<run-id>.json
 ```
 
-Each fault is scored on three weighted dimensions:
+Each fault is scored on three weighted dimensions. The weights depend on whether
+the [LLM-as-judge](LLM_AS_JUDGE.md) is enabled (via `--judge`):
 
-| Dimension | Weight | What it checks |
-|-----------|--------|----------------|
-| Keywords | 50% | Expected terms appear in the agent's response |
-| Diagnosis category | 30% | The agent identifies the correct root-cause class |
-| Tool evidence | 20% | The agent's response mentions the right diagnostic tools |
+| Dimension | Default weights | With `--judge` |
+|-----------|:--------------:|:--------------:|
+| Keyword match | 50% | 20% |
+| Diagnosis (category match or judge score) | 30% | 40% |
+| Tool evidence | 20% | 40% |
 
 A fault passes when the weighted score reaches 60% or higher. Ordering assertions (e.g., `get_session_info` must precede `terminate_connection`) are also evaluated and gate the pass verdict independently of the score.
+
+When `--judge` is enabled, the diagnosis dimension is scored by a secondary LLM that reads the agent's response against a natural-language `narrative` describing what a correct answer should contain. This replaces the brittle category string-match with semantic evaluation. See [LLM-as-Judge](LLM_AS_JUDGE.md) for full details.
 
 ---
 
@@ -314,6 +317,11 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--gateway` | — | `http://localhost:8080` | Gateway URL for playbook/agent remediation |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
+| `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
+| `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
+| `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
+| `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |
+| `--audit-url` | — | — | auditd URL for audit-trail-based tool evidence (`ToolEvidenceMode: audit`) |
 | `--infra-config` | — | — | Path to `infrastructure.json` for safety check |
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
@@ -609,13 +617,21 @@ The JSON report contains one entry per fault:
   "passed": true,
   "keyword_pass": true,
   "diagnosis_pass": true,
+  "diagnosis_score": 1.0,
   "tool_evidence": true,
+  "tool_evidence_mode": "audit",
   "ordering_pass": true,
   "response_text": "...",
   "duration": "18.4s",
+  "judge_reasoning": "Agent correctly identified max_connections exhaustion and recommended PgBouncer.",
+  "judge_model": "claude-haiku-4-5-20251001",
+  "judge_skipped": false,
   "remediation_attempted": true,
   "remediation_passed": true,
-  "recovery_time_seconds": 12.3
+  "remediation_score": 1.0,
+  "remediation_method": "playbook",
+  "recovery_time_seconds": 12.3,
+  "overall_score": 0.92
 }
 ```
 
@@ -624,12 +640,19 @@ The JSON report contains one entry per fault:
 | Field | Meaning |
 |-------|---------|
 | `keyword_pass` | At least one expected keyword found in agent response |
-| `diagnosis_pass` | Agent response contains terms from the expected diagnosis category |
-| `tool_evidence` | Agent called at least one expected tool. |
-| `tool_evidence_mode` | How tool evidence was determined: `structured` (exact name matching from a `tool_call_summary` DataPart — ADK agents via A2A) or `text_fallback` (keyword matching against response text — non-ADK agents or gateway path). Omitted when no tools were expected. A `text_fallback` score is less reliable: it passes if the right words appear in the text, not if the tool was actually called. |
+| `diagnosis_pass` | `diagnosis_score >= 0.5` |
+| `diagnosis_score` | 0.0–1.0. With `--judge`: maps from the judge's 0–3 score. Without `--judge`: fraction of diagnosis-category words matched in the response. |
+| `tool_evidence` | Agent called at least one expected tool |
+| `tool_evidence_mode` | How tool evidence was determined: `audit` (exact names from auditd — requires `--audit-url`), `structured` (from a `tool_call_summary` DataPart, ADK agents only), or `text_fallback` (keyword matching against response text). `text_fallback` is least reliable. Omitted when no tools were expected. |
 | `ordering_pass` | Tool ordering constraints satisfied (e.g., inspect before terminate) |
-| `score` | Weighted combination: 50% keywords + 30% diagnosis + 20% tools |
+| `score` | Weighted combination — see the weights table in §1 |
 | `passed` | `score >= 0.6` **and** `ordering_pass = true` |
+| `judge_reasoning` | One-sentence explanation from the judge LLM (omitted when skipped) |
+| `judge_model` | Model that produced the judge score (omitted when skipped) |
+| `judge_skipped` | `true` when judge was disabled, narrative was absent, or the judge call failed |
+| `remediation_score` | 0.0–1.0: `1.0` if recovered within half the verify timeout, `0.75` within the full timeout, `0.0` if timed out. Only present when `--remediate` was set. |
+| `remediation_method` | `playbook` or `agent_prompt` (only when `--remediate` was set) |
+| `overall_score` | `diagnosis_score × 0.6 + remediation_score × 0.4` when remediation was attempted; equals `score` otherwise |
 
 **Common failure patterns:**
 
@@ -875,7 +898,10 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
         - "my keyword"
         - "synonym"
     expected_diagnosis:
-      category: "my_diagnosis_category"
+      category: "my_diagnosis_category"    # used when --judge is not set
+      narrative: >                          # used by the LLM judge when --judge is set
+        The agent should identify <root cause> and recommend <remediation>.
+        It should explain <key detail> and mention <expected outcome>.
     # Optional: assert tool A is mentioned before tool B.
     expected_tool_order:
       - [get_session_info, terminate_connection]

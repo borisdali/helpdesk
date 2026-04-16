@@ -344,24 +344,33 @@ func checkTargetSafety(infraConfigPath, connStr string) error {
 		return fmt.Errorf("cannot extract host from connection string %q", connStr)
 	}
 
+	// Scan ALL entries matching the target host. Pass if ANY has the required
+	// tag — multiple entries can share the same hostname (e.g. alloydb-on-vm
+	// and alloydb-on-vm-local both resolve to localhost). Go map iteration is
+	// non-deterministic, so we must not short-circuit on the first match.
+	var matched []string
 	for name, srv := range cfg.DBServers {
 		srvHost := connStrHost(srv.ConnectionString)
 		if srvHost != targetHost {
 			continue
 		}
-		// Matched — check tags.
+		matched = append(matched, name)
 		for _, tag := range srv.Tags {
 			if tag == "test" || tag == "chaos" {
 				return nil
 			}
 		}
-		return fmt.Errorf("target host %q (server %q) does not have a 'test' or 'chaos' tag — "+
-			"refusing to inject faults. Add tag in infrastructure.json to opt-in", targetHost, name)
 	}
 
-	// Host not found in infra config — refuse by default.
-	return fmt.Errorf("target host %q not found in infrastructure config %q — "+
-		"refusing to inject faults. Add it with a 'test' or 'chaos' tag to opt-in", targetHost, infraConfigPath)
+	if len(matched) == 0 {
+		// Host not found in infra config — refuse by default.
+		return fmt.Errorf("target host %q not found in infrastructure config %q — "+
+			"refusing to inject faults. Add it with a 'test' or 'chaos' tag to opt-in", targetHost, infraConfigPath)
+	}
+
+	// One or more entries matched but none had test/chaos tag.
+	return fmt.Errorf("target host %q (server(s) %v) does not have a 'test' or 'chaos' tag — "+
+		"refusing to inject faults. Add tag in infrastructure.json to opt-in", targetHost, matched)
 }
 
 // connStrHost extracts the hostname from a libpq connection string (DSN or URL).
