@@ -366,7 +366,18 @@ func cmdRun(args []string) {
 		if !evalResult.Passed {
 			status = "FAIL"
 		}
-		fmt.Printf("Result: [%s] score=%d%%\n", status, int(evalResult.Score*100))
+		fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% category=%d%%)\n",
+			status, int(evalResult.Score*100),
+			int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), int(evalResult.DiagnosisScore*100))
+		if evalResult.RemediationAttempted {
+			remStatus := "PASS"
+			if !evalResult.RemediationPassed {
+				remStatus = "FAIL"
+			}
+			fmt.Printf("Remediation Result:  [%s] score=%d%% (%.1fs, %s)\n",
+				remStatus, int(evalResult.RemediationScore*100), evalResult.RecoveryTimeSecs, evalResult.RemediationMethod)
+			fmt.Printf("Overall Result:      [%s] score=%d%%\n", status, int(evalResult.OverallScore*100))
+		}
 	}
 
 	report := BuildReport(runID, results)

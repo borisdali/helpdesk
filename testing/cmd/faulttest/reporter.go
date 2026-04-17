@@ -146,9 +146,13 @@ func (r Report) PrintSummary() {
 			fmt.Printf("       Error: %s\n", res.Error)
 		}
 
-		// Show judge reasoning when available.
-		if res.JudgeReasoning != "" && !res.JudgeSkipped {
-			fmt.Printf("       Reasoning: %q\n", res.JudgeReasoning)
+		// Show judge reasoning when available, or error when judge skipped unexpectedly.
+		if res.JudgeReasoning != "" {
+			if res.JudgeSkipped {
+				fmt.Printf("       [judge skipped: %s]\n", res.JudgeReasoning)
+			} else {
+				fmt.Printf("       Reasoning: %q\n", res.JudgeReasoning)
+			}
 		}
 	}
 

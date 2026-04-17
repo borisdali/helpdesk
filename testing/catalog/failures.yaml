@@ -272,7 +272,7 @@ failures:
     description: >
       The database cache hit ratio is low because queries scan tables
       larger than shared_buffers, causing excessive disk I/O.
-    external_compat: true
+    external_compat: false  # requires shared_buffers control; one-shot seqscan diluted by agent tool calls
     inject:
       type: sql
       script: sql/inject_high_cache_miss.sql

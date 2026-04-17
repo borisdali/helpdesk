@@ -301,6 +301,11 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	result.JudgeReasoning = judgeResult.Reasoning
 	result.JudgeModel = judgeResult.Model
 
+	// Log when judge skips unexpectedly (error, not just missing narrative).
+	if judgeResult.Skipped && judgeResult.Reasoning != "" {
+		slog.Warn("LLM judge skipped", "failure", f.ID, "reason", judgeResult.Reasoning)
+	}
+
 	if judgeResult.Skipped {
 		// Backward-compat weights: keyword*0.50 + diagnosis*0.30 + tool*0.20
 		result.DiagnosisScore = diagnosisScore
@@ -314,7 +319,11 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	}
 
 	// Pass criteria: score >= 0.6 AND keyword check passes.
-	result.Passed = result.Score >= 0.6 && result.KeywordPass
+	// When judge is active, also require judgeScore >= 0.33 (score 1/3 minimum —
+	// agent must at least identify the symptom). A 0/3 judge means the agent
+	// completely missed the fault; keywords+tools alone cannot override that.
+	judgeVeto := !judgeResult.Skipped && judgeResult.Score < 0.33
+	result.Passed = result.Score >= 0.6 && result.KeywordPass && !judgeVeto
 
 	return result
 }

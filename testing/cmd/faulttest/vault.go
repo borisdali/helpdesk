@@ -34,8 +34,12 @@ type historyFaultResult struct {
 	FailureID        string  `json:"failure_id"`
 	FailureName      string  `json:"failure_name"`
 	Passed           bool    `json:"passed"`
-	Score            float64 `json:"score"`
+	Score            float64 `json:"score"`             // composite (keyword+tool+category/judge)
+	KeywordScore     float64 `json:"keyword_score,omitempty"`
+	DiagnosisScore   float64 `json:"diagnosis_score,omitempty"` // category match OR judge score
+	JudgeUsed        bool    `json:"judge_used,omitempty"`      // true = DiagnosisScore is judge score
 	RemediationScore float64 `json:"remediation_score,omitempty"`
+	OverallScore     float64 `json:"overall_score,omitempty"`
 }
 
 // historyFilePath returns the path for the faulttest history file.
@@ -67,7 +71,11 @@ func appendHistory(report Report, target string) error {
 			FailureName:      r.FailureName,
 			Passed:           r.Passed,
 			Score:            r.Score,
+			KeywordScore:     r.KeywordScore,
+			DiagnosisScore:   r.DiagnosisScore,
+			JudgeUsed:        !r.JudgeSkipped && r.JudgeModel != "",
 			RemediationScore: r.RemediationScore,
+			OverallScore:     r.OverallScore,
 		})
 	}
 	runs = append(runs, historyRun{
@@ -216,9 +224,10 @@ func vaultList(args []string) {
 func vaultStatus(args []string) {
 	fs := flag.NewFlagSet("vault status", flag.ExitOnError)
 	var sinceDays int
-	var target string
+	var target, fault string
 	fs.IntVar(&sinceDays, "since-days", 30, "Days of history to show")
 	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
+	fs.StringVar(&fault, "fault", "", "Filter by fault ID (e.g. db-max-connections)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
@@ -253,7 +262,12 @@ func vaultStatus(args []string) {
 	if target != "" {
 		targetLabel = target
 	}
-	fmt.Printf("=== Vault Status — %s (last %d days, %d runs) ===\n\n", targetLabel, sinceDays, len(filtered))
+	header := fmt.Sprintf("=== Vault Status — %s (last %d days, %d runs)", targetLabel, sinceDays, len(filtered))
+	if fault != "" {
+		header += fmt.Sprintf(", fault: %s", fault)
+	}
+	fmt.Println(header + " ===\n")
+
 	if target == "" {
 		fmt.Printf("%-10s %-20s %-20s %s\n", "DATE", "TARGET", "RUN ID", "PASS RATE")
 		fmt.Println(strings.Repeat("-", 70))
@@ -277,38 +291,65 @@ func vaultStatus(args []string) {
 		}
 	}
 
-	// Per-fault pass rates.
-	faultPass := make(map[string][]bool)
+	// Per-fault detail: group runs by fault ID, show one row per run with all scores.
+	type faultRun struct {
+		date   string
+		runID  string
+		result historyFaultResult
+	}
+	faultRuns := make(map[string][]faultRun)
 	faultName := make(map[string]string)
 	for _, run := range filtered {
+		var date string
+		if t, err := time.Parse(time.RFC3339, run.Timestamp); err == nil {
+			date = t.Format("2006-01-02")
+		}
 		for _, r := range run.Results {
-			faultPass[r.FailureID] = append(faultPass[r.FailureID], r.Passed)
+			if fault != "" && r.FailureID != fault {
+				continue
+			}
+			faultRuns[r.FailureID] = append(faultRuns[r.FailureID], faultRun{date, run.RunID, r})
 			faultName[r.FailureID] = r.FailureName
 		}
 	}
-	if len(faultPass) == 0 {
+	if len(faultRuns) == 0 {
 		return
 	}
 
 	var faultIDs []string
-	for id := range faultPass {
+	for id := range faultRuns {
 		faultIDs = append(faultIDs, id)
 	}
 	sort.Strings(faultIDs)
 
-	fmt.Printf("\n=== Per-Fault Pass Rates ===\n\n")
-	fmt.Printf("%-32s %-10s %s\n", "FAULT", "PASS RATE", "RUNS")
-	fmt.Println(strings.Repeat("-", 55))
+	fmt.Printf("\n=== Per-Fault Detail ===\n")
+	//                   date  run   kwd   score categ judge remed result
+	const rowFmt = "  %-10s %-8s  %5s  %5s  %5s  %5s  %5s  %s\n"
 	for _, id := range faultIDs {
-		passes := faultPass[id]
-		passCount := 0
-		for _, p := range passes {
-			if p {
-				passCount++
+		runs := faultRuns[id]
+		fmt.Printf("\n%s (%s)\n", id, faultName[id])
+		fmt.Printf(rowFmt, "DATE", "RUN", "KWD", "SCORE", "CATEG", "JUDGE", "REMED", "RESULT")
+		fmt.Println("  " + strings.Repeat("-", 62))
+		for _, fr := range runs {
+			r := fr.result
+			kwd := pct(r.KeywordScore)
+			score := pct(r.Score)
+			categ, judge := "-", "-"
+			if r.JudgeUsed {
+				judge = pct(r.DiagnosisScore)
+			} else {
+				categ = pct(r.DiagnosisScore)
 			}
+			remed := "-"
+			if r.RemediationScore > 0 || r.OverallScore > 0 {
+				remed = pct(r.RemediationScore)
+			}
+			res := "PASS"
+			if !r.Passed {
+				res = "FAIL"
+			}
+			fmt.Printf(rowFmt, fr.date, fr.runID, kwd, score, categ, judge, remed, res)
 		}
-		rate := float64(passCount) / float64(len(passes)) * 100
-		fmt.Printf("%-32s %-10s %d\n", id, fmt.Sprintf("%.0f%%", rate), len(passes))
 	}
 }
 
@@ -404,6 +445,9 @@ func vaultDrift(args []string) {
 		)
 	}
 }
+
+// pct formats a 0.0-1.0 score as a percentage string.
+func pct(v float64) string { return fmt.Sprintf("%.0f%%", v*100) }
 
 func passRateOf(results []bool) float64 {
 	if len(results) == 0 {
