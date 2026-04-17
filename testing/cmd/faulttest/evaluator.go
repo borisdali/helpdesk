@@ -28,7 +28,10 @@ type EvalResult struct {
 	Duration     string  `json:"duration"`
 	Error        string  `json:"error,omitempty"`
 
-	// Judge fields (populated by EvaluateWithJudge when judge is enabled).
+	// Component scores — always populated, allow operators to see exactly why
+	// the composite score came out as it did without reverse-engineering.
+	KeywordScore   float64 `json:"keyword_score"`             // 0.0 or 1.0 (any-of match)
+	ToolScore      float64 `json:"tool_score"`                // 0.0-1.0 (fraction of expected tools found)
 	DiagnosisScore float64 `json:"diagnosis_score"`           // 0.0-1.0 from judge or category match
 	JudgeReasoning string  `json:"judge_reasoning,omitempty"`
 	JudgeModel     string  `json:"judge_model,omitempty"`
@@ -46,7 +49,7 @@ type EvalResult struct {
 	RemediationScore  float64 `json:"remediation_score,omitempty"`
 	// RemediationMethod records how remediation was triggered: "playbook", "agent_prompt", or "none".
 	RemediationMethod string  `json:"remediation_method,omitempty"`
-	// OverallScore combines diagnosis and remediation: DiagnosisScore*0.6 + RemediationScore*0.4
+	// OverallScore combines composite score and remediation: Score*0.6 + RemediationScore*0.4
 	// when remediation was attempted; equals Score when not attempted.
 	OverallScore float64 `json:"overall_score,omitempty"`
 }
@@ -209,6 +212,10 @@ func Evaluate(f Failure, resp testutil.AgentResponse, auditTools ...[]string) Ev
 	result.ToolEvidence = toolEvidence
 	result.ToolEvidenceMode = toolEvidenceMode
 
+	// Store individual component scores so the reporter can surface them.
+	result.KeywordScore = keywordScore
+	result.ToolScore = toolScore
+
 	// Weighted total.
 	result.Score = keywordScore*0.5 + diagnosisScore*0.3 + toolScore*0.2
 
@@ -282,6 +289,10 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	toolScore, toolEvidence, toolEvidenceMode := scoreToolEvidence(f, resp, at)
 	result.ToolEvidence = toolEvidence
 	result.ToolEvidenceMode = toolEvidenceMode
+
+	// Store individual component scores.
+	result.KeywordScore = keywordScore
+	result.ToolScore = toolScore
 
 	// Convert Failure to faultlib.Failure for the judge call.
 	flibFailure := toFaultlibFailure(f)

@@ -520,24 +520,25 @@ func TestEvaluate_AuditModeVariadic(t *testing.T) {
 // ── OverallScore formula ───────────────────────────────────────────────────
 
 func TestOverallScoreFormula(t *testing.T) {
-	// OverallScore = DiagnosisScore*0.6 + RemediationScore*0.4 (when remediation attempted).
+	// OverallScore = Score*0.6 + RemediationScore*0.4 (when remediation attempted).
+	// Score is the full composite (keywords+tools+category/judge), not just the category sub-component.
 	// Validates the weights haven't drifted.
 	tests := []struct {
-		diagnosis   float64
+		score       float64
 		remediation float64
 		want        float64
 	}{
 		{1.0, 1.0, 1.0},
-		{1.0, 0.75, 0.9},   // fast diagnosis, slow recovery
-		{0.67, 1.0, 0.802}, // judge score=2, perfect remediation
+		{1.0, 0.75, 0.9},   // perfect score, slow recovery
+		{0.67, 1.0, 0.802}, // partial score, perfect remediation
 		{0.67, 0.75, 0.702},
 		{0.0, 0.0, 0.0},
 	}
 	for _, tt := range tests {
-		got := tt.diagnosis*0.6 + tt.remediation*0.4
+		got := tt.score*0.6 + tt.remediation*0.4
 		if got < tt.want-0.001 || got > tt.want+0.001 {
 			t.Errorf("%.2f*0.6 + %.2f*0.4 = %.4f, want %.4f",
-				tt.diagnosis, tt.remediation, got, tt.want)
+				tt.score, tt.remediation, got, tt.want)
 		}
 	}
 }

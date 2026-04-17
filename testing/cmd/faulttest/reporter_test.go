@@ -60,14 +60,13 @@ func TestPrintSummary_FailDetails(t *testing.T) {
 
 	out := captureStdout(func() { report.PrintSummary() })
 
-	if !strings.Contains(out, "Keywords: x") {
-		t.Errorf("expected 'Keywords: x' in output; got:\n%s", out)
-	}
-	if !strings.Contains(out, "Tools: x") {
-		t.Errorf("expected 'Tools: x' in output; got:\n%s", out)
-	}
+	// Component scores are omitted when an error prevented evaluation.
+	// Only the error line should appear.
 	if !strings.Contains(out, "Error: agent timeout") {
 		t.Errorf("expected error detail in output; got:\n%s", out)
+	}
+	if strings.Contains(out, "Keywords:") {
+		t.Errorf("expected no component scores for error result; got:\n%s", out)
 	}
 }
 
@@ -228,8 +227,8 @@ func TestPrintSummary_RemediationDualScore_Passed(t *testing.T) {
 
 	out := captureStdout(func() { report.PrintSummary() })
 
-	if !strings.Contains(out, "Diagnosis:") {
-		t.Errorf("expected Diagnosis label in dual-score line; got:\n%s", out)
+	if !strings.Contains(out, "Category:") {
+		t.Errorf("expected Category label in component score line; got:\n%s", out)
 	}
 	if !strings.Contains(out, "Remediation:") {
 		t.Errorf("expected Remediation label in dual-score line; got:\n%s", out)

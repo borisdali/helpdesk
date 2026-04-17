@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -113,46 +112,43 @@ func (r Report) PrintSummary() {
 
 		fmt.Printf("[%s] %s (%s) - score: %d%%%s%s\n", status, res.FailureName, res.FailureID, scorePercent, toolNote, judgeNote)
 
-		// Show dual-score line when remediation was attempted and produced a distinct overall score.
+		// Always show the 3 component scores so operators can see why the
+		// composite came out as it did, and whether to trust each component.
+		if res.Error == "" {
+			diagLabel := "Category"
+			noJudgeNote := " [no judge — add --judge for semantic scoring]"
+			if !res.JudgeSkipped && res.JudgeModel != "" {
+				diagLabel = "Judge"
+				noJudgeNote = ""
+			}
+			fmt.Printf("       Keywords: %d%% | Tools: %d%% | %s: %d%%%s\n",
+				int(res.KeywordScore*100), int(res.ToolScore*100),
+				diagLabel, int(res.DiagnosisScore*100), noJudgeNote)
+		}
+
+		// Remediation line.
 		if res.RemediationAttempted && res.OverallScore > 0 {
-			diagPct := int(res.DiagnosisScore * 100)
-			remPct := int(res.RemediationScore * 100)
 			overallPct := int(res.OverallScore * 100)
 			method := res.RemediationMethod
 			if method == "" {
 				method = "unknown"
 			}
 			if res.RemediationPassed {
-				fmt.Printf("       Diagnosis: %d%% | Remediation: %d%% (%.1fs, %s) | Overall: %d%%\n",
-					diagPct, remPct, res.RecoveryTimeSecs, method, overallPct)
+				fmt.Printf("       Remediation: %d%% (%.1fs, %s) | Overall: %d%%\n",
+					int(res.RemediationScore*100), res.RecoveryTimeSecs, method, overallPct)
 			} else {
-				fmt.Printf("       Diagnosis: %d%% | Remediation: FAILED (%s) | Overall: %d%%\n",
-					diagPct, method, overallPct)
+				fmt.Printf("       Remediation: FAILED (%s) | Overall: %d%%\n",
+					method, overallPct)
 			}
 		}
 
-		if !res.Passed {
-			var details []string
-			if !res.KeywordPass {
-				details = append(details, "Keywords: x")
-			}
-			if !res.DiagnosisPass {
-				details = append(details, "Diagnosis: x")
-			}
-			if !res.ToolEvidence {
-				details = append(details, "Tools: x")
-			}
-			if res.Error != "" {
-				details = append(details, fmt.Sprintf("Error: %s", res.Error))
-			}
-			if len(details) > 0 {
-				fmt.Printf("       %s\n", strings.Join(details, " | "))
-			}
+		if res.Error != "" {
+			fmt.Printf("       Error: %s\n", res.Error)
 		}
 
 		// Show judge reasoning when available.
 		if res.JudgeReasoning != "" && !res.JudgeSkipped {
-			fmt.Printf("       Diagnosis: %q\n", res.JudgeReasoning)
+			fmt.Printf("       Reasoning: %q\n", res.JudgeReasoning)
 		}
 	}
 

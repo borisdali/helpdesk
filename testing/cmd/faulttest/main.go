@@ -342,8 +342,8 @@ func cmdRun(args []string) {
 			if remResult.Err != nil {
 				evalResult.RemediationError = remResult.Err.Error()
 			}
-			// OverallScore: 60% diagnosis + 40% remediation when remediation attempted.
-			evalResult.OverallScore = evalResult.DiagnosisScore*0.6 + remResult.Score*0.4
+			// OverallScore: 60% composite score + 40% remediation when remediation attempted.
+			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
 			if remResult.Passed {
 				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 			} else {
