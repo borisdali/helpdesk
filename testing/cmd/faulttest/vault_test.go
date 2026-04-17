@@ -188,8 +188,10 @@ func TestValidatePlaybookExists_Found(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]map[string]interface{}{
-			{"id": "pb-001", "series_id": "pbs_db_conn_pooling"},
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"playbooks": []map[string]interface{}{
+				{"playbook_id": "pb-001", "series_id": "pbs_db_conn_pooling"},
+			},
 		})
 	}))
 	defer srv.Close()
@@ -211,10 +213,10 @@ func TestValidatePlaybookExists_NotFound(t *testing.T) {
 }
 
 func TestValidatePlaybookExists_EmptyList(t *testing.T) {
-	// Gateway returns 200 with empty array — playbook is not registered yet.
+	// Gateway returns 200 with empty playbooks array — playbook is not registered yet.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[]`))
+		w.Write([]byte(`{"playbooks":[]}`))
 	}))
 	defer srv.Close()
 
@@ -239,7 +241,9 @@ func TestValidatePlaybookExists_SendsAuth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]map[string]interface{}{{"id": "pb-1"}})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"playbooks": []map[string]interface{}{{"playbook_id": "pb-1"}},
+		})
 	}))
 	defer srv.Close()
 

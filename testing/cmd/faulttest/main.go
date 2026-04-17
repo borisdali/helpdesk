@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -135,6 +137,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	// Audit-based tool evidence.
 	fs.StringVar(&cfg.AuditURL, "audit-url", "", "Audit service base URL (e.g. http://localhost:7070); when set, tool evidence uses audit trail")
+
+	// Completion webhook.
+	fs.StringVar(&cfg.NotifyURL, "notify-url", "", "Webhook URL for POST notification on run completion (e.g. Slack incoming webhook)")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -304,7 +309,7 @@ func cmdRun(args []string) {
 		// Query audit trail for tool evidence if --audit-url is set.
 		var auditTools []string
 		if cfg.AuditURL != "" {
-			auditTools = auditQueryTools(ctx, cfg.AuditURL, callStart)
+			auditTools = auditQueryTools(ctx, cfg.AuditURL, cfg.GatewayAPIKey, callStart)
 			if len(auditTools) > 0 {
 				slog.Info("audit evidence", "failure", f.ID, "tools", auditTools)
 			}
@@ -390,6 +395,10 @@ func cmdRun(args []string) {
 		fmt.Printf("Report written to %s\n", reportFile)
 	}
 
+	if cfg.NotifyURL != "" {
+		postNotify(cfg.NotifyURL, report)
+	}
+
 	// Append run to persistent history for vault commands.
 	// Use the agent-conn alias when set (human-readable, no password);
 	// fall back to the hostname extracted from the injection conn string.
@@ -400,6 +409,35 @@ func cmdRun(args []string) {
 	if err := appendHistory(report, target); err != nil {
 		slog.Warn("failed to append to run history", "err", err, "path", historyFilePath())
 	}
+}
+
+// postNotify POSTs the full JSON report to the given webhook URL. Failures are
+// logged at Warn level and never cause the faulttest run to fail.
+func postNotify(notifyURL string, report Report) {
+	body, err := json.Marshal(report)
+	if err != nil {
+		slog.Warn("notify: failed to marshal report", "err", err)
+		return
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, notifyURL, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("notify: failed to build request", "url", notifyURL, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("notify: HTTP request failed", "url", notifyURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if resp.StatusCode >= 300 {
+		slog.Warn("notify: webhook returned non-2xx", "status", resp.StatusCode, "url", notifyURL)
+		return
+	}
+	slog.Info("notify: webhook notified", "url", notifyURL, "status", resp.StatusCode)
 }
 
 // ── inject ───────────────────────────────────────────────────────────────
@@ -668,13 +706,15 @@ func validatePlaybookExists(gatewayURL, apiKey, playbookID string) bool {
 		return false
 	}
 
-	// Parse the response: it should be a non-empty list.
-	var result []map[string]interface{}
+	// Parse the response: gateway wraps the list as {"playbooks": [...]}.
+	var result struct {
+		Playbooks []map[string]interface{} `json:"playbooks"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		slog.Warn("playbook check: failed to decode response", "err", err)
 		return false
 	}
-	return len(result) > 0
+	return len(result.Playbooks) > 0
 }
 
 // ── example ──────────────────────────────────────────────────────────────

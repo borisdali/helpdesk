@@ -23,7 +23,7 @@ type auditEvent struct {
 //
 // It calls GET {auditURL}/v1/events?since=RFC3339&event_type=tool_execution
 // and extracts the tool name from each matching event.
-func auditQueryTools(ctx context.Context, auditURL string, since time.Time) []string {
+func auditQueryTools(ctx context.Context, auditURL, apiKey string, since time.Time) []string {
 	if auditURL == "" {
 		return nil
 	}
@@ -35,6 +35,9 @@ func auditQueryTools(ctx context.Context, auditURL string, since time.Time) []st
 	if err != nil {
 		slog.Warn("audit query: failed to build request", "err", err)
 		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}

@@ -160,6 +160,10 @@ type HarnessConfig struct {
 	// When set, the harness queries tool execution events after each agent call
 	// to get structured tool evidence from the audit trail.
 	AuditURL string
+
+	// NotifyURL is an optional webhook URL. When set, faulttest POSTs the full
+	// JSON report to this URL after the run completes (e.g. a Slack webhook).
+	NotifyURL string
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.

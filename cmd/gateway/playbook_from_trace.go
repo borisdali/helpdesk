@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
+	"helpdesk/internal/audit"
 )
 
 // PlaybookFromTraceRequest is the body for POST /api/v1/fleet/playbooks/from-trace.
@@ -17,11 +21,12 @@ type PlaybookFromTraceRequest struct {
 }
 
 // PlaybookFromTraceResponse is returned by handlePlaybookFromTrace.
-// The draft YAML is not persisted; the caller reviews it and imports via
-// POST /api/v1/fleet/playbooks/import.
+// When auditd is configured, the draft is persisted as an inactive "generated"
+// playbook and its ID is returned in PlaybookID for later activation or review.
 type PlaybookFromTraceResponse struct {
-	Draft  string `json:"draft"`  // synthesized playbook YAML text
-	Source string `json:"source"` // trace_id used as source
+	Draft      string `json:"draft"`                 // synthesized playbook YAML text
+	Source     string `json:"source"`                // trace_id used as source
+	PlaybookID string `json:"playbook_id,omitempty"` // ID of the persisted draft (empty if auditd unavailable)
 }
 
 const fromTracePromptTemplate = `You are a playbook authoring assistant for an AI database operations platform.
@@ -87,12 +92,69 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 	}
 
 	// Strip any accidental markdown fences the model may emit.
-	draft = stripMarkdownFences(draft)
+	draft = strings.TrimSpace(stripMarkdownFences(draft))
+
+	// Parse the YAML draft and persist it as an inactive "generated" playbook
+	// so operators can review and activate it without copy-pasting.
+	var playbookID string
+	if g.auditURL != "" {
+		importResp, parseErr := parsePlaybookYAML(draft, PlaybookImportHints{})
+		if parseErr != nil {
+			slog.Warn("from-trace: could not parse LLM YAML; skipping persistence", "err", parseErr)
+		} else {
+			pb := importResp.Draft
+			pb.Source = "generated"
+			pb.IsActive = false
+			pb.CreatedBy = "from-trace"
+			if pb.SeriesID == "" {
+				pb.SeriesID = "pbs_generated_" + uuid.New().String()[:8]
+			}
+			id, persistErr := g.persistPlaybookDraft(r.Context(), pb)
+			if persistErr != nil {
+				slog.Warn("from-trace: could not persist draft", "err", persistErr)
+			} else {
+				playbookID = id
+				slog.Info("from-trace: persisted draft playbook", "playbook_id", playbookID, "series_id", pb.SeriesID)
+			}
+		}
+	}
 
 	writeJSON(w, http.StatusOK, PlaybookFromTraceResponse{
-		Draft:  strings.TrimSpace(draft),
-		Source: req.TraceID,
+		Draft:      draft,
+		Source:     req.TraceID,
+		PlaybookID: playbookID,
 	})
+}
+
+// persistPlaybookDraft POSTs a playbook to auditd and returns the assigned playbook_id.
+func (g *Gateway) persistPlaybookDraft(ctx context.Context, pb *audit.Playbook) (string, error) {
+	data, err := json.Marshal(pb)
+	if err != nil {
+		return "", fmt.Errorf("marshal playbook: %w", err)
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbooks"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("auditd request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("auditd returned %d: %s", resp.StatusCode, body)
+	}
+	var created audit.Playbook
+	if err := json.Unmarshal(body, &created); err != nil {
+		return "", fmt.Errorf("parse auditd response: %w", err)
+	}
+	return created.PlaybookID, nil
 }
 
 // fetchTraceEvents queries auditd for all events belonging to the given trace_id

@@ -99,9 +99,49 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 	}
 }
 
-func (r *Remediator) triggerPlaybook(ctx context.Context, playbookID string) error {
+// resolvePlaybookID resolves a series_id to the active playbook_id via the gateway list endpoint.
+func (r *Remediator) resolvePlaybookID(ctx context.Context, seriesID string) (string, error) {
+	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", err
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if len(result.Playbooks) == 0 {
+		return "", fmt.Errorf("no active playbook found for series %q", seriesID)
+	}
+	return result.Playbooks[0].PlaybookID, nil
+}
+
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error {
 	if r.cfg.GatewayURL == "" {
 		return fmt.Errorf("gateway URL is required for playbook remediation (--gateway)")
+	}
+
+	// The catalog stores the series_id (e.g. "pbs_db_restart_triage"), but the
+	// /run endpoint requires the versioned playbook_id (e.g. "pb_f49b5eac").
+	// Resolve via the list endpoint before running.
+	playbookID, err := r.resolvePlaybookID(ctx, seriesID)
+	if err != nil {
+		return fmt.Errorf("resolving playbook %q: %w", seriesID, err)
 	}
 
 	body, _ := json.Marshal(map[string]string{"connection_string": r.cfg.ConnStr})

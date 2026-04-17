@@ -10,7 +10,7 @@ import (
 )
 
 func TestAuditQueryTools_EmptyURL(t *testing.T) {
-	result := auditQueryTools(context.Background(), "", time.Now())
+	result := auditQueryTools(context.Background(), "", "", time.Now())
 	if result != nil {
 		t.Errorf("expected nil for empty URL, got %v", result)
 	}
@@ -30,7 +30,7 @@ func TestAuditQueryTools_Success(t *testing.T) {
 	defer srv.Close()
 
 	since := time.Now().Add(-time.Minute)
-	result := auditQueryTools(context.Background(), srv.URL, since)
+	result := auditQueryTools(context.Background(), srv.URL, "", since)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 tools, got %d: %v", len(result), result)
@@ -58,7 +58,7 @@ func TestAuditQueryTools_Deduplication(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, time.Now())
+	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if len(result) != 2 {
 		t.Errorf("expected 2 unique tools, got %d: %v", len(result), result)
 	}
@@ -75,7 +75,7 @@ func TestAuditQueryTools_SkipsEventsWithoutTool(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, time.Now())
+	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if len(result) != 0 {
 		t.Errorf("expected empty result when no valid tool names, got %v", result)
 	}
@@ -88,7 +88,7 @@ func TestAuditQueryTools_NonOKStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, time.Now())
+	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if result != nil {
 		t.Errorf("expected nil on non-200 status, got %v", result)
 	}
@@ -101,7 +101,7 @@ func TestAuditQueryTools_InvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, time.Now())
+	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if result != nil {
 		t.Errorf("expected nil on invalid JSON, got %v", result)
 	}
@@ -114,7 +114,7 @@ func TestAuditQueryTools_EmptyList(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, time.Now())
+	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	// Empty list is nil (no tools found — caller treats nil and empty the same way).
 	if len(result) != 0 {
 		t.Errorf("expected empty result, got %v", result)
@@ -130,7 +130,7 @@ func TestAuditQueryTools_URLConstruction(t *testing.T) {
 	defer srv.Close()
 
 	since := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
-	auditQueryTools(context.Background(), srv.URL, since)
+	auditQueryTools(context.Background(), srv.URL, "", since)
 
 	if !strings.HasPrefix(gotURL, "/v1/events?") {
 		t.Errorf("URL path = %q, want /v1/events?...", gotURL)

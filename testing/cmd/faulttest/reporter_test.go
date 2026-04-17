@@ -108,8 +108,9 @@ func TestPrintSummary_JudgeIndicator(t *testing.T) {
 	}
 }
 
-func TestPrintSummary_JudgeSkipped_NoIndicator(t *testing.T) {
-	// When JudgeSkipped=true, [judge: N%] and reasoning should not appear.
+func TestPrintSummary_JudgeSkipped_Indicator(t *testing.T) {
+	// When JudgeSkipped=true with a reason, [judge skipped: reason] appears and
+	// [judge: N%] does not (the score in the header is still the composite score).
 	report := BuildReport("run-js", []EvalResult{
 		{
 			FailureID:      "fault-s",
@@ -119,17 +120,17 @@ func TestPrintSummary_JudgeSkipped_NoIndicator(t *testing.T) {
 			Passed:         true,
 			DiagnosisScore: 1.0,
 			JudgeSkipped:   true,
-			JudgeReasoning: "should not appear",
+			JudgeReasoning: "api key not set",
 		},
 	})
 
 	out := captureStdout(func() { report.PrintSummary() })
 
 	if strings.Contains(out, "[judge:") {
-		t.Errorf("judge indicator should not appear when JudgeSkipped; got:\n%s", out)
+		t.Errorf("judge header indicator should not appear when JudgeSkipped; got:\n%s", out)
 	}
-	if strings.Contains(out, "should not appear") {
-		t.Errorf("judge reasoning should not appear when JudgeSkipped; got:\n%s", out)
+	if !strings.Contains(out, "[judge skipped: api key not set]") {
+		t.Errorf("expected '[judge skipped: api key not set]' in output; got:\n%s", out)
 	}
 	if strings.Contains(out, "LLM judge scored") {
 		t.Errorf("judge footer should not appear when no judge ran; got:\n%s", out)

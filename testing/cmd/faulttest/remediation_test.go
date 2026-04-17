@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,6 +22,15 @@ func newTestRemediator(t *testing.T, serverURL string) *Remediator {
 func TestTriggerPlaybook_Success(t *testing.T) {
 	var gotPath, gotAuth, gotPurpose string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			// resolvePlaybookID: return the series_id as the playbook_id (simplified).
+			seriesID := r.URL.Query().Get("series_id")
+			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+				"playbooks": []map[string]interface{}{{"playbook_id": seriesID}},
+			})
+			return
+		}
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotPurpose = r.Header.Get("X-Purpose")
@@ -101,13 +111,20 @@ func TestRemediate_NoAction(t *testing.T) {
 }
 
 func TestRemediate_PlaybookThenRecovery(t *testing.T) {
-	// Server responds 200 to the playbook call.
+	// Server handles: resolve (GET list) and run (POST run).
 	playbookCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/fleet/playbooks/pbs_test/run" {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") == "pbs_test":
+			// resolvePlaybookID: return a versioned playbook_id.
+			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+				"playbooks": []map[string]interface{}{{"playbook_id": "pb_resolved_test"}},
+			})
+		case r.URL.Path == "/api/v1/fleet/playbooks/pb_resolved_test/run":
 			playbookCalled = true
 			w.WriteHeader(http.StatusOK)
-		} else {
+		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))

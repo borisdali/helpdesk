@@ -36,6 +36,7 @@ type historyFaultResult struct {
 	Passed           bool    `json:"passed"`
 	Score            float64 `json:"score"`             // composite (keyword+tool+category/judge)
 	KeywordScore     float64 `json:"keyword_score,omitempty"`
+	ToolScore        float64 `json:"tool_score,omitempty"`
 	DiagnosisScore   float64 `json:"diagnosis_score,omitempty"` // category match OR judge score
 	JudgeUsed        bool    `json:"judge_used,omitempty"`      // true = DiagnosisScore is judge score
 	RemediationScore float64 `json:"remediation_score,omitempty"`
@@ -72,6 +73,7 @@ func appendHistory(report Report, target string) error {
 			Passed:           r.Passed,
 			Score:            r.Score,
 			KeywordScore:     r.KeywordScore,
+			ToolScore:        r.ToolScore,
 			DiagnosisScore:   r.DiagnosisScore,
 			JudgeUsed:        !r.JudgeSkipped && r.JudgeModel != "",
 			RemediationScore: r.RemediationScore,
@@ -116,12 +118,13 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|suggest>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|suggest|suggest-update>")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  list    Show fault↔playbook pairings and last-run status")
-		fmt.Fprintln(os.Stderr, "  status  Show pass rate trends from run history")
-		fmt.Fprintln(os.Stderr, "  drift   Highlight faults/playbooks with declining pass rates")
-		fmt.Fprintln(os.Stderr, "  suggest Generate a playbook draft from an audit trace")
+		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
+		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
+		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
+		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
+		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -133,6 +136,8 @@ func cmdVault(args []string) {
 		vaultDrift(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
+	case "suggest-update":
+		vaultSuggestUpdate(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -323,16 +328,17 @@ func vaultStatus(args []string) {
 	sort.Strings(faultIDs)
 
 	fmt.Printf("\n=== Per-Fault Detail ===\n")
-	//                   date  run   kwd   score categ judge remed result
-	const rowFmt = "  %-10s %-8s  %5s  %5s  %5s  %5s  %5s  %s\n"
+	//                   date  run   kwd   tools score categ judge remed result
+	const rowFmt = "  %-10s %-8s  %5s  %5s  %5s  %5s  %5s  %5s  %s\n"
 	for _, id := range faultIDs {
 		runs := faultRuns[id]
 		fmt.Printf("\n%s (%s)\n", id, faultName[id])
-		fmt.Printf(rowFmt, "DATE", "RUN", "KWD", "SCORE", "CATEG", "JUDGE", "REMED", "RESULT")
-		fmt.Println("  " + strings.Repeat("-", 62))
+		fmt.Printf(rowFmt, "DATE", "RUN", "KWD", "TOOLS", "SCORE", "CATEG", "JUDGE", "REMED", "RESULT")
+		fmt.Println("  " + strings.Repeat("-", 69))
 		for _, fr := range runs {
 			r := fr.result
 			kwd := pct(r.KeywordScore)
+			tools := pct(r.ToolScore)
 			score := pct(r.Score)
 			categ, judge := "-", "-"
 			if r.JudgeUsed {
@@ -348,7 +354,7 @@ func vaultStatus(args []string) {
 			if !r.Passed {
 				res = "FAIL"
 			}
-			fmt.Printf(rowFmt, fr.date, fr.runID, kwd, score, categ, judge, remed, res)
+			fmt.Printf(rowFmt, fr.date, fr.runID, kwd, tools, score, categ, judge, remed, res)
 		}
 	}
 }
@@ -460,6 +466,149 @@ func passRateOf(results []bool) float64 {
 		}
 	}
 	return float64(passed) / float64(len(results))
+}
+
+// ── vault suggest ─────────────────────────────────────────────────────────
+
+// ── vault suggest-update ──────────────────────────────────────────────────
+
+// vaultPlaybook is a minimal representation of a gateway playbook for suggest-update.
+type vaultPlaybook struct {
+	PlaybookID  string `json:"playbook_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Guidance    string `json:"guidance"`
+}
+
+// fetchActivePlaybook retrieves the active playbook for the given series_id from the gateway.
+func fetchActivePlaybook(gatewayURL, apiKey, seriesID string) (*vaultPlaybook, error) {
+	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Playbooks []vaultPlaybook `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if len(result.Playbooks) == 0 {
+		return nil, fmt.Errorf("no playbook found for series %q", seriesID)
+	}
+	return &result.Playbooks[0], nil
+}
+
+// vaultSuggestUpdate fetches the current active playbook for --series-id, then
+// calls from-trace with --trace-id to synthesize a proposed update, and displays
+// the two side by side so an operator can decide whether to activate the proposal.
+func vaultSuggestUpdate(args []string) {
+	fs := flag.NewFlagSet("vault suggest-update", flag.ExitOnError)
+	var (
+		seriesID   string
+		traceID    string
+		outcome    string
+		gatewayURL string
+		apiKey     string
+	)
+	fs.StringVar(&seriesID, "series-id", "", "Series ID of the playbook to update (required)")
+	fs.StringVar(&traceID, "trace-id", "", "Audit trace ID of the successful incident (required)")
+	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if seriesID == "" || traceID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --series-id and --trace-id are both required")
+		os.Exit(1)
+	}
+
+	// Step 1: Fetch current active playbook.
+	current, err := fetchActivePlaybook(gatewayURL, apiKey, seriesID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching current playbook: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Step 2: Synthesize proposed update via from-trace.
+	reqBody, _ := json.Marshal(map[string]string{
+		"trace_id": traceID,
+		"outcome":  outcome,
+	})
+	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
+	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(reqBody))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error calling from-trace: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, respBody)
+		os.Exit(1)
+	}
+	var traceResult struct {
+		Draft      string `json:"draft"`
+		Source     string `json:"source"`
+		PlaybookID string `json:"playbook_id"`
+	}
+	if err := json.Unmarshal(respBody, &traceResult); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Step 3: Display comparison.
+	fmt.Printf("=== Playbook Update Proposal: %s ===\n\n", seriesID)
+	fmt.Printf("Current:  %s — %s\n", current.PlaybookID, current.Name)
+	fmt.Printf("Trace:    %s (outcome: %s)\n\n", traceID, outcome)
+
+	fmt.Println("--- CURRENT DESCRIPTION ---")
+	fmt.Println(current.Description)
+	if current.Guidance != "" {
+		fmt.Println()
+		fmt.Println("--- CURRENT GUIDANCE ---")
+		fmt.Println(current.Guidance)
+	}
+	fmt.Println()
+	fmt.Println("--- PROPOSED DRAFT (from trace) ---")
+	fmt.Println(traceResult.Draft)
+	fmt.Println()
+
+	if traceResult.PlaybookID != "" {
+		fmt.Printf("Proposed draft saved as: %s (inactive, source=generated)\n\n", traceResult.PlaybookID)
+		fmt.Printf("# To activate the proposed draft:\n")
+		fmt.Printf("#   curl -X POST %s/api/v1/fleet/playbooks/%s/activate \\\n", gatewayURL, traceResult.PlaybookID)
+		fmt.Printf("#        -H 'Authorization: Bearer <key>'\n")
+	} else {
+		fmt.Printf("# To import this proposal (auditd unavailable for auto-save):\n")
+		fmt.Printf("#   curl -X POST %s/api/v1/fleet/playbooks/import \\\n", gatewayURL)
+		fmt.Printf("#        -H 'Content-Type: application/json' \\\n")
+		fmt.Printf("#        -d '{\"text\": \"<draft YAML above>\", \"format\": \"yaml\", \"hints\": {\"series_id\": \"%s\"}}'\n", seriesID)
+	}
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────
