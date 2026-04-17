@@ -21,23 +21,59 @@ failures:
       script: sql/teardown_max_connections.sh
     external_compat: true
     external_inject:
-      type: sql
-      # Hold max_connections-3 idle connections via pg_sleep to simulate exhaustion.
+      type: shell_exec
+      # Hold idle connections by piping sleep into psql — psql blocks waiting
+      # for input, producing state='idle' backends that kill_idle_connections
+      # can terminate.  Redirecting the group to /dev/null (} >/dev/null 2>&1 &)
+      # prevents FD inheritance: without it, background psql processes hold the
+      # parent bash's stdout pipe open and cmd.CombinedOutput() blocks forever.
+      # We spawn enough to fill non-superuser slots but leave superuser_reserved
+      # connections free so the verify_sql and agent can still connect.
+      # $FAULTTEST_CONN is injected by faulttest from the resolved --conn flag.
       script_inline: |
-        DO $$
-        DECLARE
-          i integer;
-          max_conn integer;
-        BEGIN
-          SELECT setting::integer INTO max_conn FROM pg_settings WHERE name='max_connections';
-          FOR i IN 1..(max_conn - 3) LOOP
-            PERFORM pg_sleep(0); -- lightweight; connections released after DO block
-          END LOOP;
-        END;
-        $$;
+        MAX_CONN=$(psql "$FAULTTEST_CONN" -t -A -c "SHOW max_connections;" 2>/dev/null | tr -d ' \n')
+        if ! printf '%s' "$MAX_CONN" | grep -qE '^[0-9]+$'; then
+          echo "ERROR: could not read max_connections" >&2; exit 1
+        fi
+        SU_RESERVED=$(psql "$FAULTTEST_CONN" -t -A -c "SHOW superuser_reserved_connections;" 2>/dev/null | tr -d ' \n')
+        SU_RESERVED=${SU_RESERVED:-3}
+        # Count existing client backends so we don't over-spawn and block superuser slots.
+        EXISTING=$(psql "$FAULTTEST_CONN" -t -A -c \
+          "SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend';" \
+          2>/dev/null | tr -d ' \n')
+        EXISTING=${EXISTING:-0}
+        # Target: fill up to max_connections - superuser_reserved (regular user limit).
+        TARGET=$(( MAX_CONN - SU_RESERVED ))
+        SLOTS=$(( TARGET - EXISTING ))
+        if [ "$SLOTS" -le 0 ]; then
+          echo "Slots already at or above target ($EXISTING existing, target $TARGET/$MAX_CONN); skipping"
+          exit 0
+        fi
+        rm -f /tmp/faulttest_maxconn_pids.txt
+        for i in $(seq 1 "$SLOTS"); do
+          { sleep 600 | psql "$FAULTTEST_CONN" -q; } >/dev/null 2>&1 &
+          echo $! >> /tmp/faulttest_maxconn_pids.txt
+        done
+        sleep 3
+        echo "Injected: $SLOTS idle connections ($EXISTING existing → $TARGET/$MAX_CONN)"
     external_teardown:
-      type: sql
-      script_inline: "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle' AND pid <> pg_backend_pid();"
+      type: shell_exec
+      script_inline: |
+        if [ -f /tmp/faulttest_maxconn_pids.txt ]; then
+          # Kill the entire process group (negative PID) so both sleep and psql
+          # are terminated; killing only the subshell PID orphans the psql child.
+          while read -r pid; do
+            kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+          done < /tmp/faulttest_maxconn_pids.txt
+          rm -f /tmp/faulttest_maxconn_pids.txt
+          sleep 2
+        fi
+        # Safety net: terminate any surviving idle backends via postgres.
+        psql "$FAULTTEST_CONN" -c "
+          SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE state = 'idle' AND pid <> pg_backend_pid();
+        " >/dev/null 2>&1 || true
+        echo "Teardown: idle connections terminated"
     prompt: >
       Users are getting "too many clients" errors connecting to the database.
       The connection_string is "{{connection_string}}" — use it verbatim for

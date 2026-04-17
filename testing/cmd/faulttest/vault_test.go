@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -59,7 +60,7 @@ func TestAppendLoadHistory_RoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := appendHistory(report); err != nil {
+	if err := appendHistory(report, "alloydb-on-vm"); err != nil {
 		t.Fatalf("appendHistory: %v", err)
 	}
 
@@ -74,6 +75,9 @@ func TestAppendLoadHistory_RoundTrip(t *testing.T) {
 	r := runs[0]
 	if r.RunID != "run-001" {
 		t.Errorf("RunID = %q, want run-001", r.RunID)
+	}
+	if r.Target != "alloydb-on-vm" {
+		t.Errorf("Target = %q, want alloydb-on-vm", r.Target)
 	}
 	if r.Total != 3 || r.Passed != 2 {
 		t.Errorf("Total=%d, Passed=%d, want 3/2", r.Total, r.Passed)
@@ -101,7 +105,7 @@ func TestAppendLoadHistory_Accumulates(t *testing.T) {
 				{FailureID: "db-test", Passed: i%2 == 0},
 			},
 		}
-		if err := appendHistory(report); err != nil {
+		if err := appendHistory(report, "staging-db"); err != nil {
 			t.Fatalf("appendHistory run %d: %v", i, err)
 		}
 	}
@@ -112,6 +116,47 @@ func TestAppendLoadHistory_Accumulates(t *testing.T) {
 	}
 	if len(runs) != 3 {
 		t.Errorf("expected 3 runs, got %d", len(runs))
+	}
+}
+
+func TestAppendLoadHistory_TargetPersistedAndDistinct(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	targets := []string{"staging-db", "canary-db", "staging-db"}
+	for i, target := range targets {
+		report := Report{
+			ID:        fmt.Sprintf("run-%03d", i),
+			Timestamp: "2026-04-16T10:00:00Z",
+			Summary:   Summary{Total: 1, Passed: 1},
+			Results:   []EvalResult{{FailureID: "db-test", Passed: true}},
+		}
+		if err := appendHistory(report, target); err != nil {
+			t.Fatalf("appendHistory: %v", err)
+		}
+	}
+
+	runs, err := loadHistory()
+	if err != nil {
+		t.Fatalf("loadHistory: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("expected 3 runs, got %d", len(runs))
+	}
+
+	stagingCount, canaryCount := 0, 0
+	for _, r := range runs {
+		switch r.Target {
+		case "staging-db":
+			stagingCount++
+		case "canary-db":
+			canaryCount++
+		}
+	}
+	if stagingCount != 2 {
+		t.Errorf("staging-db runs = %d, want 2", stagingCount)
+	}
+	if canaryCount != 1 {
+		t.Errorf("canary-db runs = %d, want 1", canaryCount)
 	}
 }
 

@@ -380,7 +380,13 @@ func cmdRun(args []string) {
 	}
 
 	// Append run to persistent history for vault commands.
-	if err := appendHistory(report); err != nil {
+	// Use the agent-conn alias when set (human-readable, no password);
+	// fall back to the hostname extracted from the injection conn string.
+	target := cfg.AgentConnStr
+	if target == "" {
+		target = connStrHost(cfg.ConnStr)
+	}
+	if err := appendHistory(report, target); err != nil {
 		slog.Warn("failed to append to run history", "err", err, "path", historyFilePath())
 	}
 }

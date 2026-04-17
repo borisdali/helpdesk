@@ -20,6 +20,10 @@ import (
 type historyRun struct {
 	RunID     string               `json:"run_id"`
 	Timestamp string               `json:"timestamp"`
+	// Target identifies the database server that was tested — the --agent-conn
+	// alias (e.g. "alloydb-on-vm") when set, otherwise the hostname extracted
+	// from --conn. Allows vault commands to filter by deployment environment.
+	Target    string               `json:"target,omitempty"`
 	Total     int                  `json:"total"`
 	Passed    int                  `json:"passed"`
 	Results   []historyFaultResult `json:"results"`
@@ -44,7 +48,8 @@ func historyFilePath() string {
 }
 
 // appendHistory appends a run summary to the history file, creating it if needed.
-func appendHistory(report Report) error {
+// target is the database server identifier (agent-conn alias or hostname).
+func appendHistory(report Report, target string) error {
 	path := historyFilePath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("creating history dir: %w", err)
@@ -68,6 +73,7 @@ func appendHistory(report Report) error {
 	runs = append(runs, historyRun{
 		RunID:     report.ID,
 		Timestamp: report.Timestamp,
+		Target:    target,
 		Total:     report.Summary.Total,
 		Passed:    report.Summary.Passed,
 		Results:   faultResults,
@@ -129,6 +135,8 @@ func cmdVault(args []string) {
 
 func vaultList(args []string) {
 	fs := flag.NewFlagSet("vault list", flag.ExitOnError)
+	var target string
+	fs.StringVar(&target, "target", "", "Filter last-run history by target (agent-conn alias or hostname)")
 	cfg := loadConfig(fs, args)
 
 	cat, err := loadActiveCatalog(cfg)
@@ -140,18 +148,26 @@ func vaultList(args []string) {
 	runs, _ := loadHistory()
 
 	// Build last-run lookup: fault_id -> (timestamp, passed).
+	// When --target is set, only consider runs against that target.
 	type lastResult struct {
 		ts     string
 		passed bool
 	}
 	lastRun := make(map[string]lastResult)
 	for _, run := range runs {
+		if target != "" && run.Target != target {
+			continue
+		}
 		for _, r := range run.Results {
 			ex := lastRun[r.FailureID]
 			if ex.ts == "" || run.Timestamp > ex.ts {
 				lastRun[r.FailureID] = lastResult{ts: run.Timestamp, passed: r.Passed}
 			}
 		}
+	}
+
+	if target != "" {
+		fmt.Printf("Target: %s\n\n", target)
 	}
 
 	fmt.Printf("%-32s %-28s %-12s %s\n", "FAULT", "PLAYBOOK", "LAST RUN", "STATUS")
@@ -200,7 +216,9 @@ func vaultList(args []string) {
 func vaultStatus(args []string) {
 	fs := flag.NewFlagSet("vault status", flag.ExitOnError)
 	var sinceDays int
+	var target string
 	fs.IntVar(&sinceDays, "since-days", 30, "Days of history to show")
+	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
@@ -219,6 +237,9 @@ func vaultStatus(args []string) {
 
 	var filtered []historyRun
 	for _, run := range runs {
+		if target != "" && run.Target != target {
+			continue
+		}
 		t, err := time.Parse(time.RFC3339, run.Timestamp)
 		if err != nil || !t.Before(cutoff) {
 			filtered = append(filtered, run)
@@ -228,9 +249,18 @@ func vaultStatus(args []string) {
 		return filtered[i].Timestamp < filtered[j].Timestamp
 	})
 
-	fmt.Printf("=== Vault Status (last %d days, %d runs) ===\n\n", sinceDays, len(filtered))
-	fmt.Printf("%-10s %-20s %s\n", "DATE", "RUN ID", "PASS RATE")
-	fmt.Println(strings.Repeat("-", 50))
+	targetLabel := "all targets"
+	if target != "" {
+		targetLabel = target
+	}
+	fmt.Printf("=== Vault Status — %s (last %d days, %d runs) ===\n\n", targetLabel, sinceDays, len(filtered))
+	if target == "" {
+		fmt.Printf("%-10s %-20s %-20s %s\n", "DATE", "TARGET", "RUN ID", "PASS RATE")
+		fmt.Println(strings.Repeat("-", 70))
+	} else {
+		fmt.Printf("%-10s %-20s %s\n", "DATE", "RUN ID", "PASS RATE")
+		fmt.Println(strings.Repeat("-", 50))
+	}
 	for _, run := range filtered {
 		var date string
 		if t, err := time.Parse(time.RFC3339, run.Timestamp); err == nil {
@@ -240,7 +270,11 @@ func vaultStatus(args []string) {
 		if run.Total > 0 {
 			rate = float64(run.Passed) / float64(run.Total) * 100
 		}
-		fmt.Printf("%-10s %-20s %.0f%% (%d/%d)\n", date, run.RunID, rate, run.Passed, run.Total)
+		if target == "" {
+			fmt.Printf("%-10s %-20s %-20s %.0f%% (%d/%d)\n", date, run.Target, run.RunID, rate, run.Passed, run.Total)
+		} else {
+			fmt.Printf("%-10s %-20s %.0f%% (%d/%d)\n", date, run.RunID, rate, run.Passed, run.Total)
+		}
 	}
 
 	// Per-fault pass rates.
@@ -283,7 +317,9 @@ func vaultStatus(args []string) {
 func vaultDrift(args []string) {
 	fs := flag.NewFlagSet("vault drift", flag.ExitOnError)
 	var sinceDays int
+	var target string
 	fs.IntVar(&sinceDays, "since-days", 90, "Days of history to analyze")
+	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
@@ -308,6 +344,9 @@ func vaultDrift(args []string) {
 	stats := make(map[string]*faultStats)
 
 	for _, run := range runs {
+		if target != "" && run.Target != target {
+			continue
+		}
 		t, err := time.Parse(time.RFC3339, run.Timestamp)
 		if err != nil || t.Before(cutoff) {
 			continue
@@ -324,7 +363,11 @@ func vaultDrift(args []string) {
 		}
 	}
 
-	fmt.Printf("=== Vault Drift Analysis (last %d days) ===\n\n", sinceDays)
+	targetLabel := "all targets"
+	if target != "" {
+		targetLabel = target
+	}
+	fmt.Printf("=== Vault Drift Analysis — %s (last %d days) ===\n\n", targetLabel, sinceDays)
 
 	type driftEntry struct {
 		id         string
