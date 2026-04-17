@@ -67,6 +67,79 @@ func TestTriggerPlaybook_ServerError(t *testing.T) {
 	}
 }
 
+// ── resolvePlaybookID ─────────────────────────────────────────────────────
+
+func TestResolvePlaybookID_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("series_id") != "pbs_db_restart_triage" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"playbooks": []map[string]interface{}{
+				{"playbook_id": "pb_f49b5eac", "series_id": "pbs_db_restart_triage"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	id, err := r.resolvePlaybookID(context.Background(), "pbs_db_restart_triage")
+	if err != nil {
+		t.Fatalf("resolvePlaybookID: %v", err)
+	}
+	if id != "pb_f49b5eac" {
+		t.Errorf("playbook_id = %q, want pb_f49b5eac", id)
+	}
+}
+
+func TestResolvePlaybookID_Empty(t *testing.T) {
+	// Gateway returns empty list → no active playbook for this series.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"playbooks": []interface{}{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	_, err := r.resolvePlaybookID(context.Background(), "pbs_missing")
+	if err == nil {
+		t.Error("expected error for empty playbooks list, got nil")
+	}
+}
+
+func TestResolvePlaybookID_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	_, err := r.resolvePlaybookID(context.Background(), "pbs_test")
+	if err == nil {
+		t.Error("expected error for 500 response, got nil")
+	}
+}
+
+func TestResolvePlaybookID_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"playbooks": []map[string]interface{}{{"playbook_id": "pb_abc"}},
+		})
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	r.resolvePlaybookID(context.Background(), "pbs_test") //nolint:errcheck
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
+	}
+}
+
 func TestTriggerPlaybook_NoGateway(t *testing.T) {
 	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
 	if err := r.triggerPlaybook(context.Background(), "pbs_restart"); err == nil {

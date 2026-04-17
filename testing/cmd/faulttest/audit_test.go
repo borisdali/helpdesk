@@ -121,6 +121,34 @@ func TestAuditQueryTools_EmptyList(t *testing.T) {
 	}
 }
 
+func TestAuditQueryTools_SendsAPIKey(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	auditQueryTools(context.Background(), srv.URL, "my-audit-key", time.Now())
+	if gotAuth != "Bearer my-audit-key" {
+		t.Errorf("Authorization = %q, want Bearer my-audit-key", gotAuth)
+	}
+}
+
+func TestAuditQueryTools_NoAuthWhenKeyEmpty(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	auditQueryTools(context.Background(), srv.URL, "", time.Now())
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty when no key provided", gotAuth)
+	}
+}
+
 func TestAuditQueryTools_URLConstruction(t *testing.T) {
 	var gotURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

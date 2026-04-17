@@ -351,6 +351,16 @@ func cmdRun(args []string) {
 			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
 			if remResult.Passed {
 				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+				// Auto-suggest: when remediation succeeds and a gateway is configured,
+				// synthesize a playbook draft from the fault trace and save it to the vault.
+				if cfg.GatewayURL != "" {
+					traceID := "faulttest-" + runID + "-" + f.ID
+					if pbID, vaultErr := requestVaultDraft(ctx, cfg, traceID, "resolved"); vaultErr != nil {
+						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
+					} else if pbID != "" {
+						fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
+					}
+				}
 			} else {
 				fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
 			}
@@ -438,6 +448,45 @@ func postNotify(notifyURL string, report Report) {
 		return
 	}
 	slog.Info("notify: webhook notified", "url", notifyURL, "status", resp.StatusCode)
+}
+
+// requestVaultDraft POSTs to the gateway's from-trace endpoint to synthesize a
+// playbook draft from the given traceID and saves it to the vault as an inactive
+// draft. Returns the persisted playbook_id, or "" when auditd is not configured.
+func requestVaultDraft(ctx context.Context, cfg *HarnessConfig, traceID, outcome string) (string, error) {
+	reqBody, err := json.Marshal(map[string]string{
+		"trace_id": traceID,
+		"outcome":  outcome,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal: %w", err)
+	}
+	reqURL := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
+	}
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST from-trace: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		PlaybookID string `json:"playbook_id"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	return result.PlaybookID, nil
 }
 
 // ── inject ───────────────────────────────────────────────────────────────

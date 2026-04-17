@@ -260,6 +260,104 @@ func TestValidatePlaybookExists_NetworkError(t *testing.T) {
 	}
 }
 
+// ── fetchActivePlaybook ───────────────────────────────────────────────────
+
+func TestFetchActivePlaybook_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("series_id") != "pbs_db_conn_pooling" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"playbooks": []map[string]interface{}{
+				{
+					"playbook_id": "pb_001",
+					"name":        "Connection Pooling",
+					"description": "Add PgBouncer",
+					"guidance":    "Check max_connections first",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	pb, err := fetchActivePlaybook(srv.URL, "", "pbs_db_conn_pooling")
+	if err != nil {
+		t.Fatalf("fetchActivePlaybook: %v", err)
+	}
+	if pb.PlaybookID != "pb_001" {
+		t.Errorf("playbook_id = %q, want pb_001", pb.PlaybookID)
+	}
+	if pb.Name != "Connection Pooling" {
+		t.Errorf("name = %q, want Connection Pooling", pb.Name)
+	}
+	if pb.Guidance != "Check max_connections first" {
+		t.Errorf("guidance = %q, want Check max_connections first", pb.Guidance)
+	}
+}
+
+func TestFetchActivePlaybook_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"playbooks": []interface{}{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	_, err := fetchActivePlaybook(srv.URL, "", "pbs_missing")
+	if err == nil {
+		t.Error("expected error for empty playbooks list, got nil")
+	}
+}
+
+func TestFetchActivePlaybook_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchActivePlaybook(srv.URL, "", "pbs_test")
+	if err == nil {
+		t.Error("expected error for 500 status, got nil")
+	}
+}
+
+func TestFetchActivePlaybook_NetworkError(t *testing.T) {
+	_, err := fetchActivePlaybook("http://127.0.0.1:19999", "", "pbs_test")
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchActivePlaybook_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"playbooks": []map[string]interface{}{{"playbook_id": "pb_x"}},
+		})
+	}))
+	defer srv.Close()
+
+	fetchActivePlaybook(srv.URL, "my-secret", "pbs_test") //nolint:errcheck
+	if gotAuth != "Bearer my-secret" {
+		t.Errorf("Authorization = %q, want Bearer my-secret", gotAuth)
+	}
+}
+
+func TestFetchActivePlaybook_InvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not json")) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	_, err := fetchActivePlaybook(srv.URL, "", "pbs_test")
+	if err == nil {
+		t.Error("expected error for invalid JSON, got nil")
+	}
+}
+
 // ── RemediationScore buckets ───────────────────────────────────────────────
 
 func TestRemediationScoreBuckets(t *testing.T) {

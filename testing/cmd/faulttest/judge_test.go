@@ -119,6 +119,29 @@ func TestEvaluateWithJudge_PartialJudgeScore(t *testing.T) {
 	}
 }
 
+func TestEvaluateWithJudge_JudgeVeto_ScoreZero(t *testing.T) {
+	// Judge score=0 → judgeResult.Score=0.0 < 0.33 → judgeVeto=true → Passed=false
+	// even when keywords+tools would produce Score >= 0.6.
+	// Score = keyword(1.0)*0.40 + judge(0.0)*0.40 + keyword(1.0)*0.20 = 0.60
+	// Without veto the 0.60 threshold would be just barely reached; veto overrides it.
+	f := failureForJudge("The agent should identify connection refused.")
+	resp := testutil.AgentResponse{Text: "connection refused is the root cause"}
+	completer := mockJudgeCompleter(`{"score":0,"reasoning":"completely wrong diagnosis"}`)
+
+	result := EvaluateWithJudge(context.Background(), f, resp, completer, "m")
+
+	if result.DiagnosisScore != 0.0 {
+		t.Errorf("DiagnosisScore = %.2f, want 0.0 for judge score=0", result.DiagnosisScore)
+	}
+	if result.Passed {
+		t.Error("Passed should be false when judge score=0 (veto: agent missed the fault entirely)")
+	}
+	// Verify the composite score is still computed and stored (veto only affects Passed).
+	if result.Score < 0 || result.Score > 1 {
+		t.Errorf("Score = %.2f, should be in [0,1]", result.Score)
+	}
+}
+
 func TestEvaluateWithJudge_JudgeFields_Populated(t *testing.T) {
 	f := failureForJudge("The agent should identify connection refused.")
 	resp := testutil.AgentResponse{Text: "connection refused"}
