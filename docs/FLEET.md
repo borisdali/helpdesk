@@ -492,7 +492,7 @@ A **playbook** is a saved runbook artifact that combines a natural-language flee
 
 aiHelpDesk ships 4 expert-authored system playbooks out of the box (vacuum triage, slow query triage, connection triage, replication lag triage). Operators can author custom playbooks from scratch or import existing runbooks from Markdown, plain text, YAML, Rundeck, or Ansible formats. Playbooks support versioning: a series can hold multiple versions, with exactly one active at any time — upgrades are staged and promoted explicitly.
 
-See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference: versioning model, system playbooks, import endpoint, authoring guidance, and the complete field schema.
+See **[here](PLAYBOOKS.md)** for the full reference: versioning model, system playbooks, import endpoint, authoring guidance, and the complete field schema.
 
 **Quick start:**
 

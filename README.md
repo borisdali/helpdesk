@@ -4,91 +4,106 @@
 </p>
 
 
-# aiHelpDesk: AI DB SRE in a box
+# aiHelpDesk: The AI DB SRE That Learns From Every Incident
 
-A Go-based AI multi-agent intelligent self-service help and support system for troubleshooting PostgreSQL and its derivative databases (like AlloyDB Omni) hosted on Kubernetes or VM infrastructure. aiHelpDesk links the reasoning power of the frontier models to your specific environment, your databases, and your proprietary data. This, combined with the strictly governed execution arm to actually remedy the database problems --not just provide a general advise-- is what sets aiHelPDesk apart from the competion. The key features are:
+aiHelpDesk is a Go-based AI multi-agent system for diagnosing and remediating PostgreSQL and AlloyDB problems on Kubernetes and VMs. It links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
 
-* aiHelpDesk is an implementation of the shift-left support paradigm in AI-Assisted Database Management products (see next section).
-* aiHelpDesk is designed from the ground up for both the human operators as well as for the upstream agents, which are treated as the first class citizens.
-* aiHelpDesk aims to prevent incidents based on active reasoning, not just help troubleshoot them after they occur.
-* aiHelpDesk offers not only the reasoning layer specific to your database inventory, but it also features the actuation arm to optionally make the remediation changes to restore service or optimize its use.
-* aiHelpDesk includes a comprehensive eight-module AI Governance framework with the tamper-proof audit as the cornerstone of safe, responsible and transparent remedial adjustments.
-* aiHelpDesk features a built-in incident diagnostic bundle management for vendor support.
-* aiHelpDesk features a built-in fault injection framework for both internal QA and customer-side validation against any PostgreSQL instance.
-* aiHelpDesk is implemented using Google ADK (Agent Development Kit) for Go and the A2A (Agent-to-Agent) protocol for modularity and extensibility where self-contained expert agents can be added or swapped from a Marketplace in favor to those shipped with aiHelpDesk out of the box.
+Two things set it apart from every general-purpose AI assistant:
 
-aiHelpDesk is designed to help customers and agents with the AI-assisted triage, root cause analysis and remediation of database related problems on K8s and VMs. For the upstream agents, including agentic full-featured SRE systems, aiHelpDesk can be thought of as the database reasoning layer that aggregates the myriad of signals emitted by a database (statistics, metrics, wait events, logs, traces, etc.) into a coherent story and offers a way to repair any of the problems found.
+**1. Agents that act, not just advise.**
+The governed actuation arm — fleet runner, playbooks, policy engine, blast-radius guards — executes remediation steps on your real infrastructure under a tamper-proof audit trail. Every tool call is logged, every destructive action requires human approval, and the governance framework enforces limits that can't be bypassed at runtime.
+
+**2. Institutional memory that compounds.**
+Every resolved incident automatically proposes a playbook draft. Every successful faulttest remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md) — aiHelpDesk's library of fault→remedy pairings — grows richer with every incident. The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking.
+
+## The Operational SRE/DBA Flywheel
+
+<p align="center">
+  <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/9687ccd4-a2ad-4c85-9466-bcb6c006e8ac" width="40%"/>
+</p>
+
+The Vault is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents, and proposes updates when a successful incident trace suggests a better approach. See [here](docs/VAULT.md) for the full story.
+
+## Key Capabilities
+
+- **Fault injection testing** — inject 27 known failure modes (SQL-only, SSH, K8s) against your own staging database, score the agent's diagnosis, verify remediation recovery. The `faulttest` tool is self-contained and needs no cluster access to run against external targets.
+- **Fleet operations** — coordinate changes across multiple databases with canary phases, approval gates, schema drift detection, and full audit trails. Natural language → fleet plan via the Planner.
+- **Playbooks** — saved runbooks that combine intent with expert guidance. System playbooks ship with aiHelpDesk; custom playbooks are authored, imported, or auto-generated from incident traces.
+- **AI Governance** — eight-module framework including tamper-proof audit, blast-radius enforcement, off-hours guards, and real-time policy evaluation. Every actuation is governed.
+- **Incident diagnostics** — the incident agent collects database, K8s, OS, and storage layers into a timestamped support bundle. On resolution, it automatically synthesises a playbook draft from the audit trace.
+- **A2A protocol** — built on Google ADK and the Agent-to-Agent protocol. Expert agents (Database, Kubernetes, Sysadmin, Incident, Orchestrator) can be swapped or extended independently.
 
 ## AI-Assisted Database Management
-While SaaS applications clearly have their market and cloud vendor DBaaS systems in particular are among the fastest growing and most profitable sectors on GCP, AWS and Azure, there are legitimate reasons for many customers to stay away from the black-box, vendor lock-in, cloud provider specific management systems. See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-8-182259e1720f) for extensive treatment of this topic and, in particular, check out the 13 specific customer expectations of the cloud provider's DBaaS and how the actual cloud offerings mostly fall short of these expectations. 
 
-Enter the world of AI-Assisted Database Management products.
+While SaaS DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. aiHelpDesk is the first product from the DDS Group on the path of AI-Assisted Database Management: a new breed of products where intelligence, governance, and operational memory live in your stack, not in a vendor's cloud.
 
-aiHelpDesk is the first product from the DDS Group that starts on the path of implementing the AI-Assisted vision of this new breed of the database management products.
+See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before diving in.
 
-## Principles and FAQ
-Before diving into aiHelpDesk we recommend reviewing our [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) that may address some of the questions about the product.
+---
 
-## Deployment and Supported Platforms
-aiHelpDesk can be deployed on K8s or VMs / bare metal. The binary packages are provided for Linux x86-64 and ARM (Graviton, Ampere), as well as for macOS (Intel and Apple Silicon).
+## Deployment
 
-  ### On VMs
-There are two options to run aiHelpDesk on non-K8s environments, either in the Docker containers or straight on the host.
+aiHelpDesk runs on Kubernetes, VMs, bare metal or inside Docker/Podman containers. Binaries are provided for Linux x86-64 and ARM (Graviton, Ampere), and macOS (Intel and Apple Silicon).
 
-For the former, the first Docker Compose command brings up all the aiHelpDesk agents. The second command starts an interactive session of the aiHelpDesk Orchestrator to talk to a human operator:
+### Docker Compose
 
-```
-  docker compose -f deploy/docker-compose/docker-compose.yaml up -d
-  docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
+```bash
+docker compose -f deploy/docker-compose/docker-compose.yaml up -d
+docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
 ```
 
-For the latter (i.e. for running aiHelpDesk with no Docker, straight on a host), there's a small helper `startall.sh` script that brings up all the agent Go binaries in the background including the optional Gateway, followed on with the interfactive aiHelpDesk Orchestrator session as well:
+Or without Docker, using the `startall.sh` helper:
 
-```
-  ./startall.sh
-```
-
-Please be sure to set your desired LLM model (it defaults to Anthropic's Haiku), the API key and the database inventory.
-
-See [VM-based Deployment](deploy/docker-compose/README.md) for detailed instructions on how to deploy aiHelpDesk either as binaries (simpler) or manually by cloning the repo.
-
-  ### On K8s
-
-```
-  tar xzf helpdesk-v0.1.0-deploy.tar.gz
-  kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
-  helm install helpdesk ./helpdesk-v0.1.0-deploy/helm/helpdesk \
-    --set model.vendor=anthropic \
-    --set model.name=claude-haiku-4-5-20251001
+```bash
+./startall.sh
 ```
 
-See [K8s-based Deployment](deploy/helm/README.md) for detailed instructions on how to deploy aiHelpDesk on K8s.
+See [VM-based Deployment](deploy/docker-compose/README.md) for full instructions.
+
+### Kubernetes / Helm
+
+```bash
+tar xzf helpdesk-v0.1.0-deploy.tar.gz
+kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
+helm install helpdesk ./helpdesk-v0.1.0-deploy/helm/helpdesk \
+  --set model.vendor=anthropic \
+  --set model.name=claude-haiku-4-5-20251001
+```
+
+See [K8s-based Deployment](deploy/helm/README.md) for full instructions.
+
+---
 
 ## Architecture
-See aiHelpDesk's [ARCHITECTURE.md](docs/ARCHITECTURE.md) for system design, configuration, and extension guide.
+
+See the primary [Architecture page](docs/ARCHITECTURE.md) for system design, configuration, and the extension guide.
+
+## The Vault
+
+See the primary [Vault page](docs/VAULT.md) for how aiHelpDesk accumulates and improves operational knowledge over time: the flywheel concept, how playbook drafts are auto-generated from incident traces, the three paths into the Vault, the review-and-activate workflow, and the three core customer workflows (onboarding, acceptance, regression monitoring).
 
 ## AI Governance
-aiHelpDesk is proud to feature a sophisticated AI Governanance system,
-which rests on eight separate subsystems, including full
-[auditing](docs/AUDIT.md). Compliance Reporting — the periodic governance
-and security posture assessment — is documented separately in
-[COMPLIANCE.md](docs/COMPLIANCE.md) and so are the
-[aiHelpDesk Journeys](docs/JOURNEYS.md), etc.
-Please see [here](docs/AIGOVERNANCE.md) for details.
 
-HTTP-level authorization (who can call which endpoint, role definitions, role
-aliases) is documented in [AUTHZ.md](docs/AUTHZ.md). Identity provider
-configuration (static users file, JWT/OIDC, service accounts) is in
-[IDENTITY.md](docs/IDENTITY.md).
+aiHelpDesk's Governance system rests on eight subsystems including full [auditing](docs/AUDIT.md), [compliance reporting](docs/COMPLIANCE.md), and the [journeys](docs/JOURNEYS.md). See the primary [AI Governance page](docs/AIGOVERNANCE.md) for the complete reference.
+
+HTTP-level authorization is presented [here](docs/AUTHZ.md). Identity provider configuration (static users, JWT/OIDC, service accounts) is describe [here](docs/IDENTITY.md).
+
+## Fleet Operations
+
+See the primary [Fleet Management page](docs/FLEET.md) for how aiHelpDesk coordinates the multi-database operations: job definitions, canary phases, approval gates, schema drift detection, the natural-language Planner, and rollback.
+
+## Playbooks
+
+See the primary [Playbook page](docs/PLAYBOOKS.md) for how Playbooks take the central stage in aiHelpDesk. This page presents the Playbook schema, CRUD API, import formats (Markdown, YAML, Ansible, Rundeck), system playbooks, and versioning. See [here](docs/PLAYBOOK_OPS.md) for the Playbooks operational best practices.
 
 ## Testing
-aiHelpDesk features a comprehensive testing strategy as documented [here](testing/README.md), including a built-in fault injection testing framework. Two guides cover this:
 
-- **[Fault Injection Testing](docs/FAULTTEST.md)** — customer-facing guide: validate agent behavior against your own staging database using SQL-only injection, SSH-level fault injection, and automated remediation verification; no Docker or cluster access required
-- **[Internal fault injection harness](testing/FAULT_INJECTION_TESTING.md)** — engineer-facing guide: Docker-compose test stack, full catalog of 27 failure modes, CI/CD integration
+aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two guides cover fault injection testing specifically:
+
+- **[Fault Injection Testing](docs/FAULTTEST.md)** is the customer-facing guide: validate agent behavior against your own staging database using SQL-only injection, SSH-level fault injection, and automated remediation verification; no Docker or cluster access required
+- **[Internal Fault Injection Harness](testing/FAULT_INJECTION_TESTING.md)** is the engineer-facing guide: Docker-compose test stack, full catalog of 27 failure modes, CI/CD integration
 
 ## Gateway REST API
-In addition to the interactive Orchestrator, aiHelpDesk provides a Gateway REST API for programmatic access:
 
 ```bash
 # Query the system
@@ -99,63 +114,48 @@ curl -X POST http://localhost:8080/api/v1/query \
 # List agents
 curl http://localhost:8080/api/v1/agents
 
-# List managed databases
-curl http://localhost:8080/api/v1/databases
-
-# Direct tool calls
-curl -X POST http://localhost:8080/api/v1/db/get_server_info \
+# Synthesise a playbook from an incident trace
+curl -X POST http://localhost:8080/api/v1/fleet/playbooks/from-trace \
+  -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"connection_string": "host=db.example.com port=5432 dbname=mydb user=admin"}'
+  -d '{"trace_id": "tr_abc123", "outcome": "resolved"}'
 ```
 
-The [Gateway API](docs/API.md#gateway-rest-api-port-8080) documents the full REST API reference: all 17 endpoints with request/response shapes, query parameters, and `curl` examples. It is recommended for CI/CD pipelines, automation, and containerized environments. See deployment READMEs for details: for [Docker](deploy/docker-compose/README.md), for running [directly on a host](deploy/host/README.md) or for running [on K8s](deploy/helm/README.md).
+See the primary [API page](docs/API.md) for the full REST API reference: all endpoints with request/response shapes, query parameters, and `curl` examples.
 
 ## Helper Scripts
-
-aiHelpDesk includes helper scripts for working around the ADK REPL bug in containers:
 
 | Script | Description |
 |--------|-------------|
 | `scripts/gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
 | `scripts/k8s-local-repl.sh` | Run orchestrator locally with K8s agents port-forwarded |
 
-See [scripts/README.md](scripts/README.md) for detailed usage.
+See [here](scripts/README.md) for detailed usage.
 
-## Demo upstream agents calling aiHelpDesk
-aiHelpDesk can certainly be used by humans and that's what the interactive LLM-powered Orchestrator is there for. Additionally however, an upstream agent or a program can call aiHelpDesk agents directly as well. Here are some examples:
+## Upstream Agents Calling aiHelpDesk
 
-See [a sample](cmd/srebot/README.md) of a O11y watcher program or an SRE bot that calls aiHelpDesk (via a Gateway) to understand a state of a database and ask for AI-powered diagnostic and troubleshooting.
+aiHelpDesk agents can be called by humans via the Orchestrator, or by upstream agents and programs via the A2A protocol and Gateway API:
 
-See [a sample](cmd/secbot/README.md) of a Security Responder bot that automatically sends alerts in real-time for security violations (e.g. for low confidence agent delegations, chain tampering, off-hours activity, high error rates, unauthorized destructive operations, etc.) and optionally creates a security incident (with the full incident bundle snapshot).
+- **[SREBot](cmd/srebot/README.md)** is the O11y watcher that calls aiHelpDesk to diagnose a database and ask for AI-powered triage
+- **[SecBot](cmd/secbot/README.md)** is the Security responder that fires alerts for governance violations in real-time and creates incident bundles
+- **[GovBot](cmd/govbot/README.md)** is the Compliance reporter that queries governance endpoints and posts structured snapshots to Slack on a schedule
+- **[Real-Time Auditor](docs/AIGOVERNANCE.md#77-auditor-cli-cmdauditor)** is the Long-running daemon that connects to the audit socket and fires webhook/email/syslog alerts
 
-See [a sample](cmd/govbot/README.md) of a Compliance Reporter bot that queries the aiHelpDesk Gateway's governance API endpoints and produces a structured compliance snapshot. It is designed to run on-demand or on a schedule (e.g. daily cron / Kubernetes CronJob) and optionally post a summary to a Slack webhook. In contrast to SEC bot (reactive, threat-driven) and Auditor (streaming, rule-based alerts), GOV bot is designed to be periodic and analytical — the compliance officer's tool rather than the on-call engineer's troubleshooter.
+See [here](docs/INTRO_DIALOG.md) for a sample interactive dialog with a human operator.
 
-See [a Real-Time Auditor](docs/AIGOVERNANCE.md#77-auditor-cli-cmdauditor) that can be used as an inspiration for an upstream long-running agent. In constrast to the SRE bot and the GOV bot that can be considered as one-shot automation agents, the SEC bot and the Auditor can be viewed as the core daemons. Indeed, both are long-running and both connect to the audit Unix socket and process events in real time. The distinction is purely in what they do: the Auditor fires webhook/email/syslog alerts, while SEC bot creates an incident bundle (via aiHelpDesk Gateway).
+## LLM Support
 
-## Sample interactive dialog with a human operator
-aiHelpDesk is designed to work with humans and upstream agents alike. Here's a [sample intro dialog](docs/INTRO_DIALOG.md) with a human operator (aka aiHelpDesk's "Hello World").
+aiHelpDesk is built on Google ADK for Go, extended to support both Anthropic and Gemini models:
 
-## LLM
-aiHelpDesk relies on Google ADK (Agent Development Kit) for Go, which was built around Gemini models. We've extended aiHelpDesk to work with both Anthropic and Gemini models.
-
-**Supported models:**
-
-| Vendor | Model Name | Notes |
-|--------|------------|-------|
+| Vendor | Model | Notes |
+|--------|-------|-------|
 | Anthropic | `claude-haiku-4-5-20251001` | Fast, cost-effective |
 | Anthropic | `claude-sonnet-4-20250514` | Balanced performance |
 | Anthropic | `claude-opus-4-5-20251101` | Most capable |
 | Gemini | `gemini-2.5-flash` | Fast, recommended for most use cases |
-| Gemini | `gemini-2.5-flash-lite` | Fastest, lower cost |
+| Gemini | `gemini-2.5-flash-lite` | Fastest, lowest cost |
 | Gemini | `gemini-2.5-pro` | Most capable 2.5 model |
 | Gemini | `gemini-3-flash-preview` | Latest 3.0 series, fast |
 | Gemini | `gemini-3-pro-preview` | Latest 3.0 series, most capable |
 
-**Note:** Gemini 1.x and 2.0 models are retired and will return errors.
-
-Beyond these, support for other models can be easily added (ADK's LLM interface is simple and can be implemented for other providers, just as we did for Anthropic). 
-
-Please note that aiHelpDesk offers the flexibility for individual expert agents (e.g. a Database agent, a K8s agent, an Incident Management agent) to run with different LLMs if needed or if an agent's provider recommends or tests their agent with a particular LLM. The sample deployment scripts assumes the same LLM for all agents, but that can be easily adjusted with setting env variables before starting each agent.
-
-Please contact aiHelpDesk if you or your customer would like to see a support for a particular LLM.
-
+Individual expert agents can run with different LLMs if needed. Support for additional providers can be added by implementing ADK's LLM interface. Contact aiHelpDesk for specific model support requests.

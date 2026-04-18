@@ -1,10 +1,10 @@
 # aiHelpDesk Fault Injection Testing (external)
 
-The two cornerstones of aiHelpDesk's **Operational SRE/DBA Flywheel** are the comprehensive, built-in, customer-facing Fault Injection Testing and [Playbooks](PLAYBOOKS.md).
+`faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
 
-This page covers the former, or to be more precise, the customer-facing, external fault injection testing against customer's own, BYO databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md) and for the wider aiHelpDesk testing strategy see [here](../testing/README.md).
+You bring your own database server, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords and tool usage, and optionally trigger a remediation playbook and confirm recovery — all without touching your production systems. When remediation succeeds, a playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
 
-`faulttest` is a CLI tool that validates how well your aiHelpDesk agents diagnose and recover from real database and infrastructure failures. You bring your own database server, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords and tool usage, and optionally trigger a remediation playbook and confirm recovery — all without touching your production systems.
+This page covers external fault injection against customer-owned databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md). For the wider testing strategy see [here](../testing/README.md).
 
 The tool was designed for two complementary use cases:
 
@@ -28,7 +28,7 @@ The tool was designed for two complementary use cases:
    - [inject / teardown](#53-inject--teardown)
    - [validate](#54-validate)
    - [example](#55-example)
-   - [vault](#56-vault)
+   - [vault](#56-vault) — see also [VAULT.md](VAULT.md) for the full flywheel concept
 6. [Fault catalog](#6-fault-catalog)
    - [External-compatible faults](#61-external-compatible-faults)
    - [SSH-injectable faults](#62-ssh-injectable-faults)
@@ -39,7 +39,7 @@ The tool was designed for two complementary use cases:
    - [Interactive single-fault injection](#73-interactive-single-fault-injection)
    - [Running from Docker](#74-running-from-docker)
    - [Running from Kubernetes (Helm)](#75-running-from-kubernetes-helm)
-   - [Vault: tracking history and drift](#76-vault-tracking-history-and-drift)
+   - [Vault: tracking history, drift, and auto-suggest](#76-vault-tracking-history-and-drift)
 8. [Interpreting results](#8-interpreting-results) — including [LLM-as-judge fields](LLM_AS_JUDGE.md)
 9. [Customer fault catalogs](#9-customer-fault-catalogs)
    - [Overview](#91-overview)
@@ -69,10 +69,14 @@ faulttest run --external --conn "host=staging-db port=5432 ..."
   │  4. Remediate (opt)─────────────┼──► POST /api/v1/fleet/playbooks/{id}/run
   │                    ◄────────────┼─── poll SELECT 1 until recovery confirmed
   │                                 │
+  │  4b. Vault auto-suggest ────────┼──► POST /api/v1/fleet/playbooks/from-trace
+  │      (on remediation pass)      │    draft saved to Vault for review
+  │                                 │
   │  5. Teardown       ─────────────┼──► cleanup SQL removes injected state
   └─────────────────────────────────┘
 
   JSON report written to faulttest-<run-id>.json
+  Run history appended to ~/.faulttest/history.json
 ```
 
 Each fault is scored on three weighted dimensions. The weights depend on whether
@@ -432,10 +436,10 @@ faulttest example --category kubernetes > k8s-faults.yaml
 ### 5.6 vault
 
 ```
-faulttest vault <list|status|drift|suggest>
+faulttest vault <list|status|drift|suggest|suggest-update>
 ```
 
-The vault tracks the history of faulttest runs and the fault↔playbook pairing status. Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`.
+The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
 
 #### vault list
 
@@ -517,7 +521,22 @@ faulttest vault suggest \
   --api-key sk-...
 ```
 
-Calls the gateway's `POST /api/v1/fleet/playbooks/from-trace` endpoint to synthesise a playbook YAML draft from an audit trace of a resolved incident. The draft is printed to stdout with import instructions — it is not automatically registered.
+Manually synthesises a playbook draft from any audit trace ID and prints it to stdout. When the gateway's auditd is configured, the draft is also **automatically saved** to the Vault as an inactive draft (`source=generated`, `is_active=false`) and the `playbook_id` of the saved draft is printed. Activate it with `POST /api/v1/fleet/playbooks/{id}/activate` when ready.
+
+Note: when `faulttest run --remediate` passes, vault auto-suggest runs automatically — you only need to call this manually for traces from real incidents outside of faulttest runs.
+
+#### vault suggest-update
+
+```bash
+faulttest vault suggest-update \
+  --series-id pbs_db_restart_triage \
+  --trace-id tr_xyz789 \
+  --outcome resolved \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Fetches the current active playbook for `--series-id`, synthesises a proposed update from the given trace, and displays the two side by side so you can compare and decide whether to activate the proposal. Useful when `vault drift` shows a declining pass rate and you want to incorporate a more recent successful approach into the existing playbook.
 
 ---
 
@@ -748,7 +767,7 @@ kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
 
 ### 7.6 Vault: tracking history and drift
 
-After running `faulttest run` a few times, use the vault to review trends and pairing status.
+After running `faulttest run` a few times, use the vault to review trends and pairing status. For the full vault concept, lifecycle, and three customer workflows, see [VAULT.md](VAULT.md).
 
 **Check what's covered and what's missing:**
 
@@ -768,8 +787,8 @@ faulttest vault list \
 # Last 30 days (default)
 faulttest vault status
 
-# Last 90 days
-faulttest vault status --since-days 90
+# Last 90 days, filtered to a specific database target
+faulttest vault status --since-days 90 --target staging-db
 ```
 
 **Find regressions before they become incidents:**
@@ -779,23 +798,42 @@ faulttest vault status --since-days 90
 faulttest vault drift --since-days 90
 ```
 
-If drift is detected, use `faulttest inject` + `faulttest teardown` to reproduce the fault interactively and investigate why the agent's diagnosis changed.
-
-**Synthesise a playbook from a real incident trace:**
+If drift is detected, use `faulttest inject` + `faulttest teardown` to reproduce the fault interactively and investigate why the agent's diagnosis changed. Then use `suggest-update` to incorporate the latest successful approach:
 
 ```bash
-# After a resolved incident, generate a playbook draft from the audit trail
+faulttest vault suggest-update \
+  --series-id pbs_db_conn_pooling \
+  --trace-id tr_latest \
+  --gateway http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+**Vault auto-suggest after remediation:**
+
+When `faulttest run --remediate` succeeds, a playbook draft is automatically saved to the Vault. You will see this in the terminal output:
+
+```
+Remediation: RECOVERED in 4.2s (score: 100%)
+Vault: draft saved → pb_faulttest_a1b2 (activate with 'faulttest vault list')
+```
+
+Review and activate the draft when ready:
+
+```bash
+# Activate
+curl -X POST http://helpdesk-gateway:8080/api/v1/fleet/playbooks/pb_faulttest_a1b2/activate \
+  -H "Authorization: Bearer $HELPDESK_API_KEY"
+```
+
+**Manual suggest from any real incident trace:**
+
+```bash
 faulttest vault suggest \
   --trace-id tr_abc123 \
   --outcome resolved \
   --gateway http://helpdesk-gateway:8080 \
-  --api-key $HELPDESK_API_KEY > draft-playbook.yaml
-
-# Review the draft, then import it
-curl -X POST http://helpdesk-gateway:8080/api/v1/fleet/playbooks/import \
-  -H "Authorization: Bearer $HELPDESK_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"text\": \"$(cat draft-playbook.yaml)\", \"format\": \"yaml\"}"
+  --api-key $HELPDESK_API_KEY
+# → draft printed and auto-saved when auditd is configured
 ```
 
 ---

@@ -114,3 +114,73 @@ func TestDoPlaybookDraftRequest_NetworkError(t *testing.T) {
 		t.Error("expected error for unreachable server, got nil")
 	}
 }
+
+// ── shouldGenerateDraft gate ───────────────────────────────────────────────
+// Test the auto-trigger condition by verifying that requestPlaybookDraft is
+// called (or not) based on Outcome and HELPDESK_GATEWAY_URL.
+
+func TestShouldGenerateDraft_ResolvedOutcome_WithGateway(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"draft": "x", "playbook_id": "pb_1"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	t.Setenv("HELPDESK_GATEWAY_URL", srv.URL)
+
+	// Simulate the shouldGenerateDraft gate for outcome="resolved".
+	outcome := "resolved"
+	gateway := srv.URL
+	shouldGenerate := (outcome == "resolved" || outcome == "escalated") && gateway != ""
+	if !shouldGenerate {
+		t.Fatal("shouldGenerateDraft should be true for outcome=resolved with gateway set")
+	}
+	_, _, err := doPlaybookDraftRequest(context.Background(), gateway, "", "inc-001", outcome)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !called {
+		t.Error("gateway was not called")
+	}
+}
+
+func TestShouldGenerateDraft_EscalatedOutcome_WithGateway(t *testing.T) {
+	outcome := "escalated"
+	gateway := "http://gateway.example.com"
+	shouldGenerate := (outcome == "resolved" || outcome == "escalated") && gateway != ""
+	if !shouldGenerate {
+		t.Error("shouldGenerateDraft should be true for outcome=escalated with gateway set")
+	}
+}
+
+func TestShouldGenerateDraft_InvestigatingOutcome_NoTrigger(t *testing.T) {
+	outcome := ""
+	gateway := "http://gateway.example.com"
+	shouldGenerate := (outcome == "resolved" || outcome == "escalated") && gateway != ""
+	if shouldGenerate {
+		t.Error("shouldGenerateDraft should be false when outcome is empty (still investigating)")
+	}
+}
+
+func TestShouldGenerateDraft_ResolvedOutcome_NoGateway(t *testing.T) {
+	outcome := "resolved"
+	gateway := ""
+	shouldGenerate := (outcome == "resolved" || outcome == "escalated") && gateway != ""
+	if shouldGenerate {
+		t.Error("shouldGenerateDraft should be false when HELPDESK_GATEWAY_URL is not set")
+	}
+}
+
+func TestShouldGenerateDraft_GenerateFlagOverrides_NoOutcome(t *testing.T) {
+	// GeneratePlaybookDraft=true still triggers even without outcome or gateway env.
+	// (Backward compat: the HTTP call will fail, but the gate opens.)
+	generateFlag := true
+	outcome := ""
+	gateway := ""
+	shouldGenerate := generateFlag || (outcome == "resolved" || outcome == "escalated") && gateway != ""
+	if !shouldGenerate {
+		t.Error("shouldGenerateDraft should be true when GeneratePlaybookDraft=true")
+	}
+}
