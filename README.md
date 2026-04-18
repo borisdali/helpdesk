@@ -19,7 +19,7 @@ Every resolved incident automatically proposes a playbook draft. Every successfu
 ## The Operational SRE/DBA Flywheel
 
 <p align="center">
-  <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/9687ccd4-a2ad-4c85-9466-bcb6c006e8ac" width="40%"/>
+  <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="40%"/>
 </p>
 
 The Vault is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents, and proposes updates when a successful incident trace suggests a better approach. See [here](docs/VAULT.md) for the full story.
