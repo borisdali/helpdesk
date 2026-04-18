@@ -1,4 +1,4 @@
-# LLM-as-Judge in aiHelpDesk
+# aiHelpDesk LLM-as-Judge 
 
 LLM-as-judge is a cross-cutting quality evaluation pattern in aiHelpDesk: a
 secondary language model (the *judge*) reads the output of a primary agent and

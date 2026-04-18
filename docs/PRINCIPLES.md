@@ -131,6 +131,22 @@ review, and the dry-run mode are all expressions of this principle. The goal
 is not to remove humans from the loop; it is to give humans much better
 information when they are in the loop.
 
+## 9. Extensibility without forking
+
+A third-party provider with deep domain expertise can replace aiHelpDesk's
+K8s agent with their own implementation, as long as it serves an agent card
+at `/.well-known/agent-card.json` and follows the A2A protocol. The
+Orchestrator does not care how a tool is implemented — only what it is named
+and what it returns.
+
+This applies equally to LLMs: the same Orchestrator and sub-agents can run on
+Anthropic Claude or Google Gemini, switched via environment variable. No
+business logic is coupled to a specific model provider. The same extensibility
+point means that a locally-hosted model (Ollama, vLLM, or any
+OpenAI-compatible inference server) can be substituted for a cloud API,
+enabling fully air-gapped deployments. Adding a new model vendor is a single
+factory change; nothing else in the system needs to know.
+
 ## 10. Probabilism is bounded, measured, and governed
 
 The question is never "deterministic or probabilistic" — it is "which layer should reason adaptively, and where must hard guarantees be enforced?"
@@ -155,18 +171,3 @@ When exact step-by-step repeatability is non-negotiable, the fleet runner's expl
 
 This principle is the answer to "AI systems are probabilistic — can you trust this in production?" Traditional operations are already probabilistic; the difference is that aiHelpDesk's probabilism is visible, bounded, measured, and continuously improved.
 
-## 9. Extensibility without forking
-
-A third-party provider with deep domain expertise can replace aiHelpDesk's
-K8s agent with their own implementation, as long as it serves an agent card
-at `/.well-known/agent-card.json` and follows the A2A protocol. The
-Orchestrator does not care how a tool is implemented — only what it is named
-and what it returns.
-
-This applies equally to LLMs: the same Orchestrator and sub-agents can run on
-Anthropic Claude or Google Gemini, switched via environment variable. No
-business logic is coupled to a specific model provider. The same extensibility
-point means that a locally-hosted model (Ollama, vLLM, or any
-OpenAI-compatible inference server) can be substituted for a cloud API,
-enabling fully air-gapped deployments. Adding a new model vendor is a single
-factory change; nothing else in the system needs to know.

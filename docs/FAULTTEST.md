@@ -1,8 +1,8 @@
 # aiHelpDesk Fault Injection Testing (external)
 
-`faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
+`faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
 
-You bring your own database server, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords and tool usage, and optionally trigger a remediation playbook and confirm recovery — all without touching your production systems. When remediation succeeds, a playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
+You bring your own database server, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit), and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
 
 This page covers external fault injection against customer-owned databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md). For the wider testing strategy see [here](../testing/README.md).
 
@@ -192,7 +192,7 @@ SSH-injectable faults are **not** marked `external_compat` — they require OS a
 
 ### 3.3 Remediation mode
 
-`--remediate` adds a recovery phase after injection and diagnosis. After the agent evaluates the fault, `faulttest` triggers either a fleet playbook or a direct agent prompt, then polls a fault-specific verification SQL query until the database responds correctly or the timeout elapses.
+`--remediate` adds a recovery phase after injection and diagnosis. After the agent evaluates the fault, `faulttest` triggers either a fleet Playbook or a direct agent prompt, then polls a fault-specific verification SQL query until the database responds correctly or the timeout elapses.
 
 ```bash
 faulttest run --external --remediate \
@@ -203,7 +203,7 @@ faulttest run --external --remediate \
   --infra-config infrastructure.json
 ```
 
-Faults that have a `remediation` block in the catalog will trigger the playbook specified there. Faults without a `remediation` block are evaluated for diagnosis only.
+Faults that have a `remediation` block in the catalog will trigger the Playbook specified there. Faults without a `remediation` block are evaluated for diagnosis only.
 
 **Remediation scoring:**
 
@@ -211,7 +211,7 @@ Each remediation attempt produces a `remediation_score` (0.0–1.0) based on rec
 
 | Recovery time | Score | Meaning |
 |---------------|:-----:|---------|
-| ≤ half the timeout | **1.0** | Fast recovery — playbook acted promptly |
+| ≤ half the timeout | **1.0** | Fast recovery — Playbook acted promptly |
 | ≤ full timeout | **0.75** | Recovered within the window, but slowly |
 | Timed out | **0.0** | Recovery not confirmed |
 
@@ -242,7 +242,7 @@ The query must return successfully (exit 0 from psql) for recovery to be confirm
 
 | `remediation_method` | How it was triggered |
 |----------------------|----------------------|
-| `playbook` | Fleet playbook run via `POST /api/v1/fleet/playbooks/{id}/run` |
+| `playbook` | Fleet Playbook run via `POST /api/v1/fleet/playbooks/{id}/run` |
 | `agent_prompt` | Direct agent call via `POST /api/v1/query` with a configured prompt |
 | `none` | No remediation block configured for this fault |
 
@@ -359,7 +359,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
-| `--gateway` | — | — | Gateway URL for playbook/agent remediation and vault playbook checks. No default — must be set explicitly when `--remediate` or `vault list` needs live validation. |
+| `--gateway` | — | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. No default — must be set explicitly when `--remediate` or `vault list` needs live validation. |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
@@ -447,7 +447,7 @@ The vault is aiHelpDesk's library of fault→remedy pairings and the engine of t
 faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
 ```
 
-Shows the full fault catalog alongside the linked playbook (if any), the date of the last run, and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced playbook IDs exist on the gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
+Shows the full fault catalog alongside the linked Playbook (if any), the date of the last run, and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced Playbook IDs exist on the gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
 
 ```
 FAULT                            PLAYBOOK                     LAST RUN     STATUS
@@ -463,7 +463,7 @@ Status values:
 | Status | Meaning |
 |--------|---------|
 | `PASS` / `FAIL` | Last run result |
-| `-` | Fault has a playbook linked but has never been run |
+| `-` | Fault has a Playbook linked but has never been run |
 | `NO PLAYBOOK` | No `remediation.playbook_id` configured in the catalog |
 | `PLAYBOOK NOT FOUND` | Playbook ID configured but not found on the gateway (`--gateway` required) |
 
@@ -521,7 +521,7 @@ faulttest vault suggest \
   --api-key sk-...
 ```
 
-Manually synthesises a playbook draft from any audit trace ID and prints it to stdout. When the gateway's auditd is configured, the draft is also **automatically saved** to the Vault as an inactive draft (`source=generated`, `is_active=false`) and the `playbook_id` of the saved draft is printed. Activate it with `POST /api/v1/fleet/playbooks/{id}/activate` when ready.
+Manually synthesises a Playbook draft from any audit trace ID and prints it to stdout. When the gateway's auditd is configured, the draft is also **automatically saved** to the Vault as an inactive draft (`source=generated`, `is_active=false`) and the `playbook_id` of the saved draft is printed. Activate it with `POST /api/v1/fleet/playbooks/{id}/activate` when ready.
 
 Note: when `faulttest run --remediate` passes, vault auto-suggest runs automatically — you only need to call this manually for traces from real incidents outside of faulttest runs.
 
@@ -536,7 +536,7 @@ faulttest vault suggest-update \
   --api-key sk-...
 ```
 
-Fetches the current active playbook for `--series-id`, synthesises a proposed update from the given trace, and displays the two side by side so you can compare and decide whether to activate the proposal. Useful when `vault drift` shows a declining pass rate and you want to incorporate a more recent successful approach into the existing playbook.
+Fetches the current active Playbook for `--series-id`, synthesises a proposed update from the given trace, and displays the two side by side so you can compare and decide whether to activate the proposal. Useful when `vault drift` shows a declining pass rate and you want to incorporate a more recent successful approach into the existing Playbook.
 
 ---
 
@@ -581,7 +581,7 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | `db-pg-hba-corrupt` | `pbs_db_config_recovery` |
 | `db-process-kill` | `pbs_db_restart_triage` |
 
-The playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
+The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
 
 Each fault's `remediation` block specifies a `verify_sql` query that confirms the specific condition has resolved. Generic `SELECT 1` (the default) only checks connectivity; fault-specific queries confirm the actual state was corrected:
 
@@ -772,10 +772,10 @@ After running `faulttest run` a few times, use the vault to review trends and pa
 **Check what's covered and what's missing:**
 
 ```bash
-# No --gateway: shows last-run status without live playbook validation
+# No --gateway: shows last-run status without live Playbook validation
 faulttest vault list
 
-# With --gateway: also verifies playbook IDs exist on the deployment
+# With --gateway: also verifies Playbook IDs exist on the deployment
 faulttest vault list \
   --gateway http://helpdesk-gateway:8080 \
   --api-key $HELPDESK_API_KEY
@@ -810,7 +810,7 @@ faulttest vault suggest-update \
 
 **Vault auto-suggest after remediation:**
 
-When `faulttest run --remediate` succeeds, a playbook draft is automatically saved to the Vault. You will see this in the terminal output:
+When `faulttest run --remediate` succeeds, a Playbook draft is automatically saved to the Vault. You will see this in the terminal output:
 
 ```
 Remediation: RECOVERED in 4.2s (score: 100%)
@@ -1134,7 +1134,7 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
   #     rm -f /tmp/faulttest_myfault_pid.txt
   #     psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS t;"
 
-  # Optional: trigger playbook remediation when --remediate is set.
+  # Optional: trigger Playbook remediation when --remediate is set.
   remediation:
     playbook_id: pbs_my_playbook
     verify_sql: "SELECT 1"

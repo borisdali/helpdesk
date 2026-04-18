@@ -19,7 +19,7 @@ Every resolved incident automatically proposes a playbook draft. Every successfu
 ## The Operational SRE/DBA Flywheel
 
 <p align="center">
-  <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="60%"/>
+  <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="80%"/>
 </p>
 
 The Vault is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents, and proposes updates when a successful incident trace suggests a better approach. See [here](docs/VAULT.md) for the full story.
@@ -45,20 +45,21 @@ See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before di
 
 aiHelpDesk runs on Kubernetes, VMs, bare metal or inside Docker/Podman containers. Binaries are provided for Linux x86-64 and ARM (Graviton, Ampere), and macOS (Intel and Apple Silicon).
 
-### Docker Compose
+### Docker/Podman 
 
 ```bash
 docker compose -f deploy/docker-compose/docker-compose.yaml up -d
-docker compose -f deploy/docker-compose/docker-compose.yaml --profile interactive run orchestrator
 ```
 
-Or without Docker, using the `startall.sh` helper:
+See [here](deploy/docker-compose/README.md) for the full instructions.
+
+### Directly on a host/VM
 
 ```bash
 ./startall.sh
 ```
 
-See [VM-based Deployment](deploy/docker-compose/README.md) for full instructions.
+See [here](deploy/host/README.md) for the full instructions.
 
 ### Kubernetes / Helm
 
@@ -70,7 +71,7 @@ helm install helpdesk ./helpdesk-v0.1.0-deploy/helm/helpdesk \
   --set model.name=claude-haiku-4-5-20251001
 ```
 
-See [K8s-based Deployment](deploy/helm/README.md) for full instructions.
+See [here](deploy/helm/README.md) for the full instructions.
 
 ---
 

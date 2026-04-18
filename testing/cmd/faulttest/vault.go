@@ -44,7 +44,11 @@ type historyFaultResult struct {
 }
 
 // historyFilePath returns the path for the faulttest history file.
+// Overridden by HELPDESK_FAULT_HISTORY_FILE env var.
 func historyFilePath() string {
+	if p := os.Getenv("HELPDESK_FAULT_HISTORY_FILE"); p != "" {
+		return p
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".faulttest", "history.json")
