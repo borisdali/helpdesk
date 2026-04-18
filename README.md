@@ -6,12 +6,12 @@
 
 # aiHelpDesk: The AI DB SRE That Learns From Every Incident
 
-aiHelpDesk is a Go-based AI multi-agent system for diagnosing and remediating PostgreSQL and AlloyDB problems on Kubernetes and VMs. It links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
+aiHelpDesk is a Go-based AI multi-agent system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) issues on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
 
-Two things set it apart from every general-purpose AI assistant:
+Two things set aiHelpDesk apart from a general-purpose AI assistant:
 
 **1. Agents that act, not just advise.**
-The governed actuation arm — fleet runner, playbooks, policy engine, blast-radius guards — executes remediation steps on your real infrastructure under a tamper-proof audit trail. Every tool call is logged, every destructive action requires human approval, and the governance framework enforces limits that can't be bypassed at runtime.
+The governed actuation arm — formal tool registry, fleet runner, playbooks, policy engine, blast-radius guards — executes remediation steps on your real infrastructure under a tamper-proof audit trail. Every tool call is logged, every destructive action requires human approval, and the governance framework enforces limits that can't be bypassed at runtime.
 
 **2. Institutional memory that compounds.**
 Every resolved incident automatically proposes a playbook draft. Every successful faulttest remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md) — aiHelpDesk's library of fault→remedy pairings — grows richer with every incident. The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking.
@@ -19,7 +19,7 @@ Every resolved incident automatically proposes a playbook draft. Every successfu
 ## The Operational SRE/DBA Flywheel
 
 <p align="center">
-  <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="40%"/>
+  <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="60%"/>
 </p>
 
 The Vault is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents, and proposes updates when a successful incident trace suggests a better approach. See [here](docs/VAULT.md) for the full story.

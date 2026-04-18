@@ -488,7 +488,7 @@ Issue codes:
 
 ### Playbooks
 
-A **playbook** is a saved runbook artifact that combines a natural-language fleet intent with expert triage knowledge. Running a playbook calls the planner fresh every time, producing a plan against the current tool catalog and live infrastructure state.
+A **playbook** is not a static runbook. It encodes strategic intent and expert triage knowledge that the fleet planner uses to generate an execution plan dynamically against the current tool catalog and live infrastructure state — the same Playbook adapts to different environments and tool availability each time it runs.
 
 aiHelpDesk ships 4 expert-authored system playbooks out of the box (vacuum triage, slow query triage, connection triage, replication lag triage). Operators can author custom playbooks from scratch or import existing runbooks from Markdown, plain text, YAML, Rundeck, or Ansible formats. Playbooks support versioning: a series can hold multiple versions, with exactly one active at any time — upgrades are staged and promoted explicitly.
 

@@ -2,7 +2,9 @@
 
 The Vault is aiHelpDesk's institutional memory for operational knowledge. It is where every playbook lives, where every incident trace lands, and where the library of known fault→remedy pairings grows — automatically, with human approval at the gate.
 
-If [Playbooks](PLAYBOOKS.md) are the individual runbooks, the Vault is the library that holds them, tracks their effectiveness over time, and keeps them current as your infrastructure and agents evolve.
+A traditional runbook is a static procedure — a fixed sequence of steps written once and followed literally. An aiHelpDesk [Playbook](PLAYBOOKS.md) is fundamentally different: it encodes strategic **intent** and expert **knowledge** that the fleet planner uses to generate an execution plan dynamically, against the current state of your infrastructure and tool catalog. The same Playbook produces different steps when your database configuration differs, when new tools are available, or when the environment has changed. This is what "never a stale script" means in practice.
+
+The Vault is the library where these Playbooks live — tracked, versioned, and continuously improved as your infrastructure and agents evolve.
 
 ---
 

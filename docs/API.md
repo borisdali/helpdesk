@@ -587,7 +587,7 @@ To approve or deny, use the auditd approval endpoints directly (see below) — t
 
 #### Playbook endpoints
 
-Playbooks are saved runbook artifacts combining a natural-language fleet intent with expert triage knowledge. aiHelpDesk ships 7 system playbooks out of the box (4 operational + 3 Database Down triage), with adaptive escalation across the triage graph. Operators create, version, and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
+Playbooks encode strategic intent and expert triage knowledge that the fleet planner executes dynamically against live infrastructure state — not static scripts. aiHelpDesk ships 7 system playbooks out of the box (4 operational + 3 Database Down triage), with adaptive escalation across the triage graph. Operators create, version, and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
 
 #### `GET /api/v1/fleet/playbooks`
 
