@@ -567,6 +567,25 @@ func TestStripMarkdownFences_EmptyString(t *testing.T) {
 	}
 }
 
+func TestStripMarkdownFences_BareYAMLTag(t *testing.T) {
+	// Some models emit "yaml\n..." without backticks.
+	input := "yaml\nname: Test\ndescription: desc\n"
+	got := stripMarkdownFences(input)
+	want := "name: Test\ndescription: desc"
+	if got != want {
+		t.Errorf("stripMarkdownFences = %q, want %q", got, want)
+	}
+}
+
+func TestStripMarkdownFences_BareJSONTag(t *testing.T) {
+	input := "json\n{\"key\": \"value\"}"
+	got := stripMarkdownFences(input)
+	want := `{"key": "value"}`
+	if got != want {
+		t.Errorf("stripMarkdownFences = %q, want %q", got, want)
+	}
+}
+
 // --- handleFleetPlan handler tests ---
 
 // makePlannerGateway builds a Gateway wired for fleet plan tests.

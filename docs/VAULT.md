@@ -21,7 +21,7 @@ The Vault is the engine of a feedback loop that tightens with every incident:
   │          │                                            │          │
   │          │                                            ▼          │
   │   Library improves  ◄── Human approves ◄── Draft auto-saved      │
-  │   (activated)           (Vault review)     to Vault              │
+  │     (activated)         (Vault review)        to Vault           │
   │                                                                  │
   └──────────────────────────────────────────────────────────────────┘
 ```

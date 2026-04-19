@@ -11,8 +11,19 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 	"helpdesk/internal/audit"
 )
+
+// isEmptyJSONArray returns true when s decodes to an empty or null JSON array.
+// json.Encoder.Encode always appends \n, so string equality against "[]" is not reliable.
+func isEmptyJSONArray(s string) bool {
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &items); err != nil {
+		return true // unparseable → treat as empty
+	}
+	return len(items) == 0
+}
 
 // PlaybookFromTraceRequest is the body for POST /api/v1/fleet/playbooks/from-trace.
 type PlaybookFromTraceRequest struct {
@@ -76,11 +87,20 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 	}
 
 	// Fetch tool execution events for this trace from auditd.
+	// Refuse to synthesize when auditd is unavailable or the trace has no events —
+	// calling the LLM with an empty trace produces hallucinated generic content.
 	traceJSON, err := g.fetchTraceEvents(req.TraceID)
 	if err != nil {
-		slog.Warn("from-trace: failed to fetch trace events", "trace_id", req.TraceID, "err", err)
-		// Continue with an empty trace — LLM will produce a generic template.
-		traceJSON = fmt.Sprintf(`[{"note": "trace %s not found or auditd unavailable"}]`, req.TraceID)
+		if g.auditURL == "" {
+			writeError(w, http.StatusServiceUnavailable, "auditd not configured: cannot synthesize playbook without an audit trace")
+		} else {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("trace %q not found in auditd: %v", req.TraceID, err))
+		}
+		return
+	}
+	if isEmptyJSONArray(traceJSON) {
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("trace %q contains no tool execution events: nothing to synthesize from", req.TraceID))
+		return
 	}
 
 	prompt := fmt.Sprintf(fromTracePromptTemplate, req.Outcome, traceJSON)
@@ -96,20 +116,22 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 
 	// Parse the YAML draft and persist it as an inactive "generated" playbook
 	// so operators can review and activate it without copy-pasting.
+	// Use the lenient map-based parser — LLM output is inconsistent and may have
+	// tab indentation, nested structures, or other formatting that the strict
+	// struct-based parser rejects.
 	var playbookID string
 	if g.auditURL != "" {
-		importResp, parseErr := parsePlaybookYAML(draft, PlaybookImportHints{})
+		pb, parseErr := parsePlaybookYAMLLenient(draft)
 		if parseErr != nil {
 			slog.Warn("from-trace: could not parse LLM YAML; skipping persistence", "err", parseErr)
 		} else {
-			pb := importResp.Draft
 			pb.Source = "generated"
 			pb.IsActive = false
 			pb.CreatedBy = "from-trace"
 			if pb.SeriesID == "" {
 				pb.SeriesID = "pbs_generated_" + uuid.New().String()[:8]
 			}
-			id, persistErr := g.persistPlaybookDraft(r.Context(), pb)
+			id, persistErr := g.persistPlaybookDraft(r.Context(), &pb)
 			if persistErr != nil {
 				slog.Warn("from-trace: could not persist draft", "err", persistErr)
 			} else {
@@ -189,5 +211,120 @@ func (g *Gateway) fetchTraceEvents(traceID string) (string, error) {
 		return "", fmt.Errorf("auditd returned %d: %s", resp.StatusCode, string(data))
 	}
 	return string(data), nil
+}
+
+// parsePlaybookYAMLLenient parses LLM-generated playbook YAML into an audit.Playbook
+// using a map[string]interface{} intermediate so that nested structures, tab indentation,
+// and other LLM formatting quirks don't cause hard parse failures.
+func parsePlaybookYAMLLenient(text string) (audit.Playbook, error) {
+	// Replace tab indentation with spaces — YAML forbids tabs.
+	text = strings.ReplaceAll(text, "\t", "  ")
+	// Remove markdown artifacts the LLM embeds inside YAML block scalars:
+	// triple-backtick fences (``` or ```sql etc.) and lines that start with
+	// a bare backtick or @ which YAML forbids as plain-scalar starters.
+	{
+		lines := strings.Split(text, "\n")
+		kept := lines[:0]
+		for _, line := range lines {
+			trimmed := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(trimmed, "```") {
+				// Drop markdown code fences entirely.
+				continue
+			}
+			if strings.HasPrefix(trimmed, "`") || strings.HasPrefix(trimmed, "@") {
+				// Prefix with a space so it becomes block scalar continuation.
+				indent := line[:len(line)-len(trimmed)]
+				kept = append(kept, indent+" "+trimmed)
+				continue
+			}
+			kept = append(kept, line)
+		}
+		text = strings.Join(kept, "\n")
+	}
+	// Strip any bare non-YAML first line (e.g. "yaml", "YAML", "json").
+	// These are language tags that some models emit without backtick fences.
+	// A valid YAML first line either starts a mapping (contains ":"), is a list
+	// item ("-"), or is a document separator ("---").
+	if nl := strings.IndexAny(text, "\n\r"); nl > 0 {
+		firstLine := strings.TrimSpace(text[:nl])
+		if firstLine != "" && firstLine != "---" &&
+			!strings.Contains(firstLine, ":") &&
+			!strings.HasPrefix(firstLine, "-") {
+			text = strings.TrimSpace(text[nl:])
+		}
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal([]byte(text), &raw); err != nil {
+		// Fallback: the YAML contains a character the parser rejects (e.g. a backtick
+		// or @ at the start of a line inside guidance). Extract top-level scalar fields
+		// with a simple line scan and store the full draft as Guidance so nothing is lost.
+		pb := extractPlaybookScalars(text)
+		if pb.Name == "" && pb.Description == "" {
+			return audit.Playbook{}, err // truly unparseable
+		}
+		if pb.Guidance == "" {
+			pb.Guidance = text
+		}
+		slog.Debug("from-trace: YAML parse failed; used scalar fallback", "err", err, "name", pb.Name)
+		return pb, nil
+	}
+
+	str := func(key string) string {
+		v, _ := raw[key]
+		return yamlToString(v)
+	}
+	strSlice := func(key string) []string {
+		v, _ := raw[key]
+		return yamlToStringSlice(v)
+	}
+
+	return audit.Playbook{
+		Name:         str("name"),
+		Description:  str("description"),
+		ProblemClass: str("problem_class"),
+		Guidance:     str("guidance"),
+		Symptoms:     strSlice("symptoms"),
+		Escalation:   strSlice("escalation"),
+		TargetHints:  strSlice("target_hints"),
+		EscalatesTo:  strSlice("escalates_to"),
+		SeriesID:     str("series_id"),
+		Author:       str("author"),
+		Version:      str("version"),
+	}, nil
+}
+
+// extractPlaybookScalars extracts simple key: value lines from YAML text that
+// failed to parse. Used as a last-resort fallback when the YAML contains
+// characters that go-yaml rejects (e.g. backtick or @ starting a line).
+func extractPlaybookScalars(text string) audit.Playbook {
+	var pb audit.Playbook
+	for _, line := range strings.Split(text, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		// Only grab simple top-level scalars (no leading whitespace = not nested).
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			continue
+		}
+		switch k {
+		case "name":
+			pb.Name = v
+		case "description":
+			pb.Description = v
+		case "problem_class":
+			pb.ProblemClass = v
+		case "author":
+			pb.Author = v
+		case "version":
+			pb.Version = v
+		case "series_id":
+			pb.SeriesID = v
+		}
+	}
+	return pb
 }
 

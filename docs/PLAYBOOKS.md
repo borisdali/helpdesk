@@ -2,9 +2,9 @@
 
 A **playbook** is not a traditional runbook. A runbook is static. A fixed sequence of steps written once and executed literally, assuming a known environment. A Playbook in aiHelpDesk encodes strategic **intent** and expert **knowledge**: what class of problem this is, what symptoms indicate it, what the planner should prioritise, and when to escalate. The fleet planner reads that intent and expertise, examines the current tool catalog and live infrastructure state, and generates the actual execution steps fresh each time. The same Playbook handles a connection exhaustion fault differently on a bare-metal host than on a Kubernetes cluster, because the available tools differ. This is what "never a stale script" means in practice.
 
-Playbooks are the primary authoring unit for fleet operations. You can author them from scratch, import and convert your existing static runbooks (Markdown, plain text, YAML, Rundeck, Ansible) into dynamic Playbooks, or let aiHelpDesk synthesise them automatically from resolved incident traces via the [Vault](VAULT.md).
+Playbooks are the system's universal remediation artifact. When the orchestrator diagnoses a fault — real or injected — it selects a Playbook and hands it to the fleet planner for execution. When `faulttest` validates an agent's remediation capability, it does so against a Playbook. When the Vault synthesises institutional knowledge from a resolved incident, the output is a Playbook. They are the connective tissue between diagnosis and action across every execution path in aiHelpDesk.
 
-Playbooks are the primary authoring unit for fleet operations. System playbooks ship with aiHelpDesk and cover the most common database triage scenarios out of the box. Operators can author custom playbooks from scratch or import existing runbooks from Markdown, plain text, YAML, Rundeck, or Ansible formats.
+System playbooks ship with aiHelpDesk and cover the most common database triage scenarios out of the box. You can author custom playbooks from scratch, import and convert your existing static runbooks (Markdown, plain text, YAML, Rundeck, Ansible), or let aiHelpDesk synthesise them automatically from resolved incident traces via the [Vault](VAULT.md).
 
 See playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk recommends making use of the playbook feature.
 

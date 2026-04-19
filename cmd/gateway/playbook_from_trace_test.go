@@ -44,6 +44,7 @@ func TestHandlePlaybookFromTrace_MissingTraceID(t *testing.T) {
 }
 
 func TestHandlePlaybookFromTrace_NoLLM(t *testing.T) {
+	// No LLM configured → 503 before even reaching trace fetch.
 	g := newFromTraceGateway(nil, "", "")
 	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_abc"})
 	if w.Code != http.StatusServiceUnavailable {
@@ -51,55 +52,68 @@ func TestHandlePlaybookFromTrace_NoLLM(t *testing.T) {
 	}
 }
 
+func TestHandlePlaybookFromTrace_NoAuditd_Returns503(t *testing.T) {
+	// No auditd → cannot fetch trace → 503 rather than hallucinating a draft.
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: Should not be called\n", nil
+	}
+	g := newFromTraceGateway(llm, "", "")
+	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_123", "outcome": "resolved"})
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlePlaybookFromTrace_EmptyTrace_Returns422(t *testing.T) {
+	// auditd reachable but returns no events for the trace → 422.
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: Should not be called\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_empty"})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422; body: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandlePlaybookFromTrace_LLMError(t *testing.T) {
+	// auditd returns events, but LLM call fails → 500.
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+	}))
+	defer auditd.Close()
+
 	llm := func(_ context.Context, _ string) (string, error) {
 		return "", context.DeadlineExceeded
 	}
-	g := newFromTraceGateway(llm, "", "")
+	g := newFromTraceGateway(llm, auditd.URL, "")
 	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_abc"})
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
 	}
 }
 
-func TestHandlePlaybookFromTrace_SuccessNoAuditd(t *testing.T) {
-	// LLM returns valid YAML; no auditd → draft returned, playbook_id empty.
-	llm := func(_ context.Context, _ string) (string, error) {
-		return `
-name: DB Restart Triage
-description: Restart the database when it is unresponsive.
-problem_class: availability
-guidance: Check pg_stat_activity first.
-`, nil
-	}
-	g := newFromTraceGateway(llm, "", "")
-	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_123", "outcome": "resolved"})
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200; body: %s", w.Code, w.Body.String())
-	}
-	var resp PlaybookFromTraceResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Draft == "" {
-		t.Error("expected non-empty draft")
-	}
-	if resp.Source != "tr_123" {
-		t.Errorf("source = %q, want tr_123", resp.Source)
-	}
-	if resp.PlaybookID != "" {
-		t.Errorf("playbook_id should be empty when auditd not configured, got %q", resp.PlaybookID)
-	}
-}
-
 func TestHandlePlaybookFromTrace_DefaultOutcome(t *testing.T) {
-	// outcome defaults to "resolved" when omitted.
+	// outcome defaults to "resolved" when omitted; verify prompt contains it.
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+	}))
+	defer auditd.Close()
+
 	var gotPrompt string
 	llm := func(_ context.Context, prompt string) (string, error) {
 		gotPrompt = prompt
 		return "name: Test\ndescription: Test desc\n", nil
 	}
-	g := newFromTraceGateway(llm, "", "")
+	g := newFromTraceGateway(llm, auditd.URL, "")
 	doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_xyz"})
 	if !strings.Contains(gotPrompt, "resolved") {
 		t.Errorf("prompt should contain 'resolved'; got: %s", gotPrompt[:min(200, len(gotPrompt))])
@@ -108,13 +122,19 @@ func TestHandlePlaybookFromTrace_DefaultOutcome(t *testing.T) {
 
 func TestHandlePlaybookFromTrace_StripMarkdownFences(t *testing.T) {
 	// LLM wraps YAML in markdown fences — should be stripped.
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+	}))
+	defer auditd.Close()
+
 	llm := func(_ context.Context, _ string) (string, error) {
 		return "```yaml\nname: Test\ndescription: desc\n```", nil
 	}
-	g := newFromTraceGateway(llm, "", "")
+	g := newFromTraceGateway(llm, auditd.URL, "")
 	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_fence"})
 	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
+		t.Errorf("status = %d, want 200; body: %s", w.Code, w.Body.String())
 	}
 	var resp PlaybookFromTraceResponse
 	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
@@ -124,15 +144,14 @@ func TestHandlePlaybookFromTrace_StripMarkdownFences(t *testing.T) {
 }
 
 func TestHandlePlaybookFromTrace_SuccessWithAuditd(t *testing.T) {
-	// auditd is configured → persistPlaybookDraft is called → playbook_id returned.
+	// auditd returns events → LLM synthesizes → draft persisted → playbook_id returned.
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Respond to auditd event fetch (GET /v1/events?...).
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[]`)) //nolint:errcheck
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
 			return
 		}
-		// Respond to playbook create (POST /v1/fleet/playbooks).
+		// POST /v1/fleet/playbooks — persist the draft.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_generated_abc123"}) //nolint:errcheck
@@ -160,10 +179,11 @@ func TestHandlePlaybookFromTrace_SuccessWithAuditd(t *testing.T) {
 }
 
 func TestHandlePlaybookFromTrace_AuditdPersistFails_DraftStillReturned(t *testing.T) {
-	// auditd returns error → draft is still returned, playbook_id is empty.
+	// auditd fetch succeeds but persist POST fails → draft still returned, playbook_id empty.
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			w.Write([]byte(`[]`)) //nolint:errcheck
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
@@ -181,12 +201,16 @@ func TestHandlePlaybookFromTrace_AuditdPersistFails_DraftStillReturned(t *testin
 	var resp PlaybookFromTraceResponse
 	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
 	if resp.Draft == "" {
-		t.Error("draft should be non-empty even when auditd fails")
+		t.Error("draft should be non-empty even when auditd persist fails")
 	}
 	if resp.PlaybookID != "" {
 		t.Errorf("playbook_id should be empty when persist fails, got %q", resp.PlaybookID)
 	}
 }
+
+// fakeTraceEvents is a minimal non-empty tool execution trace for tests that
+// need auditd to return real content so the handler proceeds past the empty-trace guard.
+const fakeTraceEvents = `[{"event_type":"tool_execution","tool_name":"get_active_connections","result":"42 connections active","trace_id":"tr_test"}]`
 
 // ── persistPlaybookDraft ──────────────────────────────────────────────────
 
