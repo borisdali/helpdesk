@@ -148,8 +148,12 @@ func (s *PlaybookRunStore) Stats(ctx context.Context, seriesID string) (*Playboo
 		st.ResolutionRate = float64(resolved) / float64(total)
 		st.EscalationRate = float64(escalated) / float64(total)
 	}
-	if lastRunAt.Valid {
-		st.LastRunAt = lastRunAt.String
+	if lastRunAt.Valid && lastRunAt.String != "" {
+		if t, err := time.Parse("2006-01-02 15:04:05", lastRunAt.String); err == nil {
+			st.LastRunAt = t.UTC().Format(time.RFC3339)
+		} else {
+			st.LastRunAt = lastRunAt.String
+		}
 	}
 	return st, nil
 }
@@ -194,8 +198,12 @@ func (s *PlaybookRunStore) StatsBatch(ctx context.Context, seriesIDs []string) (
 			st.ResolutionRate = float64(st.Resolved) / float64(st.TotalRuns)
 			st.EscalationRate = float64(st.Escalated) / float64(st.TotalRuns)
 		}
-		if lastRunAt.Valid {
-			st.LastRunAt = lastRunAt.String
+		if lastRunAt.Valid && lastRunAt.String != "" {
+			if t, err := time.Parse("2006-01-02 15:04:05", lastRunAt.String); err == nil {
+				st.LastRunAt = t.UTC().Format(time.RFC3339)
+			} else {
+				st.LastRunAt = lastRunAt.String
+			}
 		}
 		result[st.SeriesID] = &st
 	}

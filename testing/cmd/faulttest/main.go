@@ -684,8 +684,11 @@ func cmdValidate(args []string) {
 
 			// Playbook existence check (when --gateway is set).
 			if cfg.GatewayURL != "" && f.Remediation.PlaybookID != "" {
-				if !validatePlaybookExists(cfg.GatewayURL, cfg.GatewayAPIKey, f.Remediation.PlaybookID) {
+				switch checkPlaybook(cfg.GatewayURL, cfg.GatewayAPIKey, f.Remediation.PlaybookID) {
+				case playbookNotFound:
 					warns = append(warns, fmt.Sprintf("playbook %q not found at gateway %s", f.Remediation.PlaybookID, cfg.GatewayURL))
+				case playbookAuthError:
+					warns = append(warns, fmt.Sprintf("playbook %q: authentication failed (check --api-key)", f.Remediation.PlaybookID))
 				}
 			}
 
@@ -727,14 +730,23 @@ func cmdValidate(args []string) {
 // validatePlaybookExists checks whether a playbook with the given series_id exists
 // on the gateway. Returns true when the playbook is found, false otherwise.
 // Network failures or unexpected status codes are treated as "not found" (returns false).
-func validatePlaybookExists(gatewayURL, apiKey, playbookID string) bool {
+type playbookCheckResult int
+
+const (
+	playbookFound     playbookCheckResult = iota
+	playbookNotFound                      // 404 or empty list
+	playbookAuthError                     // 401/403
+	playbookUnknown                       // network error or unexpected status
+)
+
+// checkPlaybook queries the gateway to determine whether a playbook series exists.
+func checkPlaybook(gatewayURL, apiKey, playbookID string) playbookCheckResult {
 	reqURL := gatewayURL + "/api/v1/fleet/playbooks?series_id=" + playbookID
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
-		slog.Warn("playbook check: failed to build request", "playbook_id", playbookID, "err", err)
-		return false
+		return playbookUnknown
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -742,28 +754,32 @@ func validatePlaybookExists(gatewayURL, apiKey, playbookID string) bool {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Warn("playbook check: HTTP request failed", "playbook_id", playbookID, "err", err)
-		return false
+		return playbookUnknown
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return false
-	}
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return playbookAuthError
+	case http.StatusNotFound:
+		return playbookNotFound
+	case http.StatusOK:
+		// Fall through to parse body.
+	default:
 		slog.Warn("playbook check: unexpected status", "playbook_id", playbookID, "status", resp.StatusCode)
-		return false
+		return playbookUnknown
 	}
 
-	// Parse the response: gateway wraps the list as {"playbooks": [...]}.
 	var result struct {
 		Playbooks []map[string]interface{} `json:"playbooks"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		slog.Warn("playbook check: failed to decode response", "err", err)
-		return false
+		return playbookUnknown
 	}
-	return len(result.Playbooks) > 0
+	if len(result.Playbooks) == 0 {
+		return playbookNotFound
+	}
+	return playbookFound
 }
 
 // ── example ──────────────────────────────────────────────────────────────

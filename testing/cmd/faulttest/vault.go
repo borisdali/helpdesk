@@ -150,6 +150,68 @@ func cmdVault(args []string) {
 
 // ── vault list ────────────────────────────────────────────────────────────
 
+// playbookGatewayInfo holds live data fetched from the gateway for one playbook series.
+type playbookGatewayInfo struct {
+	check          playbookCheckResult
+	source         string  // "system" | "imported" | "manual" | "generated"
+	totalRuns      int
+	resolved       int
+	resolutionRate float64 // 0.0–1.0
+	lastRunAt      string  // RFC3339 or empty
+}
+
+// fetchPlaybookInfo queries the gateway for a playbook series and returns existence
+// status plus inline run stats in a single HTTP call.
+func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo {
+	reqURL := gatewayURL + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return playbookGatewayInfo{check: playbookUnknown}
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return playbookGatewayInfo{check: playbookUnknown}
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return playbookGatewayInfo{check: playbookAuthError}
+	case http.StatusNotFound:
+		return playbookGatewayInfo{check: playbookNotFound}
+	case http.StatusOK:
+	default:
+		return playbookGatewayInfo{check: playbookUnknown}
+	}
+
+	var result struct {
+		Playbooks []struct {
+			Source string `json:"source"`
+			Stats  *struct {
+				TotalRuns      int     `json:"total_runs"`
+				Resolved       int     `json:"resolved"`
+				ResolutionRate float64 `json:"resolution_rate"`
+				LastRunAt      string  `json:"last_run_at"`
+			} `json:"stats"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Playbooks) == 0 {
+		return playbookGatewayInfo{check: playbookNotFound}
+	}
+	info := playbookGatewayInfo{check: playbookFound, source: result.Playbooks[0].Source}
+	if s := result.Playbooks[0].Stats; s != nil {
+		info.totalRuns = s.TotalRuns
+		info.resolved = s.Resolved
+		info.resolutionRate = s.ResolutionRate
+		info.lastRunAt = s.LastRunAt
+	}
+	return info
+}
+
 func vaultList(args []string) {
 	fs := flag.NewFlagSet("vault list", flag.ExitOnError)
 	var target string
@@ -164,8 +226,7 @@ func vaultList(args []string) {
 
 	runs, _ := loadHistory()
 
-	// Build last-run lookup: fault_id -> (timestamp, passed).
-	// When --target is set, only consider runs against that target.
+	// Build last-run lookup from faulttest history: fault_id → (timestamp, passed).
 	type lastResult struct {
 		ts     string
 		passed bool
@@ -187,8 +248,14 @@ func vaultList(args []string) {
 		fmt.Printf("Target: %s\n\n", target)
 	}
 
-	fmt.Printf("%-32s %-28s %-12s %s\n", "FAULT", "PLAYBOOK", "LAST RUN", "STATUS")
-	fmt.Println(strings.Repeat("-", 92))
+	const (
+		colFault     = 32
+		colPlaybook  = 26
+		colFaultTest = 22 // "2026-04-18  PASS" or "(never)" or "READY"
+		// incidents column is the remainder
+	)
+	fmt.Printf("%-*s %-*s %-*s %s\n", colFault, "FAULT", colPlaybook, "PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
+	fmt.Println(strings.Repeat("-", colFault+1+colPlaybook+1+colFaultTest+1+50))
 
 	for _, f := range cat.Failures {
 		playbookID := f.Remediation.PlaybookID
@@ -197,34 +264,62 @@ func vaultList(args []string) {
 			playbookDisplay = "(none)"
 		}
 
+		// ── fault test column ────────────────────────────────────────────
 		last := lastRun[f.ID]
-		lastTs := "(never)"
-		if last.ts != "" {
+		var faultTestCol string
+		switch {
+		case playbookID == "":
+			faultTestCol = "NO PLAYBOOK"
+		case last.ts == "":
+			faultTestCol = "(never)"
+		default:
+			date := last.ts
 			if t, err := time.Parse(time.RFC3339, last.ts); err == nil {
-				lastTs = t.Format("2006-01-02")
+				date = t.Format("2006-01-02")
 			} else if len(last.ts) >= 10 {
-				lastTs = last.ts[:10]
+				date = last.ts[:10]
 			}
-		}
-
-		status := "-"
-		if last.ts != "" {
+			result := "FAIL"
 			if last.passed {
-				status = "PASS"
-			} else {
-				status = "FAIL"
+				result = "PASS"
 			}
+			faultTestCol = date + "  " + result
 		}
-		if playbookID == "" {
-			status = "NO PLAYBOOK"
-		} else if cfg.GatewayURL != "" {
-			// Verify playbook exists on gateway when --gateway is provided.
-			if !validatePlaybookExists(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID) {
-				status = "PLAYBOOK NOT FOUND"
+
+		// ── incidents column (gateway) ────────────────────────────────────
+		incidentCol := "-"
+		if playbookID != "" && cfg.GatewayURL != "" {
+			info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID)
+			switch info.check {
+			case playbookAuthError:
+				incidentCol = "AUTH ERROR"
+				faultTestCol = faultTestCol // no change
+			case playbookNotFound:
+				incidentCol = "MISSING"
+			case playbookFound:
+				if info.totalRuns == 0 {
+					if info.source != "" {
+						incidentCol = "0 runs  (" + info.source + ")"
+					} else {
+						incidentCol = "0 runs"
+					}
+					if faultTestCol == "(never)" {
+						faultTestCol = "READY"
+					}
+				} else {
+					lastDate := "-"
+					if info.lastRunAt != "" {
+						if t, err := time.Parse(time.RFC3339, info.lastRunAt); err == nil {
+							lastDate = t.Format("2006-01-02")
+						}
+					}
+					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  last: %s",
+						info.totalRuns, info.resolutionRate*100, lastDate)
+				}
 			}
 		}
 
-		fmt.Printf("%-32s %-28s %-12s %s\n", f.ID, playbookDisplay, lastTs, status)
+		fmt.Printf("%-*s %-*s %-*s %s\n", colFault, f.ID, colPlaybook, playbookDisplay, colFaultTest, faultTestCol, incidentCol)
 	}
 }
 
