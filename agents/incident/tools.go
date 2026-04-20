@@ -19,7 +19,17 @@ import (
 
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+
+	"helpdesk/internal/audit"
 )
+
+// toolAuditor records tool execution events to the audit store.
+// Set during initialization when auditing is enabled.
+var toolAuditor *audit.ToolAuditor
+
+// currentTraceStore holds the active trace ID for each A2A request.
+// Set during initialization and shared with ServeWithTracing.
+var currentTraceStore *audit.CurrentTraceStore
 
 // --- Command helpers ---
 
@@ -366,7 +376,8 @@ type IncidentBundleResult struct {
 }
 
 func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (IncidentBundleResult, error) {
-	now := time.Now()
+	start := time.Now()
+	now := start
 	incidentID := generateShortID()
 
 	if args.InfraKey == "" {
@@ -467,8 +478,23 @@ func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (
 		Errors:     allErrors,
 	}
 
+	// Record tool execution to audit store.
+	if toolAuditor != nil {
+		resultJSON, _ := json.Marshal(result)
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name: "create_incident_bundle",
+			Parameters: map[string]any{
+				"infra_key":   args.InfraKey,
+				"description": args.Description,
+				"layers":      result.Layers,
+			},
+		}, audit.ToolResult{Output: string(resultJSON)}, time.Since(start))
+	}
+
 	// Automatically generate a playbook draft when the incident is resolved or
 	// escalated and the gateway is configured — no opt-in required.
+	// Use the real audit trace ID (from the incoming A2A request) so that
+	// from-trace can find the tool execution events we just recorded above.
 	outcome := args.Outcome
 	shouldGenerateDraft := args.GeneratePlaybookDraft ||
 		(outcome == "resolved" || outcome == "escalated") && os.Getenv("HELPDESK_GATEWAY_URL") != ""
@@ -476,8 +502,14 @@ func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (
 		if outcome == "" {
 			outcome = "resolved"
 		}
-		if draft, playbookID, err := requestPlaybookDraft(ctx, incidentID, outcome); err != nil {
-			slog.Warn("playbook draft generation failed", "incident_id", incidentID, "err", err)
+		traceID := incidentID // fallback when auditd is not configured
+		if currentTraceStore != nil {
+			if id := currentTraceStore.Get(); id != "" {
+				traceID = id
+			}
+		}
+		if draft, playbookID, err := requestPlaybookDraft(ctx, traceID, outcome); err != nil {
+			slog.Warn("playbook draft generation failed", "incident_id", incidentID, "trace_id", traceID, "err", err)
 		} else {
 			result.PlaybookDraft = draft
 			result.PlaybookID = playbookID

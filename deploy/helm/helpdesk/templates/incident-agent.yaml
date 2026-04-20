@@ -58,6 +58,15 @@ spec:
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
+            - name: HELPDESK_GATEWAY_URL
+              value: "http://{{ include "helpdesk.fullname" . }}-gateway:{{ .Values.gateway.port }}"
+            {{- if .Values.agents.incident.clientAPIKeySecret }}
+            - name: HELPDESK_CLIENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agents.incident.clientAPIKeySecret }}
+                  key: {{ .Values.agents.incident.clientAPIKeyKey | default "api-key" }}
+            {{- end }}
             {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}

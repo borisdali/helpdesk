@@ -297,12 +297,12 @@ func vaultList(args []string) {
 			case playbookNotFound:
 				incidentCol = "MISSING"
 			case playbookFound:
+				sourceTag := ""
+				if info.source != "" {
+					sourceTag = "  (" + info.source + ")"
+				}
 				if info.totalRuns == 0 {
-					if info.source != "" {
-						incidentCol = "0 runs  (" + info.source + ")"
-					} else {
-						incidentCol = "0 runs"
-					}
+					incidentCol = "0 runs" + sourceTag
 					if faultTestCol == "(never)" {
 						faultTestCol = "READY"
 					}
@@ -313,8 +313,8 @@ func vaultList(args []string) {
 							lastDate = t.Format("2006-01-02")
 						}
 					}
-					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  last: %s",
-						info.totalRuns, info.resolutionRate*100, lastDate)
+					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  last: %s%s",
+						info.totalRuns, info.resolutionRate*100, lastDate, sourceTag)
 				}
 			}
 		}

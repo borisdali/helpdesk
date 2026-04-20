@@ -55,6 +55,10 @@ func (a *Authorizer) Middleware(provider identity.Provider) func(http.Handler) h
 			}
 
 			// Step 3: propagate principal and proceed.
+			slog.Debug("authz: request allowed",
+				"pattern", r.Pattern,
+				"principal", principal.EffectiveID(),
+				"anonymous", principal.IsAnonymous())
 			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), principal)))
 		})
 	}

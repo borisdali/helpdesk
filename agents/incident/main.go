@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/google/uuid"
 	"google.golang.org/adk/agent/llmagent"
 
 	"helpdesk/agentutil"
@@ -32,7 +33,13 @@ func main() {
 	if auditStore != nil {
 		defer auditStore.Close()
 	}
-	traceStore := &audit.CurrentTraceStore{}
+	currentTraceStore = &audit.CurrentTraceStore{}
+	traceStore := currentTraceStore
+	if auditStore != nil {
+		sessionID := "incident_" + uuid.New().String()[:8]
+		toolAuditor = audit.NewToolAuditorWithTraceStore(auditStore, "incident_agent", sessionID, currentTraceStore)
+		slog.Info("tool auditing enabled", "session_id", sessionID)
+	}
 
 	slog.Info("governance", "audit", cfg.AuditEnabled, "policy", false)
 

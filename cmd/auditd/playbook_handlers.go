@@ -69,14 +69,19 @@ func (s *playbookServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
 	q := audit.DefaultPlaybookListQuery()
-	if r.URL.Query().Get("active_only") == "false" {
+	if v := r.URL.Query().Get("active_only"); v == "false" {
 		q.ActiveOnly = false
+	} else if v == "true" {
+		q.ActiveOnly = true
 	}
 	if r.URL.Query().Get("include_system") == "false" {
 		q.IncludeSystem = false
 	}
 	if v := r.URL.Query().Get("series_id"); v != "" {
 		q.SeriesID = v
+	}
+	if v := r.URL.Query().Get("source"); v != "" {
+		q.Source = v
 	}
 
 	playbooks, err := s.store.List(r.Context(), q)
