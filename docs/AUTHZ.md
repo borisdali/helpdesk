@@ -1,6 +1,6 @@
 # aiHelpDesk HTTP Authorization
 
-This document covers HTTP-level authorization — who can call which endpoint and with which role. This is distinct from [policy-based governance](AIGOVERNANCE.md3-policy-engine), which determines what an agent is allowed to do once a request is admitted.
+This document covers HTTP-level authorization — who can call which endpoint and with which role. This is distinct from [policy-based governance](AIGOVERNANCE.md#3-policy-engine), which determines what an agent is allowed to do once a request is admitted.
 
 **Quick reference:** To find out what role you need to call a specific endpoint, use `GET /api/v1/roles` — the live authorization table the system is currently enforcing. See [§5. Finding Your Role](#5-finding-your-role).
 

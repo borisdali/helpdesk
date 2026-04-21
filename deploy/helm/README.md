@@ -1061,6 +1061,8 @@ spec:
               key: api-key
         - name: HOME
           value: /home/helpdesk             # so psql finds /home/helpdesk/.pgpass
+        - name: HELPDESK_FAULT_HISTORY_FILE
+          value: /reports/history.json      # persist history alongside the report
         volumeMounts:
         - name: infra-config
           mountPath: /etc/helpdesk/infrastructure.json
@@ -1084,11 +1086,12 @@ spec:
         emptyDir: {}
 EOF
 
-# Stream the logs, then copy the report out before the pod is cleaned up
+# Stream the logs, then copy the report and history out before the pod is cleaned up
 kubectl -n helpdesk-system logs -f job/faulttest
 kubectl -n helpdesk-system cp \
   $(kubectl -n helpdesk-system get pod -l job-name=faulttest -o jsonpath='{.items[0].metadata.name}'):/reports \
   ./faulttest-reports/
+# faulttest-reports/ now contains both the JSON report and history.json
 ```
 
 ### Listing faults without a full run
@@ -1103,11 +1106,154 @@ kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
 
 > **`kubectl run` pitfalls:** `--env` flags must appear *before* `--` (they are kubectl flags, not container args). Always pass `--api-key` explicitly and `--infra-config` pointing to a mounted path — omitting either produces 401 errors or psql falling back to the local Unix socket.
 
+### LLM-as-judge scoring
+
+By default faulttest scores responses using keyword and tool-call matching. Enable the LLM-as-judge to get semantic scoring — a second model call evaluates whether the agent correctly identified the root cause and recommended appropriate remediation.
+
+Add these args and env to the faulttest Job spec from Step 2:
+
+```yaml
+args:
+  - faulttest
+  - run
+  - --conn=alloydb-on-vm
+  - --db-agent=http://helpdesk-gateway:8080
+  - --api-key=$(HELPDESK_CLIENT_API_KEY)
+  - --infra-config=/etc/helpdesk/infrastructure.json
+  - --report-dir=/reports
+  - --judge                                      # add this
+  - --judge-vendor=anthropic                     # add this
+  - --judge-model=claude-haiku-4-5-20251001      # add this
+  - --judge-api-key=$(ANTHROPIC_API_KEY)         # add this
+env:
+  - name: HELPDESK_CLIENT_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: <your-gateway.clientAPIKeySecret value>
+        key: api-key
+  - name: ANTHROPIC_API_KEY         # add this
+    valueFrom:
+      secretKeyRef:
+        name: <your-anthropic-secret>
+        key: api-key
+```
+
+When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnosis*0.30 + tool*0.20` to `tool*0.40 + judge*0.40 + keyword*0.20`, and each result includes a one-sentence reasoning string explaining the score. The judge is opt-in — omitting `--judge` falls back to the default keyword-based scoring and requires no additional API key.
+
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
 
-## 11. Troubleshooting
+## 11. Fleet Playbooks & Vault
 
-### 10.1 Interactive REPL Shows Empty Responses
+Playbooks are the operational memory of aiHelpDesk — structured, versioned remediation instructions that agents use when handling incidents. The vault is the collection of all playbooks paired with their fault scenarios, giving you a live view of operational coverage.
+
+### Browsing playbooks
+
+Port-forward the gateway for local access:
+
+```bash
+kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
+```
+
+Then query the playbook API:
+
+```bash
+# List all active playbooks
+curl -s http://localhost:8080/api/v1/fleet/playbooks \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, source:.source, runs:.stats.total_runs}'
+
+# Include inactive (draft) playbooks
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks | length'
+
+# Filter to auto-generated drafts from resolved incidents
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false&source=generated" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, active:.is_active}'
+```
+
+### Auto-generated playbook drafts
+
+When the incident agent resolves an incident (with `outcome: resolved` or `outcome: escalated`), it automatically synthesizes a playbook draft from the diagnostic trace and stores it as an inactive draft (`source: generated`, `is_active: false`). No manual action is required — drafts accumulate as incidents are resolved.
+
+To list drafts waiting for review:
+
+```bash
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false&source=generated" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, created:.created_at}'
+```
+
+### Reviewing and activating a draft
+
+Fetch a draft, review its guidance, then activate it to make it available for future incidents:
+
+```bash
+# Inspect a draft playbook
+curl -s http://localhost:8080/api/v1/fleet/playbooks/<playbook_id> \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
+
+# Activate (promotes to active; deactivates any prior version in the same series)
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/<playbook_id>/activate \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '{id:.playbook_id, name:.name, active:.is_active}'
+```
+
+Before activating, consider running the draft through faulttest remediation mode (see below) to validate it against a live injected fault on staging.
+
+### Vault — fault↔playbook coverage
+
+`faulttest vault list` shows which fault scenarios have linked playbooks and their last run status, querying the gateway for live incident stats. Run it as a one-off pod inside the cluster:
+
+```bash
+export HELPDESK_CLIENT_API_KEY=$(kubectl -n helpdesk-system get secret <your-clientAPIKeySecret> \
+  -o jsonpath='{.data.api-key}' | base64 -d)
+
+kubectl -n helpdesk-system run faulttest-vault --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:latest \
+  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_CLIENT_API_KEY" \
+  -- faulttest vault list \
+    --gateway http://helpdesk-gateway:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY
+```
+
+`faulttest vault status` reads the local run history file, not the gateway. After copying the report directory out in §10, also copy the history file and run vault status locally against it:
+
+```bash
+# history.json is copied out alongside the report by the kubectl cp in §10
+# Run vault status locally against it:
+HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status
+HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status --since-days 7
+HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status --fault db-max-connections
+```
+
+> To accumulate history across Job runs, mount a PersistentVolume at `/reports` (replacing the `emptyDir`) so that `history.json` persists between Jobs.
+
+### Remediation mode
+
+To validate that a playbook actually resolves the fault it claims to fix, add `--remediate` and `--gateway` to the faulttest Job from §10. The key additions to the Job spec:
+
+```yaml
+args:
+  - faulttest
+  - run
+  - --conn=alloydb-on-vm
+  - --db-agent=http://helpdesk-gateway:8080
+  - --api-key=$(HELPDESK_CLIENT_API_KEY)
+  - --infra-config=/etc/helpdesk/infrastructure.json
+  - --gateway=http://helpdesk-gateway:8080   # add this
+  - --remediate                               # add this
+  - --report-dir=/reports
+```
+
+To validate a specific fault+playbook pair, also add `--id db-max-connections` (or any fault ID from `faulttest list`).
+
+> **Staging only:** fault injection modifies database and OS state. Never run against a production cluster. Ensure the target host has a `test` or `chaos` tag in `infrastructure.json`.
+
+## 12. Troubleshooting
+
+### 12.1 Interactive REPL Shows Empty Responses
 
 **Symptom:** When running the interactive Orchestrator in a container, agent responses appear empty and require pressing Enter to display.
 
@@ -1176,7 +1322,7 @@ Check the database agent logs for the actual error:
 kubectl -n helpdesk-system logs deploy/helpdesk-database-agent | grep -i "psql\|pgpass\|password"
 ```
 
-## 11. Uninstall
+## 13. Uninstall
 
 ```bash
 helm uninstall helpdesk --namespace helpdesk-system

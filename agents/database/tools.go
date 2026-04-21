@@ -292,7 +292,14 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}
-	env := []string{"PGCONNECT_TIMEOUT=10"}
+	env := []string{
+		"PGCONNECT_TIMEOUT=10",
+		// Prevent diagnostic queries from blocking indefinitely on lock contention.
+		// If a query cannot acquire a lock within 10s, PostgreSQL returns an error
+		// ("canceling statement due to lock timeout") that the agent can reason about,
+		// rather than the query hanging until the overall context deadline fires.
+		"PGOPTIONS=-c lock_timeout=10000",
+	}
 	output, err := cmdRunner.Run(ctx, "psql", args, env)
 	duration := time.Since(start)
 
@@ -448,7 +455,7 @@ func estimateRowsAffected(ctx context.Context, connStr, query string) (int, bool
 	if connStr != "" {
 		args = append([]string{connStr}, args...)
 	}
-	out, err := cmdRunner.Run(ctx, "psql", args, []string{"PGCONNECT_TIMEOUT=10"})
+	out, err := cmdRunner.Run(ctx, "psql", args, []string{"PGCONNECT_TIMEOUT=10", "PGOPTIONS=-c lock_timeout=10000"})
 	if err != nil {
 		return 0, false
 	}
@@ -1992,7 +1999,7 @@ func runPsqlTuples(ctx context.Context, connStr string, query string, toolName s
 	if dbInfo.ConnectionStr != "" {
 		psqlArgs = append([]string{dbInfo.ConnectionStr}, psqlArgs...)
 	}
-	output, err := cmdRunner.Run(ctx, "psql", psqlArgs, []string{"PGCONNECT_TIMEOUT=10"})
+	output, err := cmdRunner.Run(ctx, "psql", psqlArgs, []string{"PGCONNECT_TIMEOUT=10", "PGOPTIONS=-c lock_timeout=10000"})
 	duration := time.Since(start)
 
 	if toolAuditor != nil {

@@ -573,9 +573,127 @@ List available built-in faults:
 ./faulttest list
 ```
 
+### LLM-as-judge scoring
+
+By default faulttest scores responses using keyword and tool-call matching. Enable the LLM-as-judge to get semantic scoring — a second model call evaluates whether the agent correctly identified the root cause and recommended appropriate remediation:
+
+```bash
+./faulttest run \
+  --conn "host=staging-db port=5432 dbname=myapp user=dbuser" \
+  --db-agent http://localhost:8080 \
+  --api-key $HELPDESK_CLIENT_API_KEY \
+  --infra-config infrastructure.json \
+  --judge \
+  --judge-vendor anthropic \
+  --judge-model claude-haiku-4-5-20251001 \
+  --judge-api-key $ANTHROPIC_API_KEY
+```
+
+When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnosis*0.30 + tool*0.20` to `tool*0.40 + judge*0.40 + keyword*0.20`, and each result includes a one-sentence reasoning string explaining the score. The judge is opt-in — omitting `--judge` falls back to the default keyword-based scoring and requires no additional API key.
+
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
 
-## 9. Troubleshooting
+## 9. Fleet Playbooks & Vault
+
+Playbooks are the operational memory of aiHelpDesk — structured, versioned remediation instructions that agents use when handling incidents. The vault is the collection of all playbooks paired with their fault scenarios, giving you a live view of operational coverage.
+
+### Browsing playbooks
+
+```bash
+# List all active playbooks
+curl -s http://localhost:8080/api/v1/fleet/playbooks \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, source:.source, runs:.stats.total_runs}'
+
+# Include inactive (draft) playbooks
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks | length'
+
+# Filter to auto-generated drafts from resolved incidents
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false&source=generated" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, active:.is_active}'
+```
+
+### Auto-generated playbook drafts
+
+When the incident agent resolves an incident (with `outcome: resolved` or `outcome: escalated`), it automatically synthesizes a playbook draft from the diagnostic trace and stores it as an inactive draft (`source: generated`, `is_active: false`). No manual action is required — drafts accumulate as incidents are resolved.
+
+To list drafts waiting for review:
+
+```bash
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false&source=generated" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, created:.created_at}'
+```
+
+### Reviewing and activating a draft
+
+Fetch a draft, review its guidance, then activate it to make it available for future incidents:
+
+```bash
+# Inspect a draft playbook
+curl -s http://localhost:8080/api/v1/fleet/playbooks/<playbook_id> \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
+
+# Activate (promotes to active; deactivates any prior version in the same series)
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/<playbook_id>/activate \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '{id:.playbook_id, name:.name, active:.is_active}'
+```
+
+Before activating, consider running the draft through faulttest remediation mode (see below) to validate it against a live injected fault on staging.
+
+### Vault — fault↔playbook coverage
+
+`faulttest vault list` shows which fault scenarios have linked playbooks and their last run status, querying the gateway for live incident stats:
+
+```bash
+./faulttest vault list \
+  --gateway http://localhost:8080 \
+  --api-key $HELPDESK_CLIENT_API_KEY
+```
+
+`faulttest vault status` shows pass-rate trends from the local run history file (`~/.faulttest/history.json`), written automatically after each `faulttest run`. No gateway connection needed:
+
+```bash
+# Overall trend (last 30 days)
+./faulttest vault status
+
+# Narrow to recent runs or a specific fault
+./faulttest vault status --since-days 7
+./faulttest vault status --fault db-max-connections
+```
+
+### Remediation mode
+
+To validate that a playbook actually resolves the fault it claims to fix, run faulttest with `--remediate`. This injects the fault, scores the agent's diagnosis, triggers the linked playbook, and verifies recovery:
+
+```bash
+# Run all faults with remediation enabled
+./faulttest run \
+  --conn "host=staging-db port=5432 dbname=myapp user=dbuser" \
+  --db-agent http://localhost:8080 \
+  --api-key $HELPDESK_CLIENT_API_KEY \
+  --infra-config infrastructure.json \
+  --gateway http://localhost:8080 \
+  --remediate
+
+# Validate a specific fault+playbook pair
+./faulttest run \
+  --conn "host=staging-db port=5432 dbname=myapp user=dbuser" \
+  --db-agent http://localhost:8080 \
+  --api-key $HELPDESK_CLIENT_API_KEY \
+  --infra-config infrastructure.json \
+  --gateway http://localhost:8080 \
+  --remediate \
+  --id db-max-connections
+```
+
+> **Staging only:** fault injection modifies database and OS state. Never run against production. Ensure the target host has a `test` or `chaos` tag in `infrastructure.json`.
+
+## 10. Troubleshooting
 
 ### Port already in use
 
