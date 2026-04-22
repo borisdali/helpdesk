@@ -1,10 +1,12 @@
 
 <p align="center">
+  <a href="https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a">
   <img alt="aiHelpDesk_logo" src="https://github.com/user-attachments/assets/9687ccd4-a2ad-4c85-9466-bcb6c006e8ac" width="40%"/>
+  </a>
 </p>
 
 
-# aiHelpDesk: Agentic AI DB SRE support system that Learns from every incident
+# aiHelpDesk: Agentic AI DB SRE support system that learns from every incident
 
 aiHelpDesk is a Go-based AI multi-agent support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) issues on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
 
@@ -19,10 +21,12 @@ Every resolved incident automatically proposes a playbook draft. Every successfu
 ## The Operational SRE/DBA Flywheel
 
 <p align="center">
+  <a href="https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a">
   <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="80%"/>
+  </a>
 </p>
 
-The Vault is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents, and proposes updates when a successful incident trace suggests a better approach. See [here](docs/VAULT.md) for the full story.
+The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents, and proposes updates when a successful incident trace suggests a better approach. See [here](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c) for the full story.
 
 ## Key Capabilities
 
