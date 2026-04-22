@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
+	"helpdesk/internal/infra"
 	"helpdesk/testing/testutil"
 )
 
@@ -208,12 +210,33 @@ func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string)
 	return nil
 }
 
+// resolvedConnStr resolves cfg.ConnStr through the infrastructure config so
+// that named aliases (e.g. "alloydb-on-vm") are expanded to a real DSN before
+// being passed to psql. Falls back to cfg.ConnStr when no infra config is set
+// or the alias is not found.
+func (r *Remediator) resolvedConnStr() string {
+	if r.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(r.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[r.cfg.ConnStr]; ok {
+				if db.PasswordEnv != "" {
+					if pw := os.Getenv(db.PasswordEnv); pw != "" {
+						_ = pw // psql reads PGPASSWORD from env; caller sets it
+					}
+				}
+				return db.ResolvedConnectionString()
+			}
+		}
+	}
+	return r.cfg.ConnStr
+}
+
 func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
+	connStr := r.resolvedConnStr()
 
 	for {
-		err := testutil.RunSQLString(ctx, r.cfg.ConnStr, verifySQL)
+		err := testutil.RunSQLString(ctx, connStr, verifySQL)
 		if err == nil {
 			return time.Since(start).Seconds(), nil
 		}

@@ -381,9 +381,13 @@ func cmdRun(args []string) {
 		if !evalResult.Passed {
 			status = "FAIL"
 		}
-		fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% category=%d%%)\n",
+		diagLabel := "category"
+		if !evalResult.JudgeSkipped {
+			diagLabel = "judge"
+		}
+		fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% %s=%d%%)\n",
 			status, int(evalResult.Score*100),
-			int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), int(evalResult.DiagnosisScore*100))
+			int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), diagLabel, int(evalResult.DiagnosisScore*100))
 		if evalResult.RemediationAttempted {
 			remStatus := "PASS"
 			if !evalResult.RemediationPassed {
@@ -415,6 +419,12 @@ func cmdRun(args []string) {
 	target := cfg.AgentConnStr
 	if target == "" {
 		target = connStrHost(cfg.ConnStr)
+	}
+	// When --conn is a named infrastructure alias (e.g. "alloydb-on-vm") rather
+	// than a DSN, connStrHost returns "". Fall back to the alias itself so the
+	// target column in vault status is always populated.
+	if target == "" {
+		target = cfg.ConnStr
 	}
 	if err := appendHistory(report, target); err != nil {
 		slog.Warn("failed to append to run history", "err", err, "path", historyFilePath())

@@ -23,10 +23,11 @@ type historyRun struct {
 	// Target identifies the database server that was tested — the --agent-conn
 	// alias (e.g. "alloydb-on-vm") when set, otherwise the hostname extracted
 	// from --conn. Allows vault commands to filter by deployment environment.
-	Target    string               `json:"target,omitempty"`
-	Total     int                  `json:"total"`
-	Passed    int                  `json:"passed"`
-	Results   []historyFaultResult `json:"results"`
+	Target       string               `json:"target,omitempty"`
+	Total        int                  `json:"total"`
+	Passed       int                  `json:"passed"`
+	JudgeEnabled bool                 `json:"judge_enabled,omitempty"`
+	Results      []historyFaultResult `json:"results"`
 }
 
 // historyFaultResult holds the outcome of one fault within a history run.
@@ -84,13 +85,21 @@ func appendHistory(report Report, target string) error {
 			OverallScore:     r.OverallScore,
 		})
 	}
+	judgeEnabled := false
+	for _, r := range faultResults {
+		if r.JudgeUsed {
+			judgeEnabled = true
+			break
+		}
+	}
 	runs = append(runs, historyRun{
-		RunID:     report.ID,
-		Timestamp: report.Timestamp,
-		Target:    target,
-		Total:     report.Summary.Total,
-		Passed:    report.Summary.Passed,
-		Results:   faultResults,
+		RunID:        report.ID,
+		Timestamp:    report.Timestamp,
+		Target:       target,
+		Total:        report.Summary.Total,
+		Passed:       report.Summary.Passed,
+		JudgeEnabled: judgeEnabled,
+		Results:      faultResults,
 	})
 
 	data, err := json.MarshalIndent(runs, "", "  ")
@@ -373,11 +382,11 @@ func vaultStatus(args []string) {
 	fmt.Println(header + " ===\n")
 
 	if target == "" {
-		fmt.Printf("%-10s %-20s %-20s %s\n", "DATE", "TARGET", "RUN ID", "PASS RATE")
-		fmt.Println(strings.Repeat("-", 70))
+		fmt.Printf("%-10s %-20s %-20s %-6s %s\n", "DATE", "TARGET", "RUN ID", "JUDGE", "PASS RATE")
+		fmt.Println(strings.Repeat("-", 78))
 	} else {
-		fmt.Printf("%-10s %-20s %s\n", "DATE", "RUN ID", "PASS RATE")
-		fmt.Println(strings.Repeat("-", 50))
+		fmt.Printf("%-10s %-20s %-6s %s\n", "DATE", "RUN ID", "JUDGE", "PASS RATE")
+		fmt.Println(strings.Repeat("-", 58))
 	}
 	for _, run := range filtered {
 		var date string
@@ -388,10 +397,14 @@ func vaultStatus(args []string) {
 		if run.Total > 0 {
 			rate = float64(run.Passed) / float64(run.Total) * 100
 		}
+		judge := "no"
+		if run.JudgeEnabled {
+			judge = "yes"
+		}
 		if target == "" {
-			fmt.Printf("%-10s %-20s %-20s %.0f%% (%d/%d)\n", date, run.Target, run.RunID, rate, run.Passed, run.Total)
+			fmt.Printf("%-10s %-20s %-20s %-6s %.0f%% (%d/%d)\n", date, run.Target, run.RunID, judge, rate, run.Passed, run.Total)
 		} else {
-			fmt.Printf("%-10s %-20s %.0f%% (%d/%d)\n", date, run.RunID, rate, run.Passed, run.Total)
+			fmt.Printf("%-10s %-20s %-6s %.0f%% (%d/%d)\n", date, run.RunID, judge, rate, run.Passed, run.Total)
 		}
 	}
 
