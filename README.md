@@ -4,9 +4,9 @@
 </p>
 
 
-# aiHelpDesk: The AI DB SRE That Learns From Every Incident
+# aiHelpDesk: Agentic AI DB SRE support system that Learns from every incident
 
-aiHelpDesk is a Go-based AI multi-agent system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) issues on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
+aiHelpDesk is a Go-based AI multi-agent support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) issues on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
 
 Two things set aiHelpDesk apart from a general-purpose AI assistant:
 
@@ -35,7 +35,11 @@ The Vault is the mechanism that closes this loop. It holds every playbook, track
 
 ## AI-Assisted Database Management
 
-While SaaS DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. aiHelpDesk is the first product from the DDS Group on the path of AI-Assisted Database Management: a new breed of products where intelligence, governance, and operational memory live in your stack, not in a vendor's cloud.
+While SaaS DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a) for extensive treatment of this topic and, in particular, check out the 13 specific customer expectations of the cloud provider's DBaaS and how the actual cloud offerings mostly fall short them.
+
+Enter the world of AI-Assisted Database Management products.
+
+aiHelpDesk is the first product from the DDS Group on the path of AI-Assisted Database Management: a new breed of products where intelligence, governance, and operational memory live in your stack, not in a vendor's cloud.
 
 See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before diving in.
 
