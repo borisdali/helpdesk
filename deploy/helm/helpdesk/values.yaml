@@ -83,6 +83,10 @@ agents:
     # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
     auditAPIKeySecret: ""
     auditAPIKeyKey: "api-key"
+    # Secret containing the Bearer token this agent sends to the gateway when calling
+    # from-trace to auto-synthesise playbook drafts (HELPDESK_CLIENT_API_KEY).
+    clientAPIKeySecret: ""
+    clientAPIKeyKey: "api-key"
 
   # Research agent for Gemini models - provides web search via GoogleSearch.
   # GoogleSearch cannot be combined with function declarations, so this agent

@@ -132,21 +132,23 @@ func (g *Gateway) handlePlaybookImport(w http.ResponseWriter, r *http.Request) {
 
 // importPlaybookYAML is the intermediate struct for parsing YAML playbook files,
 // matching the format used by system playbooks in the playbooks/ package.
+// Guidance, Symptoms, and Escalation use interface{} because LLM-generated YAML
+// may emit nested maps or lists rather than plain strings.
 type importPlaybookYAML struct {
-	SeriesID        string   `yaml:"series_id"`
-	Name            string   `yaml:"name"`
-	Version         string   `yaml:"version"`
-	ProblemClass    string   `yaml:"problem_class"`
-	Author          string   `yaml:"author"`
-	Description     string   `yaml:"description"`
-	Symptoms        []string `yaml:"symptoms"`
-	Guidance        string   `yaml:"guidance"`
-	Escalation      []string `yaml:"escalation"`
-	TargetHints     []string `yaml:"target_hints"`
-	EntryPoint      bool     `yaml:"entry_point"`
-	EscalatesTo     []string `yaml:"escalates_to"`
-	RequiresEvidence []string `yaml:"requires_evidence"`
-	ExecutionMode   string   `yaml:"execution_mode"`
+	SeriesID         string      `yaml:"series_id"`
+	Name             string      `yaml:"name"`
+	Version          string      `yaml:"version"`
+	ProblemClass     string      `yaml:"problem_class"`
+	Author           string      `yaml:"author"`
+	Description      string      `yaml:"description"`
+	Symptoms         interface{} `yaml:"symptoms"`
+	Guidance         interface{} `yaml:"guidance"`
+	Escalation       interface{} `yaml:"escalation"`
+	TargetHints      []string    `yaml:"target_hints"`
+	EntryPoint       bool        `yaml:"entry_point"`
+	EscalatesTo      []string    `yaml:"escalates_to"`
+	RequiresEvidence []string    `yaml:"requires_evidence"`
+	ExecutionMode    string      `yaml:"execution_mode"`
 }
 
 // parsePlaybookYAML parses a canonical YAML playbook and returns a draft response.
@@ -177,9 +179,9 @@ func parsePlaybookYAML(text string, hints PlaybookImportHints) (*PlaybookImportR
 		ProblemClass:     y.ProblemClass,
 		Author:           y.Author,
 		Description:      y.Description,
-		Symptoms:         y.Symptoms,
-		Guidance:         y.Guidance,
-		Escalation:       y.Escalation,
+		Symptoms:         yamlToStringSlice(y.Symptoms),
+		Guidance:         yamlToString(y.Guidance),
+		Escalation:       yamlToStringSlice(y.Escalation),
 		TargetHints:      y.TargetHints,
 		EntryPoint:       y.EntryPoint,
 		EscalatesTo:      y.EscalatesTo,
@@ -353,4 +355,41 @@ func parseImportResponse(raw string) (*audit.Playbook, []string, float64, error)
 	}
 
 	return pb, warnings, confidence, nil
+}
+
+// yamlToString converts an interface{} value (which may be a string, map, or
+// sequence) to a plain string. Non-string values are serialized back to YAML.
+// This handles LLM-generated playbooks that may emit nested structures for
+// fields the schema defines as strings (e.g. guidance).
+func yamlToString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := yaml.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// yamlToStringSlice converts an interface{} value to []string.
+// Each element is converted to string via yamlToString.
+func yamlToStringSlice(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	if items, ok := v.([]interface{}); ok {
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			out = append(out, yamlToString(item))
+		}
+		return out
+	}
+	if s, ok := v.(string); ok {
+		return []string{s}
+	}
+	return []string{yamlToString(v)}
 }

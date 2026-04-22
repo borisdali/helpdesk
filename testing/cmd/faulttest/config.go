@@ -98,7 +98,8 @@ type KeywordSpec struct {
 
 // DiagnosisSpec defines the expected diagnosis category.
 type DiagnosisSpec struct {
-	Category string `yaml:"category"`
+	Category  string `yaml:"category"`
+	Narrative string `yaml:"narrative,omitempty"`
 }
 
 // HarnessConfig holds runtime configuration for the test harness.
@@ -145,6 +146,24 @@ type HarnessConfig struct {
 	SourceFilter string
 	// ReportDir is the directory where the JSON report is written (default: ".").
 	ReportDir string
+
+	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
+	JudgeEnabled bool
+	// JudgeModel is the model name for the LLM judge (default: HELPDESK_MODEL_NAME).
+	JudgeModel string
+	// JudgeVendor is the model vendor for the LLM judge (default: HELPDESK_MODEL_VENDOR).
+	JudgeVendor string
+	// JudgeAPIKey is the API key for the LLM judge (default: HELPDESK_API_KEY).
+	JudgeAPIKey string
+
+	// AuditURL is the base URL of the audit service (e.g. "http://localhost:7070").
+	// When set, the harness queries tool execution events after each agent call
+	// to get structured tool evidence from the audit trail.
+	AuditURL string
+
+	// NotifyURL is an optional webhook URL. When set, faulttest POSTs the full
+	// JSON report to this URL after the run completes (e.g. a Slack webhook).
+	NotifyURL string
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.
@@ -329,24 +348,33 @@ func checkTargetSafety(infraConfigPath, connStr string) error {
 		return fmt.Errorf("cannot extract host from connection string %q", connStr)
 	}
 
+	// Scan ALL entries matching the target host. Pass if ANY has the required
+	// tag — multiple entries can share the same hostname (e.g. alloydb-on-vm
+	// and alloydb-on-vm-local both resolve to localhost). Go map iteration is
+	// non-deterministic, so we must not short-circuit on the first match.
+	var matched []string
 	for name, srv := range cfg.DBServers {
 		srvHost := connStrHost(srv.ConnectionString)
 		if srvHost != targetHost {
 			continue
 		}
-		// Matched — check tags.
+		matched = append(matched, name)
 		for _, tag := range srv.Tags {
 			if tag == "test" || tag == "chaos" {
 				return nil
 			}
 		}
-		return fmt.Errorf("target host %q (server %q) does not have a 'test' or 'chaos' tag — "+
-			"refusing to inject faults. Add tag in infrastructure.json to opt-in", targetHost, name)
 	}
 
-	// Host not found in infra config — refuse by default.
-	return fmt.Errorf("target host %q not found in infrastructure config %q — "+
-		"refusing to inject faults. Add it with a 'test' or 'chaos' tag to opt-in", targetHost, infraConfigPath)
+	if len(matched) == 0 {
+		// Host not found in infra config — refuse by default.
+		return fmt.Errorf("target host %q not found in infrastructure config %q — "+
+			"refusing to inject faults. Add it with a 'test' or 'chaos' tag to opt-in", targetHost, infraConfigPath)
+	}
+
+	// One or more entries matched but none had test/chaos tag.
+	return fmt.Errorf("target host %q (server(s) %v) does not have a 'test' or 'chaos' tag — "+
+		"refusing to inject faults. Add tag in infrastructure.json to opt-in", targetHost, matched)
 }
 
 // connStrHost extracts the hostname from a libpq connection string (DSN or URL).

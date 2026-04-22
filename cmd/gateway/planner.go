@@ -599,6 +599,8 @@ func validateStepArgs(args map[string]any, schema map[string]any) error {
 }
 
 // stripMarkdownFences removes ```json ... ``` or ``` ... ``` wrappers from a string.
+// It also strips a bare language tag on the first line (e.g. "yaml\n..." or "json\n...")
+// which some models emit without backticks.
 func stripMarkdownFences(s string) string {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "```json") {
@@ -610,6 +612,12 @@ func stripMarkdownFences(s string) string {
 		s = strings.TrimPrefix(s, "```")
 		s = strings.TrimSuffix(strings.TrimSpace(s), "```")
 		return strings.TrimSpace(s)
+	}
+	// Some models emit a bare language tag as the first line without backticks.
+	for _, tag := range []string{"yaml", "json"} {
+		if strings.HasPrefix(s, tag+"\n") {
+			return strings.TrimSpace(strings.TrimPrefix(s, tag+"\n"))
+		}
 	}
 	return s
 }

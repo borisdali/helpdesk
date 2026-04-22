@@ -51,6 +51,44 @@ proposes is recorded in an auditable trail. Guaranteed.
 
 ---
 
+## "AI systems are probabilistic. Production operations require determinism. How can you trust this in production?"
+
+This is the sharpest objection to any AI operations system, and it deserves a precise answer.
+
+**First: traditional operations are already probabilistic — just unmeasured.**
+
+A human SRE following a runbook makes implicit judgment calls at every branch: "if connections are exhausted, go to step 4b" — but which connections? Is this different from last time? The runbook was written six months ago; the schema has changed. The on-call engineer is tired at 3am. Different engineers execute the same runbook differently, silently, with no record of which branch was taken or why.
+
+The "determinism" of a static runbook is largely illusory. It holds only in the most controlled lab conditions. In production, human + static runbook is deeply probabilistic — just probabilistic in a way nobody measures. aiHelpDesk doesn't introduce probabilism. It makes existing probabilism **visible, auditable, and improvable**.
+
+**Second: aiHelpDesk's architecture places determinism exactly where it matters.**
+
+The system has three distinct layers, each with a different contract:
+
+```
+  Reasoning layer   → probabilistic, contextual, adaptive   (LLM)
+  Governance layer  → deterministic, enforced, auditable     (policy engine, blast-radius)
+  Execution layer   → deterministic, exact, logged           (tool calls)
+```
+
+The LLM never directly executes anything. It proposes a tool call — `terminate_connection(pid=1234)` — and the governance layer evaluates it against policy rules, blast-radius limits, and approval gates before anything touches your database. `terminate_connection(pid=1234)` then executes exactly that command, logs it exactly, and the audit chain records it immutably. The execution is byte-for-byte deterministic.
+
+Determinism at the *reasoning* layer would actually be harmful: a static mapping of "symptom → action" is precisely what fails when the root cause of a familiar symptom has changed, or when a new tool is available that handles the situation better, or when the environment differs from when the runbook was written.
+
+**Third: the probabilism in aiHelpDesk is bounded, measured, and continuously narrowed.**
+
+- **Bounded**: Playbook `guidance` constrains the planner's reasoning space. The LLM isn't reasoning from scratch — it works within expert-encoded constraints that tighten variance toward known-good approaches.
+- **Measured**: `faulttest` gives you a concrete reliability figure. Run `db-max-connections` fifty times — if the agent diagnoses correctly 92% of the time with 100% remediation recovery, that's a number you can put in a runbook review. No human + static runbook system can tell you its reliability percentage.
+- **Continuously narrowed**: every resolved incident auto-proposes a Playbook draft. Every accepted draft encodes more expert knowledge into the guidance field, which further constrains the reasoning space on the next run. The [Vault](VAULT.md) is the mechanism by which variance shrinks over time as operational experience accumulates.
+
+**The honest caveat.**
+
+For workflows where exact step-by-step repeatability is non-negotiable — regulatory procedures with prescribed command sequences, PITR restores to a specific LSN, compliance-mandated audit trails of precise actions — the answer isn't "trust the LLM." It's to use the fleet runner's explicit job definition format, which is fully deterministic: the exact tool, exact arguments, exact rollback steps are specified by a human and executed verbatim. The LLM selects *which* Playbook fits the situation; the Playbook constrains what the planner may generate; the policy layer enforces hard limits. You can tune how much latitude the planner has, down to zero.
+
+The question is never "deterministic or probabilistic" — it is "which layer should reason adaptively, and where must we enforce hard guarantees?" aiHelpDesk is designed around that distinction.
+
+---
+
 ## "Can it run arbitrary SQL statements or shell commands?"
 
 No, and this is intentional.

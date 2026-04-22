@@ -3,17 +3,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
+	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
 
@@ -46,6 +52,8 @@ func main() {
 		cmdExample(os.Args[2:])
 	case "show":
 		cmdShow(os.Args[2:])
+	case "vault":
+		cmdVault(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -64,6 +72,7 @@ Commands:
   validate   Validate a customer catalog file for errors and warnings
   example    Print an annotated example customer catalog entry to stdout
   show       Print a fault definition as YAML (pipe to a file to customize it)
+  vault      Fault↔playbook pairing table, pass rate trends, drift detection
 `)
 }
 
@@ -107,7 +116,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	// Remediation phase.
 	fs.BoolVar(&cfg.RemediateEnabled, "remediate", false, "Run remediation phase after injection+diagnosis")
-	fs.StringVar(&cfg.GatewayURL, "gateway", "http://localhost:8080", "Gateway URL for playbook/agent remediation")
+	fs.StringVar(&cfg.GatewayURL, "gateway", "", "Gateway URL for playbook/agent remediation and vault playbook checks")
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 
@@ -119,6 +128,18 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.Var(&extraCatalogs, "catalog", "Additional customer catalog file (repeatable)")
 	fs.StringVar(&cfg.SourceFilter, "source", "", "Filter faults by source: builtin or custom")
 	fs.StringVar(&cfg.ReportDir, "report-dir", ".", "Directory to write the JSON report (default: current directory)")
+
+	// LLM judge options.
+	fs.BoolVar(&cfg.JudgeEnabled, "judge", false, "Enable LLM-as-judge for semantic diagnosis scoring")
+	fs.StringVar(&cfg.JudgeModel, "judge-model", "", "Model name for judge (default: HELPDESK_MODEL_NAME env var)")
+	fs.StringVar(&cfg.JudgeVendor, "judge-vendor", "", "Model vendor for judge: anthropic or google (default: HELPDESK_MODEL_VENDOR env var)")
+	fs.StringVar(&cfg.JudgeAPIKey, "judge-api-key", "", "API key for judge (default: HELPDESK_API_KEY env var)")
+
+	// Audit-based tool evidence.
+	fs.StringVar(&cfg.AuditURL, "audit-url", "", "Audit service base URL (e.g. http://localhost:7070); when set, tool evidence uses audit trail")
+
+	// Completion webhook.
+	fs.StringVar(&cfg.NotifyURL, "notify-url", "", "Webhook URL for POST notification on run completion (e.g. Slack incoming webhook)")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -235,6 +256,23 @@ func cmdRun(args []string) {
 	runner := NewRunner(cfg)
 	remediator := NewRemediator(cfg)
 
+	// Initialize LLM judge completer if enabled.
+	var judgeCompleter faultlib.TextCompleter
+	var judgeModel string
+	if cfg.JudgeEnabled {
+		var err error
+		judgeCompleter, err = newJudgeCompleter(ctx, cfg)
+		if err != nil {
+			slog.Warn("LLM judge disabled: could not initialize", "err", err)
+		} else {
+			judgeModel = cfg.JudgeModel
+			if judgeModel == "" {
+				judgeModel = os.Getenv("HELPDESK_MODEL_NAME")
+			}
+			slog.Info("LLM judge enabled", "vendor", cfg.JudgeVendor, "model", judgeModel)
+		}
+	}
+
 	runID := uuid.New().String()[:8]
 	var results []EvalResult
 
@@ -264,8 +302,18 @@ func cmdRun(args []string) {
 			continue
 		}
 
-		// 2. Run agent.
+		// 2. Run agent (record call start for audit window).
+		callStart := time.Now()
 		resp := runner.Run(ctx, f)
+
+		// Query audit trail for tool evidence if --audit-url is set.
+		var auditTools []string
+		if cfg.AuditURL != "" {
+			auditTools = auditQueryTools(ctx, cfg.AuditURL, cfg.GatewayAPIKey, callStart)
+			if len(auditTools) > 0 {
+				slog.Info("audit evidence", "failure", f.ID, "tools", auditTools)
+			}
+		}
 
 		// 3. Evaluate.
 		var evalResult EvalResult
@@ -279,25 +327,46 @@ func cmdRun(args []string) {
 				Duration:    resp.Duration.String(),
 			}
 		} else {
-			evalResult = Evaluate(f, resp)
+			if judgeCompleter != nil {
+				evalResult = EvaluateWithJudge(ctx, f, resp, judgeCompleter, judgeModel, auditTools)
+			} else {
+				evalResult = Evaluate(f, resp, auditTools)
+			}
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
 		}
 
 		// 4. Remediation phase (optional).
-		if cfg.RemediateEnabled && f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "" {
+		if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
 			remResult := remediator.Remediate(ctx, f)
 			evalResult.RemediationAttempted = true
 			evalResult.RemediationPassed = remResult.Passed
 			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
+			evalResult.RemediationScore = remResult.Score
+			evalResult.RemediationMethod = remResult.Method
 			if remResult.Err != nil {
 				evalResult.RemediationError = remResult.Err.Error()
 			}
+			// OverallScore: 60% composite score + 40% remediation when remediation attempted.
+			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
 			if remResult.Passed {
-				fmt.Printf("Remediation: RECOVERED in %.1fs\n", remResult.RecoveryTimeSecs)
+				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+				// Auto-suggest: when remediation succeeds and a gateway is configured,
+				// synthesize a playbook draft from the fault trace and save it to the vault.
+				if cfg.GatewayURL != "" {
+					traceID := "faulttest-" + runID + "-" + f.ID
+					if pbID, vaultErr := requestVaultDraft(ctx, cfg, traceID, "resolved"); vaultErr != nil {
+						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
+					} else if pbID != "" {
+						fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
+					}
+				}
 			} else {
 				fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
 			}
+		} else {
+			// No remediation attempted: overall score equals diagnosis score.
+			evalResult.OverallScore = evalResult.Score
 		}
 
 		results = append(results, evalResult)
@@ -312,7 +381,22 @@ func cmdRun(args []string) {
 		if !evalResult.Passed {
 			status = "FAIL"
 		}
-		fmt.Printf("Result: [%s] score=%d%%\n", status, int(evalResult.Score*100))
+		diagLabel := "category"
+		if !evalResult.JudgeSkipped {
+			diagLabel = "judge"
+		}
+		fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% %s=%d%%)\n",
+			status, int(evalResult.Score*100),
+			int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), diagLabel, int(evalResult.DiagnosisScore*100))
+		if evalResult.RemediationAttempted {
+			remStatus := "PASS"
+			if !evalResult.RemediationPassed {
+				remStatus = "FAIL"
+			}
+			fmt.Printf("Remediation Result:  [%s] score=%d%% (%.1fs, %s)\n",
+				remStatus, int(evalResult.RemediationScore*100), evalResult.RecoveryTimeSecs, evalResult.RemediationMethod)
+			fmt.Printf("Overall Result:      [%s] score=%d%%\n", status, int(evalResult.OverallScore*100))
+		}
 	}
 
 	report := BuildReport(runID, results)
@@ -324,6 +408,95 @@ func cmdRun(args []string) {
 	} else {
 		fmt.Printf("Report written to %s\n", reportFile)
 	}
+
+	if cfg.NotifyURL != "" {
+		postNotify(cfg.NotifyURL, report)
+	}
+
+	// Append run to persistent history for vault commands.
+	// Use the agent-conn alias when set (human-readable, no password);
+	// fall back to the hostname extracted from the injection conn string.
+	target := cfg.AgentConnStr
+	if target == "" {
+		target = connStrHost(cfg.ConnStr)
+	}
+	// When --conn is a named infrastructure alias (e.g. "alloydb-on-vm") rather
+	// than a DSN, connStrHost returns "". Fall back to the alias itself so the
+	// target column in vault status is always populated.
+	if target == "" {
+		target = cfg.ConnStr
+	}
+	if err := appendHistory(report, target); err != nil {
+		slog.Warn("failed to append to run history", "err", err, "path", historyFilePath())
+	}
+}
+
+// postNotify POSTs the full JSON report to the given webhook URL. Failures are
+// logged at Warn level and never cause the faulttest run to fail.
+func postNotify(notifyURL string, report Report) {
+	body, err := json.Marshal(report)
+	if err != nil {
+		slog.Warn("notify: failed to marshal report", "err", err)
+		return
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, notifyURL, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("notify: failed to build request", "url", notifyURL, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("notify: HTTP request failed", "url", notifyURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if resp.StatusCode >= 300 {
+		slog.Warn("notify: webhook returned non-2xx", "status", resp.StatusCode, "url", notifyURL)
+		return
+	}
+	slog.Info("notify: webhook notified", "url", notifyURL, "status", resp.StatusCode)
+}
+
+// requestVaultDraft POSTs to the gateway's from-trace endpoint to synthesize a
+// playbook draft from the given traceID and saves it to the vault as an inactive
+// draft. Returns the persisted playbook_id, or "" when auditd is not configured.
+func requestVaultDraft(ctx context.Context, cfg *HarnessConfig, traceID, outcome string) (string, error) {
+	reqBody, err := json.Marshal(map[string]string{
+		"trace_id": traceID,
+		"outcome":  outcome,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal: %w", err)
+	}
+	reqURL := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
+	}
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST from-trace: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		PlaybookID string `json:"playbook_id"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	return result.PlaybookID, nil
 }
 
 // ── inject ───────────────────────────────────────────────────────────────
@@ -519,6 +692,16 @@ func cmdValidate(args []string) {
 				warns = append(warns, "no expected_keywords; scoring will be unreliable")
 			}
 
+			// Playbook existence check (when --gateway is set).
+			if cfg.GatewayURL != "" && f.Remediation.PlaybookID != "" {
+				switch checkPlaybook(cfg.GatewayURL, cfg.GatewayAPIKey, f.Remediation.PlaybookID) {
+				case playbookNotFound:
+					warns = append(warns, fmt.Sprintf("playbook %q not found at gateway %s", f.Remediation.PlaybookID, cfg.GatewayURL))
+				case playbookAuthError:
+					warns = append(warns, fmt.Sprintf("playbook %q: authentication failed (check --api-key)", f.Remediation.PlaybookID))
+				}
+			}
+
 			label := f.ID
 			if label == "" {
 				label = "(no id)"
@@ -552,6 +735,61 @@ func cmdValidate(args []string) {
 	if totalErrors > 0 {
 		os.Exit(1)
 	}
+}
+
+// validatePlaybookExists checks whether a playbook with the given series_id exists
+// on the gateway. Returns true when the playbook is found, false otherwise.
+// Network failures or unexpected status codes are treated as "not found" (returns false).
+type playbookCheckResult int
+
+const (
+	playbookFound     playbookCheckResult = iota
+	playbookNotFound                      // 404 or empty list
+	playbookAuthError                     // 401/403
+	playbookUnknown                       // network error or unexpected status
+)
+
+// checkPlaybook queries the gateway to determine whether a playbook series exists.
+func checkPlaybook(gatewayURL, apiKey, playbookID string) playbookCheckResult {
+	reqURL := gatewayURL + "/api/v1/fleet/playbooks?series_id=" + playbookID
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return playbookUnknown
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return playbookUnknown
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return playbookAuthError
+	case http.StatusNotFound:
+		return playbookNotFound
+	case http.StatusOK:
+		// Fall through to parse body.
+	default:
+		slog.Warn("playbook check: unexpected status", "playbook_id", playbookID, "status", resp.StatusCode)
+		return playbookUnknown
+	}
+
+	var result struct {
+		Playbooks []map[string]interface{} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return playbookUnknown
+	}
+	if len(result.Playbooks) == 0 {
+		return playbookNotFound
+	}
+	return playbookFound
 }
 
 // ── example ──────────────────────────────────────────────────────────────

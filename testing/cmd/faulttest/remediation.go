@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
+	"helpdesk/internal/infra"
 	"helpdesk/testing/testutil"
 )
 
@@ -18,6 +20,11 @@ type RemediationResult struct {
 	Passed           bool
 	RecoveryTimeSecs float64
 	Err              error
+	// Score is 0.0-1.0: 1.0 if recovered within half the verify timeout,
+	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
+	Score  float64
+	// Method records how remediation was triggered: "playbook", "agent_prompt", or "none".
+	Method string
 }
 
 // Remediator triggers playbook or agent remediation and polls for recovery.
@@ -41,21 +48,25 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 	slog.Info("starting remediation", "failure", f.ID,
 		"playbook", spec.PlaybookID, "agent_prompt", spec.AgentPrompt != "")
 
+	// Determine method.
+	var method string
 	var triggerErr error
 	if spec.PlaybookID != "" {
+		method = "playbook"
 		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID)
 	} else if spec.AgentPrompt != "" {
+		method = "agent_prompt"
 		agentName := spec.AgentName
 		if agentName == "" {
 			agentName = "database"
 		}
 		triggerErr = r.triggerAgent(ctx, agentName, spec.AgentPrompt)
 	} else {
-		return RemediationResult{Err: fmt.Errorf("no remediation action configured (playbook_id or agent_prompt required)")}
+		return RemediationResult{Err: fmt.Errorf("no remediation action configured (playbook_id or agent_prompt required)"), Method: "none"}
 	}
 
 	if triggerErr != nil {
-		return RemediationResult{Err: fmt.Errorf("remediation trigger: %w", triggerErr)}
+		return RemediationResult{Err: fmt.Errorf("remediation trigger: %w", triggerErr), Method: method}
 	}
 
 	verifySQL := spec.VerifySQL
@@ -72,18 +83,67 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 
 	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
 	if err != nil {
-		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err)}
+		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
+	}
+
+	// Score: 1.0 if recovered within half the timeout, 0.75 if within the full timeout.
+	score := 0.75
+	halfTimeout := timeout.Seconds() / 2
+	if recoverySecs <= halfTimeout {
+		score = 1.0
 	}
 
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
+		Score:            score,
+		Method:           method,
 	}
 }
 
-func (r *Remediator) triggerPlaybook(ctx context.Context, playbookID string) error {
+// resolvePlaybookID resolves a series_id to the active playbook_id via the gateway list endpoint.
+func (r *Remediator) resolvePlaybookID(ctx context.Context, seriesID string) (string, error) {
+	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", err
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if len(result.Playbooks) == 0 {
+		return "", fmt.Errorf("no active playbook found for series %q", seriesID)
+	}
+	return result.Playbooks[0].PlaybookID, nil
+}
+
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error {
 	if r.cfg.GatewayURL == "" {
 		return fmt.Errorf("gateway URL is required for playbook remediation (--gateway)")
+	}
+
+	// The catalog stores the series_id (e.g. "pbs_db_restart_triage"), but the
+	// /run endpoint requires the versioned playbook_id (e.g. "pb_f49b5eac").
+	// Resolve via the list endpoint before running.
+	playbookID, err := r.resolvePlaybookID(ctx, seriesID)
+	if err != nil {
+		return fmt.Errorf("resolving playbook %q: %w", seriesID, err)
 	}
 
 	body, _ := json.Marshal(map[string]string{"connection_string": r.cfg.ConnStr})
@@ -150,12 +210,33 @@ func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string)
 	return nil
 }
 
+// resolvedConnStr resolves cfg.ConnStr through the infrastructure config so
+// that named aliases (e.g. "alloydb-on-vm") are expanded to a real DSN before
+// being passed to psql. Falls back to cfg.ConnStr when no infra config is set
+// or the alias is not found.
+func (r *Remediator) resolvedConnStr() string {
+	if r.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(r.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[r.cfg.ConnStr]; ok {
+				if db.PasswordEnv != "" {
+					if pw := os.Getenv(db.PasswordEnv); pw != "" {
+						_ = pw // psql reads PGPASSWORD from env; caller sets it
+					}
+				}
+				return db.ResolvedConnectionString()
+			}
+		}
+	}
+	return r.cfg.ConnStr
+}
+
 func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
+	connStr := r.resolvedConnStr()
 
 	for {
-		err := testutil.RunSQLString(ctx, r.cfg.ConnStr, verifySQL)
+		err := testutil.RunSQLString(ctx, connStr, verifySQL)
 		if err == nil {
 			return time.Since(start).Seconds(), nil
 		}

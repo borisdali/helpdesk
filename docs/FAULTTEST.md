@@ -1,15 +1,15 @@
-# aiHelpDesk Fault Injection Testing
+# aiHelpDesk Fault Injection Testing (external)
 
-The two cornerstones of aiHelpDesk's SRE/DBA Flywheel are the comprehensive built-in Fault Injection Testing and Playbooks.
+`faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
 
-This page covers the former, or to be more precise, the customer-facing, external-mode use case of fault testing. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md) and for the wider aiHelpDesk testing strategy see [here](../testing/README.md).
+You bring your own database server, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit), and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
 
-`faulttest` is a CLI tool that validates how well your aiHelpDesk agents diagnose and recover from real database and infrastructure failures. You inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords and tool usage, and optionally trigger a remediation playbook and confirm recovery — all without touching your production systems.
+This page covers external fault injection against customer-owned databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md). For the wider testing strategy see [here](../testing/README.md).
 
 The tool was designed for two complementary use cases:
 
 - **Internal QA** — engineers run the full catalog against Docker-compose or Kubernetes stacks to prevent regressions in agent behavior before shipping
-- **Customer validation** — operators run a safe subset of SQL-based faults against a staging or canary database they already own, confirming the agents behave correctly in their specific environment before going to production
+- **External Customer Validation** — operators run a safe subset of SQL-based faults against a staging or canary database they already own, confirming the agents behave correctly in their specific environment before going to production
 
 ---
 
@@ -28,6 +28,7 @@ The tool was designed for two complementary use cases:
    - [inject / teardown](#53-inject--teardown)
    - [validate](#54-validate)
    - [example](#55-example)
+   - [vault](#56-vault) — see also [VAULT.md](VAULT.md) for the full flywheel concept
 6. [Fault catalog](#6-fault-catalog)
    - [External-compatible faults](#61-external-compatible-faults)
    - [SSH-injectable faults](#62-ssh-injectable-faults)
@@ -38,7 +39,8 @@ The tool was designed for two complementary use cases:
    - [Interactive single-fault injection](#73-interactive-single-fault-injection)
    - [Running from Docker](#74-running-from-docker)
    - [Running from Kubernetes (Helm)](#75-running-from-kubernetes-helm)
-8. [Interpreting results](#8-interpreting-results)
+   - [Vault: tracking history, drift, and auto-suggest](#76-vault-tracking-history-and-drift)
+8. [Interpreting results](#8-interpreting-results) — including [LLM-as-judge fields](LLM_AS_JUDGE.md)
 9. [Customer fault catalogs](#9-customer-fault-catalogs)
    - [Overview](#91-overview)
    - [Writing a catalog file](#92-writing-a-catalog-file)
@@ -67,21 +69,28 @@ faulttest run --external --conn "host=staging-db port=5432 ..."
   │  4. Remediate (opt)─────────────┼──► POST /api/v1/fleet/playbooks/{id}/run
   │                    ◄────────────┼─── poll SELECT 1 until recovery confirmed
   │                                 │
+  │  4b. Vault auto-suggest ────────┼──► POST /api/v1/fleet/playbooks/from-trace
+  │      (on remediation pass)      │    draft saved to Vault for review
+  │                                 │
   │  5. Teardown       ─────────────┼──► cleanup SQL removes injected state
   └─────────────────────────────────┘
 
   JSON report written to faulttest-<run-id>.json
+  Run history appended to ~/.faulttest/history.json
 ```
 
-Each fault is scored on three weighted dimensions:
+Each fault is scored on three weighted dimensions. The weights depend on whether
+the [LLM-as-judge](LLM_AS_JUDGE.md) is enabled (via `--judge`):
 
-| Dimension | Weight | What it checks |
-|-----------|--------|----------------|
-| Keywords | 50% | Expected terms appear in the agent's response |
-| Diagnosis category | 30% | The agent identifies the correct root-cause class |
-| Tool evidence | 20% | The agent's response mentions the right diagnostic tools |
+| Dimension | Default weights | With `--judge` |
+|-----------|:--------------:|:--------------:|
+| Keyword match | 50% | 20% |
+| Diagnosis (category match or judge score) | 30% | 40% |
+| Tool evidence | 20% | 40% |
 
 A fault passes when the weighted score reaches 60% or higher. Ordering assertions (e.g., `get_session_info` must precede `terminate_connection`) are also evaluated and gate the pass verdict independently of the score.
+
+When `--judge` is enabled, the diagnosis dimension is scored by a secondary LLM that reads the agent's response against a natural-language `narrative` describing what a correct answer should contain. This replaces the brittle category string-match with semantic evaluation. See [LLM-as-Judge](LLM_AS_JUDGE.md) for full details.
 
 ---
 
@@ -183,7 +192,7 @@ SSH-injectable faults are **not** marked `external_compat` — they require OS a
 
 ### 3.3 Remediation mode
 
-`--remediate` adds a recovery phase after injection and diagnosis. After the agent evaluates the fault, `faulttest` triggers either a fleet playbook or a direct agent call, then polls a verification SQL query (default `SELECT 1`) until the database responds successfully or the timeout elapses.
+`--remediate` adds a recovery phase after injection and diagnosis. After the agent evaluates the fault, `faulttest` triggers either a fleet Playbook or a direct agent prompt, then polls a fault-specific verification SQL query until the database responds correctly or the timeout elapses.
 
 ```bash
 faulttest run --external --remediate \
@@ -194,9 +203,48 @@ faulttest run --external --remediate \
   --infra-config infrastructure.json
 ```
 
-Faults that have a `remediation` block in the catalog will trigger the playbook specified there. Faults without a `remediation` block are evaluated normally and skipped in the remediation phase.
+Faults that have a `remediation` block in the catalog will trigger the Playbook specified there. Faults without a `remediation` block are evaluated for diagnosis only.
 
-The JSON report includes `remediation_attempted`, `remediation_passed`, and `recovery_time_seconds` for each fault where remediation ran.
+**Remediation scoring:**
+
+Each remediation attempt produces a `remediation_score` (0.0–1.0) based on recovery speed relative to the fault's `verify_timeout` (default 120s):
+
+| Recovery time | Score | Meaning |
+|---------------|:-----:|---------|
+| ≤ half the timeout | **1.0** | Fast recovery — Playbook acted promptly |
+| ≤ full timeout | **0.75** | Recovered within the window, but slowly |
+| Timed out | **0.0** | Recovery not confirmed |
+
+The `overall_score` combines diagnosis and remediation:
+
+```
+overall_score = diagnosis_score × 0.6 + remediation_score × 0.4
+```
+
+When no remediation is attempted, `overall_score` equals `score` (the diagnosis-only score). This means a fault that was correctly diagnosed but not remediated is not penalised — remediation is strictly additive.
+
+**Fault-specific verification SQL:**
+
+Each fault in the catalog can define a `verify_sql` query that confirms the specific condition has been resolved, rather than relying on a generic connectivity check:
+
+```yaml
+remediation:
+  playbook_id: pbs_db_conn_pooling
+  verify_sql: >
+    SELECT count(*) < current_setting('max_connections')::int - 5
+    FROM pg_stat_activity WHERE state = 'idle'
+  verify_timeout: "120s"
+```
+
+The query must return successfully (exit 0 from psql) for recovery to be confirmed. A query that returns rows is enough — the row content is not checked. If `verify_sql` is absent, `faulttest` falls back to `SELECT 1` (bare connectivity check).
+
+**Remediation method:**
+
+| `remediation_method` | How it was triggered |
+|----------------------|----------------------|
+| `playbook` | Fleet Playbook run via `POST /api/v1/fleet/playbooks/{id}/run` |
+| `agent_prompt` | Direct agent call via `POST /api/v1/query` with a configured prompt |
+| `none` | No remediation block configured for this fault |
 
 ---
 
@@ -311,9 +359,14 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
-| `--gateway` | — | `http://localhost:8080` | Gateway URL for playbook/agent remediation |
+| `--gateway` | — | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. No default — must be set explicitly when `--remediate` or `vault list` needs live validation. |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
+| `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
+| `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
+| `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
+| `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |
+| `--audit-url` | — | — | auditd URL for audit-trail-based tool evidence (`ToolEvidenceMode: audit`) |
 | `--infra-config` | — | — | Path to `infrastructure.json` for safety check |
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
@@ -380,6 +433,111 @@ faulttest example > my-faults.yaml
 faulttest example --category kubernetes > k8s-faults.yaml
 ```
 
+### 5.6 vault
+
+```
+faulttest vault <list|status|drift|suggest|suggest-update>
+```
+
+The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
+
+#### vault list
+
+```bash
+faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
+```
+
+Shows the full fault catalog alongside the linked Playbook (if any), the date of the last run, and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced Playbook IDs exist on the gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
+
+```
+FAULT                            PLAYBOOK                     LAST RUN     STATUS
+--------------------------------------------------------------------------------------------
+db-max-connections               (none)                       2026-04-16   NO PLAYBOOK
+db-connection-refused            pbs_db_restart_triage        2026-04-15   PASS
+db-pg-hba-corrupt                pbs_db_config_recovery       (never)      -
+db-lock-contention               (none)                       2026-04-14   FAIL
+```
+
+Status values:
+
+| Status | Meaning |
+|--------|---------|
+| `PASS` / `FAIL` | Last run result |
+| `-` | Fault has a Playbook linked but has never been run |
+| `NO PLAYBOOK` | No `remediation.playbook_id` configured in the catalog |
+| `PLAYBOOK NOT FOUND` | Playbook ID configured but not found on the gateway (`--gateway` required) |
+
+#### vault status
+
+```bash
+faulttest vault status [--since-days 30]
+```
+
+Shows overall pass rates across all runs in the history window, plus a per-fault breakdown:
+
+```
+=== Vault Status (last 30 days, 4 runs) ===
+
+DATE         RUN ID               PASS RATE
+--------------------------------------------------
+2026-04-10   run-a1b2c3           80% (8/10)
+2026-04-12   run-d4e5f6           90% (9/10)
+2026-04-14   run-g7h8i9           80% (8/10)
+2026-04-16   run-j0k1l2           90% (9/10)
+
+=== Per-Fault Pass Rates ===
+
+FAULT                            PASS RATE  RUNS
+-------------------------------------------------------
+db-lock-contention               75%        4
+db-max-connections               100%       4
+db-table-bloat                   100%       4
+```
+
+#### vault drift
+
+```bash
+faulttest vault drift [--since-days 90]
+```
+
+Compares pass rates between the first and second halves of the history window and flags faults whose pass rate dropped by more than 20 percentage points. Useful for catching quiet regressions:
+
+```
+=== Vault Drift Analysis (last 90 days) ===
+
+FAULT                            FIRST HALF   SECOND HALF  DRIFT
+------------------------------------------------------------------------
+db-lock-contention               100%         50%          -50%
+db-replication-lag               75%          33%          -42%
+```
+
+#### vault suggest
+
+```bash
+faulttest vault suggest \
+  --trace-id tr_abc123 \
+  --outcome resolved \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Manually synthesises a Playbook draft from any audit trace ID and prints it to stdout. When the gateway's auditd is configured, the draft is also **automatically saved** to the Vault as an inactive draft (`source=generated`, `is_active=false`) and the `playbook_id` of the saved draft is printed. Activate it with `POST /api/v1/fleet/playbooks/{id}/activate` when ready.
+
+Note: when `faulttest run --remediate` passes, vault auto-suggest runs automatically — you only need to call this manually for traces from real incidents outside of faulttest runs.
+
+#### vault suggest-update
+
+```bash
+faulttest vault suggest-update \
+  --series-id pbs_db_restart_triage \
+  --trace-id tr_xyz789 \
+  --outcome resolved \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Fetches the current active Playbook for `--series-id`, synthesises a proposed update from the given trace, and displays the two side by side so you can compare and decide whether to activate the proposal. Useful when `vault drift` shows a declining pass rate and you want to incorporate a more recent successful approach into the existing Playbook.
+
 ---
 
 ## 6. Fault catalog
@@ -423,7 +581,18 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | `db-pg-hba-corrupt` | `pbs_db_config_recovery` |
 | `db-process-kill` | `pbs_db_restart_triage` |
 
-The playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
+The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
+
+Each fault's `remediation` block specifies a `verify_sql` query that confirms the specific condition has resolved. Generic `SELECT 1` (the default) only checks connectivity; fault-specific queries confirm the actual state was corrected:
+
+| Fault | verify_sql |
+|-------|-----------|
+| `db-max-connections` | `SELECT count(*) < current_setting('max_connections')::int - 5 FROM pg_stat_activity WHERE state = 'idle'` |
+| `db-idle-in-transaction` | `SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'` |
+| `db-lock-contention` | `SELECT count(*) = 0 FROM pg_locks WHERE NOT granted` |
+| `db-connection-refused` | `SELECT 1` (connectivity check is sufficient — the fault kills the postmaster) |
+
+When writing customer catalog entries, prefer specific queries that directly verify the fault condition rather than bare connectivity checks.
 
 ---
 
@@ -461,8 +630,8 @@ Sample output:
 
 ```
 --- Testing: Max connections exhausted (db-max-connections) ---
-Remediation: RECOVERED in 12.3s
-Result: [PASS] score=87%
+Remediation: RECOVERED in 12.3s (score: 100%)
+Result: [PASS] score=87% | Diagnosis: 92% | Remediation: 100% | Overall: 95%
 
 --- Testing: Long-running query blocking (db-long-running-query) ---
 Result: [PASS] score=74%
@@ -471,6 +640,8 @@ Result: [PASS] score=74%
 Passed: 9/10  Failed: 1  Skipped: 0
 Report: faulttest-a3f2b1c4.json
 ```
+
+The `overall_score` in the report combines `diagnosis_score × 0.6 + remediation_score × 0.4`. Faults without a remediation spec show only the diagnosis score.
 
 ### 7.3 Interactive single-fault injection
 
@@ -594,6 +765,77 @@ kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
   -- faulttest list
 ```
 
+### 7.6 Vault: tracking history and drift
+
+After running `faulttest run` a few times, use the vault to review trends and pairing status. For the full vault concept, lifecycle, and three customer workflows, see [VAULT.md](VAULT.md).
+
+**Check what's covered and what's missing:**
+
+```bash
+# No --gateway: shows last-run status without live Playbook validation
+faulttest vault list
+
+# With --gateway: also verifies Playbook IDs exist on the deployment
+faulttest vault list \
+  --gateway http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+**Review pass rates across recent runs:**
+
+```bash
+# Last 30 days (default)
+faulttest vault status
+
+# Last 90 days, filtered to a specific database target
+faulttest vault status --since-days 90 --target staging-db
+```
+
+**Find regressions before they become incidents:**
+
+```bash
+# Flag faults whose pass rate dropped >20 percentage points
+faulttest vault drift --since-days 90
+```
+
+If drift is detected, use `faulttest inject` + `faulttest teardown` to reproduce the fault interactively and investigate why the agent's diagnosis changed. Then use `suggest-update` to incorporate the latest successful approach:
+
+```bash
+faulttest vault suggest-update \
+  --series-id pbs_db_conn_pooling \
+  --trace-id tr_latest \
+  --gateway http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+**Vault auto-suggest after remediation:**
+
+When `faulttest run --remediate` succeeds, a Playbook draft is automatically saved to the Vault. You will see this in the terminal output:
+
+```
+Remediation: RECOVERED in 4.2s (score: 100%)
+Vault: draft saved → pb_faulttest_a1b2 (activate with 'faulttest vault list')
+```
+
+Review and activate the draft when ready:
+
+```bash
+# Activate
+curl -X POST http://helpdesk-gateway:8080/api/v1/fleet/playbooks/pb_faulttest_a1b2/activate \
+  -H "Authorization: Bearer $HELPDESK_API_KEY"
+```
+
+**Manual suggest from any real incident trace:**
+
+```bash
+faulttest vault suggest \
+  --trace-id tr_abc123 \
+  --outcome resolved \
+  --gateway http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+# → draft printed and auto-saved when auditd is configured
+```
+
 ---
 
 ## 8. Interpreting results
@@ -609,13 +851,21 @@ The JSON report contains one entry per fault:
   "passed": true,
   "keyword_pass": true,
   "diagnosis_pass": true,
+  "diagnosis_score": 1.0,
   "tool_evidence": true,
+  "tool_evidence_mode": "audit",
   "ordering_pass": true,
   "response_text": "...",
   "duration": "18.4s",
+  "judge_reasoning": "Agent correctly identified max_connections exhaustion and recommended PgBouncer.",
+  "judge_model": "claude-haiku-4-5-20251001",
+  "judge_skipped": false,
   "remediation_attempted": true,
   "remediation_passed": true,
-  "recovery_time_seconds": 12.3
+  "remediation_score": 1.0,
+  "remediation_method": "playbook",
+  "recovery_time_seconds": 12.3,
+  "overall_score": 0.92
 }
 ```
 
@@ -624,12 +874,41 @@ The JSON report contains one entry per fault:
 | Field | Meaning |
 |-------|---------|
 | `keyword_pass` | At least one expected keyword found in agent response |
-| `diagnosis_pass` | Agent response contains terms from the expected diagnosis category |
-| `tool_evidence` | Agent called at least one expected tool. |
-| `tool_evidence_mode` | How tool evidence was determined: `structured` (exact name matching from a `tool_call_summary` DataPart — ADK agents via A2A) or `text_fallback` (keyword matching against response text — non-ADK agents or gateway path). Omitted when no tools were expected. A `text_fallback` score is less reliable: it passes if the right words appear in the text, not if the tool was actually called. |
+| `diagnosis_pass` | `diagnosis_score >= 0.5` |
+| `diagnosis_score` | 0.0–1.0. With `--judge`: maps from the judge's 0–3 score. Without `--judge`: fraction of diagnosis-category words matched in the response. |
+| `tool_evidence` | At least 50% of expected tools were confirmed called |
+| `tool_evidence_mode` | How tool evidence was determined — three-tier fallback (see below). Omitted when no tools were expected. |
 | `ordering_pass` | Tool ordering constraints satisfied (e.g., inspect before terminate) |
-| `score` | Weighted combination: 50% keywords + 30% diagnosis + 20% tools |
+| `score` | Weighted combination — see the weights table in §1 |
 | `passed` | `score >= 0.6` **and** `ordering_pass = true` |
+| `judge_reasoning` | One-sentence explanation from the judge LLM (omitted when skipped) |
+| `judge_model` | Model that produced the judge score (omitted when skipped) |
+| `judge_skipped` | `true` when judge was disabled, narrative was absent, or the judge call failed |
+| `remediation_score` | 0.0–1.0: `1.0` if recovered within half the verify timeout, `0.75` within the full timeout, `0.0` if timed out. Only present when `--remediate` was set. |
+| `remediation_method` | `playbook` or `agent_prompt` (only when `--remediate` was set) |
+| `overall_score` | `diagnosis_score × 0.6 + remediation_score × 0.4` when remediation was attempted; equals `score` otherwise |
+
+**Tool evidence: three-tier fallback**
+
+`faulttest` determines whether the agent called the expected tools using the best available source, in priority order:
+
+| Priority | Mode | How | When available |
+|----------|------|-----|----------------|
+| 1 | `audit` | Exact tool names from auditd's `tool_execution` events | `--audit-url` is set and auditd is reachable |
+| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` (direct A2A, not via gateway) |
+| 3 | `text_fallback` | Keyword pattern matching against the agent's response text | All other cases |
+
+`audit` mode is the most accurate: it queries auditd directly for `tool_execution` events in the time window of the agent call, giving exact tool names regardless of which agent or transport was used. `text_fallback` is least reliable — a tool name appearing in the response text does not prove the tool was actually called. The mode used is recorded in `tool_evidence_mode` so you can assess reliability.
+
+To enable audit mode, point `--audit-url` at your auditd instance:
+
+```bash
+faulttest run --external \
+  --conn "host=staging-db ..." \
+  --db-agent http://gateway:8080 \
+  --audit-url http://auditd:1199 \
+  --api-key $HELPDESK_API_KEY
+```
 
 **Common failure patterns:**
 
@@ -855,7 +1134,7 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
   #     rm -f /tmp/faulttest_myfault_pid.txt
   #     psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS t;"
 
-  # Optional: trigger playbook remediation when --remediate is set.
+  # Optional: trigger Playbook remediation when --remediate is set.
   remediation:
     playbook_id: pbs_my_playbook
     verify_sql: "SELECT 1"
@@ -875,7 +1154,10 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
         - "my keyword"
         - "synonym"
     expected_diagnosis:
-      category: "my_diagnosis_category"
+      category: "my_diagnosis_category"    # used when --judge is not set
+      narrative: >                          # used by the LLM judge when --judge is set
+        The agent should identify <root cause> and recommend <remediation>.
+        It should explain <key detail> and mention <expected outcome>.
     # Optional: assert tool A is mentioned before tool B.
     expected_tool_order:
       - [get_session_info, terminate_connection]

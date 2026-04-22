@@ -390,6 +390,7 @@ type PlaybookListQuery struct {
 	ActiveOnly    bool   // if true, return only is_active=1 rows
 	IncludeSystem bool   // if true, include is_system=1 rows
 	SeriesID      string // if non-empty, filter to this series (useful to list all versions)
+	Source        string // if non-empty, filter by source ("generated", "imported", "manual", "system")
 }
 
 // DefaultPlaybookListQuery returns the standard query: active versions only,
@@ -424,6 +425,10 @@ func (s *PlaybookStore) List(ctx context.Context, q PlaybookListQuery) ([]*Playb
 	if q.SeriesID != "" {
 		where = append(where, "series_id = ?")
 		args = append(args, q.SeriesID)
+	}
+	if q.Source != "" {
+		where = append(where, "source = ?")
+		args = append(args, q.Source)
 	}
 
 	query := `SELECT ` + playbookColumns + ` FROM playbooks`

@@ -45,6 +45,7 @@ func TestDBAgentToolCallSummary(t *testing.T) {
 	}
 
 	t.Logf("Response text (%d chars, %s): %s", len(resp.Text), resp.Duration, truncate(resp.Text, 200))
+	SkipIfLLMKeyInvalid(t, resp.Text)
 
 	// Primary assertion: the tool_call_summary DataPart must be present.
 	// A nil ToolCalls means the DataPart was absent — agentutil's AfterEventCallback

@@ -75,7 +75,7 @@ var ToolClassification = map[string]ActionClass{
 	"rollback_exec_insert":      ActionWrite,
 
 	// Incident agent tools
-	"create_incident_bundle": ActionRead,
+	"create_incident_bundle": ActionWrite,
 	"list_incidents":         ActionRead,
 
 	// Research agent tools

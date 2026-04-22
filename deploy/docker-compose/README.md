@@ -48,7 +48,7 @@ For interactive aiHelpDesk session see [section 2.4 below](docker-compose#24-usi
 
 **Docker Networking Note:** When running in Docker containers, `localhost` in a connection string refers to the container itself, not the host machine. To connect to a database on the host:
 - **Docker Desktop (Mac/Windows):** Use `host.docker.internal` as the hostname
-- **Linux:** Use `172.17.0.1` (Docker bridge gateway) or the host's actual IP
+- **Linux:** Use `172.17.0.1` (Docker bridge Gateway) or the host's actual IP
 
 **Password Authentication:** To avoid password prompts, create a `.pgpass` file and mount it into the database-agent container. The hostname must **exactly match** the hostname in your connection string:
 
@@ -148,7 +148,7 @@ HELPDESK_MODEL_VENDOR=anthropic
 HELPDESK_MODEL_NAME=claude-haiku-4-5-20251001
 HELPDESK_API_KEY=<your-api-key-here>
 
-# Kubeconfig path for K8s and incident agents (optional)
+# Kubeconfig path for K8s and Incident Agents (optional)
 KUBECONFIG=~/.kube/config
 
 # Infrastructure inventory for the Orchestrator (optional).
@@ -169,7 +169,7 @@ See the [sample log](INSTALL_from_source_sample_interactive_log.md)  of running 
 
   ### 2.4 Using helpdesk-client
 
-`helpdesk-client` is an authenticated operator CLI that connects to the gateway over HTTP — every query carries a verified identity and declared purpose in the audit trail, replacing ad-hoc `docker compose run orchestrator` sessions.
+`helpdesk-client` is an authenticated operator CLI that connects to the Gateway over HTTP — every query carries a verified identity and declared purpose in the audit trail, replacing ad-hoc `docker compose run orchestrator` sessions.
 
 **Interactive REPL:**
 
@@ -222,7 +222,7 @@ aiHelpDesk includes an [AI Governance framework](../../docs/AIGOVERNANCE.md) wit
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
 | **fleet-runner** | Staged rollout tool — applies multi-step sequences across infrastructure targets (canary → waves → circuit breaker) | - |
-| **helpdesk-client** | Authenticated operator CLI — interactive REPL or one-shot queries through the gateway | - |
+| **helpdesk-client** | Authenticated operator CLI — interactive REPL or one-shot queries through the Gateway | - |
 
 ### 3.1 Enabling Governance (Docker Compose)
 
@@ -402,7 +402,7 @@ FLEET_RUNNER_API_KEY=<key> FLEET_JOBS_DIR=./jobs \
 
 The `FLEET_JOBS_DIR` variable (default: `./jobs`) is mounted read-only at `/jobs` inside the container. Set `FLEET_RUNNER_API_KEY` in `.env` to the API key for the `fleet-runner` service account.
 
-**Generating a job definition from natural language:** The gateway can generate a job file from a plain English description. Set `ANTHROPIC_API_KEY` in `.env`, then:
+**Generating a job definition from natural language:** The Gateway can generate a job file from a plain English description. Set `ANTHROPIC_API_KEY` in `.env`, then:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
@@ -580,16 +580,18 @@ The Gateway API is useful for:
 
 `faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response — confirming the agents behave correctly in your specific environment before going to production.
 
-The binary is baked into the Docker image. With the stack running, use `docker run` against the same image to execute a test run. The gateway and database must be reachable from within the Docker network:
+The binary is baked into the Docker image. With the stack running, use `docker run` against the same image to execute a test run. The Gateway and database must be reachable from within the Docker network:
 
 ```bash
 # Using the Compose network (container names resolve via DNS).
 # -v $(pwd):/output -w /output writes the JSON report to the host's current directory.
+# -v $HOME/.faulttest:/root/.faulttest persists run history for 'faulttest vault status'.
 # Forward any password_env variables referenced in infrastructure.json via -e.
 docker run --rm \
   --network helpdesk_default \
   -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
   -v "$(pwd):/output" -w /output \
+  -v "$HOME/.faulttest:/root/.faulttest" \
   -e DEV_DB_PASSWORD \
   ghcr.io/borisdali/helpdesk:latest \
   faulttest run \
@@ -601,6 +603,7 @@ docker run --rm \
 # Or via localhost if the gateway is port-forwarded to the host
 docker run --rm --network host \
   -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$HOME/.faulttest:/root/.faulttest" \
   ghcr.io/borisdali/helpdesk:latest \
   faulttest run \
     --conn "host=localhost port=5432 dbname=myapp user=dbuser" \
@@ -615,9 +618,156 @@ List available built-in faults without running anything:
 docker run --rm ghcr.io/borisdali/helpdesk:latest faulttest list
 ```
 
+### LLM-as-judge scoring
+
+By default faulttest scores responses using keyword and tool-call matching. Enable the LLM-as-judge to get semantic scoring — a second model call evaluates whether the agent correctly identified the root cause and recommended appropriate remediation:
+
+```bash
+docker run --rm \
+  --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" -w /output \
+  -v "$HOME/.faulttest:/root/.faulttest" \
+  -e DEV_DB_PASSWORD \
+  -e ANTHROPIC_API_KEY \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest run \
+    --conn "alloydb-on-vm" \
+    --db-agent http://gateway:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY \
+    --infra-config /infrastructure.json \
+    --judge \
+    --judge-vendor anthropic \
+    --judge-model claude-haiku-4-5-20251001 \
+    --judge-api-key $ANTHROPIC_API_KEY
+```
+
+When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnosis*0.30 + tool*0.20` to `tool*0.40 + judge*0.40 + keyword*0.20`, and each result includes a one-sentence reasoning string explaining the score. The judge is opt-in — omitting `--judge` falls back to the default keyword-based scoring and requires no additional API key.
+
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
 
-## 6. Troubleshooting
+## 6. Fleet Playbooks & Vault
+
+Playbooks are the operational memory of aiHelpDesk. Structured, versioned remediation instructions that agents use when handling incidents. The Vault is the collection of all Playbooks paired with their fault scenarios, giving you a live view of operational coverage.
+
+### Browsing Playbooks
+
+The Gateway is port-mapped to `localhost:8080` by default:
+
+```bash
+# List all active Playbooks
+curl -s http://localhost:8080/api/v1/fleet/playbooks \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, source:.source, runs:.stats.total_runs}'
+
+# Include inactive (draft) playbooks
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks | length'
+
+# Filter to auto-generated drafts from resolved incidents
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false&source=generated" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, active:.is_active}'
+```
+
+### Auto-generated Playbook drafts
+
+When the Incident Agent resolves an incident (with `outcome: resolved` or `outcome: escalated`), it automatically synthesizes a Playbook draft from the diagnostic trace and stores it as an inactive draft (`source: generated`, `is_active: false`). No manual action is required — drafts accumulate as incidents are resolved.
+
+To list drafts waiting for review:
+
+```bash
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?active_only=false&source=generated" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | {id:.playbook_id, name:.name, created:.created_at}'
+```
+
+### Reviewing and activating a draft
+
+Fetch a draft, review its guidance, then activate it to make it available for future incidents:
+
+```bash
+# Inspect a draft Playbook
+curl -s http://localhost:8080/api/v1/fleet/playbooks/<playbook_id> \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
+
+# Activate (promotes to active; deactivates any prior version in the same series)
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/<playbook_id>/activate \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '{id:.playbook_id, name:.name, active:.is_active}'
+```
+
+Before activating, consider running the draft through faulttest remediation mode (see below) to validate it against a live injected fault on staging.
+
+### Vault — fault↔playbook coverage
+
+`faulttest vault list` shows which fault scenarios have linked Playbooks and their last run status, querying the gateway for live incident stats:
+
+```bash
+docker run --rm --network helpdesk_default \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest vault list \
+    --gateway http://gateway:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY
+```
+
+`faulttest vault status` reads the local run history file written by prior `faulttest run` calls. Mount `~/.faulttest` from the host to preserve history across container runs:
+
+```bash
+docker run --rm \
+  -v "$HOME/.faulttest:/root/.faulttest" \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest vault status
+
+docker run --rm \
+  -v "$HOME/.faulttest:/root/.faulttest" \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest vault status --since-days 7 --fault db-max-connections
+```
+
+> **History persistence:** the `-v "$HOME/.faulttest:/root/.faulttest"` mount is required on every `faulttest run` invocation — without it the history file is lost when the container exits and `vault status` will show no data.
+
+### Remediation mode
+
+To validate that a Playbook actually resolves the fault it claims to fix, run faulttest with `--remediate`. This injects the fault, scores the agent's diagnosis, triggers the linked Playbook, and verifies recovery:
+
+```bash
+docker run --rm \
+  --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" -w /output \
+  -v "$HOME/.faulttest:/root/.faulttest" \
+  -e DEV_DB_PASSWORD \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest run \
+    --conn "alloydb-on-vm" \
+    --db-agent http://gateway:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY \
+    --infra-config /infrastructure.json \
+    --gateway http://gateway:8080 \
+    --remediate
+
+# Validate a specific fault+playbook pair
+docker run --rm \
+  --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$HOME/.faulttest:/root/.faulttest" \
+  -e DEV_DB_PASSWORD \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest run \
+    --conn "alloydb-on-vm" \
+    --db-agent http://gateway:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY \
+    --infra-config /infrastructure.json \
+    --gateway http://gateway:8080 \
+    --remediate \
+    --id db-max-connections
+```
+
+> **Staging only:** fault injection modifies database and OS state. Never run against production. Ensure the target host has a `test` or `chaos` tag in `infrastructure.json`.
+
+## 7. Troubleshooting
 
 ### Interactive REPL Shows Empty Responses
 

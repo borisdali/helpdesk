@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -84,6 +83,13 @@ func (r Report) PrintSummary() {
 	fmt.Printf("\n=== Fault Test Report: %s ===\n\n", r.ID)
 
 	textFallbackCount := 0
+	judgeCount := 0
+	for _, res := range r.Results {
+		if !res.JudgeSkipped && res.JudgeModel != "" {
+			judgeCount++
+		}
+	}
+
 	for _, res := range r.Results {
 		status := "PASS"
 		if !res.Passed {
@@ -98,24 +104,54 @@ func (r Report) PrintSummary() {
 			textFallbackCount++
 		}
 
-		fmt.Printf("[%s] %s (%s) - score: %d%%%s\n", status, res.FailureName, res.FailureID, scorePercent, toolNote)
+		// Append judge indicator when diagnosis was scored by the LLM judge.
+		judgeNote := ""
+		if !res.JudgeSkipped && res.JudgeModel != "" {
+			judgeNote = fmt.Sprintf(" [judge: %.0f%%]", res.DiagnosisScore*100)
+		}
 
-		if !res.Passed {
-			var details []string
-			if !res.KeywordPass {
-				details = append(details, "Keywords: x")
+		fmt.Printf("[%s] %s (%s) - score: %d%%%s%s\n", status, res.FailureName, res.FailureID, scorePercent, toolNote, judgeNote)
+
+		// Always show the 3 component scores so operators can see why the
+		// composite came out as it did, and whether to trust each component.
+		if res.Error == "" {
+			diagLabel := "Category"
+			noJudgeNote := " [no judge — add --judge for semantic scoring]"
+			if !res.JudgeSkipped && res.JudgeModel != "" {
+				diagLabel = "Judge"
+				noJudgeNote = ""
 			}
-			if !res.DiagnosisPass {
-				details = append(details, "Diagnosis: x")
+			fmt.Printf("       Keywords: %d%% | Tools: %d%% | %s: %d%%%s\n",
+				int(res.KeywordScore*100), int(res.ToolScore*100),
+				diagLabel, int(res.DiagnosisScore*100), noJudgeNote)
+		}
+
+		// Remediation line.
+		if res.RemediationAttempted && res.OverallScore > 0 {
+			overallPct := int(res.OverallScore * 100)
+			method := res.RemediationMethod
+			if method == "" {
+				method = "unknown"
 			}
-			if !res.ToolEvidence {
-				details = append(details, "Tools: x")
+			if res.RemediationPassed {
+				fmt.Printf("       Remediation: %d%% (%.1fs, %s) | Overall: %d%%\n",
+					int(res.RemediationScore*100), res.RecoveryTimeSecs, method, overallPct)
+			} else {
+				fmt.Printf("       Remediation: FAILED (%s) | Overall: %d%%\n",
+					method, overallPct)
 			}
-			if res.Error != "" {
-				details = append(details, fmt.Sprintf("Error: %s", res.Error))
-			}
-			if len(details) > 0 {
-				fmt.Printf("       %s\n", strings.Join(details, " | "))
+		}
+
+		if res.Error != "" {
+			fmt.Printf("       Error: %s\n", res.Error)
+		}
+
+		// Show judge reasoning when available, or error when judge skipped unexpectedly.
+		if res.JudgeReasoning != "" {
+			if res.JudgeSkipped {
+				fmt.Printf("       [judge skipped: %s]\n", res.JudgeReasoning)
+			} else {
+				fmt.Printf("       Reasoning: %q\n", res.JudgeReasoning)
 			}
 		}
 	}
@@ -134,6 +170,9 @@ func (r Report) PrintSummary() {
 		fmt.Printf("structured tool call data). These scores may be less reliable. For precise\n")
 		fmt.Printf("tool evidence, point --db-agent directly at the agent A2A URL rather than\n")
 		fmt.Printf("the gateway, or use an ADK-based agent.\n")
+	}
+	if judgeCount > 0 {
+		fmt.Printf("\nLLM judge scored diagnosis for %d fault(s). Weights: tool*0.40 + judge*0.40 + keyword*0.20.\n", judgeCount)
 	}
 	fmt.Println()
 }

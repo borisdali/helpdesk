@@ -1618,12 +1618,13 @@ func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Conf
 
 	if registry != nil {
 		// Build inbound auth for POST /tool/{name}.
-		// When HELPDESK_USERS_FILE is set, only service accounts with a valid
-		// Bearer API key are permitted. Otherwise logs a warning and leaves the
-		// endpoint open (dev/local mode, same behaviour as auditd with no users file).
+		// When HELPDESK_USERS_FILE is set and HELPDESK_IDENTITY_PROVIDER != "none",
+		// only service accounts with a valid Bearer API key are permitted.
+		// Otherwise logs a warning and leaves the endpoint open (dev/local mode).
 		var idProvider identity.Provider = &identity.NoAuthProvider{}
-		enforcing := cfg.UsersFile != ""
-		if cfg.UsersFile != "" {
+		idMode := os.Getenv("HELPDESK_IDENTITY_PROVIDER")
+		enforcing := cfg.UsersFile != "" && idMode != "none"
+		if enforcing {
 			p, err := identity.NewStaticProvider(cfg.UsersFile)
 			if err != nil {
 				return fmt.Errorf("agent inbound auth: failed to load users file %q: %w", cfg.UsersFile, err)

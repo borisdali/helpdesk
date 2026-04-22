@@ -146,3 +146,28 @@ point means that a locally-hosted model (Ollama, vLLM, or any
 OpenAI-compatible inference server) can be substituted for a cloud API,
 enabling fully air-gapped deployments. Adding a new model vendor is a single
 factory change; nothing else in the system needs to know.
+
+## 10. Probabilism is bounded, measured, and governed
+
+The question is never "deterministic or probabilistic" — it is "which layer should reason adaptively, and where must hard guarantees be enforced?"
+
+aiHelpDesk has three layers with different contracts:
+
+```
+  Reasoning layer   → probabilistic, contextual, adaptive   (LLM)
+  Governance layer  → deterministic, enforced, auditable     (policy engine, blast-radius)
+  Execution layer   → deterministic, exact, logged           (tool calls)
+```
+
+The LLM never directly executes anything. It proposes a tool call — `terminate_connection(pid=1234)` — and the governance layer evaluates it against policy rules, blast-radius limits, and approval gates before anything touches your infrastructure. The execution is byte-for-byte deterministic. Determinism at the *reasoning* layer would be harmful: a static mapping of symptom → action is precisely what fails when the root cause of a familiar symptom has changed, or when the environment differs from when the rule was written.
+
+The probabilism in the reasoning layer is not left unchecked:
+
+- **Bounded**: Playbook `guidance` constrains the planner's reasoning space. The LLM works within expert-encoded constraints, not from scratch.
+- **Measured**: `faulttest` gives a concrete reliability figure across repeated runs — a number that static runbooks cannot produce.
+- **Continuously narrowed**: every resolved incident auto-proposes a Playbook draft via the Vault. Every accepted draft encodes more expert knowledge into the guidance field, which further constrains the reasoning space on the next run. Variance shrinks as operational experience accumulates.
+
+When exact step-by-step repeatability is non-negotiable, the fleet runner's explicit job definition format is available: exact tool, exact arguments, exact rollback steps — specified by a human and executed verbatim. The LLM selects *which* Playbook fits; the Playbook constrains what the planner may generate; the policy layer enforces hard limits. How much latitude the planner has is tunable, down to zero.
+
+This principle is the answer to "AI systems are probabilistic — can you trust this in production?" Traditional operations are already probabilistic; the difference is that aiHelpDesk's probabilism is visible, bounded, measured, and continuously improved.
+

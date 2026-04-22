@@ -163,10 +163,13 @@ func main() {
 	}
 
 	// Build identity provider. Defaults to NoAuthProvider (dev mode) when no
-	// users file is configured. StaticProvider enables role-based auth.
+	// users file is configured or HELPDESK_IDENTITY_PROVIDER=none.
+	// StaticProvider enables role-based auth when a users file is provided and
+	// the identity provider is not explicitly disabled.
 	var idProvider identity.Provider = &identity.NoAuthProvider{}
-	enforcing := cfg.usersFile != ""
-	if cfg.usersFile != "" {
+	idMode := os.Getenv("HELPDESK_IDENTITY_PROVIDER")
+	enforcing := cfg.usersFile != "" && idMode != "none"
+	if enforcing {
 		p, err := identity.NewStaticProvider(cfg.usersFile)
 		if err != nil {
 			slog.Error("failed to load users file", "path", cfg.usersFile, "err", err)

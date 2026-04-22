@@ -113,7 +113,8 @@ type KeywordSpec struct {
 
 // DiagnosisSpec defines the expected diagnosis category.
 type DiagnosisSpec struct {
-	Category string `yaml:"category"`
+	Category  string `yaml:"category"`
+	Narrative string `yaml:"narrative,omitempty"`
 }
 
 // HarnessConfig holds runtime configuration for the test harness.
@@ -160,6 +161,11 @@ type HarnessConfig struct {
 	CustomCatalogs []string
 	// SourceFilter restricts which faults are run: "" (all), "builtin", or "custom".
 	SourceFilter string
+
+	// AuditURL is the base URL of the audit service (e.g. "http://localhost:7070").
+	// When set, the harness queries tool execution events after each agent call
+	// to get structured tool evidence from the audit trail instead of text matching.
+	AuditURL string
 }
 
 // EvalResult contains the evaluation outcome for a single failure test.
@@ -180,9 +186,25 @@ type EvalResult struct {
 	Duration     string  `json:"duration"`
 	Error        string  `json:"error,omitempty"`
 
+	// Judge fields (populated by EvaluateWithJudge when judge is enabled).
+	DiagnosisScore float64 `json:"diagnosis_score"`           // 0.0-1.0 from judge or category match
+	JudgeReasoning string  `json:"judge_reasoning,omitempty"`
+	JudgeModel     string  `json:"judge_model,omitempty"`
+	JudgeSkipped   bool    `json:"judge_skipped,omitempty"`
+
 	// Remediation outcome fields (populated only when RemediateEnabled=true).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
 	RemediationPassed    bool    `json:"remediation_passed,omitempty"`
 	RecoveryTimeSecs     float64 `json:"recovery_time_seconds,omitempty"`
 	RemediationError     string  `json:"remediation_error,omitempty"`
+
+	// Phase 2 scoring fields.
+	// RemediationScore is 0.0-1.0: 1.0 if recovered within half the verify timeout,
+	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
+	RemediationScore  float64 `json:"remediation_score,omitempty"`
+	// RemediationMethod records how remediation was triggered: "playbook", "agent_prompt", or "none".
+	RemediationMethod string  `json:"remediation_method,omitempty"`
+	// OverallScore combines diagnosis and remediation: DiagnosisScore*0.6 + RemediationScore*0.4
+	// when remediation was attempted; equals DiagnosisScore (i.e. Score) when not attempted.
+	OverallScore float64 `json:"overall_score,omitempty"`
 }

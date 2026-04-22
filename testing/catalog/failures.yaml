@@ -21,23 +21,59 @@ failures:
       script: sql/teardown_max_connections.sh
     external_compat: true
     external_inject:
-      type: sql
-      # Hold max_connections-3 idle connections via pg_sleep to simulate exhaustion.
+      type: shell_exec
+      # Hold idle connections by piping sleep into psql — psql blocks waiting
+      # for input, producing state='idle' backends that kill_idle_connections
+      # can terminate.  Redirecting the group to /dev/null (} >/dev/null 2>&1 &)
+      # prevents FD inheritance: without it, background psql processes hold the
+      # parent bash's stdout pipe open and cmd.CombinedOutput() blocks forever.
+      # We spawn enough to fill non-superuser slots but leave superuser_reserved
+      # connections free so the verify_sql and agent can still connect.
+      # $FAULTTEST_CONN is injected by faulttest from the resolved --conn flag.
       script_inline: |
-        DO $$
-        DECLARE
-          i integer;
-          max_conn integer;
-        BEGIN
-          SELECT setting::integer INTO max_conn FROM pg_settings WHERE name='max_connections';
-          FOR i IN 1..(max_conn - 3) LOOP
-            PERFORM pg_sleep(0); -- lightweight; connections released after DO block
-          END LOOP;
-        END;
-        $$;
+        MAX_CONN=$(psql "$FAULTTEST_CONN" -t -A -c "SHOW max_connections;" 2>/dev/null | tr -d ' \n')
+        if ! printf '%s' "$MAX_CONN" | grep -qE '^[0-9]+$'; then
+          echo "ERROR: could not read max_connections" >&2; exit 1
+        fi
+        SU_RESERVED=$(psql "$FAULTTEST_CONN" -t -A -c "SHOW superuser_reserved_connections;" 2>/dev/null | tr -d ' \n')
+        SU_RESERVED=${SU_RESERVED:-3}
+        # Count existing client backends so we don't over-spawn and block superuser slots.
+        EXISTING=$(psql "$FAULTTEST_CONN" -t -A -c \
+          "SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend';" \
+          2>/dev/null | tr -d ' \n')
+        EXISTING=${EXISTING:-0}
+        # Target: fill up to max_connections - superuser_reserved (regular user limit).
+        TARGET=$(( MAX_CONN - SU_RESERVED ))
+        SLOTS=$(( TARGET - EXISTING ))
+        if [ "$SLOTS" -le 0 ]; then
+          echo "Slots already at or above target ($EXISTING existing, target $TARGET/$MAX_CONN); skipping"
+          exit 0
+        fi
+        rm -f /tmp/faulttest_maxconn_pids.txt
+        for i in $(seq 1 "$SLOTS"); do
+          { sleep 600 | psql "$FAULTTEST_CONN" -q; } >/dev/null 2>&1 &
+          echo $! >> /tmp/faulttest_maxconn_pids.txt
+        done
+        sleep 3
+        echo "Injected: $SLOTS idle connections ($EXISTING existing → $TARGET/$MAX_CONN)"
     external_teardown:
-      type: sql
-      script_inline: "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle' AND pid <> pg_backend_pid();"
+      type: shell_exec
+      script_inline: |
+        if [ -f /tmp/faulttest_maxconn_pids.txt ]; then
+          # Kill the entire process group (negative PID) so both sleep and psql
+          # are terminated; killing only the subshell PID orphans the psql child.
+          while read -r pid; do
+            kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+          done < /tmp/faulttest_maxconn_pids.txt
+          rm -f /tmp/faulttest_maxconn_pids.txt
+          sleep 2
+        fi
+        # Safety net: terminate any surviving idle backends via postgres.
+        psql "$FAULTTEST_CONN" -c "
+          SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE state = 'idle' AND pid <> pg_backend_pid();
+        " >/dev/null 2>&1 || true
+        echo "Teardown: idle connections terminated"
     prompt: >
       Users are getting "too many clients" errors connecting to the database.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -55,6 +91,13 @@ failures:
           - "exhausted"
       expected_diagnosis:
         category: "connection_exhaustion"
+        narrative: "The agent should identify that the PostgreSQL max_connections limit has been reached due to idle or sleeping sessions consuming all available connection slots, and recommend either terminating idle connections or increasing max_connections."
+    remediation:
+      playbook_id: pbs_connection_triage
+      agent_name: database
+      agent_prompt: "There are too many idle connections on {{connection_string}}. Please terminate idle connections to free up connection slots."
+      verify_sql: "SELECT count(*) < current_setting('max_connections')::int - 5 FROM pg_stat_activity WHERE state = 'idle'"
+      verify_timeout: "60s"
     timeout: 60s
 
   - id: db-long-running-query
@@ -75,12 +118,32 @@ failures:
       script: sql/teardown_long_running_query.sh
     external_compat: true
     external_inject:
-      type: sql
-      script_inline: "SELECT pg_sleep(300);"
-      detach: true
+      type: shell_exec
+      script_inline: |
+        psql "$FAULTTEST_CONN" -c "
+          CREATE TABLE IF NOT EXISTS _faulttest_longquery (id int PRIMARY KEY);
+          INSERT INTO _faulttest_longquery VALUES (1) ON CONFLICT DO NOTHING;
+        "
+        { printf "BEGIN;\nLOCK TABLE _faulttest_longquery IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(300);\nCOMMIT;\n" \
+          | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
+        echo $! > /tmp/faulttest_longquery_pid.txt
+        sleep 1
+        echo "Injected: long-running query holding ACCESS EXCLUSIVE lock on _faulttest_longquery"
     external_teardown:
-      type: sql
-      script_inline: "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND pid <> pg_backend_pid();"
+      type: shell_exec
+      script_inline: |
+        if [ -f /tmp/faulttest_longquery_pid.txt ]; then
+          kill "$(cat /tmp/faulttest_longquery_pid.txt)" 2>/dev/null || true
+          rm -f /tmp/faulttest_longquery_pid.txt
+        fi
+        psql "$FAULTTEST_CONN" -c "
+          SELECT pg_terminate_backend(pid)
+          FROM pg_stat_activity
+          WHERE query LIKE '%_faulttest_longquery%'
+            AND state IN ('active', 'idle in transaction')
+            AND pid <> pg_backend_pid();
+        "
+        psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS _faulttest_longquery;"
     prompt: >
       Queries seem to hang indefinitely and certain tables are inaccessible.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -99,6 +162,13 @@ failures:
           - "blocked"
       expected_diagnosis:
         category: "lock_blocking"
+        narrative: "The agent should identify a long-running query holding an ACCESS EXCLUSIVE lock that is blocking other sessions from accessing the table, and recommend canceling or terminating the blocking query."
+    remediation:
+      playbook_id: pbs_slow_query_triage
+      agent_name: database
+      agent_prompt: "A long-running query is holding an ACCESS EXCLUSIVE lock on {{connection_string}}, blocking other sessions. Please identify and cancel or terminate the blocking query."
+      verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
+      verify_timeout: "60s"
     timeout: 90s
 
   - id: db-lock-contention
@@ -170,6 +240,13 @@ failures:
           - "lock"
       expected_diagnosis:
         category: "deadlock"
+        narrative: "The agent should identify lock contention or a deadlock situation where transactions are waiting on locks held by other sessions, and recommend resolving the blocking sessions or reviewing transaction patterns."
+    remediation:
+      playbook_id: pbs_connection_triage
+      agent_name: database
+      agent_prompt: "There is lock contention on {{connection_string}}. Please identify and terminate the blocking session to clear the deadlock."
+      verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
+      verify_timeout: "60s"
     timeout: 180s
 
   - id: db-table-bloat
@@ -213,6 +290,13 @@ failures:
           - "n_dead_tup"
       expected_diagnosis:
         category: "table_bloat"
+        narrative: "The agent should identify that a table has accumulated excessive dead tuples because autovacuum is disabled or not keeping up, causing disk bloat and query slowdowns, and recommend running VACUUM or re-enabling autovacuum."
+    remediation:
+      playbook_id: pbs_vacuum_triage
+      agent_name: database
+      agent_prompt: "The table test_bloat_table on {{connection_string}} has excessive dead tuples and autovacuum is disabled. Please run VACUUM on it."
+      verify_sql: "SELECT COALESCE((SELECT n_dead_tup < 10000 FROM pg_stat_user_tables WHERE relname = 'test_bloat_table'), true)"
+      verify_timeout: "120s"
     timeout: 60s
 
   - id: db-high-cache-miss
@@ -222,7 +306,7 @@ failures:
     description: >
       The database cache hit ratio is low because queries scan tables
       larger than shared_buffers, causing excessive disk I/O.
-    external_compat: true
+    external_compat: false  # requires shared_buffers control; one-shot seqscan diluted by agent tool calls
     inject:
       type: sql
       script: sql/inject_high_cache_miss.sql
@@ -256,6 +340,7 @@ failures:
           - "blks_read"
       expected_diagnosis:
         category: "cache_performance"
+        narrative: "The agent should identify a low buffer cache hit ratio indicating that queries are reading data from disk rather than shared_buffers, and recommend increasing shared_buffers or optimizing query access patterns."
     timeout: 60s
 
   - id: db-connection-refused
@@ -292,6 +377,7 @@ failures:
           - "not accepting"
       expected_diagnosis:
         category: "connection_refused"
+        narrative: "The agent should identify that the PostgreSQL server is not running or not accepting connections, and recommend starting or restarting the database service."
     timeout: 30s
 
   - id: db-auth-failure
@@ -324,6 +410,7 @@ failures:
           - "failed"
       expected_diagnosis:
         category: "authentication_failure"
+        narrative: "The agent should identify that the database connection is failing due to incorrect credentials or an authentication error, and recommend verifying the username and password in the connection string."
     timeout: 30s
 
   - id: db-not-exist
@@ -355,6 +442,7 @@ failures:
           - "nonexistent"
       expected_diagnosis:
         category: "database_not_found"
+        narrative: "The agent should identify that the database name specified in the connection string does not exist on the server, and recommend verifying the database name or creating it."
     timeout: 30s
 
   - id: db-replication-lag
@@ -391,6 +479,13 @@ failures:
           - "lag"
       expected_diagnosis:
         category: "replication_lag"
+        narrative: "The agent should identify that the streaming replica has fallen behind the primary due to paused or stalled WAL replay, and recommend resuming WAL replay or investigating the replica's replication slot."
+    remediation:
+      playbook_id: pbs_replication_lag
+      agent_name: database
+      agent_prompt: "The streaming replica on {{connection_string}} has significant replication lag due to paused WAL replay. Please investigate and resume replication."
+      verify_sql: "SELECT count(*) = 0 FROM pg_stat_replication WHERE replay_lag > interval '60 seconds'"
+      verify_timeout: "120s"
     timeout: 60s
 
   - id: db-idle-in-transaction
@@ -464,6 +559,13 @@ failures:
           - "locked"
       expected_diagnosis:
         category: "uncommitted_transaction"
+        narrative: "The agent should identify a session stuck in idle-in-transaction state with uncommitted writes (backend_xid set), assess the rollback cost, and recommend terminating it after confirming it is safe to do so."
+    remediation:
+      playbook_id: pbs_connection_triage
+      agent_name: database
+      agent_prompt: "There is a session stuck in idle-in-transaction on {{connection_string}} blocking other writes. Please terminate the stuck session to clear the transaction."
+      verify_sql: "SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'"
+      verify_timeout: "60s"
     timeout: 90s
 
   - id: db-terminate-direct-command
@@ -533,6 +635,7 @@ failures:
           - "pid"
       expected_diagnosis:
         category: "session_termination"
+        narrative: "The agent should discover the blocking session PID via get_active_connections, inspect it via get_session_info to assess uncommitted work, and then call terminate_connection — following the inspect-before-act policy."
       expected_tool_order:
         - [get_session_info, terminate_connection]
     timeout: 90s
@@ -824,6 +927,13 @@ failures:
           - "bloat"
       expected_diagnosis:
         category: "vacuum_needed"
+        narrative: "The agent should identify tables with high dead tuple ratios indicating they need VACUUM, and recommend running VACUUM on the affected tables or re-enabling autovacuum."
+    remediation:
+      playbook_id: pbs_vacuum_triage
+      agent_name: database
+      agent_prompt: "Several tables on {{connection_string}} have excessive dead tuples and autovacuum is not keeping up. Please run VACUUM on the affected tables."
+      verify_sql: "SELECT COALESCE((SELECT n_dead_tup < 1000 FROM pg_stat_user_tables WHERE relname = 'vacuum_bloat'), true)"
+      verify_timeout: "120s"
     timeout: 60s
 
   - id: db-disk-pressure
@@ -863,6 +973,7 @@ failures:
           - "GiB"
       expected_diagnosis:
         category: "disk_pressure"
+        narrative: "The agent should identify which databases or tables are consuming the most disk space and report on the storage situation, recommending cleanup or capacity planning."
     timeout: 60s
 
   # ── Host failures (1) ──────────────────────────────────────────────────
@@ -902,6 +1013,7 @@ failures:
           - "shutdown"
       expected_diagnosis:
         category: "shutdown"
+        narrative: "The agent should identify that the PostgreSQL container or process has been stopped and is not running, and recommend restarting it."
     timeout: 60s
 
   - id: host-pg-crash
@@ -943,6 +1055,7 @@ failures:
           - "abnormal"
       expected_diagnosis:
         category: "container_killed"
+        narrative: "The agent should identify that the PostgreSQL process was forcibly killed (SIGKILL / exit code 137) rather than cleanly stopped, distinguishing it from a normal shutdown, and recommend restarting the database."
     timeout: 60s
     # GOVERNANCE GAP: the sysadmin agent cannot distinguish a SIGKILL (exit 137)
     # from a clean stop (exit 0) — both appear as "container stopped" in tool output.
@@ -1034,6 +1147,7 @@ failures:
           - "rejected"
       expected_diagnosis:
         category: "hba_rejection"
+        narrative: "The agent should identify that pg_hba.conf is rejecting connections from the client address, and recommend reviewing and correcting the pg_hba.conf rules to allow the appropriate connections."
     timeout: 60s
 
   - id: db-process-kill
@@ -1092,6 +1206,7 @@ failures:
           - "not running"
       expected_diagnosis:
         category: "process_crash"
+        narrative: "The agent should identify that the PostgreSQL postmaster process has crashed or been killed and is not accepting connections, and recommend restarting the PostgreSQL service."
     timeout: 60s
 
   - id: db-config-bad-param
@@ -1174,6 +1289,7 @@ failures:
           - "shared_buffers"
       expected_diagnosis:
         category: "config_error"
+        narrative: "The agent should identify that PostgreSQL cannot start due to an invalid configuration parameter in postgresql.conf (such as an out-of-range shared_buffers value), and recommend correcting or reverting the configuration file."
     timeout: 60s
 
   # ── Compound failures (2) ──────────────────────────────────────────────
