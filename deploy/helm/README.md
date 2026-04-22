@@ -1057,7 +1057,7 @@ spec:
         - name: HELPDESK_CLIENT_API_KEY
           valueFrom:
             secretKeyRef:
-              name: <your-gateway.clientAPIKeySecret value>  # same Secret the gateway uses
+              name: gateway-api-key  # same Secret the gateway uses (gateway.clientAPIKeySecret)
               key: api-key
         - name: HOME
           value: /home/helpdesk             # so psql finds /home/helpdesk/.pgpass
@@ -1129,7 +1129,7 @@ env:
   - name: HELPDESK_CLIENT_API_KEY
     valueFrom:
       secretKeyRef:
-        name: <your-gateway.clientAPIKeySecret value>
+        name: gateway-api-key  # gateway.clientAPIKeySecret
         key: api-key
   - name: ANTHROPIC_API_KEY         # add this
     valueFrom:
@@ -1212,23 +1212,98 @@ export HELPDESK_CLIENT_API_KEY=$(kubectl -n helpdesk-system get secret <your-cli
 
 kubectl -n helpdesk-system run faulttest-vault --rm -it --restart=Never \
   --image=ghcr.io/borisdali/helpdesk:latest \
-  --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_CLIENT_API_KEY" \
-  -- faulttest vault list \
-    --gateway http://helpdesk-gateway:8080 \
-    --api-key $HELPDESK_CLIENT_API_KEY
+  --overrides="{
+    \"spec\": {
+      \"containers\": [{
+        \"name\": \"faulttest-vault\",
+        \"image\": \"ghcr.io/borisdali/helpdesk:latest\",
+        \"args\": [\"faulttest\",\"vault\",\"list\",\"--gateway\",\"http://helpdesk-gateway:8080\",\"--api-key\",\"$HELPDESK_CLIENT_API_KEY\"],
+        \"env\": [{\"name\":\"HELPDESK_CLIENT_API_KEY\",\"value\":\"$HELPDESK_CLIENT_API_KEY\"}]
+      }]
+    }
+  }"
 ```
 
-`faulttest vault status` reads the local run history file, not the gateway. After copying the report directory out in §10, also copy the history file and run vault status locally against it:
+`faulttest vault status` reads the run history file written by `faulttest run`. Because the Job uses an `emptyDir` for `/reports`, history is lost when the pod terminates. The recommended approach is to mount a PersistentVolumeClaim so history accumulates across runs.
+
+**Create the PVC once:**
 
 ```bash
-# history.json is copied out alongside the report by the kubectl cp in §10
-# Run vault status locally against it:
-HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status
-HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status --since-days 7
-HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status --fault db-max-connections
+kubectl -n helpdesk-system apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: faulttest-reports
+  namespace: helpdesk-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+EOF
 ```
 
-> To accumulate history across Job runs, mount a PersistentVolume at `/reports` (replacing the `emptyDir`) so that `history.json` persists between Jobs.
+**Replace the `emptyDir` in the Job with the PVC:**
+
+```yaml
+      volumes:
+      - name: reports
+        persistentVolumeClaim:
+          claimName: faulttest-reports
+```
+
+**Run `vault status` against the persistent history:**
+
+```bash
+kubectl -n helpdesk-system run faulttest-vault --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:latest \
+  --overrides='{
+    "spec": {
+      "volumes": [{"name":"reports","persistentVolumeClaim":{"claimName":"faulttest-reports"}}],
+      "containers": [{
+        "name": "faulttest-vault",
+        "image": "ghcr.io/borisdali/helpdesk:latest",
+        "args": ["faulttest","vault","status"],
+        "env": [{"name":"HELPDESK_FAULT_HISTORY_FILE","value":"/reports/history.json"}],
+        "volumeMounts": [{"name":"reports","mountPath":"/reports"}]
+      }]
+    }
+  }'
+
+# Filter by fault or time window:
+kubectl -n helpdesk-system run faulttest-vault --rm -it --restart=Never \
+  --image=ghcr.io/borisdali/helpdesk:latest \
+  --overrides='{
+    "spec": {
+      "volumes": [{"name":"reports","persistentVolumeClaim":{"claimName":"faulttest-reports"}}],
+      "containers": [{
+        "name": "faulttest-vault",
+        "image": "ghcr.io/borisdali/helpdesk:latest",
+        "args": ["faulttest","vault","status","--since-days","7"],
+        "env": [{"name":"HELPDESK_FAULT_HISTORY_FILE","value":"/reports/history.json"}],
+        "volumeMounts": [{"name":"reports","mountPath":"/reports"}]
+      }]
+    }
+  }'
+```
+
+**Alternatively, copy history out and run locally:**
+
+```bash
+# Run a temporary pod that cats the file, then grab output via logs
+# (--overrides drops args from `--`, so put the command inside the JSON)
+kubectl -n helpdesk-system run pvc-reader --restart=Never \
+  --image=busybox \
+  --overrides='{"spec":{"volumes":[{"name":"r","persistentVolumeClaim":{"claimName":"faulttest-reports"}}],"containers":[{"name":"pvc-reader","image":"busybox","command":["cat"],"args":["/reports/history.json"],"volumeMounts":[{"name":"r","mountPath":"/reports"}]}]}}'
+
+kubectl -n helpdesk-system wait pod/pvc-reader \
+  --for=jsonpath='{.status.phase}'=Succeeded --timeout=30s
+kubectl -n helpdesk-system logs pvc-reader > ./faulttest-reports/history.json
+kubectl -n helpdesk-system delete pod pvc-reader --ignore-not-found
+
+HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status
+HELPDESK_FAULT_HISTORY_FILE=./faulttest-reports/history.json ./faulttest vault status --fault db-max-connections
+```
 
 ### Remediation mode
 
