@@ -93,6 +93,7 @@ failures:
         category: "connection_exhaustion"
         narrative: "The agent should identify that the PostgreSQL max_connections limit has been reached due to idle or sleeping sessions consuming all available connection slots, and recommend either terminating idle connections or increasing max_connections."
     remediation:
+      playbook_id: pbs_connection_triage
       agent_name: database
       agent_prompt: "There are too many idle connections on {{connection_string}}. Please terminate idle connections to free up connection slots."
       verify_sql: "SELECT count(*) < current_setting('max_connections')::int - 5 FROM pg_stat_activity WHERE state = 'idle'"
@@ -162,6 +163,12 @@ failures:
       expected_diagnosis:
         category: "lock_blocking"
         narrative: "The agent should identify a long-running query holding an ACCESS EXCLUSIVE lock that is blocking other sessions from accessing the table, and recommend canceling or terminating the blocking query."
+    remediation:
+      playbook_id: pbs_slow_query_triage
+      agent_name: database
+      agent_prompt: "A long-running query is holding an ACCESS EXCLUSIVE lock on {{connection_string}}, blocking other sessions. Please identify and cancel or terminate the blocking query."
+      verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
+      verify_timeout: "60s"
     timeout: 90s
 
   - id: db-lock-contention
@@ -235,6 +242,7 @@ failures:
         category: "deadlock"
         narrative: "The agent should identify lock contention or a deadlock situation where transactions are waiting on locks held by other sessions, and recommend resolving the blocking sessions or reviewing transaction patterns."
     remediation:
+      playbook_id: pbs_connection_triage
       agent_name: database
       agent_prompt: "There is lock contention on {{connection_string}}. Please identify and terminate the blocking session to clear the deadlock."
       verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
@@ -283,6 +291,12 @@ failures:
       expected_diagnosis:
         category: "table_bloat"
         narrative: "The agent should identify that a table has accumulated excessive dead tuples because autovacuum is disabled or not keeping up, causing disk bloat and query slowdowns, and recommend running VACUUM or re-enabling autovacuum."
+    remediation:
+      playbook_id: pbs_vacuum_triage
+      agent_name: database
+      agent_prompt: "The table test_bloat_table on {{connection_string}} has excessive dead tuples and autovacuum is disabled. Please run VACUUM on it."
+      verify_sql: "SELECT COALESCE((SELECT n_dead_tup < 10000 FROM pg_stat_user_tables WHERE relname = 'test_bloat_table'), true)"
+      verify_timeout: "120s"
     timeout: 60s
 
   - id: db-high-cache-miss
@@ -466,6 +480,12 @@ failures:
       expected_diagnosis:
         category: "replication_lag"
         narrative: "The agent should identify that the streaming replica has fallen behind the primary due to paused or stalled WAL replay, and recommend resuming WAL replay or investigating the replica's replication slot."
+    remediation:
+      playbook_id: pbs_replication_lag
+      agent_name: database
+      agent_prompt: "The streaming replica on {{connection_string}} has significant replication lag due to paused WAL replay. Please investigate and resume replication."
+      verify_sql: "SELECT count(*) = 0 FROM pg_stat_replication WHERE replay_lag > interval '60 seconds'"
+      verify_timeout: "120s"
     timeout: 60s
 
   - id: db-idle-in-transaction
@@ -541,6 +561,7 @@ failures:
         category: "uncommitted_transaction"
         narrative: "The agent should identify a session stuck in idle-in-transaction state with uncommitted writes (backend_xid set), assess the rollback cost, and recommend terminating it after confirming it is safe to do so."
     remediation:
+      playbook_id: pbs_connection_triage
       agent_name: database
       agent_prompt: "There is a session stuck in idle-in-transaction on {{connection_string}} blocking other writes. Please terminate the stuck session to clear the transaction."
       verify_sql: "SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'"
@@ -907,6 +928,12 @@ failures:
       expected_diagnosis:
         category: "vacuum_needed"
         narrative: "The agent should identify tables with high dead tuple ratios indicating they need VACUUM, and recommend running VACUUM on the affected tables or re-enabling autovacuum."
+    remediation:
+      playbook_id: pbs_vacuum_triage
+      agent_name: database
+      agent_prompt: "Several tables on {{connection_string}} have excessive dead tuples and autovacuum is not keeping up. Please run VACUUM on the affected tables."
+      verify_sql: "SELECT COALESCE((SELECT n_dead_tup < 1000 FROM pg_stat_user_tables WHERE relname = 'vacuum_bloat'), true)"
+      verify_timeout: "120s"
     timeout: 60s
 
   - id: db-disk-pressure
