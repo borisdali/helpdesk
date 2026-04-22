@@ -1,6 +1,6 @@
 
 <p align="center">
-  <a href="https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a">
+  <a href="https://medium.com/@borisdali/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c">
   <img alt="aiHelpDesk_logo" src="https://github.com/user-attachments/assets/9687ccd4-a2ad-4c85-9466-bcb6c006e8ac" width="40%"/>
   </a>
 </p>
@@ -21,7 +21,7 @@ Every resolved incident automatically proposes a playbook draft. Every successfu
 ## The Operational SRE/DBA Flywheel
 
 <p align="center">
-  <a href="https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a">
+  <a href="https://medium.com/@borisdali/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c">
   <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="80%"/>
   </a>
 </p>
