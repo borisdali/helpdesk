@@ -8,7 +8,7 @@
 
 # aiHelpDesk: Agentic AI DB SRE support system that learns from every incident
 
-aiHelpDesk is a Go-based AI multi-agent support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) issues on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
+aiHelpDesk is a Go-based Agentic AI multi-agent database support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) hosted on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
 
 Two things set aiHelpDesk apart from a general-purpose AI assistant:
 
@@ -21,7 +21,7 @@ Every resolved incident automatically proposes a playbook draft. Every successfu
 ## The Operational SRE/DBA Flywheel
 
 <p align="center">
-  <a href="https://medium.com/@borisdali/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c">
+  <a href="https://medium.com/@borisdali/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c#7fe7">
   <img alt="aiHelpDesk_flywheel" src="https://github.com/user-attachments/assets/68520c1b-188d-4d3f-8bbd-b4c4aed8b950" width="80%"/>
   </a>
 </p>
