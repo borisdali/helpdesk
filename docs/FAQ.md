@@ -303,3 +303,18 @@ been validated to our satisfaction.
 
 We would rather be conservative and wrong about the timeline than release early
 and be wrong about safety.
+
+## Why you are not using ontology?
+
+We consider OWL/RDF/SPARQL to be a massive overhead for our Tool Catalog.
+The formal ontology machinery is built for open-world reasoning across vast
+concept spaces. aiHelpDesk world is deliberately closed: we strictly control
+every tool in the registry. Our real boundary is the LLM that is already doing
+the semantic work of mapping intent to tools. In our experience it's good at
+it when the constraint space is clear, which is what aiHelpDesk does.
+Our job is not to replace that reasoning with an ontology. Rather it's
+to make the constraint space unambiguous so the LLM can't make wrong choices
+even when it reasons sloppily.
+
+That's precisely what aiHelpDesk Governed Tool Taxonomy is — structured
+metadata, relationships, and hard filters — not a semantic layer in the BI sense.

@@ -1,0 +1,26 @@
+[Unit]
+Description=aiHelpDesk Database Agent
+Documentation=https://github.com/borisdali/helpdesk
+After=network.target helpdesk-auditd.service
+Wants=helpdesk-auditd.service
+
+[Service]
+Type=simple
+User=helpdesk
+Group=helpdesk
+WorkingDirectory=/opt/helpdesk
+EnvironmentFile=/opt/helpdesk/.env
+ExecStart=/opt/helpdesk/database-agent
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=helpdesk-database-agent
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/helpdesk /var/lib/helpdesk
+
+[Install]
+WantedBy=helpdesk.target

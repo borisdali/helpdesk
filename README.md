@@ -39,11 +39,11 @@ The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds ever
 
 ## AI-Assisted Database Management
 
-While SaaS DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a) for extensive treatment of this topic and, in particular, check out the 13 specific customer expectations of the cloud provider's DBaaS and how the actual cloud offerings mostly fall short them.
+While SaaS DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a) for extensive treatment of this topic and, in particular, check out the 13 specific customer expectations of the cloud provider's DBaaS and how the actual cloud offerings mostly fall short to satisfy them.
 
 Enter the world of AI-Assisted Database Management products.
 
-aiHelpDesk is the first product from the DDS Group on the path of AI-Assisted Database Management: a new breed of products where intelligence, governance, and operational memory live in your stack, not in a vendor's cloud.
+aiHelpDesk is the first product from the DDS Group on the path of AI-Assisted Database Management: a new breed of products where intelligence, governance, and operational memory live **in your stack**, not in a vendor's cloud.
 
 See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before diving in.
 
@@ -51,7 +51,7 @@ See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before di
 
 ## Deployment
 
-aiHelpDesk runs on Kubernetes, VMs, bare metal or inside Docker/Podman containers. Binaries are provided for Linux x86-64 and ARM (Graviton, Ampere), and macOS (Intel and Apple Silicon).
+aiHelpDesk runs on VMs / bare metal (either directly or inside Docker/Podman containers) or on K8s. Binaries are provided for Linux x86-64 and ARM (Graviton, Ampere), and macOS (Intel and Apple Silicon).
 
 ### Docker/Podman 
 
@@ -72,9 +72,8 @@ See [here](deploy/host/README.md) for the full instructions.
 ### Kubernetes / Helm
 
 ```bash
-tar xzf helpdesk-v0.1.0-deploy.tar.gz
 kubectl create secret generic helpdesk-api-key --from-literal=api-key=<YOUR_API_KEY>
-helm install helpdesk ./helpdesk-v0.1.0-deploy/helm/helpdesk \
+helm install helpdesk ./helpdesk-vX.Y.Z-deploy/helm/helpdesk \
   --set model.vendor=anthropic \
   --set model.name=claude-haiku-4-5-20251001
 ```

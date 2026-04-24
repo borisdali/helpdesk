@@ -1,0 +1,22 @@
+[Unit]
+Description=aiHelpDesk — AI-powered operations platform
+Documentation=https://github.com/borisdali/helpdesk
+# Pulling in this target starts the full helpdesk stack.
+# Core services (auditd, agents, gateway) are always included.
+# Governance services (auditor, secbot) are optional — enable them with:
+#   systemctl enable helpdesk-auditor.service helpdesk-secbot.service
+Wants=helpdesk-auditd.service
+Wants=helpdesk-database-agent.service
+Wants=helpdesk-k8s-agent.service
+Wants=helpdesk-sysadmin-agent.service
+Wants=helpdesk-incident-agent.service
+Wants=helpdesk-gateway.service
+After=helpdesk-auditd.service
+After=helpdesk-database-agent.service
+After=helpdesk-k8s-agent.service
+After=helpdesk-sysadmin-agent.service
+After=helpdesk-incident-agent.service
+After=helpdesk-gateway.service
+
+[Install]
+WantedBy=multi-user.target

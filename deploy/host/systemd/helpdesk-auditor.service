@@ -1,0 +1,28 @@
+[Unit]
+Description=aiHelpDesk Auditor (governance event monitor)
+Documentation=https://github.com/borisdali/helpdesk
+After=helpdesk-auditd.service
+Wants=helpdesk-auditd.service
+# Optional governance component. Enable when HELPDESK_OPERATING_MODE=fix or
+# readonly-governed, or when you want human-readable audit event logging.
+
+[Service]
+Type=simple
+User=helpdesk
+Group=helpdesk
+WorkingDirectory=/opt/helpdesk
+EnvironmentFile=/opt/helpdesk/.env
+ExecStart=/opt/helpdesk/auditor -audit-service=http://localhost:1199 -log-all
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=helpdesk-auditor
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/helpdesk /var/lib/helpdesk
+
+[Install]
+WantedBy=helpdesk.target

@@ -1,0 +1,29 @@
+[Unit]
+Description=aiHelpDesk Research Agent (Gemini / web search)
+Documentation=https://github.com/borisdali/helpdesk
+After=network.target helpdesk-auditd.service
+Wants=helpdesk-auditd.service
+# Only needed when HELPDESK_MODEL_VENDOR=gemini or google.
+# GoogleSearch cannot be combined with function declarations in a single agent,
+# so web-search capability is delegated to this dedicated agent.
+
+[Service]
+Type=simple
+User=helpdesk
+Group=helpdesk
+WorkingDirectory=/opt/helpdesk
+EnvironmentFile=/opt/helpdesk/.env
+ExecStart=/opt/helpdesk/research-agent
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=helpdesk-research-agent
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/helpdesk /var/lib/helpdesk
+
+[Install]
+WantedBy=helpdesk.target

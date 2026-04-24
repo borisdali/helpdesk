@@ -1,0 +1,26 @@
+[Unit]
+Description=aiHelpDesk Sysadmin Agent
+Documentation=https://github.com/borisdali/helpdesk
+After=network.target helpdesk-auditd.service
+Wants=helpdesk-auditd.service
+
+[Service]
+Type=simple
+User=helpdesk
+Group=helpdesk
+WorkingDirectory=/opt/helpdesk
+EnvironmentFile=/opt/helpdesk/.env
+ExecStart=/opt/helpdesk/sysadmin-agent
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=helpdesk-sysadmin-agent
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/helpdesk /var/lib/helpdesk
+
+[Install]
+WantedBy=helpdesk.target

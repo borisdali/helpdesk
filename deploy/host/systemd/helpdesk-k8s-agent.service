@@ -1,0 +1,27 @@
+[Unit]
+Description=aiHelpDesk Kubernetes Agent
+Documentation=https://github.com/borisdali/helpdesk
+After=network.target helpdesk-auditd.service
+Wants=helpdesk-auditd.service
+
+[Service]
+Type=simple
+User=helpdesk
+Group=helpdesk
+WorkingDirectory=/opt/helpdesk
+EnvironmentFile=/opt/helpdesk/.env
+ExecStart=/opt/helpdesk/k8s-agent
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=helpdesk-k8s-agent
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# Needs to read kubeconfig; adjust ReadWritePaths if KUBECONFIG is outside /opt/helpdesk.
+ReadWritePaths=/opt/helpdesk /var/lib/helpdesk
+
+[Install]
+WantedBy=helpdesk.target
