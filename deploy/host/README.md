@@ -29,7 +29,20 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── approvals                   # AI Governance: approval management CLI
 ├── govexplain                  # AI Governance: policy explainability CLI
 ├── hashapikey                  # Identity: generate Argon2id hashes for service account API keys
-└── faulttest                   # Fault injection test runner (see §8)
+├── faulttest                   # Fault injection test runner (see §8)
+│
+└── systemd/                    # systemd unit files for persistent deployments
+    ├── install-systemd.sh      # Installer: creates user, dirs, copies units, enables services
+    ├── helpdesk.target         # Convenience target — starts the full stack
+    ├── helpdesk-auditd.service
+    ├── helpdesk-database-agent.service
+    ├── helpdesk-k8s-agent.service
+    ├── helpdesk-sysadmin-agent.service
+    ├── helpdesk-incident-agent.service
+    ├── helpdesk-gateway.service
+    ├── helpdesk-auditor.service  # optional governance
+    ├── helpdesk-secbot.service   # optional governance
+    └── helpdesk-research-agent.service  # Gemini only
 ```
 
 ## 2. Quick Start
@@ -154,6 +167,90 @@ Logs are written to `/tmp/helpdesk-<service>.log`. Tail them while running:
 tail -f /tmp/helpdesk-database-agent.log
 tail -f /tmp/helpdesk-auditd.log
 tail -f /tmp/helpdesk-gateway.log
+```
+
+## 5.1 Persistent Deployment (systemd)
+
+`startall.sh` is designed for development and quick evaluation. For production servers where services must survive reboots and be managed by the OS, install aiHelpDesk as systemd units.
+
+### Install
+
+```bash
+# Core stack (auditd, agents, gateway)
+sudo ./systemd/install-systemd.sh
+
+# With governance components (auditor + secbot)
+sudo ./systemd/install-systemd.sh --governance
+
+# With Gemini research agent
+sudo ./systemd/install-systemd.sh --research
+
+# Enable units without starting immediately (image baking / AMI prep)
+sudo ./systemd/install-systemd.sh --enable-only
+```
+
+The installer:
+1. Creates a `helpdesk` system user and group
+2. Creates `/opt/helpdesk` (install directory) and `/var/lib/helpdesk` (data directory)
+3. Writes a `/opt/helpdesk/.env` stub if one does not already exist
+4. Copies unit files to `/etc/systemd/system/`
+5. Runs `systemctl daemon-reload` and enables the units
+6. Starts `helpdesk.target`
+
+Before running the installer, place the helpdesk binaries in `/opt/helpdesk/` and edit `/opt/helpdesk/.env` with your credentials:
+
+```bash
+sudo cp helpdesk-vX.Y.Z-linux-amd64/* /opt/helpdesk/
+sudo cp infrastructure.json /opt/helpdesk/        # if you have one
+sudo nano /opt/helpdesk/.env                       # set HELPDESK_MODEL_VENDOR, MODEL_NAME, API_KEY
+```
+
+### Managing services
+
+```bash
+# Start / stop the full stack
+sudo systemctl start helpdesk.target
+sudo systemctl stop helpdesk.target
+
+# Restart a single service (e.g. after updating infrastructure.json)
+sudo systemctl restart helpdesk-gateway.service
+sudo systemctl restart helpdesk-database-agent.service
+
+# Check overall stack health
+sudo systemctl status helpdesk.target
+
+# Enable/disable governance components without reinstalling
+sudo systemctl enable --now helpdesk-auditor.service helpdesk-secbot.service
+sudo systemctl disable --now helpdesk-auditor.service helpdesk-secbot.service
+```
+
+### Logs (journald)
+
+```bash
+# Follow gateway logs
+sudo journalctl -u helpdesk-gateway.service -f
+
+# All helpdesk services in one stream
+sudo journalctl -u 'helpdesk-*' -f
+
+# Last 100 lines from the database agent
+sudo journalctl -u helpdesk-database-agent.service -n 100 --no-pager
+```
+
+### Service dependency order
+
+```
+helpdesk-auditd  ──► agents (parallel) ──► helpdesk-gateway
+                                  │
+                    auditor, secbot (optional; start after gateway)
+```
+
+All services source `/opt/helpdesk/.env`. Any change to `.env` requires a restart of the affected service(s):
+
+```bash
+sudo systemctl restart helpdesk-database-agent.service
+# or restart everything:
+sudo systemctl restart helpdesk.target
 ```
 
 ## 6. Using helpdesk-client
@@ -408,7 +505,7 @@ Exit codes: `0` = allowed, `1` = denied, `2` = requires approval, `3` = error.
 ./auditor -audit-service http://localhost:1199
 ```
 
-> **Socket path:** `startall.sh` creates the socket at `HELPDESK_AUDIT_SOCKET` (default `/tmp/helpdesk-audit.sock`). The `auditor` binary defaults to `audit.sock` in the current directory — always pass `-socket` explicitly when running it outside `startall.sh`.
+> **Socket path:** `startall.sh` creates the socket at `HELPDESK_AUDIT_SOCKET` (default `/tmp/helpdesk-audit.sock`). The `auditor` binary defaults to `audit.sock` in the current directory — always pass `-socket` explicitly when running it outside `startall.sh`. The systemd unit uses `-audit-service=http://localhost:1199` (HTTP polling) instead of a socket path, which avoids Unix socket permission issues across service boundaries.
 
 Check the live alert log:
 
