@@ -31,7 +31,7 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── hashapikey                  # Identity: generate Argon2id hashes for service account API keys
 ├── faulttest                   # Fault injection test runner (see §8)
 │
-└── systemd/                    # systemd unit files for persistent deployments
+└── systemd/                    # systemd unit files for persistent deployments (Linux only)
     ├── install-systemd.sh      # Installer: creates user, dirs, copies units, enables services
     ├── helpdesk.target         # Convenience target — starts the full stack
     ├── helpdesk-auditd.service
@@ -172,6 +172,8 @@ tail -f /tmp/helpdesk-gateway.log
 ## 5.1 Persistent Deployment (systemd)
 
 `startall.sh` is designed for development and quick evaluation. For production servers where services must survive reboots and be managed by the OS, install aiHelpDesk as systemd units.
+
+> The `systemd/` directory is included only in Linux binary tarballs (`linux-amd64`, `linux-arm64`). On macOS use `startall.sh`.
 
 ### Install
 

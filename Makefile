@@ -234,6 +234,10 @@ binaries:
 		cp policies.example.yaml $$outdir/; \
 		cp users.example.yaml $$outdir/; \
 		cp agents.json $$outdir/; \
+		if [ "$$os" = "linux" ]; then \
+			cp -r deploy/host/systemd $$outdir/systemd; \
+			chmod +x $$outdir/systemd/install-systemd.sh; \
+		fi; \
 		tar -czf $(DIST)/helpdesk-$(VERSION)-$$os-$$arch.tar.gz \
 			-C $(DIST) helpdesk-$(VERSION)-$$os-$$arch; \
 		rm -rf $$outdir; \
@@ -274,7 +278,8 @@ bundle:
 	cp deploy/host/.env.example $$bundledir/host/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/host/; \
 	cp policies.example.yaml $$bundledir/host/; \
-	chmod +x $$bundledir/host/startall.sh; \
+	cp -r deploy/host/systemd $$bundledir/host/systemd; \
+	chmod +x $$bundledir/host/startall.sh $$bundledir/host/systemd/install-systemd.sh; \
 	\
 	echo "==> helper scripts"; \
 	cp scripts/gateway-repl.sh $$bundledir/scripts/; \
