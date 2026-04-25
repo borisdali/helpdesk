@@ -1,6 +1,8 @@
 # aiHelpDesk Playbook Operations Guide
 
-Operational best practices for taking advantage of aiHelpDesk [playbooks](PLAYBOOKS.md) effectively. This guide covers what to set up before an incident occurs and how to work the investigation workflow during one.
+Operational best practices for taking advantage of aiHelpDesk [Playbooks](PLAYBOOKS.md) effectively. This guide covers what to set up before an incident occurs and how to work the investigation workflow during one.
+
+> **Every resolved incident improves the Vault.** When you close a playbook run with `outcome="resolved"`, the Gateway automatically synthesises a playbook draft from the audit trace and saves it to the Vault for your review. Over time, this turns each incident into an institutional memory contribution — see the [Operational SRE/DBA Flywheel](VAULT.md) flow.
 
 ---
 
@@ -204,7 +206,7 @@ jq '{run_id, escalation_hint}' /tmp/run2.json
 
 Repeat for further escalations, always chaining `prior_run_id` to the immediately preceding run.
 
-### 2.4 Step 4 — Record the outcome
+### 2.4 Step 4 — Record the outcome and trigger draft synthesis
 
 Agent-mode runs auto-record `outcome` and `findings_summary` from the agent's structured response. Verify:
 
@@ -231,6 +233,33 @@ curl -s -H "X-User: ops@example.com" \
   -d '{"outcome": "abandoned"}'
 ```
 
+When a run is closed with `outcome="resolved"` or `outcome="escalated"` and the Gateway has auditd configured, a playbook draft is **automatically synthesised** from the audit trace and saved to the Vault as an inactive draft. You do not need to do anything to trigger this — it happens as a side-effect of recording the outcome.
+
+### 2.5 Step 5 — Review the Vault draft
+
+After closing the incident, check for the pending draft and decide whether to activate it:
+
+```bash
+# See if a draft was generated for this series
+curl -s "http://localhost:8080/api/v1/fleet/playbooks?source=generated" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.playbooks[] | select(.is_active == false) | {id, name, created_at}'
+
+# Inspect the draft
+curl -s http://localhost:8080/api/v1/fleet/playbooks/<playbook_id> \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
+
+# Activate if it captures the right approach
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/<playbook_id>/activate \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY"
+
+# Or discard if it's not useful
+curl -s -X DELETE http://localhost:8080/api/v1/fleet/playbooks/<playbook_id> \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY"
+```
+
+Before activating, consider running the draft through `faulttest run --remediate` against staging to validate it actually resolves the fault class it claims to fix. An activated playbook becomes the version used for all future runs in its series.
+
 ---
 
 ## 3. Outcome hygiene
@@ -245,6 +274,7 @@ curl -s -H "X-User: ops@example.com" \
 
 A healthy playbook should show `resolution_rate > 0.7` after 10+ runs. Below that, review recent `findings_summary` values — a low rate usually means either the agent isn't producing parseable signals or the playbook is being triggered for the wrong problem class.
 
+Outcome quality also directly affects draft quality. The `from-trace` synthesis uses `findings_summary` as context — a detailed summary ("removed invalid max_connections override from postgresql.conf, restarted") produces a more actionable draft than an empty or generic one.
 
 See [here](PLAYBOOKS.md#record-an-outcome) for the patching instructions.
 
@@ -270,3 +300,18 @@ See [here](PLAYBOOKS.md#record-an-outcome) for the patching instructions.
 - [ ] Confirm `outcome` is `resolved` (auto-set for agent runs, manual PATCH for fleet runs)
 - [ ] If not auto-set, PATCH with `findings_summary` describing what was found and fixed
 - [ ] If abandoned, PATCH to `abandoned` so stats stay accurate
+- [ ] Check for a pending Vault draft (`GET /api/v1/fleet/playbooks?source=generated`)
+- [ ] Review the draft — activate if it captures the right approach, discard otherwise
+- [ ] Optionally validate the draft against staging via `faulttest run --remediate` before activating
+
+---
+
+## 5. See also
+
+| Document | What it covers |
+|----------|----------------|
+| [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel, how drafts enter the Vault, vault commands (`vault list`, `vault status`, `vault drift`, `vault suggest`) |
+| [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, CRUD API, import formats, system playbooks |
+| [FAULTTEST.md](FAULTTEST.md) | Fault injection CLI, fault catalog, remediation mode, LLM-as-judge scoring |
+| [FLEET.md](FLEET.md) | Fleet runner, job definitions, scheduled baseline capture |
+| [API.md](API.md) | Full REST API reference including `/fleet/playbooks/from-trace` |

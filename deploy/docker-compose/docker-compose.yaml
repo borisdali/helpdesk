@@ -475,6 +475,30 @@ services:
       gateway:
         condition: service_healthy
 
+  # Development / demo PostgreSQL instance.
+  # Start with: docker compose --profile dev up -d
+  # Can be combined: docker compose --profile dev --profile governance up -d
+  # Not started by default — existing production deployments are unaffected.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    profiles:
+      - dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
   incidents:
   audit-data:
+  postgres-data:
