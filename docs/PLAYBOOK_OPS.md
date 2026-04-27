@@ -310,6 +310,7 @@ See [here](PLAYBOOKS.md#record-an-outcome) for the patching instructions.
 
 | Document | What it covers |
 |----------|----------------|
+| [INCIDENTS.md](INCIDENTS.md) | What an Incident is; how real and injected Incidents feed the Vault; bundle anatomy |
 | [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel, how drafts enter the Vault, vault commands (`vault list`, `vault status`, `vault drift`, `vault suggest`) |
 | [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, CRUD API, import formats, system playbooks |
 | [FAULTTEST.md](FAULTTEST.md) | Fault injection CLI, fault catalog, remediation mode, LLM-as-judge scoring |

@@ -422,6 +422,7 @@ The drift command identifies which Playbooks may need a guidance update. `sugges
 | Document | What it covers |
 |----------|---------------|
 | [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, CRUD API, import formats, system Playbooks |
+| [INCIDENTS.md](INCIDENTS.md) | What an Incident is; how real and injected Incidents feed the Vault; bundle anatomy |
 | [PLAYBOOK_OPS.md](PLAYBOOK_OPS.md) | Operational best practices for authoring and running Playbooks |
 | [FAULTTEST.md](FAULTTEST.md) | Full faulttest CLI reference, fault catalog, scoring, remediation |
 | [FLEET.md](FLEET.md) | Fleet runner, job definitions, schema drift, planner |
