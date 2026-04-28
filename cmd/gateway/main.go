@@ -203,6 +203,10 @@ func main() {
 
 	gw.SetAuthorizer(authzr)
 
+	// Metrics are always enabled: /metrics on the same port exposes
+	// gateway_fabrication_mismatches_total and is safe to scrape without auth.
+	gw.SetMetrics(NewGatewayMetrics())
+
 	mux := http.NewServeMux()
 	gw.RegisterRoutes(mux)
 

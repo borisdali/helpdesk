@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -56,6 +57,7 @@ type Gateway struct {
 	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
 	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
+	metrics          *GatewayMetrics         // Prometheus-compatible metrics endpoint
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -127,6 +129,51 @@ func (g *Gateway) SetToolRegistry(r *toolregistry.Registry) {
 // SetUsersFile sets the path to the users YAML file (empty = dev/no-auth mode).
 func (g *Gateway) SetUsersFile(path string) {
 	g.usersFile = path
+}
+
+// SetMetrics sets the Prometheus-compatible metrics store for the gateway.
+func (g *Gateway) SetMetrics(m *GatewayMetrics) {
+	g.metrics = m
+}
+
+// GatewayMetrics tracks gateway-level operational counters in Prometheus text format.
+// It is thread-safe and uses no external library.
+type GatewayMetrics struct {
+	mu sync.Mutex
+	// fabricationMismatches counts delegation_verification events where the
+	// agent returned success but the audit trail has no matching tool executions,
+	// partitioned by {agent, action_class}.
+	fabricationMismatches map[string]int64
+}
+
+// NewGatewayMetrics creates an initialised GatewayMetrics.
+func NewGatewayMetrics() *GatewayMetrics {
+	return &GatewayMetrics{fabricationMismatches: make(map[string]int64)}
+}
+
+// recordFabricationMismatch increments the counter for the given agent and action class.
+func (m *GatewayMetrics) recordFabricationMismatch(agent, actionClass string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := agent + "|" + actionClass
+	m.fabricationMismatches[key]++
+}
+
+// ServeHTTP exposes the metrics in Prometheus text format at /metrics.
+func (m *GatewayMetrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "# HELP gateway_fabrication_mismatches_total Delegations where agent success had no matching audit-trail tool executions\n")
+	fmt.Fprintf(w, "# TYPE gateway_fabrication_mismatches_total counter\n")
+	for key, count := range m.fabricationMismatches {
+		parts := strings.SplitN(key, "|", 2)
+		agent, class := parts[0], ""
+		if len(parts) == 2 {
+			class = parts[1]
+		}
+		fmt.Fprintf(w, "gateway_fabrication_mismatches_total{agent=%q,action_class=%q} %d\n", agent, class, count)
+	}
 }
 
 // resolveRequest extracts the verified principal and declared purpose from an
@@ -238,6 +285,14 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q}\n", buildinfo.Version) //nolint:errcheck
 	}))
+	// /metrics is unauthenticated (Prometheus scrapes do not carry auth tokens by default).
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		if g.metrics != nil {
+			g.metrics.ServeHTTP(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
 	mux.HandleFunc("GET /api/v1/agents", auth("GET /api/v1/agents", g.handleListAgents))
 	mux.HandleFunc("GET /api/v1/tools", auth("GET /api/v1/tools", g.handleListTools))
 	mux.HandleFunc("GET /api/v1/tools/{toolName}", auth("GET /api/v1/tools/{toolName}", g.handleGetTool))
@@ -1190,6 +1245,12 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		if verif.Mismatch {
 			slog.Warn("gateway: fabrication risk — agent returned success but audit trail has no matching tool executions",
 				"agent", agentName, "trace_id", traceID, "action_class", actionClass)
+			// 1. Surface to caller via response header so clients can detect and alert.
+			w.Header().Set("X-Audit-Mismatch", "true")
+			// 2. Increment Prometheus counter for dashboards / alerting rules.
+			if g.metrics != nil {
+				g.metrics.recordFabricationMismatch(agentName, string(actionClass))
+			}
 		}
 		if g.auditor != nil {
 			verifEvent := &audit.Event{

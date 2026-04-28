@@ -598,6 +598,10 @@ type JourneySummary struct {
 	// structured dispatch, "agent" for LLM-mediated A2A calls, "gateway" for
 	// gateway-originated NL queries. Taken from the first tool_execution event.
 	Origin string `json:"origin,omitempty"`
+	// HasMismatch is true when any delegation_verification event for this journey
+	// has Mismatch=true — meaning an agent returned success but no matching tool
+	// executions appeared in the audit trail (possible LLM fabrication).
+	HasMismatch bool `json:"has_mismatch,omitempty"`
 }
 
 // QueryJourneys returns journey summaries for traces anchored by a
@@ -718,6 +722,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		count              int
 		retryCount         int  // number of tool_retry events in this trace
 		sawRequireApproval bool // true if a require_approval policy decision was seen
+		hasMismatch        bool // true when any delegation_verification event has mismatch=true
 	}
 
 	// Preserve the order returned by step 1.
@@ -758,6 +763,12 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 				if outcomePriority(outcomeStatus.String) > outcomePriority(d.outcome) {
 					d.outcome = outcomeStatus.String
 				}
+			}
+			// Track fabrication mismatches: "unverified_claim" is the outcome stored
+			// for delegation_verification events where Mismatch=true.
+			if eventType == string(EventTypeDelegationVerification) &&
+				outcomeStatus.Valid && outcomeStatus.String == "unverified_claim" {
+				d.hasMismatch = true
 			}
 			continue
 		}
@@ -896,6 +907,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			EventCount:  d.count,
 			RetryCount:  d.retryCount,
 			Origin:      d.origin,
+			HasMismatch: d.hasMismatch,
 		})
 	}
 

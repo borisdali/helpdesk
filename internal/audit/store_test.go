@@ -2079,3 +2079,97 @@ func TestQueryJourneys_FilterByTraceIDPrefix(t *testing.T) {
 		t.Fatalf("QueryJourneys() = %d, want 2", len(all))
 	}
 }
+
+// TestQueryJourneys_HasMismatch verifies that has_mismatch is true when a
+// delegation_verification event with Mismatch=true exists for the journey, and
+// false when the verification was clean.
+func TestQueryJourneys_HasMismatch(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_mismatch_test")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Journey A: gateway NL query + delegation_verification with Mismatch=true.
+	eventsA := []*Event{
+		{
+			EventID:   "gwr_a",
+			Timestamp: base,
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_mismatch_a",
+			Session:   Session{ID: "tr_mismatch_a"},
+			Input:     Input{UserQuery: "terminate the slow connection"},
+		},
+		{
+			EventID:   "gv_a",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_mismatch_a",
+			Session:   Session{ID: "tr_mismatch_a"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionDestructive,
+				Mismatch:    true,
+			},
+		},
+	}
+
+	// Journey B: gateway NL query + clean delegation_verification (Mismatch=false).
+	eventsB := []*Event{
+		{
+			EventID:   "gwr_b",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_clean_b",
+			Session:   Session{ID: "tr_clean_b"},
+			Input:     Input{UserQuery: "show active connections"},
+		},
+		{
+			EventID:   "gv_b",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_clean_b",
+			Session:   Session{ID: "tr_clean_b"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionRead,
+				Mismatch:    false,
+			},
+		},
+	}
+
+	for _, e := range append(eventsA, eventsB...) {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 2 {
+		t.Fatalf("QueryJourneys() = %d, want 2", len(journeys))
+	}
+
+	byTrace := make(map[string]JourneySummary, len(journeys))
+	for _, j := range journeys {
+		byTrace[j.TraceID] = j
+	}
+
+	if !byTrace["tr_mismatch_a"].HasMismatch {
+		t.Error("tr_mismatch_a: expected HasMismatch=true")
+	}
+	if byTrace["tr_clean_b"].HasMismatch {
+		t.Error("tr_clean_b: expected HasMismatch=false")
+	}
+}

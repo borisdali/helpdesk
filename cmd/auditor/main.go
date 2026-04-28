@@ -703,6 +703,7 @@ func (a *Auditor) Analyze(event *audit.Event) {
 	a.checkOffHours(event)
 	a.checkUnauthorizedDestructive(event)
 	a.checkTimestampGap(event)
+	a.checkFabricationMismatch(event)
 }
 
 // outputJSON prints the event as a JSON line.
@@ -1312,6 +1313,26 @@ func (a *Auditor) checkTimestampGap(event *audit.Event) {
 	}
 
 	a.lastEventTime = event.Timestamp
+}
+
+// checkFabricationMismatch fires a critical security alert when a gateway reports
+// that an agent returned success but the audit trail contains no matching tool
+// executions — a strong signal of LLM response fabrication.
+func (a *Auditor) checkFabricationMismatch(event *audit.Event) {
+	if event.EventType != audit.EventTypeDelegationVerification {
+		return
+	}
+	if event.DelegationVerification == nil || !event.DelegationVerification.Mismatch {
+		return
+	}
+	agent := event.DelegationVerification.Agent
+	actionClass := string(event.DelegationVerification.ActionClass)
+	a.recordSecurityAlert("fabrication_mismatch", AlertCritical,
+		"FABRICATION RISK — agent returned success but audit trail has no matching tool executions",
+		event,
+		"agent", agent,
+		"action_class", actionClass,
+		"trace_id", event.TraceID)
 }
 
 // recordSecurityAlert records a security alert and optionally sends to incident webhook.

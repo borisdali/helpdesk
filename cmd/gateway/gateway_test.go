@@ -1784,3 +1784,136 @@ func TestProxyToAgent_FabricationDetection_SkippedWhenNoAuditURL(t *testing.T) {
 		}
 	}
 }
+
+// TestProxyToAgent_MismatchHeader verifies that X-Audit-Mismatch: true is set
+// on the HTTP response when fabrication is detected (write/destructive delegation
+// with no tool executions in the audit trail).
+func TestProxyToAgent_MismatchHeader(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Audit-Mismatch"); got != "true" {
+		t.Errorf("X-Audit-Mismatch = %q, want %q", got, "true")
+	}
+}
+
+// TestProxyToAgent_MismatchHeader_AbsentOnRead verifies that X-Audit-Mismatch
+// is NOT set when the delegation class is read (no fabrication risk).
+func TestProxyToAgent_MismatchHeader_AbsentOnRead(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"check how many connections are open"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Audit-Mismatch"); got != "" {
+		t.Errorf("X-Audit-Mismatch = %q, want empty for read-class delegation", got)
+	}
+}
+
+// TestGatewayMetrics_FabricationCounter verifies that the Prometheus counter is
+// incremented when a fabrication mismatch is detected.
+func TestGatewayMetrics_FabricationCounter(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	m := NewGatewayMetrics()
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+		metrics:  m,
+	}
+
+	postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+
+	// The counter should now have exactly one mismatch for postgres_database_agent.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var total int64
+	for _, v := range m.fabricationMismatches {
+		total += v
+	}
+	if total != 1 {
+		t.Errorf("fabricationMismatches total = %d, want 1", total)
+	}
+}
+
+// TestGatewayMetrics_ServeHTTP verifies that /metrics exposes counter lines in
+// Prometheus text format.
+func TestGatewayMetrics_ServeHTTP(t *testing.T) {
+	m := NewGatewayMetrics()
+	m.recordFabricationMismatch("postgres_database_agent", "destructive")
+	m.recordFabricationMismatch("postgres_database_agent", "destructive")
+	m.recordFabricationMismatch("k8s_agent", "write")
+
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+		metrics: m,
+	}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "gateway_fabrication_mismatches_total") {
+		t.Errorf("metrics body missing counter name; got: %s", body)
+	}
+	if !strings.Contains(body, "postgres_database_agent") {
+		t.Errorf("metrics body missing agent label; got: %s", body)
+	}
+}
