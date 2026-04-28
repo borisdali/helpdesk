@@ -43,7 +43,7 @@ func TestClassifyTool(t *testing.T) {
 		{"delete_pod", ActionDestructive},
 
 		// Incident agent
-		{"create_incident_bundle", ActionRead},
+		{"create_incident_bundle", ActionWrite},
 		{"list_incidents", ActionRead},
 
 		// Unknown

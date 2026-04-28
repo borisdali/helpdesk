@@ -79,6 +79,7 @@ const (
 	CategoryIncident   RequestCategory = "incident"
 	CategoryResearch   RequestCategory = "research"
 	CategoryFleet      RequestCategory = "fleet"
+	CategorySysadmin   RequestCategory = "sysadmin"
 	CategoryUnknown    RequestCategory = "unknown"
 )
 

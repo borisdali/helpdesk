@@ -129,6 +129,19 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 	return nil
 }
 
+// RecordEvent records a pre-built audit event directly to the audit store.
+// Used by the gateway router to emit delegation_decision events.
+func (a *GatewayAuditor) RecordEvent(ctx context.Context, event *Event) error {
+	if a.auditor == nil {
+		return nil
+	}
+	if err := a.auditor.Record(ctx, event); err != nil {
+		slog.Warn("failed to record gateway event", "event_type", event.EventType, "error", err)
+		return err
+	}
+	return nil
+}
+
 // GatewayRequest contains the data for a gateway audit event.
 type GatewayRequest struct {
 	RequestID         string
@@ -174,6 +187,8 @@ func categorizeAgent(agent string) RequestCategory {
 		return CategoryIncident
 	case "research_agent":
 		return CategoryResearch
+	case "sysadmin_agent":
+		return CategorySysadmin
 	case "gateway":
 		return CategoryFleet // gateway-generated events (e.g. fleet planner)
 	default:

@@ -334,12 +334,6 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentName, ok := agentAliases[req.Agent]
-	if !ok {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, sysadmin, host, incident, research)", req.Agent))
-		return
-	}
-
 	// Bridge JSON body "user" into the canonical X-User header so that
 	// proxyToAgentWithTool can read a single source of truth.
 	// The header takes precedence if both are supplied.
@@ -352,6 +346,45 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PurposeNote != "" && r.Header.Get("X-Purpose-Note") == "" {
 		r.Header.Set("X-Purpose-Note", req.PurposeNote)
+	}
+
+	// Generate the trace ID here — before routing — so the delegation_decision
+	// event and the subsequent gateway_request event share the same trace ID.
+	// proxyToAgentWithTool will reuse the header value rather than generating a new one.
+	traceID := audit.NewTraceID()
+	r.Header.Set("X-Trace-ID", traceID)
+
+	var agentName string
+
+	if req.Agent == "" {
+		// No agent specified: use LLM routing. Requires plannerLLM to be configured.
+		decision, err := g.routeWithLLM(r.Context(), req.Message)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "agent routing failed: "+err.Error()+
+				" — set \"agent\" explicitly or configure HELPDESK_MODEL_VENDOR/HELPDESK_MODEL_NAME/HELPDESK_API_KEY")
+			return
+		}
+
+		agentName = decision.Agent
+
+		// Record the routing decision as a delegation_decision audit event.
+		resolvedPrincipal, _, _, _, _ := g.resolveRequest(r, "", "")
+		g.recordRoutingDecision(r.Context(), traceID, resolvedPrincipal, decision)
+
+		slog.Info("gateway: LLM routing decision",
+			"agent", decision.Agent,
+			"confidence", decision.Confidence,
+			"category", decision.RequestCategory,
+			"trace_id", traceID,
+		)
+	} else {
+		// Explicit agent: resolve via alias table.
+		var ok bool
+		agentName, ok = agentAliases[req.Agent]
+		if !ok {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, sysadmin, host, incident, research)", req.Agent))
+			return
+		}
 	}
 
 	g.proxyToAgent(w, r, agentName, req.ContextID, req.Message)

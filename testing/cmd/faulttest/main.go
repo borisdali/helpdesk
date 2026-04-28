@@ -740,6 +740,10 @@ func cmdValidate(args []string) {
 // validatePlaybookExists checks whether a playbook with the given series_id exists
 // on the gateway. Returns true when the playbook is found, false otherwise.
 // Network failures or unexpected status codes are treated as "not found" (returns false).
+func validatePlaybookExists(gatewayURL, apiKey, seriesID string) bool {
+	return checkPlaybook(gatewayURL, apiKey, seriesID) == playbookFound
+}
+
 type playbookCheckResult int
 
 const (
