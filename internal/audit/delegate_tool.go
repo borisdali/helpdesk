@@ -412,10 +412,16 @@ func extractResponseText(result a2a.SendMessageResult) string {
 	return ""
 }
 
-// buildDelegationVerification queries the audit trail for tool_execution events
+// BuildDelegationVerification queries the audit trail for tool_execution events
 // belonging to this delegation (same traceID, after the delegation start time)
 // and returns a DelegationVerification recording what was actually executed.
 // It retries once after 200 ms to absorb async write propagation from RemoteStore.
+// Exported so the gateway can use it without duplicating the fetch logic.
+func BuildDelegationVerification(auditURL, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
+	return buildDelegationVerification(auditURL, traceID, since, actionClass, delegationEventID, agent)
+}
+
+// buildDelegationVerification is the unexported implementation.
 func buildDelegationVerification(auditURL, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
 	verif := &DelegationVerification{
 		DelegationEventID: delegationEventID,

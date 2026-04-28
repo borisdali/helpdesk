@@ -1608,3 +1608,179 @@ func TestDispatchDirectTool_RecordsToolResult(t *testing.T) {
 		t.Errorf("success = %v, want true", recorded["success"])
 	}
 }
+
+// --- Fabrication detection tests ---
+
+// mockA2AServer starts a minimal JSON-RPC A2A server that returns a completed
+// task. The card points to the test server's URL.
+func mockA2AServer(t *testing.T, agentName string) (*httptest.Server, *a2a.AgentCard) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-1",
+				"status": map[string]any{
+					"state": "completed",
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return srv, card
+}
+
+// TestProxyToAgent_FabricationDetection_Mismatch verifies that a destructive
+// NL query where the audit trail shows no tool executions results in a
+// delegation_verification event with Mismatch=true.
+func TestProxyToAgent_FabricationDetection_Mismatch(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	// Auditd returns empty tool execution list → mismatch for destructive delegation.
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	// "terminate" triggers ActionDestructive → Mismatch=true when no tools confirmed.
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var verifEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification {
+			verifEvent = e
+			break
+		}
+	}
+	if verifEvent == nil {
+		t.Fatal("no delegation_verification event emitted")
+	}
+	if verifEvent.DelegationVerification == nil {
+		t.Fatal("DelegationVerification is nil")
+	}
+	if !verifEvent.DelegationVerification.Mismatch {
+		t.Error("expected Mismatch=true for destructive delegation with no tool executions")
+	}
+	if verifEvent.DelegationVerification.Agent != agentNameDB {
+		t.Errorf("Agent = %q, want %q", verifEvent.DelegationVerification.Agent, agentNameDB)
+	}
+	if !strings.HasPrefix(verifEvent.EventID, "gv_") {
+		t.Errorf("EventID = %q, want gv_ prefix", verifEvent.EventID)
+	}
+	if !strings.HasPrefix(verifEvent.TraceID, "tr_") {
+		t.Errorf("TraceID = %q, want tr_ prefix", verifEvent.TraceID)
+	}
+}
+
+// TestProxyToAgent_FabricationDetection_ReadNoMismatch verifies that read
+// queries never produce Mismatch=true, even when the audit trail is empty.
+func TestProxyToAgent_FabricationDetection_ReadNoMismatch(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	// "check" triggers ActionRead → Mismatch is never set for read-class delegations.
+	rec := postQuery(t, gw, `{"agent":"db","message":"check how many connections are open"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var verifEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification {
+			verifEvent = e
+			break
+		}
+	}
+	if verifEvent == nil {
+		t.Fatal("delegation_verification event should be emitted even for read queries")
+	}
+	if verifEvent.DelegationVerification.Mismatch {
+		t.Error("Mismatch should be false for read-class delegation")
+	}
+}
+
+// TestProxyToAgent_FabricationDetection_SkippedWhenNoAuditURL verifies that
+// when auditURL is not configured, no delegation_verification event is emitted.
+func TestProxyToAgent_FabricationDetection_SkippedWhenNoAuditURL(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: map[string]*a2aclient.Client{agentNameDB: client},
+		auditor: audit.NewGatewayAuditor(ta),
+		// auditURL intentionally absent — verification must be skipped.
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification {
+			t.Error("delegation_verification event emitted but should be skipped when auditURL is empty")
+		}
+	}
+}

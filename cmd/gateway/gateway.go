@@ -1178,6 +1178,36 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
+	// Post-call fabrication detection for NL queries: verify that the agent
+	// actually executed tools consistent with the action class inferred from the
+	// prompt. A mismatch means the LLM may have fabricated a tool outcome.
+	// This mirrors the orchestrator's buildDelegationVerification pattern.
+	// Skipped for direct tool calls (toolName != "") — those are already audited
+	// structurally. Skipped when auditURL is not configured.
+	if toolName == "" && g.auditURL != "" {
+		actionClass := audit.ClassifyDelegation(agentName, prompt)
+		verif := audit.BuildDelegationVerification(g.auditURL, traceID, start, actionClass, "", agentName)
+		if verif.Mismatch {
+			slog.Warn("gateway: fabrication risk — agent returned success but audit trail has no matching tool executions",
+				"agent", agentName, "trace_id", traceID, "action_class", actionClass)
+		}
+		if g.auditor != nil {
+			verifEvent := &audit.Event{
+				EventID:   "gv_" + uuid.New().String()[:8],
+				Timestamp: time.Now().UTC(),
+				EventType: audit.EventTypeDelegationVerification,
+				TraceID:   traceID,
+				Session: audit.Session{
+					ID: traceID,
+				},
+				DelegationVerification: verif,
+			}
+			if err := g.auditor.RecordEvent(r.Context(), verifEvent); err != nil {
+				slog.Warn("gateway: failed to record delegation verification", "trace_id", traceID, "err", err)
+			}
+		}
+	}
+
 	// Record successful request with response
 	g.recordAudit(r.Context(), &audit.GatewayRequest{
 		RequestID:         requestID,

@@ -178,6 +178,25 @@ func TestFormatVerificationBlock_Mismatch_Write(t *testing.T) {
 	}
 }
 
+// TestBuildDelegationVerification_Exported verifies that the exported
+// BuildDelegationVerification delegates to the unexported implementation.
+// The gateway package uses the exported form; this test guards the contract.
+func TestBuildDelegationVerification_Exported(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "terminate_connection"}},
+	})
+
+	// Exported form should return the same result as the unexported form.
+	v := BuildDelegationVerification(srv.URL, "tr_exp", time.Now().Add(-time.Minute), ActionDestructive, "evt_exp1", "postgres_database_agent")
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: terminate_connection is destructive → satisfies ActionDestructive")
+	}
+	if len(v.DestructiveConfirmed) != 1 || v.DestructiveConfirmed[0] != "terminate_connection" {
+		t.Errorf("DestructiveConfirmed = %v, want [terminate_connection]", v.DestructiveConfirmed)
+	}
+}
+
 func TestFormatVerificationBlock_Clean(t *testing.T) {
 	v := &DelegationVerification{
 		DelegationEventID:    "evt_def",
