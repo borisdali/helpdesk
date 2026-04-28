@@ -128,9 +128,39 @@ See [here](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) for de
 | **Generic** | Works for any tool in the action-class map — current and future |
 | **Independent** | Queries auditd directly, not the agent's text |
 | **Persistent** | The verification is itself an auditable event |
-| **Queryable** | All unverified-claim incidents are surfaced via journeys API |
+| **Queryable** | All unverified-claim incidents are surfaced via journeys API (`has_mismatch: true`) |
 | **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
 | **Non-invasive** | Read delegations are verified but never flagged as mismatch |
+| **Observable** | Four independent signals fire on every mismatch — see below |
+
+**Mismatch surfacing — four concurrent signals:**
+
+When `mismatch=true` is detected the following fire simultaneously, so
+that operators, dashboards, and automated incident pipelines all receive
+the signal through the channel they already watch:
+
+| Signal | Channel | Details |
+|--------|---------|---------|
+| `has_mismatch: true` on the journey | `GET /v1/journeys` (audit trail) | Persistent; survives restarts; filterable with `jq '[.[] \| select(.has_mismatch)]'` |
+| `outcome: unverified_claim` on the journey | `GET /v1/journeys?outcome=unverified_claim` | Highest-priority outcome; allows filter-by-outcome queries |
+| `X-Audit-Mismatch: true` response header | HTTP response to the API caller | Zero-latency; client SDKs can react without polling |
+| `gateway_fabrication_mismatches_total` counter | `GET /metrics` (Prometheus) | Scrape and alert with `increase(...[5m]) > 0` |
+| `fabrication_mismatch` CRITICAL incident | auditor `--incident-webhook` | POSTs JSON payload; integrates with PagerDuty, Slack, SIEM |
+
+All five signals carry the `trace_id` so any one of them can anchor a
+drill-down into the full event detail:
+
+```bash
+# From a Prometheus alert → drill into the trace
+curl -s "http://localhost:1199/v1/events?trace_id=$TRACE_ID&event_type=delegation_verification"
+
+# From an incident webhook payload → same trace
+curl -s "http://localhost:1199/v1/journeys?trace_id=$TRACE_ID"
+```
+
+See [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection)
+for the full investigation guide, example webhook payload, and Prometheus query
+patterns.
 
 **Coverage:**
 

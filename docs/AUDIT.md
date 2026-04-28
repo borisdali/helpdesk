@@ -188,8 +188,13 @@ response — this is the authoritative record of what the sub-agent actually did
 | `destructive_confirmed` | Subset of `tools_confirmed` that are classified as `destructive` |
 | `mismatch` | `true` when the delegation was classified as `destructive` but no destructive tool execution is in the trail — strong signal of LLM fabrication |
 
-When `mismatch=true`, the journey outcome is elevated to `unverified_claim` (see
-[§5](#5-action-classification) and [JOURNEYS.md — Outcomes](JOURNEYS.md#journey-outcomes)).
+When `mismatch=true`, four signals fire simultaneously:
+- The journey `outcome` is elevated to `unverified_claim`
+- The journey object gains `has_mismatch: true`
+- The gateway sets `X-Audit-Mismatch: true` on the HTTP response
+- The auditor fires a `fabrication_mismatch` CRITICAL incident to `--incident-webhook`
+- The `gateway_fabrication_mismatches_total` Prometheus counter is incremented
+
 The orchestrator prompt instructs the LLM to report mismatches to the user and
 **not** claim success.
 
@@ -465,9 +470,20 @@ go run ./cmd/auditor/ \
 # Verify chain integrity and exit (useful for CI / cron)
 go run ./cmd/auditor/ --verify --db /var/lib/helpdesk/audit.db
 
-# Prometheus metrics
+# Prometheus metrics (auditor)
 go run ./cmd/auditor/ --socket /tmp/helpdesk-audit.sock --prometheus :9090
 ```
+
+> **Gateway metrics:** the gateway exposes its own Prometheus counter at
+> `GET http://<gateway>:8080/metrics` — no configuration needed, no auth
+> required. It currently publishes:
+>
+> ```
+> gateway_fabrication_mismatches_total{agent, action_class}
+> ```
+>
+> Scrape this endpoint alongside the auditor's `--prometheus` endpoint to
+> cover both detection layers.
 
 ### 9.1 auditor flags
 
@@ -496,14 +512,15 @@ go run ./cmd/auditor/ --socket /tmp/helpdesk-audit.sock --prometheus :9090
 
 ### 9.2 Security detection patterns
 
-| Pattern | Trigger |
-|---------|---------|
-| High volume | More than `--max-events-per-minute` events in a rolling window |
-| Off-hours | Events outside `--allowed-hours-start` to `--allowed-hours-end` |
-| Hash mismatch | Event hash does not match content |
-| Unauthorized destructive | `destructive` action without approved status |
-| Potential SQL injection | SQL syntax errors in tool output |
-| Potential command injection | Permission denied / command not found in tool output |
+| Pattern | Trigger | Severity |
+|---------|---------|---------|
+| Fabrication mismatch | `delegation_verification` event with `mismatch=true` — agent returned success but no matching tool execution appears in the audit trail | CRITICAL → incident webhook |
+| High volume | More than `--max-events-per-minute` events in a rolling window | WARNING |
+| Off-hours | Events outside `--allowed-hours-start` to `--allowed-hours-end` | WARNING |
+| Hash mismatch | Event hash does not match content | CRITICAL → incident webhook |
+| Unauthorized destructive | `destructive` action without approved status | WARNING |
+| Potential SQL injection | SQL syntax errors in tool output | WARNING |
+| Potential command injection | Permission denied / command not found in tool output | WARNING |
 
 ---
 

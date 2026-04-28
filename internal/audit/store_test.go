@@ -2080,6 +2080,80 @@ func TestQueryJourneys_FilterByTraceIDPrefix(t *testing.T) {
 	}
 }
 
+// TestQueryJourneys_HasMismatch_MultipleVerifications verifies that has_mismatch
+// is true even when a journey has both a clean and a mismatched verification —
+// the mismatch flag is OR'd across all verification events.
+func TestQueryJourneys_HasMismatch_MultipleVerifications(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_mismatch_multi_test")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	events := []*Event{
+		{
+			EventID:   "gwr_multi",
+			Timestamp: base,
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_multi",
+			Session:   Session{ID: "tr_multi"},
+			Input:     Input{UserQuery: "check then terminate the slow query"},
+		},
+		// First verification: clean (read-class, no mismatch).
+		{
+			EventID:   "gv_clean",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_multi",
+			Session:   Session{ID: "tr_multi"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionRead,
+				Mismatch:    false,
+			},
+		},
+		// Second verification: mismatch (write-class, no tool executions seen).
+		{
+			EventID:   "gv_mismatch",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_multi",
+			Session:   Session{ID: "tr_multi"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionWrite,
+				Mismatch:    true,
+			},
+		},
+	}
+
+	for _, e := range events {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+	if !journeys[0].HasMismatch {
+		t.Error("expected HasMismatch=true when at least one verification has Mismatch=true")
+	}
+}
+
 // TestQueryJourneys_HasMismatch verifies that has_mismatch is true when a
 // delegation_verification event with Mismatch=true exists for the journey, and
 // false when the verification was clean.

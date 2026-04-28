@@ -989,8 +989,12 @@ func TestGovernance_GetEvent_DelegationVerification(t *testing.T) {
 				}
 			}
 		}
-		t.Logf("journey found: trace_id=%s outcome=%v tools_used=%v event_count=%v",
-			traceID, j["outcome"], j["tools_used"], j["event_count"])
+		// has_mismatch must be true when Mismatch=true was recorded.
+		if hasMismatch, _ := j["has_mismatch"].(bool); !hasMismatch {
+			t.Error("journey has_mismatch = false, want true for mismatch delegation_verification")
+		}
+		t.Logf("journey found: trace_id=%s outcome=%v tools_used=%v event_count=%v has_mismatch=%v",
+			traceID, j["outcome"], j["tools_used"], j["event_count"], j["has_mismatch"])
 	}
 	if !found {
 		t.Errorf("journey with trace_id=%s not found in ?outcome=unverified_claim results; "+
