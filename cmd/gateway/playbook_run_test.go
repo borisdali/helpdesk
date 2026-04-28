@@ -10,6 +10,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
 
@@ -570,3 +571,141 @@ func TestHandlePlaybookRun_FleetMode_NoLLM(t *testing.T) {
 		t.Errorf("got %d, want 503 when plannerLLM is nil", rec.Code)
 	}
 }
+
+// --- recordEscalationDecision tests ---
+
+func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+		auditor: audit.NewGatewayAuditor(ta),
+	}
+
+	pb := &audit.Playbook{
+		PlaybookID: "pb_triage01",
+		SeriesID:   "pbs_db_restart_triage",
+		Name:       "DB Restart Triage",
+	}
+	principal := identity.ResolvedPrincipal{UserID: "ops@example.com", AuthMethod: "static"}
+	traceID := audit.NewTraceIDWithPrefix("tr_")
+
+	gw.recordEscalationDecision(context.Background(), traceID, principal,
+		pb, "pbs_db_config_recovery", "connection pool exhaustion detected")
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	if len(events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(events))
+	}
+	ev := events[0]
+
+	if ev.EventType != audit.EventTypeDelegation {
+		t.Errorf("EventType = %q, want %q", ev.EventType, audit.EventTypeDelegation)
+	}
+	if ev.TraceID != traceID {
+		t.Errorf("TraceID = %q, want %q", ev.TraceID, traceID)
+	}
+	if !strings.HasPrefix(ev.EventID, "ps_") {
+		t.Errorf("EventID = %q, want ps_ prefix", ev.EventID)
+	}
+	if ev.Decision == nil {
+		t.Fatal("Decision is nil")
+	}
+	if ev.Decision.Agent != "pbs_db_config_recovery" {
+		t.Errorf("Decision.Agent = %q, want pbs_db_config_recovery", ev.Decision.Agent)
+	}
+	if ev.Decision.RequestCategory != audit.CategoryIncident {
+		t.Errorf("RequestCategory = %q, want %q", ev.Decision.RequestCategory, audit.CategoryIncident)
+	}
+	if ev.Decision.Confidence != 1.0 {
+		t.Errorf("Confidence = %v, want 1.0", ev.Decision.Confidence)
+	}
+	// ReasoningChain: from-playbook, to-playbook, findings.
+	if len(ev.Decision.ReasoningChain) != 3 {
+		t.Errorf("ReasoningChain len = %d, want 3", len(ev.Decision.ReasoningChain))
+	}
+	if !strings.Contains(ev.Decision.ReasoningChain[0], "pbs_db_restart_triage") {
+		t.Errorf("ReasoningChain[0] should mention source playbook: %q", ev.Decision.ReasoningChain[0])
+	}
+	if !strings.Contains(ev.Decision.ReasoningChain[1], "pbs_db_config_recovery") {
+		t.Errorf("ReasoningChain[1] should mention target playbook: %q", ev.Decision.ReasoningChain[1])
+	}
+	if ev.Principal == nil || ev.Principal.UserID != "ops@example.com" {
+		t.Errorf("Principal not set correctly: %+v", ev.Principal)
+	}
+	if ev.Outcome == nil || ev.Outcome.Status != "success" {
+		t.Errorf("Outcome = %+v, want success", ev.Outcome)
+	}
+	if ev.Timestamp.IsZero() {
+		t.Error("Timestamp is zero")
+	}
+}
+
+func TestRecordEscalationDecision_NoFindingsOmitsThirdStep(t *testing.T) {
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+		auditor: audit.NewGatewayAuditor(ta),
+	}
+
+	pb := &audit.Playbook{SeriesID: "pbs_db_restart_triage"}
+	gw.recordEscalationDecision(context.Background(), "tr_test123",
+		identity.ResolvedPrincipal{}, pb, "pbs_db_config_recovery", "")
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	// Without findings, reasoning chain has exactly 2 entries.
+	if len(events[0].Decision.ReasoningChain) != 2 {
+		t.Errorf("ReasoningChain len = %d, want 2 (no findings)", len(events[0].Decision.ReasoningChain))
+	}
+	// Anonymous principal → Principal field should be nil.
+	if events[0].Principal != nil {
+		t.Errorf("Principal should be nil for anonymous caller, got %+v", events[0].Principal)
+	}
+}
+
+func TestRecordEscalationDecision_EmptyTraceIDGeneratesOne(t *testing.T) {
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+		auditor: audit.NewGatewayAuditor(ta),
+	}
+
+	pb := &audit.Playbook{SeriesID: "pbs_triage"}
+	gw.recordEscalationDecision(context.Background(), "",
+		identity.ResolvedPrincipal{}, pb, "pbs_next", "")
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].TraceID == "" {
+		t.Error("TraceID should be auto-generated when empty string passed")
+	}
+}
+
+func TestRecordEscalationDecision_NilAuditor(t *testing.T) {
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+		// auditor intentionally nil
+	}
+	pb := &audit.Playbook{SeriesID: "pbs_triage"}
+	// Should be a no-op, not a panic.
+	gw.recordEscalationDecision(context.Background(), "tr_test",
+		identity.ResolvedPrincipal{}, pb, "pbs_next", "")
+}
+

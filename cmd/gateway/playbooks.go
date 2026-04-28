@@ -12,7 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"helpdesk/internal/audit"
+	"helpdesk/internal/authz"
+	"helpdesk/internal/identity"
 )
 
 // proxyToAuditd forwards the request to the auditd service at the given path
@@ -235,6 +239,14 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 					outcome = "escalated"
 					escalatedTo = esc.EscalateTo
 					extra["escalation_hint"] = esc.EscalateTo
+					// Audit the playbook selection decision so the escalation
+					// chain is visible in QueryJourneys.
+					traceID := capture.header.Get("X-Trace-Id")
+					if traceID == "" {
+						traceID = capture.header.Get("X-Trace-ID")
+					}
+					g.recordEscalationDecision(r.Context(), traceID,
+						authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, findings)
 				} else if findings != "" {
 					outcome = "resolved"
 				}
@@ -266,6 +278,56 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	// Record completion with real outcome in background.
 	if runID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, escalatedTo, findings)
+	}
+}
+
+// recordEscalationDecision emits a delegation_decision audit event when an
+// agent-mode playbook run signals escalation to a follow-on playbook.
+// This closes the audit gap between "playbook ran" and "next playbook triggered",
+// making the full escalation chain visible in QueryJourneys.
+func (g *Gateway) recordEscalationDecision(ctx context.Context, traceID string, principal identity.ResolvedPrincipal, pb *audit.Playbook, nextSeriesID, findings string) {
+	if g.auditor == nil {
+		return
+	}
+	if traceID == "" {
+		traceID = audit.NewTraceID()
+	}
+
+	reasoningChain := []string{
+		"agent signalled ESCALATE_TO during playbook run: " + pb.SeriesID,
+		"escalating to next playbook: " + nextSeriesID,
+	}
+	if findings != "" {
+		reasoningChain = append(reasoningChain, "findings: "+findings)
+	}
+
+	var p *identity.ResolvedPrincipal
+	if principal.EffectiveID() != "" {
+		p = &principal
+	}
+
+	event := &audit.Event{
+		EventID:   "ps_" + uuid.New().String()[:8],
+		Timestamp: time.Now().UTC(),
+		EventType: audit.EventTypeDelegation,
+		TraceID:   traceID,
+		Principal: p,
+		Session:   audit.Session{ID: traceID},
+		Input: audit.Input{
+			UserQuery: "playbook escalation from " + pb.SeriesID,
+		},
+		Decision: &audit.Decision{
+			Agent:           nextSeriesID,
+			RequestCategory: audit.CategoryIncident,
+			Confidence:      1.0,
+			UserIntent:      "escalate from playbook " + pb.SeriesID + " to " + nextSeriesID,
+			ReasoningChain:  reasoningChain,
+		},
+		Outcome: &audit.Outcome{Status: "success"},
+	}
+
+	if err := g.auditor.RecordEvent(ctx, event); err != nil {
+		slog.Warn("playbook: failed to record escalation decision", "trace_id", traceID, "err", err)
 	}
 }
 

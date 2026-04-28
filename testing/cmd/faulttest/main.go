@@ -334,6 +334,14 @@ func cmdRun(args []string) {
 			}
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
+
+			// Push judge reasoning to the audit store so it appears alongside
+			// live agent_reasoning events in the governance trail.
+			if !evalResult.JudgeSkipped && evalResult.JudgeReasoning != "" {
+				faultTraceID := "ft_" + runID + "_" + f.ID
+				pushJudgeReasoning(ctx, cfg.AuditURL, cfg.GatewayAPIKey, faultTraceID,
+					agentNameFromCategory(f.Category), evalResult.JudgeReasoning, auditTools)
+			}
 		}
 
 		// 4. Remediation phase (optional).
