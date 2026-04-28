@@ -108,17 +108,45 @@ func TestRouteWithLLM_LLMError(t *testing.T) {
 	}
 }
 
-func TestRouteWithLLM_MalformedJSON(t *testing.T) {
+func TestRouteWithLLM_MalformedJSON_RetriesOnce(t *testing.T) {
+	calls := 0
 	gw := makeRouterGateway(func(_ context.Context, _ string) (string, error) {
+		calls++
 		return "not json at all", nil
 	}, []string{agentNameDB})
 
 	_, err := gw.routeWithLLM(context.Background(), "check connections")
 	if err == nil {
-		t.Fatal("expected error for malformed JSON")
+		t.Fatal("expected error after retries exhausted")
 	}
 	if !strings.Contains(err.Error(), "unparseable JSON") {
 		t.Errorf("error = %q, want mention of 'unparseable JSON'", err.Error())
+	}
+	if calls != 2 {
+		t.Errorf("LLM called %d times, want 2 (initial + one retry)", calls)
+	}
+}
+
+func TestRouteWithLLM_SucceedsOnRetry(t *testing.T) {
+	calls := 0
+	gw := makeRouterGateway(func(_ context.Context, _ string) (string, error) {
+		calls++
+		if calls == 1 {
+			// First call: inject a token-leak artifact like the real model produced
+			return `{"agent":"postgres_database_agent","confidence":0.9 immunotherapy"}`, nil
+		}
+		return validRoutingJSON(agentNameDB), nil
+	}, []string{agentNameDB})
+
+	decision, err := gw.routeWithLLM(context.Background(), "check connections")
+	if err != nil {
+		t.Fatalf("expected success on retry, got: %v", err)
+	}
+	if decision.Agent != agentNameDB {
+		t.Errorf("Agent = %q, want %q", decision.Agent, agentNameDB)
+	}
+	if calls != 2 {
+		t.Errorf("LLM called %d times, want 2", calls)
 	}
 }
 

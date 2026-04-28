@@ -181,7 +181,7 @@ Send a natural-language question to an agent.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `agent` | string | yes | `database`, `db`, `k8s`, or `incident` |
+| `agent` | string | no | `database` (`db`), `k8s`, `sysadmin` (`host`), `incident`, `research`. When omitted the gateway uses LLM routing to select the best agent automatically (requires `HELPDESK_MODEL_VENDOR`/`HELPDESK_MODEL_NAME`/`HELPDESK_API_KEY`). |
 | `message` | string | yes | The question or instruction (`query` is accepted as an alias) |
 | `context_id` | string | no | Resume an existing agent session. Pass the `context_id` returned by a previous response to continue a multi-turn conversation. Omit (or pass `""`) to start a new session. |
 

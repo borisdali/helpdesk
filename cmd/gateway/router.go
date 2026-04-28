@@ -17,11 +17,11 @@ import (
 // Keyed by the internal agent name; value is a plain-English description of
 // what problems the agent handles.
 var routingAgentDescriptions = map[string]string{
-	agentNameDB:       "PostgreSQL database problems: connections, queries, locks, replication, configuration, performance, table statistics, pg_settings",
-	agentNameK8s:      "Kubernetes cluster problems: pods, deployments, services, endpoints, events, node resources, CrashLoopBackOff, OOMKilled",
-	agentNameIncident: "Incident creation and investigation: creating incident bundles, listing past incidents, cross-system triage that spans database and infrastructure",
-	agentNameResearch: "General knowledge questions, documentation lookup, explaining concepts, queries that do not require live system access",
-	agentNameSysadmin: "Host/OS-level problems: CPU, memory, disk, running processes, system journal, filesystem, non-Kubernetes Linux infrastructure",
+	agentNameDB:       "Live PostgreSQL system problems that require querying a running database: connections, locks, replication lag, active queries, pg_stat_* views, configuration drift, performance on a specific server. Use only when the user needs current state from a live system.",
+	agentNameK8s:      "Live Kubernetes cluster problems that require kubectl: pods, deployments, services, endpoints, events, node resources, CrashLoopBackOff, OOMKilled. Use only when the user needs current state from a live cluster.",
+	agentNameIncident: "Incident creation and investigation: creating incident bundles, listing past incidents, cross-system triage that spans database and infrastructure.",
+	agentNameResearch: "Conceptual questions, how-does-it-work explanations, documentation lookup, and best-practice advice that do not require querying a live system. Examples: explaining VACUUM vs VACUUM FULL, what WAL is, how connection pooling works, what a CrashLoopBackOff means. Prefer this agent whenever the question can be answered from knowledge rather than live data.",
+	agentNameSysadmin: "Live host/OS-level problems that require shell access: CPU, memory, disk, running processes, system journal, filesystem, non-Kubernetes Linux infrastructure.",
 }
 
 // RoutingDecision is the LLM's structured response when routing a query.
@@ -48,16 +48,23 @@ func (g *Gateway) routeWithLLM(ctx context.Context, message string) (*RoutingDec
 	}
 
 	prompt := g.buildRoutingPrompt(message)
-	raw, err := g.plannerLLM(ctx, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("routing LLM call failed: %w", err)
-	}
 
-	raw = stripMarkdownFences(raw)
 	var decision RoutingDecision
-	if err := json.Unmarshal([]byte(raw), &decision); err != nil {
-		slog.Warn("gateway router: failed to parse LLM response", "raw", raw, "err", err)
-		return nil, fmt.Errorf("routing LLM returned unparseable JSON: %w", err)
+	for attempt := 1; attempt <= 2; attempt++ {
+		raw, err := g.plannerLLM(ctx, prompt)
+		if err != nil {
+			return nil, fmt.Errorf("routing LLM call failed: %w", err)
+		}
+		raw = stripMarkdownFences(raw)
+		if err := json.Unmarshal([]byte(raw), &decision); err != nil {
+			slog.Warn("gateway router: failed to parse LLM response",
+				"attempt", attempt, "raw", raw, "err", err)
+			if attempt == 2 {
+				return nil, fmt.Errorf("routing LLM returned unparseable JSON after %d attempts: %w", attempt, err)
+			}
+			continue
+		}
+		break
 	}
 
 	// Validate the chosen agent is real.
@@ -91,6 +98,8 @@ Given a user message, select the single best agent to handle it.
 - Provide 1–3 reasoning_chain steps explaining your choice.
 - For each agent you considered but did not choose, add an entry in alternatives_considered with rejected_because.
 - request_category must be one of: database, kubernetes, incident, research, sysadmin, fleet, unknown.
+- Key routing rule: if the question can be answered from knowledge or documentation without querying a live system, choose research_agent even if the topic is PostgreSQL or Kubernetes.
+- Output ONLY valid JSON. Do not insert any words, punctuation, or characters outside of JSON string values.
 
 ## User Message
 
@@ -98,7 +107,7 @@ Given a user message, select the single best agent to handle it.
 
 ## Response Format
 
-Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
+Respond with ONLY valid JSON — no markdown fences, no prose, nothing outside the JSON object itself:
 {
   "agent": "<internal agent name>",
   "request_category": "<category>",

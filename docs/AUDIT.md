@@ -55,6 +55,7 @@ essential for querying and correlating events.
 | Prefix | Event type | Recorded by |
 |--------|-----------|-------------|
 | `evt_` | `delegation_decision` | Orchestrator — routes a request to an agent |
+| `rt_` | `delegation_decision` | Gateway — LLM routing decision when `agent` is omitted from `POST /api/v1/query` |
 | `evt_` | `gateway_request` | Gateway — records every inbound request; anchor for NL-query journeys |
 | `tool_` | `tool_execution` | Agent — records tool name, params, result, duration |
 | `pol_` | `policy_decision` | Agent / auditd — records policy evaluation outcome |
@@ -153,13 +154,25 @@ curl "http://localhost:1199/v1/journeys?trace_id=tr_rbk_a1b2c3d4"
 | `dry_run` | `true` if enforcement was in dry-run mode |
 | `post_execution` | `true` if this was a blast-radius post-execution check |
 
-### 4.3 delegation_decision fields (orchestrator)
+### 4.3 delegation_decision fields
+
+`delegation_decision` events are emitted by two sources:
+
+- **Orchestrator** (`evt_` prefix) — the interactive REPL routes a request to a sub-agent via `delegate_to_agent`
+- **Gateway LLM routing** (`rt_` prefix) — `POST /api/v1/query` without an explicit `agent` field; the gateway uses `plannerLLM` to select the best agent
+
+Both sources populate the same fields:
 
 | Field | Description |
 |-------|-------------|
 | `user_id` | User who sent the original request |
 | `user_query` | Original natural-language query text |
-| `decision_agent` | Agent the orchestrator selected |
+| `decision_agent` | Agent selected |
+| `decision_confidence` | LLM confidence score (0.0–1.0) |
+| `reasoning_chain` | Ordered list of reasoning steps leading to the agent choice |
+| `alternatives_considered` | Agents that were evaluated but not selected, each with a `rejected_because` explanation |
+
+The `delegation_decision` and the subsequent `gateway_request` event for the same query share the same `trace_id`, so `QueryJourneys` can link them into a single journey (see [JOURNEYS.md](JOURNEYS.md)).
 
 ### 4.4 delegation_verification fields (orchestrator)
 
