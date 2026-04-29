@@ -588,6 +588,98 @@ func (g *Gateway) checkOperatingMode(w http.ResponseWriter, r *http.Request, too
 	return true
 }
 
+// checkApprovalMode enforces the approval mode stored in the request context.
+// Returns (true, errorMessage) when the call should be blocked.
+// Returns (false, "") when the call is allowed.
+//
+// Modes:
+//
+//	"auto"   — always allowed (current default behavior)
+//	"session" — allowed only when context carries a valid ApprovalSession
+//	             covering the tool's action class
+//	"manual"  — write/destructive tools are blocked (agent is read-only)
+func (g *Gateway) checkApprovalMode(ctx context.Context, toolName string) (blocked bool, msg string) {
+	approvalCtx, ok := ctx.Value(ctxKeyApprovalSession).(approvalContext)
+	if !ok || approvalCtx.mode == "" || approvalCtx.mode == "auto" {
+		return false, ""
+	}
+
+	class := audit.ClassifyTool(toolName)
+	if !class.IsApprovalRequired() {
+		return false, "" // reads are always allowed regardless of mode
+	}
+
+	switch approvalCtx.mode {
+	case "manual":
+		return true, fmt.Sprintf(
+			"approval_mode=manual: tool %q (%s) requires explicit approval — "+
+				"run in session mode with a valid approval session or obtain per-step approval",
+			toolName, class)
+
+	case "session":
+		if approvalCtx.sessionID == "" {
+			return true, fmt.Sprintf(
+				"approval_mode=session: tool %q (%s) requires an approval session — "+
+					"supply approval_session in the run request",
+				toolName, class)
+		}
+		if g.auditURL == "" {
+			// Cannot validate without auditd; fail safe.
+			return true, "approval_mode=session: cannot validate session — auditd not configured"
+		}
+		sess, err := g.fetchApprovalSession(ctx, approvalCtx.sessionID)
+		if err != nil || sess == nil {
+			return true, fmt.Sprintf(
+				"approval_mode=session: session %q not found or error: %v",
+				approvalCtx.sessionID, err)
+		}
+		if !sess.IsValid(class) {
+			detail := "expired or revoked"
+			if !sess.Revoked && time.Now().Before(sess.ExpiresAt) {
+				detail = fmt.Sprintf("does not cover action class %q", class)
+			}
+			return true, fmt.Sprintf(
+				"approval_mode=session: session %q is not valid for %s tool %q: %s",
+				approvalCtx.sessionID, class, toolName, detail)
+		}
+		return false, ""
+
+	default:
+		return false, ""
+	}
+}
+
+// fetchApprovalSession retrieves an ApprovalSession from auditd.
+func (g *Gateway) fetchApprovalSession(ctx context.Context, sessionID string) (*audit.ApprovalSession, error) {
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/approval/sessions/" + sessionID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("auditd unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("session not found")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var sess audit.ApprovalSession
+	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
+		return nil, fmt.Errorf("decode session: %w", err)
+	}
+	return &sess, nil
+}
+
 func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
 	toolName := r.PathValue("tool")
 	if !g.checkOperatingMode(w, r, toolName) {
@@ -1084,6 +1176,15 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		})
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("agent %q not available", agentName))
 		return
+	}
+
+	// Enforce approval mode from playbook run context (if set).
+	// This only applies to write/destructive tool calls; reads are always allowed.
+	if toolName != "" {
+		if blocked, msg := g.checkApprovalMode(r.Context(), toolName); blocked {
+			writeError(w, http.StatusForbidden, msg)
+			return
+		}
 	}
 
 	slog.Info("gateway: proxying request", "agent", agentName, "prompt_len", len(prompt),

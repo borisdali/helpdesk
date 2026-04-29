@@ -709,3 +709,112 @@ func TestRecordEscalationDecision_NilAuditor(t *testing.T) {
 		identity.ResolvedPrincipal{}, pb, "pbs_next", "")
 }
 
+
+// ─── parseDiagnosticReport tests ─────────────────────────────────────────────
+
+func TestParseDiagnosticReport_FullResponse(t *testing.T) {
+	text := `The container was stopped cleanly by an operator.
+
+HYPOTHESIS_1: Container was stopped by an operator | CONFIDENCE: 0.90 | EVIDENCE: "exitcode=0"
+HYPOTHESIS_2: Disk exhaustion caused the stop | CONFIDENCE: 0.20 | REJECTED: disk check showed only 45% used, no "no space left" in logs
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: Container was cleanly stopped; no infrastructure fault detected.
+ACTION_TAKEN: none — escalation recommended
+ESCALATE_TO: none`
+
+	report := parseDiagnosticReport(text)
+	if report == nil {
+		t.Fatal("expected non-nil DiagnosticReport")
+	}
+	if len(report.Hypotheses) != 2 {
+		t.Fatalf("expected 2 hypotheses, got %d", len(report.Hypotheses))
+	}
+
+	h1 := report.Hypotheses[0]
+	if h1.Rank != 1 {
+		t.Errorf("h1.Rank = %d, want 1", h1.Rank)
+	}
+	if !h1.IsPrimary {
+		t.Error("h1.IsPrimary should be true")
+	}
+	if h1.Confidence != 0.90 {
+		t.Errorf("h1.Confidence = %f, want 0.90", h1.Confidence)
+	}
+	if h1.Evidence != "exitcode=0" {
+		t.Errorf("h1.Evidence = %q, want %q", h1.Evidence, "exitcode=0")
+	}
+	if h1.RejectedReason != "" {
+		t.Errorf("h1.RejectedReason should be empty, got %q", h1.RejectedReason)
+	}
+
+	h2 := report.Hypotheses[1]
+	if h2.IsPrimary {
+		t.Error("h2.IsPrimary should be false")
+	}
+	if h2.RejectedReason == "" {
+		t.Error("h2.RejectedReason should be set")
+	}
+
+	if report.RootCause != "Container was stopped by an operator" {
+		t.Errorf("RootCause = %q", report.RootCause)
+	}
+	if report.ActionTaken != "none — escalation recommended" {
+		t.Errorf("ActionTaken = %q", report.ActionTaken)
+	}
+}
+
+func TestParseDiagnosticReport_NoHypotheses_ReturnsNil(t *testing.T) {
+	text := `FINDINGS: Something happened.
+ESCALATE_TO: none`
+	report := parseDiagnosticReport(text)
+	if report != nil {
+		t.Errorf("expected nil when no HYPOTHESIS lines, got %+v", report)
+	}
+}
+
+func TestParseDiagnosticReport_SingleHypothesis(t *testing.T) {
+	text := `HYPOTHESIS_1: OOM kill | CONFIDENCE: 0.95 | EVIDENCE: "oomkilled=true"
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: OOM kill detected.
+ESCALATE_TO: none`
+	report := parseDiagnosticReport(text)
+	if report == nil {
+		t.Fatal("expected non-nil report")
+	}
+	if len(report.Hypotheses) != 1 {
+		t.Fatalf("expected 1 hypothesis, got %d", len(report.Hypotheses))
+	}
+	if !report.Hypotheses[0].IsPrimary {
+		t.Error("single hypothesis should be primary")
+	}
+}
+
+func TestParseDiagnosticReport_BoldHypothesisLines(t *testing.T) {
+	// LLMs sometimes emit **HYPOTHESIS_N:** with markdown bold markers.
+	text := `**HYPOTHESIS_1:** Container stopped by operator | CONFIDENCE: 0.88 | EVIDENCE: "exitcode=0"
+**HYPOTHESIS_2:** OOM kill | CONFIDENCE: 0.15 | REJECTED: no OOM entry in kernel log
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: Clean stop by operator.
+ACTION_TAKEN: none — escalation recommended
+ESCALATE_TO: none`
+
+	report := parseDiagnosticReport(text)
+	if report == nil {
+		t.Fatal("expected non-nil report for bold HYPOTHESIS lines")
+	}
+	if len(report.Hypotheses) != 2 {
+		t.Fatalf("expected 2 hypotheses, got %d", len(report.Hypotheses))
+	}
+	if !report.Hypotheses[0].IsPrimary {
+		t.Error("first hypothesis should be primary")
+	}
+	if report.Hypotheses[0].Confidence != 0.88 {
+		t.Errorf("h1.Confidence = %f, want 0.88", report.Hypotheses[0].Confidence)
+	}
+	if report.Hypotheses[1].RejectedReason == "" {
+		t.Error("h2.RejectedReason should be set")
+	}
+	if report.ActionTaken != "none — escalation recommended" {
+		t.Errorf("ActionTaken = %q", report.ActionTaken)
+	}
+}

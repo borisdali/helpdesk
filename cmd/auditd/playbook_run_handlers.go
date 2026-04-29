@@ -70,9 +70,10 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 	}
 
 	var body struct {
-		Outcome         string `json:"outcome"`
-		EscalatedTo     string `json:"escalated_to,omitempty"`
-		FindingsSummary string `json:"findings_summary,omitempty"`
+		Outcome          string                  `json:"outcome"`
+		EscalatedTo      string                  `json:"escalated_to,omitempty"`
+		FindingsSummary  string                  `json:"findings_summary,omitempty"`
+		DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -83,7 +84,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.FindingsSummary); err != nil {
+	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.FindingsSummary, body.DiagnosticReport); err != nil {
 		slog.Error("failed to update playbook run", "run_id", runID, "err", err)
 		http.Error(w, "failed to update run", http.StatusInternalServerError)
 		return

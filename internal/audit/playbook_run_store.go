@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -12,17 +13,18 @@ import (
 
 // PlaybookRun records a single execution of a playbook.
 type PlaybookRun struct {
-	RunID          string    `json:"run_id"`
-	PlaybookID     string    `json:"playbook_id"`
-	SeriesID       string    `json:"series_id"`
-	ExecutionMode  string    `json:"execution_mode"` // "fleet" | "agent"
-	Outcome        string    `json:"outcome"`        // "resolved" | "escalated" | "abandoned" | "unknown"
-	EscalatedTo    string    `json:"escalated_to,omitempty"`  // series_id of next playbook
-	FindingsSummary string   `json:"findings_summary,omitempty"` // agent summary at handoff
-	ContextID      string    `json:"context_id,omitempty"`   // A2A session ID
-	Operator       string    `json:"operator"`
-	StartedAt      time.Time `json:"started_at"`
-	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	RunID           string             `json:"run_id"`
+	PlaybookID      string             `json:"playbook_id"`
+	SeriesID        string             `json:"series_id"`
+	ExecutionMode   string             `json:"execution_mode"`          // "fleet" | "agent"
+	Outcome         string             `json:"outcome"`                 // "resolved" | "escalated" | "abandoned" | "unknown"
+	EscalatedTo     string             `json:"escalated_to,omitempty"`  // series_id of next playbook
+	FindingsSummary string             `json:"findings_summary,omitempty"` // agent summary at handoff
+	DiagnosticReport *DiagnosticReport `json:"diagnostic_report,omitempty"` // structured hypotheses when agent emits HYPOTHESIS_N: lines
+	ContextID       string             `json:"context_id,omitempty"`    // A2A session ID
+	Operator        string             `json:"operator"`
+	StartedAt       time.Time          `json:"started_at"`
+	CompletedAt     time.Time          `json:"completed_at,omitempty"`
 }
 
 // PlaybookRunStats summarises run history for a playbook series.
@@ -55,17 +57,18 @@ func NewPlaybookRunStore(db *sql.DB) (*PlaybookRunStore, error) {
 func (s *PlaybookRunStore) createSchema() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS playbook_runs (
-    run_id           TEXT     NOT NULL PRIMARY KEY,
-    playbook_id      TEXT     NOT NULL,
-    series_id        TEXT     NOT NULL,
-    execution_mode   TEXT     NOT NULL DEFAULT 'fleet',
-    outcome          TEXT     NOT NULL DEFAULT 'unknown',
-    escalated_to     TEXT     NOT NULL DEFAULT '',
-    findings_summary TEXT     NOT NULL DEFAULT '',
-    context_id       TEXT     NOT NULL DEFAULT '',
-    operator         TEXT     NOT NULL DEFAULT '',
-    started_at       DATETIME NOT NULL,
-    completed_at     DATETIME NOT NULL DEFAULT ''
+    run_id             TEXT     NOT NULL PRIMARY KEY,
+    playbook_id        TEXT     NOT NULL,
+    series_id          TEXT     NOT NULL,
+    execution_mode     TEXT     NOT NULL DEFAULT 'fleet',
+    outcome            TEXT     NOT NULL DEFAULT 'unknown',
+    escalated_to       TEXT     NOT NULL DEFAULT '',
+    findings_summary   TEXT     NOT NULL DEFAULT '',
+    diagnostic_report  TEXT     NOT NULL DEFAULT '',
+    context_id         TEXT     NOT NULL DEFAULT '',
+    operator           TEXT     NOT NULL DEFAULT '',
+    started_at         DATETIME NOT NULL,
+    completed_at       DATETIME NOT NULL DEFAULT ''
 )`)
 	if err != nil {
 		return err
@@ -92,27 +95,29 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 	if outcome == "" {
 		outcome = "unknown"
 	}
+	diagJSON := marshalDiagnosticReport(r.DiagnosticReport)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO playbook_runs
 		    (run_id, playbook_id, series_id, execution_mode, outcome,
-		     escalated_to, findings_summary, context_id, operator, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.PlaybookID, r.SeriesID, r.ExecutionMode, outcome,
-		r.EscalatedTo, r.FindingsSummary, r.ContextID, r.Operator,
+		r.EscalatedTo, r.FindingsSummary, diagJSON, r.ContextID, r.Operator,
 		r.StartedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(r.CompletedAt),
 	)
 	return err
 }
 
-// Update sets outcome, escalated_to, findings_summary, and completed_at for an
-// existing run. Used when the agent session concludes.
-func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, findingsSummary string) error {
+// Update sets outcome, escalated_to, findings_summary, diagnostic_report, and completed_at
+// for an existing run. Used when the agent session concludes.
+func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, findingsSummary string, report *DiagnosticReport) error {
+	diagJSON := marshalDiagnosticReport(report)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE playbook_runs
-		 SET outcome = ?, escalated_to = ?, findings_summary = ?, completed_at = ?
+		 SET outcome = ?, escalated_to = ?, findings_summary = ?, diagnostic_report = ?, completed_at = ?
 		 WHERE run_id = ?`,
-		outcome, escalatedTo, findingsSummary,
+		outcome, escalatedTo, findingsSummary, diagJSON,
 		time.Now().UTC().Format("2006-01-02 15:04:05"),
 		runID,
 	)
@@ -215,7 +220,7 @@ func (s *PlaybookRunStore) StatsBatch(ctx context.Context, seriesIDs []string) (
 func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*PlaybookRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, findings_summary, context_id, operator, started_at, completed_at
+		       escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE run_id = ?`, runID)
 	return scanPlaybookRun(row)
@@ -228,7 +233,7 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, findings_summary, context_id, operator, started_at, completed_at
+		       escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE playbook_id = ?
 		ORDER BY started_at DESC
@@ -258,17 +263,44 @@ type playbookRunScanner interface {
 
 func scanPlaybookRun(s playbookRunScanner) (*PlaybookRun, error) {
 	var r PlaybookRun
-	var startedStr, completedStr string
+	var startedStr, completedStr, diagJSON string
 	if err := s.Scan(
 		&r.RunID, &r.PlaybookID, &r.SeriesID, &r.ExecutionMode, &r.Outcome,
-		&r.EscalatedTo, &r.FindingsSummary, &r.ContextID, &r.Operator,
+		&r.EscalatedTo, &r.FindingsSummary, &diagJSON, &r.ContextID, &r.Operator,
 		&startedStr, &completedStr,
 	); err != nil {
 		return nil, err
 	}
 	r.StartedAt = parseFlexTime(startedStr)
 	r.CompletedAt = parseFlexTime(completedStr)
+	r.DiagnosticReport = unmarshalDiagnosticReport(diagJSON)
 	return &r, nil
+}
+
+// marshalDiagnosticReport serialises a DiagnosticReport to JSON for DB storage.
+// Returns "" when report is nil (matches the column default).
+func marshalDiagnosticReport(r *DiagnosticReport) string {
+	if r == nil {
+		return ""
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// unmarshalDiagnosticReport deserialises a JSON string from the DB column.
+// Returns nil on empty input or parse error.
+func unmarshalDiagnosticReport(s string) *DiagnosticReport {
+	if s == "" {
+		return nil
+	}
+	var r DiagnosticReport
+	if err := json.Unmarshal([]byte(s), &r); err != nil {
+		return nil
+	}
+	return &r
 }
 
 // formatNullableTime returns an empty string for the zero value, otherwise the

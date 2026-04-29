@@ -96,6 +96,50 @@ type ApprovalRule struct {
 	ApproverRole    string `json:"approver_role,omitempty"` // who can approve (e.g., "admin", "dba")
 }
 
+// ApprovalSession is a time-bounded pre-authorization token that allows
+// write and/or destructive tool calls without per-step confirmation.
+//
+// Operators create a session before starting a maintenance window:
+//
+//	POST /v1/approval/sessions  {"granted_by":"boris","expires_in_secs":1800,"allowed_classes":["write","destructive"]}
+//
+// The gateway validates the session before proxying any matching tool call.
+type ApprovalSession struct {
+	// SessionID is the unique identifier, prefixed "aps_".
+	SessionID string `json:"session_id"`
+	// GrantedBy is the operator who created the session.
+	GrantedBy string `json:"granted_by"`
+	// GrantedAt is when the session was created.
+	GrantedAt time.Time `json:"granted_at"`
+	// ExpiresAt is when the session expires.
+	ExpiresAt time.Time `json:"expires_at"`
+	// AllowedClasses lists the action classes this session authorises.
+	// Typically ["write"] or ["write","destructive"].
+	AllowedClasses []ActionClass `json:"allowed_classes"`
+	// Scope optionally limits the session to a specific agent name or
+	// playbook series_id. Empty means no restriction.
+	Scope string `json:"scope,omitempty"`
+	// Revoked is true when the session was explicitly revoked before expiry.
+	Revoked bool `json:"revoked,omitempty"`
+}
+
+// IsValid returns true when the session has not expired, has not been revoked,
+// and covers the given action class.
+func (s *ApprovalSession) IsValid(class ActionClass) bool {
+	if s == nil || s.Revoked {
+		return false
+	}
+	if time.Now().After(s.ExpiresAt) {
+		return false
+	}
+	for _, c := range s.AllowedClasses {
+		if c == class {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultPolicy returns the default approval policy.
 func DefaultPolicy() *ApprovalPolicy {
 	return &ApprovalPolicy{

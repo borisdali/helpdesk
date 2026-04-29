@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,6 +105,17 @@ func (g *Gateway) handlePlaybookActivate(w http.ResponseWriter, r *http.Request)
 	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/activate")
 }
 
+// ctxKeyApprovalSession is the context key for the approval session ID.
+type ctxKeyApprovalSessionType struct{}
+
+var ctxKeyApprovalSession = ctxKeyApprovalSessionType{}
+
+// approvalContext carries approval mode + session ID through the request context.
+type approvalContext struct {
+	mode      string // "auto" | "session" | "manual"
+	sessionID string
+}
+
 // PlaybookRunRequest is the optional request body for POST /api/v1/fleet/playbooks/{id}/run.
 // For fleet-mode playbooks the body is ignored; the planner uses the playbook's own
 // description, target_hints, and guidance. For agent-mode playbooks, connection_string
@@ -114,6 +126,14 @@ type PlaybookRunRequest struct {
 	ContextID        string `json:"context_id,omitempty"` // A2A session ID for multi-turn continuity
 	PriorRunID       string `json:"prior_run_id,omitempty"` // run_id of prior investigation for continuity threading
 	PriorFindings    string `json:"-"`                       // populated at runtime from prior run; not from body
+
+	// ApprovalMode controls when approval is required for write/destructive operations.
+	//   "auto"    (default) — no gate; current behavior.
+	//   "session" — operator must supply a valid ApprovalSession ID.
+	//   "manual"  — agent-mode runs are read-only (no write/destructive proxied).
+	ApprovalMode    string `json:"approval_mode,omitempty"`
+	// ApprovalSession is the session ID for "session" mode. Required when ApprovalMode="session".
+	ApprovalSession string `json:"approval_session,omitempty"`
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -205,7 +225,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "")
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", nil)
 	}
 }
 
@@ -222,6 +242,17 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
 	prompt := assembleTriagePrompt(pb, req)
 
+	// Propagate approval mode and session ID through context so proxyToAgentWithTool
+	// can enforce them before proxying write/destructive calls.
+	ctx := r.Context()
+	if req.ApprovalMode != "" {
+		ctx = context.WithValue(ctx, ctxKeyApprovalSession, approvalContext{
+			mode:      req.ApprovalMode,
+			sessionID: req.ApprovalSession,
+		})
+		r = r.WithContext(ctx)
+	}
+
 	// Capture the agent response to parse escalation signals.
 	capture := newResponseCapture()
 	g.proxyToAgent(capture, r, agentNameDB, req.ContextID, prompt)
@@ -229,10 +260,16 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	var outcome, escalatedTo, findings string
 	extra := map[string]any{}
 
+	var diagReport *audit.DiagnosticReport
+
 	if capture.code == http.StatusOK {
 		var respBody map[string]any
 		if err := json.Unmarshal(capture.body.Bytes(), &respBody); err == nil {
 			if text, ok := respBody["text"].(string); ok {
+				// Parse structured hypotheses first; fall through to flat parser for
+				// FINDINGS/ESCALATE_TO which are always present in both formats.
+				diagReport = parseDiagnosticReport(text)
+
 				esc := parseAgentEscalation(text)
 				findings = esc.Findings
 				if esc.EscalateTo != "" {
@@ -269,6 +306,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	if findings != "" {
 		extra["findings"] = findings
 	}
+	if diagReport != nil {
+		extra["diagnostic_report"] = diagReport
+	}
 	if len(warnings) > 0 {
 		extra["warnings"] = warnings
 	}
@@ -277,7 +317,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	// Record completion with real outcome in background.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, escalatedTo, findings)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, escalatedTo, findings, diagReport)
 	}
 }
 
@@ -339,9 +379,13 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 
 	// Response protocol first — models attend more reliably to instructions at the top.
 	b.WriteString("## Response Protocol\n")
-	b.WriteString("Do NOT write a CONCLUSION section or end with '---'. Instead, close your response with these two plain-text lines (no markdown, no bold, no backticks):\n")
+	b.WriteString("Do NOT write a CONCLUSION section or end with '---'. Close your response with this exact block (plain text, no markdown, no bold, no backticks):\n\n")
+	b.WriteString("HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: \"<verbatim quote from tool output>\"\n")
+	b.WriteString("HYPOTHESIS_2: <alternative hypothesis> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason>\n")
+	b.WriteString("ROOT_CAUSE: HYPOTHESIS_1\n")
 	b.WriteString("FINDINGS: <one-sentence diagnosis and recommended action>\n")
 	b.WriteString("ESCALATE_TO: <series_id or \"none\">\n\n")
+	b.WriteString("Rules: list hypotheses in descending confidence order; EVIDENCE must be a short verbatim quote from a tool output; every non-primary hypothesis must have REJECTED with a reason; CONFIDENCE is 0.0–1.0.\n\n")
 
 	fmt.Fprintf(&b, "## Playbook: %s\n\n", pb.Name)
 
@@ -380,6 +424,9 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 	// repeated as the last thing in the prompt. Explicitly forbid the patterns
 	// Gemini uses as alternatives (**CONCLUSION:** and trailing ---).
 	b.WriteString("IMPORTANT: Do not write **CONCLUSION:** or end with ---. Close with exactly:\n")
+	b.WriteString("HYPOTHESIS_1: ... | CONFIDENCE: ... | EVIDENCE: \"...\"\n")
+	b.WriteString("HYPOTHESIS_2: ... | CONFIDENCE: ... | REJECTED: ...\n")
+	b.WriteString("ROOT_CAUSE: HYPOTHESIS_1\n")
 	b.WriteString("FINDINGS: <one-sentence diagnosis>\n")
 	b.WriteString("ESCALATE_TO: <series_id or \"none\">\n")
 
@@ -513,15 +560,19 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 
 // recordPlaybookRunComplete patches an existing run with its final outcome.
 // Best-effort: failures are logged but not returned.
-func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, findingsSummary string) {
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, findingsSummary string, report *audit.DiagnosticReport) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
-	body, _ := json.Marshal(map[string]string{
+	payload := map[string]any{
 		"outcome":          outcome,
 		"escalated_to":     escalatedTo,
 		"findings_summary": findingsSummary,
-	})
+	}
+	if report != nil {
+		payload["diagnostic_report"] = report
+	}
+	body, _ := json.Marshal(payload)
 	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(string(body)))
 	if err != nil {
@@ -647,6 +698,111 @@ func parseAgentEscalation(text string) agentEscalation {
 		result.Findings = extractConclusionFallback(result.CleanText)
 	}
 	return result
+}
+
+// parseDiagnosticReport scans the agent response for HYPOTHESIS_N: lines and
+// parses them into a DiagnosticReport. Returns nil when no hypothesis lines are
+// found (backward compat — caller falls through to parseAgentEscalation).
+//
+// Expected line format:
+//
+//	HYPOTHESIS_1: <text> | CONFIDENCE: 0.85 | EVIDENCE: "<quote>"
+//	HYPOTHESIS_2: <text> | CONFIDENCE: 0.30 | REJECTED: <reason>
+//	ROOT_CAUSE: HYPOTHESIS_1
+//	ACTION_TAKEN: <what was done>
+func parseDiagnosticReport(text string) *audit.DiagnosticReport {
+	var hypotheses []audit.DiagnosticHypothesis
+	var rootCauseRef, actionTaken string
+
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Strip markdown bold markers so **HYPOTHESIS_N:** is handled identically
+		// to plain HYPOTHESIS_N:. Also handles trailing ** on the same token.
+		trimmed = strings.TrimLeft(trimmed, "*")
+
+		// HYPOTHESIS_N: ...
+		if hypMatch := matchHypothesisLine(trimmed); hypMatch != nil {
+			hypotheses = append(hypotheses, *hypMatch)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "ROOT_CAUSE:") {
+			rootCauseRef = strings.TrimSpace(strings.TrimPrefix(trimmed, "ROOT_CAUSE:"))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "ACTION_TAKEN:") {
+			actionTaken = strings.TrimSpace(strings.TrimPrefix(trimmed, "ACTION_TAKEN:"))
+		}
+	}
+	if len(hypotheses) == 0 {
+		return nil
+	}
+
+	// Mark the primary hypothesis. ROOT_CAUSE: HYPOTHESIS_N (1-based index).
+	primaryRank := 1
+	if strings.HasPrefix(rootCauseRef, "HYPOTHESIS_") {
+		if n, err := strconv.Atoi(strings.TrimPrefix(rootCauseRef, "HYPOTHESIS_")); err == nil {
+			primaryRank = n
+		}
+	}
+	rootCauseText := ""
+	for i := range hypotheses {
+		if hypotheses[i].Rank == primaryRank {
+			hypotheses[i].IsPrimary = true
+			rootCauseText = hypotheses[i].Text
+		}
+	}
+
+	return &audit.DiagnosticReport{
+		Hypotheses:  hypotheses,
+		RootCause:   rootCauseText,
+		ActionTaken: actionTaken,
+	}
+}
+
+// matchHypothesisLine parses a single HYPOTHESIS_N: ... line.
+// Returns nil if the line does not match.
+func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
+	// Must start with HYPOTHESIS_<digit>:
+	upper := strings.ToUpper(line)
+	if !strings.HasPrefix(upper, "HYPOTHESIS_") {
+		return nil
+	}
+	colonIdx := strings.Index(line, ":")
+	if colonIdx < 0 {
+		return nil
+	}
+	rankStr := line[len("HYPOTHESIS_"):colonIdx]
+	rank, err := strconv.Atoi(rankStr)
+	if err != nil {
+		return nil
+	}
+
+	rest := strings.TrimSpace(line[colonIdx+1:])
+	h := audit.DiagnosticHypothesis{Rank: rank}
+
+	// Split on " | " to get fields.
+	parts := strings.Split(rest, " | ")
+	if len(parts) == 0 {
+		return nil
+	}
+	h.Text = strings.TrimSpace(parts[0])
+
+	for _, part := range parts[1:] {
+		part = strings.TrimSpace(part)
+		if after, ok := strings.CutPrefix(part, "CONFIDENCE:"); ok {
+			c, err := strconv.ParseFloat(strings.TrimSpace(after), 64)
+			if err == nil {
+				h.Confidence = c
+			}
+		} else if after, ok := strings.CutPrefix(part, "EVIDENCE:"); ok {
+			ev := strings.TrimSpace(after)
+			ev = strings.Trim(ev, "\"")
+			h.Evidence = ev
+		} else if after, ok := strings.CutPrefix(part, "REJECTED:"); ok {
+			h.RejectedReason = strings.TrimSpace(after)
+		}
+	}
+	return &h
 }
 
 // extractConclusionFallback extracts a findings summary from common conclusion

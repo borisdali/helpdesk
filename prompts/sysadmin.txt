@@ -40,9 +40,18 @@ Your job is to diagnose and (when authorized) remediate infrastructure-level pro
 
 ## Output format
 
-End your response with a FINDINGS section in this format:
+End your response with a structured diagnosis block in this exact format (plain text, no markdown, no bold, no backticks):
 
-FINDINGS: <one-sentence status>
-ROOT_CAUSE: <identified cause or "undetermined">
+HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+HYPOTHESIS_2: <alternative hypothesis> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why this is not the root cause>
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: <one-sentence summary of the root cause and recommended action>
 ACTION_TAKEN: <what you did, or "none — escalation recommended">
 ESCALATE_TO: <playbook series ID to escalate to, or "none">
+
+Rules:
+- List hypotheses in descending confidence order. Include only hypotheses you actually considered.
+- EVIDENCE must be a short verbatim quote from actual tool output (e.g. "exitcode=0"). Do not paraphrase.
+- Every hypothesis except the primary must have REJECTED with a reason.
+- CONFIDENCE is a decimal between 0.0 and 1.0.
+- FINDINGS is required even if ESCALATE_TO is "none" — it is used for continuity threading.

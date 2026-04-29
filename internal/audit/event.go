@@ -190,6 +190,33 @@ type PolicyDecision struct {
 	Sensitivity []string `json:"sensitivity,omitempty"`
 }
 
+// DiagnosticHypothesis is one ranked candidate root-cause produced by an
+// investigative agent. Agents that support the structured output format emit
+// one hypothesis per HYPOTHESIS_N: line in their response.
+type DiagnosticHypothesis struct {
+	// Rank is 1-based, ordered by descending confidence.
+	Rank int `json:"rank"`
+	// Text is the hypothesis statement.
+	Text string `json:"text"`
+	// Confidence is the agent's self-reported confidence, 0.0–1.0.
+	Confidence float64 `json:"confidence"`
+	// Evidence is a verbatim short quote from a tool output that supports this hypothesis.
+	Evidence string `json:"evidence,omitempty"`
+	// RejectedReason explains why this hypothesis was not chosen as the root cause.
+	// Empty on the primary (IsPrimary=true) hypothesis.
+	RejectedReason string `json:"rejected_reason,omitempty"`
+	// IsPrimary is true on the hypothesis selected as the root cause.
+	IsPrimary bool `json:"is_primary"`
+}
+
+// DiagnosticReport is the structured output of an investigative agent run.
+// It is populated when the agent emits HYPOTHESIS_N: lines in its response.
+type DiagnosticReport struct {
+	Hypotheses  []DiagnosticHypothesis `json:"hypotheses"`
+	RootCause   string                 `json:"root_cause,omitempty"`
+	ActionTaken string                 `json:"action_taken,omitempty"`
+}
+
 // AgentReasoning captures the LLM's text deliberation immediately before
 // it issues one or more tool calls. This fills the gap between policy
 // decision events (which rule matched) and tool execution events (what ran):

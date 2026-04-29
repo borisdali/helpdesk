@@ -71,7 +71,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "Logs show FATAL: invalid value for parameter max_connections")
+	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "Logs show FATAL: invalid value for parameter max_connections", nil)
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -262,3 +262,66 @@ func TestPlaybookRunStore_GetByRunID_NotFound(t *testing.T) {
 	}
 }
 
+
+func TestPlaybookRunStore_DiagnosticReport_RoundTrip(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	report := &DiagnosticReport{
+		RootCause:   "Container was stopped by an operator",
+		ActionTaken: "none — escalation recommended",
+		Hypotheses: []DiagnosticHypothesis{
+			{Rank: 1, Text: "Operator stop", Confidence: 0.90, Evidence: "exitcode=0", IsPrimary: true},
+			{Rank: 2, Text: "Disk exhaustion", Confidence: 0.20, RejectedReason: "disk 45% used", IsPrimary: false},
+		},
+	}
+
+	run := &PlaybookRun{
+		PlaybookID:      "pb_diag_test",
+		SeriesID:        "pbs_diag_test",
+		ExecutionMode:   "agent",
+		Outcome:         "resolved",
+		DiagnosticReport: report,
+		Operator:        "test",
+		StartedAt:       time.Now().UTC(),
+	}
+	if err := s.Record(ctx, run); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, err := s.GetByRunID(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID: %v", err)
+	}
+	if got.DiagnosticReport == nil {
+		t.Fatal("DiagnosticReport should not be nil after round-trip")
+	}
+	if got.DiagnosticReport.RootCause != report.RootCause {
+		t.Errorf("RootCause = %q, want %q", got.DiagnosticReport.RootCause, report.RootCause)
+	}
+	if len(got.DiagnosticReport.Hypotheses) != 2 {
+		t.Fatalf("Hypotheses len = %d, want 2", len(got.DiagnosticReport.Hypotheses))
+	}
+	if !got.DiagnosticReport.Hypotheses[0].IsPrimary {
+		t.Error("first hypothesis should be primary")
+	}
+	if got.DiagnosticReport.Hypotheses[1].RejectedReason == "" {
+		t.Error("second hypothesis should have rejection reason")
+	}
+
+	// Also test Update path.
+	report2 := &DiagnosticReport{
+		RootCause:  "Updated root cause",
+		Hypotheses: []DiagnosticHypothesis{{Rank: 1, Text: "Updated", Confidence: 0.99, IsPrimary: true}},
+	}
+	if err := s.Update(ctx, run.RunID, "resolved", "", "Updated findings", report2); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got2, err := s.GetByRunID(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID after Update: %v", err)
+	}
+	if got2.DiagnosticReport == nil || got2.DiagnosticReport.RootCause != "Updated root cause" {
+		t.Errorf("DiagnosticReport not updated correctly: %+v", got2.DiagnosticReport)
+	}
+}

@@ -132,7 +132,14 @@ func main() {
 		return
 	}
 
-	slog.Info("starting auditor", "socket", cfg.SocketPath, "log_all", cfg.LogAll)
+	startArgs := []any{"socket", cfg.SocketPath, "log_all", cfg.LogAll}
+	if cfg.AuditServiceURL != "" {
+		startArgs = append(startArgs, "audit_service", cfg.AuditServiceURL)
+	}
+	if cfg.IncidentWebhookURL != "" {
+		startArgs = append(startArgs, "incident_webhook", cfg.IncidentWebhookURL)
+	}
+	slog.Info("starting auditor", startArgs...)
 
 	// Initialize notifiers
 	notifiers := buildNotifiers(cfg)

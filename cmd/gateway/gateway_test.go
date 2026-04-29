@@ -1917,3 +1917,115 @@ func TestGatewayMetrics_ServeHTTP(t *testing.T) {
 		t.Errorf("metrics body missing agent label; got: %s", body)
 	}
 }
+
+// ─── Approval session tests ───────────────────────────────────────────────────
+
+func TestCheckApprovalMode_Auto_AlwaysAllowed(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "auto"})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if blocked {
+		t.Errorf("auto mode should never block, got: %s", msg)
+	}
+}
+
+func TestCheckApprovalMode_Manual_BlocksDestructive(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "manual"})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("manual mode should block destructive tools")
+	}
+	if msg == "" {
+		t.Error("expected non-empty error message")
+	}
+}
+
+func TestCheckApprovalMode_Manual_AllowsReads(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "manual"})
+	blocked, _ := gw.checkApprovalMode(ctx, "get_database_size")
+	if blocked {
+		t.Error("manual mode should allow read tools")
+	}
+}
+
+func TestCheckApprovalMode_Session_BlocksWhenNoSessionID(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "session", sessionID: ""})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("session mode with no session ID should block")
+	}
+	if msg == "" {
+		t.Error("expected non-empty error message")
+	}
+}
+
+func TestCheckApprovalMode_Session_BlocksWhenAuditdMissing(t *testing.T) {
+	gw := &Gateway{auditURL: ""} // no auditd
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "session", sessionID: "aps_abc"})
+	blocked, _ := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("session mode without auditd should fail safe and block")
+	}
+}
+
+func TestCheckApprovalMode_NoContext_Allowed(t *testing.T) {
+	gw := &Gateway{}
+	blocked, _ := gw.checkApprovalMode(context.Background(), "terminate_connection")
+	if blocked {
+		t.Error("no approval context should default to allow (auto mode)")
+	}
+}
+
+func TestCheckApprovalMode_Session_ValidSessionAllows(t *testing.T) {
+	// Serve a valid approval session from a mock auditd.
+	sess := audit.ApprovalSession{
+		SessionID:      "aps_test",
+		GrantedBy:      "boris",
+		GrantedAt:      time.Now().Add(-time.Minute),
+		ExpiresAt:      time.Now().Add(30 * time.Minute),
+		AllowedClasses: []audit.ActionClass{audit.ActionWrite, audit.ActionDestructive},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sess) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	gw := &Gateway{auditURL: srv.URL}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{
+		mode:      "session",
+		sessionID: "aps_test",
+	})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if blocked {
+		t.Errorf("valid session should allow, got: %s", msg)
+	}
+}
+
+func TestCheckApprovalMode_Session_ExpiredSessionBlocks(t *testing.T) {
+	sess := audit.ApprovalSession{
+		SessionID:      "aps_expired",
+		GrantedBy:      "boris",
+		GrantedAt:      time.Now().Add(-2 * time.Hour),
+		ExpiresAt:      time.Now().Add(-1 * time.Hour), // already expired
+		AllowedClasses: []audit.ActionClass{audit.ActionDestructive},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sess) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	gw := &Gateway{auditURL: srv.URL}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{
+		mode:      "session",
+		sessionID: "aps_expired",
+	})
+	blocked, _ := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("expired session should block")
+	}
+}

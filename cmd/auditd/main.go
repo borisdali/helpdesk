@@ -132,6 +132,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create approval session store (shares the same database connection)
+	approvalSessionStore, err := audit.NewApprovalSessionStore(store.DB())
+	if err != nil {
+		slog.Error("failed to create approval session store", "err", err)
+		os.Exit(1)
+	}
+	approvalSessionSrv := &approvalSessionServer{store: approvalSessionStore}
+
 	// Create rollback store (shares the same database connection)
 	rollbackStore, err := audit.NewRollbackStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -285,6 +293,11 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/runs", auth("GET /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleList))
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/stats", auth("GET /v1/fleet/playbooks/{playbookID}/stats", playbookRunSrv.handleStats))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}", auth("GET /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleGetRun))
+
+	// Approval session endpoints
+	mux.HandleFunc("POST /v1/approval/sessions", auth("POST /v1/approval/sessions", approvalSessionSrv.handleCreate))
+	mux.HandleFunc("GET /v1/approval/sessions/{sessionID}", auth("GET /v1/approval/sessions/{sessionID}", approvalSessionSrv.handleGet))
+	mux.HandleFunc("DELETE /v1/approval/sessions/{sessionID}", auth("DELETE /v1/approval/sessions/{sessionID}", approvalSessionSrv.handleRevoke))
 
 	// Tool result endpoints
 	// Upload endpoints
