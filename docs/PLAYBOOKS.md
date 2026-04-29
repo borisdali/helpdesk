@@ -257,7 +257,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 ./fleet-runner --job-file /tmp/plan.json
 ```
 
-**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms hypotheses, backs out when evidence contradicts them, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`.
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms ranked hypotheses with confidence scores, backs out when evidence contradicts a hypothesis, and returns a structured diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`.
 
 Optional request body:
 
@@ -267,6 +267,8 @@ Optional request body:
 | `context` | Free-form operator context (server name, symptoms, recent changes, relevant log lines) |
 | `context_id` | A2A session ID for multi-turn continuity within an existing session |
 | `prior_run_id` | `plr_*` run ID of a previous investigation to continue from (see [Continuity threading](#continuity-threading)) |
+| `approval_mode` | `auto` (default), `session`, or `manual` — controls whether write/destructive tool calls are gated (see [Approval modes](#approval-modes)) |
+| `approval_session` | Required when `approval_mode=session`. The `aps_*` session ID from `POST /v1/approval/sessions` on auditd |
 
 ```bash
 # Triage a down database (agent mode)
@@ -443,6 +445,7 @@ Returns `204 No Content` on success.
 | `operator` | string | Identity from `X-User` request header |
 | `started_at` | RFC3339 | When the run was initiated |
 | `completed_at` | RFC3339 | When the run was patched with a final outcome |
+| `diagnostic_report` | object | Structured hypothesis report parsed from the agent's response. `null` when the agent did not emit `HYPOTHESIS_N:` lines. See [Structured diagnostic report](#structured-diagnostic-report). |
 
 ---
 
@@ -494,9 +497,62 @@ This signals that you may have selected the wrong Playbook for the failure mode.
 
 Warnings never block execution — they are advisory.
 
+### Structured diagnostic report
+
+For agent-mode runs the agent emits a ranked hypothesis block before the standard escalation signal:
+
+```
+HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: 0.90 | EVIDENCE: "<verbatim quote from tool output>"
+HYPOTHESIS_2: <alternative> | CONFIDENCE: 0.20 | REJECTED: <one-sentence reason why this is not the root cause>
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: <one-sentence summary of the root cause and recommended action>
+ACTION_TAKEN: <what was done, or "none — escalation recommended">
+ESCALATE_TO: <series_id or "none">
+```
+
+Rules the agent follows:
+
+- Hypotheses are listed in descending confidence order.
+- `EVIDENCE` is a verbatim short quote from actual tool output, not a paraphrase.
+- Every non-primary hypothesis has a `REJECTED:` reason.
+- `CONFIDENCE` is in the range 0.0–1.0.
+- `FINDINGS` is the human-readable summary consumed by run tracking.
+
+The Gateway parses this block and stores it as a `DiagnosticReport` on the `PlaybookRun` record. Retrieve it via `GET /api/v1/fleet/playbook-runs/{runID}` — the `diagnostic_report` field is included in the run JSON:
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
+  | jq '.diagnostic_report'
+```
+
+```json
+{
+  "hypotheses": [
+    {
+      "rank": 1,
+      "text": "Container was stopped by an operator",
+      "confidence": 0.90,
+      "evidence": "exitcode=0",
+      "is_primary": true
+    },
+    {
+      "rank": 2,
+      "text": "Disk exhaustion caused the stop",
+      "confidence": 0.20,
+      "rejected_reason": "disk check showed only 45% used, no 'no space left' in logs",
+      "is_primary": false
+    }
+  ],
+  "root_cause": "Container was stopped by an operator",
+  "action_taken": "none — escalation recommended"
+}
+```
+
+The diagnostic report is available immediately after the agent session completes. If the agent's response does not contain any `HYPOTHESIS_N:` lines (older agent versions, or non-structured runs), `diagnostic_report` is `null`.
+
 ### Structured escalation signal
 
-For agent-mode runs the Gateway parses a structured signal from the agent's response before returning it to the caller. The agent is instructed to append two lines at the end of its response:
+For agent-mode runs the Gateway parses a structured signal from the agent's response before returning it to the caller. The agent is instructed to append lines at the end of its response:
 
 ```
 FINDINGS: <one-sentence diagnosis and recommended action>
@@ -555,6 +611,74 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_config_recovery/
     \"prior_run_id\": \"$FIRST_RUN_ID\"
   }" | jq .text
 ```
+
+### Approval modes
+
+Agent-mode runs may call write or destructive tools (e.g. `restart_deployment`, `cancel_query`). Three modes control whether those calls are gated:
+
+| Mode | Behaviour |
+|---|---|
+| `auto` | Default. No gate — write and destructive tools are proxied immediately. |
+| `session` | The operator pre-grants a time-bounded approval token before the run. The gateway validates the token before proxying any write or destructive call. |
+| `manual` | Read-only enforcement. The agent investigates and returns recommendations, but any write or destructive tool call is rejected with 403. Use this to get a diagnosis without risk of side effects. |
+
+#### Creating an approval session (`session` mode)
+
+Create a session token on auditd before starting the run. The token specifies which action classes it covers and for how long:
+
+```bash
+# Grant 30 minutes of write + destructive authority
+SESSION=$(curl -s -X POST http://localhost:1199/v1/approval/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "granted_by":      "alice@example.com",
+    "expires_in_secs": 1800,
+    "allowed_classes": ["write", "destructive"],
+    "scope":           "pbs_db_restart_triage"
+  }' | jq -r .session_id)
+
+echo "Session: $SESSION"   # aps_3f7a2b1c
+
+# Run the playbook using the session token
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"connection_string\": \"postgres://prod-db.example.com/app\",
+    \"context\": \"pod in CrashLoopBackOff since 10:00 UTC\",
+    \"approval_mode\":    \"session\",
+    \"approval_session\": \"$SESSION\"
+  }" | jq .text
+
+# Revoke the session early when the maintenance window closes
+curl -s -X DELETE http://localhost:1199/v1/approval/sessions/$SESSION
+```
+
+**Session validation:** the gateway calls auditd to validate the session before proxying each write or destructive tool call. If the session is expired, revoked, or does not cover the tool's action class, the gateway returns `403` with:
+
+```json
+{
+  "error":  "approval_session_required",
+  "detail": "session missing, expired, or does not cover this action class"
+}
+```
+
+The `scope` field is informational — it is stored on the session record for audit purposes but not enforced by the gateway. Use it to document which playbook or maintenance window the session was created for.
+
+See `GET /v1/approval/sessions/{id}` in [AUDIT.md §6.8](AUDIT.md#68-approval-sessions) for the full session API.
+
+#### Manual mode
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "postgres://prod-db.example.com/app",
+    "context":           "pod CrashLoopBackOff — want diagnosis only, no restarts",
+    "approval_mode":     "manual"
+  }' | jq '{text, diagnostic_report}'
+```
+
+The agent runs through its full investigation and produces a `diagnostic_report` and `FINDINGS:` signal, but cannot execute any write or destructive tool. Use this when you want to understand what the agent _would_ do before granting authority.
 
 ### Full Database Down triage example
 

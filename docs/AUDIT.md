@@ -366,6 +366,83 @@ curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
 |--------|----------|-------------|
 | `GET` | `/health` | Returns `{"status":"ok"}` |
 
+### 6.8 Approval Sessions
+
+Approval sessions are time-bounded pre-authorisation tokens for agent-mode playbook runs. An operator creates a session before a maintenance window and passes the session ID to the playbook run request. The gateway validates the session before proxying any write or destructive tool call.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/approval/sessions` | Create a new approval session |
+| `GET` | `/v1/approval/sessions/{sessionID}` | Retrieve a session by ID |
+| `DELETE` | `/v1/approval/sessions/{sessionID}` | Revoke a session immediately |
+
+#### POST /v1/approval/sessions
+
+Request body:
+
+| Field | Required | Description |
+|---|---|---|
+| `granted_by` | yes | Identity of the operator granting the session |
+| `expires_in_secs` | yes | Session lifetime in seconds (must be > 0) |
+| `allowed_classes` | yes | Action classes the session covers: `"write"`, `"destructive"`, or both |
+| `scope` | no | Informational label (e.g. a playbook series ID or maintenance window name). Stored for audit purposes, not enforced. |
+
+```bash
+curl -s -X POST http://localhost:1199/v1/approval/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "granted_by":      "alice@example.com",
+    "expires_in_secs": 1800,
+    "allowed_classes": ["write", "destructive"],
+    "scope":           "pbs_db_restart_triage"
+  }'
+```
+
+Response `201 Created`:
+
+```json
+{
+  "session_id": "aps_3f7a2b1c",
+  "expires_at": "2026-04-29T22:30:00Z"
+}
+```
+
+#### GET /v1/approval/sessions/{sessionID}
+
+Returns the full session object. Returns `404` if not found.
+
+```json
+{
+  "session_id":      "aps_3f7a2b1c",
+  "granted_by":      "alice@example.com",
+  "granted_at":      "2026-04-29T20:30:00Z",
+  "expires_at":      "2026-04-29T22:30:00Z",
+  "allowed_classes": ["write", "destructive"],
+  "scope":           "pbs_db_restart_triage",
+  "revoked":         false
+}
+```
+
+#### DELETE /v1/approval/sessions/{sessionID}
+
+Revokes the session immediately. Returns `204 No Content`. Returns `404` if not found. The session record remains readable via `GET` with `"revoked": true`.
+
+#### ApprovalSession object
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | string | Unique identifier (`aps_` prefix) |
+| `granted_by` | string | Operator who created the session |
+| `granted_at` | RFC3339 | When the session was created |
+| `expires_at` | RFC3339 | When the session expires |
+| `allowed_classes` | []string | Action classes covered: `"write"` and/or `"destructive"` |
+| `scope` | string | Informational label; empty when not provided |
+| `revoked` | bool | `true` if the session was explicitly revoked before expiry |
+
+A session is considered valid when: `revoked=false`, `expires_at` is in the future, and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call.
+
+See [Approval modes](PLAYBOOKS.md#approval-modes) in the Playbook docs for the full usage guide.
+
 ---
 
 ## 7. Event Query Filters
