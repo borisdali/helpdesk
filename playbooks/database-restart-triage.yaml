@@ -6,6 +6,7 @@ execution_mode: agent
 escalates_to:
   - pbs_db_config_recovery
   - pbs_db_pitr_recovery
+  - pbs_sysadmin_docker_inspect
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -34,15 +35,21 @@ guidance: |
   endpoint health. "Password authentication failed" means the DB is up but
   pg_hba.conf or credentials changed — this is not a restart scenario.
 
-  Step 2 — Check K8s pod state (Kubernetes deployments):
-  Use get_pod_status to determine the container state. CrashLoopBackOff means
-  PostgreSQL is repeatedly failing to start — this is a config or data issue,
-  not a simple restart. OOMKilled means the pod was killed by the OOM killer —
-  a restart will likely succeed but the root cause (memory pressure) must be
-  addressed. Completed/Succeeded is unexpected for a DB pod and indicates the
+  Step 2 — Identify the hosting type and check container/pod state:
+  If the server is Docker-hosted (not Kubernetes): you cannot read docker logs
+  directly. Emit ESCALATE_TO: pbs_sysadmin_docker_inspect in your structured
+  block so the sysadmin agent can inspect the container state and logs.
+  Do NOT guess whether the container crashed or was stopped — the sysadmin
+  agent has the tools to determine this definitively.
+
+  If the server is Kubernetes-hosted: use get_pod_status to determine the
+  container state. CrashLoopBackOff means PostgreSQL is repeatedly failing to
+  start — config or data issue, not a simple restart. OOMKilled means the pod
+  was killed by the OOM killer — a restart will likely succeed but the root
+  cause (memory pressure) must be addressed. Completed/Succeeded indicates the
   process exited cleanly — check for intentional shutdown.
 
-  Step 3 — Read the logs:
+  Step 3 — Read the logs (Kubernetes only):
   Use get_pod_logs to retrieve the last 100–200 lines of PostgreSQL output.
   Key signals to look for:
   - "database system was shut down" followed by absence of "database system is
@@ -54,7 +61,7 @@ guidance: |
   - "invalid page" or "checksum failure" — do NOT restart; escalate to data
     recovery immediately.
 
-  Step 4 — Check K8s events:
+  Step 4 — Check K8s events (Kubernetes only):
   Use get_events for the pod's namespace to see recent evictions, OOM kills,
   node pressure events, or storage mount failures. Storage mount failures
   (PVC not bound, volume unavailable) cannot be resolved by a restart.

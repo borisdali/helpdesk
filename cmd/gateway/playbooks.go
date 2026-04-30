@@ -156,7 +156,12 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	var req PlaybookRunRequest
 	if r.Body != nil {
 		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &req) //nolint:errcheck
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+				return
+			}
+		}
 	}
 
 	// Fetch the playbook from auditd.
@@ -167,9 +172,22 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve effective approval mode: per-run request overrides playbook default.
+	if req.ApprovalMode == "" {
+		req.ApprovalMode = pb.ApprovalMode
+	}
+
+	// Warn when an agent-mode playbook has no connection_string — the agent
+	// will have no target and will likely ask the operator for one.
+	var warnings []string
+	if pb.ExecutionMode == "agent" && req.ConnectionString == "" {
+		slog.Warn("handlePlaybookRun: agent-mode run has no connection_string", "playbook", pb.SeriesID)
+		warnings = append(warnings, "no connection_string specified — agent will need to ask which database to investigate")
+	}
+
 	// Item 5: soft-warn when required evidence patterns are absent from the
 	// operator-supplied context. Execution is not blocked.
-	warnings := checkRequiresEvidence(pb.RequiresEvidence, req.Context)
+	warnings = append(warnings, checkRequiresEvidence(pb.RequiresEvidence, req.Context)...)
 
 	// Item 6: soft-warn when the operator context is inconsistent with the
 	// server's known hosting type (e.g. K8s terms for a Docker-hosted server).
@@ -235,70 +253,74 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePlaybookRunAsAgent routes an agent-mode playbook run to the database agent
-// as an interactive agentic session. The playbook's guidance is injected into the
-// prompt as expert context. All tool calls within the session are expected to be
-// read-only; the agent presents remediation as recommendations for operator review.
-//
-// The agent response is captured to:
-//   - Parse structured escalation signals (ESCALATE_TO / FINDINGS lines)
-//   - Strip signal lines from the operator-visible text
-//   - Record the run with the real outcome instead of "unknown"
-//   - Inject optional warnings about missing required evidence
-func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
+// agentRunResult holds the parsed output of a single agent-mode playbook run.
+type agentRunResult struct {
+	capture    *responseCapture
+	traceID    string
+	runStart   time.Time
+	outcome    string
+	escalatedTo string
+	findings   string
+	diagReport *audit.DiagnosticReport
+	runID      string
+}
+
+// runAgentPlaybook executes one agent-mode playbook run and returns the parsed result.
+// It does NOT write to any ResponseWriter — callers compose the final response.
+// agentName overrides pb.AgentName when non-empty; falls back to agentNameDB.
+func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, agentName string, runID string) agentRunResult {
+	if agentName == "" {
+		agentName = pb.AgentName
+	}
+	if agentName == "" {
+		agentName = agentNameDB
+	}
+
 	serverTypeHint := buildServerTypeHint(g.infra, req.ConnectionString)
 	prompt := assembleTriagePrompt(pb, req, serverTypeHint)
 
-	// Propagate approval mode and session ID through context so proxyToAgentWithTool
-	// can enforce them before proxying write/destructive calls.
-	ctx := r.Context()
+	// Propagate approval mode into context so proxyToAgentWithTool can enforce
+	// it before proxying write/destructive calls within this run.
 	if req.ApprovalMode != "" {
-		ctx = context.WithValue(ctx, ctxKeyApprovalSession, approvalContext{
+		ctx := context.WithValue(r.Context(), ctxKeyApprovalSession, approvalContext{
 			mode:      req.ApprovalMode,
 			sessionID: req.ApprovalSession,
 		})
 		r = r.WithContext(ctx)
 	}
 
-	// Capture the agent response to parse escalation signals.
 	runStart := time.Now()
 	capture := newResponseCapture()
-	g.proxyToAgent(capture, r, agentNameDB, req.ContextID, prompt)
+	g.proxyToAgent(capture, r, agentName, req.ContextID, prompt)
 
-	// Extract trace ID from the capture response header once; reused for
-	// escalation auditing and post-run target-scope verification below.
 	traceID := capture.header.Get("X-Trace-ID")
 	if traceID == "" {
 		traceID = capture.header.Get("X-Trace-Id")
 	}
 
-	var outcome, escalatedTo, findings string
-	extra := map[string]any{}
-
-	var diagReport *audit.DiagnosticReport
+	res := agentRunResult{
+		capture:  capture,
+		traceID:  traceID,
+		runStart: runStart,
+		runID:    runID,
+	}
 
 	if capture.code == http.StatusOK {
 		var respBody map[string]any
 		if err := json.Unmarshal(capture.body.Bytes(), &respBody); err == nil {
 			if text, ok := respBody["text"].(string); ok {
-				// Parse structured hypotheses first; fall through to flat parser for
-				// FINDINGS/ESCALATE_TO which are always present in both formats.
-				diagReport = parseDiagnosticReport(text)
-
+				res.diagReport = parseDiagnosticReport(text)
 				esc := parseAgentEscalation(text)
-				findings = esc.Findings
+				res.findings = esc.Findings
 				if esc.EscalateTo != "" {
-					outcome = "escalated"
-					escalatedTo = esc.EscalateTo
-					extra["escalation_hint"] = esc.EscalateTo
-					// Audit the playbook selection decision so the escalation
-					// chain is visible in QueryJourneys.
+					res.outcome = "escalated"
+					res.escalatedTo = esc.EscalateTo
 					g.recordEscalationDecision(r.Context(), traceID,
-						authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, findings)
-				} else if findings != "" {
-					outcome = "resolved"
+						authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, esc.Findings)
+				} else if esc.Findings != "" {
+					res.outcome = "resolved"
 				}
-				// Replace text with the clean version (signal lines stripped).
+				// Rewrite captured body with signal lines stripped.
 				respBody["text"] = esc.CleanText
 				if b, err := json.Marshal(respBody); err == nil {
 					capture.body.Reset()
@@ -307,40 +329,229 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
-	if outcome == "" {
-		outcome = "unknown"
+	if res.outcome == "" {
+		res.outcome = "unknown"
 	}
+	return res
+}
 
+// handlePlaybookRunAsAgent routes an agent-mode playbook run, optionally chaining
+// to a follow-on playbook when ESCALATE_TO fires and approval_mode permits it.
+func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
+	primary := g.runAgentPlaybook(r, pb, req, "", runID)
+
+	extra := map[string]any{}
 	if runID != "" {
 		extra["run_id"] = runID
 	}
-	if findings != "" {
-		extra["findings"] = findings
+	if primary.findings != "" {
+		extra["findings"] = primary.findings
 	}
-	if diagReport != nil {
-		extra["diagnostic_report"] = diagReport
+	if primary.diagReport != nil {
+		extra["diagnostic_report"] = primary.diagReport
 	}
 	if len(warnings) > 0 {
 		extra["warnings"] = warnings
 	}
 
-	// Post-run: check whether the agent operated on the intended target only.
-	// Drift means the agent queried a server other than the one specified in the run request.
+	// Post-run target-scope check.
 	if req.ConnectionString != "" {
-		if drift := checkTargetScope(g.infra, g.auditURL, g.auditAPIKey, traceID, runStart, req.ConnectionString); len(drift) > 0 {
+		if drift := checkTargetScope(g.infra, g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, req.ConnectionString); len(drift) > 0 {
 			extra["target_drift"] = drift
 			slog.Warn("playbook run: target scope drift detected",
-				"trace_id", traceID,
+				"trace_id", primary.traceID,
 				"intended", req.ConnectionString,
 				"actual", drift)
 		}
 	}
 
-	injectFields(w, capture, extra)
+	// Escalation handling: auto-chain or return suggested_next.
+	finalOutcome := primary.outcome
+	finalEscalatedTo := primary.escalatedTo
+	finalFindings := primary.findings
+	finalReport := primary.diagReport
 
-	// Record completion with real outcome in background.
+	if primary.escalatedTo != "" {
+		if g.canAutoChain(r.Context(), req.ApprovalMode, req.ApprovalSession) {
+			chained := g.chainEscalation(r, pb, req, primary)
+			if chained != nil {
+				// Merge the sysadmin report back into the primary run's report.
+				merged := mergeDiagnosticReports(primary.diagReport, chained.diagReport)
+				finalReport = merged
+				finalOutcome = "escalated+resolved"
+				if chained.findings != "" {
+					finalFindings = chained.findings
+				}
+				extra["diagnostic_report"] = merged
+				extra["chained_run_id"] = chained.runID
+				if chained.findings != "" {
+					extra["chained_findings"] = chained.findings
+				}
+				// Append chained text to captured body.
+				appendChainedText(primary.capture, chained.capture)
+			}
+		} else {
+			extra["suggested_next"] = buildSuggestedNext(primary.escalatedTo, req, runID, primary.findings)
+		}
+	}
+
+	injectFields(w, primary.capture, extra)
+
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, escalatedTo, findings, diagReport)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
+			runID, finalOutcome, finalEscalatedTo, finalFindings, finalReport)
+	}
+}
+
+// canAutoChain returns true when the effective approval mode permits automatic
+// cross-agent escalation chaining.
+func (g *Gateway) canAutoChain(ctx context.Context, mode, sessionID string) bool {
+	switch mode {
+	case "auto":
+		return true
+	case "session":
+		sess, err := g.fetchApprovalSession(ctx, sessionID)
+		return err == nil && sess.IsValid(audit.ActionEscalation)
+	default: // "manual" or "" — require explicit operator trigger
+		return false
+	}
+}
+
+// chainEscalation looks up the escalated playbook and runs it as a second agent
+// session, using the primary run's findings as context. Returns nil on any error.
+func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, req PlaybookRunRequest, primary agentRunResult) *agentRunResult {
+	if g.auditURL == "" {
+		return nil
+	}
+	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), primary.escalatedTo)
+	if err != nil {
+		slog.Warn("chainEscalation: cannot fetch escalated playbook",
+			"series_id", primary.escalatedTo, "err", err)
+		return nil
+	}
+
+	chainReq := PlaybookRunRequest{
+		ConnectionString: req.ConnectionString,
+		Context:          req.Context,
+		PriorRunID:       primary.runID,
+		ApprovalMode:     req.ApprovalMode,
+		ApprovalSession:  req.ApprovalSession,
+	}
+	// Fetch prior findings for continuity threading.
+	if chainReq.PriorRunID != "" {
+		if prior, err := g.fetchPlaybookRun(r.Context(), chainReq.PriorRunID); err == nil {
+			chainReq.PriorFindings = prior.FindingsSummary
+		}
+	}
+
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, r.Header.Get("X-User"))
+	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
+
+	if chainRunID != "" {
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
+			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.findings, chainRes.diagReport)
+	}
+
+	slog.Info("playbook: auto-chained escalation",
+		"from", primaryPB.SeriesID, "to", nextPB.SeriesID,
+		"chain_run_id", chainRunID, "outcome", chainRes.outcome)
+
+	return &chainRes
+}
+
+// fetchPlaybookBySeriesID returns the active version of a playbook by series ID.
+func (g *Gateway) fetchPlaybookBySeriesID(ctx context.Context, seriesID string) (*audit.Playbook, error) {
+	return g.fetchPlaybook(ctx, seriesID)
+}
+
+// buildSuggestedNext constructs the suggested_next response field that operators
+// can use as a ready-to-fire request body for the escalated playbook.
+func buildSuggestedNext(seriesID string, req PlaybookRunRequest, priorRunID, findings string) map[string]any {
+	return map[string]any{
+		"playbook_series_id": seriesID,
+		"reason":             findings,
+		"request": map[string]any{
+			"connection_string": req.ConnectionString,
+			"prior_run_id":      priorRunID,
+			"context":           findings,
+			"approval_mode":     req.ApprovalMode,
+		},
+	}
+}
+
+// mergeDiagnosticReports combines hypotheses from two runs into one report.
+// Secondary (chained) hypotheses take precedence — they have more evidence.
+// The highest-confidence secondary hypothesis becomes IsPrimary; the primary
+// run's former primary hypothesis is demoted. All hypotheses are re-ranked by
+// confidence descending.
+func mergeDiagnosticReports(primary, secondary *audit.DiagnosticReport) *audit.DiagnosticReport {
+	if primary == nil {
+		return secondary
+	}
+	if secondary == nil {
+		return primary
+	}
+
+	merged := &audit.DiagnosticReport{}
+
+	// Collect all hypotheses; mark secondary ones as non-primary first.
+	var all []audit.DiagnosticHypothesis
+	for _, h := range primary.Hypotheses {
+		h.IsPrimary = false
+		all = append(all, h)
+	}
+	for _, h := range secondary.Hypotheses {
+		all = append(all, h)
+	}
+
+	// Sort by confidence descending.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Confidence > all[j].Confidence
+	})
+
+	// Re-rank and mark top as primary.
+	for i := range all {
+		all[i].Rank = i + 1
+		all[i].IsPrimary = i == 0
+	}
+	merged.Hypotheses = all
+
+	// Secondary root cause takes precedence if present.
+	if secondary.RootCause != "" {
+		merged.RootCause = secondary.RootCause
+	} else {
+		merged.RootCause = primary.RootCause
+	}
+	if secondary.ActionTaken != "" {
+		merged.ActionTaken = secondary.ActionTaken
+	} else {
+		merged.ActionTaken = primary.ActionTaken
+	}
+	return merged
+}
+
+// appendChainedText appends a separator and the chained run's text to the
+// primary capture body so the operator sees both agents' findings in one response.
+func appendChainedText(primary, chained *responseCapture) {
+	if chained == nil || chained.code != http.StatusOK {
+		return
+	}
+	var primaryBody, chainedBody map[string]any
+	if err := json.Unmarshal(primary.body.Bytes(), &primaryBody); err != nil {
+		return
+	}
+	if err := json.Unmarshal(chained.body.Bytes(), &chainedBody); err != nil {
+		return
+	}
+	primaryText, _ := primaryBody["text"].(string)
+	chainedText, _ := chainedBody["text"].(string)
+	if chainedText == "" {
+		return
+	}
+	primaryBody["text"] = primaryText + "\n\n---\n\n" + chainedText
+	if b, err := json.Marshal(primaryBody); err == nil {
+		primary.body.Reset()
+		primary.body.Write(b) //nolint:errcheck
 	}
 }
 
@@ -400,9 +611,20 @@ func (g *Gateway) recordEscalationDecision(ctx context.Context, traceID string, 
 func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverTypeHint string) string {
 	var b strings.Builder
 
-	b.WriteString("You are performing a database availability investigation.\n\n")
+	// Open with an unambiguous action command when a target is specified.
+	// A direct tool-invocation instruction as the very first line prevents the model
+	// from falling back to its default clarification behavior before reading context.
+	if req.ConnectionString != "" {
+		fmt.Fprintf(&b, "Call check_connection with connection_string=%q and begin diagnosing why it is unavailable. Do not ask which database — the target is %q.\n", req.ConnectionString, req.ConnectionString)
+		if serverTypeHint != "" {
+			fmt.Fprintf(&b, "%s\n", serverTypeHint)
+		}
+		b.WriteString("\n")
+	} else {
+		b.WriteString("You are performing a database availability investigation.\n\n")
+	}
 
-	// Response protocol first — models attend more reliably to instructions at the top.
+	// Response protocol — repeated at closing for Gemini's benefit.
 	b.WriteString("## Response Protocol\n")
 	b.WriteString("Do NOT write a CONCLUSION section or end with '---'. Close your response with this exact block (plain text, no markdown, no bold, no backticks):\n\n")
 	b.WriteString("HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: \"<verbatim quote from tool output>\"\n")
@@ -425,7 +647,6 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 			strings.Join(pb.EscalatesTo, ", "))
 	}
 
-	// Item 4: inject prior investigation findings for continuity.
 	if req.PriorFindings != "" {
 		fmt.Fprintf(&b, "## Prior Investigation Findings\nA previous investigation reached the following conclusion:\n%s\n\nContinue from this context and investigate further.\n\n", req.PriorFindings)
 	}
@@ -434,24 +655,23 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	b.WriteString("- Use only read-only diagnostic tools. Do not execute any write or destructive operations.\n")
 	b.WriteString("- Collect evidence, form a hypothesis, and if the evidence contradicts it, back out and pursue a different hypothesis.\n")
 	b.WriteString("- When you reach a clear diagnosis, present your findings and recommended remediation steps.\n")
-	b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n\n")
-
+	b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n")
 	if req.ConnectionString != "" {
-		fmt.Fprintf(&b, "## Target — MANDATORY SCOPE CONSTRAINT\nYou MUST use ONLY `connection_string` = `%s` for all tool calls. Do not query any other database server under any circumstances, even if the context mentions other servers, pods, or clusters.\n", req.ConnectionString)
-		if serverTypeHint != "" {
-			fmt.Fprintf(&b, "%s\n", serverTypeHint)
-		}
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "- Use ONLY `connection_string` = `%s`. Do not query any other server, even if your context lists others.\n", req.ConnectionString)
 	}
+	b.WriteString("\n")
+
 	if req.Context != "" {
 		fmt.Fprintf(&b, "## Additional context\n%s\n\n", req.Context)
 	}
 
 	slog.Debug("triage prompt assembled", "playbook", pb.SeriesID, "prompt_len", b.Len(), "prompt", b.String())
 
-	// Closing reminder — Gemini attends more reliably when the instruction is
-	// repeated as the last thing in the prompt. Explicitly forbid the patterns
-	// Gemini uses as alternatives (**CONCLUSION:** and trailing ---).
+	// Closing reminder — Gemini attends more reliably when instructions are
+	// repeated at the end. Explicitly forbid alternatives (**CONCLUSION:** and trailing ---).
+	if req.ConnectionString != "" {
+		fmt.Fprintf(&b, "REMINDER: your target is connection_string=%q only. Do not check other databases.\n", req.ConnectionString)
+	}
 	b.WriteString("IMPORTANT: Do not write **CONCLUSION:** or end with ---. Close with exactly:\n")
 	b.WriteString("HYPOTHESIS_1: ... | CONFIDENCE: ... | EVIDENCE: \"...\"\n")
 	b.WriteString("HYPOTHESIS_2: ... | CONFIDENCE: ... | REJECTED: ...\n")

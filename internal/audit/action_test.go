@@ -89,6 +89,7 @@ func TestActionClass_IsApprovalRequired(t *testing.T) {
 	}{
 		{ActionRead, false},
 		{ActionWrite, true},
+		{ActionEscalation, true},
 		{ActionDestructive, true},
 		{ActionUnknown, false},
 	}
@@ -108,7 +109,8 @@ func TestActionClass_RiskLevel(t *testing.T) {
 	}{
 		{ActionRead, 0},
 		{ActionWrite, 1},
-		{ActionDestructive, 2},
+		{ActionEscalation, 2},
+		{ActionDestructive, 3},
 		{ActionUnknown, -1},
 	}
 

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"helpdesk/internal/audit"
 	"helpdesk/internal/fleet"
 )
 
@@ -26,9 +25,9 @@ func runStages(ctx context.Context, rcfg runnerConfig, def *fleet.JobDef, server
 		return fmt.Errorf("no servers to process")
 	}
 
-	// Approval gate: if any step is write or destructive, require human approval.
+	// Approval gate: any step requiring approval (write, destructive, or escalation).
 	actionClass := jobActionClass(def.Change.Steps)
-	if actionClass == audit.ActionWrite || actionClass == audit.ActionDestructive {
+	if actionClass.IsApprovalRequired() {
 		if def.Strategy.DryRun {
 			fmt.Printf("APPROVAL WOULD BE REQUIRED: job contains %s operations\n", actionClass)
 		} else if rcfg.auditURL != "" {

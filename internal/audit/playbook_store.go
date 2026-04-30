@@ -50,6 +50,8 @@ type Playbook struct {
 	RequiresEvidence []string `json:"requires_evidence,omitempty"` // log/error patterns expected before selecting this playbook
 	ExecutionMode    string   `json:"execution_mode"`             // "fleet" | "agent" (R/O) | "agent_approve" (mutations+approval) | "agent_auto" (pre-approved mutations)
 	PermittedTools   []string `json:"permitted_tools,omitempty"`  // agent_auto: tools allowed to execute without per-step approval
+	ApprovalMode     string   `json:"approval_mode,omitempty"`    // "auto"|"session"|"manual"; playbook-level default (overridden per run)
+	AgentName        string   `json:"agent_name,omitempty"`       // A2A agent to invoke; defaults to postgres_database_agent
 
 	// Computed fields (not persisted; populated on demand)
 	Stats *PlaybookRunStats `json:"stats,omitempty"` // run statistics, injected by handleList
@@ -112,6 +114,9 @@ func (s *PlaybookStore) migrateSchema() error {
 		"ALTER TABLE playbooks ADD COLUMN requires_evidence  TEXT    NOT NULL DEFAULT '[]'",
 		"ALTER TABLE playbooks ADD COLUMN execution_mode     TEXT    NOT NULL DEFAULT 'fleet'",
 		"ALTER TABLE playbooks ADD COLUMN permitted_tools    TEXT    NOT NULL DEFAULT '[]'",
+		// Chaining and agent routing
+		"ALTER TABLE playbooks ADD COLUMN approval_mode      TEXT    NOT NULL DEFAULT ''",
+		"ALTER TABLE playbooks ADD COLUMN agent_name         TEXT    NOT NULL DEFAULT ''",
 	}
 	for _, stmt := range newCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -221,13 +226,15 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		    (playbook_id, name, description, target_hints, created_by, created_at, updated_at,
 		     problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 		     series_id, is_active, is_system, source,
-		     entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
+		     approval_mode, agent_name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
 		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode, string(permittedToolsJSON),
+		pb.ApprovalMode, pb.AgentName,
 	)
 	return err
 }
@@ -303,13 +310,15 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 		    problem_class=?, symptoms=?, guidance=?, escalation=?,
 		    related_playbooks=?, author=?, last_validated=?, version=?,
 		    series_id=?,
-		    entry_point=?, escalates_to=?, requires_evidence=?, execution_mode=?, permitted_tools=?
+		    entry_point=?, escalates_to=?, requires_evidence=?, execution_mode=?, permitted_tools=?,
+		    approval_mode=?, agent_name=?
 		 WHERE playbook_id=?`,
 		pb.Name, pb.Description, string(hintsJSON), pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON),
 		string(relatedJSON), pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID,
 		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), executionMode, string(permittedToolsJSON),
+		pb.ApprovalMode, pb.AgentName,
 		pb.PlaybookID,
 	)
 	if err != nil {
@@ -402,7 +411,8 @@ func DefaultPlaybookListQuery() PlaybookListQuery {
 const playbookColumns = `playbook_id, name, description, target_hints, created_by, created_at, updated_at,
 	problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 	series_id, is_active, is_system, source,
-	entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools`
+	entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
+	approval_mode, agent_name`
 
 // Get returns a playbook by ID, or sql.ErrNoRows if not found.
 func (s *PlaybookStore) Get(ctx context.Context, id string) (*Playbook, error) {
@@ -473,6 +483,7 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 		&relatedJSON, &pb.Author, &lastValidatedStr, &pb.Version,
 		&pb.SeriesID, &isActive, &isSystem, &pb.Source,
 		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode, &permittedToolsJSON,
+		&pb.ApprovalMode, &pb.AgentName,
 	); err != nil {
 		return nil, err
 	}

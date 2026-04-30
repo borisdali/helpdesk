@@ -18,6 +18,10 @@ const (
 	// These typically require explicit human approval, especially in production.
 	ActionDestructive ActionClass = "destructive"
 
+	// ActionEscalation is for cross-agent escalation — triggering a follow-on
+	// playbook run in a different agent. Requires approval in session/manual modes.
+	ActionEscalation ActionClass = "escalation"
+
 	// ActionUnknown is for operations that haven't been classified.
 	ActionUnknown ActionClass = "unknown"
 )
@@ -136,7 +140,7 @@ func ClassifyEndpoint(method, path string) ActionClass {
 // IsApprovalRequired returns true if this action class typically requires approval.
 func (ac ActionClass) IsApprovalRequired() bool {
 	switch ac {
-	case ActionWrite, ActionDestructive:
+	case ActionWrite, ActionDestructive, ActionEscalation:
 		return true
 	default:
 		return false
@@ -151,8 +155,10 @@ func (ac ActionClass) RiskLevel() int {
 		return 0
 	case ActionWrite:
 		return 1
-	case ActionDestructive:
+	case ActionEscalation:
 		return 2
+	case ActionDestructive:
+		return 3
 	default:
 		return -1 // Unknown
 	}

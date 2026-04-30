@@ -1,0 +1,63 @@
+series_id: pbs_sysadmin_docker_inspect
+name: "Sysadmin — Docker Container Inspection"
+version: "1.0"
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+escalates_to:
+  - pbs_db_restart_triage
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Inspect a Docker-hosted PostgreSQL container that has been reported as unreachable.
+  Determine whether the container exited cleanly (manual stop / graceful shutdown)
+  or crashed (OOM kill, panic, unexpected exit), revise the prior DB agent's root
+  cause hypothesis if necessary, and provide evidence-based remediation guidance.
+symptoms:
+  - "DB agent diagnosed 'connection refused' but could not read docker container logs"
+  - "docker-hosted PostgreSQL is unreachable"
+  - "container status unknown — DB agent toolset cannot reach docker daemon"
+guidance: |
+  You are the second stage of a two-agent diagnostic chain. The DB agent has already
+  confirmed "connection refused" — your job is to explain WHY using host/container tools.
+
+  Do NOT call any psql-based tools — the database is down.
+  Do NOT attempt a restart — describe the recommended action for operator approval.
+
+  Step 1 — Container state:
+  Call check_host with the connection_string (target). Read these fields carefully:
+  - exitcode=0  → container was stopped CLEANLY (user, orchestrator, or graceful shutdown).
+                  This is NOT a crash. Do not speculate about OOM or disk unless logs
+                  provide direct evidence.
+  - oomkilled=true → kernel killed the process due to memory pressure. Call check_memory next.
+  - exitcode=1 or higher (and oomkilled=false) → process exited with error. Check logs.
+  - restarting=true → container is in a restart loop. Check logs immediately.
+
+  Step 2 — Recent logs:
+  Call get_host_logs to retrieve the last 50 lines of container output.
+  Key signals:
+  - "database system was shut down"  → clean shutdown; a simple restart will recover.
+  - "out of memory" / "OOM"          → OOM kill; restart will succeed but investigate memory.
+  - "FATAL" / "PANIC"                → hard failure; do not restart without config review.
+  - "received fast shutdown request" / "smart shutdown" → pg_ctl stop or SIGTERM — clean.
+  - "invalid page" / "checksum failure" → data corruption; do NOT recommend restart.
+  If container logs lack PostgreSQL-level detail, also call read_pg_log_file with
+  filter="FATAL" to inspect the PostgreSQL log file directly.
+
+  Step 3 — Memory (only if oomkilled=true or logs mention OOM):
+  Call check_memory with target set. Report the memory headroom and recommend a
+  memory limit increase if the container is constrained.
+
+  Step 4 — Revise the prior hypothesis:
+  If the DB agent concluded "process crashed" but exitcode=0 and logs show clean
+  shutdown, explicitly state this correction in FINDINGS. A clean stop requires
+  a restart (not recovery). An OOM kill requires a restart plus memory investigation.
+  A crash requires config/data recovery before restart.
+
+escalation:
+  - "container logs contain 'invalid page' or 'checksum failure' — data corruption, do not restart"
+  - "container logs contain PANIC — unrecoverable state, escalate to DB config/recovery playbook"
+  - "disk full in container — restart will not help, disk space must be freed first"
+  - "container is already running — investigate the database layer, not the container"
+target_hints: []
