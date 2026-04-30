@@ -80,7 +80,30 @@ CREATE TABLE IF NOT EXISTS playbook_runs (
 	}
 	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_playbook_runs_playbook
     ON playbook_runs(playbook_id)`)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.migrate()
+}
+
+// migrate applies additive schema changes to existing databases.
+// Each ALTER TABLE is swallowed if the column already exists (idempotent).
+func (s *PlaybookRunStore) migrate() error {
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"diagnostic_report", `ALTER TABLE playbook_runs ADD COLUMN diagnostic_report TEXT NOT NULL DEFAULT ''`},
+	} {
+		if _, err := s.db.Exec(col.ddl); err != nil {
+			// SQLite returns "duplicate column name" when the column already
+			// exists; treat that as a no-op so restarts on new DBs also work.
+			if !strings.Contains(err.Error(), "duplicate column name: "+col.name) {
+				return fmt.Errorf("migrate playbook_runs.%s: %w", col.name, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Record inserts a new PlaybookRun. RunID is generated if empty.

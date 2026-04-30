@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/identity"
+	"helpdesk/internal/infra"
 )
 
 // proxyToAuditd forwards the request to the auditd service at the given path
@@ -169,6 +171,10 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// operator-supplied context. Execution is not blocked.
 	warnings := checkRequiresEvidence(pb.RequiresEvidence, req.Context)
 
+	// Item 6: soft-warn when the operator context is inconsistent with the
+	// server's known hosting type (e.g. K8s terms for a Docker-hosted server).
+	warnings = append(warnings, checkContextConsistency(g.infra, req.ConnectionString, req.Context)...)
+
 	// Item 4: continuity threading — fetch prior run's findings to seed the prompt.
 	if req.PriorRunID != "" {
 		if prior, err := g.fetchPlaybookRun(r.Context(), req.PriorRunID); err == nil {
@@ -254,8 +260,16 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Capture the agent response to parse escalation signals.
+	runStart := time.Now()
 	capture := newResponseCapture()
 	g.proxyToAgent(capture, r, agentNameDB, req.ContextID, prompt)
+
+	// Extract trace ID from the capture response header once; reused for
+	// escalation auditing and post-run target-scope verification below.
+	traceID := capture.header.Get("X-Trace-ID")
+	if traceID == "" {
+		traceID = capture.header.Get("X-Trace-Id")
+	}
 
 	var outcome, escalatedTo, findings string
 	extra := map[string]any{}
@@ -278,10 +292,6 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 					extra["escalation_hint"] = esc.EscalateTo
 					// Audit the playbook selection decision so the escalation
 					// chain is visible in QueryJourneys.
-					traceID := capture.header.Get("X-Trace-Id")
-					if traceID == "" {
-						traceID = capture.header.Get("X-Trace-ID")
-					}
 					g.recordEscalationDecision(r.Context(), traceID,
 						authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, findings)
 				} else if findings != "" {
@@ -311,6 +321,18 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	}
 	if len(warnings) > 0 {
 		extra["warnings"] = warnings
+	}
+
+	// Post-run: check whether the agent operated on the intended target only.
+	// Drift means the agent queried a server other than the one specified in the run request.
+	if req.ConnectionString != "" {
+		if drift := checkTargetScope(g.auditURL, g.auditAPIKey, traceID, runStart, req.ConnectionString); len(drift) > 0 {
+			extra["target_drift"] = drift
+			slog.Warn("playbook run: target scope drift detected",
+				"trace_id", traceID,
+				"intended", req.ConnectionString,
+				"actual", drift)
+		}
 	}
 
 	injectFields(w, capture, extra)
@@ -412,7 +434,7 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 	b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n\n")
 
 	if req.ConnectionString != "" {
-		fmt.Fprintf(&b, "## Target\nConnection string: `%s`\n\n", req.ConnectionString)
+		fmt.Fprintf(&b, "## Target — MANDATORY SCOPE CONSTRAINT\nYou MUST use ONLY `connection_string` = `%s` for all tool calls. Do not query any other database server under any circumstances, even if the context mentions other servers, pods, or clusters.\n\n", req.ConnectionString)
 	}
 	if req.Context != "" {
 		fmt.Fprintf(&b, "## Additional context\n%s\n\n", req.Context)
@@ -894,4 +916,130 @@ func checkRequiresEvidence(patterns []string, ctx string) []string {
 		}
 	}
 	return missing
+}
+
+// checkContextConsistency warns when the operator-supplied context contains
+// terminology inconsistent with the server's known hosting type. For example,
+// K8s terms (pod, kubectl, namespace) on a Docker-hosted server mislead the
+// agent into calling K8s tools, which will fail or operate on the wrong target.
+//
+// Returns nil when infra config is absent, the server is unknown, or no
+// cross-type terminology is found. Execution is never blocked.
+func checkContextConsistency(cfg *infra.Config, connectionString, operatorContext string) []string {
+	if cfg == nil || connectionString == "" || operatorContext == "" {
+		return nil
+	}
+
+	// Locate the server by map key, display name, or full connection string.
+	var server *infra.DBServer
+	for key, db := range cfg.DBServers {
+		if key == connectionString || db.Name == connectionString || db.ConnectionString == connectionString {
+			d := db
+			server = &d
+			break
+		}
+	}
+	if server == nil {
+		return nil
+	}
+
+	isK8s := server.K8sCluster != ""
+	var runtime string
+	if server.VMName != "" {
+		if vm, ok := cfg.VMs[server.VMName]; ok {
+			runtime = vm.Runtime
+		}
+	}
+
+	ctx := strings.ToLower(operatorContext)
+	var warnings []string
+
+	if !isK8s {
+		// Server is not Kubernetes-hosted — K8s terminology in context misdirects the agent.
+		k8sKeywords := []string{"pod ", "pods ", "kubectl", "deployment", "statefulset", "namespace", "kubernetes", "k8s"}
+		for _, kw := range k8sKeywords {
+			if strings.Contains(ctx, kw) {
+				label := serverHostingLabel(server, runtime)
+				warnings = append(warnings, fmt.Sprintf(
+					"context mentions %q but %q is %s — Kubernetes tools will not apply to this server",
+					strings.TrimSpace(kw), server.Name, label))
+				break
+			}
+		}
+	}
+
+	isContainer := runtime == "docker" || runtime == "podman"
+	if !isContainer && !isK8s {
+		// Server is not container-hosted — Docker/Podman terminology is misleading.
+		containerKeywords := []string{"docker ", "docker exec", "docker run", "podman "}
+		for _, kw := range containerKeywords {
+			if strings.Contains(ctx, kw) {
+				warnings = append(warnings, fmt.Sprintf(
+					"context mentions %q but %q is not container-hosted (runtime=%q)",
+					strings.TrimSpace(kw), server.Name, runtime))
+				break
+			}
+		}
+	}
+
+	return warnings
+}
+
+// serverHostingLabel returns a short human-readable description of where db runs.
+func serverHostingLabel(db *infra.DBServer, runtime string) string {
+	if runtime == "docker" || runtime == "podman" {
+		return runtime + "-hosted"
+	}
+	if db.VMName != "" {
+		return "VM-hosted"
+	}
+	return "standalone"
+}
+
+// checkTargetScope returns connection strings from audit events for traceID that
+// differ from intendedTarget. Used to detect when the agent queried a server
+// other than the one specified in the playbook run request.
+// Returns nil when auditURL is empty, no traceID, or no drift is found.
+func checkTargetScope(auditURL, apiKey, traceID string, since time.Time, intendedTarget string) []string {
+	if auditURL == "" || traceID == "" || intendedTarget == "" {
+		return nil
+	}
+	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
+	seen := map[string]bool{}
+	for _, ev := range events {
+		if ev.Tool == nil {
+			continue
+		}
+		cs, _ := ev.Tool.Parameters["connection_string"].(string)
+		if cs == "" {
+			continue
+		}
+		if !targetMatches(intendedTarget, cs) {
+			seen[cs] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	drift := make([]string, 0, len(seen))
+	for cs := range seen {
+		drift = append(drift, cs)
+	}
+	sort.Strings(drift)
+	return drift
+}
+
+// targetMatches returns true when actual equals intended, or when actual is a
+// psql-style connection string (key=value pairs) that encodes intended as one
+// of its field values — e.g. intended="test-pg", actual="host=test-pg dbname=postgres".
+func targetMatches(intended, actual string) bool {
+	if intended == actual {
+		return true
+	}
+	for _, field := range strings.Fields(actual) {
+		if kv := strings.SplitN(field, "=", 2); len(kv) == 2 && kv[1] == intended {
+			return true
+		}
+	}
+	return false
 }

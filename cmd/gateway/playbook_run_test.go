@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
@@ -817,4 +818,198 @@ ESCALATE_TO: none`
 	if report.ActionTaken != "none — escalation recommended" {
 		t.Errorf("ActionTaken = %q", report.ActionTaken)
 	}
+}
+
+// ---- checkContextConsistency tests ----
+
+func makeContextTestInfra() *infra.Config {
+	return &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-pg": {
+				Name:          "Test Postgres",
+				ConnectionString: "host=localhost port=5433 dbname=postgres",
+				VMName:        "test-host",
+			},
+			"pg-cluster-minikube": {
+				Name:       "PG Cluster Minikube",
+				ConnectionString: "host=pg-cluster-minikube port=5432 dbname=postgres",
+				K8sCluster: "minikube",
+			},
+			"standalone-db": {
+				Name:             "Standalone DB",
+				ConnectionString: "host=standalone port=5432",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"test-host": {Name: "test-host", Runtime: "docker"},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"minikube": {Name: "minikube", Context: "minikube"},
+		},
+	}
+}
+
+func TestCheckContextConsistency_K8sTermsOnDockerServer(t *testing.T) {
+	cfg := makeContextTestInfra()
+	warns := checkContextConsistency(cfg, "test-pg", "Pod db-0 is crashing. kubectl delete pod db-0.")
+	if len(warns) == 0 {
+		t.Fatal("expected warning for K8s terms on docker-hosted server, got none")
+	}
+	if !strings.Contains(warns[0], "Kubernetes") {
+		t.Errorf("warning should mention Kubernetes, got: %s", warns[0])
+	}
+}
+
+func TestCheckContextConsistency_K8sTermsOnK8sServer_NoWarning(t *testing.T) {
+	cfg := makeContextTestInfra()
+	warns := checkContextConsistency(cfg, "pg-cluster-minikube", "Pod db-0 is crashing. kubectl describe pod db-0.")
+	if len(warns) != 0 {
+		t.Errorf("expected no warning for K8s terms on K8s-hosted server, got: %v", warns)
+	}
+}
+
+func TestCheckContextConsistency_NilInfra(t *testing.T) {
+	warns := checkContextConsistency(nil, "test-pg", "pod crashed kubectl")
+	if warns != nil {
+		t.Errorf("expected nil with nil infra, got %v", warns)
+	}
+}
+
+func TestCheckContextConsistency_UnknownServer(t *testing.T) {
+	cfg := makeContextTestInfra()
+	warns := checkContextConsistency(cfg, "unknown-server", "kubectl delete pod db-0")
+	if warns != nil {
+		t.Errorf("expected nil for unknown server, got %v", warns)
+	}
+}
+
+func TestCheckContextConsistency_CleanContext_NoWarning(t *testing.T) {
+	cfg := makeContextTestInfra()
+	warns := checkContextConsistency(cfg, "test-pg", "High CPU on the host. The database is slow.")
+	if len(warns) != 0 {
+		t.Errorf("expected no warnings for clean context, got: %v", warns)
+	}
+}
+
+func TestCheckContextConsistency_EmptyContext(t *testing.T) {
+	cfg := makeContextTestInfra()
+	warns := checkContextConsistency(cfg, "test-pg", "")
+	if warns != nil {
+		t.Errorf("expected nil for empty context, got %v", warns)
+	}
+}
+
+func TestCheckContextConsistency_DockerTermsOnStandaloneServer(t *testing.T) {
+	cfg := makeContextTestInfra()
+	warns := checkContextConsistency(cfg, "standalone-db", "docker exec -it postgres psql")
+	if len(warns) == 0 {
+		t.Fatal("expected warning for docker terms on non-container server, got none")
+	}
+}
+
+// ---- targetMatches tests ----
+
+func TestTargetMatches_ExactMatch(t *testing.T) {
+	if !targetMatches("test-pg", "test-pg") {
+		t.Error("exact match should return true")
+	}
+}
+
+func TestTargetMatches_ShortNameInConnectionString(t *testing.T) {
+	if !targetMatches("test-pg", "host=test-pg dbname=postgres") {
+		t.Error("short name as host value should match")
+	}
+}
+
+func TestTargetMatches_DifferentHost(t *testing.T) {
+	if targetMatches("test-pg", "host=pg-cluster-minikube dbname=postgres") {
+		t.Error("different host should not match")
+	}
+}
+
+func TestTargetMatches_EmptyActual(t *testing.T) {
+	if targetMatches("test-pg", "") {
+		t.Error("empty actual should not match")
+	}
+}
+
+// ---- checkTargetScope tests ----
+
+func TestCheckTargetScope_NoAuditURL(t *testing.T) {
+	drift := checkTargetScope("", "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if drift != nil {
+		t.Errorf("expected nil with empty auditURL, got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_EmptyIntendedTarget(t *testing.T) {
+	drift := checkTargetScope("http://localhost:9999", "", "tr_abc", time.Now().Add(-time.Minute), "")
+	if drift != nil {
+		t.Errorf("expected nil with empty intended target, got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_NoDrift(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_session_info", Parameters: map[string]any{"connection_string": "test-pg"}},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift := checkTargetScope(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if drift != nil {
+		t.Errorf("expected nil (no drift), got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_Drift(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_session_info", Parameters: map[string]any{"connection_string": "test-pg"}},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "list_databases", Parameters: map[string]any{"connection_string": "pg-cluster-minikube"}},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift := checkTargetScope(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
+		t.Errorf("expected [pg-cluster-minikube], got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_FullConnStringMatchesShortName(t *testing.T) {
+	// Agent resolves "test-pg" to full connection string — should not be flagged as drift.
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "get_session_info",
+				Parameters: map[string]any{"connection_string": "host=test-pg dbname=postgres"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift := checkTargetScope(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if drift != nil {
+		t.Errorf("expected nil (full conn string contains intended target as host), got %v", drift)
+	}
+}
+
+// serveFakeToolEvents starts an httptest.Server that responds to
+// GET /v1/events with the given events JSON-encoded.
+func serveFakeToolEvents(t *testing.T, events []audit.Event) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(events) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }

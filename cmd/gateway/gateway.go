@@ -1342,7 +1342,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	// structurally. Skipped when auditURL is not configured.
 	if toolName == "" && g.auditURL != "" {
 		actionClass := audit.ClassifyDelegation(agentName, prompt)
-		verif := audit.BuildDelegationVerification(g.auditURL, traceID, start, actionClass, "", agentName)
+		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName)
 		if verif.Mismatch {
 			slog.Warn("gateway: fabrication risk — agent returned success but audit trail has no matching tool executions",
 				"agent", agentName, "trace_id", traceID, "action_class", actionClass)

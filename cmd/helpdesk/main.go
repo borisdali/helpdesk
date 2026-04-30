@@ -202,7 +202,7 @@ func main() {
 		// Create delegate tool with audit logging and delegation guard.
 		sessionID := "sess_" + uuid.New().String()[:8]
 		userID := os.Getenv("USER")
-		delegateTool, guard, err := audit.DelegateTool(auditor, os.Getenv("HELPDESK_AUDIT_URL"), agentRegistry, sessionID, userID, "helpdesk_orchestrator", sessionPurpose)
+		delegateTool, guard, err := audit.DelegateTool(auditor, os.Getenv("HELPDESK_AUDIT_URL"), os.Getenv("HELPDESK_AUDIT_API_KEY"), agentRegistry, sessionID, userID, "helpdesk_orchestrator", sessionPurpose)
 		if err != nil {
 			slog.Error("failed to create delegate tool", "err", err)
 			os.Exit(1)

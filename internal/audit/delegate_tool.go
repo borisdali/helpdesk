@@ -94,8 +94,8 @@ func (r *AgentRegistry) List() []string {
 // sessionPurpose, if non-empty, is injected as an explicit purpose into every
 // delegation (equivalent to X-Purpose on API requests).
 // It also creates and returns a DelegationGuard shared with NoDelegationCallback.
-func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, callerName, sessionPurpose string) (tool.Tool, *DelegationGuard, error) {
-	return DelegateToolWithTrace(auditor, auditURL, registry, sessionID, userID, "", callerName, sessionPurpose)
+func DelegateTool(auditor Auditor, auditURL, auditAPIKey string, registry *AgentRegistry, sessionID, userID, callerName, sessionPurpose string) (tool.Tool, *DelegationGuard, error) {
+	return DelegateToolWithTrace(auditor, auditURL, auditAPIKey, registry, sessionID, userID, "", callerName, sessionPurpose)
 }
 
 // DelegateToolWithTrace creates the delegate_to_agent tool with audit logging and trace ID.
@@ -103,7 +103,7 @@ func DelegateTool(auditor Auditor, auditURL string, registry *AgentRegistry, ses
 // can detect invocations where delegate_to_agent was not called.
 // sessionPurpose, if non-empty, is injected as an explicit purpose into every
 // delegation (equivalent to X-Purpose on API requests).
-func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegistry, sessionID, userID, traceID, callerName, sessionPurpose string) (tool.Tool, *DelegationGuard, error) {
+func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, registry *AgentRegistry, sessionID, userID, traceID, callerName, sessionPurpose string) (tool.Tool, *DelegationGuard, error) {
 	guard := NewDelegationGuard()
 	delegationCount := 0
 
@@ -249,7 +249,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL string, registry *AgentRegi
 		// which tools the sub-agent actually executed, independent of its text
 		// response. This closes the gap where an LLM can fabricate a success
 		// message without calling any tool.
-		verif := buildDelegationVerification(auditURL, traceID, start, actionClass, event.EventID, args.Agent)
+		verif := buildDelegationVerification(auditURL, auditAPIKey, traceID, start, actionClass, event.EventID, args.Agent)
 		if auditor != nil {
 			verifEvent := &Event{
 				EventID:                "evt_" + uuid.New().String()[:8],
@@ -417,12 +417,13 @@ func extractResponseText(result a2a.SendMessageResult) string {
 // and returns a DelegationVerification recording what was actually executed.
 // It retries once after 200 ms to absorb async write propagation from RemoteStore.
 // Exported so the gateway can use it without duplicating the fetch logic.
-func BuildDelegationVerification(auditURL, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
-	return buildDelegationVerification(auditURL, traceID, since, actionClass, delegationEventID, agent)
+// Pass apiKey="" when auditd does not require authentication.
+func BuildDelegationVerification(auditURL, auditAPIKey, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
+	return buildDelegationVerification(auditURL, auditAPIKey, traceID, since, actionClass, delegationEventID, agent)
 }
 
 // buildDelegationVerification is the unexported implementation.
-func buildDelegationVerification(auditURL, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
+func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
 	verif := &DelegationVerification{
 		DelegationEventID: delegationEventID,
 		Agent:             agent,
@@ -432,7 +433,7 @@ func buildDelegationVerification(auditURL, traceID string, since time.Time, acti
 		return verif
 	}
 
-	events := fetchToolExecutionEvents(auditURL, traceID, since)
+	events := fetchToolExecutionEvents(auditURL, auditAPIKey, traceID, since)
 	for _, ev := range events {
 		if ev.Tool == nil || ev.Tool.Name == "" {
 			continue
@@ -460,7 +461,14 @@ func buildDelegationVerification(auditURL, traceID string, since time.Time, acti
 
 // fetchToolExecutionEvents queries auditd for tool_execution events in the given
 // trace after a start time. Retries once after 200 ms for async propagation.
-func fetchToolExecutionEvents(auditURL, traceID string, since time.Time) []Event {
+// FetchToolExecutionEvents retrieves tool_execution audit events for the given
+// trace from auditd. Returns nil when auditURL is empty or the fetch fails.
+// Exported so the gateway can use it for post-run target-scope verification.
+func FetchToolExecutionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchToolExecutionEvents(auditURL, apiKey, traceID, since)
+}
+
+func fetchToolExecutionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
 	reqURL := strings.TrimRight(auditURL, "/") +
 		"/v1/events?event_type=tool_execution&trace_id=" + traceID +
 		"&since=" + since.UTC().Format(time.RFC3339)
@@ -469,7 +477,15 @@ func fetchToolExecutionEvents(auditURL, traceID string, since time.Time) []Event
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
-		resp, err := http.Get(reqURL) //nolint:noctx
+		req, err := http.NewRequest(http.MethodGet, reqURL, nil) //nolint:noctx
+		if err != nil {
+			slog.Debug("delegation verification: build request failed", "attempt", attempt, "err", err)
+			continue
+		}
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			slog.Debug("delegation verification: fetch failed", "attempt", attempt, "err", err)
 			continue

@@ -32,7 +32,7 @@ func TestBuildDelegationVerification_Mismatch(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del1", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del1", "postgres_database_agent")
 
 	if !v.Mismatch {
 		t.Error("Mismatch = false, want true: destructive delegation with no destructive tool confirmed")
@@ -52,7 +52,7 @@ func TestBuildDelegationVerification_Confirmed(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "terminate_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del2", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del2", "postgres_database_agent")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: terminate_connection was confirmed")
@@ -66,7 +66,7 @@ func TestBuildDelegationVerification_ReadDelegation_NeverMismatch(t *testing.T) 
 	// A read delegation with no tools called is never a mismatch.
 	srv := serveFakeEvents(t, []Event{})
 
-	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del3", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del3", "postgres_database_agent")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: read delegations are never a mismatch")
@@ -75,7 +75,7 @@ func TestBuildDelegationVerification_ReadDelegation_NeverMismatch(t *testing.T) 
 
 func TestBuildDelegationVerification_NoAuditURL(t *testing.T) {
 	// Empty auditURL: returns zero-value verification without mismatch.
-	v := buildDelegationVerification("", "tr_test", time.Now(), ActionDestructive, "evt_del4", "postgres_database_agent")
+	v := buildDelegationVerification("", "", "tr_test", time.Now(), ActionDestructive, "evt_del4", "postgres_database_agent")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: no auditURL means no verification possible")
@@ -91,7 +91,7 @@ func TestBuildDelegationVerification_WriteAction_Mismatch(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del5", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del5", "postgres_database_agent")
 
 	if !v.Mismatch {
 		t.Error("Mismatch = false, want true: write delegation with no write-or-stronger tool confirmed")
@@ -107,7 +107,7 @@ func TestBuildDelegationVerification_WriteAction_ConfirmedWrite(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "cancel_query"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del6", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del6", "postgres_database_agent")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: cancel_query (write) satisfies a write delegation")
@@ -123,7 +123,7 @@ func TestBuildDelegationVerification_WriteAction_ConfirmedDestructive(t *testing
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "terminate_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del7", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del7", "postgres_database_agent")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: terminate_connection (destructive) satisfies a write delegation")
@@ -187,7 +187,7 @@ func TestBuildDelegationVerification_Exported(t *testing.T) {
 	})
 
 	// Exported form should return the same result as the unexported form.
-	v := BuildDelegationVerification(srv.URL, "tr_exp", time.Now().Add(-time.Minute), ActionDestructive, "evt_exp1", "postgres_database_agent")
+	v := BuildDelegationVerification(srv.URL, "", "tr_exp", time.Now().Add(-time.Minute), ActionDestructive, "evt_exp1", "postgres_database_agent")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: terminate_connection is destructive → satisfies ActionDestructive")
