@@ -93,22 +93,49 @@ curl -s -H "X-User: ops@example.com" \
 
 ### 1.2 Understand the DB-down escalation chain
 
-The three database availability playbooks form a directed chain. Always start at the entry point:
+The four database availability playbooks form a directed chain. Always start at the entry point:
 
 ```
 pbs_db_restart_triage  (entry_point: true)
         │
-        │  evidence: FATAL / PANIC in logs, CrashLoopBackOff due to config error
-        ▼
-pbs_db_config_recovery
+        ├─ Kubernetes DB ─────────────────────────────────────────────
+        │       │  evidence: FATAL / PANIC in pod logs, CrashLoopBackOff
+        │       ▼
+        │   pbs_db_config_recovery
+        │       │  evidence: PANIC, checksum failure, invalid page
+        │       ▼
+        │   pbs_db_pitr_recovery
         │
-        │  evidence: PANIC, checksum failure, invalid page
-        ▼
-pbs_db_pitr_recovery
+        └─ Docker-hosted DB ──────────────────────────────────────────
+                │  DB agent cannot read docker logs
+                ▼
+            pbs_sysadmin_docker_inspect
+                (SysAdmin agent: check_host + get_host_logs,
+                 confirms or revises prior hypothesis)
 ```
 
-- **Start at `pbs_db_restart_triage` every time.** It classifies the failure and either resolves it (OOM kill, clean shutdown) or tells you which playbook to run next via `escalation_hint`.
+- **Start at `pbs_db_restart_triage` every time.** It classifies the failure and either resolves it or emits `ESCALATE_TO:` pointing to the next playbook.
+- For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_docker_inspect` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed, or was OOM-killed and adjusts the diagnosis accordingly.
 - **Do not jump to `pbs_db_config_recovery` or `pbs_db_pitr_recovery` without running restart triage first**, unless you already have clear `FATAL`/`PANIC` evidence.
+
+### 1.2a Auto-chaining vs. manual escalation
+
+By default, playbooks run with `approval_mode=manual` (no mutations, no auto-chaining). The operator receives `suggested_next` in the response and fires the second call themselves. This is the safe default for production.
+
+To let the gateway chain the two-agent investigation in a single API call, set `approval_mode=auto` (or supply a session token that includes `"escalation"` in `allowed_classes`):
+
+```bash
+# Auto-chain: DB agent escalates to SysAdmin agent in one call
+curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
+  -X POST http://localhost:8080/api/v1/fleet/playbooks/$RESTART_ID/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "prod-db-1",
+    "approval_mode":     "auto"
+  }' | jq '{text, chained_run_id, chained_findings, diagnostic_report}'
+```
+
+The merged `diagnostic_report` contains hypotheses from both agents ranked by confidence, with the SysAdmin agent's root cause taking precedence.
 
 ### 1.3 Know your `requires_evidence` patterns
 
@@ -172,14 +199,16 @@ curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
 # Read the diagnosis
 jq -r '.text' /tmp/run1.json
 echo "---"
-jq '{run_id, escalation_hint}' /tmp/run1.json
+jq '{run_id, escalation_hint, suggested_next}' /tmp/run1.json
 ```
 
 Save the `run_id` — you will need it for continuity threading in step 3.
 
-### 2.3 Step 3 — Follow the escalation hint
+If `suggested_next` is present, the gateway has prepared the full request body for the follow-on playbook. You can fire it directly (see step 3) or let the gateway auto-chain it by re-running with `approval_mode=auto`.
 
-If the agent signals `escalation_hint`, run the next playbook with `prior_run_id` set to the first run's ID. This injects the first run's findings into the second run's prompt, so the agent picks up where the previous one left off rather than starting fresh.
+### 2.3 Step 3 — Follow the escalation
+
+**Option A — manual (default, production-safe):** use the `suggested_next` field from step 2.
 
 ```bash
 RUN1_ID=$(jq -r .run_id /tmp/run1.json)
@@ -205,6 +234,18 @@ jq '{run_id, escalation_hint}' /tmp/run2.json
 ```
 
 Repeat for further escalations, always chaining `prior_run_id` to the immediately preceding run.
+
+**Option B — auto-chain (single call, requires `approval_mode=auto`):** re-run step 2 with `"approval_mode": "auto"`. The gateway runs both agents and returns the merged result. This is appropriate in pre-production or when you have already reviewed the escalation path and trust both agents.
+
+```bash
+curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
+  -X POST http://localhost:8080/api/v1/fleet/playbooks/$RESTART_ID/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "prod-db-1",
+    "approval_mode":     "auto"
+  }' | jq '{text, chained_run_id, chained_findings, diagnostic_report}'
+```
 
 ### 2.4 Step 4 — Record the outcome and trigger draft synthesis
 
@@ -289,12 +330,13 @@ See [here](PLAYBOOKS.md#record-an-outcome) for the patching instructions.
 - [ ] Playbook series IDs noted for your on-call runbook
 
 **During a DB-down incident:**
-- [ ] Collect 50–100 lines from the PostgreSQL log
+- [ ] Collect 50–100 lines from the PostgreSQL log (for K8s/VM; for Docker, the SysAdmin agent will do this)
 - [ ] Identify the key error line (FATAL/PANIC/connection refused)
 - [ ] Start at `pbs_db_restart_triage` (always the entry point)
 - [ ] Pass the log line in `context`
 - [ ] Save `run_id` from the response
-- [ ] If `escalation_hint` is set, run the next playbook with `prior_run_id`
+- [ ] If `suggested_next` is present: either fire the next playbook manually (manual mode) or re-run with `approval_mode=auto` for a single-call chained investigation
+- [ ] For Docker-hosted DBs: the gateway will escalate to `pbs_sysadmin_docker_inspect` — ensure the SysAdmin agent is running
 
 **After resolution:**
 - [ ] Confirm `outcome` is `resolved` (auto-set for agent runs, manual PATCH for fleet runs)

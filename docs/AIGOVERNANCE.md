@@ -314,7 +314,7 @@ Request arrives
       │
       ▼
 ┌─────────────┐
-│ Classify    │ ─── read, write, or destructive?
+│ Classify    │ ─── read, write, destructive, or escalation?
 │ Action      │
 └─────────────┘
       │
@@ -1132,7 +1132,7 @@ decisions are as important to explain as denied ones.
 |-----------|----------|-------------|
 | `resource_type` | yes | `database`, `kubernetes` |
 | `resource_name` | yes | Resource name (db name, namespace) |
-| `action` | yes | `read`, `write`, `destructive` |
+| `action` | yes | `read`, `write`, `destructive`, `escalation` |
 | `tags` | no | Comma-separated tags, e.g. `production,critical` |
 | `user_id` | no | Evaluate as a specific user |
 | `service` | no | Evaluate as a service account (e.g. `fleet-runner`) |

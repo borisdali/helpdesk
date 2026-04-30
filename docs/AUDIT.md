@@ -384,7 +384,7 @@ Request body:
 |---|---|---|
 | `granted_by` | yes | Identity of the operator granting the session |
 | `expires_in_secs` | yes | Session lifetime in seconds (must be > 0) |
-| `allowed_classes` | yes | Action classes the session covers: `"write"`, `"destructive"`, or both |
+| `allowed_classes` | yes | Action classes the session covers: `"write"`, `"destructive"`, `"escalation"`, or any combination |
 | `scope` | no | Informational label (e.g. a playbook series ID or maintenance window name). Stored for audit purposes, not enforced. |
 
 ```bash
@@ -435,11 +435,11 @@ Revokes the session immediately. Returns `204 No Content`. Returns `404` if not 
 | `granted_by` | string | Operator who created the session |
 | `granted_at` | RFC3339 | When the session was created |
 | `expires_at` | RFC3339 | When the session expires |
-| `allowed_classes` | []string | Action classes covered: `"write"` and/or `"destructive"` |
+| `allowed_classes` | []string | Action classes covered: `"write"`, `"destructive"`, and/or `"escalation"` |
 | `scope` | string | Informational label; empty when not provided |
 | `revoked` | bool | `true` if the session was explicitly revoked before expiry |
 
-A session is considered valid when: `revoked=false`, `expires_at` is in the future, and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call.
+A session is considered valid when: `revoked=false`, `expires_at` is in the future, and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call. The `"escalation"` class covers automatic cross-agent chaining — include it when the session should permit the gateway to chain a second agent (e.g. `pbs_sysadmin_docker_inspect`) without a separate operator call.
 
 See [Approval modes](PLAYBOOKS.md#approval-modes) in the Playbook docs for the full usage guide.
 

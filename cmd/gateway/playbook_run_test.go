@@ -1170,6 +1170,203 @@ func TestAssembleTriagePrompt_WithServerTypeHint(t *testing.T) {
 	}
 }
 
+func TestBuildSuggestedNext_PopulatesFields(t *testing.T) {
+	req := PlaybookRunRequest{
+		ConnectionString: "prod-db",
+		ApprovalMode:     "session",
+	}
+	result := buildSuggestedNext("pbs_sysadmin_docker_inspect", req, "run_123", "container stopped cleanly")
+
+	if result["playbook_series_id"] != "pbs_sysadmin_docker_inspect" {
+		t.Errorf("playbook_series_id = %v", result["playbook_series_id"])
+	}
+	if result["reason"] != "container stopped cleanly" {
+		t.Errorf("reason = %v", result["reason"])
+	}
+	inner, ok := result["request"].(map[string]any)
+	if !ok {
+		t.Fatal("request field missing or wrong type")
+	}
+	if inner["connection_string"] != "prod-db" {
+		t.Errorf("request.connection_string = %v", inner["connection_string"])
+	}
+	if inner["prior_run_id"] != "run_123" {
+		t.Errorf("request.prior_run_id = %v", inner["prior_run_id"])
+	}
+	if inner["approval_mode"] != "session" {
+		t.Errorf("request.approval_mode = %v", inner["approval_mode"])
+	}
+}
+
+func TestMergeDiagnosticReports_BothNil(t *testing.T) {
+	if mergeDiagnosticReports(nil, nil) != nil {
+		t.Error("expected nil when both inputs are nil")
+	}
+}
+
+func TestMergeDiagnosticReports_PrimaryNil(t *testing.T) {
+	sec := &audit.DiagnosticReport{RootCause: "HYPOTHESIS_1"}
+	got := mergeDiagnosticReports(nil, sec)
+	if got != sec {
+		t.Error("expected secondary to be returned unchanged when primary is nil")
+	}
+}
+
+func TestMergeDiagnosticReports_SecondaryNil(t *testing.T) {
+	pri := &audit.DiagnosticReport{RootCause: "HYPOTHESIS_1"}
+	got := mergeDiagnosticReports(pri, nil)
+	if got != pri {
+		t.Error("expected primary to be returned unchanged when secondary is nil")
+	}
+}
+
+func TestMergeDiagnosticReports_SecondaryTakesPrecedence(t *testing.T) {
+	primary := &audit.DiagnosticReport{
+		RootCause:   "HYPOTHESIS_1",
+		ActionTaken: "none",
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, IsPrimary: true, Confidence: 0.6, Text: "db process crashed"},
+		},
+	}
+	secondary := &audit.DiagnosticReport{
+		RootCause:   "HYPOTHESIS_2",
+		ActionTaken: "none — restart recommended",
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, IsPrimary: true, Confidence: 0.95, Text: "container stopped cleanly (exitcode=0)"},
+		},
+	}
+
+	merged := mergeDiagnosticReports(primary, secondary)
+
+	if merged.RootCause != "HYPOTHESIS_2" {
+		t.Errorf("RootCause = %q, want HYPOTHESIS_2", merged.RootCause)
+	}
+	if merged.ActionTaken != "none — restart recommended" {
+		t.Errorf("ActionTaken = %q", merged.ActionTaken)
+	}
+	if len(merged.Hypotheses) != 2 {
+		t.Fatalf("len(Hypotheses) = %d, want 2", len(merged.Hypotheses))
+	}
+	// Highest confidence (0.95 from secondary) should be rank 1 and primary.
+	if merged.Hypotheses[0].Text != "container stopped cleanly (exitcode=0)" {
+		t.Errorf("top hypothesis = %q, want secondary's", merged.Hypotheses[0].Text)
+	}
+	if !merged.Hypotheses[0].IsPrimary {
+		t.Error("top hypothesis should be marked IsPrimary")
+	}
+	if merged.Hypotheses[1].IsPrimary {
+		t.Error("second hypothesis should not be marked IsPrimary")
+	}
+	if merged.Hypotheses[0].Rank != 1 || merged.Hypotheses[1].Rank != 2 {
+		t.Errorf("ranks = %d,%d, want 1,2", merged.Hypotheses[0].Rank, merged.Hypotheses[1].Rank)
+	}
+}
+
+func TestMergeDiagnosticReports_EmptySecondaryRootCause(t *testing.T) {
+	primary := &audit.DiagnosticReport{
+		RootCause: "HYPOTHESIS_1",
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, IsPrimary: true, Confidence: 0.7, Text: "primary only"},
+		},
+	}
+	secondary := &audit.DiagnosticReport{
+		RootCause: "", // empty — primary should win
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, IsPrimary: true, Confidence: 0.5, Text: "secondary lower confidence"},
+		},
+	}
+
+	merged := mergeDiagnosticReports(primary, secondary)
+	if merged.RootCause != "HYPOTHESIS_1" {
+		t.Errorf("RootCause = %q, want HYPOTHESIS_1 (primary fallback)", merged.RootCause)
+	}
+	// Primary's hypothesis should rank first (higher confidence).
+	if merged.Hypotheses[0].Text != "primary only" {
+		t.Errorf("top hypothesis = %q, want primary's", merged.Hypotheses[0].Text)
+	}
+}
+
+func TestCanAutoChain_AutoMode(t *testing.T) {
+	gw := &Gateway{}
+	if !gw.canAutoChain(context.Background(), "auto", "") {
+		t.Error("auto mode should always allow chaining")
+	}
+}
+
+func TestCanAutoChain_ManualMode(t *testing.T) {
+	gw := &Gateway{}
+	if gw.canAutoChain(context.Background(), "manual", "") {
+		t.Error("manual mode should never allow chaining")
+	}
+}
+
+func TestCanAutoChain_EmptyMode(t *testing.T) {
+	gw := &Gateway{}
+	if gw.canAutoChain(context.Background(), "", "") {
+		t.Error("empty mode should not allow chaining")
+	}
+}
+
+func TestCanAutoChain_SessionMode_NoAuditURL(t *testing.T) {
+	// No auditURL → fetchApprovalSession will fail → no chaining.
+	gw := &Gateway{auditURL: ""}
+	if gw.canAutoChain(context.Background(), "session", "aps_123") {
+		t.Error("session mode with no auditURL should not allow chaining")
+	}
+}
+
+func TestAppendChainedText_AppendsSeparator(t *testing.T) {
+	primary := &responseCapture{code: http.StatusOK}
+	primary.body.WriteString(`{"text":"primary findings"}`)
+
+	chained := &responseCapture{code: http.StatusOK}
+	chained.body.WriteString(`{"text":"sysadmin findings"}`)
+
+	appendChainedText(primary, chained)
+
+	var result map[string]any
+	if err := json.Unmarshal(primary.body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	text, _ := result["text"].(string)
+	if !strings.Contains(text, "primary findings") {
+		t.Error("primary text missing from merged output")
+	}
+	if !strings.Contains(text, "---") {
+		t.Error("separator missing from merged output")
+	}
+	if !strings.Contains(text, "sysadmin findings") {
+		t.Error("chained text missing from merged output")
+	}
+}
+
+func TestAppendChainedText_NilChained(t *testing.T) {
+	primary := &responseCapture{code: http.StatusOK}
+	primary.body.WriteString(`{"text":"primary findings"}`)
+	before := primary.body.String()
+
+	appendChainedText(primary, nil) // should be a no-op
+
+	if primary.body.String() != before {
+		t.Error("primary body was modified when chained is nil")
+	}
+}
+
+func TestAppendChainedText_ChainedError(t *testing.T) {
+	primary := &responseCapture{code: http.StatusOK}
+	primary.body.WriteString(`{"text":"primary findings"}`)
+	before := primary.body.String()
+
+	chained := &responseCapture{code: http.StatusBadGateway}
+	chained.body.WriteString(`{"error":"agent unreachable"}`)
+
+	appendChainedText(primary, chained) // non-200 chained should be a no-op
+
+	if primary.body.String() != before {
+		t.Error("primary body was modified when chained returned an error")
+	}
+}
+
 // serveFakeToolEvents starts an httptest.Server that responds to
 // GET /v1/events with the given events JSON-encoded.
 func serveFakeToolEvents(t *testing.T, events []audit.Event) *httptest.Server {

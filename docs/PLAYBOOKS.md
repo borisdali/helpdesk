@@ -53,23 +53,24 @@ When you create a Playbook without specifying a `series_id`, a new series is sta
 
 ### System Playbooks
 
-aiHelpDesk ships 7 expert-authored system Playbooks that are seeded into auditd on startup:
+aiHelpDesk ships 8 expert-authored system Playbooks that are seeded into auditd on startup:
 
-| Series ID | Name | Problem class | Key tools |
-|---|---|---|---|
-| `pbs_vacuum_triage` | Vacuum & Bloat Triage | capacity | `get_vacuum_status`, `get_disk_usage`, `get_pg_settings` |
-| `pbs_slow_query_triage` | Slow Query Triage | performance | `get_slow_queries`, `get_wait_events`, `get_blocking_queries`, `explain_query` |
-| `pbs_connection_triage` | Connection & Lock Triage | availability | `get_server_info`, `get_blocking_queries`, `get_session_info`, `get_lock_info` |
-| `pbs_replication_lag` | Replication Lag Triage | availability | `get_replication_status`, `get_server_info` |
-| `pbs_db_restart_triage` | Database Down — Restart Triage | availability | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
-| `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
-| `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
+| Series ID | Name | Problem class | Agent | Key tools |
+|---|---|---|---|---|
+| `pbs_vacuum_triage` | Vacuum & Bloat Triage | capacity | database | `get_vacuum_status`, `get_disk_usage`, `get_pg_settings` |
+| `pbs_slow_query_triage` | Slow Query Triage | performance | database | `get_slow_queries`, `get_wait_events`, `get_blocking_queries`, `explain_query` |
+| `pbs_connection_triage` | Connection & Lock Triage | availability | database | `get_server_info`, `get_blocking_queries`, `get_session_info`, `get_lock_info` |
+| `pbs_replication_lag` | Replication Lag Triage | availability | database | `get_replication_status`, `get_server_info` |
+| `pbs_db_restart_triage` | Database Down — Restart Triage | availability | database | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
+| `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | database | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
+| `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
+| `pbs_sysadmin_docker_inspect` | Sysadmin — Docker Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
 
-The three "Database Down" Playbooks form an escalating sequence. When a database is completely unreachable, begin with **Restart Triage** to classify the failure from pod logs. If the logs reveal a configuration error, proceed to **Configuration Recovery**. If they reveal data corruption or missing files, escalate immediately to **Backup Restore & PITR**, which always requires human DBA involvement.
+The four "Database Down" Playbooks form an escalating sequence. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**. If they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, or was OOM-killed, then revises the root-cause hypothesis accordingly.
 
-Because psql-based tools cannot reach a down database, all three Playbooks rely on K8s tools (`get_pod_logs`, `get_events`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
+Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 
-For databases running on bare-metal hosts (no Kubernetes), `get_pod_logs` is unavailable. In that case the agent will attempt `read_pg_log`, which reads the PostgreSQL log directly via `pg_read_file()` — but this too requires a live DB connection. When the database is completely down and unreachable, an operator must retrieve the log file manually (e.g. via SSH or a jump host) and upload it with `POST /api/v1/fleet/uploads`. The agent then reads it using `read_uploaded_file` with the returned `upload_id`. See [Operator file uploads](API.md#operator-file-uploads) in the API reference.
+For databases running on bare-metal hosts (no Kubernetes and no Docker), `get_pod_logs` is unavailable. In that case the agent will attempt `read_pg_log`, which reads the PostgreSQL log directly via `pg_read_file()` — but this too requires a live DB connection. When the database is completely down and unreachable, an operator must retrieve the log file manually (e.g. via SSH or a jump host) and upload it with `POST /api/v1/fleet/uploads`. The agent then reads it using `read_uploaded_file` with the returned `upload_id`. See [Operator file uploads](API.md#operator-file-uploads) in the API reference.
 
 System Playbooks are **read-only**: `PUT` and `DELETE` return `400 Bad Request`. To customise one, run it as-is, or import and save your own version in the same series (the activate endpoint then lets you promote your version).
 
@@ -466,16 +467,23 @@ Only one Playbook per `problem_class` should have `entry_point: true`.
 ```
 pbs_db_restart_triage  (entry_point: true)
         │
-        ├─ logs show bad config → pbs_db_config_recovery
-        │                               │
-        │                               └─ logs show corrupt data → pbs_db_pitr_recovery
+        ├─ K8s: logs show bad config   → pbs_db_config_recovery
+        │                                       │
+        │                                       └─ logs show corrupt data → pbs_db_pitr_recovery
         │
-        └─ logs show corrupt/missing files → pbs_db_pitr_recovery
+        ├─ K8s: logs show corrupt/missing files → pbs_db_pitr_recovery
+        │
+        └─ Docker-hosted DB (agent cannot read docker logs)
+                                       → pbs_sysadmin_docker_inspect
+                                           (sysadmin agent reads container
+                                            state + logs, revises hypothesis)
 ```
 
 The agent is prompted with the escalation paths at run time:
 
-> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`"
+> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`, `pbs_sysadmin_docker_inspect`"
+
+For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised, or corrected.
 
 ### Requires-evidence warnings
 
@@ -564,24 +572,65 @@ The Gateway strips these lines from the visible `text` returned to the operator,
 - Set `outcome=resolved` when only `FINDINGS:` is present (root cause identified)
 - Set `outcome=escalated` and `escalated_to=<series_id>` when `ESCALATE_TO:` is present
 - Populate `findings_summary` with the FINDINGS text
-- Add `escalation_hint` to the JSON response when `ESCALATE_TO:` is present
 
-The `escalation_hint` field lets the caller automatically chain to the next Playbook:
+What happens next depends on the run's effective `approval_mode` (request body overrides, then Playbook default):
+
+| Mode | Gateway behaviour when `ESCALATE_TO:` is present |
+|---|---|
+| `auto` | **Auto-chains immediately** — the Gateway looks up the escalated Playbook, runs it as a second agent session, merges the two diagnostic reports, and returns the combined findings in a single response. No second API call needed. |
+| `session` (with `escalation` in `allowed_classes`) | Same as `auto` — the session token covers cross-agent escalation. |
+| `manual` or `session` (without `escalation`) | Returns `suggested_next` in the response body: a pre-filled request body the operator can use to trigger the follow-on Playbook manually. |
+
+#### Auto-chaining (`approval_mode=auto`)
 
 ```bash
-# Run restart triage, capture any escalation hint
-RESP=$(curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+# One call — DB agent diagnoses, escalates to SysAdmin agent, both findings returned
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
   -H "Content-Type: application/json" \
-  -d '{"connection_string":"...","context":"<pod logs>"}')
+  -d '{
+    "connection_string": "staging-db",
+    "approval_mode":     "auto"
+  }' | jq '{text, chained_run_id, chained_findings, diagnostic_report}'
+```
 
-echo "$RESP" | jq .text    # diagnosis for operator review
+When chaining occurs, the response includes:
+
+| Field | Description |
+|---|---|
+| `chained_run_id` | Run ID of the escalated (second) agent session |
+| `chained_findings` | The second agent's `FINDINGS:` line |
+| `diagnostic_report` | Merged report: hypotheses from both agents, re-ranked by confidence; the second agent's root cause takes precedence |
+
+#### Manual mode — `suggested_next`
+
+When the run's approval mode does not permit auto-chaining, the response includes a `suggested_next` field containing a ready-to-fire request body for the escalated Playbook:
+
+```json
+{
+  "text": "...",
+  "escalation_hint": "pbs_sysadmin_docker_inspect",
+  "suggested_next": {
+    "playbook_series_id": "pbs_sysadmin_docker_inspect",
+    "reason": "connection refused — docker container state unknown",
+    "request": {
+      "connection_string": "staging-db",
+      "prior_run_id":      "plr_8c9d2e3f",
+      "context":           "connection refused — docker container state unknown",
+      "approval_mode":     "manual"
+    }
+  }
+}
+```
+
+The `escalation_hint` field is still present for backwards compatibility. To trigger the follow-on Playbook manually:
+
+```bash
 HINT=$(echo "$RESP" | jq -r '.escalation_hint // empty')
 
 if [ -n "$HINT" ]; then
-  # Resolve the series ID to a Playbook ID and continue the investigation
   NEXT_ID=$(curl -s "http://localhost:8080/api/v1/fleet/playbooks?series_id=$HINT" \
     | jq -r '.playbooks[0].playbook_id')
-  FIRST_RUN_ID=$(echo "$RESP" | jq -r .run_id)   # from run tracking
+  FIRST_RUN_ID=$(echo "$RESP" | jq -r .run_id)
   echo "Escalating to $HINT (Playbook $NEXT_ID)"
 fi
 ```
@@ -614,26 +663,28 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_config_recovery/
 
 ### Approval modes
 
-Agent-mode runs may call write or destructive tools (e.g. `restart_deployment`, `cancel_query`). Three modes control whether those calls are gated:
+Agent-mode runs may call write or destructive tools (e.g. `restart_deployment`, `cancel_query`) and may trigger cross-agent escalation chains. Three modes control whether those operations are gated:
 
-| Mode | Behaviour |
-|---|---|
-| `auto` | Default. No gate — write and destructive tools are proxied immediately. |
-| `session` | The operator pre-grants a time-bounded approval token before the run. The gateway validates the token before proxying any write or destructive call. |
-| `manual` | Read-only enforcement. The agent investigates and returns recommendations, but any write or destructive tool call is rejected with 403. Use this to get a diagnosis without risk of side effects. |
+| Mode | Tool calls (write/destructive) | Cross-agent escalation |
+|---|---|---|
+| `auto` | Proxied immediately — no gate | Auto-chains immediately |
+| `session` | Gated by session token | Auto-chains if session includes `"escalation"` in `allowed_classes` |
+| `manual` | Rejected (403) | Returns `suggested_next` — operator fires the second call manually |
+
+The same `approval_mode` governs both tool-level gates and cross-agent escalation. There is no separate configuration for chaining.
 
 #### Creating an approval session (`session` mode)
 
 Create a session token on auditd before starting the run. The token specifies which action classes it covers and for how long:
 
 ```bash
-# Grant 30 minutes of write + destructive authority
+# Grant 30 minutes of write + destructive authority, plus cross-agent escalation chaining
 SESSION=$(curl -s -X POST http://localhost:1199/v1/approval/sessions \
   -H "Content-Type: application/json" \
   -d '{
     "granted_by":      "alice@example.com",
     "expires_in_secs": 1800,
-    "allowed_classes": ["write", "destructive"],
+    "allowed_classes": ["write", "destructive", "escalation"],
     "scope":           "pbs_db_restart_triage"
   }' | jq -r .session_id)
 
@@ -941,7 +992,9 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `entry_point` | bool | `true` marks this as the preferred starting Playbook for its `problem_class`. Used by the planner to resolve "where do I start?" when multiple Playbooks could apply. Only one Playbook per problem class should have `entry_point=true`. |
 | `escalates_to` | []string | Series IDs (`pbs_*`) of Playbooks to consider next if this Playbook's hypothesis is disproven by the collected evidence. Injected into the agent prompt as escalation context. |
 | `requires_evidence` | []string | Log patterns or error signals expected to be present before this Playbook is selected. Expressed as case-insensitive substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). At run time the Gateway checks these patterns against the `context` field of the run request and emits `warnings` for any that are missing. Execution is never blocked — warnings are advisory only. |
-| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to the database agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. The Gateway automatically parses the agent's structured response to set `outcome` and `findings_summary` on the run record. |
+| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to an agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. The Gateway automatically parses the agent's structured response to set `outcome` and `findings_summary` on the run record. |
+| `agent_name` | string | For `execution_mode: agent` Playbooks, the agent to route to. Defaults to the database agent (`database_agent`) if omitted. Use `sysadmin_agent` for Playbooks that require host-level diagnostics. |
+| `approval_mode` | string | Default approval mode for runs of this Playbook: `auto`, `session`, or `manual`. Can be overridden per run via the request body. Defaults to `""` which is treated as `manual` (safe default). For Playbooks that cross agent boundaries via auto-chaining, this also gates cross-agent escalation — see [Approval modes](#approval-modes). |
 | `stats` | object | Inline run statistics for the Playbook's series. Populated by `GET /fleet/playbooks` (list); omitted when no runs have been recorded. See `PlaybookRunStats` below. Not persisted — computed on read. |
 | `created_at` | RFC3339 | Creation timestamp |
 | `updated_at` | RFC3339 | Last update timestamp |

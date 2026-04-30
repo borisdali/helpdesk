@@ -766,6 +766,35 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		t.Logf("pitr_recovery: requires_evidence=%v", evidence)
 	})
 
+	t.Run("sysadmin_docker_inspect_is_seeded", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_sysadmin_docker_inspect")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if ep, _ := pb["entry_point"].(bool); ep {
+			t.Error("entry_point = true, want false (docker inspect is not an entry point)")
+		}
+		if am, _ := pb["approval_mode"].(string); am != "manual" {
+			t.Errorf("approval_mode = %q, want manual", am)
+		}
+		t.Logf("sysadmin_docker_inspect: execution_mode=agent entry_point=false approval_mode=manual")
+	})
+
+	t.Run("restart_triage_escalates_to_sysadmin_docker_inspect", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_db_restart_triage")
+		escalates, _ := pb["escalates_to"].([]any)
+		found := false
+		for _, e := range escalates {
+			if s, _ := e.(string); s == "pbs_sysadmin_docker_inspect" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("pbs_db_restart_triage.escalates_to does not include pbs_sysadmin_docker_inspect; got %v", escalates)
+		}
+	})
+
 	t.Run("operational_playbooks_are_fleet", func(t *testing.T) {
 		for _, sid := range []string{
 			"pbs_vacuum_triage",
