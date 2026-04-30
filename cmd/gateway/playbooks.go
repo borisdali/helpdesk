@@ -246,7 +246,8 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 //   - Record the run with the real outcome instead of "unknown"
 //   - Inject optional warnings about missing required evidence
 func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
-	prompt := assembleTriagePrompt(pb, req)
+	serverTypeHint := buildServerTypeHint(g.infra, req.ConnectionString)
+	prompt := assembleTriagePrompt(pb, req, serverTypeHint)
 
 	// Propagate approval mode and session ID through context so proxyToAgentWithTool
 	// can enforce them before proxying write/destructive calls.
@@ -326,7 +327,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	// Post-run: check whether the agent operated on the intended target only.
 	// Drift means the agent queried a server other than the one specified in the run request.
 	if req.ConnectionString != "" {
-		if drift := checkTargetScope(g.auditURL, g.auditAPIKey, traceID, runStart, req.ConnectionString); len(drift) > 0 {
+		if drift := checkTargetScope(g.infra, g.auditURL, g.auditAPIKey, traceID, runStart, req.ConnectionString); len(drift) > 0 {
 			extra["target_drift"] = drift
 			slog.Warn("playbook run: target scope drift detected",
 				"trace_id", traceID,
@@ -394,7 +395,9 @@ func (g *Gateway) recordEscalationDecision(ctx context.Context, traceID string, 
 }
 
 // assembleTriagePrompt builds the LLM prompt for an agent-mode playbook run.
-func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
+// serverTypeHint, if non-empty, is appended to the mandatory scope constraint so the agent
+// knows the server's hosting type and does not apply K8s tooling to non-K8s servers.
+func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverTypeHint string) string {
 	var b strings.Builder
 
 	b.WriteString("You are performing a database availability investigation.\n\n")
@@ -434,7 +437,11 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest) string {
 	b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n\n")
 
 	if req.ConnectionString != "" {
-		fmt.Fprintf(&b, "## Target — MANDATORY SCOPE CONSTRAINT\nYou MUST use ONLY `connection_string` = `%s` for all tool calls. Do not query any other database server under any circumstances, even if the context mentions other servers, pods, or clusters.\n\n", req.ConnectionString)
+		fmt.Fprintf(&b, "## Target — MANDATORY SCOPE CONSTRAINT\nYou MUST use ONLY `connection_string` = `%s` for all tool calls. Do not query any other database server under any circumstances, even if the context mentions other servers, pods, or clusters.\n", req.ConnectionString)
+		if serverTypeHint != "" {
+			fmt.Fprintf(&b, "%s\n", serverTypeHint)
+		}
+		b.WriteString("\n")
 	}
 	if req.Context != "" {
 		fmt.Fprintf(&b, "## Additional context\n%s\n\n", req.Context)
@@ -996,14 +1003,114 @@ func serverHostingLabel(db *infra.DBServer, runtime string) string {
 	return "standalone"
 }
 
+// buildServerTypeHint returns a prompt fragment describing how the target server is hosted,
+// so the agent knows which diagnostic tools are appropriate and doesn't apply K8s reasoning
+// to Docker/VM-hosted servers or vice versa.
+// Returns "" if cfg is nil or the server cannot be found.
+func buildServerTypeHint(cfg *infra.Config, connectionString string) string {
+	if cfg == nil || connectionString == "" {
+		return ""
+	}
+	var server *infra.DBServer
+	for key, db := range cfg.DBServers {
+		if key == connectionString || db.Name == connectionString || db.ConnectionString == connectionString {
+			d := db
+			server = &d
+			break
+		}
+	}
+	if server == nil {
+		return ""
+	}
+
+	if server.K8sCluster != "" {
+		ns := server.K8sNamespace
+		if ns == "" {
+			ns = "default"
+		}
+		cluster := server.K8sCluster
+		hint := fmt.Sprintf("Server type: Kubernetes pod (cluster: %s, namespace: %s)", cluster, ns)
+		if server.K8sPodSelector != "" {
+			hint += fmt.Sprintf(", pod selector: %s", server.K8sPodSelector)
+		}
+		hint += ".\nKubectl commands, pod log retrieval, and K8s event lookups are applicable to this server."
+		return hint
+	}
+
+	var runtime string
+	var vmAddr string
+	if server.VMName != "" {
+		if vm, ok := cfg.VMs[server.VMName]; ok {
+			runtime = vm.Runtime
+			vmAddr = vm.Address
+		}
+	}
+
+	if runtime == "docker" || runtime == "podman" {
+		hint := fmt.Sprintf("Server type: %s container", runtime)
+		if vmAddr != "" {
+			hint += fmt.Sprintf(" on VM %q (%s)", server.VMName, vmAddr)
+		}
+		if server.ContainerName != "" {
+			hint += fmt.Sprintf(", container name: %s", server.ContainerName)
+		}
+		hint += ".\nThis is NOT a Kubernetes-managed server — do NOT attempt kubectl commands, pod queries, pod log retrieval, or K8s event lookups. Use docker/host-level diagnostics only."
+		return hint
+	}
+
+	if server.VMName != "" {
+		hint := fmt.Sprintf("Server type: bare VM (%s", server.VMName)
+		if vmAddr != "" {
+			hint += fmt.Sprintf(" / %s", vmAddr)
+		}
+		hint += ")"
+		if server.SystemdUnit != "" {
+			hint += fmt.Sprintf(", systemd unit: %s", server.SystemdUnit)
+		}
+		hint += ".\nThis is NOT a Kubernetes-managed server — do NOT use kubectl or K8s tools."
+		return hint
+	}
+
+	return "Server type: standalone PostgreSQL — NOT Kubernetes-managed. Do NOT use kubectl or K8s tools."
+}
+
 // checkTargetScope returns connection strings from audit events for traceID that
 // differ from intendedTarget. Used to detect when the agent queried a server
 // other than the one specified in the playbook run request.
+//
+// cfg is used to resolve a short server name (e.g. "test-pg") to its canonical
+// connection string from infra config, so that the full resolved form used by
+// the agent (e.g. "host=localhost port=35432 dbname=postgres user=postgres")
+// is not incorrectly flagged as drift.
+//
 // Returns nil when auditURL is empty, no traceID, or no drift is found.
-func checkTargetScope(auditURL, apiKey, traceID string, since time.Time, intendedTarget string) []string {
+func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since time.Time, intendedTarget string) []string {
 	if auditURL == "" || traceID == "" || intendedTarget == "" {
 		return nil
 	}
+
+	// Resolve short name to canonical connection string so that
+	// "test-pg" and "host=localhost port=35432 ..." are treated as the same server.
+	resolved := intendedTarget
+	if cfg != nil {
+		for key, db := range cfg.DBServers {
+			if key == intendedTarget || db.Name == intendedTarget {
+				resolved = db.ConnectionString
+				break
+			}
+		}
+	}
+
+	// If intendedTarget is a short name (no "=" → not a connection string) and we
+	// couldn't resolve it to a full connection string, we cannot reliably compare it
+	// against the full-form strings the agent records in audit. Skip the check to
+	// avoid false positives; callers should ensure infra config is loaded.
+	if resolved == intendedTarget && !strings.Contains(intendedTarget, "=") {
+		slog.Debug("checkTargetScope: cannot resolve short name to connection string, skipping",
+			"intended", intendedTarget)
+		return nil
+	}
+
 	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
 	seen := map[string]bool{}
 	for _, ev := range events {
@@ -1014,7 +1121,7 @@ func checkTargetScope(auditURL, apiKey, traceID string, since time.Time, intende
 		if cs == "" {
 			continue
 		}
-		if !targetMatches(intendedTarget, cs) {
+		if !targetMatches(intendedTarget, cs) && !targetMatches(resolved, cs) {
 			seen[cs] = true
 		}
 	}
@@ -1029,17 +1136,46 @@ func checkTargetScope(auditURL, apiKey, traceID string, since time.Time, intende
 	return drift
 }
 
-// targetMatches returns true when actual equals intended, or when actual is a
-// psql-style connection string (key=value pairs) that encodes intended as one
-// of its field values — e.g. intended="test-pg", actual="host=test-pg dbname=postgres".
+// targetMatches returns true when:
+//  - actual == intended (exact), or
+//  - intended appears as a field value in actual (short name, e.g. intended="test-pg",
+//    actual="host=test-pg dbname=postgres"), or
+//  - intended is a connection string whose fields are all present with equal values
+//    in actual (actual may carry additional fields such as user= or password= that
+//    were added by the agent at runtime and are absent from the infra config entry).
 func targetMatches(intended, actual string) bool {
 	if intended == actual {
 		return true
 	}
+	// Short-name match: intended value appears as a field value in actual.
 	for _, field := range strings.Fields(actual) {
 		if kv := strings.SplitN(field, "=", 2); len(kv) == 2 && kv[1] == intended {
 			return true
 		}
 	}
-	return false
+	// Subset match: every key=value pair in intended must exist in actual.
+	// This handles the case where the agent appends user=, password=, etc.
+	intendedFields := parseConnFields(intended)
+	if len(intendedFields) == 0 {
+		return false // intended is a plain name, not a connection string
+	}
+	actualFields := parseConnFields(actual)
+	for k, v := range intendedFields {
+		if actualFields[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// parseConnFields parses a psql key=value connection string into a map.
+// Fields that are not in key=value form (no "=") are ignored.
+func parseConnFields(s string) map[string]string {
+	m := make(map[string]string)
+	for _, field := range strings.Fields(s) {
+		if kv := strings.SplitN(field, "=", 2); len(kv) == 2 {
+			m[kv[0]] = kv[1]
+		}
+	}
+	return m
 }

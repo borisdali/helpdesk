@@ -931,11 +931,18 @@ func (a *Auditor) trackEvent(event *audit.Event) {
 		}
 	}
 
-	// Track queries per session
-	if event.Input.UserQuery != "" {
+	// Track queries per session — only for tool executions and only with server
+	// context, so that the same SQL run against N different servers (normal
+	// investigation) is not counted as N repetitions of the same query.
+	if event.EventType == audit.EventTypeToolExecution && event.Tool != nil && event.Input.UserQuery != "" {
+		server := ""
+		if cs, ok := event.Tool.Parameters["connection_string"].(string); ok {
+			server = cs
+		}
+		key := event.Tool.Name + "|" + server + "|" + event.Input.UserQuery
 		a.sessionQueries[event.Session.ID] = append(
 			a.sessionQueries[event.Session.ID],
-			event.Input.UserQuery,
+			key,
 		)
 	}
 }
@@ -977,6 +984,13 @@ func (a *Auditor) checkCategoryMismatch(event *audit.Event) {
 
 	agent := event.Decision.Agent
 	category := string(event.Decision.RequestCategory)
+
+	// Playbook escalation decisions use the next playbook's series ID as the
+	// "agent" field (pbs_ prefix). They are not real agent delegations and do
+	// not have a meaningful request category — skip validation entirely.
+	if strings.HasPrefix(agent, "pbs_") {
+		return
+	}
 
 	expectedCategories := map[string][]string{
 		"postgres_database_agent": {"database"},
@@ -1097,8 +1111,15 @@ func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
 	}
 
 	if repeatCount >= 3 {
+		// Strip the "tool|server|" prefix added during tracking to show clean SQL.
+		displayQuery := lastQuery
+		if parts := strings.SplitN(lastQuery, "|", 4); len(parts) == 4 {
+			displayQuery = parts[0] + " on " + parts[1] + ": " + parts[3]
+		} else if len(parts) == 3 {
+			displayQuery = parts[0] + ": " + parts[2]
+		}
 		a.alert(AlertCritical, "repeated identical queries detected (possible loop)", event,
-			"query", truncate(lastQuery, 50),
+			"query", truncate(displayQuery, 80),
 			"repeat_count", repeatCount)
 	}
 }

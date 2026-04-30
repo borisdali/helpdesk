@@ -341,7 +341,7 @@ func runPsqlAs(ctx context.Context, connStr string, query string, toolName strin
 		if out == "" {
 			out = "(no output from psql)"
 		}
-		slog.Error("psql command failed", "tool", toolName, "ms", duration.Milliseconds(), "err", err, "output", out)
+		slog.Warn("psql command failed", "tool", toolName, "ms", duration.Milliseconds(), "err", err, "output", out)
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("psql timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
 		}
@@ -2022,7 +2022,7 @@ func runPsqlTuples(ctx context.Context, connStr string, query string, toolName s
 		if out == "" {
 			out = "(no output from psql)"
 		}
-		slog.Error("psql command failed", "tool", toolName, "ms", duration.Milliseconds(), "err", err, "output", out)
+		slog.Warn("psql command failed", "tool", toolName, "ms", duration.Milliseconds(), "err", err, "output", out)
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("psql timed out or was cancelled: %v\nOutput: %s", ctx.Err(), out)
 		}

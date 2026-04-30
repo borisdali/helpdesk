@@ -156,7 +156,7 @@ func TestAssembleTriagePrompt_ContainsGuidance(t *testing.T) {
 		Description: "Test description.",
 		Guidance:    "Step 1: check connection. Step 2: read logs.",
 	}
-	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{})
+	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
 	if !strings.Contains(prompt, "Step 1: check connection") {
 		t.Error("prompt does not contain guidance")
@@ -174,7 +174,7 @@ func TestAssembleTriagePrompt_EscalatesTo(t *testing.T) {
 		Name:        "Restart Triage",
 		EscalatesTo: []string{"pbs_db_config_recovery", "pbs_db_pitr_recovery"},
 	}
-	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{})
+	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
 	if !strings.Contains(prompt, "pbs_db_config_recovery") {
 		t.Error("prompt missing escalates_to series ID")
@@ -190,7 +190,7 @@ func TestAssembleTriagePrompt_ConnectionString(t *testing.T) {
 		ConnectionString: "postgres://prod-db.example.com/mydb",
 		Context:          "prod-db-1 returned connection refused at 10:05 UTC",
 	}
-	prompt := assembleTriagePrompt(pb, req)
+	prompt := assembleTriagePrompt(pb, req, "")
 
 	if !strings.Contains(prompt, "postgres://prod-db.example.com/mydb") {
 		t.Error("prompt does not contain connection string")
@@ -202,7 +202,7 @@ func TestAssembleTriagePrompt_ConnectionString(t *testing.T) {
 
 func TestAssembleTriagePrompt_NoEscalatesTo(t *testing.T) {
 	pb := &audit.Playbook{Name: "PITR Recovery"}
-	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{})
+	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
 	// No escalation paths section when EscalatesTo is empty.
 	if strings.Contains(prompt, "Escalation paths") {
@@ -320,7 +320,7 @@ func TestAssembleTriagePrompt_PriorFindings(t *testing.T) {
 	req := PlaybookRunRequest{
 		PriorFindings: "Restart triage found WAL corruption; PITR required.",
 	}
-	prompt := assembleTriagePrompt(pb, req)
+	prompt := assembleTriagePrompt(pb, req, "")
 
 	if !strings.Contains(prompt, "Prior Investigation Findings") {
 		t.Error("prompt missing 'Prior Investigation Findings' section")
@@ -332,7 +332,7 @@ func TestAssembleTriagePrompt_PriorFindings(t *testing.T) {
 
 func TestAssembleTriagePrompt_NoPriorFindings(t *testing.T) {
 	pb := &audit.Playbook{Name: "Restart Triage"}
-	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{})
+	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
 	if strings.Contains(prompt, "Prior Investigation Findings") {
 		t.Error("prompt should not have prior findings section when PriorFindings is empty")
@@ -341,7 +341,7 @@ func TestAssembleTriagePrompt_NoPriorFindings(t *testing.T) {
 
 func TestAssembleTriagePrompt_ResponseProtocol(t *testing.T) {
 	pb := &audit.Playbook{Name: "Triage"}
-	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{})
+	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
 	if !strings.Contains(prompt, "Response Protocol") {
 		t.Error("prompt missing Response Protocol section")
@@ -933,17 +933,53 @@ func TestTargetMatches_EmptyActual(t *testing.T) {
 	}
 }
 
+func TestTargetMatches_SubsetConnString(t *testing.T) {
+	// Infra config has host+port+dbname; agent adds user= at runtime.
+	intended := "host=localhost port=35432 dbname=postgres"
+	actual := "host=localhost port=35432 dbname=postgres user=postgres"
+	if !targetMatches(intended, actual) {
+		t.Error("actual is a superset of intended fields — should match")
+	}
+}
+
+func TestTargetMatches_SubsetMismatch(t *testing.T) {
+	// Same structure but different host — must not match.
+	intended := "host=localhost port=35432 dbname=postgres"
+	actual := "host=other-host port=35432 dbname=postgres user=postgres"
+	if targetMatches(intended, actual) {
+		t.Error("different host value — should not match")
+	}
+}
+
 // ---- checkTargetScope tests ----
 
 func TestCheckTargetScope_NoAuditURL(t *testing.T) {
-	drift := checkTargetScope("", "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift := checkTargetScope(nil, "", "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil with empty auditURL, got %v", drift)
 	}
 }
 
+func TestCheckTargetScope_ShortNameNoInfra_Skipped(t *testing.T) {
+	// Short name with no infra config: cannot resolve, must not produce false positives.
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "get_session_info",
+				Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if drift != nil {
+		t.Errorf("expected nil (short name, no infra config — skip check), got %v", drift)
+	}
+}
+
 func TestCheckTargetScope_EmptyIntendedTarget(t *testing.T) {
-	drift := checkTargetScope("http://localhost:9999", "", "tr_abc", time.Now().Add(-time.Minute), "")
+	drift := checkTargetScope(nil, "http://localhost:9999", "", "tr_abc", time.Now().Add(-time.Minute), "")
 	if drift != nil {
 		t.Errorf("expected nil with empty intended target, got %v", drift)
 	}
@@ -958,17 +994,22 @@ func TestCheckTargetScope_NoDrift(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (no drift), got %v", drift)
 	}
 }
 
 func TestCheckTargetScope_Drift(t *testing.T) {
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-pg": {Name: "Test Postgres", ConnectionString: "host=localhost port=35432 dbname=postgres"},
+		},
+	}
 	events := []audit.Event{
 		{
 			EventType: audit.EventTypeToolExecution,
-			Tool:      &audit.ToolExecution{Name: "get_session_info", Parameters: map[string]any{"connection_string": "test-pg"}},
+			Tool:      &audit.ToolExecution{Name: "get_session_info", Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"}},
 		},
 		{
 			EventType: audit.EventTypeToolExecution,
@@ -977,7 +1018,7 @@ func TestCheckTargetScope_Drift(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
 		t.Errorf("expected [pg-cluster-minikube], got %v", drift)
 	}
@@ -996,9 +1037,136 @@ func TestCheckTargetScope_FullConnStringMatchesShortName(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (full conn string contains intended target as host), got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_ResolvedViaInfraConfig(t *testing.T) {
+	// Infra config has host+port+dbname; agent appends user= at runtime.
+	// The agent-recorded connection string is a superset — must not flag as drift.
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-pg": {
+				Name:             "Test Postgres",
+				ConnectionString: "host=localhost port=35432 dbname=postgres",
+			},
+		},
+	}
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "get_session_info",
+				Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if drift != nil {
+		t.Errorf("expected nil (agent-added user= field is allowed), got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_ResolvedPlusUnintendedServer(t *testing.T) {
+	// Agent correctly uses the resolved form for the intended target, but also queries
+	// an unintended server. Only the unintended server should appear in drift.
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-pg": {
+				Name:             "Test Postgres",
+				ConnectionString: "host=localhost port=35432 dbname=postgres user=postgres",
+			},
+		},
+	}
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "get_session_info",
+				Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"},
+			},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "list_databases",
+				Parameters: map[string]any{"connection_string": "test-db"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if len(drift) != 1 || drift[0] != "test-db" {
+		t.Errorf("expected [test-db], got %v", drift)
+	}
+}
+
+// ---- buildServerTypeHint tests ----
+
+func TestBuildServerTypeHint_DockerServer(t *testing.T) {
+	cfg := makeContextTestInfra()
+	hint := buildServerTypeHint(cfg, "test-pg")
+	if !strings.Contains(hint, "docker container") {
+		t.Errorf("expected 'docker container' in hint, got: %s", hint)
+	}
+	if !strings.Contains(hint, "NOT a Kubernetes") {
+		t.Errorf("hint should warn against K8s tools, got: %s", hint)
+	}
+}
+
+func TestBuildServerTypeHint_K8sServer(t *testing.T) {
+	cfg := makeContextTestInfra()
+	hint := buildServerTypeHint(cfg, "pg-cluster-minikube")
+	if !strings.Contains(hint, "Kubernetes pod") {
+		t.Errorf("expected 'Kubernetes pod' in hint, got: %s", hint)
+	}
+	if strings.Contains(hint, "NOT a Kubernetes") {
+		t.Errorf("K8s server hint should not warn against K8s tools, got: %s", hint)
+	}
+}
+
+func TestBuildServerTypeHint_StandaloneServer(t *testing.T) {
+	cfg := makeContextTestInfra()
+	hint := buildServerTypeHint(cfg, "standalone-db")
+	if !strings.Contains(hint, "standalone") {
+		t.Errorf("expected 'standalone' in hint, got: %s", hint)
+	}
+	if !strings.Contains(hint, "NOT") {
+		t.Errorf("standalone hint should warn against K8s tools, got: %s", hint)
+	}
+}
+
+func TestBuildServerTypeHint_NilInfra(t *testing.T) {
+	hint := buildServerTypeHint(nil, "test-pg")
+	if hint != "" {
+		t.Errorf("expected empty hint with nil infra, got: %s", hint)
+	}
+}
+
+func TestBuildServerTypeHint_UnknownServer(t *testing.T) {
+	cfg := makeContextTestInfra()
+	hint := buildServerTypeHint(cfg, "no-such-server")
+	if hint != "" {
+		t.Errorf("expected empty hint for unknown server, got: %s", hint)
+	}
+}
+
+func TestAssembleTriagePrompt_WithServerTypeHint(t *testing.T) {
+	pb := &audit.Playbook{Name: "Triage"}
+	req := PlaybookRunRequest{ConnectionString: "test-pg"}
+	hint := "Server type: docker container on VM \"test-host\" (test-host), container name: test-db.\nThis is NOT a Kubernetes-managed server — do NOT attempt kubectl commands."
+	prompt := assembleTriagePrompt(pb, req, hint)
+
+	if !strings.Contains(prompt, "test-pg") {
+		t.Error("prompt missing connection string")
+	}
+	if !strings.Contains(prompt, "NOT a Kubernetes-managed server") {
+		t.Error("prompt missing server type hint")
 	}
 }
 
