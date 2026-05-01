@@ -400,11 +400,17 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	const maxChainDepth = 5
 	prev := primary
 	for len(chain) < maxChainDepth && prev.escalatedTo != "" {
-		if !g.canAutoChain(r.Context(), req.ApprovalMode, req.ApprovalSession) {
+		nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), prev.escalatedTo)
+		if err != nil {
+			slog.Warn("playbook: cannot fetch escalated playbook",
+				"series_id", prev.escalatedTo, "err", err)
+			break
+		}
+		if !g.canAutoChain(r.Context(), req.ApprovalMode, req.ApprovalSession, nextPB) {
 			extra["suggested_next"] = buildSuggestedNext(prev.escalatedTo, req, prev.runID, prev.findings)
 			break
 		}
-		chained := g.chainEscalation(r, pb, req, prev)
+		chained := g.chainEscalation(r, pb, req, prev, nextPB)
 		if chained == nil {
 			break
 		}
@@ -443,8 +449,19 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 }
 
 // canAutoChain returns true when the effective approval mode permits automatic
-// cross-agent escalation chaining.
-func (g *Gateway) canAutoChain(ctx context.Context, mode, sessionID string) bool {
+// cross-agent escalation chaining to targetPB.
+//
+// The target playbook's ApprovalMode acts as a floor: if the playbook requires
+// "manual" (or is unset), it can never be auto-chained regardless of the
+// requester's mode — the operator must invoke it explicitly. Only playbooks with
+// ApprovalMode "session" or "auto" are eligible for chaining.
+func (g *Gateway) canAutoChain(ctx context.Context, mode, sessionID string, targetPB *audit.Playbook) bool {
+	// Playbook-level gate: "manual" (or unset) always requires explicit invocation.
+	targetMode := targetPB.ApprovalMode
+	if targetMode == "" || targetMode == "manual" {
+		return false
+	}
+	// Target allows chaining at "session" or "auto" level; check requester's mode.
 	switch mode {
 	case "auto":
 		return true
@@ -456,16 +473,10 @@ func (g *Gateway) canAutoChain(ctx context.Context, mode, sessionID string) bool
 	}
 }
 
-// chainEscalation looks up the escalated playbook and runs it as a second agent
-// session, using the primary run's findings as context. Returns nil on any error.
-func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, req PlaybookRunRequest, primary agentRunResult) *agentRunResult {
+// chainEscalation runs nextPB as a chained agent session, using the primary
+// run's findings as context. nextPB must already be fetched by the caller.
+func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, req PlaybookRunRequest, primary agentRunResult, nextPB *audit.Playbook) *agentRunResult {
 	if g.auditURL == "" {
-		return nil
-	}
-	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), primary.escalatedTo)
-	if err != nil {
-		slog.Warn("chainEscalation: cannot fetch escalated playbook",
-			"series_id", primary.escalatedTo, "err", err)
 		return nil
 	}
 

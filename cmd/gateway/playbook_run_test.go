@@ -1286,31 +1286,49 @@ func TestMergeDiagnosticReports_EmptySecondaryRootCause(t *testing.T) {
 	}
 }
 
+func chainablePB(approvalMode string) *audit.Playbook {
+	return &audit.Playbook{ApprovalMode: approvalMode}
+}
+
 func TestCanAutoChain_AutoMode(t *testing.T) {
 	gw := &Gateway{}
-	if !gw.canAutoChain(context.Background(), "auto", "") {
-		t.Error("auto mode should always allow chaining")
+	if !gw.canAutoChain(context.Background(), "auto", "", chainablePB("session")) {
+		t.Error("auto mode should allow chaining to session-gated playbook")
+	}
+	if !gw.canAutoChain(context.Background(), "auto", "", chainablePB("auto")) {
+		t.Error("auto mode should allow chaining to auto-gated playbook")
 	}
 }
 
 func TestCanAutoChain_ManualMode(t *testing.T) {
 	gw := &Gateway{}
-	if gw.canAutoChain(context.Background(), "manual", "") {
-		t.Error("manual mode should never allow chaining")
+	if gw.canAutoChain(context.Background(), "manual", "", chainablePB("session")) {
+		t.Error("manual requester mode should never allow chaining")
 	}
 }
 
 func TestCanAutoChain_EmptyMode(t *testing.T) {
 	gw := &Gateway{}
-	if gw.canAutoChain(context.Background(), "", "") {
-		t.Error("empty mode should not allow chaining")
+	if gw.canAutoChain(context.Background(), "", "", chainablePB("session")) {
+		t.Error("empty requester mode should not allow chaining")
+	}
+}
+
+func TestCanAutoChain_PlaybookManualGate(t *testing.T) {
+	gw := &Gateway{}
+	// Even auto requester mode cannot chain to a manual-gated playbook.
+	if gw.canAutoChain(context.Background(), "auto", "", chainablePB("manual")) {
+		t.Error("auto mode should not chain to manual-gated playbook")
+	}
+	if gw.canAutoChain(context.Background(), "auto", "", chainablePB("")) {
+		t.Error("auto mode should not chain to unset-mode playbook")
 	}
 }
 
 func TestCanAutoChain_SessionMode_NoAuditURL(t *testing.T) {
 	// No auditURL → fetchApprovalSession will fail → no chaining.
 	gw := &Gateway{auditURL: ""}
-	if gw.canAutoChain(context.Background(), "session", "aps_123") {
+	if gw.canAutoChain(context.Background(), "session", "aps_123", chainablePB("session")) {
 		t.Error("session mode with no auditURL should not allow chaining")
 	}
 }

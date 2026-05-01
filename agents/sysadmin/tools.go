@@ -286,7 +286,12 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 }
 
 func checkHostTool(ctx tool.Context, args CheckHostArgs) (CheckHostResult, error) {
-	return checkHostImpl(ctx, args)
+	start := time.Now()
+	result, err := checkHostImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "check_host", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── get_host_logs ────────────────────────────────────────────────────────────
@@ -360,7 +365,12 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 }
 
 func getHostLogsTool(ctx tool.Context, args GetHostLogsArgs) (HostLogsResult, error) {
-	return getHostLogsImpl(ctx, args)
+	start := time.Now()
+	result, err := getHostLogsImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "get_host_logs", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── check_disk ───────────────────────────────────────────────────────────────
@@ -398,7 +408,12 @@ func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) 
 }
 
 func checkDiskTool(ctx tool.Context, args CheckDiskArgs) (DiskResult, error) {
-	return checkDiskImpl(ctx, args)
+	start := time.Now()
+	result, err := checkDiskImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "check_disk", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── check_memory ─────────────────────────────────────────────────────────────
@@ -436,7 +451,12 @@ func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, e
 }
 
 func checkMemoryTool(ctx tool.Context, args CheckMemoryArgs) (MemoryResult, error) {
-	return checkMemoryImpl(ctx, args)
+	start := time.Now()
+	result, err := checkMemoryImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "check_memory", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── read_pg_log_file ──────────────────────────────────────────────────────────
@@ -515,7 +535,12 @@ func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileRe
 }
 
 func readPgLogFileTool(ctx tool.Context, args ReadPgLogFileArgs) (PgLogFileResult, error) {
-	return readPgLogFileImpl(ctx, args)
+	start := time.Now()
+	result, err := readPgLogFileImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "read_pg_log_file", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // hostRuntimeLabel returns a human-readable label for the host's exec mechanism.

@@ -35,6 +35,8 @@ Every Playbook carries two classes of fields:
 | `related_playbooks` | []string | `pb_*` IDs of related Playbooks |
 | `author` | string | Author identity or team name |
 | `version` | string | Free-form version string (e.g. `"1.2"`) |
+| `agent_name` | string | Overrides the default agent for this Playbook (e.g. `"sysadmin"` for host-level operations). Affects which agent is dispatched when this Playbook is run or chained to. |
+| `approval_mode` | string | Default `approval_mode` for standalone runs (`""` / `"manual"` / `"session"` / `"auto"`). Also acts as a **chaining gate**: playbooks with `approval_mode: ""` or `"manual"` can never be auto-chained — callers always receive `suggested_next` for them regardless of requester mode. Only `"session"` and `"auto"` are eligible for auto-chaining. |
 
 The `guidance` field is the most important knowledge field. It is injected into the planner prompt as a `## Playbook Guidance` section whenever the Playbook is run. Use it for expert heuristics, prioritisation notes, tool sequencing hints, and common misdiagnosis warnings. It does not appear in ad-hoc `/fleet/plan` calls.
 
@@ -53,7 +55,7 @@ When you create a Playbook without specifying a `series_id`, a new series is sta
 
 ### System Playbooks
 
-aiHelpDesk ships 8 expert-authored system Playbooks that are seeded into auditd on startup:
+aiHelpDesk ships 9 expert-authored system Playbooks that are seeded into auditd on startup:
 
 | Series ID | Name | Problem class | Agent | Key tools |
 |---|---|---|---|---|
@@ -65,8 +67,9 @@ aiHelpDesk ships 8 expert-authored system Playbooks that are seeded into auditd 
 | `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | database | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
 | `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
 | `pbs_sysadmin_docker_inspect` | Sysadmin — Docker Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
+| `pbs_db_restart_action` | Sysadmin — Docker Container Restart | availability | sysadmin | `restart_container`, `check_host`, `check_connection` |
 
-The four "Database Down" Playbooks form an escalating sequence. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**. If they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, or was OOM-killed, then revises the root-cause hypothesis accordingly.
+The "Database Down" Playbooks form a three-step escalating sequence for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, or was OOM-killed, then revises the root-cause hypothesis accordingly. If inspection confirms a clean shutdown or OOM condition that warrants a restart, it escalates to **Docker Container Restart** (`pbs_db_restart_action`), which performs the actual `restart_container` call and verifies connectivity. `pbs_db_restart_action` has `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` for the restart step and must invoke it explicitly, regardless of the requester's mode.
 
 Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 
@@ -573,13 +576,18 @@ The Gateway strips these lines from the visible `text` returned to the operator,
 - Set `outcome=escalated` and `escalated_to=<series_id>` when `ESCALATE_TO:` is present
 - Populate `findings_summary` with the FINDINGS text
 
-What happens next depends on the run's effective `approval_mode` (request body overrides, then Playbook default):
+What happens next depends on **two conditions** that the Gateway checks before auto-chaining:
 
-| Mode | Gateway behaviour when `ESCALATE_TO:` is present |
-|---|---|
-| `auto` | **Auto-chains immediately** — the Gateway looks up the escalated Playbook, runs it as a second agent session, merges the two diagnostic reports, and returns the combined findings in a single response. No second API call needed. |
-| `session` (with `escalation` in `allowed_classes`) | Same as `auto` — the session token covers cross-agent escalation. |
-| `manual` or `session` (without `escalation`) | Returns `suggested_next` in the response body: a pre-filled request body the operator can use to trigger the follow-on Playbook manually. |
+1. The requester's `approval_mode` (or session) authorises escalation.
+2. The **target playbook's own `approval_mode`** is `session` or `auto` — playbooks with `approval_mode: manual` (or unset) always require explicit operator invocation, regardless of the requester's mode.
+
+| Requester `approval_mode` | Target playbook `approval_mode` | Gateway behaviour |
+|---|---|---|
+| `auto` | `session` or `auto` | **Auto-chains immediately** — the Gateway looks up the escalated Playbook, runs it as a second agent session, merges the two diagnostic reports, and returns the combined findings in a single response. No second API call needed. |
+| `auto` | `manual` or `""` | Returns `suggested_next` — the target playbook requires explicit operator invocation. |
+| `session` (with `escalation` in `allowed_classes`) | `session` or `auto` | Auto-chains — the session token covers cross-agent escalation and the target allows it. |
+| `session` (without `escalation`) | any | Returns `suggested_next`. |
+| `manual` or `""` | any | Returns `suggested_next` — operator fires the follow-on call manually. |
 
 #### Auto-chaining (`approval_mode=auto`)
 
@@ -597,9 +605,10 @@ When chaining occurs, the response includes:
 
 | Field | Description |
 |---|---|
-| `chained_run_id` | Run ID of the escalated (second) agent session |
-| `chained_findings` | The second agent's `FINDINGS:` line |
-| `diagnostic_report` | Merged report: hypotheses from both agents, re-ranked by confidence; the second agent's root cause takes precedence |
+| `chain` | Array of per-step objects describing each chained leg. Each entry contains: `step` (1-based index), `playbook_series_id`, `agent_name`, `run_id`, `findings` (the step's `FINDINGS:` text), `text` (full agent response), `diagnostic_report` (structured hypotheses for that step). |
+| `chained_run_id` | Run ID of the escalated (second) agent session (present for single-step chains; use `chain` for multi-step). |
+| `chained_findings` | The second agent's `FINDINGS:` line (present for single-step chains; use `chain` for multi-step). |
+| `diagnostic_report` | Merged report: hypotheses from all chained agents, re-ranked by confidence; the last agent's root cause takes precedence. |
 
 #### Manual mode — `suggested_next`
 
@@ -667,11 +676,11 @@ Agent-mode runs may call write or destructive tools (e.g. `restart_deployment`, 
 
 | Mode | Tool calls (write/destructive) | Cross-agent escalation |
 |---|---|---|
-| `auto` | Proxied immediately — no gate | Auto-chains immediately |
-| `session` | Gated by session token | Auto-chains if session includes `"escalation"` in `allowed_classes` |
-| `manual` | Rejected (403) | Returns `suggested_next` — operator fires the second call manually |
+| `auto` | Proxied immediately — no gate | Auto-chains if the **target playbook's `approval_mode`** is `session` or `auto`; returns `suggested_next` otherwise |
+| `session` | Gated by session token | Auto-chains if session includes `"escalation"` in `allowed_classes` **and** target playbook's `approval_mode` is `session` or `auto` |
+| `manual` | Rejected (403) | Always returns `suggested_next` — operator fires the second call manually |
 
-The same `approval_mode` governs both tool-level gates and cross-agent escalation. There is no separate configuration for chaining.
+The same `approval_mode` governs both tool-level gates and cross-agent escalation. Additionally, each playbook's own `approval_mode` acts as a **chaining gate**: a playbook with `approval_mode: manual` (or unset) can never be auto-chained, regardless of the requester's mode. This means `approval_mode` on a playbook has two roles — it sets the default for standalone invocations and it controls whether that playbook can be a chaining target.
 
 #### Creating an approval session (`session` mode)
 
