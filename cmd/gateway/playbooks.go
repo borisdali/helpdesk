@@ -114,7 +114,7 @@ var ctxKeyApprovalSession = ctxKeyApprovalSessionType{}
 
 // approvalContext carries approval mode + session ID through the request context.
 type approvalContext struct {
-	mode      string // "auto" | "session" | "manual"
+	mode      string // "auto" | "session" | "manual" | "force"
 	sessionID string
 }
 
@@ -129,10 +129,13 @@ type PlaybookRunRequest struct {
 	PriorRunID       string `json:"prior_run_id,omitempty"` // run_id of prior investigation for continuity threading
 	PriorFindings    string `json:"-"`                       // populated at runtime from prior run; not from body
 
-	// ApprovalMode controls when approval is required for write/destructive operations.
-	//   "auto"    (default) — no gate; current behavior.
-	//   "session" — operator must supply a valid ApprovalSession ID.
-	//   "manual"  — agent-mode runs are read-only (no write/destructive proxied).
+	// ApprovalMode controls when approval is required for write/destructive operations
+	// and which playbooks are eligible for auto-chaining.
+	//   "auto"    — no gate on tools; chains through session/auto-gated playbooks.
+	//   "session" — gated by session token; chains through session/auto-gated playbooks.
+	//   "manual"  — agent-mode runs are read-only (no write/destructive proxied); no chaining.
+	//   "force"   — like "auto" for tools, but also chains through manual-gated playbooks.
+	//              Use when deliberately authorising the full diagnosis-to-remediation path.
 	ApprovalMode    string `json:"approval_mode,omitempty"`
 	// ApprovalSession is the session ID for "session" mode. Required when ApprovalMode="session".
 	ApprovalSession string `json:"approval_session,omitempty"`
@@ -451,11 +454,18 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 // canAutoChain returns true when the effective approval mode permits automatic
 // cross-agent escalation chaining to targetPB.
 //
-// The target playbook's ApprovalMode acts as a floor: if the playbook requires
-// "manual" (or is unset), it can never be auto-chained regardless of the
-// requester's mode — the operator must invoke it explicitly. Only playbooks with
-// ApprovalMode "session" or "auto" are eligible for chaining.
+// Two conditions must both be satisfied:
+//  1. The requester's mode authorises chaining (auto, session with escalation, or force).
+//  2. The target playbook's ApprovalMode permits being chained to ("session" or "auto").
+//
+// Exception: approval_mode=force bypasses the playbook-level gate entirely — the operator
+// is explicitly accepting responsibility for the full diagnosis-to-remediation chain,
+// including playbooks that would otherwise require manual invocation.
 func (g *Gateway) canAutoChain(ctx context.Context, mode, sessionID string, targetPB *audit.Playbook) bool {
+	// "force" bypasses the playbook-level gate — operator is explicitly authorising the full chain.
+	if mode == "force" {
+		return true
+	}
 	// Playbook-level gate: "manual" (or unset) always requires explicit invocation.
 	targetMode := targetPB.ApprovalMode
 	if targetMode == "" || targetMode == "manual" {

@@ -1159,7 +1159,7 @@ func (a *Auditor) checkDangerousAction(event *audit.Event) {
 	if event.PolicyDecision != nil && event.PolicyDecision.Effect == "allow" {
 		return
 	}
-	// Operator pre-authorised the full chain via approval_mode=auto.
+	// Operator pre-authorised the full chain via approval_mode=auto or force.
 	if event.Approval != nil && event.Approval.Status == audit.ApprovalAutoApproved {
 		return
 	}

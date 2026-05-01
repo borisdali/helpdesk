@@ -462,7 +462,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	autoApproved := decision.NeedsApproval() &&
 		func() bool {
 			tc := audit.TraceContextFromContext(ctx)
-			return tc != nil && tc.ApprovalMode == "auto"
+			return tc != nil && (tc.ApprovalMode == "auto" || tc.ApprovalMode == "force")
 		}()
 
 	// Record the policy decision to the audit trail (allow, deny, or require_approval).

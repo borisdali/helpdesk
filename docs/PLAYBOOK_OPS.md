@@ -120,7 +120,7 @@ pbs_db_restart_triage  (entry_point: true)
 
 - **Start at `pbs_db_restart_triage` every time.** It classifies the failure and either resolves it or emits `ESCALATE_TO:` pointing to the next playbook.
 - For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_docker_inspect` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed, or was OOM-killed and adjusts the diagnosis accordingly.
-- If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_docker_inspect` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway **always** returns `suggested_next` for this step — it can never be auto-chained regardless of the requester's mode.
+- If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_docker_inspect` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway returns `suggested_next` for this step with `auto` or `session` — it requires the operator to explicitly invoke it, or use `approval_mode=force` to authorize the full chain up front.
 - **Do not jump to `pbs_db_config_recovery` or `pbs_db_pitr_recovery` without running restart triage first**, unless you already have clear `FATAL`/`PANIC` evidence.
 
 ### 1.2a Auto-chaining vs. manual escalation
@@ -134,9 +134,15 @@ Auto-chaining is controlled by **two independent gates**:
 
 This means `approval_mode=auto` auto-chains **diagnostic** steps (like `pbs_sysadmin_docker_inspect`, which has `approval_mode: session`) but **not** remediation steps (like `pbs_db_restart_action`, which has `approval_mode: manual`). The operator always receives `suggested_next` for the restart step and must invoke it explicitly after reviewing the diagnosis.
 
+To automate the entire path — diagnosis **and** remediation — use `approval_mode=force`. This bypasses the playbook-level `manual` gate and chains through every step. Use it in non-production environments or when you have already reviewed the escalation path and accept full responsibility for the outcome.
+
 **With `approval_mode=auto`, the Docker-hosted DB flow produces:**
 - A `chain` array with 2 entries (DB triage + Docker inspection) merged into a single diagnostic response.
 - A `suggested_next` field pre-filled with the `pbs_db_restart_action` request — ready for the operator to review and fire.
+
+**With `approval_mode=force`, the Docker-hosted DB flow produces:**
+- A `chain` array with 3 entries (DB triage + Docker inspection + container restart).
+- No `suggested_next` — the full chain ran to completion.
 
 ```bash
 # approval_mode=auto: diagnosis chains (2 steps), restart requires explicit approval
@@ -174,6 +180,20 @@ curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
 ```
 
 The inspection step chains because `pbs_sysadmin_docker_inspect` has `approval_mode: session` and the session includes `"escalation"` in `allowed_classes`. The restart step still stops at `suggested_next` because `pbs_db_restart_action` has `approval_mode: manual`.
+
+To run the full chain end-to-end including the restart (e.g. in staging or after a pre-reviewed escalation path):
+
+```bash
+# approval_mode=force: all 3 steps run in one call, including restart_container
+curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
+  -X POST http://localhost:8080/api/v1/fleet/playbooks/$RESTART_ID/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "staging-db",
+    "approval_mode":     "force"
+  }' | jq '{chain: [.chain[] | {step, agent_name, findings}]}'
+# → chain has 3 entries; no suggested_next
+```
 
 The merged `diagnostic_report` contains hypotheses from all chained agents ranked by confidence, with the last agent's root cause taking precedence.
 

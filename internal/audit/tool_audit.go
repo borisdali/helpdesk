@@ -118,8 +118,8 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 		event.Outcome.ErrorMessage = result.Error
 	}
 
-	// Attach auto-approval record when the chain was pre-authorised via approval_mode=auto.
-	if tc := TraceContextFromContext(ctx); tc != nil && tc.ApprovalMode == "auto" {
+	// Attach auto-approval record when the chain was pre-authorised via approval_mode=auto or force.
+	if tc := TraceContextFromContext(ctx); tc != nil && (tc.ApprovalMode == "auto" || tc.ApprovalMode == "force") {
 		if actionClass == ActionWrite || actionClass == ActionDestructive {
 			now := time.Now().UTC()
 			event.Approval = &Approval{

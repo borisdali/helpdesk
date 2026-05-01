@@ -1325,6 +1325,20 @@ func TestCanAutoChain_PlaybookManualGate(t *testing.T) {
 	}
 }
 
+func TestCanAutoChain_ForceMode(t *testing.T) {
+	gw := &Gateway{}
+	// "force" bypasses the playbook-level gate entirely.
+	if !gw.canAutoChain(context.Background(), "force", "", chainablePB("manual")) {
+		t.Error("force mode should chain to manual-gated playbook")
+	}
+	if !gw.canAutoChain(context.Background(), "force", "", chainablePB("")) {
+		t.Error("force mode should chain to unset-mode playbook")
+	}
+	if !gw.canAutoChain(context.Background(), "force", "", chainablePB("session")) {
+		t.Error("force mode should chain to session-gated playbook")
+	}
+}
+
 func TestCanAutoChain_SessionMode_NoAuditURL(t *testing.T) {
 	// No auditURL → fetchApprovalSession will fail → no chaining.
 	gw := &Gateway{auditURL: ""}

@@ -271,7 +271,7 @@ Optional request body:
 | `context` | Free-form operator context (server name, symptoms, recent changes, relevant log lines) |
 | `context_id` | A2A session ID for multi-turn continuity within an existing session |
 | `prior_run_id` | `plr_*` run ID of a previous investigation to continue from (see [Continuity threading](#continuity-threading)) |
-| `approval_mode` | `auto` (default), `session`, or `manual` — controls whether write/destructive tool calls are gated (see [Approval modes](#approval-modes)) |
+| `approval_mode` | `auto`, `session`, `manual`, or `force` — controls tool-call gating and chaining eligibility (see [Approval modes](#approval-modes)) |
 | `approval_session` | Required when `approval_mode=session`. The `aps_*` session ID from `POST /v1/approval/sessions` on auditd |
 
 ```bash
@@ -672,15 +672,32 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_config_recovery/
 
 ### Approval modes
 
-Agent-mode runs may call write or destructive tools (e.g. `restart_deployment`, `cancel_query`) and may trigger cross-agent escalation chains. Three modes control whether those operations are gated:
+Agent-mode runs may call write or destructive tools (e.g. `restart_deployment`, `cancel_query`) and may trigger cross-agent escalation chains. Four modes control whether those operations are gated:
 
 | Mode | Tool calls (write/destructive) | Cross-agent escalation |
 |---|---|---|
 | `auto` | Proxied immediately — no gate | Auto-chains if the **target playbook's `approval_mode`** is `session` or `auto`; returns `suggested_next` otherwise |
 | `session` | Gated by session token | Auto-chains if session includes `"escalation"` in `allowed_classes` **and** target playbook's `approval_mode` is `session` or `auto` |
 | `manual` | Rejected (403) | Always returns `suggested_next` — operator fires the second call manually |
+| `force` | Proxied immediately — no gate | Auto-chains through **all** playbooks, including those with `approval_mode: manual`. Use when deliberately authorising the full diagnosis-to-remediation path end-to-end. |
 
-The same `approval_mode` governs both tool-level gates and cross-agent escalation. Additionally, each playbook's own `approval_mode` acts as a **chaining gate**: a playbook with `approval_mode: manual` (or unset) can never be auto-chained, regardless of the requester's mode. This means `approval_mode` on a playbook has two roles — it sets the default for standalone invocations and it controls whether that playbook can be a chaining target.
+The same `approval_mode` governs both tool-level gates and cross-agent escalation. Additionally, each playbook's own `approval_mode` acts as a **chaining gate**: a playbook with `approval_mode: manual` (or unset) can never be auto-chained by `auto` or `session` — only `force` bypasses this. This means `approval_mode` on a playbook has two roles: it sets the default for standalone invocations and it controls whether that playbook can be a chaining target.
+
+#### Full-chain automation (`approval_mode=force`)
+
+Use `force` when you want the gateway to run the complete diagnosis-to-remediation chain in a single API call — including remediation playbooks that would otherwise require explicit operator invocation:
+
+```bash
+# One call: DB triage → docker inspect → restart container (if diagnosis is unambiguous)
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "staging-db",
+    "approval_mode":     "force"
+  }' | jq '{chain: [.chain[] | {step, agent_name, findings}], text}'
+```
+
+`force` is intentionally named to make the operator's conscious choice visible in the audit trail. Every tool execution and policy decision event records `approval_mode: force`, so the audit log clearly shows that a human made a deliberate decision to automate the full chain, rather than the system doing it silently.
 
 #### Creating an approval session (`session` mode)
 
