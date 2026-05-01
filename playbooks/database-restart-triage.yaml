@@ -1,6 +1,6 @@
 series_id: pbs_db_restart_triage
 name: Database Down — Restart Triage
-version: "1.1"
+version: "1.2"
 entry_point: true
 execution_mode: agent
 escalates_to:

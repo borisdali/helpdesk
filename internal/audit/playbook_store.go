@@ -394,6 +394,26 @@ func (s *PlaybookStore) Activate(ctx context.Context, playbookID string) error {
 	return tx.Commit()
 }
 
+// ActivateSystem is like Activate but works for system playbooks. Used by the seeder.
+func (s *PlaybookStore) ActivateSystem(ctx context.Context, playbookID, seriesID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE playbooks SET is_active=0 WHERE series_id=? AND playbook_id != ?`,
+		seriesID, playbookID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE playbooks SET is_active=1 WHERE playbook_id=?`, playbookID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // PlaybookListQuery holds filter parameters for List.
 type PlaybookListQuery struct {
 	ActiveOnly    bool   // if true, return only is_active=1 rows

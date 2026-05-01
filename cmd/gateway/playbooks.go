@@ -255,14 +255,26 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 
 // agentRunResult holds the parsed output of a single agent-mode playbook run.
 type agentRunResult struct {
-	capture    *responseCapture
-	traceID    string
-	runStart   time.Time
-	outcome    string
-	escalatedTo string
-	findings   string
-	diagReport *audit.DiagnosticReport
-	runID      string
+	capture         *responseCapture
+	traceID         string
+	runStart        time.Time
+	outcome         string
+	escalatedTo     string
+	findings        string
+	diagReport      *audit.DiagnosticReport
+	runID           string
+	playbookSeriesID string
+	agentName       string
+}
+
+// chainEntry is one element of the per-run chain returned in API responses.
+type chainEntry struct {
+	Step             int                    `json:"step"`
+	PlaybookSeriesID string                 `json:"playbook_series_id"`
+	AgentName        string                 `json:"agent_name"`
+	RunID            string                 `json:"run_id,omitempty"`
+	Findings         string                 `json:"findings,omitempty"`
+	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 }
 
 // runAgentPlaybook executes one agent-mode playbook run and returns the parsed result.
@@ -299,10 +311,12 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 	}
 
 	res := agentRunResult{
-		capture:  capture,
-		traceID:  traceID,
-		runStart: runStart,
-		runID:    runID,
+		capture:          capture,
+		traceID:          traceID,
+		runStart:         runStart,
+		runID:            runID,
+		playbookSeriesID: pb.SeriesID,
+		agentName:        agentName,
 	}
 
 	if capture.code == http.StatusOK {
@@ -371,10 +385,28 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	finalFindings := primary.findings
 	finalReport := primary.diagReport
 
+	// chain always starts with the primary run.
+	chain := []chainEntry{{
+		Step:             1,
+		PlaybookSeriesID: primary.playbookSeriesID,
+		AgentName:        primary.agentName,
+		RunID:            primary.runID,
+		Findings:         primary.findings,
+		DiagnosticReport: primary.diagReport,
+	}}
+
 	if primary.escalatedTo != "" {
 		if g.canAutoChain(r.Context(), req.ApprovalMode, req.ApprovalSession) {
 			chained := g.chainEscalation(r, pb, req, primary)
 			if chained != nil {
+				chain = append(chain, chainEntry{
+					Step:             2,
+					PlaybookSeriesID: chained.playbookSeriesID,
+					AgentName:        chained.agentName,
+					RunID:            chained.runID,
+					Findings:         chained.findings,
+					DiagnosticReport: chained.diagReport,
+				})
 				// Merge the sysadmin report back into the primary run's report.
 				merged := mergeDiagnosticReports(primary.diagReport, chained.diagReport)
 				finalReport = merged
@@ -394,6 +426,8 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			extra["suggested_next"] = buildSuggestedNext(primary.escalatedTo, req, runID, primary.findings)
 		}
 	}
+
+	extra["chain"] = chain
 
 	injectFields(w, primary.capture, extra)
 
@@ -461,7 +495,40 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 
 // fetchPlaybookBySeriesID returns the active version of a playbook by series ID.
 func (g *Gateway) fetchPlaybookBySeriesID(ctx context.Context, seriesID string) (*audit.Playbook, error) {
-	return g.fetchPlaybook(ctx, seriesID)
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbooks?series_id=" + seriesID + "&active_only=true&include_system=true"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Playbooks) == 0 {
+		return nil, fmt.Errorf("not found")
+	}
+	return result.Playbooks[0], nil
 }
 
 // buildSuggestedNext constructs the suggested_next response field that operators
