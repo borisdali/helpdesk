@@ -269,11 +269,12 @@ type agentRunResult struct {
 
 // chainEntry is one element of the per-run chain returned in API responses.
 type chainEntry struct {
-	Step             int                    `json:"step"`
-	PlaybookSeriesID string                 `json:"playbook_series_id"`
-	AgentName        string                 `json:"agent_name"`
-	RunID            string                 `json:"run_id,omitempty"`
-	Findings         string                 `json:"findings,omitempty"`
+	Step             int                     `json:"step"`
+	PlaybookSeriesID string                  `json:"playbook_series_id"`
+	AgentName        string                  `json:"agent_name"`
+	RunID            string                  `json:"run_id,omitempty"`
+	Findings         string                  `json:"findings,omitempty"`
+	Text             string                  `json:"text,omitempty"`
 	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 }
 
@@ -392,39 +393,43 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		AgentName:        primary.agentName,
 		RunID:            primary.runID,
 		Findings:         primary.findings,
+		Text:             capturedText(primary.capture),
 		DiagnosticReport: primary.diagReport,
 	}}
 
-	if primary.escalatedTo != "" {
-		if g.canAutoChain(r.Context(), req.ApprovalMode, req.ApprovalSession) {
-			chained := g.chainEscalation(r, pb, req, primary)
-			if chained != nil {
-				chain = append(chain, chainEntry{
-					Step:             2,
-					PlaybookSeriesID: chained.playbookSeriesID,
-					AgentName:        chained.agentName,
-					RunID:            chained.runID,
-					Findings:         chained.findings,
-					DiagnosticReport: chained.diagReport,
-				})
-				// Merge the sysadmin report back into the primary run's report.
-				merged := mergeDiagnosticReports(primary.diagReport, chained.diagReport)
-				finalReport = merged
-				finalOutcome = "escalated+resolved"
-				if chained.findings != "" {
-					finalFindings = chained.findings
-				}
-				extra["diagnostic_report"] = merged
-				extra["chained_run_id"] = chained.runID
-				if chained.findings != "" {
-					extra["chained_findings"] = chained.findings
-				}
-				// Append chained text to captured body.
-				appendChainedText(primary.capture, chained.capture)
-			}
-		} else {
-			extra["suggested_next"] = buildSuggestedNext(primary.escalatedTo, req, runID, primary.findings)
+	const maxChainDepth = 5
+	prev := primary
+	for len(chain) < maxChainDepth && prev.escalatedTo != "" {
+		if !g.canAutoChain(r.Context(), req.ApprovalMode, req.ApprovalSession) {
+			extra["suggested_next"] = buildSuggestedNext(prev.escalatedTo, req, prev.runID, prev.findings)
+			break
 		}
+		chained := g.chainEscalation(r, pb, req, prev)
+		if chained == nil {
+			break
+		}
+		chain = append(chain, chainEntry{
+			Step:             len(chain) + 1,
+			PlaybookSeriesID: chained.playbookSeriesID,
+			AgentName:        chained.agentName,
+			RunID:            chained.runID,
+			Findings:         chained.findings,
+			Text:             capturedText(chained.capture),
+			DiagnosticReport: chained.diagReport,
+		})
+		finalReport = mergeDiagnosticReports(finalReport, chained.diagReport)
+		finalOutcome = "escalated+resolved"
+		if chained.findings != "" {
+			finalFindings = chained.findings
+			finalEscalatedTo = chained.escalatedTo
+		}
+		extra["diagnostic_report"] = finalReport
+		extra["chained_run_id"] = chained.runID
+		if chained.findings != "" {
+			extra["chained_findings"] = chained.findings
+		}
+		appendChainedText(primary.capture, chained.capture)
+		prev = *chained
 	}
 
 	extra["chain"] = chain
@@ -599,6 +604,19 @@ func mergeDiagnosticReports(primary, secondary *audit.DiagnosticReport) *audit.D
 
 // appendChainedText appends a separator and the chained run's text to the
 // primary capture body so the operator sees both agents' findings in one response.
+// capturedText extracts the "text" field from a captured agent response body.
+func capturedText(c *responseCapture) string {
+	if c == nil || c.code != http.StatusOK {
+		return ""
+	}
+	var body map[string]any
+	if err := json.Unmarshal(c.body.Bytes(), &body); err != nil {
+		return ""
+	}
+	t, _ := body["text"].(string)
+	return t
+}
+
 func appendChainedText(primary, chained *responseCapture) {
 	if chained == nil || chained.code != http.StatusOK {
 		return

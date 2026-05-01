@@ -31,7 +31,7 @@ guidance: |
     concern and stop.
 
   Step 1 — Restart the container:
-  Call restart_service with the connection_string (target). This runs
+  Call restart_container with the connection_string (target). This runs
   docker start on the container identified in the infrastructure config.
 
   Step 2 — Confirm the container is running:
@@ -50,7 +50,7 @@ guidance: |
   - Whether PostgreSQL is now accepting connections
   - Any anomalies observed (unexpected exit codes, slow startup, log warnings)
 
-  Do NOT call any write or destructive tools beyond restart_service.
+  Do NOT call any write or destructive tools beyond restart_container.
   Do NOT retry more than once — if the container fails to start, report the
   failure and stop so a human can investigate.
 

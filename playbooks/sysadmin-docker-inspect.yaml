@@ -1,11 +1,12 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "1.0"
+version: "1.2"
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent
 approval_mode: manual
 escalates_to:
+  - pbs_db_restart_action
   - pbs_db_restart_triage
 problem_class: availability
 author: aiHelpDesk
@@ -49,11 +50,29 @@ guidance: |
   Call check_memory with target set. Report the memory headroom and recommend a
   memory limit increase if the container is constrained.
 
-  Step 4 — Revise the prior hypothesis:
+  Step 4 — Revise the prior hypothesis and escalate if appropriate:
   If the DB agent concluded "process crashed" but exitcode=0 and logs show clean
-  shutdown, explicitly state this correction in FINDINGS. A clean stop requires
-  a restart (not recovery). An OOM kill requires a restart plus memory investigation.
-  A crash requires config/data recovery before restart.
+  shutdown, explicitly state this correction in FINDINGS.
+
+  Your FINDINGS must include:
+  - Container state: Status, ExitCode, OOMKilled (from check_host output)
+  - Log evidence: quote the specific log lines that support your conclusion,
+    e.g. "Logs show: '2026-04-30 19:00:01 UTC [1] LOG: database system is shut down'"
+    Do not paraphrase — quote the actual lines verbatim so the operator can verify.
+  - Conclusion: what happened (clean stop / OOM kill / crash / other)
+  - Recommended action and why it is safe (or not safe) to proceed
+
+  Escalation rules (emit exactly one ESCALATE_TO if the condition is met):
+  - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM signals:
+    ESCALATE_TO: pbs_db_restart_action
+    (the restart playbook will perform and confirm the restart)
+  - exitcode=137 / oomkilled=true:
+    Do NOT escalate — describe the OOM evidence and recommend operator review
+    before restarting.
+  - FATAL / PANIC / "invalid page" / "checksum failure" in logs:
+    Do NOT escalate — these require config or data recovery, not an automated restart.
+  - Any ambiguity or insufficient evidence:
+    Do NOT escalate — describe what is known and what additional investigation is needed.
 
 escalation:
   - "container logs contain 'invalid page' or 'checksum failure' — data corruption, do not restart"

@@ -118,6 +118,22 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 		event.Outcome.ErrorMessage = result.Error
 	}
 
+	// Attach auto-approval record when the chain was pre-authorised via approval_mode=auto.
+	if tc := TraceContextFromContext(ctx); tc != nil && tc.ApprovalMode == "auto" {
+		if actionClass == ActionWrite || actionClass == ActionDestructive {
+			now := time.Now().UTC()
+			event.Approval = &Approval{
+				Required:    true,
+				Status:      ApprovalAutoApproved,
+				RequestedBy: tc.Principal.EffectiveID(),
+				ApprovedBy:  "approval_mode:auto",
+				ApprovedAt:  now,
+				RequestedAt: now,
+				PolicyName:  "approval_mode:auto",
+			}
+		}
+	}
+
 	if err := ta.auditor.Record(ctx, event); err != nil {
 		slog.Warn("failed to record tool audit event", "tool", call.Name, "err", err)
 	}
@@ -138,6 +154,25 @@ func (ta *ToolAuditor) RecordPolicyDecision(ctx context.Context, pd PolicyDecisi
 		ActionClass:    ActionClass(pd.Action),
 		Session:        Session{ID: ta.sessionID},
 		PolicyDecision: &pd,
+	}
+
+	// When the action was pre-authorised via approval_mode=auto, attach an
+	// auto-approval record so the auditor's destructive-action check passes.
+	if pd.AutoApproved {
+		var principal string
+		if tc := TraceContextFromContext(ctx); tc != nil {
+			principal = tc.Principal.EffectiveID()
+		}
+		now := time.Now().UTC()
+		event.Approval = &Approval{
+			Required:    true,
+			Status:      ApprovalAutoApproved,
+			RequestedBy: principal,
+			ApprovedBy:  "approval_mode:auto",
+			ApprovedAt:  now,
+			RequestedAt: now,
+			PolicyName:  "approval_mode:auto",
+		}
 	}
 
 	if err := ta.auditor.Record(ctx, event); err != nil {

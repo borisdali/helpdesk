@@ -70,6 +70,8 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 			Purpose:         parsed.purpose,
 			PurposeNote:     parsed.purposeNote,
 			PurposeExplicit: parsed.purposeExplicit,
+			ApprovalMode:    parsed.approvalMode,
+			ApprovalSession: parsed.approvalSession,
 		}
 		r = r.WithContext(WithTraceContext(r.Context(), tc))
 
@@ -118,6 +120,9 @@ type a2aRequestData struct {
 	purpose         string
 	purposeNote     string
 	purposeExplicit bool
+	// Approval context forwarded from the gateway for chained runs:
+	approvalMode    string
+	approvalSession string
 }
 
 // resolvedPrincipal reconstructs the ResolvedPrincipal from A2A metadata fields.
@@ -172,6 +177,12 @@ func parseA2ARequest(body []byte) a2aRequestData {
 		}
 		if pe, ok := meta["purpose_explicit"].(bool); ok {
 			out.purposeExplicit = pe
+		}
+		if am, ok := meta["approval_mode"].(string); ok {
+			out.approvalMode = am
+		}
+		if as, ok := meta["approval_session"].(string); ok {
+			out.approvalSession = as
 		}
 		// roles may arrive as []any (JSON array) or []string.
 		if rawRoles, ok := meta["roles"]; ok {

@@ -1147,7 +1147,22 @@ func (a *Auditor) checkEmptyReasoning(event *audit.Event) {
 }
 
 // checkDangerousAction alerts on write or destructive operations.
+// Skips pre-authorization events (tool_invoked), policy-allowed actions,
+// and auto-approved chained operations.
 func (a *Auditor) checkDangerousAction(event *audit.Event) {
+	// tool_invoked fires before policy evaluation — the subsequent policy_decision
+	// and tool_execution events carry the authoritative authorization status.
+	if event.EventType == audit.EventTypeToolInvoked {
+		return
+	}
+	// Policy explicitly allowed the action — no approval record is required.
+	if event.PolicyDecision != nil && event.PolicyDecision.Effect == "allow" {
+		return
+	}
+	// Operator pre-authorised the full chain via approval_mode=auto.
+	if event.Approval != nil && event.Approval.Status == audit.ApprovalAutoApproved {
+		return
+	}
 	switch event.ActionClass {
 	case audit.ActionWrite:
 		a.alert(AlertWarning, "write operation detected", event,
@@ -1281,8 +1296,17 @@ func (a *Auditor) checkUnauthorizedDestructive(event *audit.Event) {
 	if event.ActionClass != audit.ActionDestructive {
 		return
 	}
+	// tool_invoked events are emitted before policy evaluation — skip them;
+	// the policy_decision and tool_execution events carry the approval status.
+	if event.EventType == audit.EventTypeToolInvoked {
+		return
+	}
+	// Policy explicitly authorised the action — no approval record is needed.
+	if event.PolicyDecision != nil && event.PolicyDecision.Effect == "allow" {
+		return
+	}
 
-	// Check if approval exists and is valid
+	// Check if approval exists and is valid.
 	if event.Approval == nil {
 		a.recordSecurityAlert("unauthorized_destructive", AlertCritical,
 			"DESTRUCTIVE operation without approval record", event,

@@ -1212,6 +1212,12 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		meta["purpose_note"] = purposeNote
 	}
 	meta["purpose_explicit"] = purposeExplicit
+	if ac, ok := r.Context().Value(ctxKeyApprovalSession).(approvalContext); ok && ac.mode != "" {
+		meta["approval_mode"] = ac.mode
+		if ac.sessionID != "" {
+			meta["approval_session"] = ac.sessionID
+		}
+	}
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
 	msg.Metadata = meta

@@ -182,6 +182,10 @@ type PolicyDecision struct {
 	Service    string   `json:"service,omitempty"`
 	AuthMethod string   `json:"auth_method,omitempty"`
 
+	// AutoApproved is true when the action was pre-authorised by approval_mode=auto
+	// forwarded from the gateway. The audit event will carry an auto_approved record.
+	AutoApproved bool `json:"auto_approved,omitempty"`
+
 	// Purpose fields — why the request was made.
 	Purpose     string `json:"purpose,omitempty"`
 	PurposeNote string `json:"purpose_note,omitempty"`
