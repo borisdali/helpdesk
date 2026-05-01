@@ -419,6 +419,44 @@ func TestCheckTool_ReadonlyGoverned_AllowsRead(t *testing.T) {
 	}
 }
 
+// TestCheckTool_AutoApprovalModes verifies that approval_mode=auto and approval_mode=force
+// both bypass the require_approval gate in the PolicyEnforcer, returning nil instead of
+// an ApprovalRequiredError. This is the critical path for pre-authorised chains.
+func TestCheckTool_AutoApprovalModes(t *testing.T) {
+	for _, mode := range []string{"auto", "force"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			// Use existing requireApprovalPolicyYAML (write+destructive → require_approval).
+			// No approvalURL needed — autoApproved path returns nil before calling the client.
+			e := newRequireApprovalEnforcer(t, "")
+
+			tc := audit.NewTraceContext("gateway", identity.ResolvedPrincipal{UserID: "ops@example.com"})
+			tc.ApprovalMode = mode
+			ctx := audit.WithTraceContext(context.Background(), tc)
+
+			err := e.CheckTool(ctx, "database", "prod-db", policy.ActionDestructive, nil, "restart container", nil)
+			if err != nil {
+				t.Errorf("approval_mode=%s: expected nil (pre-authorised), got: %v", mode, err)
+			}
+		})
+	}
+}
+
+// TestCheckTool_ManualMode_DoesNotBypassRequireApproval verifies that approval_mode=manual
+// does NOT bypass require_approval — only auto and force do.
+func TestCheckTool_ManualMode_DoesNotBypassRequireApproval(t *testing.T) {
+	// No approval server → requestApproval will fail, but the point is it gets called at all.
+	e := newRequireApprovalEnforcer(t, "")
+
+	tc := audit.NewTraceContext("gateway", identity.ResolvedPrincipal{UserID: "ops@example.com"})
+	tc.ApprovalMode = "manual"
+	ctx := audit.WithTraceContext(context.Background(), tc)
+
+	err := e.CheckTool(ctx, "database", "prod-db", policy.ActionDestructive, nil, "restart container", nil)
+	if err == nil {
+		t.Error("approval_mode=manual: expected error for require_approval action, got nil")
+	}
+}
+
 func TestCheckTool_Fix_WriteNotBlockedByModeGuard(t *testing.T) {
 	t.Setenv("HELPDESK_OPERATING_MODE", "fix")
 	// In fix mode the mode guard must NOT block writes — enforcement is handled

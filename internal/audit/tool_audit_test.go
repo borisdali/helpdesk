@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"helpdesk/internal/identity"
 )
 
 // newToolAuditTestStore creates a temporary SQLite-backed Store for use in tests.
@@ -356,6 +358,74 @@ func TestRecordToolVerification_Failed(t *testing.T) {
 	}
 	if events[0].Outcome.Status != "verified_failed" {
 		t.Errorf("Outcome.Status = %q, want verified_failed", events[0].Outcome.Status)
+	}
+}
+
+// TestRecordToolCall_AutoApprovalModes verifies that RecordToolCall attaches an
+// auto-approved Approval record on write/destructive actions when the TraceContext
+// carries approval_mode=auto or approval_mode=force. This is what prevents the
+// auditor from raising AUDIT CRITICAL alerts for pre-authorised chains.
+func TestRecordToolCall_AutoApprovalModes(t *testing.T) {
+	for _, mode := range []string{"auto", "force"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			store := newToolAuditTestStore(t)
+			ta := NewToolAuditor(store, "sysadmin-agent", "sess-1", "trace-1")
+
+			tc := NewTraceContext("gateway", identity.ResolvedPrincipal{UserID: "ops@example.com"})
+			tc.ApprovalMode = mode
+			ctx := WithTraceContext(context.Background(), tc)
+
+			ta.RecordToolCall(ctx, ToolCall{
+				Name:       "restart_container",
+				Parameters: map[string]any{"target": "test-db"},
+				RawCommand: "docker restart test-db",
+			}, ToolResult{Output: "test-db"}, 100*time.Millisecond)
+
+			events, err := store.Query(ctx, QueryOptions{EventType: EventTypeToolExecution})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if len(events) != 1 {
+				t.Fatalf("expected 1 tool_execution event, got %d", len(events))
+			}
+			evt := events[0]
+			if evt.Approval == nil {
+				t.Fatalf("approval_mode=%s: Approval field is nil; expected auto-approval record", mode)
+			}
+			if evt.Approval.Status != ApprovalAutoApproved {
+				t.Errorf("approval_mode=%s: Approval.Status = %q, want %q", mode, evt.Approval.Status, ApprovalAutoApproved)
+			}
+			if evt.Approval.ApprovedBy != "approval_mode:auto" {
+				t.Errorf("approval_mode=%s: Approval.ApprovedBy = %q, want approval_mode:auto", mode, evt.Approval.ApprovedBy)
+			}
+		})
+	}
+}
+
+// TestRecordToolCall_NoAutoApprovalOnRead verifies that read actions do NOT get
+// an auto-approval record even when approval_mode=force, since reads never need approval.
+func TestRecordToolCall_NoAutoApprovalOnRead(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "db-agent", "sess-2", "trace-2")
+
+	tc := NewTraceContext("gateway", identity.ResolvedPrincipal{UserID: "ops@example.com"})
+	tc.ApprovalMode = "force"
+	ctx := WithTraceContext(context.Background(), tc)
+
+	ta.RecordToolCall(ctx, ToolCall{
+		Name:       "check_connection",
+		Parameters: map[string]any{"target": "test-db"},
+	}, ToolResult{Output: "ok"}, 10*time.Millisecond)
+
+	events, err := store.Query(ctx, QueryOptions{EventType: EventTypeToolExecution})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 tool_execution event, got %d", len(events))
+	}
+	if events[0].Approval != nil {
+		t.Errorf("read action should not have an Approval record, got %+v", events[0].Approval)
 	}
 }
 
