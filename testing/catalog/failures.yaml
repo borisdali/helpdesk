@@ -1389,7 +1389,56 @@ failures:
     teardown:
       type: shell_exec
       script: sql/teardown_wal_disk_full.sh
-    external_compat: false
+    external_compat: true
+    external_inject:
+      type: ssh_exec
+      # $FAULTTEST_CONTAINER is injected by faulttest from the infra config's
+      # container_name field.  Falls back to "postgres" as a common default.
+      # The script writes fake WAL PANIC/FATAL lines to the PostgreSQL log file
+      # and SIGKILLs the container — no disk space is consumed.
+      script_inline: |
+        set -e
+        CONTAINER="${FAULTTEST_CONTAINER:-postgres}"
+        if ! docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null | grep -q true; then
+          echo "ERROR: $CONTAINER is not running" >&2
+          exit 1
+        fi
+        TS=$(docker exec "$CONTAINER" date -u '+%Y-%m-%d %H:%M:%S.000 UTC')
+        docker exec "$CONTAINER" bash -c "
+          mkdir -p /var/lib/postgresql/data/log
+          echo '${TS} [1] FATAL:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' \
+            >> /var/lib/postgresql/data/log/postgresql.log
+          echo '${TS} [1] PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' \
+            >> /var/lib/postgresql/data/log/postgresql.log
+          echo '${TS} [1] LOG:  startup process (PID 1) was terminated by signal 6: Aborted' \
+            >> /var/lib/postgresql/data/log/postgresql.log
+        "
+        docker kill "$CONTAINER" > /dev/null
+        for i in $(seq 1 10); do
+          STATUS=$(docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null || echo "false")
+          if [ "$STATUS" != "true" ]; then
+            EXIT_CODE=$(docker inspect --format "{{.State.ExitCode}}" "$CONTAINER" 2>/dev/null || echo "?")
+            echo "Container stopped (ExitCode=${EXIT_CODE})"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "Warning: container still running after 10 s"
+    external_teardown:
+      type: ssh_exec
+      script_inline: |
+        CONTAINER="${FAULTTEST_CONTAINER:-postgres}"
+        docker start "$CONTAINER"
+        echo "Started $CONTAINER"
+        for i in $(seq 1 20); do
+          if docker exec "$CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+            echo "PostgreSQL ready after $((i * 3)) s"
+            exit 0
+          fi
+          sleep 3
+        done
+        echo "WARNING: PostgreSQL not healthy after 60 s" >&2
+        exit 1
     prompt: >
       The database server 'faulttest-db' is unreachable — connection refused.
       Please check the host-level status of the server and investigate why

@@ -8,7 +8,7 @@
 #
 # Runs on the test host (shell_exec); requires Docker.
 
-CONTAINER=helpdesk-test-pg
+CONTAINER="${FAULTTEST_CONTAINER:-helpdesk-test-pg}"
 
 # Start (or restart) the postgres container.  PostgreSQL replays WAL to
 # recover from the simulated unclean shutdown.

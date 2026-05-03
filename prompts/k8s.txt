@@ -41,6 +41,29 @@ When investigating connectivity issues:
 
 If step 1 fails with a connection or authentication error, skip all remaining steps and report the failure.
 
+## Pod restart / instability investigation
+
+When a pod is restarting or in CrashLoopBackOff, the restart reason is in the pod status,
+not in the application logs. Always follow this sequence:
+
+1. Call `get_pods` — read the `lastState.terminated.reason` field carefully.
+   - `OOMKilled` → the kernel killed the container due to memory pressure. The pod logs
+     may show a healthy startup sequence from the *current* attempt — this does NOT mean
+     the pod recovered. An OOMKilled pod will restart and be killed again immediately if
+     the memory limit is too low. You MUST call `get_pod_resources` next.
+   - `Error` / non-zero exit code → process crashed; check pod logs for FATAL/PANIC.
+   - `Completed` → process exited cleanly (unexpected for a database).
+
+2. If `OOMKilled`: call `get_pod_resources` to check the container memory limit and
+   current usage. A limit of less than ~256Mi is almost always too low for PostgreSQL.
+   Report the limit and recommend increasing it. Do NOT conclude the pod is recovering
+   just because the current startup log looks healthy — it will be killed again.
+
+3. Call `get_events` to see OOMKill events, node pressure, or evictions.
+
+4. Call `get_pod_logs` last — interpret logs in light of the restart reason already
+   established. Startup logs during an OOM loop are not evidence of recovery.
+
 For LoadBalancer services, pay attention to:
 - Whether an external IP has been provisioned (look for "pending" status)
 - Port mappings between the service and target pods

@@ -15,7 +15,7 @@
 
 set -e
 
-CONTAINER=helpdesk-test-pg
+CONTAINER="${FAULTTEST_CONTAINER:-helpdesk-test-pg}"
 
 # Verify the container is running.
 if ! docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null | grep -q true; then

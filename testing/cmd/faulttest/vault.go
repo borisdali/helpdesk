@@ -302,7 +302,6 @@ func vaultList(args []string) {
 			switch info.check {
 			case playbookAuthError:
 				incidentCol = "AUTH ERROR"
-				faultTestCol = faultTestCol // no change
 			case playbookNotFound:
 				incidentCol = "MISSING"
 			case playbookFound:

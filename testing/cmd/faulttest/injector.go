@@ -195,9 +195,14 @@ func (inj *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN.
 	// Also set PGPASSWORD when the infra config supplies a password via
 	// password_env, preventing psql from opening /dev/tty and hanging.
+	// FAULTTEST_CONTAINER is the docker/podman container name from the infra
+	// config, used by docker-based inject/teardown scripts.
 	env := append(os.Environ(), "FAULTTEST_CONN="+connStr)
 	if pgpassword != "" {
 		env = append(env, "PGPASSWORD="+pgpassword)
+	}
+	if containerName := inj.resolvedContainerName(); containerName != "" {
+		env = append(env, "FAULTTEST_CONTAINER="+containerName)
 	}
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
@@ -226,6 +231,21 @@ func (inj *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 		}
 	}
 	return inj.cfg.ConnStr, ""
+}
+
+// resolvedContainerName returns the container_name from the infra config for
+// the current --conn target, or "" if not configured. Exposed to inject scripts
+// as $FAULTTEST_CONTAINER so docker-based external faults can target the right
+// container without hardcoding a name.
+func (inj *Injector) resolvedContainerName() string {
+	if inj.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(inj.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[inj.cfg.ConnStr]; ok {
+				return db.ContainerName
+			}
+		}
+	}
+	return ""
 }
 
 // execSSH runs a script on a remote host via SSH.
@@ -259,6 +279,16 @@ func (inj *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
 	default:
 		return fmt.Errorf("ssh_exec: script or script_inline is required")
 	}
+
+	// Prepend variable exports so the remote script can use $FAULTTEST_CONN
+	// and $FAULTTEST_CONTAINER without requiring the SSH server to accept env vars.
+	connStr, _ := inj.resolvedConnEnv()
+	var preamble strings.Builder
+	fmt.Fprintf(&preamble, "export FAULTTEST_CONN=%q\n", connStr)
+	if containerName := inj.resolvedContainerName(); containerName != "" {
+		fmt.Fprintf(&preamble, "export FAULTTEST_CONTAINER=%q\n", containerName)
+	}
+	scriptContent = append([]byte(preamble.String()), scriptContent...)
 
 	args := []string{"-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"}
 	if inj.cfg.SSHKeyPath != "" {
