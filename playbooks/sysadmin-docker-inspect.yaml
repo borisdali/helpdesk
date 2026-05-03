@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "1.3"
+version: "1.4"
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent
@@ -8,6 +8,7 @@ approval_mode: session
 escalates_to:
   - pbs_db_restart_action
   - pbs_db_restart_triage
+  - pbs_wal_disk_full
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -40,7 +41,9 @@ guidance: |
   Key signals:
   - "database system was shut down"  → clean shutdown; a simple restart will recover.
   - "out of memory" / "OOM"          → OOM kill; restart will succeed but investigate memory.
-  - "FATAL" / "PANIC"                → hard failure; do not restart without config review.
+  - "No space left on device" in pg_wal path → WAL disk full; restart will re-PANIC
+    immediately. Escalate to pbs_wal_disk_full — disk must be freed BEFORE restart.
+  - "FATAL" / "PANIC" (other)        → hard failure; do not restart without config review.
   - "received fast shutdown request" / "smart shutdown" → pg_ctl stop or SIGTERM — clean.
   - "invalid page" / "checksum failure" → data corruption; do NOT recommend restart.
   If container logs lack PostgreSQL-level detail, also call read_pg_log_file with
@@ -63,13 +66,16 @@ guidance: |
   - Recommended action and why it is safe (or not safe) to proceed
 
   Escalation rules (emit exactly one ESCALATE_TO if the condition is met):
-  - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM signals:
+  - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM/disk signals:
     ESCALATE_TO: pbs_db_restart_action
     (the restart playbook will perform and confirm the restart)
+  - logs contain "No space left on device" with a pg_wal path:
+    ESCALATE_TO: pbs_wal_disk_full
+    (disk must be freed before any restart attempt — restarting now will re-PANIC)
   - exitcode=137 / oomkilled=true:
     Do NOT escalate — describe the OOM evidence and recommend operator review
     before restarting.
-  - FATAL / PANIC / "invalid page" / "checksum failure" in logs:
+  - FATAL / PANIC (other than WAL disk full) / "invalid page" / "checksum failure":
     Do NOT escalate — these require config or data recovery, not an automated restart.
   - Any ambiguity or insufficient evidence:
     Do NOT escalate — describe what is known and what additional investigation is needed.

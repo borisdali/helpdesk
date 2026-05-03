@@ -1,0 +1,82 @@
+series_id: pbs_wal_disk_full
+name: WAL Disk Full — Recovery
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+escalates_to:
+  - pbs_db_restart_action
+problem_class: capacity
+author: aiHelpDesk
+description: |
+  Diagnose and remediate a full pg_wal directory that has stopped PostgreSQL.
+  Identify the root cause of WAL accumulation (archiving backlog, stale
+  replication slot, or genuine disk growth), guide safe cleanup, and confirm
+  the database restarts cleanly.
+symptoms:
+  - "PostgreSQL stopped with PANIC: could not write to file pg_wal/..."
+  - "No space left on device in PostgreSQL logs"
+  - "disk usage alert on PostgreSQL data volume"
+  - "write transactions failing or hanging on an otherwise healthy server"
+  - "pg_wal directory is very large (>> max_wal_size)"
+guidance: |
+  IMPORTANT: Do NOT delete files from pg_wal manually with rm. PostgreSQL
+  manages WAL segment recycling; deleting the wrong file causes unrecoverable
+  data loss. The safe cleanup paths are listed in Step 3.
+
+  Step 1 — Confirm the root cause from container logs:
+  Call check_host with the connection_string to confirm the container exited.
+  Then call get_host_logs. Look for the PANIC line:
+    PANIC:  could not write to file "pg_wal/<segment>": No space left on device
+  This confirms WAL disk full, not a process crash (exit 137) or clean stop
+  (exit 0). Note the segment name — it helps estimate how much WAL is held.
+
+  Step 2 — Diagnose WHY the WAL directory filled:
+  Call check_disk with the data directory path to see current usage.
+  If the database is reachable (it may not be), call get_pg_settings with
+  category="replication" to check:
+  - archive_mode + archive_command: if archiving is enabled, a failing
+    archive_command prevents pg_wal cleanup. Look for "archive_status/ready"
+    files (many ready files = archiver is stuck).
+  - max_replication_slots / pg_replication_slots: a stale or disconnected
+    slot with a low restart_lsn prevents WAL recycling until the slot is
+    dropped or the replica reconnects.
+  - wal_keep_size: a very high value forces PostgreSQL to retain more WAL
+    than necessary.
+
+  Common root causes:
+  - Archive command failure (network, S3 credentials, backup server down)
+  - Stale replication slot (replica disconnected, never restarted)
+  - Genuine growth from high write workload + small data volume
+  - Runaway WAL from a long-running transaction or logical replication slot
+
+  Step 3 — Safe cleanup (choose the right path):
+  a) If archive backlog: fix the archiver first (restore connectivity,
+     rotate credentials). Once pg_archive_cleanup can run, WAL will recede.
+     Do NOT delete "ready" files — that breaks WAL archiving continuity.
+  b) If stale replication slot: confirm the replica is permanently gone,
+     then recommend: SELECT pg_drop_replication_slot('<slot_name>');
+     (This requires operator approval — a destructive write.)
+  c) If no archiving or slots are involved: the disk is simply full.
+     Expand the volume, or remove large files in OTHER directories (logs,
+     core dumps) to create headroom. Never touch pg_wal files directly.
+
+  Step 4 — Free enough space and restart:
+  At least 3× max_wal_size (default 1 GB → 3 GB headroom) is needed to
+  restart safely. Once space is freed, emit ESCALATE_TO: pbs_db_restart_action
+  so the restart playbook confirms the database comes back cleanly.
+
+  Step 5 — Post-restart validation:
+  After restart confirm:
+  - check_host shows container running
+  - get_host_logs shows "database system is ready to accept connections"
+  - If archiving was the cause, verify archive_status/ready count is
+    declining (archiver is making progress)
+
+escalation:
+  - "pg_wal directory contains active replication slots — dropping requires operator confirmation"
+  - "archive backlog > 1000 WAL segments — recovery may take significant time"
+  - "data volume has no free space at the filesystem level — requires volume expansion"
+  - "logs contain 'invalid page' or 'checksum failure' — data corruption, do not restart"
+target_hints: []

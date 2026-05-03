@@ -68,8 +68,14 @@ aiHelpDesk ships 9 expert-authored system Playbooks that are seeded into auditd 
 | `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
 | `pbs_sysadmin_docker_inspect` | Sysadmin — Docker Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
 | `pbs_db_restart_action` | Sysadmin — Docker Container Restart | availability | sysadmin | `restart_container`, `check_host`, `check_connection` |
+| `pbs_wal_disk_full` | WAL Disk Full — Recovery | capacity | sysadmin | `check_host`, `get_host_logs`, `check_disk`, `get_pg_settings` |
 
-The "Database Down" Playbooks form a three-step escalating sequence for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, or was OOM-killed, then revises the root-cause hypothesis accordingly. If inspection confirms a clean shutdown or OOM condition that warrants a restart, it escalates to **Docker Container Restart** (`pbs_db_restart_action`), which performs the actual `restart_container` call and verifies connectivity. `pbs_db_restart_action` has `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` for the restart step and must invoke it explicitly, regardless of the requester's mode.
+The "Database Down" Playbooks form an escalating triage graph for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, was OOM-killed, or hit a WAL disk full condition, then revises the root-cause hypothesis accordingly.
+
+- **Clean shutdown or OOM kill**: Inspection escalates to **Docker Container Restart** (`pbs_db_restart_action`), which performs the actual `restart_container` call and verifies connectivity.
+- **WAL disk full** (`PANIC: could not write to file "pg_wal/...": No space left on device` in logs): Inspection escalates to **WAL Disk Full — Recovery** (`pbs_wal_disk_full`), which diagnoses the root cause of WAL accumulation (archiving backlog, stale replication slot, or genuine growth) and guides safe cleanup before any restart attempt. Restarting without first freeing disk space will re-PANIC immediately.
+
+Both `pbs_db_restart_action` and `pbs_wal_disk_full` have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
 
 Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 
@@ -470,23 +476,31 @@ Only one Playbook per `problem_class` should have `entry_point: true`.
 ```
 pbs_db_restart_triage  (entry_point: true)
         │
-        ├─ K8s: logs show bad config   → pbs_db_config_recovery
-        │                                       │
-        │                                       └─ logs show corrupt data → pbs_db_pitr_recovery
+        ├─ K8s: logs show bad config      → pbs_db_config_recovery
+        │                                          │
+        │                                          └─ logs show corrupt data → pbs_db_pitr_recovery
         │
         ├─ K8s: logs show corrupt/missing files → pbs_db_pitr_recovery
         │
         └─ Docker-hosted DB (agent cannot read docker logs)
-                                       → pbs_sysadmin_docker_inspect
-                                           (sysadmin agent reads container
-                                            state + logs, revises hypothesis)
+                                          → pbs_sysadmin_docker_inspect
+                                              (sysadmin agent reads container
+                                               state + logs, revises hypothesis)
+                                                    │
+                                                    ├─ exitcode=0, clean shutdown
+                                                    │       → pbs_db_restart_action [manual]
+                                                    │
+                                                    └─ "No space left on device" in pg_wal
+                                                            → pbs_wal_disk_full [manual]
+                                                              (free disk space first,
+                                                               then restart)
 ```
 
 The agent is prompted with the escalation paths at run time:
 
 > "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`, `pbs_sysadmin_docker_inspect`"
 
-For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised, or corrected.
+For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised, or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
 
 ### Requires-evidence warnings
 

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const builtinMinimum = 27
+const builtinMinimum = 28
 
 func TestLoadCatalog_Valid(t *testing.T) {
 	// Load the real catalog and verify structure.

@@ -31,8 +31,9 @@ The tool was designed for two complementary use cases:
    - [vault](#56-vault) — see also [VAULT.md](VAULT.md) for the full flywheel concept
 6. [Fault catalog](#6-fault-catalog)
    - [External-compatible faults](#61-external-compatible-faults)
-   - [SSH-injectable faults](#62-ssh-injectable-faults)
-   - [Remediation specs](#63-remediation-specs)
+   - [Docker Compose faults (internal only)](#62-docker-compose-faults-internal-only)
+   - [SSH-injectable faults](#63-ssh-injectable-faults)
+   - [Remediation specs](#64-remediation-specs)
 7. [Example workflows](#7-example-workflows)
    - [Smoke test a staging database](#71-smoke-test-a-staging-database)
    - [Full run with remediation](#72-full-run-with-remediation)
@@ -561,7 +562,19 @@ These faults work against any PostgreSQL instance accessible over libpq. No Dock
 | `db-idle-in-transaction` | Session stuck with uncommitted writes | high |
 | `db-terminate-direct-command` | Direct terminate — inspect-first check | high |
 
-### 6.2 SSH-injectable faults
+### 6.2 Docker Compose faults (internal only)
+
+These faults require the Docker Compose test environment (`testing/docker/`). They operate at the container and host level and are not suitable for external or SSH injection. Run them with the internal harness against the `helpdesk-test-pg` container.
+
+| ID | Name | Severity | Category | What it does |
+|----|------|----------|----------|--------------|
+| `host-container-stopped` | Database container stopped | critical | host | `docker stop` on the postgres service; sysadmin agent must identify clean exit (exitcode=0) |
+| `host-pg-crash` | PostgreSQL process crash | critical | host | `docker kill --signal SIGKILL`; sysadmin agent must distinguish crash (exitcode=137) from clean stop |
+| `db-wal-disk-full` | WAL disk full — writes failing | critical | host | Fills `pg_wal/` via `docker exec dd`; forces `pg_switch_wal()` to trigger PANIC; teardown mounts the pgdata volume in a temporary Alpine container to remove the filler, then restarts postgres |
+
+`db-wal-disk-full` is not external-compatible: safely filling a real server's WAL directory requires Docker or SSH access, and the teardown involves restarting postgres — too invasive for shared infrastructure.
+
+### 6.3 SSH-injectable faults
 
 These faults require OS-level access to the database host and are injected via SSH. Not included in `--external` runs.
 
@@ -571,7 +584,7 @@ These faults require OS-level access to the database host and are injected via S
 | `db-process-kill` | PostgreSQL postmaster killed | critical | Sends SIGKILL to the postmaster PID |
 | `db-config-bad-param` | postgresql.conf invalid parameter | high | Appends `shared_buffers = 999GB` to postgresql.conf |
 
-### 6.3 Remediation specs
+### 6.4 Remediation specs
 
 Some faults carry a `remediation` block that identifies the recovery action. When `--remediate` is set, `faulttest` triggers this action after the diagnosis phase.
 
@@ -928,7 +941,7 @@ faulttest run --external \
 
 ### 9.1 Overview
 
-Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 27 built-in faults. Customer catalog files layer on top of this without modifying the binary.
+Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 28 built-in faults. Customer catalog files layer on top of this without modifying the binary.
 
 A customer catalog is a plain YAML file you author, validate with `faulttest validate`, and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
 
@@ -1166,4 +1179,4 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
   governance_gap: false          # true = known gap; failure is logged, not asserted
 ```
 
-After adding a fault, the test count floor checks in both test files will still pass (they assert `>= 27`, not exactly 27), so no test edits are required for additions. Run `go test ./testing/faultlib/... ./testing/cmd/faulttest/...` to confirm.
+After adding a fault, the test count floor checks in both test files will still pass (they assert `>= 28`, not exactly 28), so no test edits are required for additions. Run `go test ./testing/faultlib/... ./testing/cmd/faulttest/...` to confirm.

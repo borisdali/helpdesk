@@ -1371,3 +1371,46 @@ failures:
       expected_diagnosis:
         category: "compound_no_endpoints"
     timeout: 90s
+
+  - id: db-wal-disk-full
+    name: "WAL disk full — writes failing"
+    category: host
+    severity: critical
+    description: >
+      The pg_wal directory fills to capacity, leaving no room for new WAL
+      segments. PostgreSQL emits PANIC ("could not write to file pg_wal/...:
+      No space left on device") and stops. The database is unreachable.
+      The sysadmin agent must read container logs to distinguish disk-full
+      from a process crash or clean shutdown, then guide safe WAL cleanup
+      before restart.
+    inject:
+      type: shell_exec
+      script: sql/inject_wal_disk_full.sh
+    teardown:
+      type: shell_exec
+      script: sql/teardown_wal_disk_full.sh
+    external_compat: false
+    prompt: >
+      The database server 'faulttest-db' is unreachable — connection refused.
+      Please check the host-level status of the server and investigate why
+      the database process has stopped.
+    evaluation:
+      expected_tools:
+        - check_host
+        - get_host_logs
+      expected_keywords:
+        any_of:
+          - "pg_wal"
+          - "WAL"
+          - "disk"
+          - "space"
+          - "No space left"
+          - "PANIC"
+      expected_diagnosis:
+        category: "wal_disk_full"
+        narrative: >
+          The agent should identify that PostgreSQL stopped due to a full WAL
+          disk (PANIC in logs, not SIGKILL exit code 137 and not a clean stop
+          exit code 0), and recommend freeing disk space in pg_wal before
+          restarting the database.
+    timeout: 90s
