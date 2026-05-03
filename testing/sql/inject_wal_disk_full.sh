@@ -2,8 +2,14 @@
 #
 # aiHelpDesk fault injection script.
 #
-# Fill the pg_wal directory to within ~10 MB of the volume limit, then
-# force a WAL segment switch to trigger a PANIC immediately.
+# Simulate a WAL disk full PANIC: write the PANIC message to PID 1's stderr
+# (visible in docker logs), then send SIGABRT to the postmaster so the
+# container exits with a non-zero code — exactly how a real ENOSPC crash
+# appears to an observer using check_host + get_host_logs.
+#
+# Filling the actual filesystem is not used here because Docker Desktop
+# reports theoretical disk space (hundreds of GB) that doesn't reflect the
+# real VM disk image size, making dd-based fills unreliable and slow.
 #
 # Runs on the test host (shell_exec); requires Docker.
 
@@ -17,24 +23,37 @@ if ! docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null | gre
   exit 1
 fi
 
-# Calculate how much to fill (leave 10 MB free so teardown has headroom).
-AVAIL_KB=$(docker exec "$CONTAINER" df -k /var/lib/postgresql/data | awk 'NR==2{print $4}')
-FILL_MB=$(( AVAIL_KB / 1024 - 10 ))
-if [ "$FILL_MB" -le 0 ]; then
-  echo "ERROR: less than 10 MB free on data volume (${AVAIL_KB} KB available)" >&2
+# Write the PANIC message to PID 1's stderr so it appears in docker logs.
+# PostgreSQL's real ENOSPC PANIC goes through elog(), which also writes to
+# stderr — the container's captured output stream.
+docker exec "$CONTAINER" bash -c \
+  'printf "PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device\n" > /proc/1/fd/2'
+
+# Read the postmaster PID and send SIGABRT — the same signal PostgreSQL's
+# PANIC handler triggers via abort().  This exits the container with a
+# non-zero code (OOMKilled=false, ExitCode≠0), distinct from a clean stop.
+PG_PID=$(docker exec "$CONTAINER" head -1 /var/lib/postgresql/data/postmaster.pid 2>/dev/null)
+if [ -z "$PG_PID" ]; then
+  echo "ERROR: could not read postmaster.pid" >&2
   exit 1
 fi
 
-echo "Filling pg_wal with ${FILL_MB} MB (${AVAIL_KB} KB was free)"
-docker exec "$CONTAINER" dd if=/dev/zero \
-  of=/var/lib/postgresql/data/pg_wal/FAULTTEST_WAL_FILLER \
-  bs=1M count="$FILL_MB" 2>&1
+docker exec "$CONTAINER" kill -SIGABRT "$PG_PID" || true
 
-# Force a WAL segment switch.  PostgreSQL will attempt to open a new segment,
-# hit ENOSPC, and emit PANIC — the process exits and the container stops.
-# The psql call is expected to fail; ignore its exit code.
-docker exec "$CONTAINER" psql -U postgres \
-  -c "SELECT pg_switch_wal();" 2>&1 || true
+# Wait up to 10 s for the container to stop.
+for i in $(seq 1 10); do
+  STATUS=$(docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null || echo "false")
+  if [ "$STATUS" != "true" ]; then
+    EXIT_CODE=$(docker inspect --format "{{.State.ExitCode}}" "$CONTAINER" 2>/dev/null || echo "?")
+    echo "Container stopped (ExitCode=${EXIT_CODE})"
+    exit 0
+  fi
+  sleep 1
+done
 
+# Fallback: SIGABRT may have been delivered to a worker process that already
+# exited; try again with SIGKILL on the postmaster.
+docker exec "$CONTAINER" kill -SIGKILL "$PG_PID" 2>/dev/null || true
 sleep 2
-echo "Injection complete — postgres PANIC expected, container may have stopped"
+echo "Container stopped (SIGKILL fallback)"
+exit 0
