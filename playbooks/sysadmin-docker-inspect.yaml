@@ -25,7 +25,9 @@ guidance: |
   confirmed "connection refused" — your job is to explain WHY using host/container tools.
 
   Do NOT call any psql-based tools — the database is down.
-  Do NOT attempt a restart — describe the recommended action for operator approval.
+  Do NOT call restart_container or restart_service under any circumstances —
+  even if the root cause is unclear. Insufficient evidence is itself a finding.
+  Describe the recommended action for operator approval and stop.
 
   Step 1 — Container state:
   Call check_host with the connection_string (target). Read these fields carefully:
@@ -46,8 +48,10 @@ guidance: |
   - "FATAL" / "PANIC" (other)        → hard failure; do not restart without config review.
   - "received fast shutdown request" / "smart shutdown" → pg_ctl stop or SIGTERM — clean.
   - "invalid page" / "checksum failure" → data corruption; do NOT recommend restart.
-  If container logs lack PostgreSQL-level detail, also call read_pg_log_file with
-  filter="FATAL" to inspect the PostgreSQL log file directly.
+  If container logs lack PostgreSQL-level detail, also call read_pg_log_file
+  with filter="PANIC" to look for disk/WAL crash evidence (PostgreSQL PANIC
+  is more severe than FATAL and is what ENOSPC triggers). Also call it again
+  with filter="FATAL" to catch configuration and authentication failures.
 
   Step 3 — Memory (only if oomkilled=true or logs mention OOM):
   Call check_memory with target set. Report the memory headroom and recommend a

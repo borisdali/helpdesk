@@ -2,14 +2,14 @@
 #
 # aiHelpDesk fault injection script.
 #
-# Simulate a WAL disk full PANIC: write the PANIC message to PID 1's stderr
-# (visible in docker logs), then send SIGABRT to the postmaster so the
-# container exits with a non-zero code — exactly how a real ENOSPC crash
-# appears to an observer using check_host + get_host_logs.
+# Simulate a WAL disk full PANIC: append the PANIC message to PostgreSQL's
+# log file (with logging_collector=on, that's where the agent will look),
+# then SIGKILL the container from outside so it exits with a non-zero code
+# (ExitCode=137, OOMKilled=false) — indistinguishable from an internal crash
+# to check_host, and the log file carries the diagnostic evidence.
 #
-# Filling the actual filesystem is not used here because Docker Desktop
-# reports theoretical disk space (hundreds of GB) that doesn't reflect the
-# real VM disk image size, making dd-based fills unreliable and slow.
+# Writing to /proc/1/fd/2 is blocked by Docker Desktop's seccomp profile
+# even as root, so we write directly to the log file instead.
 #
 # Runs on the test host (shell_exec); requires Docker.
 
@@ -23,22 +23,25 @@ if ! docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null | gre
   exit 1
 fi
 
-# Write the PANIC message to PID 1's stderr so it appears in docker logs.
-# PostgreSQL's real ENOSPC PANIC goes through elog(), which also writes to
-# stderr — the container's captured output stream.
-docker exec "$CONTAINER" bash -c \
-  'printf "PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device\n" > /proc/1/fd/2'
+# Append the PANIC message to the PostgreSQL log file.
+# With logging_collector=on the log is at $PGDATA/log/postgresql.log.
+# docker exec runs as root, which can append to files owned by the
+# postgres user.
+TS=$(docker exec "$CONTAINER" date -u '+%Y-%m-%d %H:%M:%S.000 UTC')
+docker exec "$CONTAINER" bash -c "
+  mkdir -p /var/lib/postgresql/data/log
+  echo '${TS} [1] FATAL:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' \
+    >> /var/lib/postgresql/data/log/postgresql.log
+  echo '${TS} [1] PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' \
+    >> /var/lib/postgresql/data/log/postgresql.log
+  echo '${TS} [1] LOG:  startup process (PID 1) was terminated by signal 6: Aborted' \
+    >> /var/lib/postgresql/data/log/postgresql.log
+"
 
-# Read the postmaster PID and send SIGABRT — the same signal PostgreSQL's
-# PANIC handler triggers via abort().  This exits the container with a
-# non-zero code (OOMKilled=false, ExitCode≠0), distinct from a clean stop.
-PG_PID=$(docker exec "$CONTAINER" head -1 /var/lib/postgresql/data/postmaster.pid 2>/dev/null)
-if [ -z "$PG_PID" ]; then
-  echo "ERROR: could not read postmaster.pid" >&2
-  exit 1
-fi
-
-docker exec "$CONTAINER" kill -SIGABRT "$PG_PID" || true
+# Kill the container from outside — no /proc permission issues.
+# SIGKILL gives ExitCode=137, OOMKilled=false, which the sysadmin guidance
+# routes to "process exited with error, check logs".
+docker kill "$CONTAINER" > /dev/null
 
 # Wait up to 10 s for the container to stop.
 for i in $(seq 1 10); do
@@ -51,9 +54,5 @@ for i in $(seq 1 10); do
   sleep 1
 done
 
-# Fallback: SIGABRT may have been delivered to a worker process that already
-# exited; try again with SIGKILL on the postmaster.
-docker exec "$CONTAINER" kill -SIGKILL "$PG_PID" 2>/dev/null || true
-sleep 2
-echo "Container stopped (SIGKILL fallback)"
+echo "Warning: container still running after 10 s"
 exit 0

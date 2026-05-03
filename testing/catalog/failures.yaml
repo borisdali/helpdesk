@@ -1398,6 +1398,7 @@ failures:
       expected_tools:
         - check_host
         - get_host_logs
+        - read_pg_log_file
       expected_keywords:
         any_of:
           - "pg_wal"
@@ -1410,9 +1411,10 @@ failures:
         category: "wal_disk_full"
         narrative: >
           The agent should identify that PostgreSQL stopped due to a full WAL
-          disk (PANIC in logs, not SIGKILL exit code 137 and not a clean stop
-          exit code 0), and recommend freeing disk space in pg_wal before
-          restarting the database.
+          disk (PANIC in the pg log file). With logging_collector=on, the PANIC
+          is not visible in docker container logs — the agent must call
+          read_pg_log_file after finding docker logs uninformative. The agent
+          should recommend freeing disk space in pg_wal before restarting.
     timeout: 90s
     remediation:
       playbook_id: pbs_wal_disk_full

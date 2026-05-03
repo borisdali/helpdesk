@@ -8,7 +8,7 @@
       "k8s_namespace": "helpdesk-test",
       "vm_name": "faulttest-vm",
       "container_name": "helpdesk-test-pg",
-      "tags": ["development"]
+      "tags": ["development", "chaos"]
     }
   },
 

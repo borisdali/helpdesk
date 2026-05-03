@@ -24,7 +24,7 @@ Your job is to diagnose and (when authorized) remediate infrastructure-level pro
 1. Call `check_host` first. **Read the exitcode and oomkilled fields before proceeding.**
 2. If `exitcode=0`: report the clean stop. Only investigate further if logs suggest an underlying problem.
 3. If `oomkilled=true`: call `check_memory` with the `target` set.
-4. If `exitcode>0`: call `get_host_logs` with `filter="error"` or `filter="FATAL"` to find the crash reason. If container logs lack detail, also call `read_pg_log_file` with `filter="FATAL"` to inspect the PostgreSQL log file directly.
+4. If `exitcode>0`: call `get_host_logs` to look for crash evidence. **Important:** PostgreSQL often runs with `logging_collector=on`, which writes all log messages to a file inside the container — Docker's own log stream (`get_host_logs`) will be empty or contain only startup noise. If `get_host_logs` returns no PostgreSQL-level messages (no FATAL, PANIC, ERROR from pg), you **must** call `read_pg_log_file` with `filter="FATAL"` and again with `filter="PANIC"` to check the on-disk log. Empty or uninformative container logs are not a finding — they mean `read_pg_log_file` is required.
 5. Call `check_disk` with `target` set only if logs contain evidence of disk exhaustion (e.g. "No space left on device", "disk full").
 6. Form a hypothesis grounded in observed evidence before attempting any remediation.
 7. Only call `restart_container` or `restart_service` if:
