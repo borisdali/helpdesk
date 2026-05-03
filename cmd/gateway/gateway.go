@@ -58,6 +58,7 @@ type Gateway struct {
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
 	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
 	metrics          *GatewayMetrics         // Prometheus-compatible metrics endpoint
+	crystalBall       bool                    // when true, bypass playbook guidance/chaining — for demo/comparison only
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -134,6 +135,14 @@ func (g *Gateway) SetUsersFile(path string) {
 // SetMetrics sets the Prometheus-compatible metrics store for the gateway.
 func (g *Gateway) SetMetrics(m *GatewayMetrics) {
 	g.metrics = m
+}
+
+// SetCrystalBall enables crystal-ball mode: playbook guidance, structured output
+// requirements, and escalation chaining are all bypassed. The agent receives
+// only the operator's question and its tool set, with no expert scaffolding.
+// Intended for demo and LLM benchmark comparisons only — not for production use.
+func (g *Gateway) SetCrystalBall(enabled bool) {
+	g.crystalBall = enabled
 }
 
 // GatewayMetrics tracks gateway-level operational counters in Prometheus text format.

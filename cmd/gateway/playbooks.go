@@ -293,7 +293,12 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 	}
 
 	serverTypeHint := buildServerTypeHint(g.infra, req.ConnectionString)
-	prompt := assembleTriagePrompt(pb, req, serverTypeHint)
+	var prompt string
+	if g.crystalBall {
+		prompt = assembleCrystalBallPrompt(req, serverTypeHint)
+	} else {
+		prompt = assembleTriagePrompt(pb, req, serverTypeHint)
+	}
 
 	// Propagate approval mode into context so proxyToAgentWithTool can enforce
 	// it before proxying write/destructive calls within this run.
@@ -381,6 +386,20 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				"intended", req.ConnectionString,
 				"actual", drift)
 		}
+	}
+
+	// Oracle mode: skip chaining and structured output; inject warning then return.
+	if g.crystalBall {
+		extra["crystal_ball"] = true
+		extra["crystal_ball_warning"] = "Crystal-ball mode is active. Playbook guidance, hypothesis formatting, and escalation chaining are bypassed. " +
+			"This response reflects the LLM's unscaffolded judgment over available tools. " +
+			"Not recommended for production use."
+		injectFields(w, primary.capture, extra)
+		if runID != "" {
+			go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
+				runID, primary.outcome, "", primary.findings, nil)
+		}
+		return
 	}
 
 	// Escalation handling: auto-chain or return suggested_next.
@@ -788,40 +807,113 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	return b.String()
 }
 
+// assembleCrystalBallPrompt builds a minimal prompt for crystal-ball mode: no playbook
+// guidance, no hypothesis format, no escalation paths. The LLM receives only
+// the target, operator context, and infrastructure type hint — then decides
+// freely which tools to call and what to conclude.
+//
+// This intentionally mirrors what a capable LLM would do if given raw tool
+// access without any expert scaffolding. Use it to benchmark unguided LLM
+// diagnosis against structured playbook runs.
+func assembleCrystalBallPrompt(req PlaybookRunRequest, serverTypeHint string) string {
+	var b strings.Builder
+
+	b.WriteString("You are a database operations assistant with access to diagnostic tools.\n\n")
+
+	if req.ConnectionString != "" {
+		fmt.Fprintf(&b, "The operator is reporting that %q is unavailable. Investigate using whatever tools you judge appropriate and explain what you find.\n", req.ConnectionString)
+		if serverTypeHint != "" {
+			fmt.Fprintf(&b, "%s\n", serverTypeHint)
+		}
+	} else {
+		b.WriteString("The operator needs help diagnosing a database issue. Investigate and explain what you find.\n")
+	}
+
+	if req.Context != "" {
+		fmt.Fprintf(&b, "\nAdditional context from the operator:\n%s\n", req.Context)
+	}
+
+	b.WriteString("\nUse your tools to investigate. When you have a diagnosis, explain your findings and what you recommend.\n")
+
+	return b.String()
+}
+
 // fetchPlaybook retrieves a single playbook record from auditd.
+// id may be either a playbook UUID or a series_id (e.g. "pbs_db_restart_triage").
+// When the direct GET returns 404, it falls back to a list?series_id= query
+// and returns the active version.
 func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook, error) {
-	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbooks/" + id
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	base := strings.TrimSuffix(g.auditURL, "/")
+	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	doGet := func(url string) (*audit.Playbook, int, error) {
+		req, err := http.NewRequestWithContext(ctx2, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		if g.auditAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, resp.StatusCode, nil
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, resp.StatusCode, err
+		}
+		var pb audit.Playbook
+		if err := json.Unmarshal(body, &pb); err != nil {
+			return nil, resp.StatusCode, err
+		}
+		return &pb, resp.StatusCode, nil
+	}
+
+	// Try direct lookup by playbook_id first.
+	pb, status, err := doGet(base + "/v1/fleet/playbooks/" + id)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusOK {
+		return pb, nil
+	}
+
+	// Fall back to series_id list query (handles "pbs_*" series IDs).
+	listURL := base + "/v1/fleet/playbooks?series_id=" + id + "&active_only=true"
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, listURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	req = req.WithContext(ctx2)
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("not found")
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("not found")
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	var pb audit.Playbook
-	if err := json.Unmarshal(body, &pb); err != nil {
+	var wrapper struct {
+		Playbooks []*audit.Playbook `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &wrapper); err != nil {
 		return nil, err
 	}
-	return &pb, nil
+	if len(wrapper.Playbooks) == 0 {
+		return nil, fmt.Errorf("not found")
+	}
+	return wrapper.Playbooks[0], nil
 }
 
 // fetchPlaybookRun retrieves a single run record from auditd by run_id.
