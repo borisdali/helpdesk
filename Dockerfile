@@ -63,6 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
     lsb-release \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # PostgreSQL 16 client.

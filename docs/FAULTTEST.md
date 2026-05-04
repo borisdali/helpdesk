@@ -189,7 +189,7 @@ faulttest inject --id db-pg-hba-corrupt \
 
 The target host in the fault spec (`exec_via`) can be overridden by `--ssh-host`. SSH options used: `-o StrictHostKeyChecking=no -o BatchMode=yes`.
 
-SSH-injectable faults are **not** marked `external_compat` — they require OS access and are excluded from `--external` runs.
+SSH-injectable faults for the most part are **not** marked `external_compat` because they require OS access and are excluded from `--external` runs. There are some safe exceptions thought, e.g. `db-wal-disk-full`.  See [here](FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for a sample fault injection via SSH.
 
 ### 3.3 Remediation mode
 

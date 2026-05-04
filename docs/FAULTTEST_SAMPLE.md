@@ -500,7 +500,7 @@ And finally review the JSON file with the results, similar to the host and Docke
 
 ## External fault injection with SSH
 
-Some faults require OS-level access to the database host — for example, `db-wal-disk-full` injects fake FATAL/PANIC entries into the PostgreSQL log file and kills the process to simulate a WAL disk exhaustion crash. These faults use `ssh_exec` injection: `faulttest` streams a shell script to the database host over SSH, so no files need to be pre-staged there. The inject and teardown scripts are embedded in the fault catalog.
+Some faults require OS-level access to the database host. For example, `db-wal-disk-full` injects fake FATAL/PANIC entries into the PostgreSQL log file and kills the process to simulate a WAL disk exhaustion crash. These faults use `ssh_exec` injection: `faulttest` streams a shell script to the database host over SSH, so no files need to be pre-staged there. The inject and teardown scripts are embedded in the fault catalog.
 
 Pass `--ssh-host` (or set `--ssh-user` / `--ssh-key` separately) to enable SSH injection. When `--external` is also set, the run is restricted to the `external_compat` subset of faults, which includes both SQL-only faults and SSH-injectable faults like `db-wal-disk-full`. See [FAULTTEST.md §3.2](FAULTTEST.md#32-ssh-injection-mode) for the full reference.
 
