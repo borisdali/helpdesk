@@ -280,10 +280,17 @@ func (inj *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
 		return fmt.Errorf("ssh_exec: script or script_inline is required")
 	}
 
-	// Prepend variable exports so the remote script can use $FAULTTEST_CONN
-	// and $FAULTTEST_CONTAINER without requiring the SSH server to accept env vars.
+	// Prepend a profile source + variable exports so the remote script can use
+	// $FAULTTEST_CONN and $FAULTTEST_CONTAINER without requiring the SSH server
+	// to accept env vars.  Non-interactive bash -s sessions don't load ~/.bashrc
+	// or ~/.profile, so docker/kubectl may not be in PATH without this.
 	connStr, _ := inj.resolvedConnEnv()
 	var preamble strings.Builder
+	// Extend PATH to cover common Docker/kubectl install locations.
+	// Non-interactive SSH sessions on macOS/Linux start with a minimal PATH
+	// (/usr/bin:/bin) — Docker Desktop, Homebrew, and nvm all install outside
+	// that.  We extend rather than replace so any existing entries are kept.
+	preamble.WriteString(`export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"` + "\n")
 	fmt.Fprintf(&preamble, "export FAULTTEST_CONN=%q\n", connStr)
 	if containerName := inj.resolvedContainerName(); containerName != "" {
 		fmt.Fprintf(&preamble, "export FAULTTEST_CONTAINER=%q\n", containerName)

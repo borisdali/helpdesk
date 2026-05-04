@@ -1142,6 +1142,42 @@ When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnos
 
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
 
+### SSH injection mode
+
+Some faults require OS-level access to the database host (e.g. `db-wal-disk-full`, which injects FATAL/PANIC log entries and kills the PostgreSQL process to simulate WAL disk exhaustion). These use `ssh_exec` injection: the fault script is streamed to the host over SSH, so no files need to be pre-staged there.
+
+Create a Secret with the SSH private key (once), then submit a Job that mounts it:
+
+```bash
+kubectl create secret generic faulttest-ssh-key \
+  --from-file=id_rsa=/path/to/your/ssh/private/key \
+  --namespace helpdesk-system
+```
+
+Add these args, env, volume mount, and volume to the Job spec from Step 2 above:
+
+```yaml
+args:
+  # ... existing args ...
+  - --external
+  - --ssh-host=db-host.internal
+  - --ssh-user=ubuntu
+  - --ssh-key=/etc/faulttest-ssh/id_rsa
+volumeMounts:
+  # ... existing mounts ...
+  - name: ssh-key
+    mountPath: /etc/faulttest-ssh
+    readOnly: true
+volumes:
+  # ... existing volumes ...
+  - name: ssh-key
+    secret:
+      secretName: faulttest-ssh-key
+      defaultMode: 0600
+```
+
+`--ssh-host` alone is sufficient to trigger SSH injection mode; `--external` additionally restricts the run to the `external_compat` subset of faults. The `FAULTTEST_CONTAINER` variable is resolved automatically from `infrastructure.json` and passed to inject/teardown scripts — you do not need to set it manually. The SSH target must be reachable from the Kubernetes node (same VPC, egress policy permits port 22). See [docs/FAULTTEST_SAMPLE.md](../../docs/FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for the full Job YAML and a sample run.
+
 ## 11. Fleet Playbooks & Vault
 
 Playbooks are the operational memory of aiHelpDesk — structured, versioned remediation instructions that agents use when handling incidents. The vault is the collection of all playbooks paired with their fault scenarios, giving you a live view of operational coverage.

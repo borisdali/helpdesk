@@ -646,6 +646,33 @@ When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnos
 
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
 
+### SSH injection mode
+
+Some faults require OS-level access to the database host (e.g. `db-wal-disk-full`, which injects FATAL/PANIC log entries and kills the PostgreSQL process to simulate WAL disk exhaustion). These use `ssh_exec` injection: the fault script is streamed to the host over SSH, so no files need to be pre-staged there.
+
+Bind-mount the SSH private key into the container and pass the `--ssh-host` / `--ssh-key` flags:
+
+```bash
+docker run --rm \
+  --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" -w /output \
+  -v "$HOME/.ssh/db-host.pem:/ssh/id_rsa:ro" \
+  -e DEV_DB_PASSWORD \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest run \
+    --conn "alloydb-on-vm" \
+    --db-agent http://gateway:8080 \
+    --api-key $HELPDESK_CLIENT_API_KEY \
+    --infra-config /infrastructure.json \
+    --external \
+    --ssh-host db-host.internal \
+    --ssh-user ubuntu \
+    --ssh-key /ssh/id_rsa
+```
+
+`--ssh-host` alone is sufficient to trigger SSH injection mode; `--external` additionally restricts the run to the `external_compat` subset of faults. The `FAULTTEST_CONTAINER` variable is resolved automatically from `infrastructure.json` and passed to inject/teardown scripts — you do not need to set it manually. See [docs/FAULTTEST_SAMPLE.md](../../docs/FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for a full sample run.
+
 ## 6. Fleet Playbooks & Vault
 
 Playbooks are the operational memory of aiHelpDesk. Structured, versioned remediation instructions that agents use when handling incidents. The Vault is the collection of all Playbooks paired with their fault scenarios, giving you a live view of operational coverage.

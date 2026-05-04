@@ -1440,7 +1440,7 @@ failures:
         echo "WARNING: PostgreSQL not healthy after 60 s" >&2
         exit 1
     prompt: >
-      The database server 'faulttest-db' is unreachable — connection refused.
+      The database server '{{connection_string}}' is unreachable — connection refused.
       Please check the host-level status of the server and investigate why
       the database process has stopped.
     evaluation:
