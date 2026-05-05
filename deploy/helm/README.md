@@ -1008,14 +1008,22 @@ The binary is baked into the same Docker image as the agents, and runs as a Kube
 Because the Helm chart already knows your agent URLs, model API Secret, and infrastructure ConfigMap, you only need to name the fault and flip one flag:
 
 ```bash
+# On an existing release:
 helm upgrade helpdesk ./deploy/helm/helpdesk \
     --reuse-values \
     --set faulttest.enabled=true \
     --set faulttest.conn=test-db \
     --set faulttest.ids=db-wal-disk-full-k8s
+
+# Or at first install — --set works identically:
+helm install helpdesk ./deploy/helm/helpdesk \
+    -f my-values.yaml \
+    --set faulttest.enabled=true \
+    --set faulttest.conn=test-db \
+    --set faulttest.ids=db-wal-disk-full-k8s
 ```
 
-The chart creates a Helm-hook Job (and the required RBAC) that runs immediately after the upgrade, then self-destructs after one hour. Stream the output while it runs:
+The chart creates a Helm-hook Job (and the required RBAC) that runs immediately after the install or upgrade, then self-destructs after one hour. Stream the output while it runs:
 
 ```bash
 kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f
