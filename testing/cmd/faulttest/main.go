@@ -416,6 +416,7 @@ func cmdRun(args []string) {
 	} else {
 		fmt.Printf("Report written to %s\n", reportFile)
 	}
+	report.PrintJSON()
 
 	if cfg.NotifyURL != "" {
 		postNotify(cfg.NotifyURL, report)

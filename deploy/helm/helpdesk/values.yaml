@@ -370,6 +370,13 @@ fleetRunner:
 #   kubectl logs -l app.kubernetes.io/component=faulttest -f
 faulttest:
   # Set to true to run the faulttest Job on the next helm install/upgrade.
+  # NOTE: the Job runs as a post-install/post-upgrade hook, so `helm install`
+  # and `helm upgrade` will block until it completes (or --timeout is reached).
+  # Stream progress in a second terminal:
+  #   kubectl -n <namespace> logs -l app.kubernetes.io/component=faulttest --follow
+  # Increase the Helm timeout if running many faults:
+  #   helm upgrade ... --timeout 15m --set faulttest.enabled=true
+  # Set back to false after testing to prevent re-runs on unrelated upgrades.
   enabled: false
 
   # Connection string or infrastructure key (e.g., "test-db" when infrastructure

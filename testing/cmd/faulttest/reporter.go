@@ -78,6 +78,19 @@ func (r Report) WriteJSON(path string) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+// PrintJSON writes the full JSON report to stdout, prefixed with a sentinel
+// line so it can be extracted from `kubectl logs` output.
+func (r Report) PrintJSON() {
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not marshal report to JSON: %v\n", err)
+		return
+	}
+	fmt.Println("--- BEGIN FAULTTEST REPORT JSON ---")
+	fmt.Println(string(data))
+	fmt.Println("--- END FAULTTEST REPORT JSON ---")
+}
+
 // PrintSummary writes a human-readable summary to stdout.
 func (r Report) PrintSummary() {
 	fmt.Printf("\n=== Fault Test Report: %s ===\n\n", r.ID)
