@@ -197,12 +197,17 @@ func (inj *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	// password_env, preventing psql from opening /dev/tty and hanging.
 	// FAULTTEST_CONTAINER is the docker/podman container name from the infra
 	// config, used by docker-based inject/teardown scripts.
+	// FAULTTEST_K8S_CONTEXT is the kubectl context from --context, used by
+	// K8s shell_exec inject/teardown scripts.
 	env := append(os.Environ(), "FAULTTEST_CONN="+connStr)
 	if pgpassword != "" {
 		env = append(env, "PGPASSWORD="+pgpassword)
 	}
 	if containerName := inj.resolvedContainerName(); containerName != "" {
 		env = append(env, "FAULTTEST_CONTAINER="+containerName)
+	}
+	if inj.cfg.KubeContext != "" {
+		env = append(env, "FAULTTEST_K8S_CONTEXT="+inj.cfg.KubeContext)
 	}
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()

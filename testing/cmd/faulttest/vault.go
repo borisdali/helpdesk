@@ -259,18 +259,30 @@ func vaultList(args []string) {
 
 	const (
 		colFault     = 32
+		colPlatform  = 10
 		colPlaybook  = 26
 		colFaultTest = 22 // "2026-04-18  PASS" or "(never)" or "READY"
 		// incidents column is the remainder
 	)
-	fmt.Printf("%-*s %-*s %-*s %s\n", colFault, "FAULT", colPlaybook, "PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
-	fmt.Println(strings.Repeat("-", colFault+1+colPlaybook+1+colFaultTest+1+50))
+	fmt.Printf("%-*s %-*s %-*s %-*s %s\n", colFault, "FAULT", colPlatform, "PLATFORM", colPlaybook, "PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
+	fmt.Println(strings.Repeat("-", colFault+1+colPlatform+1+colPlaybook+1+colFaultTest+1+50))
 
 	for _, f := range cat.Failures {
 		playbookID := f.Remediation.PlaybookID
 		playbookDisplay := playbookID
 		if playbookDisplay == "" {
 			playbookDisplay = "(none)"
+		}
+
+		// ── platform column ───────────────────────────────────────────────
+		platform := map[string]string{
+			"database":   "any",
+			"kubernetes": "k8s",
+			"host":       "docker/vm",
+			"compound":   "multi",
+		}[f.Category]
+		if platform == "" {
+			platform = f.Category
 		}
 
 		// ── fault test column ────────────────────────────────────────────
@@ -327,7 +339,7 @@ func vaultList(args []string) {
 			}
 		}
 
-		fmt.Printf("%-*s %-*s %-*s %s\n", colFault, f.ID, colPlaybook, playbookDisplay, colFaultTest, faultTestCol, incidentCol)
+		fmt.Printf("%-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colPlaybook, playbookDisplay, colFaultTest, faultTestCol, incidentCol)
 	}
 }
 

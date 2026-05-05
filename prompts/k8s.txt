@@ -51,7 +51,11 @@ not in the application logs. Always follow this sequence:
      may show a healthy startup sequence from the *current* attempt — this does NOT mean
      the pod recovered. An OOMKilled pod will restart and be killed again immediately if
      the memory limit is too low. You MUST call `get_pod_resources` next.
-   - `Error` / non-zero exit code → process crashed; check pod logs for FATAL/PANIC.
+   - `Error` / non-zero exit code (and `oomkilled=false`) → the process itself crashed.
+     Call `get_pod_logs` with `previous=true` to retrieve logs from the crashed instance.
+     Look for FATAL or PANIC lines — these indicate a hard failure (e.g. disk full, corrupt
+     data, bad config). Do NOT read current pod logs for crash diagnosis — the current
+     container started fresh and its logs reflect a new attempt, not the crash.
    - `Completed` → process exited cleanly (unexpected for a database).
 
 2. If `OOMKilled`: call `get_pod_resources` to check the container memory limit and
@@ -59,10 +63,17 @@ not in the application logs. Always follow this sequence:
    Report the limit and recommend increasing it. Do NOT conclude the pod is recovering
    just because the current startup log looks healthy — it will be killed again.
 
-3. Call `get_events` to see OOMKill events, node pressure, or evictions.
+3. If `Error` (non-OOM crash): call `get_pod_logs` with `previous=true` to read the
+   crashed container's output. Key PANIC patterns to look for:
+   - "No space left on device" in a pg_wal path → WAL disk exhaustion
+   - "invalid page in block" or "checksum failure" → data corruption
+   - "could not open file" or "Permission denied" → filesystem/config issue
 
-4. Call `get_pod_logs` last — interpret logs in light of the restart reason already
-   established. Startup logs during an OOM loop are not evidence of recovery.
+4. Call `get_events` to see OOMKill events, node pressure, or evictions.
+
+5. Call `get_pod_logs` (current, no previous flag) last — interpret logs in light of
+   the restart reason already established. Startup logs during an OOM or crash loop
+   are not evidence of recovery.
 
 For LoadBalancer services, pay attention to:
 - Whether an external IP has been provisioned (look for "pending" status)
