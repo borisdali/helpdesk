@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"google.golang.org/adk/tool"
+	corev1 "k8s.io/api/core/v1"
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
@@ -593,30 +595,47 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
-	cmdArgs := []string{"logs", args.PodName}
-
-	if namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", namespace)
+	cs, err := sharedClient.clientset(kubeContext)
+	if err != nil {
+		return KubectlResult{}, err
 	}
 
-	if args.Container != "" {
-		cmdArgs = append(cmdArgs, "-c", args.Container)
-	}
-
-	tailLines := args.TailLines
+	tailLines := int64(args.TailLines)
 	if tailLines <= 0 {
 		tailLines = 50
 	}
-	cmdArgs = append(cmdArgs, "--tail", strconv.Itoa(tailLines))
-
-	if args.Previous {
-		cmdArgs = append(cmdArgs, "--previous")
+	opts := &corev1.PodLogOptions{
+		Previous:  args.Previous,
+		TailLines: &tailLines,
+	}
+	if args.Container != "" {
+		opts.Container = args.Container
 	}
 
-	output, err := runKubectlWithToolName(ctx, kubeContext, "get_pod_logs", cmdArgs...)
+	start := time.Now()
+	req := cs.CoreV1().Pods(namespace).GetLogs(args.PodName, opts)
+	stream, err := req.Stream(ctx)
 	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", err)
+		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", diagnoseClientError(err))
 	}
+	defer stream.Close()
+
+	data, err := io.ReadAll(stream)
+	duration := time.Since(start)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error reading pod logs: %v", err)
+	}
+
+	output := string(data)
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "get_pod_logs",
+			Parameters: map[string]any{"namespace": namespace, "pod_name": args.PodName, "previous": args.Previous},
+		}, audit.ToolResult{
+			Output: truncateForAudit(output, 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "get_pod_logs", "ms", duration.Milliseconds())
 	if strings.TrimSpace(output) == "" {
 		return KubectlResult{Output: "No logs available for this pod."}, nil
 	}
