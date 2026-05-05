@@ -1,4 +1,7 @@
 {{- if .Values.faulttest.enabled }}
+{{- if and (not .Values.faulttest.ids) (not .Values.faulttest.categories) }}
+  {{- fail "faulttest.ids or faulttest.categories is required when faulttest.enabled=true — running the full catalog in-cluster will fail for most faults (no Docker, no kustomize overlays). Specify e.g. --set faulttest.ids=db-wal-disk-full-k8s or --set faulttest.categories=kubernetes" }}
+{{- end }}
 {{- $fullname := include "helpdesk.fullname" . }}
 {{- $dbAgent := .Values.faulttest.dbAgentURL | default (printf "http://%s-database-agent:%d" $fullname (.Values.agents.database.port | int)) }}
 {{- $k8sAgent := .Values.faulttest.k8sAgentURL | default (printf "http://%s-k8s-agent:%d" $fullname (.Values.agents.k8s.port | int)) }}
@@ -98,7 +101,6 @@ spec:
           command: ["/usr/local/bin/faulttest"]
           args:
             - run
-            - --external=false
             {{- if .Values.faulttest.ids }}
             - --ids={{ .Values.faulttest.ids }}
             {{- end }}

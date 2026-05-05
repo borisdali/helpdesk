@@ -1475,6 +1475,7 @@ failures:
     name: "WAL disk full — writes failing (Kubernetes)"
     category: kubernetes
     severity: critical
+    external_compat: true  # injects via kubectl exec — no Docker required
     description: >
       The PostgreSQL pod emits PANIC ("could not write to file pg_wal/...:
       No space left on device") and shuts down (exit code 0, reason=Completed —
