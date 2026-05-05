@@ -155,6 +155,7 @@ func main() {
 			"k8s_agent-get_endpoints":         {"kubernetes", "endpoints", "networking"},
 			"k8s_agent-get_events":            {"kubernetes", "events", "cluster"},
 			"k8s_agent-get_pod_logs":          {"kubernetes", "logs", "debugging"},
+			"k8s_agent-read_pod_file":         {"kubernetes", "logs", "debugging"},
 			"k8s_agent-describe_pod":          {"kubernetes", "pods", "debugging"},
 			"k8s_agent-get_nodes":             {"kubernetes", "nodes", "cluster"},
 			"k8s_agent-delete_pod":            {"kubernetes", "pods", "remediation"},
@@ -226,6 +227,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	readPodFileToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "read_pod_file",
+		Description: "Read a file directly from inside a running pod via kubectl exec. Use when PostgreSQL logs to a file (logging_collector=on) rather than stdout, making get_pod_logs return empty. Supports optional line-count limit and keyword filter.",
+	}, readPodFileTool)
+	if err != nil {
+		return nil, err
+	}
+
 	describePodToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "describe_pod",
 		Description: "Get detailed information about a Kubernetes pod including status, conditions, events, and container details.",
@@ -289,6 +298,7 @@ func createTools() ([]tool.Tool, error) {
 		getEndpointsToolDef,
 		getEventsToolDef,
 		getPodLogsToolDef,
+		readPodFileToolDef,
 		describePodToolDef,
 		getNodesToolDef,
 		deletePodToolDef,

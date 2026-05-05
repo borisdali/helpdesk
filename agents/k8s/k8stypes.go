@@ -11,18 +11,27 @@ import (
 
 // --- Pod types ---
 
+// LastTerminatedState holds the exit details for the most recent container termination.
+type LastTerminatedState struct {
+	Reason    string `json:"reason"`               // e.g. "OOMKilled", "Error", "Completed"
+	ExitCode  int32  `json:"exit_code"`
+	OOMKilled bool   `json:"oomkilled"`
+	FinishedAt string `json:"finished_at,omitempty"` // RFC3339 timestamp
+}
+
 // PodInfo contains structured information about a Kubernetes pod.
 type PodInfo struct {
-	Name       string            `json:"name"`
-	Namespace  string            `json:"namespace"`
-	Phase      string            `json:"phase"`
-	Ready      string            `json:"ready"`
-	Restarts   int32             `json:"restarts"`
-	Age        string            `json:"age"`
-	IP         string            `json:"ip"`
-	Node       string            `json:"node"`
-	Labels     map[string]string `json:"labels,omitempty"`
-	Conditions []string          `json:"conditions,omitempty"`
+	Name       string               `json:"name"`
+	Namespace  string               `json:"namespace"`
+	Phase      string               `json:"phase"`
+	Ready      string               `json:"ready"`
+	Restarts   int32                `json:"restarts"`
+	Age        string               `json:"age"`
+	IP         string               `json:"ip"`
+	Node       string               `json:"node"`
+	Labels     map[string]string    `json:"labels,omitempty"`
+	Conditions []string             `json:"conditions,omitempty"`
+	LastState  *LastTerminatedState `json:"last_state,omitempty"` // set when restarts > 0
 }
 
 // GetPodsResult is the structured result for the get_pods tool.
@@ -217,6 +226,24 @@ func totalRestarts(statuses []corev1.ContainerStatus) int32 {
 		total += s.RestartCount
 	}
 	return total
+}
+
+// lastTerminatedState returns the most recent termination state from any container,
+// or nil when no container has a LastTerminationState.
+func lastTerminatedState(statuses []corev1.ContainerStatus) *LastTerminatedState {
+	for _, s := range statuses {
+		t := s.LastTerminationState.Terminated
+		if t == nil {
+			continue
+		}
+		return &LastTerminatedState{
+			Reason:     t.Reason,
+			ExitCode:   t.ExitCode,
+			OOMKilled:  t.Reason == "OOMKilled",
+			FinishedAt: t.FinishedAt.UTC().Format(time.RFC3339),
+		}
+	}
+	return nil
 }
 
 // formatPodConditions converts pod conditions to "Type=Status" strings.

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"helpdesk/internal/infra"
 	"helpdesk/testing/testutil"
@@ -49,28 +50,46 @@ func (inj *Injector) Teardown(ctx context.Context, f Failure) error {
 }
 
 func (inj *Injector) exec(ctx context.Context, spec InjectSpec, f Failure) error {
+	var err error
 	switch spec.Type {
 	case "sql":
-		return inj.execSQL(ctx, spec)
+		err = inj.execSQL(ctx, spec)
 	case "docker":
-		return inj.execDocker(ctx, spec)
+		err = inj.execDocker(ctx, spec)
 	case "docker_exec":
-		return inj.execDockerExec(ctx, spec)
+		err = inj.execDockerExec(ctx, spec)
 	case "kustomize":
-		return inj.execKustomize(ctx, spec)
+		err = inj.execKustomize(ctx, spec)
 	case "kustomize_delete":
-		return inj.execKustomizeDelete(ctx, spec)
+		err = inj.execKustomizeDelete(ctx, spec)
 	case "config":
-		return inj.execConfig(ctx, spec)
+		err = inj.execConfig(ctx, spec)
 	case "ssh_exec":
-		return inj.execSSH(ctx, spec)
+		err = inj.execSSH(ctx, spec)
 	case "shell_exec":
-		return inj.execShell(ctx, spec)
+		err = inj.execShell(ctx, spec)
 	case "":
 		return nil
 	default:
 		return fmt.Errorf("unknown injection type: %s", spec.Type)
 	}
+	if err != nil {
+		return err
+	}
+	if spec.Wait != "" {
+		d, parseErr := time.ParseDuration(spec.Wait)
+		if parseErr != nil {
+			slog.Warn("invalid wait duration, skipping", "wait", spec.Wait, "err", parseErr)
+		} else {
+			slog.Info("waiting after injection", "duration", d)
+			select {
+			case <-time.After(d):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return nil
 }
 
 func (inj *Injector) execSQL(ctx context.Context, spec InjectSpec) error {

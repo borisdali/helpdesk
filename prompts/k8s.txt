@@ -46,25 +46,40 @@ If step 1 fails with a connection or authentication error, skip all remaining st
 When a pod is restarting or in CrashLoopBackOff, the restart reason is in the pod status,
 not in the application logs. Always follow this sequence:
 
-1. Call `get_pods` — read the `lastState.terminated.reason` field carefully.
-   - `OOMKilled` → the kernel killed the container due to memory pressure. The pod logs
-     may show a healthy startup sequence from the *current* attempt — this does NOT mean
-     the pod recovered. An OOMKilled pod will restart and be killed again immediately if
-     the memory limit is too low. You MUST call `get_pod_resources` next.
-   - `Error` / non-zero exit code (and `oomkilled=false`) → the process itself crashed.
-     Call `get_pod_logs` with `previous=true` to retrieve logs from the crashed instance.
-     Look for FATAL or PANIC lines — these indicate a hard failure (e.g. disk full, corrupt
-     data, bad config). Do NOT read current pod logs for crash diagnosis — the current
-     container started fresh and its logs reflect a new attempt, not the crash.
-   - `Completed` → process exited cleanly (unexpected for a database).
+1. Call `get_pods` — read the `last_state` field in the response carefully.
+   Each pod entry includes `last_state.reason`, `last_state.exit_code`, and
+   `last_state.oomkilled`. Use these fields — do NOT guess the cause from restart count
+   or memory limits alone.
+   - `last_state.oomkilled = true` (reason `OOMKilled`) → the kernel killed the container
+     due to memory pressure. The pod logs may show a healthy startup sequence from the
+     *current* attempt — this does NOT mean the pod recovered. An OOMKilled pod will
+     restart and be killed again immediately if the memory limit is too low.
+     You MUST call `get_pod_resources` next.
+   - `last_state.oomkilled = false` with reason `Error` or non-zero exit_code → the
+     process itself crashed. Call `get_pod_logs` with `previous=true` to retrieve logs
+     from the crashed instance. Look for FATAL or PANIC lines — these indicate a hard
+     failure (e.g. disk full, corrupt data, bad config). Do NOT read current pod logs
+     for crash diagnosis — the current container started fresh.
+   - `last_state.oomkilled = false` with reason `Completed` (exit code 0) → process
+     exited cleanly, which is unexpected for a database. This happens when PostgreSQL
+     performs an emergency shutdown after a PANIC (e.g. WAL disk full triggers a
+     controlled abort). Treat the same as `Error`: call `get_pod_logs(previous=true)`,
+     then `read_pod_file` if logs are empty.
 
 2. If `OOMKilled`: call `get_pod_resources` to check the container memory limit and
    current usage. A limit of less than ~256Mi is almost always too low for PostgreSQL.
    Report the limit and recommend increasing it. Do NOT conclude the pod is recovering
    just because the current startup log looks healthy — it will be killed again.
 
-3. If `Error` (non-OOM crash): call `get_pod_logs` with `previous=true` to read the
-   crashed container's output. Key PANIC patterns to look for:
+3. If `Error` or `Completed` (non-OOM restart): call `get_pod_logs` with `previous=true`
+   to read the previous container's output. If `get_pod_logs` returns empty or
+   "No logs available" (this happens when `logging_collector=on` redirects postgres
+   output to a log file), call `read_pod_file` on the current pod to read the on-disk log:
+     file_path: /var/lib/postgresql/data/log/postgresql.log
+     filter: FATAL  (then repeat with filter: PANIC if needed)
+   The log file persists in the pgdata volume across pod restarts, so it is readable
+   from the new running pod even though the previous container is gone.
+   Key patterns to look for:
    - "No space left on device" in a pg_wal path → WAL disk exhaustion
    - "invalid page in block" or "checksum failure" → data corruption
    - "could not open file" or "Permission denied" → filesystem/config issue

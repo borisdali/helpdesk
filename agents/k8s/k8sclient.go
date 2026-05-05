@@ -234,6 +234,7 @@ func fetchPods(ctx context.Context, kubeContext, namespace, labels string) (GetP
 			Node:       p.Spec.NodeName,
 			Labels:     p.Labels,
 			Conditions: formatPodConditions(p.Status.Conditions),
+			LastState:  lastTerminatedState(p.Status.ContainerStatuses),
 		})
 	}
 

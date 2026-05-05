@@ -1477,12 +1477,12 @@ failures:
     severity: critical
     description: >
       The PostgreSQL pod emits PANIC ("could not write to file pg_wal/...:
-      No space left on device") and aborts with SIGABRT (exit code 134,
-      not OOMKilled). Simulated by writing fake PANIC lines to the
-      container's stderr then killing the postmaster with SIGABRT — no
-      disk space is consumed. The K8s agent must distinguish this from an
-      OOM kill by reading the previous container's logs and identify the
-      WAL disk full root cause.
+      No space left on device") and shuts down (exit code 0, reason=Completed —
+      postgres performs an emergency shutdown after a PANIC). Simulated by
+      writing fake PANIC lines to the on-disk postgres log file then sending
+      SIGQUIT to the postmaster — no disk space is consumed. The K8s agent
+      must notice get_pod_logs returns empty (logging_collector=on), call
+      read_pod_file on the on-disk log, and identify the WAL disk full root cause.
     inject:
       type: shell_exec
       script_inline: |
@@ -1490,24 +1490,29 @@ failures:
         CTX_ARG=""
         [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
         NS="helpdesk-test"
+        LOG="/var/lib/postgresql/data/log/postgresql.log"
         POD=$(kubectl $CTX_ARG get pod -n "$NS" -l app=postgres \
           -o jsonpath='{.items[0].metadata.name}')
         [ -z "$POD" ] && { echo "No postgres pod found in $NS" >&2; exit 1; }
         TS=$(kubectl $CTX_ARG exec -n "$NS" "$POD" -- \
           date -u '+%Y-%m-%d %H:%M:%S.000 UTC' 2>/dev/null \
           || date -u '+%Y-%m-%d %H:%M:%S.000 UTC')
-        # Write PANIC lines to container stderr — visible in kubectl logs --previous
-        # after the pod exits.
+        # Write PANIC lines to the on-disk postgres log file (logging_collector=on).
+        # The pgdata volume persists across pod restarts so the entries remain
+        # readable via read_pod_file on the new pod after the crash.
         kubectl $CTX_ARG exec -n "$NS" "$POD" -- bash -c "
-          echo '${TS} [1] FATAL:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' >&2
-          echo '${TS} [1] PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' >&2
-          echo '${TS} [1] LOG:    startup process (PID 1) was terminated by signal 6: Aborted' >&2
+          mkdir -p \$(dirname $LOG)
+          echo '${TS} [1] FATAL:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' >> $LOG
+          echo '${TS} [1] PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' >> $LOG
+          echo '${TS} [1] LOG:    startup process (PID 1) was terminated by signal 9: Killed' >> $LOG
         "
-        # Kill postmaster with SIGABRT (signal 6) — matches a real WAL PANIC abort.
-        # exit code 134 (128+6), oomkilled=false.
+        # Send SIGQUIT (fast shutdown) to the postmaster. kubectl exec returns
+        # non-zero when the pod dies, so suppress that error.
+        # PostgreSQL exits cleanly (exit code 0, reason=Completed) — this matches
+        # a real PANIC scenario where postgres performs an emergency shutdown.
         kubectl $CTX_ARG exec -n "$NS" "$POD" -- bash -c \
-          "kill -ABRT \$(head -1 /var/lib/postgresql/data/postmaster.pid)"
-        echo "PANIC lines written and postmaster killed (SIGABRT, exit code 134)"
+          'kill -QUIT $(head -1 /var/lib/postgresql/data/postmaster.pid)' || true
+        echo "PANIC lines written to $LOG and postmaster sent SIGQUIT (exit code 0)"
       wait: 15s   # allow K8s to record pod termination before prompting the agent
     teardown:
       type: shell_exec
@@ -1523,7 +1528,7 @@ failures:
     evaluation:
       expected_tools:
         - get_pods
-        - get_pod_logs
+        - read_pod_file
       expected_keywords:
         any_of:
           - "pg_wal"
@@ -1535,11 +1540,11 @@ failures:
       expected_diagnosis:
         category: "wal_disk_full"
         narrative: >
-          The agent should find that the pod exited with a non-OOM crash
-          (exitCode=134, oomkilled=false), call get_pod_logs with previous=true
-          to retrieve logs from the crashed instance, and correctly diagnose
-          WAL disk exhaustion from the PANIC lines rather than misidentifying
-          it as an OOM kill or configuration error.
+          The agent should find that the pod restarted (reason=Completed,
+          exitCode=0 — postgres emergency shutdown), notice get_pod_logs returns
+          empty (logging_collector=on redirects output to a file), then call
+          read_pod_file on the on-disk log to find the PANIC lines, and
+          correctly diagnose WAL disk exhaustion.
     timeout: 90s
     remediation:
       playbook_id: pbs_wal_disk_full

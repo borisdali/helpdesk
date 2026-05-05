@@ -627,6 +627,62 @@ func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error
 	return getPodLogsImpl(ctx, args)
 }
 
+// ReadPodFileArgs defines arguments for the read_pod_file tool.
+type ReadPodFileArgs struct {
+	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace string `json:"namespace,omitempty" jsonschema:"The Kubernetes namespace of the pod."`
+	PodName   string `json:"pod_name" jsonschema:"required,The exact pod name to read a file from."`
+	Container string `json:"container,omitempty" jsonschema:"Container name, only needed if pod has multiple containers."`
+	FilePath  string `json:"file_path" jsonschema:"required,Absolute path of the file to read inside the container (e.g. '/var/lib/postgresql/data/log/postgresql.log')."`
+	Filter    string `json:"filter,omitempty" jsonschema:"Optional string to filter lines (case-insensitive grep). Use to focus on FATAL, PANIC, or other keywords."`
+	TailLines int    `json:"tail_lines,omitempty" jsonschema:"Return only the last N lines of the file (default: all lines)."`
+}
+
+func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, error) {
+	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
+	namespace := nsInfo.Namespace
+	kubeContext := resolveContext(args.Context)
+
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	// Build the shell command to run inside the container.
+	// Use tail when a line limit is requested, grep when a filter is set.
+	shellCmd := "cat " + args.FilePath
+	if args.TailLines > 0 {
+		shellCmd = fmt.Sprintf("tail -n %d %s", args.TailLines, args.FilePath)
+	}
+	if args.Filter != "" {
+		shellCmd = fmt.Sprintf("(%s) | grep -i %q || true", shellCmd, args.Filter)
+	}
+
+	cmdArgs := []string{"exec", args.PodName}
+	if namespace != "" {
+		cmdArgs = append(cmdArgs, "-n", namespace)
+	}
+	if args.Container != "" {
+		cmdArgs = append(cmdArgs, "-c", args.Container)
+	}
+	cmdArgs = append(cmdArgs, "--", "sh", "-c", shellCmd)
+
+	output, err := runKubectlWithToolName(ctx, kubeContext, "read_pod_file", cmdArgs...)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error reading file %s from pod %s: %v", args.FilePath, args.PodName, err)
+	}
+	if strings.TrimSpace(output) == "" {
+		return KubectlResult{Output: fmt.Sprintf("File %s is empty or not found in pod %s.", args.FilePath, args.PodName)}, nil
+	}
+	return KubectlResult{Output: output}, nil
+}
+
+func readPodFileTool(ctx tool.Context, args ReadPodFileArgs) (KubectlResult, error) {
+	return readPodFileImpl(ctx, args)
+}
+
 // DescribePodArgs defines arguments for the describe_pod tool.
 type DescribePodArgs struct {
 	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -1105,6 +1161,18 @@ func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := getPodLogsImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("read_pod_file", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[ReadPodFileArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := readPodFileImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

@@ -9,6 +9,10 @@ data:
     max_connections = 20
     shared_buffers = 32MB
     log_statement = 'all'
+    logging_collector = on
+    log_directory = '/var/lib/postgresql/data/log'
+    log_filename = 'postgresql.log'
+    log_truncate_on_rotation = off
   pg_hba.conf: |
     # TYPE  DATABASE  USER  ADDRESS     METHOD
     local   all       all               trust
