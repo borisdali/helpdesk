@@ -999,7 +999,7 @@ See [here](../../docs/FLEET.md) for the full job definition schema, multi-step e
 
 ## 10. Fault Injection Testing (faulttest)
 
-`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response — confirming the agents behave correctly in your specific environment before going to production.
+`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response. This confirms that the agents behave correctly in your specific environment before going to production.
 
 The binary is baked into the same Docker image as the agents, and runs as a Kubernetes Job. There are two ways to trigger it.
 
@@ -1031,6 +1031,8 @@ helm upgrade helpdesk ./deploy/helm/helpdesk \
     --set faulttest.categories=kubernetes \
     --set faulttest.judge=true
 ```
+
+When `judge=true`, the judge uses the same vendor and model configured for the agents (`model.vendor` and `model.name`). No separate API key or model secret is needed. To use a different model for judging, pass `--judge-vendor`, `--judge-model`, and `--judge-api-key` explicitly via the Job spec (§10.2).
 
 Disable after testing so the Job does not re-run on the next unrelated upgrade:
 
