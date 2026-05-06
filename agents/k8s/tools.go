@@ -14,6 +14,7 @@ import (
 
 	"google.golang.org/adk/tool"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 
@@ -756,17 +757,49 @@ func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, 
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
-	cmdArgs := []string{"describe", "pod", args.PodName}
-
-	if namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", namespace)
-	}
-
-	output, err := runKubectlWithToolName(ctx, kubeContext, "describe_pod", cmdArgs...)
+	cs, err := sharedClient.clientset(kubeContext)
 	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error describing pod: %v", err)
+		return KubectlResult{}, err
 	}
-	return KubectlResult{Output: output}, nil
+
+	start := time.Now()
+	pod, err := cs.CoreV1().Pods(namespace).Get(ctx, args.PodName, metav1.GetOptions{})
+	duration := time.Since(start)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error describing pod: %v", diagnoseClientError(err))
+	}
+
+	// Render a kubectl-describe-style summary the agent can read.
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Name:       %s\nNamespace:  %s\nNode:       %s\n",
+		pod.Name, pod.Namespace, pod.Spec.NodeName)
+	fmt.Fprintf(&sb, "Status:     %s\n", pod.Status.Phase)
+	for _, c := range pod.Status.Conditions {
+		fmt.Fprintf(&sb, "Condition:  %s=%s\n", c.Type, c.Status)
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		fmt.Fprintf(&sb, "Container %s: ready=%v restarts=%d\n", cs.Name, cs.Ready, cs.RestartCount)
+		if t := cs.LastTerminationState.Terminated; t != nil {
+			fmt.Fprintf(&sb, "  LastTerminated: reason=%s exitCode=%d\n", t.Reason, t.ExitCode)
+		}
+	}
+	for k, v := range pod.Annotations {
+		fmt.Fprintf(&sb, "Annotation: %s=%s\n", k, v)
+	}
+	for k, v := range pod.Labels {
+		fmt.Fprintf(&sb, "Label: %s=%s\n", k, v)
+	}
+
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "describe_pod",
+			Parameters: map[string]any{"namespace": namespace, "pod_name": args.PodName},
+		}, audit.ToolResult{
+			Output: truncateForAudit(sb.String(), 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "describe_pod", "ms", duration.Milliseconds())
+	return KubectlResult{Output: sb.String()}, nil
 }
 
 func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
