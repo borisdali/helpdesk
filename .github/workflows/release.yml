@@ -64,6 +64,7 @@ jobs:
         run: |
           git tag -f ${{ inputs.version }}
           git push --force origin refs/tags/${{ inputs.version }}
+          gh release delete ${{ inputs.version }} --yes || true
           gh release create ${{ inputs.version }} dist/*.tar.gz \
             --title "${{ inputs.version }}" \
             --generate-notes
