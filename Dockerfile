@@ -27,7 +27,7 @@ WORKDIR /src/helpdesk
 RUN go mod edit -replace google.golang.org/adk=/src/adk-go
 
 # Download dependencies and build all binaries.
-RUN go mod download
+RUN GOFLAGS=-mod=mod go mod download
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/database-agent  ./agents/database/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/k8s-agent       ./agents/k8s/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/sysadmin-agent ./agents/sysadmin/
