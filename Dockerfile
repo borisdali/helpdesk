@@ -26,8 +26,11 @@ WORKDIR /src/helpdesk
 # Rewrite the replace directive to use the in-container path.
 RUN go mod edit -replace google.golang.org/adk=/src/adk-go
 
+# Allow go to extend go.sum for deps brought in by the local adk-go replace.
+ENV GOFLAGS=-mod=mod
+
 # Download dependencies and build all binaries.
-RUN GOFLAGS=-mod=mod go mod download
+RUN go mod download
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/database-agent  ./agents/database/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/k8s-agent       ./agents/k8s/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/sysadmin-agent ./agents/sysadmin/
