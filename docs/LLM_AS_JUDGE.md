@@ -23,8 +23,9 @@ used by the primary agent.
    - [Score weights](#52-score-weights)
    - [Catalog schema: narrative field](#53-catalog-schema-narrative-field)
    - [Report output](#54-report-output)
-6. [Planned uses](#6-planned-uses)
-7. [Adding judge evaluation to a new component](#7-adding-judge-evaluation-to-a-new-component)
+6. [Crystal-ball mode: benchmarking without scaffolding](#6-crystal-ball-mode-benchmarking-without-scaffolding)
+7. [Planned uses](#7-planned-uses)
+8. [Adding judge evaluation to a new component](#8-adding-judge-evaluation-to-a-new-component)
 
 ---
 
@@ -245,7 +246,73 @@ The JSON report includes the judge fields on every result:
 
 ---
 
-## 6. Planned uses
+## 6. Crystal-ball mode: benchmarking without scaffolding
+
+By default, the gateway wraps every playbook run in expert scaffolding: the
+agent receives structured `## Playbook Guidance` with tool-call hints,
+hypothesis-formatting requirements, and an escalation chain. This scaffolding
+is the product's value-add — it makes a general-purpose LLM behave like a
+trained SRE.
+
+**Crystal-ball mode** removes all of that. The agent receives only the operator
+question, the list of available tools, and a brief server-type hint. No
+playbook guidance, no hypothesis format, no escalation. The LLM calls tools
+and reaches conclusions entirely on its own.
+
+This mode exists so you can measure how much of `faulttest`'s score comes from
+the scaffolding versus raw LLM capability. Running the same fault catalog once
+with scaffolding and once in crystal-ball mode gives a clean A/B comparison.
+
+### Enabling crystal-ball mode
+
+| Deployment | Setting |
+|------------|---------|
+| **CLI / systemd** | `HELPDESK_CRYSTAL_BALL=true` (in `.env` or shell) |
+| **Docker Compose** | `HELPDESK_CRYSTAL_BALL=true` in the shell or `.env` file |
+| **Helm** | `--set gateway.crystalBall=true` |
+
+When enabled, every `/api/v1/fleet/playbooks/*/run` response includes:
+
+```json
+{
+  "crystal_ball": true,
+  "crystal_ball_warning": "Crystal-ball mode is active. Playbook guidance, hypothesis formatting, and escalation chaining are bypassed. ..."
+}
+```
+
+### Typical benchmark workflow
+
+```bash
+# 1. Normal run — full scaffolding
+faulttest run \
+  --conn "host=staging-db user=postgres" \
+  --db-agent http://gateway:8080 \
+  --judge --categories database \
+  --report-dir ./reports/scaffolded
+
+# 2. Crystal-ball run — no scaffolding (gateway restarted with HELPDESK_CRYSTAL_BALL=true)
+HELPDESK_CRYSTAL_BALL=true \
+faulttest run \
+  --conn "host=staging-db user=postgres" \
+  --db-agent http://gateway:8080 \
+  --judge --categories database \
+  --report-dir ./reports/crystal-ball
+
+# 3. Compare
+jq .overall_score reports/scaffolded/faulttest-*.json
+jq .overall_score reports/crystal-ball/faulttest-*.json
+```
+
+The delta is a concrete measure of what the playbook system contributes beyond
+baseline LLM capability.
+
+> **Not for production.** Crystal-ball mode skips escalation chaining, so
+> multi-agent diagnosis chains will not run. Use it only in test environments
+> for benchmarking or demos.
+
+---
+
+## 7. Planned uses
 
 LLM-as-judge is being extended to other aiHelpDesk components. Each use case
 shares the same `TextCompleter` abstraction and 0–3 scoring rubric but provides
@@ -261,7 +328,7 @@ a domain-specific prompt narrative.
 
 ---
 
-## 7. Adding judge evaluation to a new component
+## 8. Adding judge evaluation to a new component
 
 The integration pattern is the same regardless of the component.
 

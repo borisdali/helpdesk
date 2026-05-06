@@ -66,6 +66,10 @@ spec:
                   name: {{ .Values.gateway.clientAPIKeySecret }}
                   key: {{ .Values.gateway.clientAPIKeyKey }}
             {{- end }}
+            {{- if .Values.gateway.crystalBall }}
+            - name: HELPDESK_CRYSTAL_BALL
+              value: "true"
+            {{- end }}
             {{- if ne .Values.gateway.identity.provider "none" }}
             - name: HELPDESK_IDENTITY_PROVIDER
               value: {{ .Values.gateway.identity.provider | quote }}

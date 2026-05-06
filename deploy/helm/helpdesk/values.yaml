@@ -120,6 +120,11 @@ gateway:
   # Can reuse agentAPIKeySecret if the same key covers gateway inbound auth.
   clientAPIKeySecret: ""
   clientAPIKeyKey: "api-key"
+  # Crystal-ball mode: bypass playbook guidance, hypothesis formatting, and
+  # escalation chaining. The gateway sends the operator question directly to
+  # the agent with no structured scaffolding. Intended for LLM benchmark
+  # comparisons and demos only. NOT recommended for production use.
+  crystalBall: false
   identity:
     # Identity provider: none (default), static, or jwt.
     # "none"   = accept X-User / X-Roles headers without verification (dev only).
