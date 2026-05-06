@@ -36,6 +36,10 @@ type Failure struct {
 	// ExternalCompat marks faults that work against any PostgreSQL instance over
 	// libpq (no Docker/OS access required).
 	ExternalCompat   bool       `yaml:"external_compat,omitempty"`
+	// DiagnosisPlaybookSeriesID links this fault to a gateway playbook for
+	// diagnosis. When set and --via-gateway is active, faulttest calls
+	// POST /api/v1/fleet/playbooks/{id}/run instead of the agent directly.
+	DiagnosisPlaybookSeriesID string `yaml:"diagnosis_playbook_series_id,omitempty"`
 	ExternalInject   InjectSpec `yaml:"external_inject,omitempty"`
 	ExternalTeardown InjectSpec `yaml:"external_teardown,omitempty"`
 	Remediation RemediationSpec `yaml:"remediation,omitempty"`
@@ -164,6 +168,13 @@ type HarnessConfig struct {
 	// NotifyURL is an optional webhook URL. When set, faulttest POSTs the full
 	// JSON report to this URL after the run completes (e.g. a Slack webhook).
 	NotifyURL string
+
+	// ViaGateway routes the diagnosis call through the gateway's playbook
+	// endpoint instead of calling the agent directly, when the fault has a
+	// DiagnosisPlaybookSeriesID and GatewayURL is set.
+	// Enables a valid A/B comparison between scaffolded (normal) and
+	// crystal-ball (unguided) gateway runs.
+	ViaGateway bool
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.

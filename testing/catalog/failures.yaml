@@ -1476,6 +1476,7 @@ failures:
     category: kubernetes
     severity: critical
     external_compat: true  # injects via kubectl exec — no Docker required
+    diagnosis_playbook_series_id: pbs_k8s_pod_crash_triage  # used with --via-gateway for A/B comparison
     description: >
       The PostgreSQL pod emits PANIC ("could not write to file pg_wal/...:
       No space left on device") and shuts down (exit code 0, reason=Completed —

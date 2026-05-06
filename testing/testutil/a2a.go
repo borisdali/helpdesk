@@ -21,6 +21,9 @@ type AgentResponse struct {
 	ToolCalls []ToolCallResult // nil when structured data is unavailable (gateway path)
 	Duration  time.Duration
 	Error     error
+	// CrystalBall is true when the gateway ran this call in crystal-ball mode
+	// (playbook scaffolding bypassed). Set only on gateway playbook responses.
+	CrystalBall bool
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

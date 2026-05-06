@@ -141,6 +141,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	// Completion webhook.
 	fs.StringVar(&cfg.NotifyURL, "notify-url", "", "Webhook URL for POST notification on run completion (e.g. Slack incoming webhook)")
 
+	// Gateway-routed diagnosis (A/B comparison mode).
+	fs.BoolVar(&cfg.ViaGateway, "via-gateway", false, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -305,6 +308,10 @@ func cmdRun(args []string) {
 		// 2. Run agent (record call start for audit window).
 		callStart := time.Now()
 		resp := runner.Run(ctx, f)
+
+		if resp.CrystalBall {
+			slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
+		}
 
 		// Query audit trail for tool evidence if --audit-url is set.
 		var auditTools []string
