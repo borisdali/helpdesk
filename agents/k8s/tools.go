@@ -14,6 +14,8 @@ import (
 
 	"google.golang.org/adk/tool"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
@@ -679,19 +681,51 @@ func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, 
 		shellCmd = fmt.Sprintf("(%s) | grep -i %q || true", shellCmd, args.Filter)
 	}
 
-	cmdArgs := []string{"exec", args.PodName}
-	if namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", namespace)
-	}
-	if args.Container != "" {
-		cmdArgs = append(cmdArgs, "-c", args.Container)
-	}
-	cmdArgs = append(cmdArgs, "--", "sh", "-c", shellCmd)
-
-	output, err := runKubectlWithToolName(ctx, kubeContext, "read_pod_file", cmdArgs...)
+	cs, err := sharedClient.clientset(kubeContext)
 	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error reading file %s from pod %s: %v", args.FilePath, args.PodName, err)
+		return KubectlResult{}, err
 	}
+
+	execReq := cs.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(args.PodName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: args.Container,
+			Command:   []string{"sh", "-c", shellCmd},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	start := time.Now()
+	exec, err := remotecommand.NewSPDYExecutor(sharedClient.restConfig(kubeContext), "POST", execReq.URL())
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error reading file %s from pod %s: %v", args.FilePath, args.PodName, diagnoseClientError(err))
+	}
+
+	var stdout, stderr strings.Builder
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	duration := time.Since(start)
+
+	output := stdout.String()
+	if err != nil && strings.TrimSpace(output) == "" {
+		return KubectlResult{}, fmt.Errorf("error reading file %s from pod %s: %v", args.FilePath, args.PodName, diagnoseClientError(err))
+	}
+
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "read_pod_file",
+			Parameters: map[string]any{"namespace": namespace, "pod_name": args.PodName, "file_path": args.FilePath},
+		}, audit.ToolResult{
+			Output: truncateForAudit(output, 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "read_pod_file", "ms", duration.Milliseconds())
+
 	if strings.TrimSpace(output) == "" {
 		return KubectlResult{Output: fmt.Sprintf("File %s is empty or not found in pod %s.", args.FilePath, args.PodName)}, nil
 	}
