@@ -412,6 +412,11 @@ faulttest:
   k8sAgentURL: ""
   sysadminAgentURL: ""
 
+  # Route diagnosis calls through the Gateway playbook endpoint (--via-gateway).
+  # Enables A/B comparison with gateway.crystalBall. Requires gatewayAPIKeySecret
+  # when the gateway enforces inbound auth. See docs/BENCHMARKING.md.
+  viaGateway: false
+
   # Optional: Secret containing a gateway API key (HELPDESK_CLIENT_API_KEY).
   # Required when the gateway enforces inbound auth.
   gatewayAPIKeySecret: ""

@@ -123,6 +123,10 @@ spec:
             {{- if .Values.faulttest.judge }}
             - --judge
             {{- end }}
+            {{- if .Values.faulttest.viaGateway }}
+            - --via-gateway
+            - --gateway=http://{{ $fullname }}-gateway:{{ .Values.gateway.port }}
+            {{- end }}
             - --report-dir=/reports
           env:
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
