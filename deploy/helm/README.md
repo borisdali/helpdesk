@@ -999,11 +999,76 @@ See [here](../../docs/FLEET.md) for the full job definition schema, multi-step e
 
 ## 10. Fault Injection Testing (faulttest)
 
-`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response — confirming the agents behave correctly in your specific environment before going to production.
+`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response. This confirms that the agents behave correctly in your specific environment before going to production.
 
-The binary is baked into the same Docker image as the agents. The recommended way to run it in-cluster is a one-off Job that mounts the ConfigMap and Secrets the chart already created, so `infrastructure.json` and database passwords are available without duplicating credentials.
+The binary is baked into the same Docker image as the agents, and runs as a Kubernetes Job. There are two ways to trigger it.
 
-### Step 1 — Find your infrastructure ConfigMap name
+### 10.1 Via Helm (recommended)
+
+Because the Helm chart already knows your agent URLs, model API Secret, and infrastructure ConfigMap, you only need to name the fault and flip one flag:
+
+```bash
+# On an existing release:
+helm upgrade helpdesk ./deploy/helm/helpdesk \
+    --reuse-values \
+    --set faulttest.enabled=true \
+    --set faulttest.conn=test-db \
+    --set faulttest.ids=db-wal-disk-full-k8s
+
+# Or at first install — --set works identically:
+helm install helpdesk ./deploy/helm/helpdesk \
+    -f my-values.yaml \
+    --set faulttest.enabled=true \
+    --set faulttest.conn=test-db \
+    --set faulttest.ids=db-wal-disk-full-k8s
+```
+
+The chart creates a Helm-hook Job (and the required RBAC) that runs immediately after the install or upgrade, then self-destructs after one hour. Stream the output while it runs:
+
+```bash
+kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f
+```
+
+Run all Kubernetes faults with semantic judge scoring:
+
+```bash
+helm upgrade helpdesk ./deploy/helm/helpdesk \
+    --reuse-values \
+    --set faulttest.enabled=true \
+    --set faulttest.conn=test-db \
+    --set faulttest.categories=kubernetes \
+    --set faulttest.judge=true
+```
+
+When `judge=true`, the judge uses the same vendor and model configured for the agents (`model.vendor` and `model.name`). No separate API key or model secret is needed. To use a different model for judging, pass `--judge-vendor`, `--judge-model`, and `--judge-api-key` explicitly via the Job spec (§10.2).
+
+Disable after testing so the Job does not re-run on the next unrelated upgrade:
+
+```bash
+helm upgrade helpdesk ./deploy/helm/helpdesk --reuse-values --set faulttest.enabled=false
+```
+
+Key `faulttest.*` values:
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Create the Job on next install/upgrade |
+| `conn` | — | Connection string or infra key (required) |
+| `ids` | _(all)_ | Comma-separated fault IDs |
+| `categories` | _(all)_ | Comma-separated categories |
+| `judge` | `false` | Enable LLM-as-judge semantic scoring |
+| `targetNamespace` | `helpdesk-test` | Namespace where faults are injected |
+| `ttlSecondsAfterFinished` | `3600` | Auto-delete the Job after N seconds |
+
+See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full fault catalog, scoring details, and custom catalog authoring.
+
+---
+
+### 10.2 Via K8s Job (the hard way)
+
+If you are not using Helm, or need full control over the Job spec (custom image registry, node selectors, resource limits, etc.), you can apply the Job directly. This requires manually wiring the ConfigMap and Secrets that the chart would otherwise resolve for you.
+
+#### Step 1 — Find your infrastructure ConfigMap name
 
 The chart stores `infrastructure.json` in a ConfigMap alongside other config files. Find it by checking how the database-agent mounts its infra volume:
 
@@ -1015,7 +1080,7 @@ kubectl -n helpdesk-system get deploy helpdesk-database-agent \
 
 Typically the ConfigMap is named `helpdesk-config`.
 
-### Step 2 — Run the Job
+#### Step 2 — Run the Job
 
 The Job reuses:
 - the `pgpass` Secret already mounted into the database-agent (no separate password Secret needed)
@@ -1094,7 +1159,76 @@ kubectl -n helpdesk-system cp \
 # faulttest-reports/ now contains both the JSON report and history.json
 ```
 
-### Listing faults without a full run
+#### Running `kubernetes`-category faults (e.g. `db-wal-disk-full-k8s`)
+
+The Job spec above covers `database`-category faults. Kubernetes faults (those whose inject scripts run `kubectl exec` inside a pod) need two additional things that the Helm path (§10.1) handles automatically:
+
+**a) A `--k8s-agent` arg** pointing at the k8s agent service, plus the fault ID:
+
+```yaml
+args:
+  # ... existing args ...
+  - --k8s-agent=http://helpdesk-k8s-agent:1102
+  - --ids=db-wal-disk-full-k8s          # or --categories=kubernetes for all k8s faults
+```
+
+**b) RBAC** so the Job pod can `kubectl exec` into pods in the injection target namespace. Apply once before running the Job:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: faulttest
+  namespace: helpdesk-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: faulttest
+  namespace: helpdesk-test       # namespace where faults are injected
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: faulttest
+  namespace: helpdesk-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: faulttest
+subjects:
+  - kind: ServiceAccount
+    name: faulttest
+    namespace: helpdesk-system
+EOF
+```
+
+Then add `serviceAccountName: faulttest` to the Job's pod spec:
+
+```yaml
+spec:
+  template:
+    spec:
+      serviceAccountName: faulttest   # add this
+      restartPolicy: Never
+      containers:
+        # ...
+```
+
+The Helm path (§10.1) creates this ServiceAccount, Role, and RoleBinding as Helm hooks alongside the Job, so no manual RBAC setup is needed there.
+
+### 10.3 Listing faults without a full run
 
 To list the built-in catalog without mounting anything:
 
@@ -1106,7 +1240,7 @@ kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
 
 > **`kubectl run` pitfalls:** `--env` flags must appear *before* `--` (they are kubectl flags, not container args). Always pass `--api-key` explicitly and `--infra-config` pointing to a mounted path — omitting either produces 401 errors or psql falling back to the local Unix socket.
 
-### LLM-as-judge scoring
+### 10.4 LLM-as-judge scoring
 
 By default faulttest scores responses using keyword and tool-call matching. Enable the LLM-as-judge to get semantic scoring — a second model call evaluates whether the agent correctly identified the root cause and recommended appropriate remediation.
 
@@ -1141,6 +1275,42 @@ env:
 When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnosis*0.30 + tool*0.20` to `tool*0.40 + judge*0.40 + keyword*0.20`, and each result includes a one-sentence reasoning string explaining the score. The judge is opt-in — omitting `--judge` falls back to the default keyword-based scoring and requires no additional API key.
 
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
+
+### 10.5 SSH injection mode
+
+Some faults require OS-level access to the database host (e.g. `db-wal-disk-full`, which injects FATAL/PANIC log entries and kills the PostgreSQL process to simulate WAL disk exhaustion). These use `ssh_exec` injection: the fault script is streamed to the host over SSH, so no files need to be pre-staged there.
+
+Create a Secret with the SSH private key (once), then submit a Job that mounts it:
+
+```bash
+kubectl create secret generic faulttest-ssh-key \
+  --from-file=id_rsa=/path/to/your/ssh/private/key \
+  --namespace helpdesk-system
+```
+
+Add these args, env, volume mount, and volume to the Job spec from Step 2 above:
+
+```yaml
+args:
+  # ... existing args ...
+  - --external
+  - --ssh-host=db-host.internal
+  - --ssh-user=ubuntu
+  - --ssh-key=/etc/faulttest-ssh/id_rsa
+volumeMounts:
+  # ... existing mounts ...
+  - name: ssh-key
+    mountPath: /etc/faulttest-ssh
+    readOnly: true
+volumes:
+  # ... existing volumes ...
+  - name: ssh-key
+    secret:
+      secretName: faulttest-ssh-key
+      defaultMode: 0600
+```
+
+`--ssh-host` alone is sufficient to trigger SSH injection mode; `--external` additionally restricts the run to the `external_compat` subset of faults. The `FAULTTEST_CONTAINER` variable is resolved automatically from `infrastructure.json` and passed to inject/teardown scripts — you do not need to set it manually. The SSH target must be reachable from the Kubernetes node (same VPC, egress policy permits port 22). See [docs/FAULTTEST_SAMPLE.md](../../docs/FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for the full Job YAML and a sample run.
 
 ## 11. Fleet Playbooks & Vault
 

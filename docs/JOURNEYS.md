@@ -201,6 +201,20 @@ are returned.
     "outcome":     "error",
     "event_count": 3,
     "origin":      "agent"
+  },
+  {
+    "trace_id":    "tr_9b3f1c7e",
+    "started_at":  "2026-03-01T08:30:05Z",
+    "ended_at":    "2026-03-01T08:30:06Z",
+    "duration_ms": 1047,
+    "user_id":     "carol",
+    "user_query":  "kill all idle connections on staging-db",
+    "agent":       "postgres_database_agent",
+    "tools_used":  [],
+    "outcome":     "unverified_claim",
+    "event_count": 1,
+    "origin":      "agent",
+    "has_mismatch": true
   }
 ]
 ```
@@ -222,6 +236,7 @@ are returned.
 | `event_count` | Audit events recorded under this trace (excludes `delegation_verification` and `verification_outcome` plumbing events) |
 | `retry_count` | Number of mutation-tool re-poll attempts (non-zero means a tool had to wait for state to propagate but ultimately succeeded) |
 | `origin` | Dispatch path for this journey: `"agent"` for LLM-mediated interactions, `"gateway"` for gateway-originated NL queries. Taken from the first `tool_execution` event in the trace. See [§7.1](#71-origin-values-in-journeys). |
+| `has_mismatch` | `true` when at least one `delegation_verification` event in this journey has `mismatch=true` — meaning an agent returned success but no matching tool execution appears in the audit trail. Omitted (falsy) when the journey is clean. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
 
 ### 5.6 Journey outcomes
 
@@ -442,30 +457,95 @@ After every `delegate_to_agent` call, the orchestrator:
 4. If the delegation was `destructive` and **no destructive tool execution**
    appears in the trail, sets `mismatch=true`
 
-When `mismatch=true`:
-- The journey outcome is elevated to `unverified_claim`
-- The orchestrator's response includes an `[AUDIT VERIFICATION]` block
-  informing the LLM that the action could not be confirmed
-- The LLM's system prompt instructs it to report this to the user and **not**
-  claim success
+When `mismatch=true`, four independent signals fire simultaneously:
+
+| Signal | Where | Details |
+|--------|-------|---------|
+| **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the journey object |
+| **HTTP response header** | API caller | Gateway sets `X-Audit-Mismatch: true` on the HTTP response for the offending request |
+| **Prometheus counter** | Gateway `/metrics` | `gateway_fabrication_mismatches_total{agent, action_class}` incremented |
+| **Security alert** | auditor → incident webhook | auditor fires a `CRITICAL` `fabrication_mismatch` incident to `--incident-webhook` |
+
+Additionally, the LLM's system prompt instructs it to report the mismatch to the
+user and **not** claim success.
 
 ### Investigating an unverified claim
 
 ```bash
-# 1. Find all unverified claim journeys
+# 1. Find all unverified claim journeys — has_mismatch: true on each
 curl -s "http://localhost:1199/v1/journeys?outcome=unverified_claim"
 
 # 2. Get the trace_id from the result, then fetch all events for that trace
-curl -s "http://localhost:1199/v1/events?trace_id=tr_abc123"
+curl -s "http://localhost:1199/v1/events?trace_id=tr_9b3f1c7e"
 
 # 3. Look specifically at the delegation_verification event
-curl -s "http://localhost:1199/v1/events?trace_id=tr_abc123&event_type=delegation_verification"
+curl -s "http://localhost:1199/v1/events?trace_id=tr_9b3f1c7e&event_type=delegation_verification"
 ```
 
 The `delegation_verification` event shows:
 - `tools_confirmed`: what the agent actually executed
 - `destructive_confirmed`: which of those were destructive
 - `mismatch`: whether there is a discrepancy
+
+You can also spot mismatches directly on the journey object without a separate filter — any journey with `"has_mismatch": true` had at least one fabrication event, regardless of what other outcome it carries.
+
+```bash
+# All recent journeys with at least one mismatch — includes cases where
+# the outcome was overridden by a higher-priority signal (e.g. "error")
+curl -s "http://localhost:1199/v1/journeys" | jq '[.[] | select(.has_mismatch)]'
+```
+
+### Monitoring with Prometheus and the incident webhook
+
+**Prometheus** (gateway `/metrics`):
+
+```
+# HELP gateway_fabrication_mismatches_total Delegations where agent success had no matching audit-trail tool executions
+# TYPE gateway_fabrication_mismatches_total counter
+gateway_fabrication_mismatches_total{agent="postgres_database_agent",action_class="destructive"} 3
+gateway_fabrication_mismatches_total{agent="k8s_agent",action_class="write"} 1
+```
+
+Scrape `GET http://<gateway>:8080/metrics` (no auth required). Alert on
+`increase(gateway_fabrication_mismatches_total[5m]) > 0`.
+
+**Incident webhook** (auditor `--incident-webhook`):
+
+When the auditor detects a `delegation_verification` event with `mismatch=true`
+it immediately POSTs a `CRITICAL` incident to the configured URL:
+
+```json
+{
+  "type":       "security_incident",
+  "alert_type": "fabrication_mismatch",
+  "severity":   "CRITICAL",
+  "message":    "FABRICATION RISK — agent returned success but audit trail has no matching tool executions",
+  "event_id":   "gv_a1b2c3d4",
+  "trace_id":   "tr_9b3f1c7e",
+  "details": {
+    "agent":        "postgres_database_agent",
+    "action_class": "destructive",
+    "trace_id":     "tr_9b3f1c7e"
+  },
+  "timestamp": "2026-03-01T08:30:06Z",
+  "source":    "audit_monitor"
+}
+```
+
+Configure the auditor with `--incident-webhook https://your-pagerduty-or-slack-url`.
+
+**HTTP response header** (`X-Audit-Mismatch`):
+
+The gateway sets `X-Audit-Mismatch: true` on the HTTP response to the original
+API caller when a mismatch is detected. This lets any client-side integration
+detect and react to fabrication incidents without polling the audit trail:
+
+```bash
+curl -si http://localhost:8080/api/v1/query \
+  -d '{"agent":"db","message":"terminate idle connections"}' \
+  | grep X-Audit-Mismatch
+# X-Audit-Mismatch: true
+```
 
 ### Root causes
 

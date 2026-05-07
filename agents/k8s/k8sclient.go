@@ -26,10 +26,12 @@ import (
 type k8sClient struct {
 	mu      sync.Mutex
 	clients map[string]kubernetes.Interface
+	configs map[string]*rest.Config
 }
 
 var sharedClient = &k8sClient{
 	clients: make(map[string]kubernetes.Interface),
+	configs: make(map[string]*rest.Config),
 }
 
 // injectForTest temporarily overrides the cached clientset for the given
@@ -101,8 +103,17 @@ func (kc *k8sClient) clientset(kubeContext string) (kubernetes.Interface, error)
 	}
 
 	kc.clients[kubeContext] = cs
+	kc.configs[kubeContext] = config
 	slog.Info("k8s clientset created", "context", kubeContext)
 	return cs, nil
+}
+
+// restConfig returns the cached *rest.Config for the given context.
+// Must be called after clientset() has been called for the same context.
+func (kc *k8sClient) restConfig(kubeContext string) *rest.Config {
+	kc.mu.Lock()
+	defer kc.mu.Unlock()
+	return kc.configs[kubeContext]
 }
 
 // diagnoseClientError translates client-go errors into actionable messages.
@@ -234,6 +245,7 @@ func fetchPods(ctx context.Context, kubeContext, namespace, labels string) (GetP
 			Node:       p.Spec.NodeName,
 			Labels:     p.Labels,
 			Conditions: formatPodConditions(p.Status.Conditions),
+			LastState:  lastTerminatedState(p.Status.ContainerStatuses),
 		})
 	}
 

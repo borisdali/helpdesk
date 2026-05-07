@@ -120,6 +120,11 @@ gateway:
   # Can reuse agentAPIKeySecret if the same key covers gateway inbound auth.
   clientAPIKeySecret: ""
   clientAPIKeyKey: "api-key"
+  # Crystal-ball mode: bypass playbook guidance, hypothesis formatting, and
+  # escalation chaining. The gateway sends the operator question directly to
+  # the agent with no structured scaffolding. Intended for LLM benchmark
+  # comparisons and demos only. NOT recommended for production use.
+  crystalBall: false
   identity:
     # Identity provider: none (default), static, or jwt.
     # "none"   = accept X-User / X-Roles headers without verification (dev only).
@@ -351,3 +356,76 @@ fleetRunner:
   #   waveSize: 0             # 0 = use value from job definition
   #   wavePauseSeconds: 0     # 0 = use value from job definition
   #   definition: {}          # inline fleet.JobDef (serialised to job.json in the ConfigMap)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fault Injection Testing
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# When enabled, a Kubernetes Job is created on each helm install/upgrade that
+# runs the faulttest suite against the deployed agents. The Job is deleted and
+# re-created before each upgrade (hook-delete-policy: before-hook-creation).
+#
+# Typical usage:
+#   helm upgrade helpdesk ./deploy/helm/helpdesk \
+#     --set faulttest.enabled=true \
+#     --set faulttest.conn=test-db \
+#     --set faulttest.ids=db-wal-disk-full-k8s
+#
+# Monitor results:
+#   kubectl logs -l app.kubernetes.io/component=faulttest -f
+faulttest:
+  # Set to true to run the faulttest Job on the next helm install/upgrade.
+  # NOTE: the Job runs as a post-install/post-upgrade hook, so `helm install`
+  # and `helm upgrade` will block until it completes (or --timeout is reached).
+  # Stream progress in a second terminal:
+  #   kubectl -n <namespace> logs -l app.kubernetes.io/component=faulttest --follow
+  # Increase the Helm timeout if running many faults:
+  #   helm upgrade ... --timeout 15m --set faulttest.enabled=true
+  # Set back to false after testing to prevent re-runs on unrelated upgrades.
+  enabled: false
+
+  # Connection string or infrastructure key (e.g., "test-db" when infrastructure
+  # config defines a "test-db" entry). Required when enabled=true.
+  conn: ""
+
+  # Fault IDs to run, comma-separated. Empty = all faults for selected categories.
+  # Example: "db-wal-disk-full-k8s,k8s-pod-oomkilled"
+  ids: ""
+
+  # Categories to include, comma-separated: database, kubernetes, host, compound.
+  # Empty = all categories.
+  categories: ""
+
+  # Kubernetes context for kubectl commands in inject/teardown scripts.
+  # Leave empty to use the in-cluster default (recommended for cluster-internal Jobs).
+  context: ""
+
+  # Enable semantic judge evaluation of agent responses (uses the chart model config).
+  judge: false
+
+  # Namespace where failures are injected. The faulttest ServiceAccount is granted
+  # pod exec permissions in this namespace.
+  targetNamespace: "helpdesk-test"
+
+  # Agent URL overrides. Default: auto-derived from chart-managed agent services.
+  dbAgentURL: ""
+  k8sAgentURL: ""
+  sysadminAgentURL: ""
+
+  # Route diagnosis calls through the Gateway playbook endpoint (--via-gateway).
+  # Enables A/B comparison with gateway.crystalBall. Requires gatewayAPIKeySecret
+  # when the gateway enforces inbound auth. See docs/BENCHMARKING.md.
+  viaGateway: false
+
+  # Optional: Secret containing a gateway API key (HELPDESK_CLIENT_API_KEY).
+  # Required when the gateway enforces inbound auth.
+  gatewayAPIKeySecret: ""
+  gatewayAPIKeyKey: "api-key"
+
+  # RBAC: create a ServiceAccount, Role (in targetNamespace), and RoleBinding.
+  rbac:
+    create: true
+
+  # How long (seconds) to retain the completed Job before auto-deletion.
+  # Set to 0 to disable TTL (manual cleanup required).
+  ttlSecondsAfterFinished: 3600

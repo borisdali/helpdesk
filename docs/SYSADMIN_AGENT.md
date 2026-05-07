@@ -4,7 +4,7 @@ The **SysAdmin agent** is the host-level layer of aiHelpDesk. Where the database
 
 Its primary role is **diagnostic**: it can check whether a container or systemd service is running, retrieve recent logs, inspect disk and memory pressure, and — when a playbook with the right permission tier authorises it — restart the container or service. All restart operations are policy-checked and fully audited.
 
-The SysAdmin agent is the execution backend for `execution_mode: agent_approve` and `execution_mode: agent_auto` playbooks (see [Playbooks](PLAYBOOKS.md)). The three Database Down playbooks currently run in `execution_mode: agent` (read-only diagnostic), which routes to the database agent. Future versions will promote those playbooks to `agent_approve` mode, where the SysAdmin agent performs the investigation **and** executes the approved remediation.
+The SysAdmin agent is the execution backend for `execution_mode: agent_approve` and `execution_mode: agent_auto` playbooks, and for the `pbs_sysadmin_docker_inspect` system Playbook (see [Playbooks](PLAYBOOKS.md)). For Docker-hosted databases that go unreachable, the DB agent's restart triage escalates to the SysAdmin agent automatically, which then reads container state and logs to confirm or revise the root-cause hypothesis.
 
 ---
 
@@ -480,16 +480,22 @@ This is the only infrastructure change required to run the host fault test in th
 
 ## 10. Integration with playbooks
 
-The SysAdmin agent is currently invoked by playbooks with `execution_mode: agent` (read-only investigation routed to the database agent). Direct SysAdmin agent invocation is the next step and will use `execution_mode: agent_approve`.
+The SysAdmin agent is actively used by the `pbs_sysadmin_docker_inspect` system Playbook — the second stage of the Docker DB-down diagnostic chain. When the DB agent's restart triage (`pbs_db_restart_triage`) confirms "connection refused" on a Docker-hosted server, it emits `ESCALATE_TO: pbs_sysadmin_docker_inspect`. The gateway then routes to the SysAdmin agent, which:
 
-The three Database Down system playbooks are planned to migrate as follows:
+1. Calls `check_host` to read the container's exit code and OOM-kill flag
+2. Calls `get_host_logs` for recent container output
+3. Optionally calls `read_pg_log_file` if container logs lack PostgreSQL-level detail
+4. Explicitly states in `FINDINGS:` whether the DB agent's prior hypothesis was **confirmed**, **revised**, or **corrected**
 
-| Series | Current mode | Planned mode | SysAdmin involvement |
+This chain runs in one API call when `approval_mode=auto`, or returns `suggested_next` for the operator to fire manually when `approval_mode=manual` (the default).
+
+| Series | Mode | Agent | SysAdmin involvement |
 |---|---|---|---|
-| `pbs_db_restart_triage` | `agent` (db agent) | `agent_approve` | Agent investigates with R/O tools, proposes `restart_container`/`restart_service`, operator approves |
-| `pbs_db_config_recovery` | `agent` (db agent) | `agent_approve` | Same — config fix is a human operation; agent provides the exact change |
-| `pbs_db_pitr_recovery` | `agent` (db agent) | `agent` (db agent, unchanged) | PITR recovery always requires human DBA — restart is never appropriate |
+| `pbs_db_restart_triage` | `agent` | database | Classifies failure; escalates to SysAdmin agent for Docker-hosted DBs |
+| `pbs_sysadmin_docker_inspect` | `agent` | **sysadmin** | Reads container state + logs; revises or confirms prior hypothesis |
+| `pbs_db_config_recovery` | `agent` | database | Config-error recovery; no SysAdmin involvement |
+| `pbs_db_pitr_recovery` | `agent` | database | WAL/data corruption recovery; always requires human DBA |
 
-The `agent_auto` mode (for non-production or pre-approved restart targets) will use `permitted_tools: ["restart_container"]` to scope autonomous execution to the restart tool only, keeping `check_disk` and `check_memory` as required pre-checks in the agent's system prompt rather than policy.
+The `agent_approve` and `agent_auto` modes (for playbooks where the SysAdmin agent also *executes* remediation, not just diagnoses) are planned for a future release.
 
-See [Playbooks](PLAYBOOKS.md) for the full `execution_mode` specification and the approval API.
+See [Playbooks](PLAYBOOKS.md) for the full `execution_mode` and `agent_name` specification.

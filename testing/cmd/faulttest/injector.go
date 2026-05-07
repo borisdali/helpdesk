@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"helpdesk/internal/infra"
 	"helpdesk/testing/testutil"
@@ -49,28 +50,46 @@ func (inj *Injector) Teardown(ctx context.Context, f Failure) error {
 }
 
 func (inj *Injector) exec(ctx context.Context, spec InjectSpec, f Failure) error {
+	var err error
 	switch spec.Type {
 	case "sql":
-		return inj.execSQL(ctx, spec)
+		err = inj.execSQL(ctx, spec)
 	case "docker":
-		return inj.execDocker(ctx, spec)
+		err = inj.execDocker(ctx, spec)
 	case "docker_exec":
-		return inj.execDockerExec(ctx, spec)
+		err = inj.execDockerExec(ctx, spec)
 	case "kustomize":
-		return inj.execKustomize(ctx, spec)
+		err = inj.execKustomize(ctx, spec)
 	case "kustomize_delete":
-		return inj.execKustomizeDelete(ctx, spec)
+		err = inj.execKustomizeDelete(ctx, spec)
 	case "config":
-		return inj.execConfig(ctx, spec)
+		err = inj.execConfig(ctx, spec)
 	case "ssh_exec":
-		return inj.execSSH(ctx, spec)
+		err = inj.execSSH(ctx, spec)
 	case "shell_exec":
-		return inj.execShell(ctx, spec)
+		err = inj.execShell(ctx, spec)
 	case "":
 		return nil
 	default:
 		return fmt.Errorf("unknown injection type: %s", spec.Type)
 	}
+	if err != nil {
+		return err
+	}
+	if spec.Wait != "" {
+		d, parseErr := time.ParseDuration(spec.Wait)
+		if parseErr != nil {
+			slog.Warn("invalid wait duration, skipping", "wait", spec.Wait, "err", parseErr)
+		} else {
+			slog.Info("waiting after injection", "duration", d)
+			select {
+			case <-time.After(d):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return nil
 }
 
 func (inj *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
@@ -195,9 +214,19 @@ func (inj *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	// Expose the resolved connection string so scripts can use $FAULTTEST_CONN.
 	// Also set PGPASSWORD when the infra config supplies a password via
 	// password_env, preventing psql from opening /dev/tty and hanging.
+	// FAULTTEST_CONTAINER is the docker/podman container name from the infra
+	// config, used by docker-based inject/teardown scripts.
+	// FAULTTEST_K8S_CONTEXT is the kubectl context from --context, used by
+	// K8s shell_exec inject/teardown scripts.
 	env := append(os.Environ(), "FAULTTEST_CONN="+connStr)
 	if pgpassword != "" {
 		env = append(env, "PGPASSWORD="+pgpassword)
+	}
+	if containerName := inj.resolvedContainerName(); containerName != "" {
+		env = append(env, "FAULTTEST_CONTAINER="+containerName)
+	}
+	if inj.cfg.KubeContext != "" {
+		env = append(env, "FAULTTEST_K8S_CONTEXT="+inj.cfg.KubeContext)
 	}
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
@@ -226,6 +255,21 @@ func (inj *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 		}
 	}
 	return inj.cfg.ConnStr, ""
+}
+
+// resolvedContainerName returns the container_name from the infra config for
+// the current --conn target, or "" if not configured. Exposed to inject scripts
+// as $FAULTTEST_CONTAINER so docker-based external faults can target the right
+// container without hardcoding a name.
+func (inj *Injector) resolvedContainerName() string {
+	if inj.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(inj.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[inj.cfg.ConnStr]; ok {
+				return db.ContainerName
+			}
+		}
+	}
+	return ""
 }
 
 // execSSH runs a script on a remote host via SSH.
@@ -259,6 +303,23 @@ func (inj *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
 	default:
 		return fmt.Errorf("ssh_exec: script or script_inline is required")
 	}
+
+	// Prepend a profile source + variable exports so the remote script can use
+	// $FAULTTEST_CONN and $FAULTTEST_CONTAINER without requiring the SSH server
+	// to accept env vars.  Non-interactive bash -s sessions don't load ~/.bashrc
+	// or ~/.profile, so docker/kubectl may not be in PATH without this.
+	connStr, _ := inj.resolvedConnEnv()
+	var preamble strings.Builder
+	// Extend PATH to cover common Docker/kubectl install locations.
+	// Non-interactive SSH sessions on macOS/Linux start with a minimal PATH
+	// (/usr/bin:/bin) — Docker Desktop, Homebrew, and nvm all install outside
+	// that.  We extend rather than replace so any existing entries are kept.
+	preamble.WriteString(`export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"` + "\n")
+	fmt.Fprintf(&preamble, "export FAULTTEST_CONN=%q\n", connStr)
+	if containerName := inj.resolvedContainerName(); containerName != "" {
+		fmt.Fprintf(&preamble, "export FAULTTEST_CONTAINER=%q\n", containerName)
+	}
+	scriptContent = append([]byte(preamble.String()), scriptContent...)
 
 	args := []string{"-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"}
 	if inj.cfg.SSHKeyPath != "" {

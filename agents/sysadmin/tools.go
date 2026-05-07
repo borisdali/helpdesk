@@ -286,7 +286,12 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 }
 
 func checkHostTool(ctx tool.Context, args CheckHostArgs) (CheckHostResult, error) {
-	return checkHostImpl(ctx, args)
+	start := time.Now()
+	result, err := checkHostImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "check_host", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── get_host_logs ────────────────────────────────────────────────────────────
@@ -360,7 +365,12 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 }
 
 func getHostLogsTool(ctx tool.Context, args GetHostLogsArgs) (HostLogsResult, error) {
-	return getHostLogsImpl(ctx, args)
+	start := time.Now()
+	result, err := getHostLogsImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "get_host_logs", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── check_disk ───────────────────────────────────────────────────────────────
@@ -398,7 +408,12 @@ func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) 
 }
 
 func checkDiskTool(ctx tool.Context, args CheckDiskArgs) (DiskResult, error) {
-	return checkDiskImpl(ctx, args)
+	start := time.Now()
+	result, err := checkDiskImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "check_disk", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── check_memory ─────────────────────────────────────────────────────────────
@@ -436,7 +451,12 @@ func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, e
 }
 
 func checkMemoryTool(ctx tool.Context, args CheckMemoryArgs) (MemoryResult, error) {
-	return checkMemoryImpl(ctx, args)
+	start := time.Now()
+	result, err := checkMemoryImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "check_memory", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
 }
 
 // ── read_pg_log_file ──────────────────────────────────────────────────────────
@@ -468,9 +488,14 @@ func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileRe
 	}
 
 	// Find the most recently modified log file.
-	lsOut, err := execInProcess(ctx, host, []string{"ls", "-t", logDir})
-	if err != nil {
-		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: cannot list %s: %w", logDir, err)
+	lsOut, lsErr := execInProcess(ctx, host, []string{"ls", "-t", logDir})
+	if lsErr != nil {
+		// Container may be stopped (e.g. after a crash).  Fall back to
+		// docker/podman cp so the log file is still readable post-mortem.
+		if host.Runtime == "docker" || host.Runtime == "podman" {
+			return readPgLogFileViaCopy(ctx, host, logDir, lines, args.Filter, args.Target)
+		}
+		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: cannot list %s: %w", logDir, lsErr)
 	}
 	files := strings.Fields(strings.TrimSpace(lsOut))
 	if len(files) == 0 {
@@ -515,7 +540,96 @@ func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileRe
 }
 
 func readPgLogFileTool(ctx tool.Context, args ReadPgLogFileArgs) (PgLogFileResult, error) {
-	return readPgLogFileImpl(ctx, args)
+	start := time.Now()
+	result, err := readPgLogFileImpl(ctx, args)
+	if err == nil {
+		slog.Info("tool ok", "name", "read_pg_log_file", "ms", time.Since(start).Milliseconds())
+	}
+	return result, err
+}
+
+// readPgLogFileViaCopy reads the PostgreSQL log from a stopped container using
+// "docker/podman cp" instead of exec.  Called as a fallback when execInProcess
+// fails — typically because the container crashed and is no longer running.
+func readPgLogFileViaCopy(ctx context.Context, host resolvedHost, logDir string, lines int, filter, serverID string) (PgLogFileResult, error) {
+	tmpDir, err := os.MkdirTemp("", "pg_log_*")
+	if err != nil {
+		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: cannot create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// docker cp containerName:logDir/. tmpDir copies the directory contents.
+	src := host.ContainerName + ":" + logDir + "/."
+	if _, cpErr := cmdRunner.Run(ctx, host.Runtime, []string{"cp", src, tmpDir}, nil); cpErr != nil {
+		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: container is stopped and docker cp failed — log dir may not exist: %w", cpErr)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil || len(entries) == 0 {
+		return PgLogFileResult{
+			ServerID: serverID,
+			Runtime:  hostRuntimeLabel(host),
+			Logs:     fmt.Sprintf("no log files found in %s (read from stopped container via cp)", logDir),
+		}, nil
+	}
+
+	// Sort by modification time descending to pick the most recent file.
+	type fileEntry struct {
+		name    string
+		modTime time.Time
+	}
+	var fes []fileEntry
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		fes = append(fes, fileEntry{e.Name(), info.ModTime()})
+	}
+	if len(fes) == 0 {
+		return PgLogFileResult{
+			ServerID: serverID,
+			Runtime:  hostRuntimeLabel(host),
+			Logs:     fmt.Sprintf("no log files found in %s (read from stopped container via cp)", logDir),
+		}, nil
+	}
+	sort.Slice(fes, func(i, j int) bool { return fes[i].modTime.After(fes[j].modTime) })
+
+	content, err := os.ReadFile(tmpDir + "/" + fes[0].name)
+	if err != nil {
+		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: cannot read %s: %w", fes[0].name, err)
+	}
+
+	allLines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+	if len(allLines) > lines {
+		allLines = allLines[len(allLines)-lines:]
+	}
+	logOutput := strings.Join(allLines, "\n")
+
+	if filter != "" {
+		lf := strings.ToLower(filter)
+		var keep []string
+		for _, line := range strings.Split(logOutput, "\n") {
+			if strings.Contains(strings.ToLower(line), lf) {
+				keep = append(keep, line)
+			}
+		}
+		logOutput = strings.Join(keep, "\n")
+	}
+
+	linesReturned := 0
+	if logOutput != "" {
+		linesReturned = len(strings.Split(logOutput, "\n"))
+	}
+	return PgLogFileResult{
+		ServerID:      serverID,
+		Runtime:       hostRuntimeLabel(host),
+		LinesReturned: linesReturned,
+		Logs:          logOutput,
+	}, nil
 }
 
 // hostRuntimeLabel returns a human-readable label for the host's exec mechanism.

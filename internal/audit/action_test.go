@@ -43,7 +43,7 @@ func TestClassifyTool(t *testing.T) {
 		{"delete_pod", ActionDestructive},
 
 		// Incident agent
-		{"create_incident_bundle", ActionRead},
+		{"create_incident_bundle", ActionWrite},
 		{"list_incidents", ActionRead},
 
 		// Unknown
@@ -89,6 +89,7 @@ func TestActionClass_IsApprovalRequired(t *testing.T) {
 	}{
 		{ActionRead, false},
 		{ActionWrite, true},
+		{ActionEscalation, true},
 		{ActionDestructive, true},
 		{ActionUnknown, false},
 	}
@@ -108,7 +109,8 @@ func TestActionClass_RiskLevel(t *testing.T) {
 	}{
 		{ActionRead, 0},
 		{ActionWrite, 1},
-		{ActionDestructive, 2},
+		{ActionEscalation, 2},
+		{ActionDestructive, 3},
 		{ActionUnknown, -1},
 	}
 

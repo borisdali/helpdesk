@@ -21,6 +21,9 @@ type AgentResponse struct {
 	ToolCalls []ToolCallResult // nil when structured data is unavailable (gateway path)
 	Duration  time.Duration
 	Error     error
+	// CrystalBall is true when the gateway ran this call in crystal-ball mode
+	// (playbook scaffolding bypassed). Set only on gateway playbook responses.
+	CrystalBall bool
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.
@@ -55,7 +58,14 @@ func SendPrompt(ctx context.Context, agentURL, prompt string) AgentResponse {
 		}
 	}
 
-	client, err := a2aclient.NewFromCard(ctx, card)
+	// Use a no-timeout HTTP client: agent calls can take 30-120 s when the
+	// model issues multiple tool calls. The default 5-second timeout in the
+	// a2aclient JSONRPC transport causes the request to be cut short and the
+	// ADK to return an empty "llm error response" rather than a real answer.
+	// The caller's context (set by the fault harness timeout flag) is the
+	// actual deadline.
+	httpClient := &http.Client{}
+	client, err := a2aclient.NewFromCard(ctx, card, a2aclient.WithJSONRPCTransport(httpClient))
 	if err != nil {
 		return AgentResponse{
 			Duration: time.Since(start),

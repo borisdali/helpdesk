@@ -226,6 +226,86 @@ func TestApproval_IsValid(t *testing.T) {
 	}
 }
 
+func TestApprovalSession_IsValid(t *testing.T) {
+	tests := []struct {
+		name    string
+		session *ApprovalSession
+		class   ActionClass
+		want    bool
+	}{
+		{
+			name: "valid session covers class",
+			session: &ApprovalSession{
+				ExpiresAt:      time.Now().Add(time.Hour),
+				AllowedClasses: []ActionClass{ActionWrite, ActionDestructive},
+			},
+			class: ActionWrite,
+			want:  true,
+		},
+		{
+			name: "valid session covers destructive",
+			session: &ApprovalSession{
+				ExpiresAt:      time.Now().Add(time.Hour),
+				AllowedClasses: []ActionClass{ActionWrite, ActionDestructive},
+			},
+			class: ActionDestructive,
+			want:  true,
+		},
+		{
+			name: "session does not cover class",
+			session: &ApprovalSession{
+				ExpiresAt:      time.Now().Add(time.Hour),
+				AllowedClasses: []ActionClass{ActionWrite},
+			},
+			class: ActionDestructive,
+			want:  false,
+		},
+		{
+			name: "expired session",
+			session: &ApprovalSession{
+				ExpiresAt:      time.Now().Add(-time.Minute),
+				AllowedClasses: []ActionClass{ActionWrite},
+			},
+			class: ActionWrite,
+			want:  false,
+		},
+		{
+			name: "revoked session",
+			session: &ApprovalSession{
+				Revoked:        true,
+				ExpiresAt:      time.Now().Add(time.Hour),
+				AllowedClasses: []ActionClass{ActionWrite},
+			},
+			class: ActionWrite,
+			want:  false,
+		},
+		{
+			name:    "nil session",
+			session: nil,
+			class:   ActionWrite,
+			want:    false,
+		},
+		{
+			name: "read class not in allowed list",
+			session: &ApprovalSession{
+				ExpiresAt:      time.Now().Add(time.Hour),
+				AllowedClasses: []ActionClass{ActionWrite},
+			},
+			class: ActionRead,
+			want:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.session.IsValid(tc.class)
+			if got != tc.want {
+				t.Errorf("IsValid(%q) = %v, want %v", tc.class, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApprovalRule_Matches(t *testing.T) {
 	tests := []struct {
 		name    string

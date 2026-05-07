@@ -1,0 +1,61 @@
+series_id: pbs_db_restart_action
+name: "Sysadmin — Docker Container Restart"
+version: "1.0"
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Restart a cleanly-stopped Docker-hosted PostgreSQL container. This playbook
+  runs only when the prior sysadmin inspection confirmed ExitCode=0 and clean
+  shutdown logs — meaning the container was stopped intentionally or gracefully,
+  not crashed or OOM-killed. Executes docker start and confirms the container
+  is healthy before reporting success.
+symptoms:
+  - "sysadmin inspection confirmed container exited with ExitCode=0"
+  - "container logs show clean PostgreSQL shutdown (no FATAL/PANIC/corruption)"
+  - "service is down and a restart is the confirmed correct action"
+guidance: |
+  You are the third stage of a diagnostic chain. Prior agents have confirmed:
+  1. The database is unreachable (connection refused).
+  2. The container exited cleanly (ExitCode=0, clean shutdown in logs).
+
+  Your job is to restart the container and confirm it is healthy.
+
+  PRECONDITION CHECK — abort if any of these are true:
+  - Prior findings mention "FATAL", "PANIC", "invalid page", "checksum failure",
+    or "OOM" — those require human review, not an automated restart.
+  - You have any doubt about the prior diagnosis — emit FINDINGS describing the
+    concern and stop.
+
+  Step 1 — Restart the container:
+  Call restart_container with the connection_string (target). This runs
+  docker start on the container identified in the infrastructure config.
+
+  Step 2 — Confirm the container is running:
+  Call check_host with the same connection_string. Verify Status=running
+  and Restarting=false.
+
+  Step 3 — Confirm PostgreSQL is accepting connections:
+  Call check_connection with the connection_string. If it succeeds, the
+  service is restored. If it fails, wait 5 seconds and try once more — the
+  PostgreSQL startup sequence takes a moment.
+
+  Step 4 — Report outcome:
+  Emit FINDINGS with:
+  - Whether the restart succeeded or failed
+  - The container state after restart (Status, ExitCode, StartedAt)
+  - Whether PostgreSQL is now accepting connections
+  - Any anomalies observed (unexpected exit codes, slow startup, log warnings)
+
+  Do NOT call any write or destructive tools beyond restart_container.
+  Do NOT retry more than once — if the container fails to start, report the
+  failure and stop so a human can investigate.
+
+escalation:
+  - "container fails to start after restart_service — may indicate a config or data issue"
+  - "PostgreSQL does not accept connections after container is running — investigate pg logs"
+  - "prior findings mention OOM, FATAL, PANIC, or data corruption — do not restart automatically"
+target_hints: []

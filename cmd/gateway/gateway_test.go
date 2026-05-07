@@ -1608,3 +1608,424 @@ func TestDispatchDirectTool_RecordsToolResult(t *testing.T) {
 		t.Errorf("success = %v, want true", recorded["success"])
 	}
 }
+
+// --- Fabrication detection tests ---
+
+// mockA2AServer starts a minimal JSON-RPC A2A server that returns a completed
+// task. The card points to the test server's URL.
+func mockA2AServer(t *testing.T, agentName string) (*httptest.Server, *a2a.AgentCard) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-1",
+				"status": map[string]any{
+					"state": "completed",
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return srv, card
+}
+
+// TestProxyToAgent_FabricationDetection_Mismatch verifies that a destructive
+// NL query where the audit trail shows no tool executions results in a
+// delegation_verification event with Mismatch=true.
+func TestProxyToAgent_FabricationDetection_Mismatch(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	// Auditd returns empty tool execution list → mismatch for destructive delegation.
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	// "terminate" triggers ActionDestructive → Mismatch=true when no tools confirmed.
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var verifEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification {
+			verifEvent = e
+			break
+		}
+	}
+	if verifEvent == nil {
+		t.Fatal("no delegation_verification event emitted")
+	}
+	if verifEvent.DelegationVerification == nil {
+		t.Fatal("DelegationVerification is nil")
+	}
+	if !verifEvent.DelegationVerification.Mismatch {
+		t.Error("expected Mismatch=true for destructive delegation with no tool executions")
+	}
+	if verifEvent.DelegationVerification.Agent != agentNameDB {
+		t.Errorf("Agent = %q, want %q", verifEvent.DelegationVerification.Agent, agentNameDB)
+	}
+	if !strings.HasPrefix(verifEvent.EventID, "gv_") {
+		t.Errorf("EventID = %q, want gv_ prefix", verifEvent.EventID)
+	}
+	if !strings.HasPrefix(verifEvent.TraceID, "tr_") {
+		t.Errorf("TraceID = %q, want tr_ prefix", verifEvent.TraceID)
+	}
+}
+
+// TestProxyToAgent_FabricationDetection_ReadNoMismatch verifies that read
+// queries never produce Mismatch=true, even when the audit trail is empty.
+func TestProxyToAgent_FabricationDetection_ReadNoMismatch(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	// "check" triggers ActionRead → Mismatch is never set for read-class delegations.
+	rec := postQuery(t, gw, `{"agent":"db","message":"check how many connections are open"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var verifEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification {
+			verifEvent = e
+			break
+		}
+	}
+	if verifEvent == nil {
+		t.Fatal("delegation_verification event should be emitted even for read queries")
+	}
+	if verifEvent.DelegationVerification.Mismatch {
+		t.Error("Mismatch should be false for read-class delegation")
+	}
+}
+
+// TestProxyToAgent_FabricationDetection_SkippedWhenNoAuditURL verifies that
+// when auditURL is not configured, no delegation_verification event is emitted.
+func TestProxyToAgent_FabricationDetection_SkippedWhenNoAuditURL(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: map[string]*a2aclient.Client{agentNameDB: client},
+		auditor: audit.NewGatewayAuditor(ta),
+		// auditURL intentionally absent — verification must be skipped.
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification {
+			t.Error("delegation_verification event emitted but should be skipped when auditURL is empty")
+		}
+	}
+}
+
+// TestProxyToAgent_MismatchHeader verifies that X-Audit-Mismatch: true is set
+// on the HTTP response when fabrication is detected (write/destructive delegation
+// with no tool executions in the audit trail).
+func TestProxyToAgent_MismatchHeader(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Audit-Mismatch"); got != "true" {
+		t.Errorf("X-Audit-Mismatch = %q, want %q", got, "true")
+	}
+}
+
+// TestProxyToAgent_MismatchHeader_AbsentOnRead verifies that X-Audit-Mismatch
+// is NOT set when the delegation class is read (no fabrication risk).
+func TestProxyToAgent_MismatchHeader_AbsentOnRead(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"check how many connections are open"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Audit-Mismatch"); got != "" {
+		t.Errorf("X-Audit-Mismatch = %q, want empty for read-class delegation", got)
+	}
+}
+
+// TestGatewayMetrics_FabricationCounter verifies that the Prometheus counter is
+// incremented when a fabrication mismatch is detected.
+func TestGatewayMetrics_FabricationCounter(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	m := NewGatewayMetrics()
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+		metrics:  m,
+	}
+
+	postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+
+	// The counter should now have exactly one mismatch for postgres_database_agent.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var total int64
+	for _, v := range m.fabricationMismatches {
+		total += v
+	}
+	if total != 1 {
+		t.Errorf("fabricationMismatches total = %d, want 1", total)
+	}
+}
+
+// TestGatewayMetrics_ServeHTTP verifies that /metrics exposes counter lines in
+// Prometheus text format.
+func TestGatewayMetrics_ServeHTTP(t *testing.T) {
+	m := NewGatewayMetrics()
+	m.recordFabricationMismatch("postgres_database_agent", "destructive")
+	m.recordFabricationMismatch("postgres_database_agent", "destructive")
+	m.recordFabricationMismatch("k8s_agent", "write")
+
+	gw := &Gateway{
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
+		metrics: m,
+	}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "gateway_fabrication_mismatches_total") {
+		t.Errorf("metrics body missing counter name; got: %s", body)
+	}
+	if !strings.Contains(body, "postgres_database_agent") {
+		t.Errorf("metrics body missing agent label; got: %s", body)
+	}
+}
+
+// ─── Approval session tests ───────────────────────────────────────────────────
+
+func TestCheckApprovalMode_Auto_AlwaysAllowed(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "auto"})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if blocked {
+		t.Errorf("auto mode should never block, got: %s", msg)
+	}
+}
+
+func TestCheckApprovalMode_Manual_BlocksDestructive(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "manual"})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("manual mode should block destructive tools")
+	}
+	if msg == "" {
+		t.Error("expected non-empty error message")
+	}
+}
+
+func TestCheckApprovalMode_Manual_AllowsReads(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "manual"})
+	blocked, _ := gw.checkApprovalMode(ctx, "get_database_size")
+	if blocked {
+		t.Error("manual mode should allow read tools")
+	}
+}
+
+func TestCheckApprovalMode_Session_BlocksWhenNoSessionID(t *testing.T) {
+	gw := &Gateway{auditURL: "http://localhost:9999"}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "session", sessionID: ""})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("session mode with no session ID should block")
+	}
+	if msg == "" {
+		t.Error("expected non-empty error message")
+	}
+}
+
+func TestCheckApprovalMode_Session_BlocksWhenAuditdMissing(t *testing.T) {
+	gw := &Gateway{auditURL: ""} // no auditd
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{mode: "session", sessionID: "aps_abc"})
+	blocked, _ := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("session mode without auditd should fail safe and block")
+	}
+}
+
+func TestCheckApprovalMode_NoContext_Allowed(t *testing.T) {
+	gw := &Gateway{}
+	blocked, _ := gw.checkApprovalMode(context.Background(), "terminate_connection")
+	if blocked {
+		t.Error("no approval context should default to allow (auto mode)")
+	}
+}
+
+func TestCheckApprovalMode_Session_ValidSessionAllows(t *testing.T) {
+	// Serve a valid approval session from a mock auditd.
+	sess := audit.ApprovalSession{
+		SessionID:      "aps_test",
+		GrantedBy:      "boris",
+		GrantedAt:      time.Now().Add(-time.Minute),
+		ExpiresAt:      time.Now().Add(30 * time.Minute),
+		AllowedClasses: []audit.ActionClass{audit.ActionWrite, audit.ActionDestructive},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sess) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	gw := &Gateway{auditURL: srv.URL}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{
+		mode:      "session",
+		sessionID: "aps_test",
+	})
+	blocked, msg := gw.checkApprovalMode(ctx, "terminate_connection")
+	if blocked {
+		t.Errorf("valid session should allow, got: %s", msg)
+	}
+}
+
+func TestCheckApprovalMode_Session_ExpiredSessionBlocks(t *testing.T) {
+	sess := audit.ApprovalSession{
+		SessionID:      "aps_expired",
+		GrantedBy:      "boris",
+		GrantedAt:      time.Now().Add(-2 * time.Hour),
+		ExpiresAt:      time.Now().Add(-1 * time.Hour), // already expired
+		AllowedClasses: []audit.ActionClass{audit.ActionDestructive},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sess) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	gw := &Gateway{auditURL: srv.URL}
+	ctx := context.WithValue(context.Background(), ctxKeyApprovalSession, approvalContext{
+		mode:      "session",
+		sessionID: "aps_expired",
+	})
+	blocked, _ := gw.checkApprovalMode(ctx, "terminate_connection")
+	if !blocked {
+		t.Error("expired session should block")
+	}
+}

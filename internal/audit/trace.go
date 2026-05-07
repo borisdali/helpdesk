@@ -36,6 +36,14 @@ type TraceContext struct {
 	// PurposeExplicit is true when the purpose was explicitly declared by the caller
 	// (via X-Purpose header or request body), false when derived from operating mode.
 	PurposeExplicit bool `json:"purpose_explicit,omitempty"`
+
+	// ApprovalMode is the operator-specified approval mode for this chain ("auto",
+	// "session", or "manual"). Forwarded from the gateway via A2A metadata so
+	// agents can honour the same approval policy without separate approval requests.
+	ApprovalMode string `json:"approval_mode,omitempty"`
+
+	// ApprovalSession is the session ID when ApprovalMode == "session".
+	ApprovalSession string `json:"approval_session,omitempty"`
 }
 
 // NewTraceID generates a new trace ID with the default "tr_" prefix.

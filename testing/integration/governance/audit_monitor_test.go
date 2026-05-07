@@ -190,6 +190,93 @@ func TestAuditorHTTPPollingMode(t *testing.T) {
 	}
 }
 
+// TestAuditorFabricationMismatchAlert verifies that when a delegation_verification
+// event with mismatch=true is posted to auditd, the auditor fires a
+// "fabrication_mismatch" CRITICAL alert to the incident webhook.
+//
+// This exercises the full path: auditd stores the event → auditor polls via
+// HTTP → checkFabricationMismatch fires → sendSecurityIncident POSTs to webhook.
+func TestAuditorFabricationMismatchAlert(t *testing.T) {
+	auditdURL, _ := startAuditdOnPort(t, 19912)
+
+	// Incident webhook receiver. The auditor POSTs a JSON object with
+	// alert_type="fabrication_mismatch" and severity="CRITICAL".
+	incidentCh := make(chan map[string]any, 16)
+	incidentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+			select {
+			case incidentCh <- payload:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer incidentSrv.Close()
+
+	// Start auditor in HTTP polling mode with incident webhook.
+	cmd := exec.Command(auditorBin,
+		"-audit-service="+auditdURL,
+		"-incident-webhook="+incidentSrv.URL,
+	)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start auditor: %v", err)
+	}
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+
+	// Allow at least one poll cycle before injecting the event.
+	time.Sleep(6 * time.Second)
+
+	// POST a gateway_request anchor so QueryJourneys can find the trace.
+	traceID := fmt.Sprintf("tr_fab_%d", time.Now().UnixNano())
+	anchor := map[string]any{
+		"event_id":   fmt.Sprintf("gwr_%d", time.Now().UnixNano()),
+		"event_type": "gateway_request",
+		"trace_id":   traceID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"session":    map[string]any{"id": traceID},
+	}
+	body, _ := json.Marshal(anchor)
+	http.Post(auditdURL+"/v1/events", "application/json", bytes.NewReader(body)) //nolint:errcheck
+
+	// POST the fabrication mismatch delegation_verification event.
+	dvEvent := map[string]any{
+		"event_id":   fmt.Sprintf("gv_%d", time.Now().UnixNano()),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"session":    map[string]any{"id": traceID},
+		"delegation_verification": map[string]any{
+			"agent":        "postgres_database_agent",
+			"action_class": "destructive",
+			"mismatch":     true,
+		},
+	}
+	body, _ = json.Marshal(dvEvent)
+	resp, err := http.Post(auditdURL+"/v1/events", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST delegation_verification: %v", err)
+	}
+	resp.Body.Close()
+
+	// Wait for the auditor to poll, detect the mismatch, and fire to the incident webhook.
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case incident := <-incidentCh:
+			alertType, _ := incident["alert_type"].(string)
+			severity, _ := incident["severity"].(string)
+			t.Logf("incident webhook: alert_type=%s severity=%s", alertType, severity)
+			if alertType == "fabrication_mismatch" && severity == "CRITICAL" {
+				return // pass
+			}
+		case <-deadline:
+			t.Fatal("auditor did not fire fabrication_mismatch CRITICAL alert to incident webhook within 30 s")
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Secbot HTTP polling mode
 // ─────────────────────────────────────────────────────────────────────────────

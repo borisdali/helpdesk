@@ -132,7 +132,14 @@ func main() {
 		return
 	}
 
-	slog.Info("starting auditor", "socket", cfg.SocketPath, "log_all", cfg.LogAll)
+	startArgs := []any{"socket", cfg.SocketPath, "log_all", cfg.LogAll}
+	if cfg.AuditServiceURL != "" {
+		startArgs = append(startArgs, "audit_service", cfg.AuditServiceURL)
+	}
+	if cfg.IncidentWebhookURL != "" {
+		startArgs = append(startArgs, "incident_webhook", cfg.IncidentWebhookURL)
+	}
+	slog.Info("starting auditor", startArgs...)
 
 	// Initialize notifiers
 	notifiers := buildNotifiers(cfg)
@@ -703,6 +710,7 @@ func (a *Auditor) Analyze(event *audit.Event) {
 	a.checkOffHours(event)
 	a.checkUnauthorizedDestructive(event)
 	a.checkTimestampGap(event)
+	a.checkFabricationMismatch(event)
 }
 
 // outputJSON prints the event as a JSON line.
@@ -923,11 +931,18 @@ func (a *Auditor) trackEvent(event *audit.Event) {
 		}
 	}
 
-	// Track queries per session
-	if event.Input.UserQuery != "" {
+	// Track queries per session — only for tool executions and only with server
+	// context, so that the same SQL run against N different servers (normal
+	// investigation) is not counted as N repetitions of the same query.
+	if event.EventType == audit.EventTypeToolExecution && event.Tool != nil && event.Input.UserQuery != "" {
+		server := ""
+		if cs, ok := event.Tool.Parameters["connection_string"].(string); ok {
+			server = cs
+		}
+		key := event.Tool.Name + "|" + server + "|" + event.Input.UserQuery
 		a.sessionQueries[event.Session.ID] = append(
 			a.sessionQueries[event.Session.ID],
-			event.Input.UserQuery,
+			key,
 		)
 	}
 }
@@ -969,6 +984,13 @@ func (a *Auditor) checkCategoryMismatch(event *audit.Event) {
 
 	agent := event.Decision.Agent
 	category := string(event.Decision.RequestCategory)
+
+	// Playbook escalation decisions use the next playbook's series ID as the
+	// "agent" field (pbs_ prefix). They are not real agent delegations and do
+	// not have a meaningful request category — skip validation entirely.
+	if strings.HasPrefix(agent, "pbs_") {
+		return
+	}
 
 	expectedCategories := map[string][]string{
 		"postgres_database_agent": {"database"},
@@ -1089,8 +1111,15 @@ func (a *Auditor) checkRepeatedQueries(event *audit.Event) {
 	}
 
 	if repeatCount >= 3 {
+		// Strip the "tool|server|" prefix added during tracking to show clean SQL.
+		displayQuery := lastQuery
+		if parts := strings.SplitN(lastQuery, "|", 4); len(parts) == 4 {
+			displayQuery = parts[0] + " on " + parts[1] + ": " + parts[3]
+		} else if len(parts) == 3 {
+			displayQuery = parts[0] + ": " + parts[2]
+		}
 		a.alert(AlertCritical, "repeated identical queries detected (possible loop)", event,
-			"query", truncate(lastQuery, 50),
+			"query", truncate(displayQuery, 80),
 			"repeat_count", repeatCount)
 	}
 }
@@ -1118,7 +1147,22 @@ func (a *Auditor) checkEmptyReasoning(event *audit.Event) {
 }
 
 // checkDangerousAction alerts on write or destructive operations.
+// Skips pre-authorization events (tool_invoked), policy-allowed actions,
+// and auto-approved chained operations.
 func (a *Auditor) checkDangerousAction(event *audit.Event) {
+	// tool_invoked fires before policy evaluation — the subsequent policy_decision
+	// and tool_execution events carry the authoritative authorization status.
+	if event.EventType == audit.EventTypeToolInvoked {
+		return
+	}
+	// Policy explicitly allowed the action — no approval record is required.
+	if event.PolicyDecision != nil && event.PolicyDecision.Effect == "allow" {
+		return
+	}
+	// Operator pre-authorised the full chain via approval_mode=auto or force.
+	if event.Approval != nil && event.Approval.Status == audit.ApprovalAutoApproved {
+		return
+	}
 	switch event.ActionClass {
 	case audit.ActionWrite:
 		a.alert(AlertWarning, "write operation detected", event,
@@ -1252,8 +1296,17 @@ func (a *Auditor) checkUnauthorizedDestructive(event *audit.Event) {
 	if event.ActionClass != audit.ActionDestructive {
 		return
 	}
+	// tool_invoked events are emitted before policy evaluation — skip them;
+	// the policy_decision and tool_execution events carry the approval status.
+	if event.EventType == audit.EventTypeToolInvoked {
+		return
+	}
+	// Policy explicitly authorised the action — no approval record is needed.
+	if event.PolicyDecision != nil && event.PolicyDecision.Effect == "allow" {
+		return
+	}
 
-	// Check if approval exists and is valid
+	// Check if approval exists and is valid.
 	if event.Approval == nil {
 		a.recordSecurityAlert("unauthorized_destructive", AlertCritical,
 			"DESTRUCTIVE operation without approval record", event,
@@ -1312,6 +1365,26 @@ func (a *Auditor) checkTimestampGap(event *audit.Event) {
 	}
 
 	a.lastEventTime = event.Timestamp
+}
+
+// checkFabricationMismatch fires a critical security alert when a gateway reports
+// that an agent returned success but the audit trail contains no matching tool
+// executions — a strong signal of LLM response fabrication.
+func (a *Auditor) checkFabricationMismatch(event *audit.Event) {
+	if event.EventType != audit.EventTypeDelegationVerification {
+		return
+	}
+	if event.DelegationVerification == nil || !event.DelegationVerification.Mismatch {
+		return
+	}
+	agent := event.DelegationVerification.Agent
+	actionClass := string(event.DelegationVerification.ActionClass)
+	a.recordSecurityAlert("fabrication_mismatch", AlertCritical,
+		"FABRICATION RISK — agent returned success but audit trail has no matching tool executions",
+		event,
+		"agent", agent,
+		"action_class", actionClass,
+		"trace_id", event.TraceID)
 }
 
 // recordSecurityAlert records a security alert and optionally sends to incident webhook.

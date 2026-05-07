@@ -1043,6 +1043,10 @@ func TestIntegration_DelegationVerification_MismatchSurfacesInJourneys(t *testin
 		if count, ok := j["event_count"].(float64); ok && count != 1 {
 			t.Errorf("event_count = %.0f, want 1 (delegation_verification excluded from count)", count)
 		}
+		// has_mismatch must be true when at least one verification event has mismatch=true.
+		if hasMismatch, _ := j["has_mismatch"].(bool); !hasMismatch {
+			t.Error("journey has_mismatch = false, want true for mismatch delegation_verification")
+		}
 	}
 	if !found {
 		t.Errorf("journey with trace_id=%s not found in outcome=unverified_claim results", traceID)
@@ -1184,6 +1188,10 @@ func TestIntegration_DelegationVerification_CleanVerification(t *testing.T) {
 			found = true
 			if j["outcome"] == "unverified_claim" {
 				t.Error("clean verification should not result in unverified_claim outcome")
+			}
+			// has_mismatch must be absent / false for a clean verification.
+			if hasMismatch, _ := j["has_mismatch"].(bool); hasMismatch {
+				t.Error("clean verification should not set has_mismatch=true")
 			}
 		}
 	}

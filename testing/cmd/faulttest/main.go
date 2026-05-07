@@ -141,6 +141,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	// Completion webhook.
 	fs.StringVar(&cfg.NotifyURL, "notify-url", "", "Webhook URL for POST notification on run completion (e.g. Slack incoming webhook)")
 
+	// Gateway-routed diagnosis (A/B comparison mode).
+	fs.BoolVar(&cfg.ViaGateway, "via-gateway", false, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -306,6 +309,10 @@ func cmdRun(args []string) {
 		callStart := time.Now()
 		resp := runner.Run(ctx, f)
 
+		if resp.CrystalBall {
+			slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
+		}
+
 		// Query audit trail for tool evidence if --audit-url is set.
 		var auditTools []string
 		if cfg.AuditURL != "" {
@@ -334,6 +341,14 @@ func cmdRun(args []string) {
 			}
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
+
+			// Push judge reasoning to the audit store so it appears alongside
+			// live agent_reasoning events in the governance trail.
+			if !evalResult.JudgeSkipped && evalResult.JudgeReasoning != "" {
+				faultTraceID := "ft_" + runID + "_" + f.ID
+				pushJudgeReasoning(ctx, cfg.AuditURL, cfg.GatewayAPIKey, faultTraceID,
+					agentNameFromCategory(f.Category), evalResult.JudgeReasoning, auditTools)
+			}
 		}
 
 		// 4. Remediation phase (optional).
@@ -408,6 +423,7 @@ func cmdRun(args []string) {
 	} else {
 		fmt.Printf("Report written to %s\n", reportFile)
 	}
+	report.PrintJSON()
 
 	if cfg.NotifyURL != "" {
 		postNotify(cfg.NotifyURL, report)
@@ -740,6 +756,10 @@ func cmdValidate(args []string) {
 // validatePlaybookExists checks whether a playbook with the given series_id exists
 // on the gateway. Returns true when the playbook is found, false otherwise.
 // Network failures or unexpected status codes are treated as "not found" (returns false).
+func validatePlaybookExists(gatewayURL, apiKey, seriesID string) bool {
+	return checkPlaybook(gatewayURL, apiKey, seriesID) == playbookFound
+}
+
 type playbookCheckResult int
 
 const (

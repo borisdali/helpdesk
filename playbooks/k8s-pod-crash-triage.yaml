@@ -1,0 +1,78 @@
+series_id: pbs_k8s_pod_crash_triage
+name: "K8s Pod Crash — Diagnosis"
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a crashing or restarting Kubernetes pod running PostgreSQL.
+  Identify the root cause from pod state, exit code, and on-disk logs,
+  and provide evidence-based remediation guidance.
+symptoms:
+  - "PostgreSQL pod is restarting or in CrashLoopBackOff"
+  - "pod status shows Completed (exit 0) or OOMKilled (exit 137)"
+  - "database connection refused from application"
+  - "psql cannot reach the database"
+  - "kubectl get pods shows non-Running state for postgres pod"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT query other namespaces or cluster names unless you have fully
+  investigated the namespace specified. The root cause is there.
+
+  Step 1 — Pod state and restart history:
+  Call get_pods for the exact namespace named in the ticket to find the
+  postgres pod. Then call describe_pod to get the full pod status: look
+  at the last termination state for ExitCode and Reason.
+    ExitCode=0, Reason=Completed  → PostgreSQL performed a controlled
+      emergency shutdown (PANIC or fast shutdown request). NOT a crash.
+      Requires investigation of why it shut down. MANDATORY: go to Step 3.
+    ExitCode=137, Reason=OOMKilled → container was killed by the OOM killer.
+      Memory limit too low or genuine memory leak.
+    ExitCode=1 or other non-zero  → process error. Check logs for details.
+
+  Step 2 — Previous container logs:
+  Call get_pod_logs with previous=true for the postgres pod in the ticket
+  namespace. If logs are empty, short, or say "No logs available", PostgreSQL
+  is configured with logging_collector=on and writes logs to disk instead of
+  stdout. Proceed immediately to Step 3 — do NOT form a diagnosis yet.
+  NOTE: logs from the current (new) container after a restart are not
+  relevant to the crash cause. Always use previous=true.
+
+  Step 3 — On-disk log file (MANDATORY when ExitCode=0 Reason=Completed):
+  When the pod terminated with ExitCode=0 and Reason=Completed, the cause
+  is ALWAYS in the on-disk PostgreSQL log — call read_pod_file even if
+  Step 2 returned some output. Also required when Step 2 logs were empty.
+  Call read_pod_file on the postgres pod in the ticket namespace. Paths:
+    /var/lib/postgresql/data/log/postgresql.log
+    /var/lib/postgresql/data/pg_log/postgresql.log
+  Look for PANIC, FATAL, or ERROR lines that explain the shutdown.
+  Common patterns:
+    "could not write to file \"pg_wal/...\": No space left on device"
+      → WAL disk full. Disk expansion or WAL cleanup required.
+    "out of memory" or "cannot allocate"
+      → OOM inside the process (distinct from OOMKilled at container level).
+    "invalid page" or "checksum failure"
+      → Data corruption. Do NOT restart without investigation.
+    "received fast shutdown request" or "database system was shut down"
+      → Clean stop. Likely an operator action or liveness probe kill.
+
+  Step 4 — Resource check:
+  Call get_pod_resources to see memory and CPU limits. Cross-reference
+  with ExitCode=137 (OOMKilled) or a pattern of memory-related errors.
+
+  Step 5 — Root cause summary:
+  State clearly:
+  - What caused the pod to stop (ExitCode + log evidence)
+  - Whether this is a crash (needs recovery) or a clean stop (needs restart)
+  - What action the operator should take (expand disk, increase memory limit,
+    fix archiving, or simply restart)
+  Do NOT attempt the restart — describe the recommended action for operator approval.
+
+escalation:
+  - "log file shows data corruption (invalid page, checksum failure)"
+  - "OOMKilled repeatedly — memory limit needs tuning before restart"
+  - "pg_wal disk full — requires disk expansion or WAL slot cleanup"
+target_hints: []

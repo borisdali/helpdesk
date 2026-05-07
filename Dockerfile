@@ -26,6 +26,9 @@ WORKDIR /src/helpdesk
 # Rewrite the replace directive to use the in-container path.
 RUN go mod edit -replace google.golang.org/adk=/src/adk-go
 
+# Allow go to extend go.sum for deps brought in by the local adk-go replace.
+ENV GOFLAGS=-mod=mod
+
 # Download dependencies and build all binaries.
 RUN go mod download
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X helpdesk/internal/buildinfo.Version=$VERSION" -o /out/database-agent  ./agents/database/
@@ -63,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
     lsb-release \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # PostgreSQL 16 client.

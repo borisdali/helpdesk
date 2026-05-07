@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -359,4 +360,37 @@ func TestSREBotWorkflow(t *testing.T) {
 			t.Error("Diagnosis response too short")
 		}
 	})
+}
+
+// TestGatewayMetricsEndpoint verifies that GET /metrics on the gateway returns
+// Prometheus text format with the gateway_fabrication_mismatches_total counter
+// declared. The counter value may be zero if no mismatches have occurred.
+func TestGatewayMetricsEndpoint(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	resp, err := http.Get(cfg.GatewayURL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics: status %d, want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics body: %v", err)
+	}
+	body := string(bodyBytes)
+	if !strings.Contains(body, "gateway_fabrication_mismatches_total") {
+		t.Errorf("/metrics missing gateway_fabrication_mismatches_total; body:\n%s", body)
+	}
 }

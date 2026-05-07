@@ -1371,3 +1371,185 @@ failures:
       expected_diagnosis:
         category: "compound_no_endpoints"
     timeout: 90s
+
+  - id: db-wal-disk-full
+    name: "WAL disk full — writes failing"
+    category: host
+    severity: critical
+    description: >
+      The pg_wal directory fills to capacity, leaving no room for new WAL
+      segments. PostgreSQL emits PANIC ("could not write to file pg_wal/...:
+      No space left on device") and stops. The database is unreachable.
+      The sysadmin agent must read container logs to distinguish disk-full
+      from a process crash or clean shutdown, then guide safe WAL cleanup
+      before restart.
+    inject:
+      type: shell_exec
+      script: sql/inject_wal_disk_full.sh
+    teardown:
+      type: shell_exec
+      script: sql/teardown_wal_disk_full.sh
+    external_compat: true
+    external_inject:
+      type: ssh_exec
+      # $FAULTTEST_CONTAINER is injected by faulttest from the infra config's
+      # container_name field.  Falls back to "postgres" as a common default.
+      # The script writes fake WAL PANIC/FATAL lines to the PostgreSQL log file
+      # and SIGKILLs the container — no disk space is consumed.
+      script_inline: |
+        set -e
+        CONTAINER="${FAULTTEST_CONTAINER:-postgres}"
+        if ! docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null | grep -q true; then
+          echo "ERROR: $CONTAINER is not running" >&2
+          exit 1
+        fi
+        TS=$(docker exec "$CONTAINER" date -u '+%Y-%m-%d %H:%M:%S.000 UTC')
+        docker exec "$CONTAINER" bash -c "
+          mkdir -p /var/lib/postgresql/data/log
+          echo '${TS} [1] FATAL:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' \
+            >> /var/lib/postgresql/data/log/postgresql.log
+          echo '${TS} [1] PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' \
+            >> /var/lib/postgresql/data/log/postgresql.log
+          echo '${TS} [1] LOG:  startup process (PID 1) was terminated by signal 6: Aborted' \
+            >> /var/lib/postgresql/data/log/postgresql.log
+        "
+        docker kill "$CONTAINER" > /dev/null
+        for i in $(seq 1 10); do
+          STATUS=$(docker inspect --format "{{.State.Running}}" "$CONTAINER" 2>/dev/null || echo "false")
+          if [ "$STATUS" != "true" ]; then
+            EXIT_CODE=$(docker inspect --format "{{.State.ExitCode}}" "$CONTAINER" 2>/dev/null || echo "?")
+            echo "Container stopped (ExitCode=${EXIT_CODE})"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "Warning: container still running after 10 s"
+    external_teardown:
+      type: ssh_exec
+      script_inline: |
+        CONTAINER="${FAULTTEST_CONTAINER:-postgres}"
+        docker start "$CONTAINER"
+        echo "Started $CONTAINER"
+        for i in $(seq 1 20); do
+          if docker exec "$CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+            echo "PostgreSQL ready after $((i * 3)) s"
+            exit 0
+          fi
+          sleep 3
+        done
+        echo "WARNING: PostgreSQL not healthy after 60 s" >&2
+        exit 1
+    prompt: >
+      The database server '{{connection_string}}' is unreachable — connection refused.
+      Please check the host-level status of the server and investigate why
+      the database process has stopped.
+    evaluation:
+      expected_tools:
+        - check_host
+        - get_host_logs
+        - read_pg_log_file
+      expected_keywords:
+        any_of:
+          - "pg_wal"
+          - "WAL"
+          - "disk"
+          - "space"
+          - "No space left"
+          - "PANIC"
+      expected_diagnosis:
+        category: "wal_disk_full"
+        narrative: >
+          The agent should identify that PostgreSQL stopped due to a full WAL
+          disk (PANIC in the pg log file). With logging_collector=on, the PANIC
+          is not visible in docker container logs — the agent must call
+          read_pg_log_file after finding docker logs uninformative. The agent
+          should recommend freeing disk space in pg_wal before restarting.
+    timeout: 90s
+    remediation:
+      playbook_id: pbs_wal_disk_full
+      agent_name: sysadmin
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
+
+  - id: db-wal-disk-full-k8s
+    name: "WAL disk full — writes failing (Kubernetes)"
+    category: kubernetes
+    severity: critical
+    external_compat: true  # injects via kubectl exec — no Docker required
+    diagnosis_playbook_series_id: pbs_k8s_pod_crash_triage  # used with --via-gateway for A/B comparison
+    description: >
+      The PostgreSQL pod emits PANIC ("could not write to file pg_wal/...:
+      No space left on device") and shuts down (exit code 0, reason=Completed —
+      postgres performs an emergency shutdown after a PANIC). Simulated by
+      writing fake PANIC lines to the on-disk postgres log file then sending
+      SIGQUIT to the postmaster — no disk space is consumed. The K8s agent
+      must notice get_pod_logs returns empty (logging_collector=on), call
+      read_pod_file on the on-disk log, and identify the WAL disk full root cause.
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS="helpdesk-test"
+        LOG="/var/lib/postgresql/data/log/postgresql.log"
+        POD=$(kubectl $CTX_ARG get pod -n "$NS" -l app=postgres \
+          -o jsonpath='{.items[0].metadata.name}')
+        [ -z "$POD" ] && { echo "No postgres pod found in $NS" >&2; exit 1; }
+        TS=$(kubectl $CTX_ARG exec -n "$NS" "$POD" -- \
+          date -u '+%Y-%m-%d %H:%M:%S.000 UTC' 2>/dev/null \
+          || date -u '+%Y-%m-%d %H:%M:%S.000 UTC')
+        # Write PANIC lines to the on-disk postgres log file (logging_collector=on).
+        # The pgdata volume persists across pod restarts so the entries remain
+        # readable via read_pod_file on the new pod after the crash.
+        kubectl $CTX_ARG exec -n "$NS" "$POD" -- bash -c "
+          mkdir -p \$(dirname $LOG)
+          echo '${TS} [1] FATAL:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' >> $LOG
+          echo '${TS} [1] PANIC:  could not write to file \"pg_wal/000000010000000000000001\": No space left on device' >> $LOG
+          echo '${TS} [1] LOG:    startup process (PID 1) was terminated by signal 9: Killed' >> $LOG
+        "
+        # Send SIGQUIT (fast shutdown) to the postmaster. kubectl exec returns
+        # non-zero when the pod dies, so suppress that error.
+        # PostgreSQL exits cleanly (exit code 0, reason=Completed) — this matches
+        # a real PANIC scenario where postgres performs an emergency shutdown.
+        kubectl $CTX_ARG exec -n "$NS" "$POD" -- bash -c \
+          'kill -QUIT $(head -1 /var/lib/postgresql/data/postmaster.pid)' || true
+        echo "PANIC lines written to $LOG and postmaster sent SIGQUIT (exit code 0)"
+      wait: 15s   # allow K8s to record pod termination before prompting the agent
+    teardown:
+      type: shell_exec
+      script_inline: |
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        # StatefulSet controller auto-restarts the pod; just wait for healthy state.
+        kubectl $CTX_ARG rollout status statefulset/postgres \
+          -n helpdesk-test --timeout=90s
+    prompt: >
+      The database pod in namespace helpdesk-test is not responding.
+      Please investigate what caused the crash and identify the root cause.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - read_pod_file
+      expected_keywords:
+        any_of:
+          - "pg_wal"
+          - "WAL"
+          - "disk"
+          - "space"
+          - "No space left"
+          - "PANIC"
+      expected_diagnosis:
+        category: "wal_disk_full"
+        narrative: >
+          The agent should find that the pod restarted (reason=Completed,
+          exitCode=0 — postgres emergency shutdown), notice get_pod_logs returns
+          empty (logging_collector=on redirects output to a file), then call
+          read_pod_file on the on-disk log to find the PANIC lines, and
+          correctly diagnose WAL disk exhaustion.
+    timeout: 90s
+    remediation:
+      playbook_id: pbs_wal_disk_full
+      agent_name: k8s
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"

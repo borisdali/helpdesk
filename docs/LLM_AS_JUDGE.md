@@ -23,8 +23,9 @@ used by the primary agent.
    - [Score weights](#52-score-weights)
    - [Catalog schema: narrative field](#53-catalog-schema-narrative-field)
    - [Report output](#54-report-output)
-6. [Planned uses](#6-planned-uses)
-7. [Adding judge evaluation to a new component](#7-adding-judge-evaluation-to-a-new-component)
+6. [Benchmarking: scaffolded vs. unguided runs](#6-benchmarking-scaffolded-vs-unguided-runs)
+7. [Planned uses](#7-planned-uses)
+8. [Adding judge evaluation to a new component](#8-adding-judge-evaluation-to-a-new-component)
 
 ---
 
@@ -245,7 +246,20 @@ The JSON report includes the judge fields on every result:
 
 ---
 
-## 6. Planned uses
+## 6. Benchmarking: scaffolded vs. unguided runs
+
+The LLM judge is the right scoring mechanism for A/B comparisons between
+aiHelpDesk's scaffolded playbook runs and unguided (Crystal Ball) runs — keyword
+matching alone cannot distinguish a superficially correct answer from a genuinely
+well-reasoned one.
+
+For the full benchmarking workflow, including Crystal Ball mode setup, the
+`--via-gateway` faulttest flag, and how to interpret the score delta, see
+**[BENCHMARKING.md](BENCHMARKING.md)**.
+
+---
+
+## 7. Planned uses
 
 LLM-as-judge is being extended to other aiHelpDesk components. Each use case
 shares the same `TextCompleter` abstraction and 0–3 scoring rubric but provides
@@ -261,7 +275,7 @@ a domain-specific prompt narrative.
 
 ---
 
-## 7. Adding judge evaluation to a new component
+## 8. Adding judge evaluation to a new component
 
 The integration pattern is the same regardless of the component.
 

@@ -283,6 +283,9 @@ services:
       HELPDESK_JWT_AUDIENCE: ${HELPDESK_JWT_AUDIENCE:-}
       HELPDESK_JWT_ROLES_CLAIM: ${HELPDESK_JWT_ROLES_CLAIM:-}
       HELPDESK_JWT_CACHE_TTL: ${HELPDESK_JWT_CACHE_TTL:-}
+      # Crystal-ball mode: bypass playbook guidance, hypothesis formatting, and
+      # escalation chaining. For LLM benchmarks / demos only. NOT for production.
+      HELPDESK_CRYSTAL_BALL: ${HELPDESK_CRYSTAL_BALL:-}
     volumes:
       - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro

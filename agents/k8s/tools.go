@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"sort"
@@ -12,6 +13,10 @@ import (
 	"time"
 
 	"google.golang.org/adk/tool"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
@@ -472,22 +477,92 @@ func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (Kubectl
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
-	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
-	cmdArgs := []string{"describe", "svc", args.ServiceName}
-
-	if namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", namespace)
-	}
-
-	output, err := runKubectlWithToolName(ctx, kubeContext, "describe_service", cmdArgs...)
+	cs, err := sharedClient.clientset(kubeContext)
 	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error describing service: %v", err)
+		return KubectlResult{}, err
 	}
-	return KubectlResult{Output: output}, nil
+
+	start := time.Now()
+	svc, err := cs.CoreV1().Services(namespace).Get(ctx, args.ServiceName, metav1.GetOptions{})
+	duration := time.Since(start)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error describing service: %v", diagnoseClientError(err))
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Name:       %s\nNamespace:  %s\n", svc.Name, svc.Namespace)
+	fmt.Fprintf(&sb, "Type:       %s\n", svc.Spec.Type)
+	fmt.Fprintf(&sb, "ClusterIP:  %s\n", svc.Spec.ClusterIP)
+	for k, v := range svc.Labels {
+		fmt.Fprintf(&sb, "Label: %s=%s\n", k, v)
+	}
+	if len(svc.Spec.Selector) > 0 {
+		parts := make([]string, 0, len(svc.Spec.Selector))
+		for k, v := range svc.Spec.Selector {
+			parts = append(parts, k+"="+v)
+		}
+		fmt.Fprintf(&sb, "Selector:   %s\n", strings.Join(parts, ","))
+	} else {
+		fmt.Fprintf(&sb, "Selector:   <none>\n")
+	}
+	for _, p := range svc.Spec.Ports {
+		line := fmt.Sprintf("Port:       %s %d/%s -> %s", p.Name, p.Port, p.Protocol, p.TargetPort.String())
+		if p.NodePort != 0 {
+			line += fmt.Sprintf(" (NodePort: %d)", p.NodePort)
+		}
+		fmt.Fprintln(&sb, line)
+	}
+	fmt.Fprintf(&sb, "SessionAffinity: %s\n", svc.Spec.SessionAffinity)
+	if svc.Spec.Type == corev1.ServiceTypeNodePort || svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		fmt.Fprintf(&sb, "ExternalTrafficPolicy: %s\n", svc.Spec.ExternalTrafficPolicy)
+	}
+	for _, ing := range svc.Status.LoadBalancer.Ingress {
+		if ing.IP != "" {
+			fmt.Fprintf(&sb, "LoadBalancerIngress: %s\n", ing.IP)
+		} else if ing.Hostname != "" {
+			fmt.Fprintf(&sb, "LoadBalancerIngress: %s\n", ing.Hostname)
+		}
+	}
+
+	// Fetch endpoints to show healthy/not-ready backends.
+	if ep, epErr := cs.CoreV1().Endpoints(namespace).Get(ctx, args.ServiceName, metav1.GetOptions{}); epErr == nil {
+		var ready, notReady []string
+		for _, sub := range ep.Subsets {
+			for _, addr := range sub.Addresses {
+				for _, port := range sub.Ports {
+					ready = append(ready, fmt.Sprintf("%s:%d", addr.IP, port.Port))
+				}
+			}
+			for _, addr := range sub.NotReadyAddresses {
+				for _, port := range sub.Ports {
+					notReady = append(notReady, fmt.Sprintf("%s:%d", addr.IP, port.Port))
+				}
+			}
+		}
+		if len(ready) > 0 {
+			fmt.Fprintf(&sb, "Endpoints:  %s\n", strings.Join(ready, ","))
+		} else {
+			fmt.Fprintf(&sb, "Endpoints:  <none>\n")
+		}
+		if len(notReady) > 0 {
+			fmt.Fprintf(&sb, "NotReadyEndpoints: %s\n", strings.Join(notReady, ","))
+		}
+	}
+
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "describe_service",
+			Parameters: map[string]any{"namespace": namespace, "service_name": args.ServiceName},
+		}, audit.ToolResult{
+			Output: truncateForAudit(sb.String(), 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "describe_service", "ms", duration.Milliseconds())
+	return KubectlResult{Output: sb.String()}, nil
 }
 
 func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
@@ -593,30 +668,47 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
-	cmdArgs := []string{"logs", args.PodName}
-
-	if namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", namespace)
+	cs, err := sharedClient.clientset(kubeContext)
+	if err != nil {
+		return KubectlResult{}, err
 	}
 
-	if args.Container != "" {
-		cmdArgs = append(cmdArgs, "-c", args.Container)
-	}
-
-	tailLines := args.TailLines
+	tailLines := int64(args.TailLines)
 	if tailLines <= 0 {
 		tailLines = 50
 	}
-	cmdArgs = append(cmdArgs, "--tail", strconv.Itoa(tailLines))
-
-	if args.Previous {
-		cmdArgs = append(cmdArgs, "--previous")
+	opts := &corev1.PodLogOptions{
+		Previous:  args.Previous,
+		TailLines: &tailLines,
+	}
+	if args.Container != "" {
+		opts.Container = args.Container
 	}
 
-	output, err := runKubectlWithToolName(ctx, kubeContext, "get_pod_logs", cmdArgs...)
+	start := time.Now()
+	req := cs.CoreV1().Pods(namespace).GetLogs(args.PodName, opts)
+	stream, err := req.Stream(ctx)
 	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", err)
+		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", diagnoseClientError(err))
 	}
+	defer stream.Close()
+
+	data, err := io.ReadAll(stream)
+	duration := time.Since(start)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error reading pod logs: %v", err)
+	}
+
+	output := string(data)
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "get_pod_logs",
+			Parameters: map[string]any{"namespace": namespace, "pod_name": args.PodName, "previous": args.Previous},
+		}, audit.ToolResult{
+			Output: truncateForAudit(output, 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "get_pod_logs", "ms", duration.Milliseconds())
 	if strings.TrimSpace(output) == "" {
 		return KubectlResult{Output: "No logs available for this pod."}, nil
 	}
@@ -625,6 +717,94 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 
 func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
 	return getPodLogsImpl(ctx, args)
+}
+
+// ReadPodFileArgs defines arguments for the read_pod_file tool.
+type ReadPodFileArgs struct {
+	Context   string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace string `json:"namespace,omitempty" jsonschema:"The Kubernetes namespace of the pod."`
+	PodName   string `json:"pod_name" jsonschema:"required,The exact pod name to read a file from."`
+	Container string `json:"container,omitempty" jsonschema:"Container name, only needed if pod has multiple containers."`
+	FilePath  string `json:"file_path" jsonschema:"required,Absolute path of the file to read inside the container (e.g. '/var/lib/postgresql/data/log/postgresql.log')."`
+	Filter    string `json:"filter,omitempty" jsonschema:"Optional string to filter lines (case-insensitive grep). Use to focus on FATAL, PANIC, or other keywords."`
+	TailLines int    `json:"tail_lines,omitempty" jsonschema:"Return only the last N lines of the file (default: all lines)."`
+}
+
+func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, error) {
+	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
+	namespace := nsInfo.Namespace
+	kubeContext := resolveContext(args.Context)
+
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	// Build the shell command to run inside the container.
+	// Use tail when a line limit is requested, grep when a filter is set.
+	shellCmd := "cat " + args.FilePath
+	if args.TailLines > 0 {
+		shellCmd = fmt.Sprintf("tail -n %d %s", args.TailLines, args.FilePath)
+	}
+	if args.Filter != "" {
+		shellCmd = fmt.Sprintf("(%s) | grep -i %q || true", shellCmd, args.Filter)
+	}
+
+	cs, err := sharedClient.clientset(kubeContext)
+	if err != nil {
+		return KubectlResult{}, err
+	}
+
+	execReq := cs.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(args.PodName).
+		Namespace(namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: args.Container,
+			Command:   []string{"sh", "-c", shellCmd},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	start := time.Now()
+	exec, err := remotecommand.NewSPDYExecutor(sharedClient.restConfig(kubeContext), "POST", execReq.URL())
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error reading file %s from pod %s: %v", args.FilePath, args.PodName, diagnoseClientError(err))
+	}
+
+	var stdout, stderr strings.Builder
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	duration := time.Since(start)
+
+	output := stdout.String()
+	if err != nil && strings.TrimSpace(output) == "" {
+		return KubectlResult{}, fmt.Errorf("error reading file %s from pod %s: %v", args.FilePath, args.PodName, diagnoseClientError(err))
+	}
+
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "read_pod_file",
+			Parameters: map[string]any{"namespace": namespace, "pod_name": args.PodName, "file_path": args.FilePath},
+		}, audit.ToolResult{
+			Output: truncateForAudit(output, 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "read_pod_file", "ms", duration.Milliseconds())
+
+	if strings.TrimSpace(output) == "" {
+		return KubectlResult{Output: fmt.Sprintf("File %s is empty or not found in pod %s.", args.FilePath, args.PodName)}, nil
+	}
+	return KubectlResult{Output: output}, nil
+}
+
+func readPodFileTool(ctx tool.Context, args ReadPodFileArgs) (KubectlResult, error) {
+	return readPodFileImpl(ctx, args)
 }
 
 // DescribePodArgs defines arguments for the describe_pod tool.
@@ -647,17 +827,49 @@ func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, 
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
-	cmdArgs := []string{"describe", "pod", args.PodName}
-
-	if namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", namespace)
-	}
-
-	output, err := runKubectlWithToolName(ctx, kubeContext, "describe_pod", cmdArgs...)
+	cs, err := sharedClient.clientset(kubeContext)
 	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error describing pod: %v", err)
+		return KubectlResult{}, err
 	}
-	return KubectlResult{Output: output}, nil
+
+	start := time.Now()
+	pod, err := cs.CoreV1().Pods(namespace).Get(ctx, args.PodName, metav1.GetOptions{})
+	duration := time.Since(start)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error describing pod: %v", diagnoseClientError(err))
+	}
+
+	// Render a kubectl-describe-style summary the agent can read.
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Name:       %s\nNamespace:  %s\nNode:       %s\n",
+		pod.Name, pod.Namespace, pod.Spec.NodeName)
+	fmt.Fprintf(&sb, "Status:     %s\n", pod.Status.Phase)
+	for _, c := range pod.Status.Conditions {
+		fmt.Fprintf(&sb, "Condition:  %s=%s\n", c.Type, c.Status)
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		fmt.Fprintf(&sb, "Container %s: ready=%v restarts=%d\n", cs.Name, cs.Ready, cs.RestartCount)
+		if t := cs.LastTerminationState.Terminated; t != nil {
+			fmt.Fprintf(&sb, "  LastTerminated: reason=%s exitCode=%d\n", t.Reason, t.ExitCode)
+		}
+	}
+	for k, v := range pod.Annotations {
+		fmt.Fprintf(&sb, "Annotation: %s=%s\n", k, v)
+	}
+	for k, v := range pod.Labels {
+		fmt.Fprintf(&sb, "Label: %s=%s\n", k, v)
+	}
+
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "describe_pod",
+			Parameters: map[string]any{"namespace": namespace, "pod_name": args.PodName},
+		}, audit.ToolResult{
+			Output: truncateForAudit(sb.String(), 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "describe_pod", "ms", duration.Milliseconds())
+	return KubectlResult{Output: sb.String()}, nil
 }
 
 func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
@@ -1105,6 +1317,18 @@ func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := getPodLogsImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("read_pod_file", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[ReadPodFileArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := readPodFileImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

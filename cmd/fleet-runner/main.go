@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"helpdesk/internal/audit"
 	"helpdesk/internal/fleet"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/logging"
@@ -341,9 +340,9 @@ func printDryRunPlan(def *fleet.JobDef, servers []string) {
 		fmt.Printf("  [%d] %s/%s  (on_failure=%s)\n", i+1, step.Agent, step.Tool, onFail)
 	}
 
-	// Show approval requirement if any step is write or destructive.
+	// Show approval requirement if any step requires approval.
 	actionClass := jobActionClass(def.Change.Steps)
-	if actionClass == audit.ActionWrite || actionClass == audit.ActionDestructive {
+	if actionClass.IsApprovalRequired() {
 		fmt.Printf("\nAPPROVAL WOULD BE REQUIRED: job contains %s operations\n", actionClass)
 	}
 

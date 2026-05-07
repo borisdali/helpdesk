@@ -27,8 +27,21 @@ import (
 )
 
 func main() {
-	logging.InitLogging(os.Args[1:])
+	remaining := logging.InitLogging(os.Args[1:])
 	slog.Info("helpdesk gateway", "version", buildinfo.Version)
+
+	// --crystal-ball: bypass playbook guidance, structured output, and chaining.
+	// For demo and LLM benchmark comparisons only.
+	crystalBall := os.Getenv("HELPDESK_CRYSTAL_BALL") == "true" || os.Getenv("HELPDESK_CRYSTAL_BALL") == "1"
+	for _, arg := range remaining {
+		if arg == "--crystal-ball" || arg == "-crystal-ball" {
+			crystalBall = true
+			break
+		}
+	}
+	if crystalBall {
+		slog.Warn("⚠️  CRYSTAL-BALL MODE ENABLED — playbook guidance, hypothesis format, and escalation chaining are bypassed. NOT recommended for production use.")
+	}
 
 	listenAddr := os.Getenv("HELPDESK_GATEWAY_ADDR")
 	if listenAddr == "" {
@@ -201,7 +214,12 @@ func main() {
 		}
 	}
 
+	gw.SetCrystalBall(crystalBall)
 	gw.SetAuthorizer(authzr)
+
+	// Metrics are always enabled: /metrics on the same port exposes
+	// gateway_fabrication_mismatches_total and is safe to scrape without auth.
+	gw.SetMetrics(NewGatewayMetrics())
 
 	mux := http.NewServeMux()
 	gw.RegisterRoutes(mux)

@@ -164,6 +164,83 @@ func TestTotalRestarts(t *testing.T) {
 	}
 }
 
+// --- lastTerminatedState tests ---
+
+func TestLastTerminatedState(t *testing.T) {
+	ts := metav1.Now()
+	tests := []struct {
+		name     string
+		statuses []corev1.ContainerStatus
+		wantNil  bool
+		want     *LastTerminatedState
+	}{
+		{
+			name:    "no last state",
+			statuses: []corev1.ContainerStatus{{RestartCount: 0}},
+			wantNil: true,
+		},
+		{
+			name: "OOMKilled",
+			statuses: []corev1.ContainerStatus{{
+				RestartCount: 1,
+				LastTerminationState: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						Reason:     "OOMKilled",
+						ExitCode:   137,
+						FinishedAt: ts,
+					},
+				},
+			}},
+			want: &LastTerminatedState{Reason: "OOMKilled", ExitCode: 137, OOMKilled: true},
+		},
+		{
+			name: "Completed",
+			statuses: []corev1.ContainerStatus{{
+				RestartCount: 1,
+				LastTerminationState: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						Reason:     "Completed",
+						ExitCode:   0,
+						FinishedAt: ts,
+					},
+				},
+			}},
+			want: &LastTerminatedState{Reason: "Completed", ExitCode: 0, OOMKilled: false},
+		},
+		{
+			name: "Error",
+			statuses: []corev1.ContainerStatus{{
+				RestartCount: 2,
+				LastTerminationState: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						Reason:     "Error",
+						ExitCode:   1,
+						FinishedAt: ts,
+					},
+				},
+			}},
+			want: &LastTerminatedState{Reason: "Error", ExitCode: 1, OOMKilled: false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := lastTerminatedState(tt.statuses)
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("want nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("want %+v, got nil", tt.want)
+			}
+			if got.Reason != tt.want.Reason || got.ExitCode != tt.want.ExitCode || got.OOMKilled != tt.want.OOMKilled {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- nodeRoles tests ---
 
 func TestNodeRoles(t *testing.T) {

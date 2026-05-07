@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"sync"
+	"time"
 
 	"helpdesk/testing/testutil"
 )
@@ -27,7 +32,13 @@ func NewRunner(cfg *HarnessConfig) *Runner {
 }
 
 // Run sends the failure's prompt to the appropriate agent and returns the response.
+// When --via-gateway is set and the fault has a diagnosis_playbook_series_id,
+// the call is routed through the gateway playbook endpoint instead.
 func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
+	if r.cfg.ViaGateway && f.DiagnosisPlaybookSeriesID != "" && r.cfg.GatewayURL != "" {
+		return r.runViaPlaybook(ctx, f)
+	}
+
 	prompt := ResolvePrompt(f.Prompt, r.cfg)
 	agentURL := r.agentURL(f.Category)
 
@@ -57,6 +68,107 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 		return testutil.SendPromptViaGateway(ctx, agentURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose)
 	}
 	return testutil.SendPrompt(ctx, agentURL, prompt)
+}
+
+// runViaPlaybook routes the diagnosis call through the gateway's playbook
+// endpoint and returns the response. Crystal-ball mode is detected from the
+// gateway's response and surfaced via AgentResponse.CrystalBall.
+func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentResponse {
+	start := time.Now()
+	client := &http.Client{Timeout: f.TimeoutDuration() + 10*time.Second}
+
+	// Resolve series_id → versioned playbook_id.
+	playbookID, err := r.resolvePlaybookID(ctx, client, f.DiagnosisPlaybookSeriesID)
+	if err != nil {
+		return testutil.AgentResponse{
+			Duration: time.Since(start),
+			Error:    fmt.Errorf("resolving diagnosis playbook %q: %w", f.DiagnosisPlaybookSeriesID, err),
+		}
+	}
+
+	slog.Info("sending prompt to agent via playbook",
+		"failure", f.ID,
+		"series_id", f.DiagnosisPlaybookSeriesID,
+		"playbook_id", playbookID,
+		"gateway", r.cfg.GatewayURL,
+	)
+
+	connStr := r.cfg.ConnStr
+	if r.cfg.AgentConnStr != "" {
+		connStr = r.cfg.AgentConnStr
+	}
+	body, _ := json.Marshal(map[string]string{
+		"connection_string": connStr,
+		"context":           ResolvePrompt(f.Prompt, r.cfg),
+	})
+
+	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return testutil.AgentResponse{Duration: time.Since(start), Error: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Purpose", r.cfg.GatewayPurpose)
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return testutil.AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("POST %s: %w", reqURL, err)}
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	duration := time.Since(start)
+
+	if resp.StatusCode >= 300 {
+		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("playbook run returned %d: %s", resp.StatusCode, string(respBody))}
+	}
+
+	var result struct {
+		Text        string `json:"text"`
+		CrystalBall bool   `json:"crystal_ball"`
+		Error       string `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
+	}
+	if result.Error != "" {
+		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("playbook error: %s", result.Error)}
+	}
+	return testutil.AgentResponse{Text: result.Text, CrystalBall: result.CrystalBall, Duration: duration}
+}
+
+// resolvePlaybookID resolves a series_id to the active versioned playbook_id.
+func (r *Runner) resolvePlaybookID(ctx context.Context, client *http.Client, seriesID string) (string, error) {
+	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", err
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gateway returned %d for series %q", resp.StatusCode, seriesID)
+	}
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if len(result.Playbooks) == 0 {
+		return "", fmt.Errorf("no active playbook found for series %q", seriesID)
+	}
+	return result.Playbooks[0].PlaybookID, nil
 }
 
 // isGateway returns true if url is a helpdesk gateway, caching the result.

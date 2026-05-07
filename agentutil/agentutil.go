@@ -456,9 +456,18 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	// between the audit and policy packages).
 	traceJSON, _ := json.Marshal(trace)
 
+	// Determine whether this action is pre-authorised by a gateway-forwarded
+	// approval_mode before recording the policy decision, so the audit event
+	// carries the correct approval record from the start.
+	autoApproved := decision.NeedsApproval() &&
+		func() bool {
+			tc := audit.TraceContextFromContext(ctx)
+			return tc != nil && (tc.ApprovalMode == "auto" || tc.ApprovalMode == "force")
+		}()
+
 	// Record the policy decision to the audit trail (allow, deny, or require_approval).
 	if e.toolAuditor != nil {
-		e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+		pd := audit.PolicyDecision{
 			ResourceType: resourceType,
 			ResourceName: resourceName,
 			Action:       string(action),
@@ -476,14 +485,21 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			AuthMethod:   principal.AuthMethod,
 			Purpose:      purpose,
 			PurposeNote:  purposeNote,
-		})
+			AutoApproved: autoApproved,
+		}
+		e.toolAuditor.RecordPolicyDecision(ctx, pd)
 	}
 
-	// If approval is required, attempt to get approval.
-	if decision.NeedsApproval() && e.approvalClient != nil {
-		return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags, note)
-	}
+	// If approval is required, check whether the incoming request carries a
+	// gateway-forwarded approval_mode that pre-authorises this action.
 	if decision.NeedsApproval() {
+		if autoApproved {
+			// approval_mode=auto: operator pre-authorised the full chain.
+			return nil
+		}
+		if e.approvalClient != nil {
+			return e.requestApproval(ctx, traceID, resourceType, resourceName, action, tags, note)
+		}
 		return &policy.ApprovalRequiredError{Decision: decision}
 	}
 	if decision.IsDenied() {

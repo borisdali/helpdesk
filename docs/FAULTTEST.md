@@ -31,8 +31,10 @@ The tool was designed for two complementary use cases:
    - [vault](#56-vault) — see also [VAULT.md](VAULT.md) for the full flywheel concept
 6. [Fault catalog](#6-fault-catalog)
    - [External-compatible faults](#61-external-compatible-faults)
-   - [SSH-injectable faults](#62-ssh-injectable-faults)
-   - [Remediation specs](#63-remediation-specs)
+   - [Docker Compose faults (internal only)](#62-docker-compose-faults-internal-only)
+   - [SSH-injectable faults](#63-ssh-injectable-faults)
+   - [Kubernetes faults](#64-kubernetes-faults)
+   - [Remediation specs](#65-remediation-specs)
 7. [Example workflows](#7-example-workflows)
    - [Smoke test a staging database](#71-smoke-test-a-staging-database)
    - [Full run with remediation](#72-full-run-with-remediation)
@@ -188,7 +190,7 @@ faulttest inject --id db-pg-hba-corrupt \
 
 The target host in the fault spec (`exec_via`) can be overridden by `--ssh-host`. SSH options used: `-o StrictHostKeyChecking=no -o BatchMode=yes`.
 
-SSH-injectable faults are **not** marked `external_compat` — they require OS access and are excluded from `--external` runs.
+SSH-injectable faults for the most part are **not** marked `external_compat` because they require OS access and are excluded from `--external` runs. There are some safe exceptions thought, e.g. `db-wal-disk-full`.  See [here](FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for a sample fault injection via SSH.
 
 ### 3.3 Remediation mode
 
@@ -450,22 +452,36 @@ faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
 Shows the full fault catalog alongside the linked Playbook (if any), the date of the last run, and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced Playbook IDs exist on the gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
 
 ```
-FAULT                            PLAYBOOK                     LAST RUN     STATUS
---------------------------------------------------------------------------------------------
-db-max-connections               (none)                       2026-04-16   NO PLAYBOOK
-db-connection-refused            pbs_db_restart_triage        2026-04-15   PASS
-db-pg-hba-corrupt                pbs_db_config_recovery       (never)      -
-db-lock-contention               (none)                       2026-04-14   FAIL
+FAULT                            PLATFORM   PLAYBOOK                   FAULT TEST             INCIDENTS
+------------------------------------------------------------------------------------------------------------------------------------------------
+db-max-connections               any        pbs_connection_triage      2026-04-22  PASS       -
+db-connection-refused            any        pbs_db_restart_triage      (never)                -
+db-pg-hba-corrupt                any        pbs_db_config_recovery     (never)                -
+host-container-stopped           docker/vm  (none)                     NO PLAYBOOK            -
+db-wal-disk-full                 docker/vm  pbs_wal_disk_full          2026-05-03  PASS       -
+db-wal-disk-full-k8s             k8s        pbs_wal_disk_full          (never)                -
+k8s-oomkilled                    k8s        (none)                     NO PLAYBOOK            -
+compound-db-pod-crash            multi      (none)                     NO PLAYBOOK            -
 ```
+
+The PLATFORM column is derived from the fault's `category` field:
+
+| Platform | Category | Meaning |
+|----------|----------|---------|
+| `any` | `database` | SQL-based — works against any PostgreSQL instance |
+| `docker/vm` | `host` | Requires Docker or SSH access to the database host |
+| `k8s` | `kubernetes` | Requires kubectl access to the cluster |
+| `multi` | `compound` | Spans multiple agents or platforms |
 
 Status values:
 
 | Status | Meaning |
 |--------|---------|
 | `PASS` / `FAIL` | Last run result |
-| `-` | Fault has a Playbook linked but has never been run |
+| `(never)` | Fault has a Playbook linked but has never been run |
 | `NO PLAYBOOK` | No `remediation.playbook_id` configured in the catalog |
 | `PLAYBOOK NOT FOUND` | Playbook ID configured but not found on the gateway (`--gateway` required) |
+| `READY` | Playbook exists on the gateway and has 0 runs — ready to use |
 
 #### vault status
 
@@ -561,25 +577,52 @@ These faults work against any PostgreSQL instance accessible over libpq. No Dock
 | `db-idle-in-transaction` | Session stuck with uncommitted writes | high |
 | `db-terminate-direct-command` | Direct terminate — inspect-first check | high |
 
-### 6.2 SSH-injectable faults
+### 6.2 Docker Compose faults (internal only)
 
-These faults require OS-level access to the database host and are injected via SSH. Not included in `--external` runs.
+These faults require the Docker Compose test environment (`testing/docker/`). They operate at the container and host level and must be run with the internal harness against the `helpdesk-test-pg` container.
 
 | ID | Name | Severity | What it does |
 |----|------|----------|--------------|
-| `db-pg-hba-corrupt` | pg_hba.conf corrupted | critical | Replaces pg_hba.conf to reject all non-local connections; reloads config |
-| `db-process-kill` | PostgreSQL postmaster killed | critical | Sends SIGKILL to the postmaster PID |
-| `db-config-bad-param` | postgresql.conf invalid parameter | high | Appends `shared_buffers = 999GB` to postgresql.conf |
+| `host-container-stopped` | Database container stopped | critical | `docker stop` on the postgres service; sysadmin agent must identify clean exit (exitcode=0) |
+| `host-pg-crash` | PostgreSQL process crash | critical | `docker kill --signal SIGKILL`; sysadmin agent must distinguish crash (exitcode=137) from clean stop |
 
-### 6.3 Remediation specs
+### 6.3 SSH-injectable faults
+
+These faults require OS-level access to the database host and are injected via SSH (either from the local machine via `--ssh-host`, or from inside a K8s Job with an SSH key Secret). Most are also marked `external_compat: true` so they are included in `--external` runs. See [§3.2](#32-ssh-injection-mode) for SSH configuration.
+
+| ID | Name | Severity | external_compat | What it does |
+|----|------|----------|:---:|--------------|
+| `db-wal-disk-full` | WAL disk full — writes failing | critical | ✓ | Writes fake FATAL/PANIC lines to the PostgreSQL log file via `docker exec`, then SIGKILLs the container (exitcode=137). Teardown calls `docker start` and waits for `pg_isready`. No disk space is consumed — the fault is simulated entirely in the log file. |
+| `db-pg-hba-corrupt` | pg_hba.conf corrupted | critical | — | Replaces pg_hba.conf to reject all non-local connections; reloads config |
+| `db-process-kill` | PostgreSQL postmaster killed | critical | — | Sends SIGKILL to the postmaster PID |
+| `db-config-bad-param` | postgresql.conf invalid parameter | high | — | Appends `shared_buffers = 999GB` to postgresql.conf |
+
+### 6.4 Kubernetes faults
+
+These faults target PostgreSQL running in Kubernetes and require kubectl access to the cluster. They are run with `--k8s-agent` pointing at the k8s agent A2A URL.
+
+| ID | Name | Severity | What it does |
+|----|------|----------|--------------|
+| `k8s-crashloop` | Pod CrashLoopBackOff | critical | Deploys a kustomize overlay that sets an invalid image tag, causing the pod to fail to start |
+| `k8s-pending` | Pod stuck in Pending | high | Applies a node selector that matches no node, preventing scheduling |
+| `k8s-image-pull` | ImagePullBackOff | high | Sets a non-existent image tag; kubelet cannot pull it |
+| `k8s-no-endpoints` | Service has no endpoints | high | Introduces a label selector mismatch between the Service and the pod |
+| `k8s-pvc-pending` | PVC stuck in Pending | critical | Creates a StorageClass that does not exist, leaving the PVC unbound |
+| `k8s-oomkilled` | Pod OOMKilled | critical | Patches the container memory limit to 10Mi — too low for PostgreSQL to start; pod enters OOMKilled restart loop |
+| `k8s-scale-to-zero` | Deployment scaled to zero | high | Patches replicas to 0; k8s agent must scale back up |
+| `db-wal-disk-full-k8s` | WAL disk full — writes failing (Kubernetes) | critical | Writes fake PANIC lines to the container's stderr via `kubectl exec`, then kills the postmaster with SIGABRT (exitcode=134, not OOMKilled). Pod auto-restarts clean; PANIC lines visible in `kubectl logs --previous`. |
+
+### 6.5 Remediation specs
 
 Some faults carry a `remediation` block that identifies the recovery action. When `--remediate` is set, `faulttest` triggers this action after the diagnosis phase.
 
-| Fault | Playbook |
-|-------|----------|
-| `db-connection-refused` | `pbs_db_restart_triage` |
-| `db-pg-hba-corrupt` | `pbs_db_config_recovery` |
-| `db-process-kill` | `pbs_db_restart_triage` |
+| Fault | Playbook | Agent |
+|-------|----------|-------|
+| `db-connection-refused` | `pbs_db_restart_triage` | db |
+| `db-pg-hba-corrupt` | `pbs_db_config_recovery` | db |
+| `db-process-kill` | `pbs_db_restart_triage` | db |
+| `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin |
+| `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s |
 
 The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
 
@@ -591,6 +634,8 @@ Each fault's `remediation` block specifies a `verify_sql` query that confirms th
 | `db-idle-in-transaction` | `SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'` |
 | `db-lock-contention` | `SELECT count(*) = 0 FROM pg_locks WHERE NOT granted` |
 | `db-connection-refused` | `SELECT 1` (connectivity check is sufficient — the fault kills the postmaster) |
+| `db-wal-disk-full` | `SELECT 1` (connectivity check confirms postgres restarted successfully after WAL cleanup) |
+| `db-wal-disk-full-k8s` | `SELECT 1` (connectivity check confirms the pod restarted and postgres is accepting connections) |
 
 When writing customer catalog entries, prefer specific queries that directly verify the fault condition rather than bare connectivity checks.
 
@@ -928,7 +973,7 @@ faulttest run --external \
 
 ### 9.1 Overview
 
-Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 27 built-in faults. Customer catalog files layer on top of this without modifying the binary.
+Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 28 built-in faults. Customer catalog files layer on top of this without modifying the binary.
 
 A customer catalog is a plain YAML file you author, validate with `faulttest validate`, and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
 
@@ -1166,4 +1211,4 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
   governance_gap: false          # true = known gap; failure is logged, not asserted
 ```
 
-After adding a fault, the test count floor checks in both test files will still pass (they assert `>= 27`, not exactly 27), so no test edits are required for additions. Run `go test ./testing/faultlib/... ./testing/cmd/faulttest/...` to confirm.
+After adding a fault, the test count floor checks in both test files will still pass (they assert `>= 28`, not exactly 28), so no test edits are required for additions. Run `go test ./testing/faultlib/... ./testing/cmd/faulttest/...` to confirm.

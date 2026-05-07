@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -56,6 +57,8 @@ type Gateway struct {
 	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
 	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
+	metrics          *GatewayMetrics         // Prometheus-compatible metrics endpoint
+	crystalBall       bool                    // when true, bypass playbook guidance/chaining — for demo/comparison only
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -127,6 +130,59 @@ func (g *Gateway) SetToolRegistry(r *toolregistry.Registry) {
 // SetUsersFile sets the path to the users YAML file (empty = dev/no-auth mode).
 func (g *Gateway) SetUsersFile(path string) {
 	g.usersFile = path
+}
+
+// SetMetrics sets the Prometheus-compatible metrics store for the gateway.
+func (g *Gateway) SetMetrics(m *GatewayMetrics) {
+	g.metrics = m
+}
+
+// SetCrystalBall enables crystal-ball mode: playbook guidance, structured output
+// requirements, and escalation chaining are all bypassed. The agent receives
+// only the operator's question and its tool set, with no expert scaffolding.
+// Intended for demo and LLM benchmark comparisons only — not for production use.
+func (g *Gateway) SetCrystalBall(enabled bool) {
+	g.crystalBall = enabled
+}
+
+// GatewayMetrics tracks gateway-level operational counters in Prometheus text format.
+// It is thread-safe and uses no external library.
+type GatewayMetrics struct {
+	mu sync.Mutex
+	// fabricationMismatches counts delegation_verification events where the
+	// agent returned success but the audit trail has no matching tool executions,
+	// partitioned by {agent, action_class}.
+	fabricationMismatches map[string]int64
+}
+
+// NewGatewayMetrics creates an initialised GatewayMetrics.
+func NewGatewayMetrics() *GatewayMetrics {
+	return &GatewayMetrics{fabricationMismatches: make(map[string]int64)}
+}
+
+// recordFabricationMismatch increments the counter for the given agent and action class.
+func (m *GatewayMetrics) recordFabricationMismatch(agent, actionClass string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := agent + "|" + actionClass
+	m.fabricationMismatches[key]++
+}
+
+// ServeHTTP exposes the metrics in Prometheus text format at /metrics.
+func (m *GatewayMetrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "# HELP gateway_fabrication_mismatches_total Delegations where agent success had no matching audit-trail tool executions\n")
+	fmt.Fprintf(w, "# TYPE gateway_fabrication_mismatches_total counter\n")
+	for key, count := range m.fabricationMismatches {
+		parts := strings.SplitN(key, "|", 2)
+		agent, class := parts[0], ""
+		if len(parts) == 2 {
+			class = parts[1]
+		}
+		fmt.Fprintf(w, "gateway_fabrication_mismatches_total{agent=%q,action_class=%q} %d\n", agent, class, count)
+	}
 }
 
 // resolveRequest extracts the verified principal and declared purpose from an
@@ -238,6 +294,14 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q}\n", buildinfo.Version) //nolint:errcheck
 	}))
+	// /metrics is unauthenticated (Prometheus scrapes do not carry auth tokens by default).
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		if g.metrics != nil {
+			g.metrics.ServeHTTP(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
 	mux.HandleFunc("GET /api/v1/agents", auth("GET /api/v1/agents", g.handleListAgents))
 	mux.HandleFunc("GET /api/v1/tools", auth("GET /api/v1/tools", g.handleListTools))
 	mux.HandleFunc("GET /api/v1/tools/{toolName}", auth("GET /api/v1/tools/{toolName}", g.handleGetTool))
@@ -334,12 +398,6 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentName, ok := agentAliases[req.Agent]
-	if !ok {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, sysadmin, host, incident, research)", req.Agent))
-		return
-	}
-
 	// Bridge JSON body "user" into the canonical X-User header so that
 	// proxyToAgentWithTool can read a single source of truth.
 	// The header takes precedence if both are supplied.
@@ -352,6 +410,45 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PurposeNote != "" && r.Header.Get("X-Purpose-Note") == "" {
 		r.Header.Set("X-Purpose-Note", req.PurposeNote)
+	}
+
+	// Generate the trace ID here — before routing — so the delegation_decision
+	// event and the subsequent gateway_request event share the same trace ID.
+	// proxyToAgentWithTool will reuse the header value rather than generating a new one.
+	traceID := audit.NewTraceID()
+	r.Header.Set("X-Trace-ID", traceID)
+
+	var agentName string
+
+	if req.Agent == "" {
+		// No agent specified: use LLM routing. Requires plannerLLM to be configured.
+		decision, err := g.routeWithLLM(r.Context(), req.Message)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "agent routing failed: "+err.Error()+
+				" — set \"agent\" explicitly or configure HELPDESK_MODEL_VENDOR/HELPDESK_MODEL_NAME/HELPDESK_API_KEY")
+			return
+		}
+
+		agentName = decision.Agent
+
+		// Record the routing decision as a delegation_decision audit event.
+		resolvedPrincipal, _, _, _, _ := g.resolveRequest(r, "", "")
+		g.recordRoutingDecision(r.Context(), traceID, resolvedPrincipal, decision)
+
+		slog.Info("gateway: LLM routing decision",
+			"agent", decision.Agent,
+			"confidence", decision.Confidence,
+			"category", decision.RequestCategory,
+			"trace_id", traceID,
+		)
+	} else {
+		// Explicit agent: resolve via alias table.
+		var ok bool
+		agentName, ok = agentAliases[req.Agent]
+		if !ok {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent %q (valid: database, db, k8s, sysadmin, host, incident, research)", req.Agent))
+			return
+		}
 	}
 
 	g.proxyToAgent(w, r, agentName, req.ContextID, req.Message)
@@ -498,6 +595,98 @@ func (g *Gateway) checkOperatingMode(w http.ResponseWriter, r *http.Request, too
 		return false
 	}
 	return true
+}
+
+// checkApprovalMode enforces the approval mode stored in the request context.
+// Returns (true, errorMessage) when the call should be blocked.
+// Returns (false, "") when the call is allowed.
+//
+// Modes:
+//
+//	"auto"   — always allowed (current default behavior)
+//	"session" — allowed only when context carries a valid ApprovalSession
+//	             covering the tool's action class
+//	"manual"  — write/destructive tools are blocked (agent is read-only)
+func (g *Gateway) checkApprovalMode(ctx context.Context, toolName string) (blocked bool, msg string) {
+	approvalCtx, ok := ctx.Value(ctxKeyApprovalSession).(approvalContext)
+	if !ok || approvalCtx.mode == "" || approvalCtx.mode == "auto" {
+		return false, ""
+	}
+
+	class := audit.ClassifyTool(toolName)
+	if !class.IsApprovalRequired() {
+		return false, "" // reads are always allowed regardless of mode
+	}
+
+	switch approvalCtx.mode {
+	case "manual":
+		return true, fmt.Sprintf(
+			"approval_mode=manual: tool %q (%s) requires explicit approval — "+
+				"run in session mode with a valid approval session or obtain per-step approval",
+			toolName, class)
+
+	case "session":
+		if approvalCtx.sessionID == "" {
+			return true, fmt.Sprintf(
+				"approval_mode=session: tool %q (%s) requires an approval session — "+
+					"supply approval_session in the run request",
+				toolName, class)
+		}
+		if g.auditURL == "" {
+			// Cannot validate without auditd; fail safe.
+			return true, "approval_mode=session: cannot validate session — auditd not configured"
+		}
+		sess, err := g.fetchApprovalSession(ctx, approvalCtx.sessionID)
+		if err != nil || sess == nil {
+			return true, fmt.Sprintf(
+				"approval_mode=session: session %q not found or error: %v",
+				approvalCtx.sessionID, err)
+		}
+		if !sess.IsValid(class) {
+			detail := "expired or revoked"
+			if !sess.Revoked && time.Now().Before(sess.ExpiresAt) {
+				detail = fmt.Sprintf("does not cover action class %q", class)
+			}
+			return true, fmt.Sprintf(
+				"approval_mode=session: session %q is not valid for %s tool %q: %s",
+				approvalCtx.sessionID, class, toolName, detail)
+		}
+		return false, ""
+
+	default:
+		return false, ""
+	}
+}
+
+// fetchApprovalSession retrieves an ApprovalSession from auditd.
+func (g *Gateway) fetchApprovalSession(ctx context.Context, sessionID string) (*audit.ApprovalSession, error) {
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/approval/sessions/" + sessionID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("auditd unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("session not found")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var sess audit.ApprovalSession
+	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
+		return nil, fmt.Errorf("decode session: %w", err)
+	}
+	return &sess, nil
 }
 
 func (g *Gateway) handleDBTool(w http.ResponseWriter, r *http.Request) {
@@ -998,6 +1187,15 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
+	// Enforce approval mode from playbook run context (if set).
+	// This only applies to write/destructive tool calls; reads are always allowed.
+	if toolName != "" {
+		if blocked, msg := g.checkApprovalMode(r.Context(), toolName); blocked {
+			writeError(w, http.StatusForbidden, msg)
+			return
+		}
+	}
+
 	slog.Info("gateway: proxying request", "agent", agentName, "prompt_len", len(prompt),
 		"principal", principalStr, "purpose", purpose)
 
@@ -1023,6 +1221,12 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		meta["purpose_note"] = purposeNote
 	}
 	meta["purpose_explicit"] = purposeExplicit
+	if ac, ok := r.Context().Value(ctxKeyApprovalSession).(approvalContext); ok && ac.mode != "" {
+		meta["approval_mode"] = ac.mode
+		if ac.sessionID != "" {
+			meta["approval_session"] = ac.sessionID
+		}
+	}
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
 	msg.Metadata = meta
@@ -1143,6 +1347,42 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		})
 		writeError(w, http.StatusUnprocessableEntity, response.Text)
 		return
+	}
+
+	// Post-call fabrication detection for NL queries: verify that the agent
+	// actually executed tools consistent with the action class inferred from the
+	// prompt. A mismatch means the LLM may have fabricated a tool outcome.
+	// This mirrors the orchestrator's buildDelegationVerification pattern.
+	// Skipped for direct tool calls (toolName != "") — those are already audited
+	// structurally. Skipped when auditURL is not configured.
+	if toolName == "" && g.auditURL != "" {
+		actionClass := audit.ClassifyDelegation(agentName, prompt)
+		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName)
+		if verif.Mismatch {
+			slog.Warn("gateway: fabrication risk — agent returned success but audit trail has no matching tool executions",
+				"agent", agentName, "trace_id", traceID, "action_class", actionClass)
+			// 1. Surface to caller via response header so clients can detect and alert.
+			w.Header().Set("X-Audit-Mismatch", "true")
+			// 2. Increment Prometheus counter for dashboards / alerting rules.
+			if g.metrics != nil {
+				g.metrics.recordFabricationMismatch(agentName, string(actionClass))
+			}
+		}
+		if g.auditor != nil {
+			verifEvent := &audit.Event{
+				EventID:   "gv_" + uuid.New().String()[:8],
+				Timestamp: time.Now().UTC(),
+				EventType: audit.EventTypeDelegationVerification,
+				TraceID:   traceID,
+				Session: audit.Session{
+					ID: traceID,
+				},
+				DelegationVerification: verif,
+			}
+			if err := g.auditor.RecordEvent(r.Context(), verifEvent); err != nil {
+				slog.Warn("gateway: failed to record delegation verification", "trace_id", traceID, "err", err)
+			}
+		}
 	}
 
 	// Record successful request with response

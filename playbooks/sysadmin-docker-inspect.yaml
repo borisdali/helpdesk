@@ -1,0 +1,92 @@
+series_id: pbs_sysadmin_docker_inspect
+name: "Sysadmin — Docker Container Inspection"
+version: "1.4"
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: session
+escalates_to:
+  - pbs_db_restart_action
+  - pbs_db_restart_triage
+  - pbs_wal_disk_full
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Inspect a Docker-hosted PostgreSQL container that has been reported as unreachable.
+  Determine whether the container exited cleanly (manual stop / graceful shutdown)
+  or crashed (OOM kill, panic, unexpected exit), revise the prior DB agent's root
+  cause hypothesis if necessary, and provide evidence-based remediation guidance.
+symptoms:
+  - "DB agent diagnosed 'connection refused' but could not read docker container logs"
+  - "docker-hosted PostgreSQL is unreachable"
+  - "container status unknown — DB agent toolset cannot reach docker daemon"
+guidance: |
+  You are the second stage of a two-agent diagnostic chain. The DB agent has already
+  confirmed "connection refused" — your job is to explain WHY using host/container tools.
+
+  Do NOT call any psql-based tools — the database is down.
+  Do NOT call restart_container or restart_service under any circumstances —
+  even if the root cause is unclear. Insufficient evidence is itself a finding.
+  Describe the recommended action for operator approval and stop.
+
+  Step 1 — Container state:
+  Call check_host with the connection_string (target). Read these fields carefully:
+  - exitcode=0  → container was stopped CLEANLY (user, orchestrator, or graceful shutdown).
+                  This is NOT a crash. Do not speculate about OOM or disk unless logs
+                  provide direct evidence.
+  - oomkilled=true → kernel killed the process due to memory pressure. Call check_memory next.
+  - exitcode=1 or higher (and oomkilled=false) → process exited with error. Check logs.
+  - restarting=true → container is in a restart loop. Check logs immediately.
+
+  Step 2 — Recent logs:
+  Call get_host_logs to retrieve the last 50 lines of container output.
+  Key signals:
+  - "database system was shut down"  → clean shutdown; a simple restart will recover.
+  - "out of memory" / "OOM"          → OOM kill; restart will succeed but investigate memory.
+  - "No space left on device" in pg_wal path → WAL disk full; restart will re-PANIC
+    immediately. Escalate to pbs_wal_disk_full — disk must be freed BEFORE restart.
+  - "FATAL" / "PANIC" (other)        → hard failure; do not restart without config review.
+  - "received fast shutdown request" / "smart shutdown" → pg_ctl stop or SIGTERM — clean.
+  - "invalid page" / "checksum failure" → data corruption; do NOT recommend restart.
+  If container logs lack PostgreSQL-level detail, also call read_pg_log_file
+  with filter="PANIC" to look for disk/WAL crash evidence (PostgreSQL PANIC
+  is more severe than FATAL and is what ENOSPC triggers). Also call it again
+  with filter="FATAL" to catch configuration and authentication failures.
+
+  Step 3 — Memory (only if oomkilled=true or logs mention OOM):
+  Call check_memory with target set. Report the memory headroom and recommend a
+  memory limit increase if the container is constrained.
+
+  Step 4 — Revise the prior hypothesis and escalate if appropriate:
+  If the DB agent concluded "process crashed" but exitcode=0 and logs show clean
+  shutdown, explicitly state this correction in FINDINGS.
+
+  Your FINDINGS must include:
+  - Container state: Status, ExitCode, OOMKilled (from check_host output)
+  - Log evidence: quote the specific log lines that support your conclusion,
+    e.g. "Logs show: '2026-04-30 19:00:01 UTC [1] LOG: database system is shut down'"
+    Do not paraphrase — quote the actual lines verbatim so the operator can verify.
+  - Conclusion: what happened (clean stop / OOM kill / crash / other)
+  - Recommended action and why it is safe (or not safe) to proceed
+
+  Escalation rules (emit exactly one ESCALATE_TO if the condition is met):
+  - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM/disk signals:
+    ESCALATE_TO: pbs_db_restart_action
+    (the restart playbook will perform and confirm the restart)
+  - logs contain "No space left on device" with a pg_wal path:
+    ESCALATE_TO: pbs_wal_disk_full
+    (disk must be freed before any restart attempt — restarting now will re-PANIC)
+  - exitcode=137 / oomkilled=true:
+    Do NOT escalate — describe the OOM evidence and recommend operator review
+    before restarting.
+  - FATAL / PANIC (other than WAL disk full) / "invalid page" / "checksum failure":
+    Do NOT escalate — these require config or data recovery, not an automated restart.
+  - Any ambiguity or insufficient evidence:
+    Do NOT escalate — describe what is known and what additional investigation is needed.
+
+escalation:
+  - "container logs contain 'invalid page' or 'checksum failure' — data corruption, do not restart"
+  - "container logs contain PANIC — unrecoverable state, escalate to DB config/recovery playbook"
+  - "disk full in container — restart will not help, disk space must be freed first"
+  - "container is already running — investigate the database layer, not the container"
+target_hints: []

@@ -104,6 +104,7 @@ func TestCategorizeAgent(t *testing.T) {
 		{"k8s_agent", CategoryKubernetes},
 		{"incident_agent", CategoryIncident},
 		{"research_agent", CategoryResearch},
+		{"sysadmin_agent", CategorySysadmin},
 		{"unknown_agent", CategoryUnknown},
 		{"", CategoryUnknown},
 	}
@@ -249,5 +250,74 @@ func TestGatewayAuditor_TraceID(t *testing.T) {
 	}
 	if events[1].TraceID != traceID {
 		t.Errorf("event[1] trace ID = %q, want %q", events[1].TraceID, traceID)
+	}
+}
+
+func TestGatewayAuditor_RecordEvent(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit-record-event-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DSN: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	auditor := NewGatewayAuditor(store)
+	traceID := NewTraceIDWithPrefix("rt_")
+
+	event := &Event{
+		EventID:   "rt_testcase01",
+		Timestamp: time.Now().UTC(),
+		EventType: EventTypeDelegation,
+		TraceID:   traceID,
+		Decision: &Decision{
+			Agent:           "postgres_database_agent",
+			RequestCategory: CategoryDatabase,
+			Confidence:      0.95,
+			UserIntent:      "check connection pool",
+			ReasoningChain:  []string{"message mentions connections", "database agent handles pg"},
+			AlternativesConsidered: []Alternative{
+				{Agent: "incident_agent", RejectedBecause: "no incident context provided"},
+			},
+		},
+		Outcome: &Outcome{Status: "success"},
+	}
+
+	if err := auditor.RecordEvent(context.Background(), event); err != nil {
+		t.Fatalf("RecordEvent: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), QueryOptions{TraceID: traceID})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	got := events[0]
+	if got.EventType != EventTypeDelegation {
+		t.Errorf("EventType = %q, want %q", got.EventType, EventTypeDelegation)
+	}
+	if got.Decision == nil {
+		t.Fatal("Decision is nil")
+	}
+	if got.Decision.Agent != "postgres_database_agent" {
+		t.Errorf("Decision.Agent = %q, want postgres_database_agent", got.Decision.Agent)
+	}
+	if got.Decision.Confidence != 0.95 {
+		t.Errorf("Decision.Confidence = %v, want 0.95", got.Decision.Confidence)
+	}
+}
+
+func TestGatewayAuditor_RecordEvent_NilAuditor(t *testing.T) {
+	a := NewGatewayAuditor(nil)
+	// Should be a no-op, not a panic.
+	err := a.RecordEvent(context.Background(), &Event{EventID: "rt_noop"})
+	if err != nil {
+		t.Errorf("expected nil error from no-op auditor, got %v", err)
 	}
 }

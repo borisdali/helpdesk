@@ -55,6 +55,7 @@ essential for querying and correlating events.
 | Prefix | Event type | Recorded by |
 |--------|-----------|-------------|
 | `evt_` | `delegation_decision` | Orchestrator — routes a request to an agent |
+| `rt_` | `delegation_decision` | Gateway — LLM routing decision when `agent` is omitted from `POST /api/v1/query` |
 | `evt_` | `gateway_request` | Gateway — records every inbound request; anchor for NL-query journeys |
 | `tool_` | `tool_execution` | Agent — records tool name, params, result, duration |
 | `pol_` | `policy_decision` | Agent / auditd — records policy evaluation outcome |
@@ -153,13 +154,25 @@ curl "http://localhost:1199/v1/journeys?trace_id=tr_rbk_a1b2c3d4"
 | `dry_run` | `true` if enforcement was in dry-run mode |
 | `post_execution` | `true` if this was a blast-radius post-execution check |
 
-### 4.3 delegation_decision fields (orchestrator)
+### 4.3 delegation_decision fields
+
+`delegation_decision` events are emitted by two sources:
+
+- **Orchestrator** (`evt_` prefix) — the interactive REPL routes a request to a sub-agent via `delegate_to_agent`
+- **Gateway LLM routing** (`rt_` prefix) — `POST /api/v1/query` without an explicit `agent` field; the gateway uses `plannerLLM` to select the best agent
+
+Both sources populate the same fields:
 
 | Field | Description |
 |-------|-------------|
 | `user_id` | User who sent the original request |
 | `user_query` | Original natural-language query text |
-| `decision_agent` | Agent the orchestrator selected |
+| `decision_agent` | Agent selected |
+| `decision_confidence` | LLM confidence score (0.0–1.0) |
+| `reasoning_chain` | Ordered list of reasoning steps leading to the agent choice |
+| `alternatives_considered` | Agents that were evaluated but not selected, each with a `rejected_because` explanation |
+
+The `delegation_decision` and the subsequent `gateway_request` event for the same query share the same `trace_id`, so `QueryJourneys` can link them into a single journey (see [JOURNEYS.md](JOURNEYS.md)).
 
 ### 4.4 delegation_verification fields (orchestrator)
 
@@ -175,8 +188,13 @@ response — this is the authoritative record of what the sub-agent actually did
 | `destructive_confirmed` | Subset of `tools_confirmed` that are classified as `destructive` |
 | `mismatch` | `true` when the delegation was classified as `destructive` but no destructive tool execution is in the trail — strong signal of LLM fabrication |
 
-When `mismatch=true`, the journey outcome is elevated to `unverified_claim` (see
-[§5](#5-action-classification) and [JOURNEYS.md — Outcomes](JOURNEYS.md#journey-outcomes)).
+When `mismatch=true`, four signals fire simultaneously:
+- The journey `outcome` is elevated to `unverified_claim`
+- The journey object gains `has_mismatch: true`
+- The gateway sets `X-Audit-Mismatch: true` on the HTTP response
+- The auditor fires a `fabrication_mismatch` CRITICAL incident to `--incident-webhook`
+- The `gateway_fabrication_mismatches_total` Prometheus counter is incremented
+
 The orchestrator prompt instructs the LLM to report mismatches to the user and
 **not** claim success.
 
@@ -348,6 +366,83 @@ curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
 |--------|----------|-------------|
 | `GET` | `/health` | Returns `{"status":"ok"}` |
 
+### 6.8 Approval Sessions
+
+Approval sessions are time-bounded pre-authorisation tokens for agent-mode playbook runs. An operator creates a session before a maintenance window and passes the session ID to the playbook run request. The gateway validates the session before proxying any write or destructive tool call.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/approval/sessions` | Create a new approval session |
+| `GET` | `/v1/approval/sessions/{sessionID}` | Retrieve a session by ID |
+| `DELETE` | `/v1/approval/sessions/{sessionID}` | Revoke a session immediately |
+
+#### POST /v1/approval/sessions
+
+Request body:
+
+| Field | Required | Description |
+|---|---|---|
+| `granted_by` | yes | Identity of the operator granting the session |
+| `expires_in_secs` | yes | Session lifetime in seconds (must be > 0) |
+| `allowed_classes` | yes | Action classes the session covers: `"write"`, `"destructive"`, `"escalation"`, or any combination |
+| `scope` | no | Informational label (e.g. a playbook series ID or maintenance window name). Stored for audit purposes, not enforced. |
+
+```bash
+curl -s -X POST http://localhost:1199/v1/approval/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "granted_by":      "alice@example.com",
+    "expires_in_secs": 1800,
+    "allowed_classes": ["write", "destructive"],
+    "scope":           "pbs_db_restart_triage"
+  }'
+```
+
+Response `201 Created`:
+
+```json
+{
+  "session_id": "aps_3f7a2b1c",
+  "expires_at": "2026-04-29T22:30:00Z"
+}
+```
+
+#### GET /v1/approval/sessions/{sessionID}
+
+Returns the full session object. Returns `404` if not found.
+
+```json
+{
+  "session_id":      "aps_3f7a2b1c",
+  "granted_by":      "alice@example.com",
+  "granted_at":      "2026-04-29T20:30:00Z",
+  "expires_at":      "2026-04-29T22:30:00Z",
+  "allowed_classes": ["write", "destructive"],
+  "scope":           "pbs_db_restart_triage",
+  "revoked":         false
+}
+```
+
+#### DELETE /v1/approval/sessions/{sessionID}
+
+Revokes the session immediately. Returns `204 No Content`. Returns `404` if not found. The session record remains readable via `GET` with `"revoked": true`.
+
+#### ApprovalSession object
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | string | Unique identifier (`aps_` prefix) |
+| `granted_by` | string | Operator who created the session |
+| `granted_at` | RFC3339 | When the session was created |
+| `expires_at` | RFC3339 | When the session expires |
+| `allowed_classes` | []string | Action classes covered: `"write"`, `"destructive"`, and/or `"escalation"` |
+| `scope` | string | Informational label; empty when not provided |
+| `revoked` | bool | `true` if the session was explicitly revoked before expiry |
+
+A session is considered valid when: `revoked=false`, `expires_at` is in the future, and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call. The `"escalation"` class covers automatic cross-agent chaining — include it when the session should permit the gateway to chain a second agent (e.g. `pbs_sysadmin_docker_inspect`) without a separate operator call.
+
+See [Approval modes](PLAYBOOKS.md#approval-modes) in the Playbook docs for the full usage guide.
+
 ---
 
 ## 7. Event Query Filters
@@ -452,9 +547,20 @@ go run ./cmd/auditor/ \
 # Verify chain integrity and exit (useful for CI / cron)
 go run ./cmd/auditor/ --verify --db /var/lib/helpdesk/audit.db
 
-# Prometheus metrics
+# Prometheus metrics (auditor)
 go run ./cmd/auditor/ --socket /tmp/helpdesk-audit.sock --prometheus :9090
 ```
+
+> **Gateway metrics:** the gateway exposes its own Prometheus counter at
+> `GET http://<gateway>:8080/metrics` — no configuration needed, no auth
+> required. It currently publishes:
+>
+> ```
+> gateway_fabrication_mismatches_total{agent, action_class}
+> ```
+>
+> Scrape this endpoint alongside the auditor's `--prometheus` endpoint to
+> cover both detection layers.
 
 ### 9.1 auditor flags
 
@@ -483,14 +589,15 @@ go run ./cmd/auditor/ --socket /tmp/helpdesk-audit.sock --prometheus :9090
 
 ### 9.2 Security detection patterns
 
-| Pattern | Trigger |
-|---------|---------|
-| High volume | More than `--max-events-per-minute` events in a rolling window |
-| Off-hours | Events outside `--allowed-hours-start` to `--allowed-hours-end` |
-| Hash mismatch | Event hash does not match content |
-| Unauthorized destructive | `destructive` action without approved status |
-| Potential SQL injection | SQL syntax errors in tool output |
-| Potential command injection | Permission denied / command not found in tool output |
+| Pattern | Trigger | Severity |
+|---------|---------|---------|
+| Fabrication mismatch | `delegation_verification` event with `mismatch=true` — agent returned success but no matching tool execution appears in the audit trail | CRITICAL → incident webhook |
+| High volume | More than `--max-events-per-minute` events in a rolling window | WARNING |
+| Off-hours | Events outside `--allowed-hours-start` to `--allowed-hours-end` | WARNING |
+| Hash mismatch | Event hash does not match content | CRITICAL → incident webhook |
+| Unauthorized destructive | `destructive` action without approved status | WARNING |
+| Potential SQL injection | SQL syntax errors in tool output | WARNING |
+| Potential command injection | Permission denied / command not found in tool output | WARNING |
 
 ---
 

@@ -497,3 +497,145 @@ Report written to faulttest-b7ea876d.json
 ```
 
 And finally review the JSON file with the results, similar to the host and Docker/Podman container runs.
+
+## External fault injection with SSH
+
+Some faults require OS-level access to the database host. For example, `db-wal-disk-full` injects fake FATAL/PANIC entries into the PostgreSQL log file and kills the process to simulate a WAL disk exhaustion crash. These faults use `ssh_exec` injection: `faulttest` streams a shell script to the database host over SSH, so no files need to be pre-staged there. The inject and teardown scripts are embedded in the fault catalog.
+
+Pass `--ssh-host` (or set `--ssh-user` / `--ssh-key` separately) to enable SSH injection. When `--external` is also set, the run is restricted to the `external_compat` subset of faults, which includes both SQL-only faults and SSH-injectable faults like `db-wal-disk-full`. See [FAULTTEST.md §3.2](FAULTTEST.md#32-ssh-injection-mode) for the full reference.
+
+The `FAULTTEST_CONTAINER` environment variable is automatically resolved from the `container_name` field in `infrastructure.json` for the target server and exposed to inject/teardown scripts. You do not need to set it manually.
+
+### Host/VM
+
+```bash
+./faulttest run \
+  --conn "alloydb-on-vm" \
+  --db-agent http://localhost:8080 \
+  --api-key gateway-api-key \
+  --infra-config infrastructure.json \
+  --external \
+  --ssh-host db-host.internal \
+  --ssh-user ubuntu \
+  --ssh-key ~/.ssh/db-host.pem
+```
+
+Or target a single fault:
+
+```bash
+./faulttest run \
+  --conn "alloydb-on-vm" \
+  --db-agent http://localhost:8080 \
+  --api-key gateway-api-key \
+  --infra-config infrastructure.json \
+  --ids db-wal-disk-full \
+  --ssh-host ubuntu@db-host.internal \
+  --ssh-key ~/.ssh/db-host.pem
+```
+
+### Docker/Podman
+
+Mount the SSH private key into the container with a read-only bind mount:
+
+```bash
+DEV_DB_PASSWORD=ChangeMe123 docker run --rm \
+  --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" \
+  -v "$HOME/.ssh/db-host.pem:/ssh/id_rsa:ro" \
+  -w /output \
+  -e DEV_DB_PASSWORD \
+  ghcr.io/borisdali/helpdesk:latest \
+  faulttest run \
+  --conn "alloydb-on-vm" \
+  --db-agent http://gateway:8080 \
+  --api-key gateway-api-key \
+  --infra-config /infrastructure.json \
+  --external \
+  --ssh-host db-host.internal \
+  --ssh-user ubuntu \
+  --ssh-key /ssh/id_rsa
+```
+
+### K8s
+
+Create a Secret containing the SSH private key (run once):
+
+```bash
+kubectl create secret generic faulttest-ssh-key \
+  --from-file=id_rsa=/path/to/your/ssh/private/key \
+  --namespace helpdesk-system
+```
+
+Then submit a Job that mounts the secret and passes the SSH flags:
+
+```
+kubectl -n helpdesk-system apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: faulttest-external
+  namespace: helpdesk-system
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: faulttest
+        image: ghcr.io/borisdali/helpdesk:latest
+        args:
+          - faulttest
+          - run
+          - --conn=alloydb-on-vm
+          - --db-agent=http://helpdesk-gateway:8080
+          - --api-key=$(HELPDESK_CLIENT_API_KEY)
+          - --infra-config=/etc/helpdesk/infrastructure.json
+          - --external
+          - --ssh-host=db-host.internal
+          - --ssh-user=ubuntu
+          - --ssh-key=/etc/faulttest-ssh/id_rsa
+        env:
+        - name: HELPDESK_CLIENT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: <your-gateway.clientAPIKeySecret value>  # same Secret the gateway uses
+              key: api-key
+        - name: HOME
+          value: /home/helpdesk             # so psql finds /home/helpdesk/.pgpass
+        volumeMounts:
+        - name: infra-config
+          mountPath: /etc/helpdesk/infrastructure.json
+          subPath: infrastructure.json
+          readOnly: true
+        - name: pgpass
+          mountPath: /home/helpdesk/.pgpass
+          subPath: .pgpass
+          readOnly: true
+        - name: ssh-key
+          mountPath: /etc/faulttest-ssh
+          readOnly: true
+      volumes:
+      - name: infra-config
+        configMap:
+          name: helpdesk-config             # ConfigMap name from Step 1
+      - name: pgpass
+        secret:
+          secretName: pgpass                # same Secret the database-agent uses
+          defaultMode: 0600
+      - name: ssh-key
+        secret:
+          secretName: faulttest-ssh-key     # Secret created above
+          defaultMode: 0600
+EOF
+```
+
+Monitor the run:
+
+```
+kubectl -n helpdesk-system logs -f job/faulttest-external
+```
+
+The `--ssh-host` value must be reachable from the Kubernetes node. For database hosts on the same VPC, use the internal DNS name or IP. For external hosts, ensure the pod's egress policy permits outbound SSH (port 22) to the target.
+
+> **Tip:** To run only a specific SSH-injectable fault, add `--ids db-wal-disk-full` to the args list. The `--external` flag is implied when `--ssh-host` is set, but including it explicitly also restricts the run to the `external_compat` subset, skipping faults that require the internal Docker Compose harness.

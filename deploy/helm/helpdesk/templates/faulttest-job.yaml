@@ -1,0 +1,158 @@
+{{- if .Values.faulttest.enabled }}
+{{- if and (not .Values.faulttest.ids) (not .Values.faulttest.categories) }}
+  {{- fail "faulttest.ids or faulttest.categories is required when faulttest.enabled=true — running the full catalog in-cluster will fail for most faults (no Docker, no kustomize overlays). Specify e.g. --set faulttest.ids=db-wal-disk-full-k8s or --set faulttest.categories=kubernetes" }}
+{{- end }}
+{{- $fullname := include "helpdesk.fullname" . }}
+{{- $dbAgent := .Values.faulttest.dbAgentURL | default (printf "http://%s-database-agent:%d" $fullname (.Values.agents.database.port | int)) }}
+{{- $k8sAgent := .Values.faulttest.k8sAgentURL | default (printf "http://%s-k8s-agent:%d" $fullname (.Values.agents.k8s.port | int)) }}
+{{- $sysAgent := .Values.faulttest.sysadminAgentURL | default (printf "http://%s-sysadmin-agent:%d" $fullname (.Values.agents.sysadmin.port | int)) }}
+{{- if .Values.faulttest.rbac.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-faulttest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: faulttest
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+# Role in the target namespace — grants the faulttest Job permission to exec
+# into pods (for shell_exec-type fault injection) and watch rollout status.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-faulttest
+  namespace: {{ .Values.faulttest.targetNamespace }}
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: faulttest
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-faulttest
+  namespace: {{ .Values.faulttest.targetNamespace }}
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: faulttest
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-faulttest
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-faulttest
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-faulttest
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: faulttest
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  {{- if .Values.faulttest.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ .Values.faulttest.ttlSecondsAfterFinished }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: faulttest
+    spec:
+      restartPolicy: Never
+      {{- if .Values.faulttest.rbac.create }}
+      serviceAccountName: {{ $fullname }}-faulttest
+      {{- end }}
+      containers:
+        - name: faulttest
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/faulttest"]
+          args:
+            - run
+            {{- if .Values.faulttest.ids }}
+            - --ids={{ .Values.faulttest.ids }}
+            {{- end }}
+            {{- if .Values.faulttest.categories }}
+            - --categories={{ .Values.faulttest.categories }}
+            {{- end }}
+            - --conn={{ required "faulttest.conn is required when faulttest.enabled=true" .Values.faulttest.conn }}
+            - --db-agent={{ $dbAgent }}
+            - --k8s-agent={{ $k8sAgent }}
+            - --sysadmin-agent={{ $sysAgent }}
+            {{- if .Values.faulttest.context }}
+            - --context={{ .Values.faulttest.context }}
+            {{- end }}
+            {{- if .Values.infrastructure }}
+            - --infra-config=/etc/helpdesk/infrastructure.json
+            {{- end }}
+            {{- if .Values.governance.auditd.enabled }}
+            - --audit-url=http://{{ $fullname }}-auditd:{{ .Values.governance.auditd.port }}
+            {{- end }}
+            {{- if .Values.faulttest.judge }}
+            - --judge
+            {{- end }}
+            {{- if .Values.faulttest.viaGateway }}
+            - --via-gateway
+            - --gateway=http://{{ $fullname }}-gateway:{{ .Values.gateway.port }}
+            {{- end }}
+            - --report-dir=/reports
+          env:
+            {{- include "helpdesk.modelEnv" . | nindent 12 }}
+            {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
+            {{- if .Values.faulttest.gatewayAPIKeySecret }}
+            - name: HELPDESK_CLIENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.faulttest.gatewayAPIKeySecret }}
+                  key: {{ .Values.faulttest.gatewayAPIKeyKey | default "api-key" }}
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.infrastructure }}
+            - name: infra-config
+              mountPath: /etc/helpdesk/infrastructure.json
+              subPath: infrastructure.json
+              readOnly: true
+            {{- end }}
+            - name: reports
+              mountPath: /reports
+      volumes:
+        {{- if .Values.infrastructure }}
+        - name: infra-config
+          configMap:
+            name: {{ $fullname }}-config
+        {{- end }}
+        - name: reports
+          emptyDir: {}
+{{- end }}

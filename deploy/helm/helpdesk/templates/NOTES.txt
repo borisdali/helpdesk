@@ -5,11 +5,16 @@ aiHelpDesk has been deployed.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 helpdesk-client is the authenticated CLI for operators.
-Install it from the release tarball, or extract it from the image:
+Download the binary for your OS from the release tarball, or — on Linux — extract it
+directly from the image:
 
+  # Linux only (image contains a Linux/amd64 or Linux/arm64 binary)
   docker run --rm --entrypoint cat \
     {{ .Values.image.repository }}:{{ .Values.image.tag }} \
     /usr/local/bin/helpdesk-client > helpdesk-client && chmod +x helpdesk-client
+
+  # macOS: download the tarball for your platform (darwin/amd64 or darwin/arm64) from
+  # https://github.com/borisdali/helpdesk/releases/ and extract helpdesk-client.
 
 {{- if eq .Values.gateway.service.type "LoadBalancer" }}
 
@@ -47,4 +52,28 @@ Authentication is enabled (provider: {{ .Values.gateway.identity.provider }}).
 Pass your API key:
 
   helpdesk-client --gateway <URL> --api-key <your-key> --purpose diagnostic
+{{- end }}
+{{- if .Values.faulttest.enabled }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Fault Injection Test running
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A faulttest Job was launched as a post-install hook.
+Helm waits for it to finish — stream its output in another terminal:
+
+  kubectl -n {{ .Release.Namespace }} logs \
+    -l app.kubernetes.io/component=faulttest --follow
+
+When it completes, extract the JSON report from the logs:
+
+  kubectl -n {{ .Release.Namespace }} logs \
+    -l app.kubernetes.io/component=faulttest \
+    | sed -n '/^--- BEGIN FAULTTEST REPORT JSON ---$/,/^--- END FAULTTEST REPORT JSON ---$/{ /^---/d; p }' \
+    > faulttest-report.json
+
+Disable for subsequent upgrades (so it does not re-run on unrelated changes):
+
+  helm upgrade {{ .Release.Name }} <chart> --reuse-values \
+    --set faulttest.enabled=false
 {{- end }}
