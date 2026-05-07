@@ -3,6 +3,11 @@ package main
 import (
 	"context"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // expectedK8sTools is the canonical list of tools that must be registered in
@@ -62,11 +67,25 @@ func TestK8sArgsToStruct_EmptyArgs(t *testing.T) {
 	}
 }
 
-// TestK8sDirectRegistry_ToolCallable verifies that a registered read tool can
-// be called via the registry without panicking. Uses withMockKubectl to avoid
-// spawning a real kubectl process.
+// TestK8sDirectRegistry_ToolCallable verifies that describe_service can be
+// called via the registry and returns structured output. Uses a fake clientset
+// so no real cluster is required.
 func TestK8sDirectRegistry_ToolCallable(t *testing.T) {
-	defer withMockKubectl("NAME   READY   STATUS    RESTARTS\nnginx  1/1     Running   0\n", nil)()
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Type:      corev1.ServiceTypeClusterIP,
+			ClusterIP: "10.96.0.1",
+			Selector:  map[string]string{"app": "nginx"},
+			Ports: []corev1.ServicePort{
+				{Name: "http", Port: 80, Protocol: corev1.ProtocolTCP,
+					TargetPort: intstr.FromInt(8080)},
+			},
+		},
+	}
+	cs := fake.NewSimpleClientset(svc)
+	defer injectFakeClientset("", cs)()
+
 	r := NewK8sDirectRegistry()
 	fn, ok := r.Get("describe_service")
 	if !ok {

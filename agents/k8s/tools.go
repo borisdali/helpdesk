@@ -477,22 +477,92 @@ func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (Kubectl
 	namespace := nsInfo.Namespace
 	kubeContext := resolveContext(args.Context)
 
-	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
-	cmdArgs := []string{"describe", "svc", args.ServiceName}
-
-	if namespace != "" {
-		cmdArgs = append(cmdArgs, "-n", namespace)
-	}
-
-	output, err := runKubectlWithToolName(ctx, kubeContext, "describe_service", cmdArgs...)
+	cs, err := sharedClient.clientset(kubeContext)
 	if err != nil {
-		return KubectlResult{}, fmt.Errorf("error describing service: %v", err)
+		return KubectlResult{}, err
 	}
-	return KubectlResult{Output: output}, nil
+
+	start := time.Now()
+	svc, err := cs.CoreV1().Services(namespace).Get(ctx, args.ServiceName, metav1.GetOptions{})
+	duration := time.Since(start)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("error describing service: %v", diagnoseClientError(err))
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Name:       %s\nNamespace:  %s\n", svc.Name, svc.Namespace)
+	fmt.Fprintf(&sb, "Type:       %s\n", svc.Spec.Type)
+	fmt.Fprintf(&sb, "ClusterIP:  %s\n", svc.Spec.ClusterIP)
+	for k, v := range svc.Labels {
+		fmt.Fprintf(&sb, "Label: %s=%s\n", k, v)
+	}
+	if len(svc.Spec.Selector) > 0 {
+		parts := make([]string, 0, len(svc.Spec.Selector))
+		for k, v := range svc.Spec.Selector {
+			parts = append(parts, k+"="+v)
+		}
+		fmt.Fprintf(&sb, "Selector:   %s\n", strings.Join(parts, ","))
+	} else {
+		fmt.Fprintf(&sb, "Selector:   <none>\n")
+	}
+	for _, p := range svc.Spec.Ports {
+		line := fmt.Sprintf("Port:       %s %d/%s -> %s", p.Name, p.Port, p.Protocol, p.TargetPort.String())
+		if p.NodePort != 0 {
+			line += fmt.Sprintf(" (NodePort: %d)", p.NodePort)
+		}
+		fmt.Fprintln(&sb, line)
+	}
+	fmt.Fprintf(&sb, "SessionAffinity: %s\n", svc.Spec.SessionAffinity)
+	if svc.Spec.Type == corev1.ServiceTypeNodePort || svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		fmt.Fprintf(&sb, "ExternalTrafficPolicy: %s\n", svc.Spec.ExternalTrafficPolicy)
+	}
+	for _, ing := range svc.Status.LoadBalancer.Ingress {
+		if ing.IP != "" {
+			fmt.Fprintf(&sb, "LoadBalancerIngress: %s\n", ing.IP)
+		} else if ing.Hostname != "" {
+			fmt.Fprintf(&sb, "LoadBalancerIngress: %s\n", ing.Hostname)
+		}
+	}
+
+	// Fetch endpoints to show healthy/not-ready backends.
+	if ep, epErr := cs.CoreV1().Endpoints(namespace).Get(ctx, args.ServiceName, metav1.GetOptions{}); epErr == nil {
+		var ready, notReady []string
+		for _, sub := range ep.Subsets {
+			for _, addr := range sub.Addresses {
+				for _, port := range sub.Ports {
+					ready = append(ready, fmt.Sprintf("%s:%d", addr.IP, port.Port))
+				}
+			}
+			for _, addr := range sub.NotReadyAddresses {
+				for _, port := range sub.Ports {
+					notReady = append(notReady, fmt.Sprintf("%s:%d", addr.IP, port.Port))
+				}
+			}
+		}
+		if len(ready) > 0 {
+			fmt.Fprintf(&sb, "Endpoints:  %s\n", strings.Join(ready, ","))
+		} else {
+			fmt.Fprintf(&sb, "Endpoints:  <none>\n")
+		}
+		if len(notReady) > 0 {
+			fmt.Fprintf(&sb, "NotReadyEndpoints: %s\n", strings.Join(notReady, ","))
+		}
+	}
+
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "describe_service",
+			Parameters: map[string]any{"namespace": namespace, "service_name": args.ServiceName},
+		}, audit.ToolResult{
+			Output: truncateForAudit(sb.String(), 500),
+		}, duration)
+	}
+	slog.Info("tool ok", "name", "describe_service", "ms", duration.Milliseconds())
+	return KubectlResult{Output: sb.String()}, nil
 }
 
 func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
