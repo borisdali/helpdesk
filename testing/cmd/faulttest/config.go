@@ -326,7 +326,7 @@ type infraConfig struct {
 //
 // When infraConfigPath is empty the check is skipped (opt-out).
 func checkTargetSafety(infraConfigPath, connStr string) error {
-	if infraConfigPath == "" {
+	if infraConfigPath == "" || connStr == "" {
 		return nil
 	}
 

@@ -107,7 +107,9 @@ spec:
             {{- if .Values.faulttest.categories }}
             - --categories={{ .Values.faulttest.categories }}
             {{- end }}
-            - --conn={{ required "faulttest.conn is required when faulttest.enabled=true" .Values.faulttest.conn }}
+            {{- if .Values.faulttest.conn }}
+            - --conn={{ .Values.faulttest.conn }}
+            {{- end }}
             - --db-agent={{ $dbAgent }}
             - --k8s-agent={{ $k8sAgent }}
             - --sysadmin-agent={{ $sysAgent }}

@@ -97,10 +97,13 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
 	}
-	body, _ := json.Marshal(map[string]string{
-		"connection_string": connStr,
-		"context":           ResolvePrompt(f.Prompt, r.cfg),
-	})
+	reqBody := map[string]string{
+		"context": ResolvePrompt(f.Prompt, r.cfg),
+	}
+	if connStr != "" {
+		reqBody["connection_string"] = connStr
+	}
+	body, _ := json.Marshal(reqBody)
 
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))

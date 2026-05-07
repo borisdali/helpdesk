@@ -746,7 +746,7 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 		}
 		b.WriteString("\n")
 	} else {
-		b.WriteString("You are performing a database availability investigation.\n\n")
+		b.WriteString("Follow the playbook guidance below to investigate the reported issue.\n\n")
 	}
 
 	// Response protocol — repeated at closing for Gemini's benefit.
