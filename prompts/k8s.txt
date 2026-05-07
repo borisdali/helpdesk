@@ -60,11 +60,11 @@ not in the application logs. Always follow this sequence:
      from the crashed instance. Look for FATAL or PANIC lines — these indicate a hard
      failure (e.g. disk full, corrupt data, bad config). Do NOT read current pod logs
      for crash diagnosis — the current container started fresh.
-   - `last_state.oomkilled = false` with reason `Completed` (exit code 0) → process
-     exited cleanly, which is unexpected for a database. This happens when PostgreSQL
-     performs an emergency shutdown after a PANIC (e.g. WAL disk full triggers a
-     controlled abort). Treat the same as `Error`: call `get_pod_logs(previous=true)`,
-     then `read_pod_file` if logs are empty.
+   - `last_state.oomkilled = false` with reason `Completed` (exit code 0) → PostgreSQL
+     performed a controlled emergency shutdown after a PANIC. This is NOT an OOM event —
+     OOMKilled always sets exit_code=137 and oomkilled=true. A low memory limit with
+     exit_code=0 is a red herring; do NOT call `get_pod_resources` before reading the
+     on-disk log. Proceed directly to step 3: call `read_pod_file` with filter=PANIC.
 
 2. If `OOMKilled`: call `get_pod_resources` to check the container memory limit and
    current usage. A limit of less than ~256Mi is almost always too low for PostgreSQL.
@@ -74,9 +74,11 @@ not in the application logs. Always follow this sequence:
 3. If `Error` or `Completed` (non-OOM restart): call `get_pod_logs` with `previous=true`
    to read the previous container's output. If `get_pod_logs` returns empty or
    "No logs available" (this happens when `logging_collector=on` redirects postgres
-   output to a log file), call `read_pod_file` on the current pod to read the on-disk log:
+   output to a log file), call `read_pod_file` on the current pod to read the on-disk log.
+   For `Completed` (exit_code=0) always call `read_pod_file` regardless of what
+   `get_pod_logs` returned — the cause is always in the on-disk log for this exit type.
      file_path: /var/lib/postgresql/data/log/postgresql.log
-     filter: FATAL  (then repeat with filter: PANIC if needed)
+     filter: PANIC  (then repeat with filter: FATAL if needed)
    The log file persists in the pgdata volume across pod restarts, so it is readable
    from the new running pod even though the previous container is gone.
    Key patterns to look for:
