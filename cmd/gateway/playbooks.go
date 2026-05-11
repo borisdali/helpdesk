@@ -746,7 +746,10 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 		}
 		b.WriteString("\n")
 	} else {
-		b.WriteString("Follow the playbook guidance below to investigate the reported issue.\n\n")
+		b.WriteString("Read the 'Additional context' section at the bottom of this prompt first.\n")
+		b.WriteString("It identifies the specific namespace, pod, or service to investigate.\n")
+		b.WriteString("Use exactly what the context specifies — do not substitute or expand to other systems listed in your infrastructure configuration.\n")
+		b.WriteString("Then follow the playbook guidance below.\n\n")
 	}
 
 	// Response protocol — repeated at closing for Gemini's benefit.
