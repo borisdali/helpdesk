@@ -1553,3 +1553,78 @@ failures:
       agent_name: k8s
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
+
+  - id: db-wal-stale-slot
+    name: "WAL accumulation — stale replication slot"
+    category: database
+    severity: high
+    description: >
+      A physical replication slot was created for a standby that has since been
+      decommissioned. With nothing consuming the slot, PostgreSQL cannot recycle
+      WAL segments behind restart_lsn — the pg_wal directory grows without bound.
+      The database remains fully operational until the volume fills. Three other
+      causes produce the same symptom (archive failure, long transaction, write
+      volume), so the agent must work through a hypothesis tree rather than
+      jumping to the slot explanation.
+    inject:
+      type: sql
+      script_inline: |
+        SELECT pg_create_physical_replication_slot('old_standby');
+        CREATE TABLE IF NOT EXISTS _wal_gen (id serial, val text);
+        INSERT INTO _wal_gen (val)
+          SELECT md5(i::text) FROM generate_series(1, 10000) AS i;
+    teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_drop_replication_slot('old_standby');
+        DROP TABLE IF EXISTS _wal_gen;
+        CHECKPOINT;
+    external_compat: true
+    external_inject:
+      type: sql
+      script_inline: |
+        SELECT pg_create_physical_replication_slot('old_standby');
+        CREATE TABLE IF NOT EXISTS _wal_gen (id serial, val text);
+        INSERT INTO _wal_gen (val)
+          SELECT md5(i::text) FROM generate_series(1, 10000) AS i;
+    external_teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_drop_replication_slot('old_standby');
+        DROP TABLE IF EXISTS _wal_gen;
+        CHECKPOINT;
+    prompt: >
+      Storage monitoring is alerting on the PostgreSQL data volume for
+      '{{connection_string}}': the pg_wal directory is consuming an unusually
+      large and still-growing amount of disk space. The database itself appears
+      healthy — queries are succeeding normally. Please investigate why WAL is
+      accumulating and identify the root cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "old_standby"
+          - "stale slot"
+          - "replication slot"
+          - "inactive"
+          - "lag_bytes"
+          - "restart_lsn"
+          - "slot"
+      expected_diagnosis:
+        category: "wal_accumulation.stale_slot"
+        narrative: >
+          The agent should work through the WAL accumulation hypothesis tree:
+          rule out archive failure (call get_pg_settings category=wal_archiving,
+          find archive_mode=off), then call get_replication_status and find the
+          inactive slot 'old_standby' with lag_bytes > 0. It should correctly
+          identify this as a stale replication slot, not a disk configuration
+          issue or write volume problem, and propose dropping the slot with
+          operator approval before recommending any checkpoint or max_wal_size
+          tuning.
+    timeout: 90s
+    remediation:
+      playbook_id: pbs_wal_stale_slot
+      agent_name: database
+      verify_sql: "SELECT 1"
+      verify_timeout: "30s"

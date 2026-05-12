@@ -1,0 +1,83 @@
+series_id: pbs_wal_stale_slot
+name: WAL Accumulation — Stale Replication Slot
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: database_agent
+approval_mode: manual
+problem_class: capacity
+author: aiHelpDesk
+description: |
+  Diagnose and remediate WAL accumulation caused by an inactive replication slot.
+  An abandoned slot holds restart_lsn fixed while the current WAL position
+  advances — PostgreSQL cannot recycle segments behind that pointer. The database
+  remains fully operational until the data volume fills. Safe remediation is
+  pg_drop_replication_slot, which requires operator confirmation because it
+  permanently removes the replica's reconnection point.
+symptoms:
+  - "pg_wal directory growing without bound"
+  - "storage alert on PostgreSQL data volume — writes still succeeding"
+  - "pg_replication_slots shows an inactive slot with large lag_bytes"
+  - "no active replica connected but a physical or logical slot exists"
+  - "disk usage rising on the PostgreSQL data volume despite stable table sizes"
+guidance: |
+  WAL accumulation has four distinct causes, each requiring a different fix.
+  Evaluate them in order and eliminate before committing to a diagnosis.
+  Do NOT recommend a remediation until you have ruled out the other hypotheses.
+
+  HYPOTHESIS 1 — Archive command failure
+  Call get_pg_settings with category="wal_archiving".
+  - If archive_mode = off → archiving not configured; eliminate this hypothesis.
+  - If archive_mode = on → the archiver may be stuck (network failure, bad
+    credentials, backup target full). It retains WAL in archive_status/ready/
+    until each segment is confirmed archived. Fix the archiver rather than
+    dropping slots. Escalate if you reach this branch.
+  Eliminate if: archive_mode = off (typical for single-instance setups).
+
+  HYPOTHESIS 2 — Inactive replication slot
+  Call get_replication_status. Examine the pg_replication_slots section.
+  COMMIT this hypothesis if: any slot has active = false AND lag_bytes > 0.
+
+  An inactive slot means the replica was decommissioned, crashed, or was never
+  fully set up — but nobody dropped the slot. PostgreSQL cannot recycle any WAL
+  segment behind that slot's restart_lsn, so pg_wal grows until disk is full.
+
+  Confirm by noting:
+  - slot_name — identifies which replica it belonged to
+  - lag_bytes — how much WAL is retained; a large value confirms this is the cause
+  - pg_stat_replication is empty — no active replicas currently connected
+
+  Remediation: SELECT pg_drop_replication_slot('<slot_name>') removes the
+  retention anchor. PostgreSQL recycles retained WAL segments at the next
+  checkpoint. This is DESTRUCTIVE — the slot is permanently gone and any
+  replica holding it can no longer reconnect from that WAL position. Confirm
+  the replica is permanently decommissioned before proposing this drop.
+
+  Present the operator with:
+    SELECT pg_drop_replication_slot('<slot_name>');
+  and request approval before executing. Emit ESCALATE_TO: requires_operator_approval.
+
+  HYPOTHESIS 3 — Long-running transaction
+  Call get_active_connections. Look for rows where xact_start is hours or days
+  ago. A very long-running transaction holds a low xmin horizon and can delay
+  WAL cleanup in some configurations.
+  Eliminate if: no transactions with xact_start age > 1 hour.
+
+  HYPOTHESIS 4 — Write volume exceeds max_wal_size
+  Call get_pg_settings with category="wal". Check max_wal_size (default 1 GB).
+  If the workload generates more WAL than max_wal_size between checkpoints,
+  pg_wal grows. This is the residual hypothesis — only reach it after ruling
+  out hypotheses 1–3.
+  Remediation: increase max_wal_size, tune checkpoint_completion_target, or
+  reduce write volume.
+
+  IMPORTANT: Do not recommend increasing max_wal_size or tuning checkpoint
+  parameters if an inactive slot is present. Those changes have no effect while
+  a stale slot retains old WAL segments.
+
+escalation:
+  - "archive_mode = on with evidence of archiver failure — fix archiver before touching slots"
+  - "slot lag_bytes > 50 GB — disk may fill before operator approves the drop"
+  - "multiple inactive slots found — each must be evaluated and approved separately"
+  - "slot belongs to a logical replication subscriber that may still be in use"
+target_hints: []
