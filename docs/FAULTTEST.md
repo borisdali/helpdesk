@@ -576,6 +576,7 @@ These faults work against any PostgreSQL instance accessible over libpq. No Dock
 | `db-lock-contention` | Lock contention / deadlock | high |
 | `db-idle-in-transaction` | Session stuck with uncommitted writes | high |
 | `db-terminate-direct-command` | Direct terminate — inspect-first check | high |
+| `db-wal-stale-slot` | WAL accumulation — stale replication slot | high |
 
 ### 6.2 Docker Compose faults (internal only)
 
@@ -623,6 +624,7 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | `db-process-kill` | `pbs_db_restart_triage` | db |
 | `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin |
 | `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s |
+| `db-wal-stale-slot` | `pbs_wal_stale_slot` | database |
 
 The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
 
@@ -636,6 +638,7 @@ Each fault's `remediation` block specifies a `verify_sql` query that confirms th
 | `db-connection-refused` | `SELECT 1` (connectivity check is sufficient — the fault kills the postmaster) |
 | `db-wal-disk-full` | `SELECT 1` (connectivity check confirms postgres restarted successfully after WAL cleanup) |
 | `db-wal-disk-full-k8s` | `SELECT 1` (connectivity check confirms the pod restarted and postgres is accepting connections) |
+| `db-wal-stale-slot` | `SELECT 1` (DB stays up throughout; slot removal is confirmed by the agent's structured diagnosis — `pg_drop_replication_slot` in the response) |
 
 When writing customer catalog entries, prefer specific queries that directly verify the fault condition rather than bare connectivity checks.
 

@@ -560,3 +560,86 @@ func TestOverallScore_NoRemediation_EqualsDiagnosisScore(t *testing.T) {
 		t.Errorf("OverallScore = %.4f, want Score = %.4f", result.OverallScore, result.Score)
 	}
 }
+
+// ── WAL accumulation / stale slot diagnosis ────────────────────────────────
+
+func TestEvaluate_WalStaleSlot_CommittedResponse_Passes(t *testing.T) {
+	// An agent that works through the hypothesis tree and commits to stale_slot
+	// should score full diagnosis marks.
+	f := Failure{
+		ID:       "db-wal-stale-slot",
+		Name:     "WAL accumulation — stale replication slot",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"old_standby", "slot", "inactive", "lag_bytes"}},
+			ExpectedDiagnosis: DiagnosisSpec{Category: "wal_accumulation_stale_slot"},
+			ExpectedTools:     []string{"get_replication_status"},
+		},
+	}
+
+	response := `I called get_replication_status and found an inactive replication slot
+named 'old_standby' with lag_bytes=104857600. The archive_mode is off so the
+archiver is not the cause. This is WAL accumulation due to a stale slot —
+the replica was decommissioned but the slot was never dropped. Recommend
+SELECT pg_drop_replication_slot('old_standby') with operator approval.`
+
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+
+	if !result.DiagnosisPass {
+		t.Errorf("DiagnosisPass should be true for committed stale-slot response, got false")
+	}
+	if !result.KeywordPass {
+		t.Errorf("KeywordPass should be true, got false")
+	}
+	if !result.Passed {
+		t.Errorf("Evaluate should pass, got Score=%.2f", result.Score)
+	}
+}
+
+func TestEvaluate_WalStaleSlot_VagueResponse_Fails(t *testing.T) {
+	// An agent that mentions replication without committing to the stale-slot
+	// hypothesis (Crystal Ball failure mode) should fail diagnosis scoring.
+	f := Failure{
+		ID:       "db-wal-stale-slot",
+		Name:     "WAL accumulation — stale replication slot",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"old_standby", "slot", "inactive", "lag_bytes"}},
+			ExpectedDiagnosis: DiagnosisSpec{Category: "wal_accumulation_stale_slot"},
+			ExpectedTools:     []string{"get_replication_status"},
+		},
+	}
+
+	// Mentions replication and max_wal_size but never commits to the slot root cause.
+	// Does not contain any of: "wal", "accumulation", "stale", "slot".
+	response := `The database disk usage is rising. I checked configuration and found that
+max_wal_size is set to the default of 1GB. Consider increasing it to reduce
+checkpoint frequency. Also review your write workload for opportunities to
+reduce transaction volume.`
+
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+
+	if result.DiagnosisPass {
+		t.Errorf("DiagnosisPass should be false for vague response that doesn't mention slot/stale/wal/accumulation")
+	}
+	if result.KeywordPass {
+		t.Errorf("KeywordPass should be false — response doesn't mention slot, lag_bytes, or old_standby")
+	}
+}
+
+func TestSplitCategory_DotIsNotSeparator(t *testing.T) {
+	// Dots are not split characters — use underscore for compound categories.
+	// "wal_accumulation.stale_slot" would produce "accumulation.stale" as a
+	// single token, hiding the "stale" word from diagnosis matching.
+	// Categories must use underscore or hyphen as separators.
+	got := splitCategory("wal_accumulation.stale_slot")
+	want := []string{"wal", "accumulation.stale", "slot"} // dot stays joined
+	if len(got) != len(want) {
+		t.Fatalf("splitCategory with dot: got %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("splitCategory[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}

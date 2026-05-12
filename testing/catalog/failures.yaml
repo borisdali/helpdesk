@@ -1612,7 +1612,7 @@ failures:
           - "restart_lsn"
           - "slot"
       expected_diagnosis:
-        category: "wal_accumulation.stale_slot"
+        category: "wal_accumulation_stale_slot"
         narrative: >
           The agent should work through the WAL accumulation hypothesis tree:
           rule out archive failure (call get_pg_settings category=wal_archiving,
