@@ -194,7 +194,11 @@ e2e-identity: image
 # Docker image (local, current arch)
 # ---------------------------------------------------------------------------
 image:
-	docker build --load --build-arg VERSION=$(IMAGE_TAG) -t $(IMAGE):$(VERSION) -t helpdesk:latest -f Dockerfile ..
+	docker build --load --build-arg VERSION=$(IMAGE_TAG) \
+		-t $(IMAGE):$(IMAGE_TAG) \
+		-t $(IMAGE):$(VERSION) \
+		-t helpdesk:latest \
+		-f Dockerfile ..
 
 # ---------------------------------------------------------------------------
 # Docker image (multi-arch, push to GHCR)

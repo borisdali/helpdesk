@@ -1581,7 +1581,6 @@ failures:
           FROM pg_replication_slots
          WHERE slot_name = 'old_standby' AND active = false;
         DROP TABLE IF EXISTS _wal_gen;
-        CHECKPOINT;
     external_compat: true
     external_inject:
       type: sql
@@ -1597,7 +1596,6 @@ failures:
           FROM pg_replication_slots
          WHERE slot_name = 'old_standby' AND active = false;
         DROP TABLE IF EXISTS _wal_gen;
-        CHECKPOINT;
     prompt: >
       Storage monitoring is alerting on the PostgreSQL data volume for
       '{{connection_string}}': the pg_wal directory is consuming an unusually
