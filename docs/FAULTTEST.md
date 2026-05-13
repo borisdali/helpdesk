@@ -624,7 +624,7 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | `db-process-kill` | `pbs_db_restart_triage` | db |
 | `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin |
 | `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s |
-| `db-wal-stale-slot` | `pbs_wal_stale_slot` | database |
+| `db-wal-stale-slot` | `pbs_wal_stale_slot` | postgres_database_agent |
 
 The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
 

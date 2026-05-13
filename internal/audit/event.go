@@ -252,6 +252,9 @@ type DelegationVerification struct {
 	// Mismatch is true when the delegation was classified as destructive or write but
 	// the audit trail contains no confirmed tool execution of that class or stronger.
 	Mismatch bool `json:"mismatch"`
+	// MismatchReason explains why a potential mismatch was downgraded to non-alerting
+	// (e.g. approval_mode=manual means no execution is expected).
+	MismatchReason string `json:"mismatch_reason,omitempty"`
 }
 
 // RollbackExecution is set on rollback_initiated, rollback_executed, and

@@ -1358,7 +1358,12 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	if toolName == "" && g.auditURL != "" {
 		actionClass := audit.ClassifyDelegation(agentName, prompt)
 		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName)
-		if verif.Mismatch {
+		// When approval_mode=manual the agent is expected to propose destructive
+		// actions in text without executing them — no tool call will appear in the
+		// audit trail. Treat this as expected, not as fabrication.
+		ac, _ := r.Context().Value(ctxKeyApprovalSession).(approvalContext)
+		manualHold := ac.mode == "manual" && actionClass == audit.ActionDestructive
+		if verif.Mismatch && !manualHold {
 			slog.Warn("gateway: fabrication risk — agent returned success but audit trail has no matching tool executions",
 				"agent", agentName, "trace_id", traceID, "action_class", actionClass)
 			// 1. Surface to caller via response header so clients can detect and alert.
@@ -1369,6 +1374,13 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			}
 		}
 		if g.auditor != nil {
+			// Clear Mismatch before storing when the absence of a tool execution
+			// is expected (manual hold) — the auditor fires a CRITICAL alert on
+			// any stored event with Mismatch=true.
+			if manualHold && verif != nil {
+				verif.Mismatch = false
+				verif.MismatchReason = "approval_mode=manual: destructive action proposed pending operator approval"
+			}
 			verifEvent := &audit.Event{
 				EventID:   "gv_" + uuid.New().String()[:8],
 				Timestamp: time.Now().UTC(),

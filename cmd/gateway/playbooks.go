@@ -112,6 +112,15 @@ type ctxKeyApprovalSessionType struct{}
 
 var ctxKeyApprovalSession = ctxKeyApprovalSessionType{}
 
+// terminalEscalations maps sentinel series IDs that signal a human gate is
+// needed. They are not chainable playbooks — the gateway stops the chain and
+// surfaces an operator-approval requirement to the caller instead of looking
+// up a follow-on playbook. Also used to suppress spurious audit delegation
+// events for these non-agent targets.
+var terminalEscalations = map[string]string{
+	"requires_operator_approval": "This action requires explicit operator approval before it can proceed.",
+}
+
 // approvalContext carries approval mode + session ID through the request context.
 type approvalContext struct {
 	mode      string // "auto" | "session" | "manual" | "force"
@@ -338,8 +347,13 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				if esc.EscalateTo != "" {
 					res.outcome = "escalated"
 					res.escalatedTo = esc.EscalateTo
-					g.recordEscalationDecision(r.Context(), traceID,
-						authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, esc.Findings)
+					// Don't record a delegation event for terminal escalation tokens
+					// (e.g. requires_operator_approval) — they are human gates, not
+					// agent handoffs, and would produce "unknown agent" audit alerts.
+					if _, isTerminal := terminalEscalations[esc.EscalateTo]; !isTerminal {
+						g.recordEscalationDecision(r.Context(), traceID,
+							authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, esc.Findings)
+					}
 				} else if esc.Findings != "" {
 					res.outcome = "resolved"
 				}
@@ -422,6 +436,16 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	const maxChainDepth = 5
 	prev := primary
 	for len(chain) < maxChainDepth && prev.escalatedTo != "" {
+		if msg, isTerminal := terminalEscalations[prev.escalatedTo]; isTerminal {
+			extra["suggested_next"] = map[string]any{
+				"escalation_token":             prev.escalatedTo,
+				"message":                      msg,
+				"requires_operator_approval":   true,
+			}
+			slog.Info("playbook: operator approval required — stopping chain",
+				"series_id", prev.escalatedTo, "trace_id", prev.traceID)
+			break
+		}
 		nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), prev.escalatedTo)
 		if err != nil {
 			slog.Warn("playbook: cannot fetch escalated playbook",
@@ -1576,11 +1600,15 @@ func targetMatches(intended, actual string) bool {
 	}
 	// Subset match: every key=value pair in intended must exist in actual.
 	// This handles the case where the agent appends user=, password=, etc.
+	// password is excluded: the audit layer masks it as "***" so comparing
+	// against the plain-text value from the infra config always false-positives.
 	intendedFields := parseConnFields(intended)
+	delete(intendedFields, "password")
 	if len(intendedFields) == 0 {
 		return false // intended is a plain name, not a connection string
 	}
 	actualFields := parseConnFields(actual)
+	delete(actualFields, "password")
 	for k, v := range intendedFields {
 		if actualFields[k] != v {
 			return false
