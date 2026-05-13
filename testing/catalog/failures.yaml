@@ -1577,7 +1577,9 @@ failures:
     teardown:
       type: sql
       script_inline: |
-        SELECT pg_drop_replication_slot('old_standby');
+        SELECT pg_drop_replication_slot(slot_name)
+          FROM pg_replication_slots
+         WHERE slot_name = 'old_standby' AND active = false;
         DROP TABLE IF EXISTS _wal_gen;
         CHECKPOINT;
     external_compat: true
@@ -1591,7 +1593,9 @@ failures:
     external_teardown:
       type: sql
       script_inline: |
-        SELECT pg_drop_replication_slot('old_standby');
+        SELECT pg_drop_replication_slot(slot_name)
+          FROM pg_replication_slots
+         WHERE slot_name = 'old_standby' AND active = false;
         DROP TABLE IF EXISTS _wal_gen;
         CHECKPOINT;
     prompt: >
@@ -1627,5 +1631,5 @@ failures:
     remediation:
       playbook_id: pbs_wal_stale_slot
       agent_name: postgres_database_agent
-      verify_sql: "SELECT 1"
+      verify_sql: "SELECT count(*) = 0 FROM pg_replication_slots WHERE slot_name = 'old_standby'"
       verify_timeout: "30s"

@@ -7,7 +7,8 @@
 #   make push                   Build multi-arch image and push to GHCR
 #   make binaries               Cross-compile Go binaries (4 platforms)
 #   make bundle                 Package deploy files for end-users
-#   make release VERSION=v1.0.0 All of the above
+#   make build VERSION=v1.0.0   Binaries + bundle, no Docker push
+#   make release VERSION=v1.0.0 All of the above (includes push)
 #   make github-release VERSION=v1.0.0  release + create GitHub Release
 #   make clean                  Remove dist/
 
@@ -44,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle release github-release clean hashapikey fleet-runner
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -295,9 +296,17 @@ bundle:
 	@echo "Bundle: $(DIST)/helpdesk-$(VERSION)-deploy.tar.gz"
 
 # ---------------------------------------------------------------------------
+# Local build (binaries + bundle, no Docker push)
+# ---------------------------------------------------------------------------
+build: binaries bundle
+	@echo ""
+	@echo "Build $(VERSION) complete. Artifacts in $(DIST)/:"
+	@ls -1 $(DIST)/
+
+# ---------------------------------------------------------------------------
 # Full release
 # ---------------------------------------------------------------------------
-release: push binaries bundle
+release: push build
 	@echo ""
 	@echo "Release $(VERSION) complete. Artifacts in $(DIST)/:"
 	@ls -1 $(DIST)/
