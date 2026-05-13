@@ -742,6 +742,7 @@ func TestToolsErrorHandling(t *testing.T) {
 		{"getReplicationStatusTool", func() (PsqlResult, error) { return getReplicationStatusTool(ctx, GetReplicationStatusArgs{}) }, "get_replication_status"},
 		{"getLockInfoTool", func() (PsqlResult, error) { return getLockInfoTool(ctx, GetLockInfoArgs{}) }, "get_lock_info"},
 		{"getTableStatsTool", func() (PsqlResult, error) { return getTableStatsTool(ctx, GetTableStatsArgs{}) }, "get_table_stats"},
+		{"getBgwriterStatsTool", func() (PsqlResult, error) { return getBgwriterStatsTool(ctx, GetBgwriterStatsArgs{}) }, "get_bgwriter_stats"},
 	}
 
 	for _, tt := range tests {
@@ -3095,6 +3096,40 @@ func TestGetWaitEventsTool_NoWaits(t *testing.T) {
 		t.Errorf("getWaitEventsTool() output = %q, want 'No wait events'", result.Output)
 	}
 }
+
+// =============================================================================
+// get_bgwriter_stats
+// =============================================================================
+
+func TestGetBgwriterStatsTool_Success(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]------------------+------------------------------
+checkpoints_timed             | 42
+checkpoints_req               | 7
+checkpoint_write_secs         | 1.23
+checkpoint_sync_secs          | 0.04
+buffers_checkpoint            | 12500
+buffers_clean                 | 890
+maxwritten_clean              | 3
+buffers_backend               | 410
+buffers_backend_fsync         | 0
+buffers_alloc                 | 18000
+stats_reset                   | 2026-05-13 00:00:00+00
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getBgwriterStatsTool(ctx, GetBgwriterStatsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBgwriterStatsTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "maxwritten_clean") {
+		t.Errorf("getBgwriterStatsTool() output = %q, want maxwritten_clean", result.Output)
+	}
+	if !strings.Contains(result.Output, "buffers_backend") {
+		t.Errorf("getBgwriterStatsTool() output = %q, want buffers_backend", result.Output)
+	}
+}
+
 
 // =============================================================================
 // get_blocking_queries

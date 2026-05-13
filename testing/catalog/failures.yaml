@@ -1631,3 +1631,104 @@ failures:
       agent_name: postgres_database_agent
       verify_sql: "SELECT count(*) = 0 FROM pg_replication_slots WHERE slot_name = 'old_standby'"
       verify_timeout: "30s"
+
+  - id: db-checkpoint-warning
+    name: "Checkpoint warnings — bgwriter overload"
+    category: database
+    severity: medium
+    diagnosis_playbook_series_id: pbs_checkpoint_bgwriter_triage
+    description: >
+      bgwriter_lru_maxpages is set far too low and max_wal_size is reduced, so
+      the background writer hits its per-round page limit continuously
+      (maxwritten_clean > 0) and backends start writing dirty pages directly
+      (buffers_backend climbs). Forced checkpoints occur faster than
+      checkpoint_warning allows, so PostgreSQL emits LOG messages:
+      "checkpoints are occurring too frequently". The database stays available
+      but query latency increases due to I/O contention during checkpoint bursts.
+    inject:
+      type: sql
+      script_inline: |
+        ALTER SYSTEM SET bgwriter_lru_maxpages = 2;
+        ALTER SYSTEM SET checkpoint_warning = '3600s';
+        ALTER SYSTEM SET max_wal_size = '32MB';
+        SELECT pg_reload_conf();
+        CREATE TABLE IF NOT EXISTS _chkpt_gen (id serial, val text);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        CHECKPOINT;
+        SELECT pg_sleep(1);
+        CHECKPOINT;
+    teardown:
+      type: sql
+      script_inline: |
+        ALTER SYSTEM RESET bgwriter_lru_maxpages;
+        ALTER SYSTEM RESET checkpoint_warning;
+        ALTER SYSTEM RESET max_wal_size;
+        SELECT pg_reload_conf();
+        DROP TABLE IF EXISTS _chkpt_gen;
+    external_compat: true
+    external_inject:
+      type: sql
+      script_inline: |
+        ALTER SYSTEM SET bgwriter_lru_maxpages = 2;
+        ALTER SYSTEM SET checkpoint_warning = '3600s';
+        ALTER SYSTEM SET max_wal_size = '32MB';
+        SELECT pg_reload_conf();
+        CREATE TABLE IF NOT EXISTS _chkpt_gen (id serial, val text);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        CHECKPOINT;
+        SELECT pg_sleep(1);
+        CHECKPOINT;
+    external_teardown:
+      type: sql
+      script_inline: |
+        ALTER SYSTEM RESET bgwriter_lru_maxpages;
+        ALTER SYSTEM RESET checkpoint_warning;
+        ALTER SYSTEM RESET max_wal_size;
+        SELECT pg_reload_conf();
+        DROP TABLE IF EXISTS _chkpt_gen;
+    prompt: >
+      Performance monitoring is showing elevated write latency on
+      '{{connection_string}}' and the PostgreSQL log has warning messages about
+      checkpoints occurring too frequently. The database is still accepting
+      queries but response times are degraded. Please investigate the checkpoint
+      and background-writer health and identify what is causing the warnings.
+    evaluation:
+      expected_tools:
+        - get_bgwriter_stats
+      expected_keywords:
+        any_of:
+          - "checkpoint"
+          - "too frequently"
+          - "bgwriter"
+          - "maxwritten_clean"
+          - "buffers_backend"
+          - "max_wal_size"
+          - "bgwriter_lru_maxpages"
+          - "checkpoint_warning"
+      expected_diagnosis:
+        category: "checkpoint_bgwriter_overload"
+        narrative: >
+          The agent should call get_bgwriter_stats and observe that
+          maxwritten_clean > 0 (bgwriter throttled by bgwriter_lru_maxpages),
+          checkpoints_req > 0 (forced checkpoints from WAL fill), and
+          buffers_backend elevated (backends writing dirty pages directly).
+          It should also call read_pg_log and find the "checkpoints are
+          occurring too frequently" warning, then call get_pg_settings with
+          category=checkpoint or category=bgwriter to see the mis-configured
+          parameters. The agent should recommend increasing max_wal_size,
+          raising bgwriter_lru_maxpages, and reviewing
+          checkpoint_completion_target.
+    timeout: 90s
+    remediation:
+      playbook_id: pbs_checkpoint_bgwriter_triage
+      agent_name: postgres_database_agent
+      verify_sql: |
+        SELECT
+          (SELECT setting FROM pg_settings WHERE name = 'bgwriter_lru_maxpages') = '100'
+          AND
+          (SELECT setting FROM pg_settings WHERE name = 'max_wal_size') = '1048576'
+      verify_timeout: "30s"

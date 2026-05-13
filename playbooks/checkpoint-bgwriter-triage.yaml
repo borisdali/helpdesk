@@ -1,0 +1,117 @@
+series_id: pbs_checkpoint_bgwriter_triage
+name: Checkpoint & bgwriter Triage
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: auto
+problem_class: performance
+author: aiHelpDesk
+description: |
+  Diagnose elevated write latency or checkpoint warnings caused by misconfigured
+  checkpoint or background-writer parameters. The canonical symptoms are
+  "checkpoints are occurring too frequently" in the PostgreSQL log,
+  maxwritten_clean > 0 in pg_stat_bgwriter (bgwriter hitting its per-round page
+  limit), and elevated buffers_backend (backends forced to write dirty pages
+  themselves). These conditions do not threaten data integrity but cause periodic
+  I/O bursts that degrade query latency during each checkpoint.
+symptoms:
+  - "LOG: checkpoints are occurring too frequently (X seconds apart)"
+  - "elevated write latency or I/O spikes at regular intervals"
+  - "pg_stat_bgwriter.maxwritten_clean > 0"
+  - "buffers_backend disproportionately high vs. buffers_checkpoint"
+  - "checkpoints_req >> checkpoints_timed (forced by WAL fill, not timeout)"
+guidance: |
+  STEP 1 — Confirm checkpoint warnings in the log.
+  Call read_pg_log with filter="checkpoint". Look for:
+    LOG:  checkpoints are occurring too frequently (X seconds apart)
+    HINT: Consider increasing the configuration parameter "max_wal_size".
+  Note the interval (X seconds). A very short interval (< 30s) indicates
+  WAL is filling max_wal_size far faster than checkpoint_timeout triggers
+  a scheduled checkpoint.
+
+  STEP 2 — Read bgwriter counters.
+  Call get_bgwriter_stats. Interpret the key counters:
+
+  - checkpoints_req vs. checkpoints_timed:
+    checkpoints_req is forced by WAL hitting max_wal_size.
+    checkpoints_timed is scheduled by checkpoint_timeout.
+    If checkpoints_req >> checkpoints_timed, max_wal_size is too small for
+    the current write volume.
+
+  - maxwritten_clean:
+    Each time bgwriter tries to write dirty LRU pages but has already written
+    bgwriter_lru_maxpages in that round, it increments this counter and stops.
+    maxwritten_clean > 0 means bgwriter is throttled. Backends then write dirty
+    pages directly (buffers_backend rises), causing unpredictable I/O latency.
+
+  - buffers_backend vs. buffers_checkpoint:
+    buffers_checkpoint: pages written during checkpoints (expected).
+    buffers_backend: pages written by regular backends (unexpected; indicates
+    bgwriter cannot flush ahead of demand). A high ratio of
+    buffers_backend / (buffers_checkpoint + buffers_clean + buffers_backend)
+    above ~10% is a red flag.
+
+  - buffers_backend_fsync:
+    If > 0, backends are also doing their own fsync calls. This is severe —
+    it means the checkpoint process has fallen behind badly enough that backends
+    cannot hand off the sync work.
+
+  STEP 3 — Identify the misconfigured parameters.
+  Call get_pg_settings with category="checkpoint" then category="bgwriter".
+  Key parameters to examine:
+
+  max_wal_size (default: 1GB):
+    Controls when a forced checkpoint fires. If the write workload generates
+    more WAL than max_wal_size between checkpoints, checkpoints_req grows.
+    Too small → too-frequent forced checkpoints and the warning.
+
+  checkpoint_timeout (default: 5min):
+    Maximum time between scheduled checkpoints. Increasing it spreads I/O
+    but also means more work to do at each checkpoint.
+
+  checkpoint_completion_target (default: 0.9):
+    Fraction of checkpoint_timeout over which to spread the checkpoint write.
+    Low values (< 0.5) cause aggressive I/O bursts at the start of each
+    checkpoint. Increase toward 0.9 to smooth I/O.
+
+  bgwriter_lru_maxpages (default: 100):
+    Max dirty LRU pages bgwriter writes per round. If set very low (< 10),
+    bgwriter throttles immediately and backends write pages themselves.
+    Increase to allow bgwriter to keep pace with the write workload.
+
+  bgwriter_lru_multiplier (default: 2.0):
+    Controls how aggressively bgwriter scales up ahead of demand. Lower
+    values reduce background I/O but increase the chance of cache misses.
+
+  STEP 4 — Recommend parameter changes.
+  Do NOT propose changes without first confirming the observed counters
+  support the diagnosis (maxwritten_clean > 0 or checkpoints_req high).
+
+  Safe first-step recommendations (present to operator, do not apply):
+  - Increase max_wal_size: double from current value and monitor checkpoints_req.
+    For write-heavy workloads, 2–4 GB is common. Requires only pg_reload_conf().
+  - Increase bgwriter_lru_maxpages to 200–500 if currently set < 50.
+    Requires only pg_reload_conf().
+  - Set checkpoint_completion_target = 0.9 if currently < 0.5.
+    Requires only pg_reload_conf().
+
+  These are all non-default parameter changes applied via ALTER SYSTEM SET +
+  pg_reload_conf() — no restart needed. Emit each as a proposed SQL statement
+  and request operator confirmation before execution.
+
+  STEP 5 — Confirm resolution.
+  After parameter changes are applied, re-run get_bgwriter_stats and compare:
+  - checkpoints_req growth should slow
+  - maxwritten_clean should stop increasing
+  - buffers_backend ratio should fall
+
+  Note: stats_reset shows when counters were last zeroed. If stats_reset was
+  recent, wait for meaningful data to accumulate before judging improvement.
+
+escalation:
+  - "buffers_backend_fsync > 0 — backends are doing their own fsyncs; immediate I/O capacity review needed"
+  - "checkpoint_sync_time > 30s — checkpoint sync is blocking writes for extended periods"
+  - "checkpoints occurring < 5 seconds apart despite max_wal_size being already large (> 4GB)"
+  - "disk I/O at saturation (not diagnosable from SQL alone — escalate to sysadmin agent for iostat)"
+target_hints: []

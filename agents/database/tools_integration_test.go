@@ -83,15 +83,10 @@ func TestInspectQuery_AllColumnsPresent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Get our own backend PID so we have a valid PID to query.
-	pidStr, err := runIntegrationSQLOutput(ctx, "SELECT pg_backend_pid()")
-	if err != nil {
-		t.Fatalf("get backend pid: %v", err)
-	}
-	pid, _ := strconv.Atoi(pidStr)
-
-	// Run the actual inspectionQuery with -x (same flags inspectConnection uses).
-	query := fmt.Sprintf(inspectionQuery, pid)
+	// Substitute pg_backend_pid() directly so a single psql process both
+	// supplies the PID and runs the query — avoiding the race where a
+	// two-step approach queries a PID that has already exited pg_stat_activity.
+	query := strings.Replace(inspectionQuery, "%d", "(SELECT pg_backend_pid())", 1)
 	cmd := exec.CommandContext(ctx, "psql", integrationConnStr, "-x", "-c", query)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -420,6 +415,29 @@ func TestDetectRollbackCapability_Integration_Override(t *testing.T) {
 // TestWALBracket_Open_FailsWithoutLogicalWAL verifies that WALBracket.Open
 // returns a meaningful error when the target DB does not have wal_level=logical.
 // This is the expected behaviour for the standard test instance.
+func TestGetBgwriterStatsTool_Integration(t *testing.T) {
+	skipIfNoPostgres(t)
+
+	result, err := getBgwriterStatsTool(newTestContext(), GetBgwriterStatsArgs{
+		ConnectionString: integrationConnStr,
+	})
+	if err != nil {
+		t.Fatalf("getBgwriterStatsTool: %v", err)
+	}
+
+	for _, col := range []string{
+		"checkpoints_timed", "checkpoints_req",
+		"checkpoint_write_secs", "checkpoint_sync_secs",
+		"buffers_checkpoint", "buffers_clean", "maxwritten_clean",
+		"buffers_backend", "buffers_backend_fsync", "buffers_alloc",
+		"stats_reset",
+	} {
+		if !strings.Contains(result.Output, col) {
+			t.Errorf("output missing column %q\noutput: %s", col, result.Output)
+		}
+	}
+}
+
 func TestWALBracket_Open_FailsWithoutLogicalWAL(t *testing.T) {
 	skipIfNoPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

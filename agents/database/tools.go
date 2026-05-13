@@ -1737,6 +1737,41 @@ func getDiskUsageTool(ctx tool.Context, args GetDiskUsageArgs) (PsqlResult, erro
 }
 
 // ---------------------------------------------------------------------------
+// get_bgwriter_stats
+// ---------------------------------------------------------------------------
+
+// GetBgwriterStatsArgs defines arguments for the get_bgwriter_stats tool.
+type GetBgwriterStatsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getBgwriterStatsImpl(ctx context.Context, args GetBgwriterStatsArgs) (PsqlResult, error) {
+	query := `SELECT
+		checkpoints_timed,
+		checkpoints_req,
+		round(checkpoint_write_time::numeric / 1000, 2)  AS checkpoint_write_secs,
+		round(checkpoint_sync_time::numeric  / 1000, 2)  AS checkpoint_sync_secs,
+		buffers_checkpoint,
+		buffers_clean,
+		maxwritten_clean,
+		buffers_backend,
+		buffers_backend_fsync,
+		buffers_alloc,
+		stats_reset
+	FROM pg_stat_bgwriter;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_bgwriter_stats")
+	if err != nil {
+		return errorResult("get_bgwriter_stats", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getBgwriterStatsTool(ctx tool.Context, args GetBgwriterStatsArgs) (PsqlResult, error) {
+	return getBgwriterStatsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
 // get_wait_events
 // ---------------------------------------------------------------------------
 
@@ -2459,6 +2494,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := getDiskUsageImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_bgwriter_stats", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetBgwriterStatsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getBgwriterStatsImpl(ctx, a)
 		return result.Output, nil
 	})
 	r.Register("get_wait_events", func(ctx context.Context, args map[string]any) (string, error) {

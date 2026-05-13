@@ -109,11 +109,19 @@ integration-governance:
 # ---------------------------------------------------------------------------
 # Integration tests (requires Docker)
 # ---------------------------------------------------------------------------
+INTEGRATION_PKGS = ./testing/integration/... ./agents/database/... ./agents/k8s/... ./agents/sysadmin/...
+INTEGRATION_LOG  = /tmp/helpdesk-integration.log
+E2E_LOG          = /tmp/helpdesk-e2e.log
+
+# Shared awk program — append a log file path to invoke: $(SUMMARY_CMD) <logfile>
+SUMMARY_CMD = awk '/^--- PASS:/{p++} /^--- FAIL:/{f++; fails=fails"\n    "substr($$0,11)} END{printf "\n=== Test Summary ===\n  Total:  %d\n  Passed: %d\n  Failed: %d\n",p+f,p,f; if(f>0){print "  Failing tests:"fails}}'
+
 integration:
 	@echo "Starting test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running integration tests..."
-	-go test -tags integration -timeout 120s -v ./testing/integration/...
+	-go test -tags integration -timeout 120s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml down -v
 
@@ -125,7 +133,8 @@ integration-nocache:
 	@echo "Starting test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running integration tests..."
-	-go test --count=1 -tags integration -timeout 120s -v ./testing/integration/...
+	-go test --count=1 -tags integration -timeout 120s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml down -v
 
@@ -154,7 +163,8 @@ e2e: image
 	@echo "Starting full stack..."
 	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Running E2E tests..."
-	-go test -tags e2e -timeout 300s -v ./testing/e2e/...
+	-go test -tags e2e -timeout 300s -v ./testing/e2e/... 2>&1 | tee $(E2E_LOG)
+	@$(SUMMARY_CMD) $(E2E_LOG)
 	@echo "Stopping full stack..."
 	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
@@ -170,7 +180,8 @@ e2e-governance: image
 		echo "  waiting ($$i/30)..."; sleep 3; \
 	done
 	@echo "Running governance E2E tests..."
-	-go test -tags e2e -timeout 300s -v -run TestGovernance ./testing/e2e/...
+	-go test -tags e2e -timeout 300s -v -run TestGovernance ./testing/e2e/... 2>&1 | tee $(E2E_LOG)
+	@$(SUMMARY_CMD) $(E2E_LOG)
 	@echo "Stopping full stack..."
 	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
@@ -186,7 +197,8 @@ e2e-identity: image
 		echo "  waiting ($$i/30)..."; sleep 3; \
 	done
 	@echo "Running Identity & Access E2E tests..."
-	-go test -tags e2e -timeout 300s -v -run TestIdentityE2E ./testing/e2e/...
+	-go test -tags e2e -timeout 300s -v -run TestIdentityE2E ./testing/e2e/... 2>&1 | tee $(E2E_LOG)
+	@$(SUMMARY_CMD) $(E2E_LOG)
 	@echo "Stopping full stack..."
 	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 

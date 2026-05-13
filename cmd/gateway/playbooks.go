@@ -848,7 +848,11 @@ func assembleCrystalBallPrompt(req PlaybookRunRequest, serverTypeHint string) st
 	b.WriteString("You are a database operations assistant with access to diagnostic tools.\n\n")
 
 	if req.ConnectionString != "" {
-		fmt.Fprintf(&b, "The operator is reporting that %q is unavailable. Investigate using whatever tools you judge appropriate and explain what you find.\n", req.ConnectionString)
+		if req.Context != "" {
+			fmt.Fprintf(&b, "The operator is reporting an issue with %q. Investigate using whatever tools you judge appropriate and explain what you find.\n", req.ConnectionString)
+		} else {
+			fmt.Fprintf(&b, "The operator is reporting that %q is unavailable. Investigate using whatever tools you judge appropriate and explain what you find.\n", req.ConnectionString)
+		}
 		if serverTypeHint != "" {
 			fmt.Fprintf(&b, "%s\n", serverTypeHint)
 		}

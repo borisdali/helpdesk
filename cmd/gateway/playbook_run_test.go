@@ -354,6 +354,58 @@ func TestAssembleTriagePrompt_ResponseProtocol(t *testing.T) {
 	}
 }
 
+// --- assembleCrystalBallPrompt ---
+
+func TestAssembleCrystalBallPrompt_WithContext(t *testing.T) {
+	req := PlaybookRunRequest{
+		ConnectionString: "postgres://prod-db.example.com/mydb",
+		Context:          "Checkpoints occurring too frequently. Database is still accepting queries.",
+	}
+	prompt := assembleCrystalBallPrompt(req, "")
+
+	if strings.Contains(prompt, "is unavailable") {
+		t.Error("prompt should not say 'is unavailable' when operator context is provided")
+	}
+	if !strings.Contains(prompt, "is reporting an issue with") {
+		t.Error("prompt should use neutral 'is reporting an issue with' phrasing when context is provided")
+	}
+	if !strings.Contains(prompt, "Checkpoints occurring too frequently") {
+		t.Error("prompt should contain operator context")
+	}
+	if !strings.Contains(prompt, "postgres://prod-db.example.com/mydb") {
+		t.Error("prompt should contain connection string")
+	}
+}
+
+func TestAssembleCrystalBallPrompt_WithoutContext(t *testing.T) {
+	req := PlaybookRunRequest{
+		ConnectionString: "postgres://prod-db.example.com/mydb",
+	}
+	prompt := assembleCrystalBallPrompt(req, "")
+
+	if !strings.Contains(prompt, "is unavailable") {
+		t.Error("prompt should say 'is unavailable' when no operator context is provided")
+	}
+}
+
+func TestAssembleCrystalBallPrompt_NoConnectionString(t *testing.T) {
+	req := PlaybookRunRequest{}
+	prompt := assembleCrystalBallPrompt(req, "")
+
+	if !strings.Contains(prompt, "database issue") {
+		t.Error("prompt should contain fallback 'database issue' text when no connection string")
+	}
+}
+
+func TestAssembleCrystalBallPrompt_ServerTypeHint(t *testing.T) {
+	req := PlaybookRunRequest{ConnectionString: "host=localhost"}
+	prompt := assembleCrystalBallPrompt(req, "This is a managed PostgreSQL instance.")
+
+	if !strings.Contains(prompt, "managed PostgreSQL instance") {
+		t.Error("prompt should contain server type hint")
+	}
+}
+
 // --- requires_evidence warnings in fleet mode ---
 
 // mockAuditdPlaybookAndRun starts an httptest server that serves a playbook at
