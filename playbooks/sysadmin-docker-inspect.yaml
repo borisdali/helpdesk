@@ -4,7 +4,7 @@ version: "1.4"
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent
-approval_mode: session
+approval_mode: manual
 escalates_to:
   - pbs_db_restart_action
   - pbs_db_restart_triage

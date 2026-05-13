@@ -167,6 +167,7 @@ The `--infra-config` flag is recommended (see [section 4](#4-policy-safety-the-i
 | `db-high-cache-miss` | SQL: creates a table larger than `shared_buffers`, forces sequential scan |
 | `db-vacuum-needed` | SQL: creates bloat table, disables autovacuum, generates dead tuples |
 | `db-disk-pressure` | SQL: inserts 10,000 rows of 2 KB each |
+| `db-checkpoint-warning` | SQL: sets `bgwriter_lru_maxpages=2` and `max_wal_size=32MB`, inserts 300k rows, forces back-to-back checkpoints |
 | `db-replication-lag` | SQL: `pg_wal_replay_pause()` on replica |
 | `db-max-connections` | SQL: opens near-`max_connections` idle sessions |
 | `db-long-running-query` | SQL: `pg_sleep(300)` in a detached session |
@@ -570,6 +571,7 @@ These faults work against any PostgreSQL instance accessible over libpq. No Dock
 | `db-high-cache-miss` | High cache miss ratio | medium |
 | `db-vacuum-needed` | Tables needing vacuum | medium |
 | `db-disk-pressure` | Disk usage — large table growth | medium |
+| `db-checkpoint-warning` | Checkpoint warnings — bgwriter overload | medium |
 | `db-replication-lag` | Replication lag | high |
 | `db-max-connections` | Max connections exhausted | high |
 | `db-long-running-query` | Long-running query blocking | high |
@@ -622,6 +624,7 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | `db-connection-refused` | `pbs_db_restart_triage` | db |
 | `db-pg-hba-corrupt` | `pbs_db_config_recovery` | db |
 | `db-process-kill` | `pbs_db_restart_triage` | db |
+| `db-checkpoint-warning` | `pbs_checkpoint_bgwriter_triage` | db |
 | `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin |
 | `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s |
 | `db-wal-stale-slot` | `pbs_wal_stale_slot` | postgres_database_agent |
@@ -636,6 +639,7 @@ Each fault's `remediation` block specifies a `verify_sql` query that confirms th
 | `db-idle-in-transaction` | `SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'` |
 | `db-lock-contention` | `SELECT count(*) = 0 FROM pg_locks WHERE NOT granted` |
 | `db-connection-refused` | `SELECT 1` (connectivity check is sufficient — the fault kills the postmaster) |
+| `db-checkpoint-warning` | Verifies `bgwriter_lru_maxpages = '100'` AND `max_wal_size = '1048576'` (1 GB in 8 kB pages) are back at PostgreSQL defaults via `pg_settings` |
 | `db-wal-disk-full` | `SELECT 1` (connectivity check confirms postgres restarted successfully after WAL cleanup) |
 | `db-wal-disk-full-k8s` | `SELECT 1` (connectivity check confirms the pod restarted and postgres is accepting connections) |
 | `db-wal-stale-slot` | `SELECT 1` (DB stays up throughout; slot removal is confirmed by the agent's structured diagnosis — `pg_drop_replication_slot` in the response) |
@@ -976,7 +980,7 @@ faulttest run --external \
 
 ### 9.1 Overview
 
-Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 28 built-in faults. Customer catalog files layer on top of this without modifying the binary.
+Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 31 built-in faults. Customer catalog files layer on top of this without modifying the binary.
 
 A customer catalog is a plain YAML file you author, validate with `faulttest validate`, and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
 
