@@ -134,6 +134,37 @@ func (c *Config) ListDatabases() []DBInfo {
 	return dbs
 }
 
+// connEndpoint extracts "host:port/dbname" from a key=value connection string,
+// omitting credentials so it is safe to include in the LLM system prompt.
+func connEndpoint(connStr string) string {
+	var host, port, dbname string
+	for _, field := range strings.Fields(connStr) {
+		k, v, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "host":
+			host = v
+		case "port":
+			port = v
+		case "dbname":
+			dbname = v
+		}
+	}
+	if host == "" && port == "" {
+		return ""
+	}
+	ep := host
+	if port != "" {
+		ep += ":" + port
+	}
+	if dbname != "" {
+		ep += "/" + dbname
+	}
+	return ep
+}
+
 // Summary returns a human-readable summary of the infrastructure.
 func (c *Config) Summary() string {
 	if c == nil {
@@ -153,6 +184,9 @@ func (c *Config) Summary() string {
 				line += fmt.Sprintf(" [%s container: %s]", db.VMRuntime, db.ContainerName)
 			case db.SystemdUnit != "":
 				line += fmt.Sprintf(" [systemd: %s]", db.SystemdUnit)
+			}
+			if ep := connEndpoint(db.ConnectionString); ep != "" {
+				line += fmt.Sprintf(" [conn: %s]", ep)
 			}
 			sb.WriteString(line + "\n")
 		}

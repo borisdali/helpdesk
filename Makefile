@@ -56,11 +56,13 @@ fleet-runner:
 
 # Target for standard cached tests
 test:
-	go test $(TESTARGS) ./...
+	-go test -v $(TESTARGS) ./... 2>&1 | tee $(TEST_LOG) | grep -E "^(ok |FAIL)"
+	@$(SUMMARY_CMD) $(TEST_LOG)
 
 # Target to force a fresh run by bypassing the cache
 test-nocache:
-	go test --count=1 ./...
+	-go test -v --count=1 ./... 2>&1 | tee $(TEST_LOG) | grep -E "^(ok |FAIL)"
+	@$(SUMMARY_CMD) $(TEST_LOG)
 
 # ---------------------------------------------------------------------------
 # Helm chart template tests (requires helm in PATH; no Kubernetes cluster needed)
@@ -110,11 +112,13 @@ integration-governance:
 # Integration tests (requires Docker)
 # ---------------------------------------------------------------------------
 INTEGRATION_PKGS = ./testing/integration/... ./agents/database/... ./agents/k8s/... ./agents/sysadmin/...
+TEST_LOG         = /tmp/helpdesk-test.log
 INTEGRATION_LOG  = /tmp/helpdesk-integration.log
 E2E_LOG          = /tmp/helpdesk-e2e.log
+FAULTTEST_LOG    = /tmp/helpdesk-faulttest.log
 
 # Shared awk program — append a log file path to invoke: $(SUMMARY_CMD) <logfile>
-SUMMARY_CMD = awk '/^--- PASS:/{p++} /^--- FAIL:/{f++; fails=fails"\n    "substr($$0,11)} END{printf "\n=== Test Summary ===\n  Total:  %d\n  Passed: %d\n  Failed: %d\n",p+f,p,f; if(f>0){print "  Failing tests:"fails}}'
+SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:  %d\n  Passed: %d\n  Failed: %d\n",p+f,p,f; if(f>0){print "  Failing tests:"fails}}'
 
 integration:
 	@echo "Starting test infrastructure..."
@@ -141,6 +145,13 @@ integration-nocache:
 # ---------------------------------------------------------------------------
 # Fault injection tests (requires Docker + agents + LLM API key)
 # ---------------------------------------------------------------------------
+# Required env vars (export before running):
+#   FAULTTEST_DB_AGENT_URL       e.g. http://localhost:1102  (database agent)
+#   FAULTTEST_SYSADMIN_AGENT_URL e.g. http://localhost:1103  (sysadmin agent)
+#     └─ sysadmin MUST be started with HELPDESK_INFRA_CONFIG=testing/testing.infra.json
+#        so it resolves the test container name (helpdesk-test-pg) correctly.
+#   FAULTTEST_K8S_AGENT_URL      e.g. http://localhost:1104  (k8s agent, optional)
+# ---------------------------------------------------------------------------
 faulttest:
 	@echo "Starting test infrastructure (primary + replica)..."
 	docker compose \
@@ -149,7 +160,8 @@ faulttest:
 		up -d --wait
 	@echo "Running fault tests..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
-	go test -tags faulttest -timeout 1000s -v ./testing/faulttest/...
+	go test -tags faulttest -timeout 1000s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose \
 		-f testing/docker/docker-compose.yaml \

@@ -18,8 +18,14 @@ func RunSQL(ctx context.Context, connStr, scriptPath string) error {
 }
 
 // RunSQLString executes a SQL string against the database using psql.
+// Statements are piped via stdin (-f -) rather than passed with -c so that
+// each statement is sent in its own protocol message. This is required for
+// ALTER SYSTEM, which rejects execution inside a transaction block — psql -c
+// with multiple statements sends them all in one message, which PostgreSQL
+// treats as an implicit transaction.
 func RunSQLString(ctx context.Context, connStr, sql string) error {
-	cmd := exec.CommandContext(ctx, "psql", connStr, "-c", sql)
+	cmd := exec.CommandContext(ctx, "psql", connStr, "-v", "ON_ERROR_STOP=1", "-f", "-")
+	cmd.Stdin = strings.NewReader(sql)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("psql: %v\n%s", err, output)

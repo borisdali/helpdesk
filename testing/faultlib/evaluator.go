@@ -32,6 +32,7 @@ var ToolPatterns = map[string][]string{
 	"get_disk_usage":       {"pg_database_size", "pg_total_relation_size", "database size"},
 	"get_wait_events":      {"wait_event_type", "wait_event", "sessions waiting"},
 	"get_blocking_queries": {"blocking_pid", "lock_type", "relation_name"},
+	"get_bgwriter_stats":   {"maxwritten_clean", "buffers_backend", "checkpoints_req"},
 	"get_pg_settings":      {"pg_settings", "non-default", "altered"},
 	"get_extensions":       {"installed_version", "pg_available_extensions"},
 	"get_baseline":         {"server info", "pg settings", "baseline"},

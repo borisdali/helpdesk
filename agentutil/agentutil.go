@@ -183,7 +183,9 @@ func NewTextCompleter(ctx context.Context, cfg Config) (TextCompleter, error) {
 func NewLLM(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 	switch strings.ToLower(cfg.ModelVendor) {
 	case "google", "gemini":
-		llm, err := gemini.NewModel(ctx, cfg.ModelName, &genai.ClientConfig{APIKey: cfg.APIKey})
+		llm, err := gemini.NewModel(ctx, cfg.ModelName, &genai.ClientConfig{
+			APIKey: cfg.APIKey,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Gemini model: %v", err)
 		}
