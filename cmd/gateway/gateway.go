@@ -1733,12 +1733,13 @@ func (g *Gateway) dispatchDirectTool(w http.ResponseWriter, r *http.Request, age
 
 // a2aResponse is the structured response returned by the gateway.
 type a2aResponse struct {
-	AgentName string `json:"agent"`
-	TaskID    string `json:"task_id,omitempty"`
-	State     string `json:"state,omitempty"`
-	Text      string `json:"text,omitempty"`
-	Artifacts []any  `json:"artifacts,omitempty"`
-	ContextID string `json:"context_id,omitempty"` // agent session context — echo back to continue the conversation
+	AgentName string   `json:"agent"`
+	TaskID    string   `json:"task_id,omitempty"`
+	State     string   `json:"state,omitempty"`
+	Text      string   `json:"text,omitempty"`
+	Artifacts []any    `json:"artifacts,omitempty"`
+	ContextID string   `json:"context_id,omitempty"` // agent session context — echo back to continue the conversation
+	ToolCalls []string `json:"tool_calls,omitempty"` // tool names called by the agent (from tool_call_summary DataPart)
 }
 
 // extractResponse pulls text and artifacts from a SendMessageResult.
@@ -1766,13 +1767,26 @@ func extractResponse(result a2a.SendMessageResult) a2aResponse {
 			}
 		}
 
-		// Extract artifacts.
+		// Extract artifacts; also harvest tool_call_summary DataPart for structured tool detection.
 		for _, a := range v.Artifacts {
 			resp.Artifacts = append(resp.Artifacts, map[string]any{
 				"id":    a.ID,
 				"name":  a.Name,
 				"parts": extractText(a.Parts),
 			})
+			for _, part := range a.Parts {
+				if dp, ok := part.(a2a.DataPart); ok {
+					if meta, _ := dp.Metadata["helpdesk_type"].(string); meta == "tool_call_summary" {
+						if names, ok := dp.Data["tool_calls"].([]any); ok {
+							for _, n := range names {
+								if s, ok := n.(string); ok {
+									resp.ToolCalls = append(resp.ToolCalls, s)
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 
 		// If still no text, use the first artifact's content.

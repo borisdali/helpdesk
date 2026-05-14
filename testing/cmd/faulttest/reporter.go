@@ -97,9 +97,13 @@ func (r Report) PrintSummary() {
 
 	textFallbackCount := 0
 	judgeCount := 0
+	crystalBallCount := 0
 	for _, res := range r.Results {
 		if !res.JudgeSkipped && res.JudgeModel != "" {
 			judgeCount++
+		}
+		if res.CrystalBall {
+			crystalBallCount++
 		}
 	}
 
@@ -117,13 +121,19 @@ func (r Report) PrintSummary() {
 			textFallbackCount++
 		}
 
+		// Append crystal-ball marker when playbook scaffolding was bypassed.
+		crystalBallNote := ""
+		if res.CrystalBall {
+			crystalBallNote = " ⚠ [crystal-ball]"
+		}
+
 		// Append judge indicator when diagnosis was scored by the LLM judge.
 		judgeNote := ""
 		if !res.JudgeSkipped && res.JudgeModel != "" {
 			judgeNote = fmt.Sprintf(" [judge: %.0f%%]", res.DiagnosisScore*100)
 		}
 
-		fmt.Printf("[%s] %s (%s) - score: %d%%%s%s\n", status, res.FailureName, res.FailureID, scorePercent, toolNote, judgeNote)
+		fmt.Printf("[%s] %s (%s) - score: %d%%%s%s%s\n", status, res.FailureName, res.FailureID, scorePercent, crystalBallNote, toolNote, judgeNote)
 
 		// Always show the 3 component scores so operators can see why the
 		// composite came out as it did, and whether to trust each component.
@@ -183,6 +193,10 @@ func (r Report) PrintSummary() {
 		fmt.Printf("structured tool call data). These scores may be less reliable. For precise\n")
 		fmt.Printf("tool evidence, point --db-agent directly at the agent A2A URL rather than\n")
 		fmt.Printf("the gateway, or use an ADK-based agent.\n")
+	}
+	if crystalBallCount > 0 {
+		fmt.Printf("\nNote: %d fault(s) ran in crystal-ball mode — playbook scaffolding was bypassed.\n", crystalBallCount)
+		fmt.Printf("Results measure unguided LLM capability only and are not comparable to guided runs.\n")
 	}
 	if judgeCount > 0 {
 		fmt.Printf("\nLLM judge scored diagnosis for %d fault(s). Weights: tool*0.40 + judge*0.40 + keyword*0.20.\n", judgeCount)

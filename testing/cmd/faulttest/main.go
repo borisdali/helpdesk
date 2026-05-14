@@ -341,6 +341,7 @@ func cmdRun(args []string) {
 			}
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
+			evalResult.CrystalBall = resp.CrystalBall
 
 			// Push judge reasoning to the audit store so it appears alongside
 			// live agent_reasoning events in the governance trail.

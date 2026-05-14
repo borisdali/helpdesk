@@ -37,6 +37,10 @@ type EvalResult struct {
 	JudgeModel     string  `json:"judge_model,omitempty"`
 	JudgeSkipped   bool    `json:"judge_skipped,omitempty"`
 
+	// CrystalBall is true when the gateway ran without playbook scaffolding.
+	// Set only on --via-gateway runs; false on direct A2A calls.
+	CrystalBall bool `json:"crystal_ball,omitempty"`
+
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
 	RemediationPassed    bool    `json:"remediation_passed,omitempty"`
@@ -61,6 +65,7 @@ var toolPatterns = map[string][]string{
 	"get_active_connections": {"pg_stat_activity", "active", "idle", "pid", "query"},
 	"get_connection_stats":  {"max_connections", "connections", "connection_count", "numbackends"},
 	"get_database_stats":    {"cache hit", "blks_hit", "blks_read", "tup_returned", "hit ratio"},
+	"get_bgwriter_stats":    {"maxwritten_clean", "buffers_backend", "checkpoints_req"},
 	"get_config_parameter":  {"setting", "parameter", "configuration"},
 	"get_replication_status": {"replication", "wal", "replay", "standby", "lag"},
 	"get_lock_info":         {"lock", "pg_locks", "granted", "waiting", "blocked"},
@@ -295,8 +300,14 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	result.ToolScore = toolScore
 
 	// Convert Failure to faultlib.Failure for the judge call.
+	// Pass structured tool names (when available) so the judge does not
+	// incorrectly penalise tools the agent called but didn't name in prose.
 	flibFailure := toFaultlibFailure(f)
-	judgeResult := faultlib.Judge(ctx, flibFailure, responseText, completer, model)
+	var structuredToolNames []string
+	for _, tc := range resp.ToolCalls {
+		structuredToolNames = append(structuredToolNames, tc.Name)
+	}
+	judgeResult := faultlib.Judge(ctx, flibFailure, responseText, completer, model, structuredToolNames...)
 	result.JudgeSkipped = judgeResult.Skipped
 	result.JudgeReasoning = judgeResult.Reasoning
 	result.JudgeModel = judgeResult.Model
