@@ -1746,19 +1746,50 @@ type GetBgwriterStatsArgs struct {
 }
 
 func getBgwriterStatsImpl(ctx context.Context, args GetBgwriterStatsArgs) (PsqlResult, error) {
-	query := `SELECT
-		checkpoints_timed,
-		checkpoints_req,
-		round(checkpoint_write_time::numeric / 1000, 2)  AS checkpoint_write_secs,
-		round(checkpoint_sync_time::numeric  / 1000, 2)  AS checkpoint_sync_secs,
-		buffers_checkpoint,
-		buffers_clean,
-		maxwritten_clean,
-		buffers_backend,
-		buffers_backend_fsync,
-		buffers_alloc,
-		stats_reset
-	FROM pg_stat_bgwriter;`
+	// PG17 split pg_stat_bgwriter: checkpoint columns moved to pg_stat_checkpointer.
+	// Detect version first, then query the right view(s).
+	verOut, err := runPsql(ctx, args.ConnectionString,
+		"SELECT current_setting('server_version_num')::int AS v")
+	if err != nil {
+		return errorResult("get_bgwriter_stats", args.ConnectionString, err), nil
+	}
+	verRow := parseExpandedRow(verOut)
+	versionNum := 0
+	if s, ok := verRow["v"]; ok {
+		fmt.Sscanf(s, "%d", &versionNum)
+	}
+
+	var query string
+	if versionNum >= 170000 {
+		// PG17+: join pg_stat_checkpointer (checkpoint stats) with pg_stat_bgwriter (bgwriter stats).
+		query = `SELECT
+			c.checkpoints_timed,
+			c.checkpoints_req,
+			round(c.checkpoint_write_time::numeric / 1000, 2) AS checkpoint_write_secs,
+			round(c.checkpoint_sync_time::numeric  / 1000, 2) AS checkpoint_sync_secs,
+			c.buffers_checkpoint,
+			b.buffers_clean,
+			b.maxwritten_clean,
+			b.buffers_backend,
+			b.buffers_backend_fsync,
+			b.buffers_alloc,
+			b.stats_reset
+		FROM pg_stat_checkpointer c, pg_stat_bgwriter b;`
+	} else {
+		query = `SELECT
+			checkpoints_timed,
+			checkpoints_req,
+			round(checkpoint_write_time::numeric / 1000, 2) AS checkpoint_write_secs,
+			round(checkpoint_sync_time::numeric  / 1000, 2) AS checkpoint_sync_secs,
+			buffers_checkpoint,
+			buffers_clean,
+			maxwritten_clean,
+			buffers_backend,
+			buffers_backend_fsync,
+			buffers_alloc,
+			stats_reset
+		FROM pg_stat_bgwriter;`
+	}
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_bgwriter_stats")
 	if err != nil {

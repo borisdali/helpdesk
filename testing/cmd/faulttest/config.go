@@ -21,11 +21,12 @@ type Catalog struct {
 
 // Failure describes a single failure mode with injection and evaluation config.
 type Failure struct {
-	ID          string     `yaml:"id"`
-	Name        string     `yaml:"name"`
-	Category    string     `yaml:"category"`
-	Severity    string     `yaml:"severity"`
-	Description string     `yaml:"description"`
+	ID            string     `yaml:"id"`
+	Name          string     `yaml:"name"`
+	Category      string     `yaml:"category"`
+	Severity      string     `yaml:"severity"`
+	Description   string     `yaml:"description"`
+	Prerequisites string     `yaml:"prerequisites,omitempty"`
 	Inject      InjectSpec `yaml:"inject"`
 	Teardown    InjectSpec `yaml:"teardown"`
 	Prompt      string     `yaml:"prompt"`
