@@ -1638,28 +1638,34 @@ failures:
     severity: medium
     diagnosis_playbook_series_id: pbs_checkpoint_bgwriter_triage
     prerequisites: |
-      CNPG only: ALTER SYSTEM is disabled by default. Steps before and after:
+      CNPG only: ALTER SYSTEM is disabled by default, and pg_reload_conf() is
+      blocked for non-operator connections even with pg_signal_backend granted.
+      The external_inject uses `kubectl exec pg_ctl reload` to work around this.
 
       Before:
         kubectl patch cluster <cluster-name> -n <namespace> --type merge \
           -p '{"spec":{"postgresql":{"enableAlterSystem":true}}}'
 
-        PostgreSQL 18+: grant per-parameter ALTER SYSTEM and signal privileges —
+        PostgreSQL 18+: grant per-parameter ALTER SYSTEM privileges —
           GRANT ALTER SYSTEM ON PARAMETER bgwriter_lru_maxpages TO <app-user>;
           GRANT ALTER SYSTEM ON PARAMETER checkpoint_warning TO <app-user>;
-          GRANT pg_signal_backend TO <app-user>;  -- required by pg_reload_conf()
-          GRANT pg_checkpoint TO <app-user>;       -- required by CHECKPOINT
+          GRANT pg_checkpoint TO <app-user>;  -- required by CHECKPOINT
 
-        PostgreSQL ≤ 17: no parameter-level grant exists; pass a superuser DSN
-          via --conn (e.g. user=postgres with the cluster superuser secret) and
-          use --agent-conn for a separate app-user alias so the superuser DSN
-          is not exposed in the agent prompt.
+        PostgreSQL ≤ 17: no parameter-level GRANT ALTER SYSTEM; pass a
+          superuser DSN via --conn and use --agent-conn for the app-user alias.
+
+        Set env vars for the inject script (Helm: faulttest.extraEnv):
+          CNPG_CLUSTER=<cluster-name>   (default: pg-cluster-minkube)
+          CNPG_NAMESPACE=<namespace>    (default: db)
+
+        Ensure the faulttest job service account has pods/exec create in
+        the CNPG namespace (the Helm chart's faulttest.targetNamespace RBAC
+        already grants this when faulttest.rbac.create=true).
 
       After:
         PostgreSQL 18+:
           REVOKE ALTER SYSTEM ON PARAMETER bgwriter_lru_maxpages FROM <app-user>;
           REVOKE ALTER SYSTEM ON PARAMETER checkpoint_warning FROM <app-user>;
-          REVOKE pg_signal_backend FROM <app-user>;
           REVOKE pg_checkpoint FROM <app-user>;
         kubectl patch cluster <cluster-name> -n <namespace> --type merge \
           -p '{"spec":{"postgresql":{"enableAlterSystem":false}}}'
@@ -1703,11 +1709,28 @@ failures:
         DROP TABLE IF EXISTS _chkpt_gen;
     external_compat: true
     external_inject:
-      type: sql
+      type: shell_exec
       script_inline: |
+        set -e
+        # ALTER SYSTEM: writes settings to postgresql.auto.conf.
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
         ALTER SYSTEM SET bgwriter_lru_maxpages = 2;
         ALTER SYSTEM SET checkpoint_warning = '10s';
-        DO $$ BEGIN PERFORM pg_reload_conf(); EXCEPTION WHEN insufficient_privilege THEN NULL; END $$;
+        PSQL
+        # Reload config via pg_ctl inside the CNPG primary pod.
+        # pg_reload_conf() is blocked for non-operator users in CNPG; pg_ctl
+        # reload via kubectl exec works because it runs as the postgres OS user.
+        # Override CNPG_CLUSTER / CNPG_NAMESPACE if your cluster differs.
+        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+        NS="${CNPG_NAMESPACE:-db}"
+        POD=$(kubectl get pod -n "$NS" \
+          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+          -o jsonpath='{.items[0].metadata.name}')
+        kubectl exec -n "$NS" "$POD" -c postgres -- \
+          sh -c 'pg_ctl reload -D "$PGDATA"'
+        sleep 2
+        # Workload: generates dirty pages and triggers checkpoint warnings.
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
         CREATE TABLE IF NOT EXISTS _chkpt_gen (id serial, val text);
         INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
         SELECT pg_sleep(1);
@@ -1718,14 +1741,24 @@ failures:
         CHECKPOINT;
         SELECT pg_sleep(1);
         CHECKPOINT;
+        PSQL
       wait: 30s
     external_teardown:
-      type: sql
+      type: shell_exec
       script_inline: |
+        set -e
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
         ALTER SYSTEM RESET bgwriter_lru_maxpages;
         ALTER SYSTEM RESET checkpoint_warning;
-        DO $$ BEGIN PERFORM pg_reload_conf(); EXCEPTION WHEN insufficient_privilege THEN NULL; END $$;
         DROP TABLE IF EXISTS _chkpt_gen;
+        PSQL
+        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+        NS="${CNPG_NAMESPACE:-db}"
+        POD=$(kubectl get pod -n "$NS" \
+          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+          -o jsonpath='{.items[0].metadata.name}')
+        kubectl exec -n "$NS" "$POD" -c postgres -- \
+          sh -c 'pg_ctl reload -D "$PGDATA"'
     prompt: >
       Performance monitoring is showing elevated write latency on
       '{{connection_string}}' and the PostgreSQL log has warning messages about
