@@ -1760,14 +1760,36 @@ func getBgwriterStatsImpl(ctx context.Context, args GetBgwriterStatsArgs) (PsqlR
 	}
 
 	var query string
-	if versionNum >= 170000 {
-		// PG17+: join pg_stat_checkpointer (checkpoint stats) with pg_stat_bgwriter (bgwriter stats).
+	if versionNum >= 180000 {
+		// PG18 stripped pg_stat_bgwriter further: buffers_backend and
+		// buffers_backend_fsync were removed (they live in pg_stat_io now).
+		// pg_stat_checkpointer column names are the same as in PG17.
 		query = `SELECT
-			c.checkpoints_timed,
-			c.checkpoints_req,
-			round(c.checkpoint_write_time::numeric / 1000, 2) AS checkpoint_write_secs,
-			round(c.checkpoint_sync_time::numeric  / 1000, 2) AS checkpoint_sync_secs,
-			c.buffers_checkpoint,
+			c.num_timed        AS checkpoints_timed,
+			c.num_requested    AS checkpoints_req,
+			round(c.write_time::numeric / 1000, 2)  AS checkpoint_write_secs,
+			round(c.sync_time::numeric  / 1000, 2)  AS checkpoint_sync_secs,
+			c.buffers_written  AS buffers_checkpoint,
+			b.buffers_clean,
+			b.maxwritten_clean,
+			0                  AS buffers_backend,
+			0                  AS buffers_backend_fsync,
+			b.buffers_alloc,
+			b.stats_reset
+		FROM pg_stat_checkpointer c, pg_stat_bgwriter b;`
+	} else if versionNum >= 170000 {
+		// PG17: checkpoint columns moved to pg_stat_checkpointer with new names;
+		// pg_stat_bgwriter still has buffers_backend and buffers_backend_fsync.
+		//   checkpoints_timed  → num_timed
+		//   checkpoints_req    → num_requested
+		//   checkpoint_write_time → write_time / checkpoint_sync_time → sync_time
+		//   buffers_checkpoint → buffers_written
+		query = `SELECT
+			c.num_timed        AS checkpoints_timed,
+			c.num_requested    AS checkpoints_req,
+			round(c.write_time::numeric / 1000, 2)  AS checkpoint_write_secs,
+			round(c.sync_time::numeric  / 1000, 2)  AS checkpoint_sync_secs,
+			c.buffers_written  AS buffers_checkpoint,
 			b.buffers_clean,
 			b.maxwritten_clean,
 			b.buffers_backend,

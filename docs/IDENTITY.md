@@ -715,7 +715,7 @@ go run ./cmd/govexplain --auditd http://localhost:1199 --list --effect deny --si
 
 ## 8. Compliance Reporting
 
-[`govbot`](AIGOVERNANCE.md#8-compliance-reporting-cmdgovbot) includes two identity-focused phases:
+[`govbot`](AIGOVERNANCE.md#8-compliance-reporting-cmdgovbot) now includes two new identity-focused phases:
 
 **Phase 10 — Identity Coverage**
 
@@ -858,4 +858,4 @@ their policies to ensure role-restricted rules have the intended scope.
 | fleet-runner: `HELPDESK_SESSION_PURPOSE=fleet_rollout`; Bearer token auth via `FLEET_RUNNER_API_KEY` | `cmd/fleet-runner/runner.go`, `deploy/docker-compose/docker-compose.yaml` |
 | fleet-runner: `fleet-runner` service account in `users.yaml` | `users.example.yaml` |
 | govexplain: `--user`, `--role`, `--purpose`, `--sensitivity`, `--effect` flags | `cmd/govexplain/main.go` |
-| govbot: Phase 10 (identity coverage), Phase 11 (purpose coverage) | `cmd/govbot/main.go` |
+| govbot: two new sections: Phase 10 (identity coverage) + Phase 11 (purpose coverage) | `cmd/govbot/main.go` |
