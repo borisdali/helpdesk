@@ -4,48 +4,43 @@
 
 ```
 [boris@ ~/helpdesk]$ make test-nocache
-go test --count=1 ./...
-ok  	helpdesk/agents/database	0.437s
-ok  	helpdesk/agents/incident	0.707s
-ok  	helpdesk/agents/k8s	0.899s
-?   	helpdesk/agents/research	[no test files]
-ok  	helpdesk/agents/sysadmin	0.315s
-ok  	helpdesk/agentutil	1.568s
-ok  	helpdesk/agentutil/retryutil	2.197s
-?   	helpdesk/cmd/approvals	[no test files]
-ok  	helpdesk/cmd/auditd	2.458s
-?   	helpdesk/cmd/auditor	[no test files]
-ok  	helpdesk/cmd/fleet-runner	3.071s
-ok  	helpdesk/cmd/gateway	1.548s
-ok  	helpdesk/cmd/govbot	2.209s
-?   	helpdesk/cmd/govexplain	[no test files]
-?   	helpdesk/cmd/hashapikey	[no test files]
-ok  	helpdesk/cmd/helpdesk	1.994s
-ok  	helpdesk/cmd/helpdesk-client	2.144s
-?   	helpdesk/cmd/jwttest	[no test files]
-?   	helpdesk/cmd/secbot	[no test files]
-ok  	helpdesk/cmd/srebot	2.232s
-ok  	helpdesk/internal/audit	3.065s
-ok  	helpdesk/internal/authz	1.895s
-?   	helpdesk/internal/buildinfo	[no test files]
-ok  	helpdesk/internal/client	2.363s
-ok  	helpdesk/internal/discovery	1.555s
-?   	helpdesk/internal/fleet	[no test files]
-ok  	helpdesk/internal/identity	2.547s
-?   	helpdesk/internal/infra	[no test files]
-?   	helpdesk/internal/logging	[no test files]
-?   	helpdesk/internal/model	[no test files]
-ok  	helpdesk/internal/policy	1.605s
-ok  	helpdesk/internal/toolregistry	1.456s
-ok  	helpdesk/playbooks	1.743s
-ok  	helpdesk/prompts	1.404s
-ok  	helpdesk/testing/cmd/faulttest	1.782s
-ok  	helpdesk/testing/faultlib	1.625s
-ok  	helpdesk/testing/helm	2.138s
-ok  	helpdesk/testing/testutil	1.471s
+go test -v --count=1 ./... 2>&1 | tee /tmp/helpdesk-test.log | grep -E "^(ok |FAIL)"
+ok      helpdesk/agents/database        0.348s
+ok      helpdesk/agents/incident        0.610s
+ok      helpdesk/agents/k8s     1.132s
+ok      helpdesk/agents/sysadmin        0.302s
+ok      helpdesk/agentutil      1.771s
+ok      helpdesk/agentutil/retryutil    2.260s
+ok      helpdesk/cmd/auditd     1.188s
+ok      helpdesk/cmd/auditor    1.357s
+ok      helpdesk/cmd/fleet-runner       2.900s
+ok      helpdesk/cmd/gateway    2.185s
+ok      helpdesk/cmd/govbot     2.249s
+ok      helpdesk/cmd/helpdesk   1.998s
+ok      helpdesk/cmd/helpdesk-client    2.111s
+ok      helpdesk/cmd/srebot     1.806s
+ok      helpdesk/internal/audit 2.720s
+ok      helpdesk/internal/authz 1.963s
+ok      helpdesk/internal/client        2.158s
+ok      helpdesk/internal/discovery     1.518s
+ok      helpdesk/internal/identity      2.680s
+ok      helpdesk/internal/infra 1.513s
+ok      helpdesk/internal/policy        1.382s
+ok      helpdesk/internal/toolregistry  1.244s
+ok      helpdesk/playbooks      1.728s
+ok      helpdesk/prompts        1.386s
+ok      helpdesk/testing/cmd/faulttest  3.561s
+ok      helpdesk/testing/faultlib       1.524s
+ok      helpdesk/testing/helm   2.099s
+ok      helpdesk/testing/testutil       1.556s
+
+=== Test Summary ===
+  Total:  1475
+  Passed: 1475
+  Failed: 0
 ```
 
-Other than the basic unit tests, the other tests are (much) longer (in time it takes to finish them and in the rather verbose output), so they are stored in separate sample log files. Please see a sample integration test run [here](INTEGRATION_SAMPLE.md), a sample e2e test run [here](E2E_SAMPLE.md) and a sample fault injection run [here](FAULT_INJECTION_TESTING_SAMPLE.md).
+Other than the basic unit tests, the other tests are (much) longer (in time it takes to finish them and in the rather verbose output), so they are presented in separate sample log files. Check out a sample integration test run [here](INTEGRATION_SAMPLE.md), a sample e2e test run [here](E2E_SAMPLE.md) and a sample fault injection run [here](FAULT_INJECTION_TESTING_SAMPLE.md).
 
 
   ## Architecture & Testing Boundaries
