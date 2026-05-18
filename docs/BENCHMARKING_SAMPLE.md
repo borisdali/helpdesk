@@ -1,8 +1,10 @@
-# aiHelpDesk Benchmarking sample: Crystal Ball vs. the full power of aiHelpDesk
+# Benchmarking diagnosis sample: Crystal Ball vs. the full power of aiHelpDesk
 
-For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md) and the definition of a Crystal Ball mode is presented [here](BENCHMARKING.md#2-crystal-ball-mode).
+For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md). The Crystal Ball mode is presented [here](BENCHMARKING.md#2-crystal-ball-mode).
 
-This is an example showcasing a comparison of diagnosis of one specific database fault (Checkpoint stall / bgwriter overload that we refer to as `db-checkpoint-warning` in the catalog) by two different means. First, we run the diagnosis via the Crystal Ball mode and then follow on with the full aiHelpDesk diagnosis with the structured playbook guidance. These two blog posts [here](https://medium.com/google-cloud/dont-ask-your-ai-to-diagnose-production-unless-you-ve-given-it-a-structured-guided-playbook-46195c2aae71) and [here](https://medium.com/google-cloud/we-wanted-a-dramatic-ai-agent-failure-we-got-something-better-5d6d57135a88) go beyond our standard documentation and present a gentle introduction and the thinking behind this comparison.
+This is an example showcasing a comparison of diagnosis of one specific database fault (Checkpoint stall / bgwriter overload that we refer to as `db-checkpoint-warning` in the catalog) by two different means. First, we run the diagnosis via the Crystal Ball mode. We then follow on with the full aiHelpDesk diagnosis according to the structured playbook guidance.
+
+If you are not familiar with the Crystal Ball mode, these two blog posts [here](https://medium.com/google-cloud/dont-ask-your-ai-to-diagnose-production-unless-you-ve-given-it-a-structured-guided-playbook-46195c2aae71) and [here](https://medium.com/google-cloud/we-wanted-a-dramatic-ai-agent-failure-we-got-something-better-5d6d57135a88) go beyond our standard documentation and present a gentle introduction and the thinking behind this comparison.
 
 ## Full aiHelpDesk diagnosis
 In the examples below we inject the same `db-checkpoint-warning` fault and run the diagnostics from the source. In the latter section in this document we show equivalent commands for running this test on K8s via Helm.
@@ -318,6 +320,9 @@ helm upgrade helpdesk . --namespace helpdesk-system \
 ```
 
 ## Reproducability and differences in scoring
-It's worth pointing out that the original listings and the comparison table were obtained by running the tests from the source against a PostgreSQL 16 database server running inside a Docker container and diagnosed by Haiku Anthropic models use by both the agents and the judge. In testing, we found that the version of PostgreSQL, the differences in models, perhaps the hosting platform, but most importantly the "mood" of the models affect the diagnosis significantly. But only the Crystal Ball diagnosis. The structured, guided aiHelpDesk diagnosis remains stable irrespective of all those deployment and environmenental factors. This, on its own, is a very important finding because consistency is the key for building a trust in AI-driven diagnosis.
+It's worth pointing out that the original listings and the comparison table were obtained by running the tests from the source against a PostgreSQL 16 database server running inside a Docker container and diagnosed by Haiku Anthropic models use by both the agents and the judge. In testing, we found that the version of PostgreSQL, the differences in models, perhaps the hosting platform, but most importantly the "mood" of the models affect the diagnosis significantly. But only the Crystal Ball diagnosis. 
 
-aiHelpDesk features a full-fledged, 8-modules [AI Governance](AIGOVERNANCE.md) suite as the basis for building this trust, so that ALL decisions can be fully traced, explained and survive any audit, but this is after the fact. The consistency in diagnosis with the structured guidance is another important piece in this trust puzzle.
+The structured, guided aiHelpDesk diagnosis remains stable irrespective of all those deployment and environmenental factors. This, on its own, is a very important finding because consistency is the key for building a trust in AI-driven diagnosis.
+
+> aiHelpDesk features a fully-fledged, 8-module [AI Governance](AIGOVERNANCE.md) suite as the basis for building the user trust, so that ALL decisions can be fully traced, explained and survive the most stringent audit. 
+> But this is after the fact.  **The consistency in diagnosis** that comes from the structured guidance is another important piece in the trust puzzle.
