@@ -280,8 +280,9 @@ func SendPromptViaGateway(ctx context.Context, gatewayURL, apiKey, agentName, pr
 	}
 
 	var result struct {
-		Text  string `json:"text"`
-		Error string `json:"error"`
+		Text      string   `json:"text"`
+		Error     string   `json:"error"`
+		ToolCalls []string `json:"tool_calls"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("decoding gateway response: %v", err)}
@@ -289,7 +290,19 @@ func SendPromptViaGateway(ctx context.Context, gatewayURL, apiKey, agentName, pr
 	if result.Error != "" {
 		return AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("gateway error: %s", result.Error)}
 	}
-	return AgentResponse{Text: result.Text, Duration: time.Since(start)}
+	ar := AgentResponse{Text: result.Text, Duration: time.Since(start)}
+	if len(result.ToolCalls) > 0 {
+		lower := strings.ToLower(result.Text)
+		ar.ToolCalls = make([]ToolCallResult, len(result.ToolCalls))
+		for i, name := range result.ToolCalls {
+			sentinel := strings.ToLower("ERROR — " + name + " failed")
+			ar.ToolCalls[i] = ToolCallResult{
+				Name:    name,
+				Success: !strings.Contains(lower, sentinel),
+			}
+		}
+	}
+	return ar
 }
 
 func partsText(parts a2a.ContentParts) string {

@@ -43,6 +43,11 @@ var externalInjectCases = map[string]string{
 	"db-high-cache-miss": `
 		SELECT count(*) FROM information_schema.tables
 		WHERE table_name = 'cache_miss_data'`,
+
+	// After injecting a stale slot, pg_replication_slots has an inactive row.
+	"db-wal-stale-slot": `
+		SELECT count(*) FROM pg_replication_slots
+		WHERE slot_name = 'old_standby' AND active = false`,
 }
 
 func TestExternalInjectSpecs(t *testing.T) {

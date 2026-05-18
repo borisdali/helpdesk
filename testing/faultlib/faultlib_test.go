@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const builtinMinimum = 29
+const builtinMinimum = 31
 
 func TestLoadCatalog_Valid(t *testing.T) {
 	// Find the catalog relative to this test file.

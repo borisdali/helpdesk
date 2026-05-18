@@ -1553,3 +1553,248 @@ failures:
       agent_name: k8s
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
+
+  - id: db-wal-stale-slot
+    name: "WAL accumulation — stale replication slot"
+    category: database
+    severity: high
+    diagnosis_playbook_series_id: pbs_wal_stale_slot
+    description: >
+      A physical replication slot was created for a standby that has since been
+      decommissioned. With nothing consuming the slot, PostgreSQL cannot recycle
+      WAL segments behind restart_lsn — the pg_wal directory grows without bound.
+      The database remains fully operational until the volume fills. Three other
+      causes produce the same symptom (archive failure, long transaction, write
+      volume), so the agent must work through a hypothesis tree rather than
+      jumping to the slot explanation.
+    inject:
+      type: sql
+      script_inline: |
+        SELECT pg_create_physical_replication_slot('old_standby', true);
+        CREATE TABLE IF NOT EXISTS _wal_gen (id serial, val text);
+        INSERT INTO _wal_gen (val)
+          SELECT md5(i::text) FROM generate_series(1, 10000) AS i;
+    teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_drop_replication_slot(slot_name)
+          FROM pg_replication_slots
+         WHERE slot_name = 'old_standby' AND active = false;
+        DROP TABLE IF EXISTS _wal_gen;
+    external_compat: true
+    external_inject:
+      type: sql
+      script_inline: |
+        SELECT pg_create_physical_replication_slot('old_standby', true);
+        CREATE TABLE IF NOT EXISTS _wal_gen (id serial, val text);
+        INSERT INTO _wal_gen (val)
+          SELECT md5(i::text) FROM generate_series(1, 10000) AS i;
+    external_teardown:
+      type: sql
+      script_inline: |
+        SELECT pg_drop_replication_slot(slot_name)
+          FROM pg_replication_slots
+         WHERE slot_name = 'old_standby' AND active = false;
+        DROP TABLE IF EXISTS _wal_gen;
+    prompt: >
+      Storage monitoring is alerting on the PostgreSQL data volume for
+      '{{connection_string}}': the pg_wal directory is consuming an unusually
+      large and still-growing amount of disk space. The database itself appears
+      healthy — queries are succeeding normally. Please investigate why WAL is
+      accumulating and identify the root cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "old_standby"
+          - "stale slot"
+          - "replication slot"
+          - "inactive"
+          - "lag_bytes"
+          - "restart_lsn"
+          - "slot"
+      expected_diagnosis:
+        category: "wal_accumulation_stale_slot"
+        narrative: >
+          The agent should work through the WAL accumulation hypothesis tree:
+          rule out archive failure (call get_pg_settings category=wal_archiving,
+          find archive_mode=off), then call get_replication_status and find the
+          inactive slot 'old_standby' with lag_bytes > 0. It should correctly
+          identify this as a stale replication slot, not a disk configuration
+          issue or write volume problem, and propose dropping the slot with
+          operator approval before recommending any checkpoint or max_wal_size
+          tuning.
+    timeout: 90s
+    remediation:
+      playbook_id: pbs_wal_stale_slot
+      agent_name: postgres_database_agent
+      verify_sql: "SELECT count(*) = 0 FROM pg_replication_slots WHERE slot_name = 'old_standby'"
+      verify_timeout: "30s"
+
+  - id: db-checkpoint-warning
+    name: "Checkpoint warnings — bgwriter overload"
+    category: database
+    severity: medium
+    diagnosis_playbook_series_id: pbs_checkpoint_bgwriter_triage
+    prerequisites: |
+      CNPG only: ALTER SYSTEM is disabled by default, and pg_reload_conf() is
+      blocked for non-operator connections even with pg_signal_backend granted.
+      The external_inject uses `kubectl exec pg_ctl reload` to work around this.
+
+      Before:
+        kubectl patch cluster <cluster-name> -n <namespace> --type merge \
+          -p '{"spec":{"postgresql":{"enableAlterSystem":true}}}'
+
+        PostgreSQL 18+: grant per-parameter ALTER SYSTEM privileges —
+          GRANT ALTER SYSTEM ON PARAMETER bgwriter_lru_maxpages TO <app-user>;
+          GRANT ALTER SYSTEM ON PARAMETER checkpoint_warning TO <app-user>;
+          GRANT pg_checkpoint TO <app-user>;  -- required by CHECKPOINT
+
+        PostgreSQL ≤ 17: no parameter-level GRANT ALTER SYSTEM; pass a
+          superuser DSN via --conn and use --agent-conn for the app-user alias.
+
+        Set env vars for the inject script (Helm: faulttest.extraEnv):
+          CNPG_CLUSTER=<cluster-name>   (default: pg-cluster-minkube)
+          CNPG_NAMESPACE=<namespace>    (default: db)
+
+        Ensure the faulttest job service account has pods/exec create in
+        the CNPG namespace (the Helm chart's faulttest.targetNamespace RBAC
+        already grants this when faulttest.rbac.create=true).
+
+      After:
+        PostgreSQL 18+:
+          REVOKE ALTER SYSTEM ON PARAMETER bgwriter_lru_maxpages FROM <app-user>;
+          REVOKE ALTER SYSTEM ON PARAMETER checkpoint_warning FROM <app-user>;
+          REVOKE pg_checkpoint FROM <app-user>;
+        kubectl patch cluster <cluster-name> -n <namespace> --type merge \
+          -p '{"spec":{"postgresql":{"enableAlterSystem":false}}}'
+
+      Other operators (Crunchy, Zalando, StackGres, KubeDB) and standalone
+      PostgreSQL do not require any of these steps.
+    description: >
+      bgwriter_lru_maxpages is set to 2 (default: 100), so the background
+      writer hits its per-round page limit on every wakeup cycle
+      (maxwritten_clean > 0) and backends must write dirty pages themselves
+      (buffers_backend climbs). checkpoint_warning is set to 10s, so two rapid
+      manual checkpoints 1 second apart cause PostgreSQL to emit LOG:
+      "checkpoints are occurring too frequently (1 second apart)". The database
+      stays available but query latency increases due to bgwriter starvation and
+      elevated backend I/O. max_wal_size is left at its default (1 GB) — the
+      checkpoint warnings come from the short checkpoint_warning threshold, not
+      from WAL fill.
+    inject:
+      type: sql
+      script_inline: |
+        ALTER SYSTEM SET bgwriter_lru_maxpages = 2;
+        ALTER SYSTEM SET checkpoint_warning = '10s';
+        DO $$ BEGIN PERFORM pg_reload_conf(); EXCEPTION WHEN insufficient_privilege THEN NULL; END $$;
+        CREATE TABLE IF NOT EXISTS _chkpt_gen (id serial, val text);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        SELECT pg_sleep(1);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        SELECT pg_sleep(1);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        SELECT pg_sleep(2);
+        CHECKPOINT;
+        SELECT pg_sleep(1);
+        CHECKPOINT;
+      wait: 30s
+    teardown:
+      type: sql
+      script_inline: |
+        ALTER SYSTEM RESET bgwriter_lru_maxpages;
+        ALTER SYSTEM RESET checkpoint_warning;
+        DO $$ BEGIN PERFORM pg_reload_conf(); EXCEPTION WHEN insufficient_privilege THEN NULL; END $$;
+        DROP TABLE IF EXISTS _chkpt_gen;
+    external_compat: true
+    external_inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        # ALTER SYSTEM: writes settings to postgresql.auto.conf.
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
+        ALTER SYSTEM SET bgwriter_lru_maxpages = 2;
+        ALTER SYSTEM SET checkpoint_warning = '10s';
+        PSQL
+        # Reload config via pg_ctl inside the CNPG primary pod.
+        # pg_reload_conf() is blocked for non-operator users in CNPG; pg_ctl
+        # reload via kubectl exec works because it runs as the postgres OS user.
+        # Override CNPG_CLUSTER / CNPG_NAMESPACE if your cluster differs.
+        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+        NS="${CNPG_NAMESPACE:-db}"
+        POD=$(kubectl get pod -n "$NS" \
+          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+          -o jsonpath='{.items[0].metadata.name}')
+        kubectl exec -n "$NS" "$POD" -c postgres -- \
+          sh -c 'pg_ctl reload -D "$PGDATA"'
+        sleep 2
+        # Workload: generates dirty pages and triggers checkpoint warnings.
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
+        CREATE TABLE IF NOT EXISTS _chkpt_gen (id serial, val text);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        SELECT pg_sleep(1);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        SELECT pg_sleep(1);
+        INSERT INTO _chkpt_gen (val) SELECT md5(i::text) FROM generate_series(1,100000) AS i;
+        SELECT pg_sleep(2);
+        CHECKPOINT;
+        SELECT pg_sleep(1);
+        CHECKPOINT;
+        PSQL
+      wait: 30s
+    external_teardown:
+      type: shell_exec
+      script_inline: |
+        set -e
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
+        ALTER SYSTEM RESET bgwriter_lru_maxpages;
+        ALTER SYSTEM RESET checkpoint_warning;
+        DROP TABLE IF EXISTS _chkpt_gen;
+        PSQL
+        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+        NS="${CNPG_NAMESPACE:-db}"
+        POD=$(kubectl get pod -n "$NS" \
+          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+          -o jsonpath='{.items[0].metadata.name}')
+        kubectl exec -n "$NS" "$POD" -c postgres -- \
+          sh -c 'pg_ctl reload -D "$PGDATA"'
+    prompt: >
+      Performance monitoring is showing elevated write latency on
+      '{{connection_string}}' and the PostgreSQL log has warning messages about
+      checkpoints occurring too frequently. The database is still accepting
+      queries but response times are degraded. Please investigate the checkpoint
+      and background-writer health and identify what is causing the warnings.
+    evaluation:
+      expected_tools:
+        - get_bgwriter_stats
+      expected_keywords:
+        any_of:
+          - "checkpoint"
+          - "too frequently"
+          - "bgwriter"
+          - "maxwritten_clean"
+          - "buffers_backend"
+          - "bgwriter_lru_maxpages"
+          - "checkpoint_warning"
+      expected_diagnosis:
+        category: "checkpoint_bgwriter_overload"
+        narrative: >
+          The agent should call get_bgwriter_stats and observe that
+          maxwritten_clean > 0 (bgwriter is throttled — it hits bgwriter_lru_maxpages
+          on every wakeup cycle and stops) and buffers_backend elevated (backends
+          are writing dirty pages themselves because bgwriter cannot keep up).
+          It should call read_pg_log and find the "checkpoints are occurring too
+          frequently" warning, then call get_pg_settings with category=bgwriter
+          to find bgwriter_lru_maxpages = 2 (default 100) as the root cause.
+          max_wal_size is at its default 1 GB — the checkpoint warning is triggered
+          by the short checkpoint_warning threshold (10s), not by WAL fill.
+          The agent should identify bgwriter_lru_maxpages = 2 as the primary root
+          cause and recommend raising it to at least 100 (default) or higher.
+    timeout: 90s
+    remediation:
+      playbook_id: pbs_checkpoint_bgwriter_triage
+      agent_name: postgres_database_agent
+      verify_sql: |
+        SELECT (SELECT setting FROM pg_settings WHERE name = 'bgwriter_lru_maxpages') = '100'
+      verify_timeout: "30s"

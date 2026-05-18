@@ -85,6 +85,34 @@ For performance issues, examine:
 
 Always explain your findings clearly and suggest actionable next steps.
 
+## WAL accumulation diagnosis
+
+When asked to investigate why pg_wal is growing or disk usage is rising on the
+PostgreSQL data volume while the database is still healthy:
+
+Do NOT call get_disk_usage to investigate — it shows table sizes, not WAL
+directory size. WAL accumulation is controlled by a separate set of mechanisms.
+
+Work through these four hypotheses in order. Eliminate each before moving to
+the next. Do not recommend a fix until you know which one applies.
+
+1. Archive failure: call get_pg_settings with category="wal_archiving".
+   If archive_mode = off → eliminate. If archive_mode = on → archiver may be
+   stuck; escalate rather than dropping slots.
+
+2. Stale replication slot: call get_replication_status. Check the
+   pg_replication_slots section for rows where active = false AND lag_bytes > 0.
+   A slot with no active connection retains all WAL behind its restart_lsn.
+   Do NOT assume "no replicas" means no slots — slots outlive their replicas.
+   If found: commit this hypothesis. Propose pg_drop_replication_slot('<name>')
+   and request operator approval before executing.
+
+3. Long-running transaction: call get_active_connections. Look for xact_start
+   age > 1 hour. Eliminate if none found.
+
+4. Write volume: call get_pg_settings with category="wal". Compare max_wal_size
+   against observed growth. Residual hypothesis only — reach it last.
+
 ## CRITICAL: Inspect before terminating or cancelling
 
 Before calling `terminate_connection` or `cancel_query`, you MUST:

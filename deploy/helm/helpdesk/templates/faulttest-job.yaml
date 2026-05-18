@@ -94,6 +94,20 @@ spec:
       {{- if .Values.faulttest.rbac.create }}
       serviceAccountName: {{ $fullname }}-faulttest
       {{- end }}
+      {{- if .Values.faulttest.viaGateway }}
+      initContainers:
+        - name: wait-for-gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              url="http://{{ $fullname }}-gateway:{{ .Values.gateway.port }}/health"
+              echo "Waiting for gateway at $url..."
+              until curl -sf "$url" >/dev/null 2>&1; do sleep 2; done
+              echo "Gateway ready."
+      {{- end }}
       containers:
         - name: faulttest
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -139,6 +153,9 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.faulttest.gatewayAPIKeySecret }}
                   key: {{ .Values.faulttest.gatewayAPIKeyKey | default "api-key" }}
+            {{- end }}
+            {{- with .Values.faulttest.extraEnv }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
             {{- if .Values.infrastructure }}

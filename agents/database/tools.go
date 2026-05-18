@@ -1737,6 +1737,94 @@ func getDiskUsageTool(ctx tool.Context, args GetDiskUsageArgs) (PsqlResult, erro
 }
 
 // ---------------------------------------------------------------------------
+// get_bgwriter_stats
+// ---------------------------------------------------------------------------
+
+// GetBgwriterStatsArgs defines arguments for the get_bgwriter_stats tool.
+type GetBgwriterStatsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+func getBgwriterStatsImpl(ctx context.Context, args GetBgwriterStatsArgs) (PsqlResult, error) {
+	// PG17 split pg_stat_bgwriter: checkpoint columns moved to pg_stat_checkpointer.
+	// Detect version first, then query the right view(s).
+	verOut, err := runPsql(ctx, args.ConnectionString,
+		"SELECT current_setting('server_version_num')::int AS v")
+	if err != nil {
+		return errorResult("get_bgwriter_stats", args.ConnectionString, err), nil
+	}
+	verRow := parseExpandedRow(verOut)
+	versionNum := 0
+	if s, ok := verRow["v"]; ok {
+		fmt.Sscanf(s, "%d", &versionNum)
+	}
+
+	var query string
+	if versionNum >= 180000 {
+		// PG18 stripped pg_stat_bgwriter further: buffers_backend and
+		// buffers_backend_fsync were removed (they live in pg_stat_io now).
+		// pg_stat_checkpointer column names are the same as in PG17.
+		query = `SELECT
+			c.num_timed        AS checkpoints_timed,
+			c.num_requested    AS checkpoints_req,
+			round(c.write_time::numeric / 1000, 2)  AS checkpoint_write_secs,
+			round(c.sync_time::numeric  / 1000, 2)  AS checkpoint_sync_secs,
+			c.buffers_written  AS buffers_checkpoint,
+			b.buffers_clean,
+			b.maxwritten_clean,
+			0                  AS buffers_backend,
+			0                  AS buffers_backend_fsync,
+			b.buffers_alloc,
+			b.stats_reset
+		FROM pg_stat_checkpointer c, pg_stat_bgwriter b;`
+	} else if versionNum >= 170000 {
+		// PG17: checkpoint columns moved to pg_stat_checkpointer with new names;
+		// pg_stat_bgwriter still has buffers_backend and buffers_backend_fsync.
+		//   checkpoints_timed  → num_timed
+		//   checkpoints_req    → num_requested
+		//   checkpoint_write_time → write_time / checkpoint_sync_time → sync_time
+		//   buffers_checkpoint → buffers_written
+		query = `SELECT
+			c.num_timed        AS checkpoints_timed,
+			c.num_requested    AS checkpoints_req,
+			round(c.write_time::numeric / 1000, 2)  AS checkpoint_write_secs,
+			round(c.sync_time::numeric  / 1000, 2)  AS checkpoint_sync_secs,
+			c.buffers_written  AS buffers_checkpoint,
+			b.buffers_clean,
+			b.maxwritten_clean,
+			b.buffers_backend,
+			b.buffers_backend_fsync,
+			b.buffers_alloc,
+			b.stats_reset
+		FROM pg_stat_checkpointer c, pg_stat_bgwriter b;`
+	} else {
+		query = `SELECT
+			checkpoints_timed,
+			checkpoints_req,
+			round(checkpoint_write_time::numeric / 1000, 2) AS checkpoint_write_secs,
+			round(checkpoint_sync_time::numeric  / 1000, 2) AS checkpoint_sync_secs,
+			buffers_checkpoint,
+			buffers_clean,
+			maxwritten_clean,
+			buffers_backend,
+			buffers_backend_fsync,
+			buffers_alloc,
+			stats_reset
+		FROM pg_stat_bgwriter;`
+	}
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_bgwriter_stats")
+	if err != nil {
+		return errorResult("get_bgwriter_stats", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func getBgwriterStatsTool(ctx tool.Context, args GetBgwriterStatsArgs) (PsqlResult, error) {
+	return getBgwriterStatsImpl(ctx, args)
+}
+
+// ---------------------------------------------------------------------------
 // get_wait_events
 // ---------------------------------------------------------------------------
 
@@ -2459,6 +2547,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := getDiskUsageImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("get_bgwriter_stats", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetBgwriterStatsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getBgwriterStatsImpl(ctx, a)
 		return result.Output, nil
 	})
 	r.Register("get_wait_events", func(ctx context.Context, args map[string]any) (string, error) {

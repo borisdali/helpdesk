@@ -421,6 +421,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getBgwriterStatsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_bgwriter_stats",
+		Description: "Show checkpoint and background-writer I/O statistics from pg_stat_bgwriter: counts of timed vs. requested (forced) checkpoints, write/sync times, buffer origins (checkpoint vs. bgwriter vs. backend), maxwritten_clean (bgwriter throttle hits), and buffers_backend_fsync. Use to diagnose checkpoint warnings, bgwriter overload, or excessive backend writes.",
+	}, getBgwriterStatsTool)
+	if err != nil {
+		return nil, err
+	}
+
 	getWaitEventsToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_wait_events",
 		Description: "Show a snapshot of current wait events aggregated by type and name from pg_stat_activity. Useful for diagnosing contention: Lock, LWLock, IO, Client, and other wait categories.",
@@ -491,6 +499,7 @@ func createTools() ([]tool.Tool, error) {
 		getSlowQueriesToolDef,
 		getVacuumStatusToolDef,
 		getDiskUsageToolDef,
+		getBgwriterStatsToolDef,
 		getWaitEventsToolDef,
 		getBlockingQueriesToolDef,
 		explainQueryToolDef,

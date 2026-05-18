@@ -55,7 +55,7 @@ When you create a Playbook without specifying a `series_id`, a new series is sta
 
 ### System Playbooks
 
-aiHelpDesk ships 9 expert-authored system Playbooks that are seeded into auditd on startup:
+aiHelpDesk ships 12 expert-authored system Playbooks that are seeded into auditd on startup:
 
 | Series ID | Name | Problem class | Agent | Key tools |
 |---|---|---|---|---|
@@ -63,19 +63,25 @@ aiHelpDesk ships 9 expert-authored system Playbooks that are seeded into auditd 
 | `pbs_slow_query_triage` | Slow Query Triage | performance | database | `get_slow_queries`, `get_wait_events`, `get_blocking_queries`, `explain_query` |
 | `pbs_connection_triage` | Connection & Lock Triage | availability | database | `get_server_info`, `get_blocking_queries`, `get_session_info`, `get_lock_info` |
 | `pbs_replication_lag` | Replication Lag Triage | availability | database | `get_replication_status`, `get_server_info` |
+| `pbs_checkpoint_bgwriter_triage` | Checkpoint & bgwriter Triage | performance | database | `get_bgwriter_stats`, `read_pg_log`, `get_pg_settings` |
 | `pbs_db_restart_triage` | Database Down — Restart Triage | availability | database | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
 | `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | database | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
 | `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
 | `pbs_sysadmin_docker_inspect` | Sysadmin — Docker Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
 | `pbs_db_restart_action` | Sysadmin — Docker Container Restart | availability | sysadmin | `restart_container`, `check_host`, `check_connection` |
 | `pbs_wal_disk_full` | WAL Disk Full — Recovery | capacity | sysadmin | `check_host`, `get_host_logs`, `check_disk`, `get_pg_settings` |
+| `pbs_wal_stale_slot` | WAL Accumulation — Stale Replication Slot | capacity | database | `get_pg_settings`, `get_replication_status`, `get_active_connections` |
+
+The **Checkpoint & bgwriter Triage** Playbook (`pbs_checkpoint_bgwriter_triage`) covers performance degradation caused by misconfigured checkpoint or background-writer parameters. It is not a database-down scenario — the database stays available — but write latency degrades due to periodic I/O bursts. The canonical symptom is a PostgreSQL `LOG: checkpoints are occurring too frequently` warning accompanied by `maxwritten_clean > 0` in `pg_stat_bgwriter` (bgwriter hitting its per-round page limit) and elevated `buffers_backend` (regular backends forced to flush dirty pages themselves). The five-step guidance leads the agent from log confirmation through counter interpretation, parameter identification (`max_wal_size`, `bgwriter_lru_maxpages`, `checkpoint_completion_target`), safe `ALTER SYSTEM SET + pg_reload_conf()` recommendations presented to the operator for approval, and a post-change verification using `get_bgwriter_stats`. Escalation triggers include `buffers_backend_fsync > 0` (backends doing their own fsyncs — a severe condition requiring immediate I/O capacity review) and `checkpoint_sync_time > 30s`. This Playbook also demonstrates the Crystal Ball gap clearly: the PostgreSQL `HINT: Consider increasing max_wal_size` in the log is a shortcut that `bgwriter_lru_maxpages=2` makes misleading — an unguided agent typically follows the hint and misses the root cause, while the Playbook's systematic counter analysis surfaces it.
 
 The "Database Down" Playbooks form an escalating triage graph for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, was OOM-killed, or hit a WAL disk full condition, then revises the root-cause hypothesis accordingly.
 
 - **Clean shutdown or OOM kill**: Inspection escalates to **Docker Container Restart** (`pbs_db_restart_action`), which performs the actual `restart_container` call and verifies connectivity.
 - **WAL disk full** (`PANIC: could not write to file "pg_wal/...": No space left on device` in logs): Inspection escalates to **WAL Disk Full — Recovery** (`pbs_wal_disk_full`), which diagnoses the root cause of WAL accumulation (archiving backlog, stale replication slot, or genuine growth) and guides safe cleanup before any restart attempt. Restarting without first freeing disk space will re-PANIC immediately.
 
-Both `pbs_db_restart_action` and `pbs_wal_disk_full` have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
+The **WAL Accumulation — Stale Replication Slot** Playbook (`pbs_wal_stale_slot`) handles the complementary scenario where the database is still up but `pg_wal` is growing without bound. It differs from `pbs_wal_disk_full` in that the database is reachable — the agent works through a four-hypothesis elimination tree (archive failure → inactive slot → long transaction → write volume) rather than reading crash logs. Dropping the slot requires `approval_mode: manual` since it permanently removes the replica's reconnection point.
+
+Both `pbs_db_restart_action`, `pbs_wal_disk_full`, and `pbs_wal_stale_slot` have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
 
 Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 

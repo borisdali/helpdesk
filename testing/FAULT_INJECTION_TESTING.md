@@ -53,10 +53,13 @@ host-pg-crash                  host         critical            builtin  Postgre
 db-pg-hba-corrupt              database     critical            builtin  pg_hba.conf corrupted — all connections rejected
 db-process-kill                database     critical            builtin  PostgreSQL postmaster killed (SIGKILL)
 db-config-bad-param            database     high                builtin  postgresql.conf invalid parameter
+db-wal-disk-full               host         critical            builtin  WAL disk full — writes failing
+db-wal-disk-full-k8s           kubernetes   critical            builtin  WAL disk full — writes failing (Kubernetes)
+db-wal-stale-slot              database     high       yes      builtin  WAL accumulation — stale replication slot
 compound-db-pod-crash          compound     critical            builtin  DB unreachable + pod crashing
 compound-db-no-endpoints       compound     critical            builtin  DB timeout + no endpoints
 
-Total: 27 failure modes
+Total: 30 failure modes
 ```
 
 This is a good start because in this step we verify the

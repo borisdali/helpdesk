@@ -25,7 +25,7 @@ FAULT INJECTED: %s — %s
 
 EXPECTED DIAGNOSIS:
 %s
-
+%s
 AGENT RESPONSE:
 %s
 
@@ -39,14 +39,23 @@ Respond with JSON only, no other text: {"score": <0|1|2|3>, "reasoning": "<one c
 
 // Judge evaluates an agent's response using an LLM judge.
 // When completer is nil or narrative is empty, returns a skipped result.
-func Judge(ctx context.Context, f Failure, responseText string, completer TextCompleter, model string) JudgeResult {
+// toolCalls is the authoritative structured list of tool names called by the agent;
+// when non-empty it is included in the prompt so the judge does not incorrectly
+// penalise the agent for "not calling" tools that appear in the structured data.
+func Judge(ctx context.Context, f Failure, responseText string, completer TextCompleter, model string, toolCalls ...string) JudgeResult {
 	if completer == nil || f.Evaluation.ExpectedDiagnosis.Narrative == "" {
 		return JudgeResult{Skipped: true}
+	}
+
+	toolSection := ""
+	if len(toolCalls) > 0 {
+		toolSection = fmt.Sprintf("\nTOOLS CALLED (structured, authoritative — do not second-guess this list):\n%s\n", strings.Join(toolCalls, ", "))
 	}
 
 	prompt := fmt.Sprintf(judgePromptTemplate,
 		f.Name, f.Description,
 		f.Evaluation.ExpectedDiagnosis.Narrative,
+		toolSection,
 		responseText,
 	)
 

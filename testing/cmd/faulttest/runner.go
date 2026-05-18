@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -129,9 +130,10 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	}
 
 	var result struct {
-		Text        string `json:"text"`
-		CrystalBall bool   `json:"crystal_ball"`
-		Error       string `json:"error"`
+		Text        string   `json:"text"`
+		CrystalBall bool     `json:"crystal_ball"`
+		Error       string   `json:"error"`
+		ToolCalls   []string `json:"tool_calls"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -139,7 +141,19 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	if result.Error != "" {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("playbook error: %s", result.Error)}
 	}
-	return testutil.AgentResponse{Text: result.Text, CrystalBall: result.CrystalBall, Duration: duration}
+	ar := testutil.AgentResponse{Text: result.Text, CrystalBall: result.CrystalBall, Duration: duration}
+	if len(result.ToolCalls) > 0 {
+		lower := strings.ToLower(result.Text)
+		ar.ToolCalls = make([]testutil.ToolCallResult, len(result.ToolCalls))
+		for i, name := range result.ToolCalls {
+			sentinel := strings.ToLower("ERROR — " + name + " failed")
+			ar.ToolCalls[i] = testutil.ToolCallResult{
+				Name:    name,
+				Success: !strings.Contains(lower, sentinel),
+			}
+		}
+	}
+	return ar
 }
 
 // resolvePlaybookID resolves a series_id to the active versioned playbook_id.

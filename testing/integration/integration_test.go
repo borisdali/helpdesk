@@ -348,3 +348,27 @@ func TestQuery_ExtendedFormat(t *testing.T) {
 		t.Error("expected 'current_database' in extended output")
 	}
 }
+
+func TestQuery_BgwriterStats(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	query := `SELECT
+		checkpoints_timed, checkpoints_req,
+		buffers_checkpoint, buffers_clean, maxwritten_clean,
+		buffers_backend, buffers_backend_fsync, buffers_alloc
+	FROM pg_stat_bgwriter`
+
+	cmd := exec.CommandContext(ctx, "psql", testConnStr, "-c", query)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query failed: %v\n%s", err, output)
+	}
+
+	out := string(output)
+	for _, col := range []string{"checkpoints_timed", "maxwritten_clean", "buffers_backend"} {
+		if !strings.Contains(out, col) {
+			t.Errorf("expected %q in pg_stat_bgwriter output, got: %s", col, out)
+		}
+	}
+}

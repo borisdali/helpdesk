@@ -30,6 +30,10 @@ type Failure struct {
 	// *where* the agent falls short, not to enforce that it passes.
 	GovernanceGap bool `yaml:"governance_gap,omitempty"`
 
+	// Prerequisites documents manual steps required before running this fault
+	// (e.g. CNPG-specific GRANT or cluster patch commands). Informational only.
+	Prerequisites string `yaml:"prerequisites,omitempty"`
+
 	// ExternalCompat marks faults that work against any PostgreSQL instance over
 	// libpq (no Docker/OS access required). Used to filter the catalog when
 	// --external is set.
