@@ -7,7 +7,14 @@ This is an example showcasing a comparison of diagnosis of one specific database
 If you are not familiar with the Crystal Ball mode, these two blog posts [here](https://medium.com/google-cloud/dont-ask-your-ai-to-diagnose-production-unless-you-ve-given-it-a-structured-guided-playbook-46195c2aae71) and [here](https://medium.com/google-cloud/we-wanted-a-dramatic-ai-agent-failure-we-got-something-better-5d6d57135a88) go beyond our standard documentation and present a gentle introduction and the thinking behind this comparison.
 
 ## Full aiHelpDesk diagnosis
-In the examples below we inject the same `db-checkpoint-warning` fault and run the diagnostics from the source. In the latter section in this document we show equivalent commands for running this test on K8s via Helm.
+In the examples below we inject the checkpoint stall / bgwriter overload fault test (dubbed `db-checkpoint-warning` in our [fault catalog](FAULTTEST.md#61-external-compatible-faults)) and attempt to diagnose this fault by running the Crystal Ball and the full aihelpDesk playbook-driven diagnosis. In this particular example we run both from the source code (but in the [latter section](BENCHMARKING_SAMPLE.md#running-on-k8s-via-a-helm-chart) in this document we show equivalent commands for running this test on K8s via Helm).
+
+```
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault list|egrep '(FAULT|---|db-checkpoint-warning)'
+FAULT                            PLATFORM   PLAYBOOK                   FAULT TEST             INCIDENTS
+------------------------------------------------------------------------------------------------------------------------------------------------
+db-checkpoint-warning            any        pbs_checkpoint_bgwriter_triage 2026-05-14  FAIL       -
+```
 
 First off, start aiHelpDesk Gateway without the Crystal Ball setting (either omit it altogether or set it to false as a flag or as an env var):
 
@@ -112,8 +119,8 @@ Report written to ./faulttest-d5dcf519.json
 It's easier for humans to read the diagnosis by formatting the above JSON output. It's not difficult to automate this or just copy and paste the section between the BEGIN/END FAULTTEST REPORT JSON tags to a file (we call it /tmp/reason.json in the excerpt below) and run it through a simple Python snippet as follows:
 
 ```
-boris@cassiopeia ~/cassiopeia/helpdesk]$ vi /tmp/reason.json
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ cat /tmp/reason.json | python3 -c "
+[boris@ ~/helpdesk]$ vi /tmp/reason.json
+[boris@ ~/helpdesk]$ cat /tmp/reason.json | python3 -c "
    import json, sys
    d = json.load(sys.stdin)
    r = d['results'][0]
