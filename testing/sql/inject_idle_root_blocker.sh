@@ -17,8 +17,8 @@ psql -h postgres -U postgres -d testdb -c "
   INSERT INTO _faulttest_lock_chain VALUES (1) ON CONFLICT DO NOTHING;
 "
 
-{ printf "BEGIN;\nUPDATE _faulttest_lock_chain SET id = 1 WHERE id = 1;\n"; sleep 3600; } \
-  | psql -h postgres -U postgres -d testdb >/dev/null 2>&1 &
+{ { printf "BEGIN;\nUPDATE _faulttest_lock_chain SET id = 1 WHERE id = 1;\n"; sleep 3600; } \
+  | psql -h postgres -U postgres -d testdb; } >/dev/null 2>&1 &
 echo $! > /tmp/faulttest_lock_chain_root.pid
 sleep 1
 
