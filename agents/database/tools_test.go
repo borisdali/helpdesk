@@ -1533,6 +1533,46 @@ func TestCancelQueryTool_Level2_ExhaustedWarning(t *testing.T) {
 	}
 }
 
+func TestCancelQueryTool_IdleInTransaction_FalsePositive(t *testing.T) {
+	// pg_cancel_backend() returns true for an idle-in-transaction session, but the
+	// connection and its locks persist — SIGINT has no effect when no query is running.
+	// Level-2 verification also passes: it checks whether state left "active", but the
+	// session was never active, so the first poll succeeds immediately.
+	// The tool returns VerifyStatus="ok" with no warning — a false positive.
+	// Callers must read the "idle in transaction" state in the output and escalate
+	// to terminate_connection rather than treating cancelled=t as proof of fix.
+	//   call #1: inspectConnection — state=idle in transaction
+	//   call #2: pg_cancel_backend — cancelled=t (signal delivered, session unaffected)
+	//   call #3: level-2 verify   — state=idle in transaction (not "active" → passes)
+	defer withZeroVerifyConfig()()
+	defer withMockRunnerSequence(
+		psqlResponse{out: testInspectOutput, err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+-----\ncancelled       | t\npid             | 5678\n", err: nil},
+		psqlResponse{out: "-[ RECORD 1 ]---+------\nstate | idle in transaction\n", err: nil},
+	)()
+
+	ctx := newTestContext()
+	result, err := cancelQueryTool(ctx, CancelQueryArgs{
+		ConnectionString: "host=localhost",
+		PID:              5678,
+	})
+	if err != nil {
+		t.Fatalf("cancelQueryTool() unexpected Go error: %v", err)
+	}
+	// Tool reports ok — the false positive.
+	if result.VerifyStatus != "ok" {
+		t.Errorf("VerifyStatus = %q, want ok (idle-in-tx cancel produces false positive)", result.VerifyStatus)
+	}
+	if strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("output contains unexpected VERIFICATION WARNING; idle-in-tx cancel passes level-2 silently")
+	}
+	// The "idle in transaction" state must be visible in the output so a caller
+	// can detect the false positive and escalate to terminate_connection.
+	if !strings.Contains(result.Output, "idle in transaction") {
+		t.Errorf("output = %q, want 'idle in transaction' state visible to caller", result.Output)
+	}
+}
+
 // =============================================================================
 // terminateConnectionTool
 // =============================================================================

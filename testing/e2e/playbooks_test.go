@@ -47,6 +47,7 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		"pbs_vacuum_triage",
 		"pbs_slow_query_triage",
 		"pbs_connection_triage",
+		"pbs_idle_blocker_triage",
 		"pbs_replication_lag",
 		"pbs_db_restart_triage",
 		"pbs_db_config_recovery",
@@ -800,6 +801,7 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 			"pbs_vacuum_triage",
 			"pbs_slow_query_triage",
 			"pbs_connection_triage",
+			"pbs_idle_blocker_triage",
 			"pbs_replication_lag",
 		} {
 			pbID, ok := idBySeries[sid]

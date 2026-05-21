@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"helpdesk/playbooks"
 )
 
 const builtinMinimum = 32
@@ -405,5 +407,48 @@ func TestTimeoutDuration_Invalid(t *testing.T) {
 	d := f.TimeoutDuration()
 	if d != 60*time.Second {
 		t.Errorf("TimeoutDuration(invalid) = %v, want 60s default", d)
+	}
+}
+
+// TestCatalog_DiagnosisPlaybookSeriesIDs_Exist verifies that every
+// diagnosis_playbook_series_id referenced in the built-in catalog corresponds
+// to an actual playbook embedded in the playbooks package. This catches
+// regressions where a catalog entry references a renamed or missing playbook.
+func TestCatalog_DiagnosisPlaybookSeriesIDs_Exist(t *testing.T) {
+	cat, err := LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatalf("LoadBuiltinCatalog: %v", err)
+	}
+
+	// Collect all series_ids from the embedded playbook YAML files.
+	entries, err := playbooks.FS.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading playbooks FS: %v", err)
+	}
+	known := make(map[string]bool)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		data, readErr := playbooks.FS.ReadFile(entry.Name())
+		if readErr != nil {
+			t.Fatalf("reading playbook %s: %v", entry.Name(), readErr)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "series_id:") {
+				known[strings.TrimSpace(strings.TrimPrefix(line, "series_id:"))] = true
+				break
+			}
+		}
+	}
+
+	for _, f := range cat.Failures {
+		if f.DiagnosisPlaybookSeriesID == "" {
+			continue
+		}
+		if !known[f.DiagnosisPlaybookSeriesID] {
+			t.Errorf("fault %q: diagnosis_playbook_series_id=%q not found in playbooks/",
+				f.ID, f.DiagnosisPlaybookSeriesID)
+		}
 	}
 }
