@@ -1,0 +1,46 @@
+series_id: pbs_idle_blocker_triage
+name: Idle-in-Transaction Blocker Triage
+version: "1.0"
+execution_mode: fleet
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Investigate sessions blocked on a lock queue where the root holder is in
+  idle-in-transaction state. Identify the root blocker, assess held locks,
+  and terminate it — never cancel it. pg_cancel_backend() has no effect on
+  idle-in-transaction sessions: it returns true but the connection and its
+  locks persist.
+symptoms:
+  - "queries hanging indefinitely"
+  - "Lock wait events visible in pg_stat_activity"
+  - "application sessions timing out on DML"
+  - "pg_stat_activity shows multiple sessions in 'Lock' wait"
+  - "blocking session appears idle or stuck"
+guidance: |
+  Start with get_blocking_queries to surface the full lock chain. Look for the
+  root blocker — the session that appears as a blocker but has no blocking_pid
+  of its own. This is the session to terminate.
+
+  Use get_session_info on the root blocker. Confirm: state = 'idle in
+  transaction', has_open_tx = true, total_locks > 0. The locked_tables field
+  shows exactly which objects it is holding.
+
+  CRITICAL: for idle-in-transaction sessions, cancel_query is ineffective.
+  pg_cancel_backend() sends SIGINT to the backend, but since no query is
+  executing, the signal is ignored and the connection stays open holding all
+  its locks. The tool will report cancelled=true — this is a false positive.
+  Do not stop here.
+
+  Use terminate_connection on the root blocker. pg_terminate_backend() sends
+  SIGTERM, which closes the connection unconditionally and releases all held
+  locks. Verify that the lock queue clears by re-checking get_blocking_queries
+  or get_active_connections.
+
+  Common misdiagnosis: terminating a victim session instead of the root blocker.
+  The victim will reconnect and queue again immediately. Always trace the chain
+  to the session with no blocker of its own.
+escalation:
+  - "root blocker has has_writes=true (uncommitted DML) and has been idle > 30 minutes"
+  - "lock queue exceeds 20 sessions"
+  - "blocking table is a system catalog (pg_class, pg_attribute, etc.)"
+target_hints: []
