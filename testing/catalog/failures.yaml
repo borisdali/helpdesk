@@ -569,15 +569,19 @@ failures:
     timeout: 90s
 
   - id: db-idle-in-tx-blocker
-    name: "Idle-in-transaction root blocker with lock queue"
+    name: "Idle-in-transaction root blocker — two-level lock chain"
     category: database
     severity: high
     description: >
       A session ran an UPDATE and went idle (waiting for application input), holding
-      a row-level lock. Three victim sessions queue behind it. The diagnostic trap:
-      pg_cancel_backend() returns true for idle-in-transaction sessions but does NOT
-      release held locks — only pg_terminate_backend() closes the connection and frees
-      all locks. Calling cancel_query looks like success but the lock queue persists.
+      a row-level lock on a first table (root blocker, A). A second session updates
+      a second table and then waits for A's lock — creating an intermediate blocker
+      (B) that itself blocks two leaf sessions (C, D) waiting for the second table.
+      Two Crystal Ball traps: (1) pg_cancel_backend() returns true for
+      idle-in-transaction sessions but releases no locks; (2) terminating the
+      intermediate session (B) frees C and D temporarily but A's lock persists —
+      anything waiting for it immediately requeues. Only terminating A resolves the
+      full chain.
     inject:
       type: docker_exec
       exec_via: helpdesk-test-pgloader
@@ -590,39 +594,46 @@ failures:
     external_compat: true
     external_inject:
       type: shell_exec
-      # Root blocker: pipe BEGIN+UPDATE to psql, then hold stdin open with sleep.
-      # psql executes the DML and waits for more input → state='idle in transaction'.
-      # Three victim sessions then try SELECT FOR UPDATE on the same row and block.
+      # Two-level lock chain:
+      #   A (root)         — BEGIN + UPDATE chain, hold stdin open → idle in transaction
+      #   B (intermediate) — BEGIN + UPDATE chain2 (acquires lock), then SELECT chain
+      #                       FOR UPDATE → blocks on A while still holding chain2 lock
+      #   C, D (leaves)    — SELECT chain2 FOR UPDATE → blocked by B's UPDATE lock
       script_inline: |
         set -e
         psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "
-          CREATE TABLE IF NOT EXISTS _faulttest_lock_chain (id int PRIMARY KEY);
-          INSERT INTO _faulttest_lock_chain VALUES (1) ON CONFLICT DO NOTHING;
+          CREATE TABLE IF NOT EXISTS _faulttest_lock_chain  (id int PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS _faulttest_lock_chain2 (id int PRIMARY KEY);
+          INSERT INTO _faulttest_lock_chain  VALUES (1) ON CONFLICT DO NOTHING;
+          INSERT INTO _faulttest_lock_chain2 VALUES (1) ON CONFLICT DO NOTHING;
         "
-        { { printf "BEGIN;\nUPDATE _faulttest_lock_chain SET id = 1 WHERE id = 1;\n"; sleep 3600; } \
+        { { printf "BEGIN;\nUPDATE _faulttest_lock_chain SET id=1 WHERE id=1;\n"; sleep 3600; } \
           | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
         echo $! > /tmp/faulttest_lock_chain_root.pid
         sleep 1
-        for i in 1 2 3; do
+        { printf "BEGIN;\nUPDATE _faulttest_lock_chain2 SET id=1 WHERE id=1;\nSELECT * FROM _faulttest_lock_chain WHERE id=1 FOR UPDATE;\n" \
+          | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
+        sleep 1
+        for i in 1 2; do
           psql "$FAULTTEST_CONN" \
-            -c "SELECT * FROM _faulttest_lock_chain WHERE id = 1 FOR UPDATE;" >/dev/null 2>&1 &
+            -c "SELECT * FROM _faulttest_lock_chain2 WHERE id=1 FOR UPDATE;" >/dev/null 2>&1 &
         done
         sleep 1
-        echo "Injected: idle-in-transaction root blocker + 3 victims on _faulttest_lock_chain"
+        echo "Injected: two-level lock chain — root A (idle-in-tx on chain), intermediate B (chain2 + blocked on chain), leaves C/D (blocked on chain2)"
     external_teardown:
       type: shell_exec
       script_inline: |
-        set -e
         if [ -f /tmp/faulttest_lock_chain_root.pid ]; then
           kill "$(cat /tmp/faulttest_lock_chain_root.pid)" 2>/dev/null || true
           rm -f /tmp/faulttest_lock_chain_root.pid
         fi
-        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "
+        psql "$FAULTTEST_CONN" -c "
           SELECT pg_terminate_backend(pid)
           FROM pg_stat_activity
           WHERE query LIKE '%_faulttest_lock_chain%'
             AND pid <> pg_backend_pid();
           DROP TABLE IF EXISTS _faulttest_lock_chain;
+          DROP TABLE IF EXISTS _faulttest_lock_chain2;
         "
     diagnosis_playbook_series_id: pbs_idle_blocker_triage
     prompt: >
@@ -631,7 +642,6 @@ failures:
       all tool calls. Please investigate.
     evaluation:
       expected_tools:
-        - get_active_connections
         - get_blocking_queries
         - get_session_info
         - terminate_connection
@@ -645,16 +655,21 @@ failures:
       expected_diagnosis:
         category: lock_blocking
         narrative: >
-          The agent should identify an idle-in-transaction session holding a row-level
-          lock that is blocking other sessions, recognize that cancel_query is
-          ineffective for idle-in-transaction sessions (pg_cancel_backend returns true
-          but the connection and its locks persist), and use terminate_connection to
-          close the connection and release all held locks.
+          The agent should identify the two-level lock chain: a root session (A) in
+          idle-in-transaction state holding a lock on the first table, an intermediate
+          session (B) blocked by A but itself holding a lock on a second table that
+          two leaf sessions (C, D) are waiting for. The agent must identify A as the
+          root blocker (the only session with no blocking_pid), recognize that
+          cancel_query is ineffective for idle-in-transaction sessions (pg_cancel_backend
+          returns true but the connection and its locks persist), and use
+          terminate_connection on A specifically — NOT on B, C, or D. After terminating
+          A the cascade clears: B's pending SELECT completes, B's implicit ROLLBACK
+          releases the chain2 lock, and C and D complete.
     remediation:
       playbook_id: pbs_idle_blocker_remediate
       verify_sql: >
         SELECT count(*) = 0 FROM pg_stat_activity
-        WHERE state = 'idle in transaction'
+        WHERE (state = 'idle in transaction' OR wait_event_type = 'Lock')
         AND query LIKE '%_faulttest_lock_chain%'
         AND pid <> pg_backend_pid()
       verify_timeout: "60s"

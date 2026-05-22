@@ -1,6 +1,6 @@
 series_id: pbs_idle_blocker_triage
 name: Idle-in-Transaction Blocker Triage
-version: "1.0"
+version: "1.1"
 execution_mode: agent
 agent_name: postgres_database_agent
 approval_mode: manual
@@ -9,9 +9,9 @@ author: aiHelpDesk
 description: |
   Investigate sessions blocked on a lock queue where the root holder is in
   idle-in-transaction state. Identify the root blocker, assess held locks,
-  and terminate it — never cancel it. pg_cancel_backend() has no effect on
-  idle-in-transaction sessions: it returns true but the connection and its
-  locks persist.
+  and determine the correct remediation action. pg_cancel_backend() has no
+  effect on idle-in-transaction sessions: it returns true but the connection
+  and its locks persist.
 symptoms:
   - "queries hanging indefinitely"
   - "Lock wait events visible in pg_stat_activity"
@@ -20,12 +20,20 @@ symptoms:
   - "blocking session appears idle or stuck"
 guidance: |
   Step 1: Call get_blocking_queries to surface the full lock chain. The root
-  blocker is the session that appears as a blocker but has no blocking_pid of
-  its own. Record its PID.
+  blocker is the session that has no blocking_pid of its own (blocking_pid is
+  NULL or absent). Record its PID.
 
-  Step 2: Call get_session_info on that PID. Do not take any action until you
-  have done this. Confirm: state = 'idle in transaction', has_open_tx = true,
-  total_locks > 0. The locked_tables field shows exactly which objects it holds.
+  Multi-level chains: get_blocking_queries may show sessions that both have a
+  blocking_pid AND appear as a blocker for other sessions. These are intermediate
+  victims — they hold a lock acquired before they became blocked, and they will
+  complete naturally once the root releases its lock. Do NOT terminate them.
+  The root is always and only the session with blocking_pid = NULL.
+
+  Step 2: Call get_session_info on the root blocker PID. Do not take any action
+  until you have done this. Confirm: state = 'idle in transaction',
+  has_open_tx = true, total_locks > 0. The locked_tables field shows exactly
+  which objects it holds. Check has_writes: if true, terminating the session
+  will roll back uncommitted DML.
 
   Step 3: Because state = 'idle in transaction', no query is executing.
   cancel_query sends SIGINT to interrupt an active query — there is no active
@@ -33,20 +41,24 @@ guidance: |
   cancelled=true, but the connection stays open and all locks remain held. This
   is a false positive. Do not call cancel_query.
 
-  Call terminate_connection on the root blocker PID. pg_terminate_backend sends
-  SIGTERM, which closes the connection unconditionally and releases all held
-  locks regardless of session state. After the call, verify the lock queue has
-  cleared with get_blocking_queries or get_active_connections.
+  Call terminate_connection on the root blocker PID only. pg_terminate_backend
+  sends SIGTERM, which closes the connection unconditionally and releases all
+  held locks regardless of session state. In a multi-level chain, this triggers
+  a cascade: intermediate sessions acquire their pending locks and complete,
+  releasing downstream locks in turn.
 
   Step 4: After your ROOT_CAUSE line, include an explicit RECOMMENDATION section
   that states: (a) cancel_query is ineffective here because the session is idle
   in transaction — pg_cancel_backend returns true but the connection and its
   locks persist; (b) terminate_connection is the required action because
-  pg_terminate_backend closes the connection unconditionally.
+  pg_terminate_backend closes the connection unconditionally; (c) in a
+  multi-level chain, only the root blocker (blocking_pid = NULL) is the target —
+  terminating an intermediate victim frees its downstream sessions temporarily
+  but the root lock persists and any replacement immediately requeues.
 
-  Common misdiagnosis: terminating a victim session instead of the root blocker.
-  The victim will reconnect and queue again immediately. The root blocker is
-  always the session with no blocking_pid.
+  Common misdiagnosis: terminating an intermediate victim instead of the root
+  blocker. The intermediate will re-queue (or a replacement session will queue)
+  immediately. The root blocker is always the sole target.
 escalation:
   - "root blocker has has_writes=true (uncommitted DML) and has been idle > 30 minutes"
   - "lock queue exceeds 20 sessions"

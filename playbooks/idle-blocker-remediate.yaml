@@ -1,31 +1,53 @@
 series_id: pbs_idle_blocker_remediate
 name: Idle-in-Transaction Blocker — Terminate Root Blocker
-version: "1.0"
+version: "1.1"
 execution_mode: agent_approve
 agent_name: postgres_database_agent
 approval_mode: manual
 problem_class: availability
 author: aiHelpDesk
 description: |
-  Terminate the idle-in-transaction root blocker identified during diagnosis.
-  Uses terminate_connection (pg_terminate_backend) — not cancel_query
-  (pg_cancel_backend) — which closes the connection unconditionally and
-  releases all held locks.
+  Terminate the idle-in-transaction root blocker in a lock chain. Handles both
+  simple (one root, N direct victims) and multi-level chains (root → intermediate
+  → leaves). Uses terminate_connection (pg_terminate_backend) — not cancel_query
+  (pg_cancel_backend) — which closes the connection unconditionally and releases
+  all held locks. In a multi-level chain, terminating the root triggers a cascade:
+  intermediate sessions acquire their pending locks and exit, releasing downstream
+  locks in turn.
 symptoms:
   - "lock queue still blocking after diagnosis"
   - "idle-in-transaction session identified as root blocker"
 guidance: |
-  Step 1: Confirm the root blocker is still present.
-  Call get_blocking_queries to find the session with no blocking_pid.
-  Call get_session_info to confirm state = 'idle in transaction'.
+  Step 1: Confirm the chain and identify the root.
+  Call get_blocking_queries. The root blocker is the session with no blocking_pid
+  (blocking_pid = NULL or absent). In a multi-level chain, some sessions appear
+  both as a blocker AND have their own blocking_pid — these are intermediate
+  victims. Do NOT terminate them. Record the root blocker PID.
 
-  Step 2: Call terminate_connection on the root blocker PID.
-  Do NOT call cancel_query — pg_cancel_backend returns true but has no effect
-  on idle-in-transaction sessions (no active query to interrupt).
+  Step 2: Inspect the root blocker before acting.
+  Call get_session_info on the root blocker PID. Confirm state = 'idle in
+  transaction' and has_open_tx = true. Check has_writes:
+    - If has_writes = true AND the session has been idle > 30 minutes: escalate
+      rather than terminate — uncommitted DML may be significant and rollback
+      risk should be assessed by the operator.
+    - Otherwise: proceed to Step 3.
 
-  Step 3: Verify recovery. Call get_blocking_queries or get_active_connections
-  to confirm the lock queue cleared and previously blocked sessions have resumed.
+  Step 3: Terminate the root blocker.
+  Call terminate_connection on the root blocker PID.
+  Do NOT call cancel_query — pg_cancel_backend has no effect on idle-in-transaction
+  sessions (no active query to interrupt). It returns true as a false positive,
+  but the connection and all held locks persist unchanged. The only effective
+  action is terminate_connection (pg_terminate_backend), which sends SIGTERM and
+  closes the connection unconditionally.
+
+  Step 4: Verify the cascade cleared.
+  Call get_blocking_queries. Confirm no sessions remain in a Lock wait state
+  related to the affected tables. In a multi-level chain, terminating the root
+  causes a cascade: intermediate and leaf sessions acquire their pending locks
+  and complete. If any Lock waits persist after a brief moment, a second root
+  blocker may be present — repeat from Step 1.
 escalation:
-  - "root blocker has has_writes=true and has been idle > 30 minutes — risk of data loss on terminate"
+  - "root blocker has has_writes=true and has been idle > 30 minutes — risk of significant data loss on terminate"
   - "blocking table is a system catalog (pg_class, pg_attribute, etc.)"
+  - "lock queue exceeds 20 sessions — assess blast radius before proceeding"
 target_hints: []
