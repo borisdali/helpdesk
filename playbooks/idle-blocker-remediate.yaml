@@ -1,0 +1,31 @@
+series_id: pbs_idle_blocker_remediate
+name: Idle-in-Transaction Blocker — Terminate Root Blocker
+version: "1.0"
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Terminate the idle-in-transaction root blocker identified during diagnosis.
+  Uses terminate_connection (pg_terminate_backend) — not cancel_query
+  (pg_cancel_backend) — which closes the connection unconditionally and
+  releases all held locks.
+symptoms:
+  - "lock queue still blocking after diagnosis"
+  - "idle-in-transaction session identified as root blocker"
+guidance: |
+  Step 1: Confirm the root blocker is still present.
+  Call get_blocking_queries to find the session with no blocking_pid.
+  Call get_session_info to confirm state = 'idle in transaction'.
+
+  Step 2: Call terminate_connection on the root blocker PID.
+  Do NOT call cancel_query — pg_cancel_backend returns true but has no effect
+  on idle-in-transaction sessions (no active query to interrupt).
+
+  Step 3: Verify recovery. Call get_blocking_queries or get_active_connections
+  to confirm the lock queue cleared and previously blocked sessions have resumed.
+escalation:
+  - "root blocker has has_writes=true and has been idle > 30 minutes — risk of data loss on terminate"
+  - "blocking table is a system catalog (pg_class, pg_attribute, etc.)"
+target_hints: []
