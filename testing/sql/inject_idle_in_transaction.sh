@@ -13,7 +13,7 @@
 # assess the uncommitted work, then terminate_connection to clean it up.
 
 # Create the test table.
-psql -h postgres -U postgres -d testdb -c "
+psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
 CREATE TABLE IF NOT EXISTS iit_writes_test (
     id   INT PRIMARY KEY,
     val  TEXT

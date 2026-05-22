@@ -10,7 +10,7 @@ if [ -f /tmp/long_query_pid.txt ]; then
 fi
 
 # Also terminate from the server side.
-psql -h postgres -U postgres -d testdb -c "
+psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity
 WHERE query LIKE '%pg_sleep(300)%'

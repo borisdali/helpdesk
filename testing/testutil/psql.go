@@ -46,13 +46,13 @@ func RunSQLViaPgloader(ctx context.Context, scriptPath string) error {
 }
 
 // RunSQLStringViaPgloader executes a SQL string inside the pgloader container.
-// The SQL is passed via -c rather than stdin so there is no pipe involved —
-// docker exec -i has a race under load where psql reads EOF before the host
-// goroutine has written the SQL bytes, silently running nothing and exiting 0.
+// Connects via host.docker.internal:15432 (the host port binding) rather than
+// the container hostname, because the pgloader container may be on multiple
+// Docker networks and hostname resolution can return the wrong postgres instance.
 func RunSQLStringViaPgloader(ctx context.Context, sql string) error {
 	args := []string{
 		"exec", "helpdesk-test-pgloader",
-		"psql", "-h", "postgres", "-U", "postgres", "-d", "testdb",
+		"psql", "-h", "host.docker.internal", "-p", "15432", "-U", "postgres", "-d", "testdb",
 		"-v", "ON_ERROR_STOP=1",
 		"-c", sql,
 	}

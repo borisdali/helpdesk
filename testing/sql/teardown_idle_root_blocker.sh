@@ -9,7 +9,7 @@ if [ -f /tmp/faulttest_lock_chain_root.pid ]; then
   rm -f /tmp/faulttest_lock_chain_root.pid
 fi
 
-psql -h postgres -U postgres -d testdb -c "
+psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
   SELECT pg_terminate_backend(pid)
   FROM pg_stat_activity
   WHERE query LIKE '%_faulttest_lock_chain%'

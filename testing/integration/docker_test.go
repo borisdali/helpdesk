@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -78,24 +79,52 @@ func TestRunSQLStringViaPgloader_Success(t *testing.T) {
 	}
 }
 
+func pgloaderServerInfo(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "docker", "exec", "helpdesk-test-pgloader",
+		"psql", "-h", "host.docker.internal", "-p", "15432", "-U", "postgres", "-d", "testdb",
+		"-t", "-A", "-c", "SELECT inet_server_addr()||':'||inet_server_port()||' db='||current_database()")
+	out, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out))
+}
+
+func hostServerInfo(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "psql", testConnStr,
+		"-t", "-A", "-c", "SELECT inet_server_addr()||':'||inet_server_port()||' db='||current_database()")
+	out, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out))
+}
+
 func TestRunSQLStringViaPgloader_Query(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Create and query via pgloader.
-	err := testutil.RunSQLStringViaPgloader(ctx, `
-		CREATE TABLE IF NOT EXISTS pgloader_test (id serial);
-		INSERT INTO pgloader_test DEFAULT VALUES;
-	`)
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	defer testutil.RunSQLStringViaPgloader(ctx, "DROP TABLE IF EXISTS pgloader_test")
+	// Log which postgres each path connects to — mismatch is the root cause.
+	t.Logf("pgloader→postgres: %s", pgloaderServerInfo(ctx))
+	t.Logf("host→postgres:     %s", hostServerInfo(ctx))
 
-	// Verify via direct psql.
-	err = testutil.RunSQLString(ctx, testConnStr, "SELECT * FROM pgloader_test")
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
+	// Use separate calls so we know exactly which step fails.
+	if err := testutil.RunSQLStringViaPgloader(ctx, "CREATE TABLE IF NOT EXISTS pgloader_test (id serial)"); err != nil {
+		t.Fatalf("CREATE TABLE via pgloader: %v", err)
+	}
+	defer testutil.RunSQLStringViaPgloader(ctx, "DROP TABLE IF EXISTS pgloader_test") //nolint:errcheck
+
+	// Verify table is visible from pgloader container before checking from host.
+	if err := testutil.RunSQLStringViaPgloader(ctx, "SELECT 1 FROM pgloader_test LIMIT 0"); err != nil {
+		t.Fatalf("table not visible from pgloader container after CREATE: %v", err)
+	}
+
+	// Verify CREATE TABLE reached the same database the host psql connects to.
+	if err := testutil.RunSQLString(ctx, testConnStr, "SELECT 1 FROM pgloader_test LIMIT 0"); err != nil {
+		t.Fatalf("table not visible from host after CREATE TABLE via pgloader: %v", err)
+	}
+
+	if err := testutil.RunSQLStringViaPgloader(ctx, "INSERT INTO pgloader_test DEFAULT VALUES"); err != nil {
+		t.Fatalf("INSERT via pgloader: %v", err)
+	}
+
+	// Verify INSERT reached the database.
+	if err := testutil.RunSQLString(ctx, testConnStr, "SELECT * FROM pgloader_test"); err != nil {
+		t.Fatalf("query failed after INSERT via pgloader: %v", err)
 	}
 }
 

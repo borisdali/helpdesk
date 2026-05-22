@@ -12,7 +12,7 @@ fi
 
 # Terminate any remaining PostgreSQL backends from the injected session
 # and drop the test table.
-psql -h postgres -U postgres -d testdb -c "
+psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity
 WHERE application_name = 'iit_fault_session'
