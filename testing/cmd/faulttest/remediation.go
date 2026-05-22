@@ -146,7 +146,11 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 		return fmt.Errorf("resolving playbook %q: %w", seriesID, err)
 	}
 
-	body, _ := json.Marshal(map[string]string{"connection_string": r.cfg.ConnStr})
+	remediationReq := map[string]any{"connection_string": r.cfg.ConnStr}
+	if r.cfg.ApprovalMode != "" {
+		remediationReq["approval_mode"] = r.cfg.ApprovalMode
+	}
+	body, _ := json.Marshal(remediationReq)
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))

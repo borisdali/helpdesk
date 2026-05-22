@@ -119,6 +119,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.GatewayURL, "gateway", "", "Gateway URL for playbook/agent remediation and vault playbook checks")
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
+	fs.StringVar(&cfg.ApprovalMode, "approval-mode", "", "Override playbook approval_mode for this run (auto|session|manual|force). Empty = playbook default. Use 'force' to bypass manual gates in automated runs.")
 
 	// Policy safety check.
 	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")
@@ -178,6 +179,11 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	}
 
 	testutil.DockerComposeDir = filepath.Join(cfg.TestingDir, "docker")
+
+	// Resolve named infra alias (e.g. "faulttest-db") to the actual DSN so
+	// downstream injection code always gets a real connection string.
+	cfg.ConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ConnStr)
+	cfg.ReplicaConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ReplicaConnStr)
 
 	return cfg
 }

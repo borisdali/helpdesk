@@ -98,11 +98,14 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
 	}
-	reqBody := map[string]string{
+	reqBody := map[string]any{
 		"context": ResolvePrompt(f.Prompt, r.cfg),
 	}
 	if connStr != "" {
 		reqBody["connection_string"] = connStr
+	}
+	if r.cfg.ApprovalMode != "" {
+		reqBody["approval_mode"] = r.cfg.ApprovalMode
 	}
 	body, _ := json.Marshal(reqBody)
 
