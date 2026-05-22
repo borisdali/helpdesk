@@ -260,18 +260,23 @@ func vaultList(args []string) {
 	const (
 		colFault     = 32
 		colPlatform  = 10
-		colPlaybook  = 26
+		colDiag      = 26
+		colRemed     = 26
 		colFaultTest = 22 // "2026-04-18  PASS" or "(never)" or "READY"
 		// incidents column is the remainder
 	)
-	fmt.Printf("%-*s %-*s %-*s %-*s %s\n", colFault, "FAULT", colPlatform, "PLATFORM", colPlaybook, "PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
-	fmt.Println(strings.Repeat("-", colFault+1+colPlatform+1+colPlaybook+1+colFaultTest+1+50))
+	fmt.Printf("%-*s %-*s %-*s %-*s %-*s %s\n", colFault, "FAULT", colPlatform, "PLATFORM", colDiag, "DIAG PLAYBOOK", colRemed, "REMED PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
+	fmt.Println(strings.Repeat("-", colFault+1+colPlatform+1+colDiag+1+colRemed+1+colFaultTest+1+50))
 
 	for _, f := range cat.Failures {
 		playbookID := f.Remediation.PlaybookID
-		playbookDisplay := playbookID
-		if playbookDisplay == "" {
-			playbookDisplay = "(none)"
+		diagDisplay := f.DiagnosisPlaybookSeriesID
+		if diagDisplay == "" {
+			diagDisplay = "-"
+		}
+		remedDisplay := playbookID
+		if remedDisplay == "" {
+			remedDisplay = "(none)"
 		}
 
 		// ── platform column ───────────────────────────────────────────────
@@ -289,7 +294,7 @@ func vaultList(args []string) {
 		last := lastRun[f.ID]
 		var faultTestCol string
 		switch {
-		case playbookID == "":
+		case playbookID == "" && f.DiagnosisPlaybookSeriesID == "":
 			faultTestCol = "NO PLAYBOOK"
 		case last.ts == "":
 			faultTestCol = "(never)"
@@ -339,7 +344,7 @@ func vaultList(args []string) {
 			}
 		}
 
-		fmt.Printf("%-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colPlaybook, playbookDisplay, colFaultTest, faultTestCol, incidentCol)
+		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, incidentCol)
 	}
 }
 

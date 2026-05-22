@@ -435,6 +435,87 @@ func mockAuditdPlaybookAndRun(t *testing.T, pb *audit.Playbook, run *audit.Playb
 	return srv
 }
 
+// TestHandlePlaybookRun_AgentApproveMode verifies that an agent_approve-mode
+// playbook calls the planner LLM to propose the first step and returns HTTP 202
+// with status "pending_approval" — it does NOT route to the agent or the fleet
+// planner directly.
+func TestHandlePlaybookRun_AgentApproveMode(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_approve01",
+		SeriesID:      "pbs_idle_blocker_remediate",
+		Name:          "Idle-in-Transaction Blocker — Terminate Root Blocker",
+		Guidance:      "Step 1: terminate_connection on root blocker PID.",
+		ExecutionMode: "agent_approve",
+		IsActive:      true,
+	}
+
+	// Mock auditd: handles GET playbook, POST run-record, POST step, POST approval.
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_approve_test01", "approval_id": "apr_test01"}) //nolint:errcheck
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(pb) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	// Override GET to return the playbook.
+	auditSrv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(pb) //nolint:errcheck
+			return
+		}
+		// POST: run record, step create, approval create all return 201.
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_approve_test01", "approval_id": "apr_test01"}) //nolint:errcheck
+	}))
+	t.Cleanup(auditSrv2.Close)
+
+	plannerCalled := false
+	llmFn := func(ctx context.Context, prompt string) (string, error) {
+		plannerCalled = true
+		return `{
+			"action": "execute_step",
+			"agent": "database",
+			"tool": "terminate_connection",
+			"args": {"pid": 1234},
+			"reason": "Terminate the idle-in-transaction root blocker"
+		}`, nil
+	}
+
+	gw := makePlaybookRunGateway(auditSrv2.URL, llmFn)
+	rec := postPlaybookRun(t, gw, "pb_approve01",
+		`{"connection_string":"host=prod-db port=5432 dbname=postgres"}`)
+
+	if !plannerCalled {
+		t.Error("planner LLM was not called for agent_approve-mode playbook")
+	}
+	// Should return 202 Accepted with pending_approval status.
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("got %d, want 202 for agent_approve mode; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_approval" {
+		t.Errorf("status = %q, want pending_approval", resp["status"])
+	}
+	if resp["run_id"] == "" || resp["run_id"] == nil {
+		t.Error("run_id should be set in agent_approve response")
+	}
+	step, _ := resp["step"].(map[string]any)
+	if step == nil {
+		t.Fatal("step should be present in pending_approval response")
+	}
+	if step["tool"] != "terminate_connection" {
+		t.Errorf("step.tool = %v, want terminate_connection", step["tool"])
+	}
+}
+
 func TestHandlePlaybookRun_FleetMode_RequiresEvidenceWarning(t *testing.T) {
 	pb := &audit.Playbook{
 		PlaybookID:       "pb_cfg01",
