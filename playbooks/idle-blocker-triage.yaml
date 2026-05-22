@@ -38,6 +38,12 @@ guidance: |
   locks regardless of session state. After the call, verify the lock queue has
   cleared with get_blocking_queries or get_active_connections.
 
+  Step 4: After your ROOT_CAUSE line, include an explicit RECOMMENDATION section
+  that states: (a) cancel_query is ineffective here because the session is idle
+  in transaction — pg_cancel_backend returns true but the connection and its
+  locks persist; (b) terminate_connection is the required action because
+  pg_terminate_backend closes the connection unconditionally.
+
   Common misdiagnosis: terminating a victim session instead of the root blocker.
   The victim will reconnect and queue again immediately. The root blocker is
   always the session with no blocking_pid.
