@@ -12,7 +12,7 @@ fi
 psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
   SELECT pg_terminate_backend(pid)
   FROM pg_stat_activity
-  WHERE query LIKE '%_faulttest_lock_chain%'
+  WHERE (query LIKE '%_faulttest_lock_chain%' OR application_name = '_faulttest_lock_chain_root')
     AND pid <> pg_backend_pid();
   DROP TABLE IF EXISTS _faulttest_lock_chain;
   DROP TABLE IF EXISTS _faulttest_lock_chain2;

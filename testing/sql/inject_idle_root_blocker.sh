@@ -2,24 +2,25 @@
 #
 # aiHelpDesk fault injection helper script.
 #
-# Inject a two-level idle-in-transaction lock chain:
+# Inject a two-level lock chain where the root blocker appears ACTIVE
+# (running pg_sleep inside an open transaction) rather than idle in transaction.
 #
-#   A (root)         — idle in transaction, holds row-lock on _faulttest_lock_chain row 1
+#   A (root)         — active, running pg_sleep(3600) inside a BEGIN+UPDATE
+#                       transaction; holds row-lock on _faulttest_lock_chain row 1.
+#                       State: active / wait_event=Timeout — looks like a slow query.
 #   B (intermediate) — holds row-lock on _faulttest_lock_chain2 row 1,
 #                       blocked waiting for A's lock on _faulttest_lock_chain row 1
 #   C, D (leaves)    — blocked waiting for B's lock on _faulttest_lock_chain2 row 1
 #
-# Terminating A releases the full chain: B's SELECT FOR UPDATE returns, B's
-# psql exits (implicit ROLLBACK releases chain2 lock), then C and D acquire
-# chain2's lock and complete. All four sessions exit cleanly.
+# Crystal Ball trap:
+#   The unguided agent sees A as an active query blocking everything and calls
+#   cancel_query(A). pg_cancel_backend sends SIGINT, pg_sleep is interrupted,
+#   and the function returns true — success. But A's transaction is still open
+#   (now in idle in transaction (aborted) state) and all row locks remain held.
+#   B, C, D are still blocked. The agent declared victory over a false positive.
 #
-# Crystal Ball gaps this fault exposes:
-#   1. cancel_query(A)       — pg_cancel_backend returns true but the idle-in-transaction
-#                              session has no active query; SIGINT is ignored; all locks
-#                              persist unchanged.
-#   2. terminate_connection(B) — B exits and C/D are temporarily freed from chain2, but
-#                              A still holds the chain lock; B or any replacement
-#                              immediately requeues behind A.
+#   terminate_connection is the only effective action: it sends SIGTERM, closes
+#   the connection, and rolls back the transaction unconditionally.
 
 psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
   CREATE TABLE IF NOT EXISTS _faulttest_lock_chain  (id int PRIMARY KEY);
@@ -28,8 +29,11 @@ psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
   INSERT INTO _faulttest_lock_chain2 VALUES (1) ON CONFLICT DO NOTHING;
 "
 
-# Session A: root blocker — BEGIN + UPDATE chain, then hold stdin open (idle in transaction)
-{ { printf "BEGIN;\nUPDATE _faulttest_lock_chain SET id=1 WHERE id=1;\n"; sleep 3600; } \
+# Session A: root blocker — UPDATE chain (acquires lock), then pg_sleep inside the
+# same transaction. State shows as 'active' with wait_event=Timeout.
+# application_name is set so teardown can find this session even when its
+# visible query is 'SELECT pg_sleep(3600)' (no _faulttest_lock_chain in the text).
+{ printf "SET application_name='_faulttest_lock_chain_root';\nBEGIN;\nUPDATE _faulttest_lock_chain SET id=1 WHERE id=1;\nSELECT pg_sleep(3600);\n" \
   | psql -h host.docker.internal -p 15432 -U postgres -d testdb; } >/dev/null 2>&1 &
 echo $! > /tmp/faulttest_lock_chain_root.pid
 sleep 1
@@ -47,4 +51,4 @@ for i in 1 2; do
 done
 sleep 1
 
-echo "Injected: two-level lock chain — root A (idle-in-tx on chain), intermediate B (chain2 + blocked on chain), leaves C/D (blocked on chain2)"
+echo "Injected: two-level lock chain — root A (active/pg_sleep on chain), intermediate B (chain2 + blocked on chain), leaves C/D (blocked on chain2)"

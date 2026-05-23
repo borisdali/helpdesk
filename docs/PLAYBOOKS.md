@@ -78,7 +78,7 @@ The **Checkpoint & bgwriter Triage** Playbook (`pbs_checkpoint_bgwriter_triage`)
 
 The **Idle-in-Transaction Blocker Triage** Playbook (`pbs_idle_blocker_triage`) handles lock queues whose root holder is an `idle in transaction` session — a backend that executed DML, acquired row locks, then stopped sending SQL while leaving the transaction open (waiting for application input that never came). The canonical symptom is multiple sessions in `Lock` wait state against the same table, with the root blocker appearing dormant in `pg_stat_activity`. The critical diagnostic rule the Playbook enforces: `cancel_query` (`pg_cancel_backend`) is **ineffective** for idle-in-transaction sessions. Because no query is executing, SIGINT is ignored and the function returns `true` — a false positive that looks like success but leaves the connection and its locks intact. The Playbook explicitly directs the agent to `terminate_connection` (`pg_terminate_backend`) on the root blocker, which sends SIGTERM and unconditionally closes the connection. This Playbook is the reference case for the Crystal Ball gap in remediation: an unguided agent typically attempts cancel first, sees `cancelled=t`, declares the problem resolved, and leaves the lock queue intact — while the Playbook-guided agent proceeds directly to terminate and the lock queue clears in under a second. When an operator is ready to act on the triage findings, the companion **`pbs_idle_blocker_remediate`** Playbook executes the termination under step-by-step approval.
 
-The **Idle-in-Transaction Blocker — Remediate** Playbook (`pbs_idle_blocker_remediate`) is the remediation counterpart to `pbs_idle_blocker_triage`. Where the triage Playbook runs autonomously (agent mode) to diagnose, this Playbook uses `execution_mode: agent_approve` to execute termination under explicit per-step operator approval. The LLM proposes one action at a time across a four-step sequence — identify the root in the chain (`get_blocking_queries`), inspect it before acting (`get_session_info`, checking `has_writes` for the escalation condition), terminate the root only (`terminate_connection`), and verify the cascade cleared (`get_blocking_queries` again) — and the operator approves each step before it executes. In a multi-level chain, only the session with no `blocking_pid` is terminated; intermediate sessions are victims and resolve themselves once the root is gone. The Playbook has `approval_mode: manual` and is never auto-chained: the operator always invokes it explicitly after reviewing the triage findings. See [agent_approve execution mode](#agent_approve-execution-mode) below for the full lifecycle.
+The **Idle-in-Transaction Blocker — Remediate** Playbook (`pbs_idle_blocker_remediate`) is the remediation counterpart to `pbs_idle_blocker_triage`. Where the triage Playbook runs autonomously (agent mode) to diagnose, this Playbook uses `execution_mode: agent_approve` to execute termination under explicit per-step operator approval. The LLM proposes one action at a time across a four-step sequence — map the full chain (`get_blocking_queries`), inspect the root AND each intermediate for `has_writes` (`get_session_info`), terminate the root only (`terminate_connection`), and verify the cascade cleared (`get_blocking_queries` again) — and the operator approves each step before it executes. A critical safety property: in a multi-level chain, terminating the root releases its lock and causes each intermediate session to complete and disconnect without `COMMIT`, rolling back its own open transaction as a side effect. If an intermediate has `has_writes=true`, that uncommitted work is silently discarded. The Playbook surfaces this cascade risk explicitly in the `reason` field of the termination step proposal, giving the operator full visibility before they approve. An unguided agent terminates without disclosing this. The Playbook has `approval_mode: manual` and is never auto-chained: the operator always invokes it explicitly after reviewing the triage findings. See [agent_approve execution mode](#agent_approve-execution-mode) below for the full lifecycle.
 
 The "Database Down" Playbooks form an escalating triage graph for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, was OOM-killed, or hit a WAL disk full condition, then revises the root-cause hypothesis accordingly.
 
@@ -840,7 +840,7 @@ fi
 
 `agent_approve` is the third execution mode for Playbooks. Where `agent` mode lets the LLM run autonomously (gathering evidence and deciding actions without human gates), `agent_approve` puts the operator in the loop at every step: the gateway proposes one action, the operator approves or denies it, the gateway executes and re-plans, and the loop continues until done.
 
-Use `agent_approve` for Playbooks that perform **mutating** operations — process terminations, setting changes, restarts — where you want a human to confirm each individual tool call before it fires.
+Use `agent_approve` for Playbooks that perform **mutating** operations — process terminations, setting changes, restarts — where you want a human to confirm each individual tool call before it fires. Critically, the operator sees the proposed action and its stated reason *before* it executes — this is the only point in the system where cascade risks (e.g. "terminating this session will also roll back session B's uncommitted writes") are surfaced to a human before damage is done.
 
 ### When to use each execution mode
 
@@ -882,7 +882,7 @@ Response (`202 Accepted`):
 }
 ```
 
-The `reason` field is written by the LLM and shown to the operator to explain why this step is being proposed. The operator should read it before approving.
+The `reason` field is written by the LLM and shown to the operator to explain why this step is being proposed. The operator should read it before approving. For destructive steps, the Playbook guidance instructs the LLM to include cascade side effects in `reason` — for example, if terminating a root blocker will also roll back an intermediate session's uncommitted writes, that warning appears here before the operator approves.
 
 ### Approving a step
 
@@ -1035,9 +1035,9 @@ Response:
       "agent":       "database",
       "tool":        "get_session_info",
       "args":        {"pid": 9847},
-      "reason":      "Inspect root blocker before acting: confirm idle-in-transaction state and check has_writes for escalation condition.",
+      "reason":      "Inspect root blocker (pid=9847) before acting: confirm idle-in-transaction state and check has_writes. Also inspecting intermediate session (pid=10234) for cascade rollback risk.",
       "status":      "succeeded",
-      "result":      "state=idle in transaction, has_open_tx=true, has_writes=true, idle_secs=47",
+      "result":      "pid=9847: state=idle in transaction, has_open_tx=true, has_writes=true, idle_secs=47. pid=10234: has_open_tx=true, has_writes=true, idle_secs=46 (blocked victim)",
       "approval_id": "apr_2c3d4e5f",
       "created_at":  "2026-05-22T10:00:07Z",
       "updated_at":  "2026-05-22T10:00:09Z"
@@ -1048,7 +1048,7 @@ Response:
       "agent":       "database",
       "tool":        "terminate_connection",
       "args":        {"pid": 9847},
-      "reason":      "Terminate root blocker only. has_writes=true but idle_secs=47 is under the 30-minute escalation threshold.",
+      "reason":      "Terminate root blocker pid=9847 (idle in transaction, has_writes=true, idle_secs=47 — under 30-min escalation threshold). WARNING: terminating root will cascade to roll back intermediate session pid=10234 (has_writes=true, 46s idle) — operator should confirm this work can be discarded before approving.",
       "status":      "succeeded",
       "result":      "terminated=true",
       "approval_id": "apr_1b2c3d4e",

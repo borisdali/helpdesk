@@ -1844,12 +1844,8 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		// Return partial result rather than failing entirely.
-		writeJSON(w, http.StatusOK, ApproveRunResponse{
-			RunID:   runID,
-			Status:  "complete",
-			Summary: fmt.Sprintf("Step %d executed. Re-planning failed: %v", pendingStep.StepIndex, err),
-		})
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "re-planning failed: "+err.Error(), nil)
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 

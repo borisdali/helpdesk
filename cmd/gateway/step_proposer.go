@@ -42,11 +42,14 @@ GUIDANCE:
 
 TARGET: %s
 
-STEPS EXECUTED SO FAR:
+TOOL CALLS EXECUTED SO FAR (in order):
 %s
 
-Based on the guidance and the results above, what is the SINGLE next action to take?
-If all remediation goals have been achieved, return action=complete with a brief summary.
+Based on the guidance above and the tool results so far, what is the SINGLE next tool call to make?
+Do NOT confuse the numbered tool calls above with the numbered steps in the guidance — they are independent.
+Determine what the guidance still requires that has not yet been done, and propose the next tool call for it.
+
+Only return action=complete when ALL goals in the guidance have been achieved (including any required terminations and verification).
 
 Respond with JSON only, no other text:
 {
@@ -120,12 +123,12 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 
 func buildHistorySection(history []*audit.PlaybookRunStep) string {
 	if len(history) == 0 {
-		return "(none yet — this is the first step)"
+		return "(none yet — this is the first tool call)"
 	}
 	var sb strings.Builder
 	for _, s := range history {
 		argsJSON, _ := json.Marshal(s.Args)
-		sb.WriteString(fmt.Sprintf("Step %d — %s(%s)\nResult: %s\n\n",
+		sb.WriteString(fmt.Sprintf("Tool call #%d: %s(%s)\nResult: %s\n\n",
 			s.StepIndex, s.Tool, string(argsJSON), s.Result))
 	}
 	return strings.TrimRight(sb.String(), "\n")
@@ -153,6 +156,9 @@ func (g *Gateway) callToolForStep(ctx context.Context, r *http.Request, traceID,
 
 // callToolWithPrincipal is the low-level agent HTTP call used by callToolForStep.
 func (g *Gateway) callToolWithPrincipal(ctx context.Context, traceID, purpose, agentName, toolName string, args map[string]any, principal identity.ResolvedPrincipal) (string, error) {
+	if resolved, ok := agentAliases[agentName]; ok {
+		agentName = resolved
+	}
 	agentInfo, ok := g.agents[agentName]
 	if !ok {
 		return "", fmt.Errorf("agent %q not available", agentName)
