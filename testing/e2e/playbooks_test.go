@@ -47,8 +47,8 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		"pbs_vacuum_triage",
 		"pbs_slow_query_triage",
 		"pbs_connection_triage",
-		"pbs_idle_blocker_triage",
-		"pbs_idle_blocker_remediate",
+		"pbs_lock_chain_triage",
+		"pbs_lock_chain_remediate",
 		"pbs_replication_lag",
 		"pbs_db_restart_triage",
 		"pbs_db_config_recovery",
@@ -797,8 +797,8 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		}
 	})
 
-	t.Run("idle_blocker_remediate_is_agent_approve", func(t *testing.T) {
-		pb := getBySeriesID(t, "pbs_idle_blocker_remediate")
+	t.Run("lock_chain_remediate_is_agent_approve", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_lock_chain_remediate")
 		if mode, _ := pb["execution_mode"].(string); mode != "agent_approve" {
 			t.Errorf("execution_mode = %q, want agent_approve", mode)
 		}
@@ -811,7 +811,7 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		if ep, _ := pb["entry_point"].(bool); ep {
 			t.Error("entry_point = true; remediation playbook should not be an entry point")
 		}
-		t.Logf("idle_blocker_remediate: execution_mode=agent_approve approval_mode=manual")
+		t.Logf("lock_chain_remediate: execution_mode=agent_approve approval_mode=manual")
 	})
 
 	t.Run("operational_playbooks_are_fleet", func(t *testing.T) {
@@ -819,7 +819,7 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 			"pbs_vacuum_triage",
 			"pbs_slow_query_triage",
 			"pbs_connection_triage",
-			"pbs_idle_blocker_triage",
+			"pbs_lock_chain_triage",
 			"pbs_replication_lag",
 		} {
 			pbID, ok := idBySeries[sid]
@@ -887,7 +887,7 @@ func TestPlaybooks_RunAgentMode(t *testing.T) {
 	t.Logf("agent run OK: playbook_id=%s text_len=%d", restartID, len(fmt.Sprintf("%v", resp["text"])))
 }
 
-// TestPlaybooks_RunAgentApproveMode calls POST /run on the pbs_idle_blocker_remediate
+// TestPlaybooks_RunAgentApproveMode calls POST /run on the pbs_lock_chain_remediate
 // system playbook (execution_mode=agent_approve) and verifies the gateway returns
 // HTTP 202 with status="pending_approval" and a non-nil step proposal. The LLM is
 // called to propose the first remediation step; no database agent or live database
@@ -909,13 +909,13 @@ func TestPlaybooks_RunAgentApproveMode(t *testing.T) {
 	}
 	var remedID string
 	for _, pb := range playbooks {
-		if sid, _ := pb["series_id"].(string); sid == "pbs_idle_blocker_remediate" {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_lock_chain_remediate" {
 			remedID, _ = pb["playbook_id"].(string)
 			break
 		}
 	}
 	if remedID == "" {
-		t.Skip("pbs_idle_blocker_remediate system playbook not found — stack may not be seeded")
+		t.Skip("pbs_lock_chain_remediate system playbook not found — stack may not be seeded")
 	}
 
 	resp, err := client.PlaybookRun(ctx, remedID, map[string]any{

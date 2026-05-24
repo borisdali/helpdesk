@@ -12,8 +12,8 @@ import (
 
 func TestBuildHistorySection_Empty(t *testing.T) {
 	out := buildHistorySection(nil)
-	if !strings.Contains(out, "first step") {
-		t.Errorf("empty history should mention 'first step', got: %q", out)
+	if !strings.Contains(out, "first tool call") {
+		t.Errorf("empty history should mention 'first tool call', got: %q", out)
 	}
 }
 
@@ -24,8 +24,8 @@ func TestBuildHistorySection_WithSteps(t *testing.T) {
 	}
 	out := buildHistorySection(steps)
 
-	if !strings.Contains(out, "Step 1") {
-		t.Error("output missing 'Step 1'")
+	if !strings.Contains(out, "Tool call #1") {
+		t.Error("output missing 'Tool call #1'")
 	}
 	if !strings.Contains(out, "get_blocking_queries") {
 		t.Error("output missing tool name from step 1")
@@ -33,8 +33,8 @@ func TestBuildHistorySection_WithSteps(t *testing.T) {
 	if !strings.Contains(out, "1 blocker found") {
 		t.Error("output missing result from step 1")
 	}
-	if !strings.Contains(out, "Step 2") {
-		t.Error("output missing 'Step 2'")
+	if !strings.Contains(out, "Tool call #2") {
+		t.Error("output missing 'Tool call #2'")
 	}
 	if !strings.Contains(out, "terminate_connection") {
 		t.Error("output missing tool name from step 2")

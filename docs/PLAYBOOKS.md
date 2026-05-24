@@ -62,8 +62,8 @@ aiHelpDesk ships 14 expert-authored system Playbooks that are seeded into auditd
 | `pbs_vacuum_triage` | Vacuum & Bloat Triage | capacity | database | `get_vacuum_status`, `get_disk_usage`, `get_pg_settings` |
 | `pbs_slow_query_triage` | Slow Query Triage | performance | database | `get_slow_queries`, `get_wait_events`, `get_blocking_queries`, `explain_query` |
 | `pbs_connection_triage` | Connection & Lock Triage | availability | database | `get_server_info`, `get_blocking_queries`, `get_session_info`, `get_lock_info` |
-| `pbs_idle_blocker_triage` | Idle-in-Transaction Blocker Triage | availability | database | `get_blocking_queries`, `get_session_info`, `terminate_connection` |
-| `pbs_idle_blocker_remediate` | Idle-in-Transaction Blocker — Remediate | availability | database | `get_blocking_queries`, `get_session_info`, `terminate_connection` |
+| `pbs_lock_chain_triage` | Transaction Lock Chain Triage | availability | database | `get_blocking_queries`, `get_session_info`, `terminate_connection` |
+| `pbs_lock_chain_remediate` | Transaction Lock Chain — Terminate Root Blocker | availability | database | `get_blocking_queries`, `get_session_info`, `terminate_connection` |
 | `pbs_replication_lag` | Replication Lag Triage | availability | database | `get_replication_status`, `get_server_info` |
 | `pbs_checkpoint_bgwriter_triage` | Checkpoint & bgwriter Triage | performance | database | `get_bgwriter_stats`, `read_pg_log`, `get_pg_settings` |
 | `pbs_db_restart_triage` | Database Down — Restart Triage | availability | database | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
@@ -76,9 +76,9 @@ aiHelpDesk ships 14 expert-authored system Playbooks that are seeded into auditd
 
 The **Checkpoint & bgwriter Triage** Playbook (`pbs_checkpoint_bgwriter_triage`) covers performance degradation caused by misconfigured checkpoint or background-writer parameters. It is not a database-down scenario — the database stays available — but write latency degrades due to periodic I/O bursts. The canonical symptom is a PostgreSQL `LOG: checkpoints are occurring too frequently` warning accompanied by `maxwritten_clean > 0` in `pg_stat_bgwriter` (bgwriter hitting its per-round page limit) and elevated `buffers_backend` (regular backends forced to flush dirty pages themselves). The five-step guidance leads the agent from log confirmation through counter interpretation, parameter identification (`max_wal_size`, `bgwriter_lru_maxpages`, `checkpoint_completion_target`), safe `ALTER SYSTEM SET + pg_reload_conf()` recommendations presented to the operator for approval, and a post-change verification using `get_bgwriter_stats`. Escalation triggers include `buffers_backend_fsync > 0` (backends doing their own fsyncs — a severe condition requiring immediate I/O capacity review) and `checkpoint_sync_time > 30s`. This Playbook also demonstrates the Crystal Ball gap clearly: the PostgreSQL `HINT: Consider increasing max_wal_size` in the log is a shortcut that `bgwriter_lru_maxpages=2` makes misleading — an unguided agent typically follows the hint and misses the root cause, while the Playbook's systematic counter analysis surfaces it.
 
-The **Idle-in-Transaction Blocker Triage** Playbook (`pbs_idle_blocker_triage`) handles lock queues whose root holder is an `idle in transaction` session — a backend that executed DML, acquired row locks, then stopped sending SQL while leaving the transaction open (waiting for application input that never came). The canonical symptom is multiple sessions in `Lock` wait state against the same table, with the root blocker appearing dormant in `pg_stat_activity`. The critical diagnostic rule the Playbook enforces: `cancel_query` (`pg_cancel_backend`) is **ineffective** for idle-in-transaction sessions. Because no query is executing, SIGINT is ignored and the function returns `true` — a false positive that looks like success but leaves the connection and its locks intact. The Playbook explicitly directs the agent to `terminate_connection` (`pg_terminate_backend`) on the root blocker, which sends SIGTERM and unconditionally closes the connection. This Playbook is the reference case for the Crystal Ball gap in remediation: an unguided agent typically attempts cancel first, sees `cancelled=t`, declares the problem resolved, and leaves the lock queue intact — while the Playbook-guided agent proceeds directly to terminate and the lock queue clears in under a second. When an operator is ready to act on the triage findings, the companion **`pbs_idle_blocker_remediate`** Playbook executes the termination under step-by-step approval.
+The **Transaction Lock Chain Triage** Playbook (`pbs_lock_chain_triage`) handles lock queues whose root holder is keeping an open transaction — either `idle in transaction` (paused after DML) or `active` while executing a long-running or sleeping statement such as `pg_sleep`. The canonical symptom is multiple sessions in `Lock` wait state against the same table, with the root blocker appearing dormant or slow in `pg_stat_activity`. The critical diagnostic rule the Playbook enforces: `cancel_query` (`pg_cancel_backend`) is **unreliable** for root blockers. If the root is idle-in-transaction, SIGINT is ignored entirely. If the root is active with `pg_sleep`, SIGINT interrupts the sleep and the function returns `true` — a false positive that looks like success but leaves the transaction and its locks intact (the session moves to `idle in transaction aborted`). The Playbook explicitly directs the agent to `terminate_connection` (`pg_terminate_backend`) on the root blocker, which sends SIGTERM and unconditionally closes the connection regardless of state. This Playbook is the reference case for the Crystal Ball gap in remediation: an unguided agent presents `cancel_query` as "Option 1 (Immediate)" and declares the problem resolved — while the Playbook-guided agent proceeds directly to terminate and the lock queue clears in under a second. When an operator is ready to act on the triage findings, the companion **`pbs_lock_chain_remediate`** Playbook executes the termination under step-by-step approval.
 
-The **Idle-in-Transaction Blocker — Remediate** Playbook (`pbs_idle_blocker_remediate`) is the remediation counterpart to `pbs_idle_blocker_triage`. Where the triage Playbook runs autonomously (agent mode) to diagnose, this Playbook uses `execution_mode: agent_approve` to execute termination under explicit per-step operator approval. The LLM proposes one action at a time across a four-step sequence — map the full chain (`get_blocking_queries`), inspect the root AND each intermediate for `has_writes` (`get_session_info`), terminate the root only (`terminate_connection`), and verify the cascade cleared (`get_blocking_queries` again) — and the operator approves each step before it executes. A critical safety property: in a multi-level chain, terminating the root releases its lock and causes each intermediate session to complete and disconnect without `COMMIT`, rolling back its own open transaction as a side effect. If an intermediate has `has_writes=true`, that uncommitted work is silently discarded. The Playbook surfaces this cascade risk explicitly in the `reason` field of the termination step proposal, giving the operator full visibility before they approve. An unguided agent terminates without disclosing this. The Playbook has `approval_mode: manual` and is never auto-chained: the operator always invokes it explicitly after reviewing the triage findings. See [agent_approve execution mode](#agent_approve-execution-mode) below for the full lifecycle.
+The **Transaction Lock Chain — Terminate Root Blocker** Playbook (`pbs_lock_chain_remediate`) is the remediation counterpart to `pbs_lock_chain_triage`. Where the triage Playbook runs autonomously (agent mode) to diagnose, this Playbook uses `execution_mode: agent_approve` to execute termination under explicit per-step operator approval. The LLM proposes one action at a time across a four-step sequence — map the full chain (`get_blocking_queries`), inspect the root AND each intermediate for `has_writes` (`get_session_info`), terminate the root only (`terminate_connection`), and verify the cascade cleared (`get_blocking_queries` again) — and the operator approves each step before it executes. A critical safety property: in a multi-level chain, terminating the root releases its lock and causes each intermediate session to complete and disconnect without `COMMIT`, rolling back its own open transaction as a side effect. If an intermediate has `has_writes=true`, that uncommitted work is silently discarded. The Playbook surfaces this cascade risk explicitly in the `reason` field of the termination step proposal, giving the operator full visibility before they approve. An unguided agent terminates without disclosing this. The Playbook has `approval_mode: manual` and is never auto-chained: the operator always invokes it explicitly after reviewing the triage findings. See [agent_approve execution mode](#agent_approve-execution-mode) below for the full lifecycle.
 
 The "Database Down" Playbooks form an escalating triage graph for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, was OOM-killed, or hit a WAL disk full condition, then revises the root-cause hypothesis accordingly.
 
@@ -87,7 +87,7 @@ The "Database Down" Playbooks form an escalating triage graph for Docker-hosted 
 
 The **WAL Accumulation — Stale Replication Slot** Playbook (`pbs_wal_stale_slot`) handles the complementary scenario where the database is still up but `pg_wal` is growing without bound. It differs from `pbs_wal_disk_full` in that the database is reachable — the agent works through a four-hypothesis elimination tree (archive failure → inactive slot → long transaction → write volume) rather than reading crash logs. Dropping the slot requires `approval_mode: manual` since it permanently removes the replica's reconnection point.
 
-`pbs_db_restart_action`, `pbs_wal_disk_full`, `pbs_wal_stale_slot`, and `pbs_idle_blocker_remediate` all have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
+`pbs_db_restart_action`, `pbs_wal_disk_full`, `pbs_wal_stale_slot`, and `pbs_lock_chain_remediate` all have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
 
 Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 
@@ -854,7 +854,7 @@ Use `agent_approve` for Playbooks that perform **mutating** operations — proce
 
 ```bash
 # Find the playbook ID for the remediation series
-PB=$(curl -s "http://localhost:8080/api/v1/fleet/playbooks?series_id=pbs_idle_blocker_remediate" \
+PB=$(curl -s "http://localhost:8080/api/v1/fleet/playbooks?series_id=pbs_lock_chain_remediate" \
   | jq -r '.playbooks[0].playbook_id')
 
 # Start the run
@@ -936,7 +936,7 @@ CONN="postgres://prod-db.example.com/app"
 OPERATOR="alice@example.com"
 
 # Find the active remediation playbook
-PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_idle_blocker_remediate" \
+PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_lock_chain_remediate" \
   | jq -r '.playbooks[0].playbook_id')
 
 # Start the run
@@ -987,15 +987,61 @@ done
 
 ### Automated approval (CI and fault tests)
 
-In CI or automated test harnesses, pass `resolved_by: "faulttest"` and approve each step automatically. The `faulttest` CLI does this when `--approval-mode force` is set:
+In CI or automated test harnesses, `--approval-mode force` auto-approves every step and logs each proposal before executing:
 
 ```bash
-go run ./testing/cmd/faulttest \
-  --gateway http://localhost:8080 --api-key $KEY \
-  --fault db-idle-in-tx-blocker --remediate --approval-mode force
+go run ./testing/cmd/faulttest run \
+  --ids db-tx-lock-chain-blocker --external --conn faulttest-db \
+  --db-agent http://localhost:8080 --via-gateway --gateway http://localhost:8080 \
+  --infra-config ~/cassiopeia/claude/infrastructure.json \
+  --remediate --approval-mode force
 ```
 
-`force` auto-approves every step and walks the full loop to completion. `manual` pauses at each step and asks for confirmation in the terminal (equivalent to the shell loop above).
+Each step appears as a structured log line before execution:
+
+```
+level=INFO msg="agent_approve: pending step" step_index=5 tool=terminate_connection \
+  pid=92612 reason="Root blocker (blocking_pid=NULL, has_writes=true, 36s idle). \
+  Terminating root will cascade to roll back session 92621 (has_writes=true, 39s idle) \
+  — operator should confirm this work can be discarded before approving."
+```
+
+The loop completes without pausing. `force` chains through all playbooks including those with `approval_mode: manual`, making it suitable for unattended regression runs where the safety story is tested rather than exercised.
+
+### Interactive approval (human-in-the-loop demo)
+
+`--approval-mode manual` turns the approval loop into a live terminal prompt. For each proposed step, `faulttest` prints the tool, its logical arguments (connection plumbing stripped), and the full reason field — then waits for `y/n` before sending `/proceed`:
+
+```bash
+go run ./testing/cmd/faulttest run \
+  --ids db-tx-lock-chain-blocker --external --conn faulttest-db \
+  --db-agent http://localhost:8080 --via-gateway --gateway http://localhost:8080 \
+  --infra-config ~/cassiopeia/claude/infrastructure.json \
+  --remediate --approval-mode manual
+```
+
+The read-only steps (`get_blocking_queries`, `get_session_info`) appear first. The number of `get_session_info` steps varies — the step proposer inspects every session it classifies as an intermediate before terminating, so a longer chain produces more inspection steps. The `terminate_connection` step always comes last before the verification. At that step the output looks like:
+
+```
+────────────────────────────────────────────────────────────────
+  Step N — terminate_connection
+
+  pid:       97617
+  reason:    Root blocker (blocking_pid=NULL, idle in transaction).
+             Root has_writes=true, idle_secs=40. WARNING:
+             terminating root will cascade to roll back session
+             97618 (has_writes=true, 43s idle) — operator should
+             confirm this work can be discarded before approving.
+             Session 97619 (has_writes=false, read-only) and 97620
+             (has_writes=false, read-only) will rollback instantly
+             with no data loss.
+────────────────────────────────────────────────────────────────
+  Approve? [y/n]:
+```
+
+The `reason` field is what the Playbook guidance instructs the LLM to produce: before the operator sees a destructive action, they see exactly why it is being proposed and what side effects to expect. If the operator types `n`, `faulttest` sends `resolution: "denied"` to `/proceed` and the gateway marks the run abandoned — nothing is executed.
+
+This is the contrast with Crystal Ball mode: an unguided agent would either terminate silently (if running autonomously) or, as observed in testing, present `cancel_query` as "Option 1 (Immediate)" with an incorrect description of its effect. The guided `agent_approve` path surfaces the correct action, its reason, and its cascade risk — all before the operator commits.
 
 ### Step tracking
 
@@ -1104,11 +1150,11 @@ The `agent_approve` mode naturally pairs with an `agent`-mode diagnosis Playbook
 1. Run the **diagnosis Playbook** (`execution_mode: agent`, `approval_mode: manual`) — the agent gathers evidence autonomously and returns a structured `DiagnosticReport` with findings. No mutations.
 2. Review the findings. If the agent recommends action, invoke the **remediation Playbook** (`execution_mode: agent_approve`, `approval_mode: manual`) — the gateway proposes one step at a time and you approve each one.
 
-The `pbs_idle_blocker_triage` / `pbs_idle_blocker_remediate` pair demonstrates this pattern:
+The `pbs_lock_chain_triage` / `pbs_lock_chain_remediate` pair demonstrates this pattern:
 
 ```bash
 # 1. Diagnose (autonomous, read-only)
-TRIAGE_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_idle_blocker_triage" \
+TRIAGE_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_lock_chain_triage" \
   | jq -r '.playbooks[0].playbook_id')
 DIAG=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/$TRIAGE_PB/run" \
   -H "Content-Type: application/json" \
@@ -1118,7 +1164,7 @@ echo "$DIAG" | jq -r .text     # agent findings
 TRIAGE_RUN=$(echo "$DIAG" | jq -r .run_id)
 
 # 2. Review — if diagnosis confirms idle-in-tx blocker, proceed to remediation
-REMED_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_idle_blocker_remediate" \
+REMED_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_lock_chain_remediate" \
   | jq -r '.playbooks[0].playbook_id')
 curl -s -X POST "$GW/api/v1/fleet/playbooks/$REMED_PB/run" \
   -H "Content-Type: application/json" \

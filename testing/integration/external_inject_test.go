@@ -49,10 +49,10 @@ var externalInjectCases = map[string]string{
 		SELECT count(*) FROM pg_replication_slots
 		WHERE slot_name = 'old_standby' AND active = false`,
 
-	// After injecting the idle-in-tx blocker, the test table must exist and
+	// After injecting the lock chain fault, the test table must exist and
 	// have its seed row (psql errors if the relation is missing, which would
 	// indicate the inject shell_exec failed before creating the table).
-	"db-idle-in-tx-blocker": `
+	"db-tx-lock-chain-blocker": `
 		SELECT 1 FROM _faulttest_lock_chain WHERE id = 1`,
 }
 

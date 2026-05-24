@@ -568,8 +568,8 @@ failures:
       verify_timeout: "60s"
     timeout: 90s
 
-  - id: db-idle-in-tx-blocker
-    name: "Idle-in-transaction root blocker — two-level lock chain"
+  - id: db-tx-lock-chain-blocker
+    name: "Transaction lock chain — active root blocker (pg_sleep trap)"
     category: database
     severity: high
     description: >
@@ -640,7 +640,7 @@ failures:
           DROP TABLE IF EXISTS _faulttest_lock_chain;
           DROP TABLE IF EXISTS _faulttest_lock_chain2;
         "
-    diagnosis_playbook_series_id: pbs_idle_blocker_triage
+    diagnosis_playbook_series_id: pbs_lock_chain_triage
     prompt: >
       Several database sessions appear to be blocked and not making progress.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -672,7 +672,7 @@ failures:
           and row-lock persist), or notes the cascade risk (terminating A will roll
           back B's uncommitted transaction as a side effect).
     remediation:
-      playbook_id: pbs_idle_blocker_remediate
+      playbook_id: pbs_lock_chain_remediate
       verify_sql: >
         SELECT count(*) = 0 FROM pg_stat_activity
         WHERE (query LIKE '%_faulttest_lock_chain%' OR application_name = '_faulttest_lock_chain_root')

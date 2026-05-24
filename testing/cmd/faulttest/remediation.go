@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"helpdesk/internal/infra"
@@ -143,11 +146,12 @@ type approveRunResponse struct {
 }
 
 type approveRunStep struct {
-	Index  int            `json:"index"`
-	Agent  string         `json:"agent"`
-	Tool   string         `json:"tool"`
-	Args   map[string]any `json:"args"`
-	Reason string         `json:"reason,omitempty"`
+	Index       int            `json:"index"`
+	Agent       string         `json:"agent"`
+	Tool        string         `json:"tool"`
+	Args        map[string]any `json:"args"`
+	Reason      string         `json:"reason,omitempty"`
+	ActionClass string         `json:"action_class,omitempty"`
 }
 
 func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error {
@@ -202,26 +206,43 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 }
 
 // runApprovalLoop drives the agent_approve step-by-step loop.
-// For --approval-mode force/auto it auto-approves each step.
-// For --approval-mode manual it logs the step and always auto-approves (interactive UI TBD).
+// --approval-mode force:  auto-approves every step, logs via slog.
+// --approval-mode review: auto-approves read-only steps, prompts for write/destructive.
+// --approval-mode manual: prompts for every step.
 func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResponse) error {
 	current := initial
 	const maxSteps = 20
+	mode := r.cfg.ApprovalMode
 
 	for i := 0; i < maxSteps && current.Status == "pending_approval"; i++ {
 		if current.Step == nil {
 			return fmt.Errorf("approval loop: pending_approval response has no step")
 		}
 
-		slog.Info("agent_approve: pending step",
-			"step_index", current.Step.Index,
-			"tool", current.Step.Tool,
-			"args", current.Step.Args,
-			"reason", current.Step.Reason,
-			"approval_id", current.ApprovalID,
-		)
+		needsPrompt := mode == "manual" ||
+			(mode == "review" && current.Step.ActionClass != "read")
 
-		next, err := r.proceedStep(ctx, current.RunID, current.Step.Index)
+		resolution := "approved"
+		if needsPrompt {
+			approved, err := r.promptStepApproval(current.Step)
+			if err != nil {
+				return fmt.Errorf("prompt: %w", err)
+			}
+			if !approved {
+				resolution = "denied"
+				fmt.Println("  Denied. Sending denial to gateway...")
+			}
+		} else {
+			slog.Info("agent_approve: pending step",
+				"step_index", current.Step.Index,
+				"tool", current.Step.Tool,
+				"action_class", current.Step.ActionClass,
+				"reason", current.Step.Reason,
+				"approval_id", current.ApprovalID,
+			)
+		}
+
+		next, err := r.proceedStep(ctx, current.RunID, current.Step.Index, resolution)
 		if err != nil {
 			return fmt.Errorf("proceed step %d: %w", current.Step.Index, err)
 		}
@@ -229,7 +250,11 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResp
 	}
 
 	if current.Status == "complete" {
-		slog.Info("agent_approve: remediation complete", "summary", current.Summary)
+		if mode == "manual" || mode == "review" {
+			fmt.Printf("\n  Remediation complete: %s\n\n", current.Summary)
+		} else {
+			slog.Info("agent_approve: remediation complete", "summary", current.Summary)
+		}
 		return nil
 	}
 	if current.Status == "denied" {
@@ -238,10 +263,94 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResp
 	return fmt.Errorf("approval loop ended with unexpected status: %s", current.Status)
 }
 
-// proceedStep calls POST /api/v1/fleet/playbook-runs/{runID}/proceed with auto-approval.
-func (r *Remediator) proceedStep(ctx context.Context, runID string, stepIndex int) (*approveRunResponse, error) {
+// promptStepApproval prints a proposed step to stdout and reads y/n from the
+// controlling terminal (/dev/tty). Using /dev/tty rather than os.Stdin avoids
+// reading a stale EOF left on fd 0 by background bash processes spawned during
+// injection (exec.Command("bash", "-s") with a pipe stdin that closes on exit).
+func (r *Remediator) promptStepApproval(step *approveRunStep) (bool, error) {
+	const width = 64
+	sep := strings.Repeat("─", width)
+
+	fmt.Printf("\n%s\n", sep)
+	fmt.Printf("  Step %d — %s\n", step.Index, step.Tool)
+
+	// Show logical args (strip connection plumbing).
+	if display := logicalArgs(step.Args); len(display) > 0 {
+		fmt.Println()
+		keys := make([]string, 0, len(display))
+		for k := range display {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %-10s %v\n", k+":", display[k])
+		}
+	}
+
+	if step.Reason != "" {
+		fmt.Println()
+		// Word-wrap reason at width-4 (leave room for the "  " indent).
+		for _, line := range wrapText(step.Reason, width-4) {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+	fmt.Printf("%s\n", sep)
+	fmt.Print("  Approve? [y/n]: ")
+
+	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+	if err != nil {
+		tty = os.Stdin // fallback for non-Unix or when no controlling terminal
+	} else {
+		defer tty.Close()
+	}
+	reader := bufio.NewReader(tty)
+	answer, err := reader.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	return answer == "y" || answer == "yes", nil
+}
+
+// logicalArgs returns a copy of args with connection plumbing keys removed.
+func logicalArgs(args map[string]any) map[string]any {
+	skip := map[string]bool{
+		"connection_string": true,
+		"host": true, "port": true, "dbname": true,
+		"user": true, "password": true,
+		"reason": true, // shown separately via step.Reason
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		if !skip[k] {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// wrapText breaks s into lines of at most width runes, splitting on spaces.
+func wrapText(s string, width int) []string {
+	var lines []string
+	for len(s) > width {
+		cut := strings.LastIndex(s[:width], " ")
+		if cut <= 0 {
+			cut = width
+		}
+		lines = append(lines, s[:cut])
+		s = strings.TrimLeft(s[cut:], " ")
+	}
+	if s != "" {
+		lines = append(lines, s)
+	}
+	return lines
+}
+
+// proceedStep calls POST /api/v1/fleet/playbook-runs/{runID}/proceed.
+// resolution is "approved" or "denied".
+func (r *Remediator) proceedStep(ctx context.Context, runID string, stepIndex int, resolution string) (*approveRunResponse, error) {
 	proceedBody, _ := json.Marshal(map[string]any{
-		"resolution":        "approved",
+		"resolution":        resolution,
 		"resolved_by":       "faulttest",
 		"step_index":        stepIndex,
 		"connection_string": r.cfg.ConnStr,

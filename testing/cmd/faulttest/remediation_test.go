@@ -317,7 +317,7 @@ func TestTriggerPlaybook_AgentApprove_FullLoop(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_idle_blocker_remediate"); err != nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_remediate"); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if proceedCount != 1 {
@@ -335,7 +335,7 @@ func TestProceedStep_SendsCorrectPayload(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	resp, err := r.proceedStep(context.Background(), "plr_payload01", 3)
+	resp, err := r.proceedStep(context.Background(), "plr_payload01", 3, "approved")
 	if err != nil {
 		t.Fatalf("proceedStep: %v", err)
 	}

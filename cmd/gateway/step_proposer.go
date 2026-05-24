@@ -17,11 +17,12 @@ import (
 
 // StepProposal is the structured output of the re-planning LLM for one action.
 type StepProposal struct {
-	Index  int            `json:"index"`
-	Agent  string         `json:"agent"`
-	Tool   string         `json:"tool"`
-	Args   map[string]any `json:"args"`
-	Reason string         `json:"reason,omitempty"`
+	Index       int            `json:"index"`
+	Agent       string         `json:"agent"`
+	Tool        string         `json:"tool"`
+	Args        map[string]any `json:"args"`
+	Reason      string         `json:"reason,omitempty"`
+	ActionClass string         `json:"action_class,omitempty"` // "read", "write", "destructive"
 }
 
 // stepProposerResult is the raw LLM output before index assignment.
@@ -103,12 +104,17 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 	}
 
 	nextIdx := len(history) + 1
+	actionClass := string(audit.ToolClassification[result.Tool])
+	if actionClass == "" {
+		actionClass = string(audit.ActionUnknown)
+	}
 	proposal := &StepProposal{
-		Index:  nextIdx,
-		Agent:  result.Agent,
-		Tool:   result.Tool,
-		Args:   result.Args,
-		Reason: result.Reason,
+		Index:       nextIdx,
+		Agent:       result.Agent,
+		Tool:        result.Tool,
+		Args:        result.Args,
+		Reason:      result.Reason,
+		ActionClass: actionClass,
 	}
 	if proposal.Agent == "" {
 		proposal.Agent = "database"

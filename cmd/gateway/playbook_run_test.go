@@ -442,8 +442,8 @@ func mockAuditdPlaybookAndRun(t *testing.T, pb *audit.Playbook, run *audit.Playb
 func TestHandlePlaybookRun_AgentApproveMode(t *testing.T) {
 	pb := &audit.Playbook{
 		PlaybookID:    "pb_approve01",
-		SeriesID:      "pbs_idle_blocker_remediate",
-		Name:          "Idle-in-Transaction Blocker — Terminate Root Blocker",
+		SeriesID:      "pbs_lock_chain_remediate",
+		Name:          "Transaction Lock Chain — Terminate Root Blocker",
 		Guidance:      "Step 1: terminate_connection on root blocker PID.",
 		ExecutionMode: "agent_approve",
 		IsActive:      true,
