@@ -138,11 +138,12 @@ func (r *Remediator) resolvePlaybookID(ctx context.Context, seriesID string) (st
 
 // approveRunResponse mirrors the gateway's ApproveRunResponse for agent_approve playbooks.
 type approveRunResponse struct {
-	RunID      string            `json:"run_id"`
-	Status     string            `json:"status"` // "pending_approval" | "complete" | "denied"
-	Step       *approveRunStep   `json:"step,omitempty"`
-	ApprovalID string            `json:"approval_id,omitempty"`
-	Summary    string            `json:"summary,omitempty"`
+	RunID      string          `json:"run_id"`
+	Status     string          `json:"status"` // "pending_approval" | "complete" | "denied"
+	Step       *approveRunStep `json:"step,omitempty"`
+	ApprovalID string          `json:"approval_id,omitempty"`
+	Summary    string          `json:"summary,omitempty"`
+	Warnings   []string        `json:"warnings,omitempty"`
 }
 
 type approveRunStep struct {
@@ -201,6 +202,11 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 		return r.runApprovalLoop(ctx, runResp)
 	}
 
+	// Surface any gateway warnings (e.g. approval_mode clamped) for agent-mode runs.
+	for _, w := range runResp.Warnings {
+		fmt.Fprintf(os.Stderr, "WARNING: %s\n", w)
+	}
+
 	slog.Info("playbook triggered", "id", playbookID, "status", resp.StatusCode)
 	return nil
 }
@@ -210,6 +216,10 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 // --approval-mode review: auto-approves read-only steps, prompts for write/destructive.
 // --approval-mode manual: prompts for every step.
 func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResponse) error {
+	for _, w := range initial.Warnings {
+		fmt.Fprintf(os.Stderr, "WARNING: %s\n", w)
+	}
+
 	current := initial
 	const maxSteps = 20
 	mode := r.cfg.ApprovalMode
