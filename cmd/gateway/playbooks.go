@@ -121,6 +121,45 @@ var terminalEscalations = map[string]string{
 	"requires_operator_approval": "This action requires explicit operator approval before it can proceed.",
 }
 
+// approvalModeRank defines permissiveness order for approval modes (higher = less restrictive).
+var approvalModeRank = map[string]int{
+	"":        0,
+	"manual":  0,
+	"review":  1,
+	"session": 2,
+	"auto":    3,
+	"force":   4,
+}
+
+// enforceApprovalOverride clamps *requestedMode back to playbookMode when the target
+// database restricts approval overrides and the caller lacks a required role.
+// Appends a warning to *warnings when clamping occurs; otherwise is a no-op.
+func (g *Gateway) enforceApprovalOverride(
+	principal identity.ResolvedPrincipal,
+	requestedMode *string,
+	playbookMode string,
+	connStr string,
+	warnings *[]string,
+) {
+	if g.infra == nil || approvalModeRank[*requestedMode] <= approvalModeRank[playbookMode] {
+		return
+	}
+	db, _, ok := g.infra.FindDBByConnStr(connStr)
+	if !ok || len(db.ApprovalOverrideRoles) == 0 {
+		return
+	}
+	for _, role := range db.ApprovalOverrideRoles {
+		if principal.HasRole(role) {
+			return
+		}
+	}
+	*warnings = append(*warnings, fmt.Sprintf(
+		"approval_mode clamped to %q: override to %q requires one of roles %v (caller: %s)",
+		playbookMode, *requestedMode, db.ApprovalOverrideRoles, principal.EffectiveID(),
+	))
+	*requestedMode = playbookMode
+}
+
 // approvalContext carries approval mode + session ID through the request context.
 type approvalContext struct {
 	mode      string // "auto" | "session" | "manual" | "force"
@@ -185,13 +224,15 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve effective approval mode: per-run request overrides playbook default.
+	var warnings []string
 	if req.ApprovalMode == "" {
 		req.ApprovalMode = pb.ApprovalMode
 	}
+	principal := authz.PrincipalFromContext(r.Context())
+	g.enforceApprovalOverride(principal, &req.ApprovalMode, pb.ApprovalMode, req.ConnectionString, &warnings)
 
 	// Warn when an agent-mode playbook has no connection_string — the agent
 	// will have no target and will likely ask the operator for one.
-	var warnings []string
 	if pb.ExecutionMode == "agent" && req.ConnectionString == "" {
 		slog.Warn("handlePlaybookRun: agent-mode run has no connection_string", "playbook", pb.SeriesID)
 		warnings = append(warnings, "no connection_string specified — agent will need to ask which database to investigate")

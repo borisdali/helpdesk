@@ -742,6 +742,36 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/r
 
 `force` is intentionally named to make the operator's conscious choice visible in the audit trail. Every tool execution and policy decision event records `approval_mode: force`, so the audit log clearly shows that a human made a deliberate decision to automate the full chain, rather than the system doing it silently.
 
+#### Per-database override restrictions (`approval_override_roles`)
+
+A database entry in `infrastructure.json` can declare which roles are permitted to request an approval mode more permissive than the playbook's own `approval_mode` setting:
+
+```json
+{
+  "db_servers": {
+    "prod-primary": {
+      "name": "Production Primary",
+      "connection_string": "host=prod.internal port=5432 dbname=app user=app",
+      "tags": ["production"],
+      "sensitivity": ["pii"],
+      "approval_override_roles": ["dba_lead", "oncall_senior"]
+    }
+  }
+}
+```
+
+With this configuration: a caller requesting `approval_mode: force` against `prod-primary` must hold the `dba_lead` or `oncall_senior` role. A caller without a matching role is silently **clamped** to the playbook's declared mode (typically `manual`) — the run proceeds, but without the requested override. The response `warnings` array records what was requested, what it was clamped to, and the caller's identity:
+
+```json
+{
+  "warnings": [
+    "approval_mode clamped to \"manual\": override to \"force\" requires one of roles [dba_lead oncall_senior] (caller: bob@example.com)"
+  ]
+}
+```
+
+Databases with no `approval_override_roles` (e.g., dev or test databases) are unrestricted — any caller may pass any approval mode, as before. The restriction only applies when a caller requests a mode **more permissive** than the playbook's declared mode; requesting `manual` on a `manual` playbook is never an override and is never gated.
+
 #### Creating an approval session (`session` mode)
 
 Create a session token on auditd before starting the run. The token specifies which action classes it covers and for how long:

@@ -68,7 +68,7 @@ Diagnostic Result:   [PASS] score=73% (keywords=100% tools=66% judge=67%)
 
 === Fault Test Report: b25c8e6f ===
 
-[PASS] Idle-in-transaction root blocker — two-level lock chain (db-tx-lock-chain-blocker) - score: 73% ⚠ [crystal-ball] [judge: 67%]
+[PASS] Transaction Lock Chain Triage / Terminate Root Blocker — two-level lock chain (db-tx-lock-chain-blocker) - score: 73% ⚠ [crystal-ball] [judge: 67%]
        Keywords: 100% | Tools: 66% | Judge: 67%
        Reasoning: "Agent correctly identified PID 88455 as the root blocker and the two-level lock chain structure, but failed to recognize the critical trap that cancel_query is ineffective (it interrupts pg_sleep but leaves the transaction and row-lock persisted in idle-in-transaction-aborted state), and incorrectly presented cancel_query as a viable immediate solution rather than emphasizing that only terminate_connection on PID 88455 fully resolves the cascade."
 
@@ -89,7 +89,7 @@ Report written to ./faulttest-b25c8e6f.json
   "results": [
     {
       "failure_id": "db-tx-lock-chain-blocker",
-      "failure_name": "Idle-in-transaction root blocker — two-level lock chain",
+      "failure_name": "Transaction Lock Chain Triage / Terminate Root Blocker — two-level lock chain",
       "category": "database",
       "score": 0.7346666666666668,
       "passed": true,
@@ -191,9 +191,6 @@ To run the normal, guided, structured aiHelpDesk diagnosis and remediation Cryst
 
 ```
 [boris@ ~/helpdesk]$ date; time go run ./testing/cmd/faulttest run \
->       --ids db-checkpoint-warning \
-
-[boris@ ~/helpdesk]$ date; go run ./testing/cmd/faulttest run     \
   --ids db-tx-lock-chain-blocker \
   --db-agent http://localhost:8080 \
   --via-gateway --gateway http://localhost:8080 \
@@ -205,7 +202,7 @@ Sat May 23 13:41:15 EDT 2026
 time=2026-05-23T13:41:18.212-04:00 level=INFO msg="using model" vendor=anthropic model=claude-haiku-4-5-20251001
 time=2026-05-23T13:41:18.212-04:00 level=INFO msg="LLM judge enabled" vendor=anthropic model=claude-haiku-4-5-20251001
 
---- Testing: Idle-in-transaction root blocker — two-level lock chain (db-tx-lock-chain-blocker) ---
+--- Testing: Transaction Lock Chain Triage / Terminate Root Blocker — two-level lock chain (db-tx-lock-chain-blocker) ---
 time=2026-05-23T13:41:18.212-04:00 level=INFO msg="injecting failure" id=db-tx-lock-chain-blocker type=shell_exec mode=external
 time=2026-05-23T13:41:21.320-04:00 level=INFO msg="shell_exec completed" output="CREATE TABLE\nCREATE TABLE\nINSERT 0 1\nINSERT 0 1\nInjected: two-level lock chain — root A (active/pg_sleep on chain), intermediate B (chain2 + blocked on      chain), leaves C/D (blocked on chain2)"
 time=2026-05-23T13:41:21.748-04:00 level=INFO msg="sending prompt to agent via playbook" failure=db-tx-lock-chain-blocker series_id=pbs_lock_chain_triage playbook_id=pb_5bebf0cc gateway=http://localhost:8080
@@ -226,7 +223,7 @@ Remediation Result:  [PASS] score=100% (0.1s, playbook)
 Overall Result:      [PASS] score=92%
 
 === Fault Test Report: 74b503c0 ===
-[PASS] Idle-in-transaction root blocker — two-level lock chain (db-tx-lock-chain-blocker) - score: 86% [judge: 67%]
+[PASS] Transaction Lock Chain Triage / Terminate Root Blocker — two-level lock chain (db-tx-lock-chain-blocker) - score: 86% [judge: 67%]
        Keywords: 100% | Tools: 100% | Judge: 67%
        Remediation: 100% (0.1s, playbook) | Overall: 92%
        Reasoning: "Agent correctly identified PID 92612 as the root blocker and the two-level lock chain structure, but failed to explicitly address why cancel_query is ineffective (the critical trap mentioned in expected diagnosis) and did  not emphasize that terminate_connection is the only solution—the statement 'cancel_query could interrupt the pg_sleep itself, the locks would persist' is present but buried and not clearly positioned as a reason to reject cancel_query as a   primary recommendation."
@@ -245,7 +242,7 @@ Report written to ./faulttest-74b503c0.json
   "results": [
     {
       "failure_id": "db-tx-lock-chain-blocker",
-      "failure_name": "Idle-in-transaction root blocker — two-level lock chain",
+      "failure_name": "Transaction Lock Chain Triage / Terminate Root Blocker — two-level lock chain",
       "category": "database",
       "score": 0.8680000000000001,
       "passed": true,
@@ -283,48 +280,6 @@ Report written to ./faulttest-74b503c0.json
   }
 }
 --- END FAULTTEST REPORT JSON ---
-```
-
-Also note the structured way of presenting the diagnosis: the step-by-step analysis, the list of hypotheses supported by evidence and the confidence score, the reason for rejecting the alternative hypotheses and choosing one as the root cause (there happened to be no escalation section in this particular example, but you'll see it in many others where the RCA is inconclusive).
-
-## Diagnosis comparison: unconstrained Crystal Ball vs. guided, playbook driven aiHelpDesk
-
-```
-  ┌────────────────────────────────┬───────┬───────┬────────────────────────────────┐
-  │              Mode              │ Score │ Judge │           Root Cause           │
-  ├────────────────────────────────┼───────┼───────┼────────────────────────────────┤
-  │ Guided (playbook)              │ 100%  │ 100%  │ bgwriter_lru_maxpages=2 ✓      │
-  ├────────────────────────────────┼───────┼───────┼────────────────────────────────┤
-  │ Crystal Ball (Gemini unguided) │ 60%   │ 0%    │ checkpoint_warning threshold ✗ │
-  └────────────────────────────────┴───────┴───────┴────────────────────────────────┘
-```
-
-
-
-
-
-## Running on K8s (via a Helm Chart)
-
-The examples above, both via the structured aiHelpDesk guided playbook and via Crystal Ball, were done from the code source. Here's how the invocation of this fault test looks like on K8s. In the example below I ran the same `db-tx-lock-chain-blocker` failure scenario against the CNPG cluster called `pg-cluster-minikube` deployed in a `ns=db` on Minikube:
-
-```
-helm upgrade helpdesk . --namespace helpdesk-system \
-  --set faulttest.enabled=true \
-  --set faulttest.ids=db-tx-lock-chain-blocker \
-  --set faulttest.judge=true \
-  --set faulttest.viaGateway=true \
-  --set faulttest.gatewayAPIKeySecret=<your API key> \
-  --set faulttest.conn=<a fully qualified conn string or an alias from your infra.json file> \
-  --set 'infrastructure.db_servers.pg-cluster-minikube.connection_string=host=pg-cluster-minikube-rw.db.svc.cluster.local port=5432 dbname=app user=app' \
-  --set 'infrastructure.db_servers.pg-cluster-minikube.password_env=CNPG_APP_PASSWORD' \
-  --set 'faulttest.extraEnv[0].name=CNPG_APP_PASSWORD' \
-  --set 'faulttest.extraEnv[0]. valueFrom.secretKeyRef.name=pg-cluster-minkube-app' \
-  --set 'faulttest.extraEnv[0].valueFrom.secretKeyRef.key=password' \
-  --set image.pullPolicy=Never \
-  --set image.tag=v0.13.0-a71a4ba \
-  --timeout 15m \
-  --set gateway.crystalBall=true \	<-- that's the setting you want to flip to false (or remove) for the normal, guided aiHelpDesk diagnosis
-  --set faulttest.targetNamespace=db 
 ```
 
 And here's the formatted version for human's comsumption:
@@ -402,7 +357,12 @@ The step proposer is also classifying the chain correctly. It found 92622 as ano
 The judge 67% diagnosis is slightly unfair because the agent DID say "cancel_query could interrupt the pg_sleep itself, the locks would persist if the session remains open" but the judge called it "buried."
 The judge gave Crystal Ball the same 67% despite Crystal Ball recommending cancel as "Option 1 (Immediate)" with a wrong description. Same score for opposite quality.
 
+Also note the structured way of presenting the diagnosis: the step-by-step analysis, the list of hypotheses supported by evidence and the confidence score, the reason for rejecting the alternative hypotheses and choosing one as the root cause (there happened to be no escalation section in this particular example, but you'll see it in many others where the RCA is inconclusive).
+
+## Diagnosis comparison: unconstrained Crystal Ball vs. guided, structured, playbook driven aiHelpDesk
+
 The numbers that matter for the comparison:
+
 ```
   ┌─────────────────────────────┬──────────────┬─────────────┐
   │                             │ Crystal Ball │   Guided    │
@@ -442,6 +402,29 @@ And the terminate_connection reason field is exactly what the playbook guidance 
 That's the operator-facing approval request. Everything the human needs to make an informed decision, in the right format, before anything is executed.
 
 
+## Running on K8s (via a Helm Chart)
+
+The examples above, both via the structured aiHelpDesk guided playbook and via Crystal Ball, were done from the code source. Here's how the invocation of this fault test looks like on K8s. In the example below I ran the same `db-tx-lock-chain-blocker` failure scenario against the CNPG cluster called `pg-cluster-minikube` deployed in a `ns=db` on Minikube:
+
+```
+helm upgrade helpdesk . --namespace helpdesk-system \
+  --set faulttest.enabled=true \
+  --set faulttest.ids=db-tx-lock-chain-blocker \
+  --set faulttest.judge=true \
+  --set faulttest.viaGateway=true \
+  --set faulttest.gatewayAPIKeySecret=<your API key> \
+  --set faulttest.conn=<a fully qualified conn string or an alias from your infra.json file> \
+  --set 'infrastructure.db_servers.pg-cluster-minikube.connection_string=host=pg-cluster-minikube-rw.db.svc.cluster.local port=5432 dbname=app user=app' \
+  --set 'infrastructure.db_servers.pg-cluster-minikube.password_env=CNPG_APP_PASSWORD' \
+  --set 'faulttest.extraEnv[0].name=CNPG_APP_PASSWORD' \
+  --set 'faulttest.extraEnv[0]. valueFrom.secretKeyRef.name=pg-cluster-minkube-app' \
+  --set 'faulttest.extraEnv[0].valueFrom.secretKeyRef.key=password' \
+  --set image.pullPolicy=Never \
+  --set image.tag=v0.13.0-a71a4ba \
+  --timeout 15m \
+  --set gateway.crystalBall=true \	<-- that's the setting you want to flip to false (or remove) for the normal, guided aiHelpDesk diagnosis
+  --set faulttest.targetNamespace=db 
+```
 
 ## Reproducability and differences in scoring
 It's worth pointing out that the original listings and the comparison table were obtained by running the tests from the source against a PostgreSQL 16 database server running inside a Docker container and diagnosed by Haiku Anthropic models use by both the agents and the judge. In testing, we found that the version of PostgreSQL, the differences in models, perhaps the hosting platform, but most importantly the "mood" of the models affect the diagnosis significantly. But only the Crystal Ball diagnosis. 

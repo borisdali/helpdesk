@@ -1543,3 +1543,99 @@ func serveFakeToolEvents(t *testing.T, events []audit.Event) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// ── enforceApprovalOverride ───────────────────────────────────────────────────
+
+func TestEnforceApprovalOverride_NoInfra(t *testing.T) {
+	g := &Gateway{infra: nil}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(identity.ResolvedPrincipal{}, &mode, "manual", "host=db", &warnings)
+	if mode != "force" {
+		t.Errorf("mode changed without infra config: got %q", mode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestEnforceApprovalOverride_NoRestriction(t *testing.T) {
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"dev-db": {ConnectionString: "host=localhost port=5432 dbname=dev"},
+		},
+	}}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(identity.ResolvedPrincipal{}, &mode, "manual", "host=localhost port=5432 dbname=dev", &warnings)
+	if mode != "force" {
+		t.Errorf("mode should not change when no approval_override_roles set: got %q", mode)
+	}
+}
+
+func TestEnforceApprovalOverride_CallerHasRole(t *testing.T) {
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead"},
+			},
+		},
+	}}
+	principal := identity.ResolvedPrincipal{UserID: "alice", Roles: []string{"dba_lead"}}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(principal, &mode, "manual", "host=prod port=5432 dbname=app", &warnings)
+	if mode != "force" {
+		t.Errorf("mode should not change when caller has required role: got %q", mode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestEnforceApprovalOverride_CallerLacksRole(t *testing.T) {
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead", "oncall_senior"},
+			},
+		},
+	}}
+	principal := identity.ResolvedPrincipal{UserID: "bob", Roles: []string{"sre"}}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(principal, &mode, "manual", "host=prod port=5432 dbname=app", &warnings)
+	if mode != "manual" {
+		t.Errorf("mode should be clamped to 'manual': got %q", mode)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "clamped") {
+		t.Errorf("warning should mention 'clamped': %q", warnings[0])
+	}
+}
+
+func TestEnforceApprovalOverride_NotAnOverride(t *testing.T) {
+	// Requesting 'manual' against a playbook that is also 'manual' — not an override.
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead"},
+			},
+		},
+	}}
+	principal := identity.ResolvedPrincipal{UserID: "bob", Roles: []string{"sre"}}
+	mode := "manual"
+	var warnings []string
+	g.enforceApprovalOverride(principal, &mode, "manual", "host=prod port=5432 dbname=app", &warnings)
+	if mode != "manual" {
+		t.Errorf("mode should be unchanged: got %q", mode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}

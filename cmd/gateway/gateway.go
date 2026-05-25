@@ -321,6 +321,8 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/governance/events/{eventID}", auth("GET /api/v1/governance/events/{eventID}", g.handleGovernanceEvent))
 	mux.HandleFunc("GET /api/v1/governance/approvals/pending", auth("GET /api/v1/governance/approvals/pending", g.handleGovernanceApprovalsPending))
 	mux.HandleFunc("GET /api/v1/governance/approvals", auth("GET /api/v1/governance/approvals", g.handleGovernanceApprovals))
+	mux.HandleFunc("POST /api/v1/governance/approvals/{approvalID}/approve", auth("POST /api/v1/governance/approvals/{approvalID}/approve", g.handleGovernanceApprovalApprove))
+	mux.HandleFunc("POST /api/v1/governance/approvals/{approvalID}/deny", auth("POST /api/v1/governance/approvals/{approvalID}/deny", g.handleGovernanceApprovalDeny))
 	mux.HandleFunc("GET /api/v1/governance/verify", auth("GET /api/v1/governance/verify", g.handleGovernanceVerify))
 	mux.HandleFunc("GET /api/v1/governance/journeys", auth("GET /api/v1/governance/journeys", g.handleGovernanceJourneys))
 	mux.HandleFunc("GET /api/v1/governance/govbot/runs", auth("GET /api/v1/governance/govbot/runs", g.handleGovernanceGovbotRuns))
@@ -858,6 +860,16 @@ func (g *Gateway) handleGovernanceApprovalsPending(w http.ResponseWriter, r *htt
 	g.proxyGovernanceRequest(w, r, "/v1/approvals/pending")
 }
 
+func (g *Gateway) handleGovernanceApprovalApprove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("approvalID")
+	g.proxyGovernanceRequest(w, r, "/v1/approvals/"+id+"/approve")
+}
+
+func (g *Gateway) handleGovernanceApprovalDeny(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("approvalID")
+	g.proxyGovernanceRequest(w, r, "/v1/approvals/"+id+"/deny")
+}
+
 func (g *Gateway) handleGovernanceVerify(w http.ResponseWriter, r *http.Request) {
 	g.proxyGovernanceRequest(w, r, "/v1/verify")
 }
@@ -1094,11 +1106,14 @@ func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request,
 		targetURL += "?" + q
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
 	if err != nil {
 		slog.Error("failed to build governance request", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		req.Header.Set("Content-Type", ct)
 	}
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)

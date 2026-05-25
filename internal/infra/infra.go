@@ -19,8 +19,9 @@ type DBServer struct {
 	VMName           string   `json:"vm_name,omitempty"`
 	ContainerName    string   `json:"container_name,omitempty"` // container name when VM.Runtime is docker|podman
 	SystemdUnit      string   `json:"systemd_unit,omitempty"`   // unit name when VM.Runtime is ""
-	Tags             []string `json:"tags,omitempty"`           // Tags for policy matching (e.g., "production", "staging")
-	Sensitivity      []string `json:"sensitivity,omitempty"`    // Sensitivity classes (e.g., "pii", "critical")
+	Tags                 []string `json:"tags,omitempty"`                   // Tags for policy matching (e.g., "production", "staging")
+	Sensitivity          []string `json:"sensitivity,omitempty"`            // Sensitivity classes (e.g., "pii", "critical")
+	ApprovalOverrideRoles []string `json:"approval_override_roles,omitempty"` // Roles allowed to request a less restrictive approval_mode than the playbook declares. Empty = unrestricted.
 }
 
 // ResolvedConnectionString returns ConnectionString with the password appended when
@@ -163,6 +164,32 @@ func connEndpoint(connStr string) string {
 		ep += "/" + dbname
 	}
 	return ep
+}
+
+// FindDBByConnStr finds the first DBServer whose config key, Name, or ConnectionString
+// matches connStr. Falls back to matching on host:port/dbname endpoint. Returns the
+// server, its config key, and true on success.
+func (c *Config) FindDBByConnStr(connStr string) (*DBServer, string, bool) {
+	if c == nil || connStr == "" {
+		return nil, "", false
+	}
+	for key, db := range c.DBServers {
+		if key == connStr || db.Name == connStr || db.ConnectionString == connStr {
+			d := db
+			return &d, key, true
+		}
+	}
+	ep := connEndpoint(connStr)
+	if ep == "" {
+		return nil, "", false
+	}
+	for key, db := range c.DBServers {
+		if connEndpoint(db.ConnectionString) == ep {
+			d := db
+			return &d, key, true
+		}
+	}
+	return nil, "", false
 }
 
 // Summary returns a human-readable summary of the infrastructure.
