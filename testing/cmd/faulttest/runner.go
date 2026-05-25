@@ -15,6 +15,11 @@ import (
 	"helpdesk/testing/testutil"
 )
 
+// ctxKeyFaultTraceID is the context key for the per-fault X-Trace-ID sent to the gateway.
+// All files in package main can use it; it is defined here because Runner is the first
+// to consume it.
+type ctxKeyFaultTraceID struct{}
+
 // Runner sends prompts to agents and captures responses.
 type Runner struct {
 	cfg *HarnessConfig
@@ -118,6 +123,9 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	req.Header.Set("X-Purpose", r.cfg.GatewayPurpose)
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		req.Header.Set("X-Trace-ID", id)
 	}
 
 	resp, err := client.Do(req)

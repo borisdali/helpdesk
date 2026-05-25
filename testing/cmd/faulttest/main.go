@@ -298,6 +298,11 @@ func cmdRun(args []string) {
 		// Save original conn string for config-override failures.
 		origConn := cfg.ConnStr
 
+		// Per-fault trace ID propagated as X-Trace-ID on all gateway requests so that
+		// tool execution events land under a stable ID vault synthesis can query later.
+		faultTraceID := "faulttest-" + runID + "-" + f.ID
+		faultCtx := context.WithValue(ctx, ctxKeyFaultTraceID{}, faultTraceID)
+
 		// 1. Inject.
 		if err := injector.Inject(ctx, f); err != nil {
 			slog.Error("injection failed", "id", f.ID, "err", err)
@@ -313,7 +318,7 @@ func cmdRun(args []string) {
 
 		// 2. Run agent (record call start for audit window).
 		callStart := time.Now()
-		resp := runner.Run(ctx, f)
+		resp := runner.Run(faultCtx, f)
 
 		if resp.CrystalBall {
 			slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
@@ -360,7 +365,7 @@ func cmdRun(args []string) {
 
 		// 4. Remediation phase (optional).
 		if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
-			remResult := remediator.Remediate(ctx, f)
+			remResult := remediator.Remediate(faultCtx, f)
 			evalResult.RemediationAttempted = true
 			evalResult.RemediationPassed = remResult.Passed
 			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
@@ -376,8 +381,7 @@ func cmdRun(args []string) {
 				// Auto-suggest: when remediation succeeds and a gateway is configured,
 				// synthesize a playbook draft from the fault trace and save it to the vault.
 				if cfg.GatewayURL != "" {
-					traceID := "faulttest-" + runID + "-" + f.ID
-					if pbID, vaultErr := requestVaultDraft(ctx, cfg, traceID, "resolved"); vaultErr != nil {
+					if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
 						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
 					} else if pbID != "" {
 						fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)

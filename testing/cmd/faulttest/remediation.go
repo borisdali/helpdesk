@@ -184,6 +184,9 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
 	}
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		req.Header.Set("X-Trace-ID", id)
+	}
 
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -375,6 +378,9 @@ func (r *Remediator) proceedStep(ctx context.Context, runID string, stepIndex in
 	req.Header.Set("X-Purpose", "remediation")
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		req.Header.Set("X-Trace-ID", id)
 	}
 
 	resp, err := r.client.Do(req)

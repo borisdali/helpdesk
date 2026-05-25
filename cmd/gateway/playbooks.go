@@ -1836,7 +1836,10 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	traceID := audit.NewTraceIDWithPrefix("sa_")
+	traceID := r.Header.Get("X-Trace-ID")
+	if traceID == "" {
+		traceID = audit.NewTraceIDWithPrefix("sa_")
+	}
 	result, toolErr := g.callToolForStep(r.Context(), r, traceID, "remediation", pendingStep.Agent, pendingStep.Tool, args)
 
 	var stepStatus, stepErrStr string
