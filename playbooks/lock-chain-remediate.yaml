@@ -1,6 +1,6 @@
 series_id: pbs_lock_chain_remediate
 name: Transaction Lock Chain — Terminate Root Blocker
-version: "1.2"
+version: "1.4"
 execution_mode: agent_approve
 agent_name: postgres_database_agent
 approval_mode: manual
@@ -31,14 +31,16 @@ guidance: |
   Record the root PID and the PID of every intermediate session.
 
   Step 2: Inspect root AND all intermediate sessions before acting.
-  Call get_session_info on the root blocker PID. Confirm has_open_tx = true.
+  Call get_session_info with pid=<root_pid> (the parameter is named "pid", NOT
+  "pid_filter" — there is no pid_filter parameter). Confirm has_open_tx = true.
   Note state: may be 'idle in transaction' or 'active' (e.g. pg_sleep) — both
   require terminate_connection; cancel_query does not release the lock in either
   case.
   Escalate (do NOT terminate) if root has_writes = true AND idle_secs > 1800
   (30 minutes) — uncommitted DML may be significant.
 
-  Also call get_session_info on each intermediate session. Cascade risk:
+  Also call get_session_info with pid=<intermediate_pid> for each intermediate
+  session. Cascade risk:
   when the root is terminated, its lock is released and each intermediate's
   blocked query completes. The intermediate's connection then exits without
   COMMIT, rolling back its own transaction. If an intermediate has has_writes =
@@ -47,9 +49,10 @@ guidance: |
   arrived and its connection closed normally. The operator must be aware of this
   before approving the termination.
 
-  Step 3: Terminate the root, with explicit cascade disclosure in the reason.
-  Call terminate_connection on the root PID only.
-  The reason field MUST include:
+  Step 3: Terminate the root, with explicit cascade disclosure before acting.
+  Call terminate_connection with pid=<root_pid> only (parameters: connection_string
+  and pid — there is no "reason" parameter on this tool).
+  Before requesting approval, your response text MUST include:
     - Confirmation that this is the root (blocking_pid = NULL)
     - Root's state (idle in transaction or active), has_writes status, idle_secs
     - For each intermediate with has_writes = true: "WARNING: terminating root

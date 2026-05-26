@@ -138,10 +138,16 @@ failures:
         fi
         psql "$FAULTTEST_CONN" -c "
           SELECT pg_terminate_backend(pid)
-          FROM pg_stat_activity
-          WHERE query LIKE '%_faulttest_longquery%'
-            AND state IN ('active', 'idle in transaction')
-            AND pid <> pg_backend_pid();
+          FROM (
+            SELECT pid FROM pg_stat_activity
+            WHERE query LIKE '%_faulttest_longquery%'
+              AND state IN ('active', 'idle in transaction')
+            UNION
+            SELECT l.pid FROM pg_locks l
+            JOIN pg_class c ON c.oid = l.relation
+            WHERE c.relname = '_faulttest_longquery'
+          ) t
+          WHERE pid <> pg_backend_pid();
         "
         psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS _faulttest_longquery;"
     prompt: >
@@ -164,7 +170,7 @@ failures:
         category: "lock_blocking"
         narrative: "The agent should identify a long-running query holding an ACCESS EXCLUSIVE lock that is blocking other sessions from accessing the table, and recommend canceling or terminating the blocking query."
     remediation:
-      playbook_id: pbs_slow_query_triage
+      playbook_id: pbs_connection_triage
       agent_name: database
       agent_prompt: "A long-running query is holding an ACCESS EXCLUSIVE lock on {{connection_string}}, blocking other sessions. Please identify and cancel or terminate the blocking query."
       verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
@@ -452,7 +458,7 @@ failures:
     description: >
       The streaming replica has fallen behind the primary due to paused
       WAL replay, causing stale reads.
-    external_compat: true
+    external_compat: false  # requires a replica; set FAULTTEST_REPLICA_CONN_STR
     inject:
       type: sql
       target: replica
@@ -1829,17 +1835,20 @@ failures:
         ALTER SYSTEM SET bgwriter_lru_maxpages = 2;
         ALTER SYSTEM SET checkpoint_warning = '10s';
         PSQL
-        # Reload config via pg_ctl inside the CNPG primary pod.
-        # pg_reload_conf() is blocked for non-operator users in CNPG; pg_ctl
-        # reload via kubectl exec works because it runs as the postgres OS user.
-        # Override CNPG_CLUSTER / CNPG_NAMESPACE if your cluster differs.
-        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
-        NS="${CNPG_NAMESPACE:-db}"
-        POD=$(kubectl get pod -n "$NS" \
-          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
-          -o jsonpath='{.items[0].metadata.name}')
-        kubectl exec -n "$NS" "$POD" -c postgres -- \
-          sh -c 'pg_ctl reload -D "$PGDATA"'
+        # Reload config: pg_reload_conf() works on standalone Postgres and CNPG
+        # with a superuser DSN. Fall back to kubectl exec for CNPG restricted users.
+        if psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "SELECT pg_reload_conf();" 2>/dev/null; then
+          echo "Config reloaded via pg_reload_conf()"
+        else
+          CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+          NS="${CNPG_NAMESPACE:-db}"
+          POD=$(kubectl get pod -n "$NS" \
+            -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n "$NS" "$POD" -c postgres -- \
+            sh -c 'pg_ctl reload -D "$PGDATA"'
+          echo "Config reloaded via kubectl"
+        fi
         sleep 2
         # Workload: generates dirty pages and triggers checkpoint warnings.
         psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
@@ -1864,13 +1873,18 @@ failures:
         ALTER SYSTEM RESET checkpoint_warning;
         DROP TABLE IF EXISTS _chkpt_gen;
         PSQL
-        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
-        NS="${CNPG_NAMESPACE:-db}"
-        POD=$(kubectl get pod -n "$NS" \
-          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
-          -o jsonpath='{.items[0].metadata.name}')
-        kubectl exec -n "$NS" "$POD" -c postgres -- \
-          sh -c 'pg_ctl reload -D "$PGDATA"'
+        if psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "SELECT pg_reload_conf();" 2>/dev/null; then
+          echo "Config reloaded via pg_reload_conf()"
+        else
+          CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+          NS="${CNPG_NAMESPACE:-db}"
+          POD=$(kubectl get pod -n "$NS" \
+            -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n "$NS" "$POD" -c postgres -- \
+            sh -c 'pg_ctl reload -D "$PGDATA"'
+          echo "Config reloaded via kubectl"
+        fi
     prompt: >
       Performance monitoring is showing elevated write latency on
       '{{connection_string}}' and the PostgreSQL log has warning messages about

@@ -134,9 +134,16 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 }
 
 // ResolvePrompt replaces template variables in the failure prompt.
+// AgentConnStr overrides ConnStr for {{connection_string}} substitution — use
+// it when the agent runs in a different network context than the test runner
+// (e.g. Docker agent uses host.docker.internal while the runner uses localhost).
 func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
+	connStr := cfg.ConnStr
+	if cfg.AgentConnStr != "" {
+		connStr = cfg.AgentConnStr
+	}
 	r := strings.NewReplacer(
-		"{{connection_string}}", cfg.ConnStr,
+		"{{connection_string}}", connStr,
 		"{{replica_connection_string}}", cfg.ReplicaConnStr,
 		"{{kube_context}}", cfg.KubeContext,
 	)

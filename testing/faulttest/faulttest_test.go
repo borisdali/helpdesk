@@ -50,6 +50,7 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 	cfg := &faultlib.HarnessConfig{
 		ConnStr:          os.Getenv("FAULTTEST_CONN_STR"),
 		ReplicaConnStr:   os.Getenv("FAULTTEST_REPLICA_CONN_STR"),
+		AgentConnStr:     os.Getenv("FAULTTEST_AGENT_CONN_STR"),
 		DBAgentURL:       os.Getenv("FAULTTEST_DB_AGENT_URL"),
 		K8sAgentURL:      os.Getenv("FAULTTEST_K8S_AGENT_URL"),
 		SysadminAgentURL: os.Getenv("FAULTTEST_SYSADMIN_AGENT_URL"),
@@ -195,9 +196,22 @@ func TestFaultInjection(t *testing.T) {
 			}
 
 			// Skip ssh_exec faults when no target host is configured.
-			// These faults require a real remote host (exec_via filled at runtime).
-			if f.Inject.Type == "ssh_exec" && f.Inject.ExecVia == "" {
+			// Check both primary and external inject specs (external mode uses ExternalInject).
+			activeInjectType := f.Inject.Type
+			if cfg.External && f.ExternalInject.Type != "" {
+				activeInjectType = f.ExternalInject.Type
+			}
+			if activeInjectType == "ssh_exec" && f.Inject.ExecVia == "" && cfg.SSHHost == "" {
 				t.Skip("ssh_exec fault requires a target host; set FAULTTEST_SSH_HOST or exec_via in catalog")
+			}
+
+			// Skip faults that require a replica when no replica connection is configured.
+			injectTarget := f.Inject.Target
+			if cfg.External && f.ExternalInject.Type != "" {
+				injectTarget = f.ExternalInject.Target
+			}
+			if injectTarget == "replica" && cfg.ReplicaConnStr == "" {
+				t.Skip("fault targets the replica but FAULTTEST_REPLICA_CONN_STR not set")
 			}
 
 			ctx := context.Background()
