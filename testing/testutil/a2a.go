@@ -24,6 +24,9 @@ type AgentResponse struct {
 	// CrystalBall is true when the gateway ran this call in crystal-ball mode
 	// (playbook scaffolding bypassed). Set only on gateway playbook responses.
 	CrystalBall bool
+	// Warnings contains advisory messages returned by the gateway (e.g., approval_mode
+	// clamped due to insufficient roles). Empty on direct agent calls.
+	Warnings []string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

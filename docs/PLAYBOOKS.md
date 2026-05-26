@@ -872,6 +872,27 @@ fi
 
 Use `agent_approve` for Playbooks that perform **mutating** operations — process terminations, setting changes, restarts — where you want a human to confirm each individual tool call before it fires. Critically, the operator sees the proposed action and its stated reason *before* it executes — this is the only point in the system where cascade risks (e.g. "terminating this session will also roll back session B's uncommitted writes") are surfaced to a human before damage is done.
 
+`agent_approve` requires the gateway to be configured with a planner LLM (the same one used by fleet planning). If no planner LLM is wired up, runs fail at the first step with `planner LLM not configured`.
+
+### Reactive re-planning
+
+The defining property of `agent_approve` — and what distinguishes it from `fleet` mode — is that the plan is not generated up front. After each step executes, its result is fed back to the LLM, which proposes the next step against the **actual observed state** rather than a frozen prediction made before the run started.
+
+Concretely, on every `/proceed` call the gateway:
+
+1. Persists the executed step's result to the run's step history.
+2. Re-invokes the planner LLM with the Playbook guidance and the **full history of executed steps and their results so far** as context.
+3. The LLM either proposes the next single tool call (with a fresh `reason`) or signals `complete` with a summary.
+
+This means the plan adapts to evidence as it arrives. A few concrete consequences:
+
+- **Step count is not fixed.** A lock-chain remediation against a 2-session chain produces fewer `get_session_info` steps than one against a 5-session chain — the LLM inspects every intermediate it discovers, and the chain depth is only known after `get_blocking_queries` returns.
+- **State changes between steps are absorbed.** If a blocked session disconnects on its own between step 1 and step 3, the LLM sees the updated `get_blocking_queries` output and skips the now-unnecessary termination.
+- **The `reason` field is grounded in real data.** Cascade warnings ("terminating root will also roll back session 92621 with `has_writes=true`") are written after the LLM has actually inspected session 92621 — they are not boilerplate from the Playbook guidance.
+- **Failures truncate the plan.** If the LLM cannot produce a valid next step (parse error, empty tool, LLM error), the run is abandoned at the current step rather than continuing on a stale plan.
+
+Contrast with `fleet`, where the planner emits the full multi-step job up front and `fleet-runner` executes it. In that mode, the only way to react to evidence is `--replan` (see [docs/FLEET.md](FLEET.md)), which regenerates the plan offline against drifted schema — not against tool results. `agent_approve` is fundamentally reactive; `fleet` is fundamentally batch.
+
 ### When to use each execution mode
 
 | Mode | What the LLM does | What the operator does | When to use |
@@ -957,6 +978,13 @@ curl -s -X POST "http://localhost:8080/api/v1/fleet/playbook-runs/$RUN_ID/procee
 ```
 
 Response: `200 OK` with `status: "denied"`. The run is marked `outcome=abandoned` in auditd.
+
+Two other terminal failure modes exist, both of which return `422 Unprocessable Entity` and mark the run `outcome=abandoned`:
+
+- **Tool execution failed** — the operator approved the step, but the agent's tool call returned an error (network failure, agent-side validation error, policy denial). Response body: `tool execution failed: <err>`. The step's status is set to `failed` in the run's step history; no further re-planning is attempted.
+- **Re-planning failed** — the step executed successfully, but the subsequent call to the planner LLM failed (LLM unavailable, malformed response, empty tool name). Response body: `re-planning failed after step N: <err>`. The successful step is preserved in the history; only the run as a whole is abandoned.
+
+In both cases the operator must inspect the run's step history (via `GET /api/v1/fleet/playbook-runs/{runID}/steps`) to see what executed before the failure.
 
 ### Full shell example
 

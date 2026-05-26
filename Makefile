@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest faulttest-gateway e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -167,6 +167,36 @@ faulttest:
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
 		down -v
+
+# ---------------------------------------------------------------------------
+# Fault injection tests via gateway playbooks (requires a live gateway)
+# ---------------------------------------------------------------------------
+# Routes diagnosis through gateway playbooks and runs remediation.
+# The gateway must already be running; the test Postgres is started automatically.
+#
+# Required env vars (export before running):
+#   FAULTTEST_GATEWAY_URL        e.g. http://localhost:8080  (gateway)
+#   FAULTTEST_API_KEY            gateway API key (or HELPDESK_CLIENT_API_KEY)
+#
+# Quickest way to get a live gateway:
+#   HELPDESK_IDENTITY_PROVIDER=none \
+#   docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+# ---------------------------------------------------------------------------
+faulttest-gateway:
+	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ]; then \
+		echo "Error: FAULTTEST_GATEWAY_URL is not set"; \
+		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
+		exit 1; \
+	fi
+	@echo "Starting test database..."
+	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	@echo "Running fault tests via gateway ($(FAULTTEST_GATEWAY_URL))..."
+	-FAULTTEST_VIA_GATEWAY=true \
+	FAULTTEST_REMEDIATE=true \
+	FAULTTEST_EXTERNAL=true \
+	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
+	go test -tags faulttest -timeout 1000s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
 # ---------------------------------------------------------------------------
 # End-to-end tests (requires full stack + LLM API key)

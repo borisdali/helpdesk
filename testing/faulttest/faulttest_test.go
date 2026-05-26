@@ -19,6 +19,10 @@
 //   - FAULTTEST_KUBE_CONTEXT: Kubernetes context (optional)
 //   - FAULTTEST_CATEGORIES: Comma-separated categories to test (optional)
 //   - FAULTTEST_IDS: Comma-separated failure IDs to test (optional)
+//   - FAULTTEST_GATEWAY_URL: Gateway base URL (e.g., http://localhost:8080)
+//   - FAULTTEST_VIA_GATEWAY: Set to "true" to route diagnosis through gateway playbooks
+//   - FAULTTEST_APPROVAL_MODE: Override playbook approval_mode (use "force" for automated runs)
+//   - FAULTTEST_REMEDIATE: Set to "true" to run remediation phase after diagnosis
 package faulttest
 
 import (
@@ -36,6 +40,13 @@ import (
 )
 
 func loadConfigFromEnv() *faultlib.HarnessConfig {
+	approvalMode := os.Getenv("FAULTTEST_APPROVAL_MODE")
+	viaGateway := os.Getenv("FAULTTEST_VIA_GATEWAY") == "true"
+	// Default approval_mode to "force" when routing via gateway so automated
+	// test runs never block waiting for manual approval gates.
+	if viaGateway && approvalMode == "" {
+		approvalMode = "force"
+	}
 	cfg := &faultlib.HarnessConfig{
 		ConnStr:          os.Getenv("FAULTTEST_CONN_STR"),
 		ReplicaConnStr:   os.Getenv("FAULTTEST_REPLICA_CONN_STR"),
@@ -45,13 +56,16 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		OrchestratorURL:  os.Getenv("FAULTTEST_ORCHESTRATOR_URL"),
 		KubeContext:      os.Getenv("FAULTTEST_KUBE_CONTEXT"),
 		// External PG mode: only external_compat faults, SQL-based injection.
-		External:      os.Getenv("FAULTTEST_EXTERNAL") == "true",
+		External: os.Getenv("FAULTTEST_EXTERNAL") == "true",
 		// SSH mode: set FAULTTEST_SSH_HOST to route ssh_exec faults via ExternalInject.
-		SSHHost:       os.Getenv("FAULTTEST_SSH_HOST"),
-		SSHUser:       os.Getenv("FAULTTEST_SSH_USER"),
-		SSHKeyPath:    os.Getenv("FAULTTEST_SSH_KEY"),
-		GatewayURL:    os.Getenv("FAULTTEST_GATEWAY_URL"),
-		GatewayAPIKey: os.Getenv("FAULTTEST_API_KEY"),
+		SSHHost:          os.Getenv("FAULTTEST_SSH_HOST"),
+		SSHUser:          os.Getenv("FAULTTEST_SSH_USER"),
+		SSHKeyPath:       os.Getenv("FAULTTEST_SSH_KEY"),
+		GatewayURL:       os.Getenv("FAULTTEST_GATEWAY_URL"),
+		GatewayAPIKey:    os.Getenv("FAULTTEST_API_KEY"),
+		ViaGateway:       viaGateway,
+		ApprovalMode:     approvalMode,
+		RemediateEnabled: os.Getenv("FAULTTEST_REMEDIATE") == "true",
 	}
 
 	if categories := os.Getenv("FAULTTEST_CATEGORIES"); categories != "" {
@@ -114,10 +128,13 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	// Check at least one agent URL is configured.
-	if cfg.DBAgentURL == "" && cfg.K8sAgentURL == "" && cfg.OrchestratorURL == "" {
+	// Check at least one agent URL is configured (or a gateway URL when ViaGateway mode is active).
+	hasAgent := cfg.DBAgentURL != "" || cfg.K8sAgentURL != "" || cfg.OrchestratorURL != ""
+	hasGateway := cfg.ViaGateway && cfg.GatewayURL != ""
+	if !hasAgent && !hasGateway {
 		fmt.Fprintln(os.Stderr, "SKIP: No agent URLs configured")
 		fmt.Fprintln(os.Stderr, "Set FAULTTEST_DB_AGENT_URL, FAULTTEST_K8S_AGENT_URL, or FAULTTEST_ORCHESTRATOR_URL")
+		fmt.Fprintln(os.Stderr, "Or set FAULTTEST_VIA_GATEWAY=true and FAULTTEST_GATEWAY_URL=<url> to route via gateway")
 		os.Exit(0)
 	}
 
@@ -141,6 +158,8 @@ func TestFaultInjection(t *testing.T) {
 	t.Logf("Running %d fault injection tests", len(failures))
 
 	injector := faultlib.NewInjector(cfg)
+	runner := faultlib.NewRunner(cfg)
+	runID := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	passed, failed, skipped := 0, 0, 0
 	for _, f := range failures {
@@ -150,12 +169,15 @@ func TestFaultInjection(t *testing.T) {
 			defer func() { wasSkipped = t.Skipped() }()
 			// Check if we have the right agent for this failure.
 			url := agentURL(cfg, f.Category)
-			if url == "" {
+			if url == "" && (!cfg.ViaGateway || cfg.GatewayURL == "") {
 				t.Skipf("No agent configured for category %q", f.Category)
 			}
 
-			// Check agent is reachable.
-			if !isAgentReachable(url) {
+			// When routing via gateway, skip the direct-agent reachability check.
+			// When calling the agent directly, confirm it's reachable.
+			if cfg.ViaGateway && cfg.GatewayURL != "" {
+				// gateway routing — no direct agent probe needed
+			} else if !isAgentReachable(url) {
 				t.Skipf("Agent not reachable at %s", url)
 			}
 
@@ -198,17 +220,17 @@ func TestFaultInjection(t *testing.T) {
 				}
 			}()
 
-			// 3. Send prompt to agent.
+			// 3. Send prompt to agent (or gateway playbook when ViaGateway is set).
 			t.Log("Sending prompt to agent...")
-			prompt := faultlib.ResolvePrompt(f.Prompt, cfg)
-			timeout := f.TimeoutDuration()
+			faultTraceID := "gotest-" + runID + "-" + f.ID
+			faultCtx := faultlib.WithFaultTraceID(ctx, faultTraceID)
 
-			promptCtx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
-
-			resp := testutil.SendPrompt(promptCtx, url, prompt)
+			resp := runner.Run(faultCtx, f)
 			if resp.Error != nil {
 				t.Fatalf("Agent call failed: %v", resp.Error)
+			}
+			for _, w := range resp.Warnings {
+				t.Logf("Gateway warning: %s", w)
 			}
 
 			t.Logf("Agent responded in %s (%d chars)", resp.Duration, len(resp.Text))
@@ -236,6 +258,19 @@ func TestFaultInjection(t *testing.T) {
 					} else {
 						t.Logf("Response: %s", resp.Text)
 					}
+				}
+			}
+
+			// 5. Remediation phase (opt-in via FAULTTEST_REMEDIATE=true).
+			if cfg.RemediateEnabled && f.Remediation.PlaybookID != "" {
+				t.Log("Running remediation...")
+				remediator := faultlib.NewRemediator(cfg)
+				remResult := remediator.Remediate(faultCtx, f)
+				if remResult.Err != nil {
+					t.Errorf("Remediation failed: %v", remResult.Err)
+				} else {
+					t.Logf("Remediation: method=%s, recovered_in=%.1fs, score=%.2f",
+						remResult.Method, remResult.RecoveryTimeSecs, remResult.Score)
 				}
 			}
 		})
@@ -395,7 +430,7 @@ func TestExternalModeInjection(t *testing.T) {
 	if cfg.DBAgentURL == "" {
 		t.Skip("FAULTTEST_DB_AGENT_URL not set")
 	}
-	if !isAgentReachable(cfg.DBAgentURL) {
+	if !cfg.ViaGateway && !isAgentReachable(cfg.DBAgentURL) {
 		t.Skipf("Database agent not reachable at %s", cfg.DBAgentURL)
 	}
 
@@ -414,6 +449,8 @@ func TestExternalModeInjection(t *testing.T) {
 	t.Logf("External mode: running %d external_compat database faults", len(failures))
 
 	injector := faultlib.NewInjector(cfg)
+	runner := faultlib.NewRunner(cfg)
+	runID := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	for _, f := range failures {
 		f := f
@@ -432,14 +469,15 @@ func TestExternalModeInjection(t *testing.T) {
 				}
 			}()
 
-			prompt := faultlib.ResolvePrompt(f.Prompt, cfg)
-			timeout := f.TimeoutDuration()
-			promptCtx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
+			faultTraceID := "gotest-" + runID + "-" + f.ID
+			faultCtx := faultlib.WithFaultTraceID(ctx, faultTraceID)
 
-			resp := testutil.SendPrompt(promptCtx, cfg.DBAgentURL, prompt)
+			resp := runner.Run(faultCtx, f)
 			if resp.Error != nil {
 				t.Fatalf("Agent call failed: %v", resp.Error)
+			}
+			for _, w := range resp.Warnings {
+				t.Logf("Gateway warning: %s", w)
 			}
 
 			result := faultlib.Evaluate(f, resp.Text)
