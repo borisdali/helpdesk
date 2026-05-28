@@ -177,6 +177,10 @@ type HarnessConfig struct {
 	// ApprovalMode overrides the playbook's approval_mode for this run.
 	// Use "force" in automated test runs to bypass manual approval gates.
 	ApprovalMode string
+	// OperatorID is the user identity sent as X-User on gateway requests.
+	// Must match a user in users.yaml with the roles required for the run
+	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
+	OperatorID string
 
 	// AuditURL is the base URL of the audit service (e.g. "http://localhost:7070").
 	// When set, the harness queries tool execution events after each agent call

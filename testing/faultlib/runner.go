@@ -145,6 +145,9 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
 	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
+	}
 	if id := FaultTraceID(ctx); id != "" {
 		req.Header.Set("X-Trace-ID", id)
 	}

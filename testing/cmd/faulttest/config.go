@@ -137,6 +137,10 @@ type HarnessConfig struct {
 	// Values: "manual", "session", "auto", "force". Empty = use playbook default.
 	// Use "force" to bypass manual gates in automated/CI faulttest runs.
 	ApprovalMode string
+	// OperatorID is the user identity sent as X-User on gateway requests.
+	// Must match a user in users.yaml with roles required for the run
+	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
+	OperatorID string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
 	InfraConfigPath string
 	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty

@@ -438,6 +438,11 @@ faulttest:
   #            Requires an interactive terminal — not for K8s Jobs.
   approvalMode: ""
 
+  # Operator identity sent as X-User on gateway requests (--operator).
+  # Must match a user in users.yaml. Set to a user with dba_lead or oncall_senior
+  # role to prevent approval_override_roles clamping when using --approval-mode=force/review.
+  operator: ""
+
   # Run the remediation phase after injection+diagnosis (--remediate).
   # Requires viaGateway=true and a gateway API key. The remediation playbook
   # series must be defined in the fault catalog (remediation.playbook_series_id).

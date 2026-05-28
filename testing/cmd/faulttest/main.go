@@ -124,6 +124,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 	fs.StringVar(&cfg.ApprovalMode, "approval-mode", "", "Override playbook approval_mode for this run (auto|session|manual|force). Empty = playbook default. Use 'force' to bypass manual gates in automated runs.")
+	fs.StringVar(&cfg.OperatorID, "operator", os.Getenv("HELPDESK_OPERATOR"), "User identity sent as X-User on gateway requests (e.g. alice@example.com). Must have roles required by approval_override_roles to avoid mode clamping.")
 
 	// Policy safety check.
 	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")

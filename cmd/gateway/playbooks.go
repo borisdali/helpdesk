@@ -1683,12 +1683,13 @@ func parseConnFields(s string) map[string]string {
 
 // ApproveRunResponse is returned by POST /run (agent_approve) and POST /proceed.
 type ApproveRunResponse struct {
-	RunID      string        `json:"run_id"`
-	Status     string        `json:"status"`            // "pending_approval" | "complete" | "denied"
-	Step       *StepProposal `json:"step,omitempty"`
-	ApprovalID string        `json:"approval_id,omitempty"`
-	Summary    string        `json:"summary,omitempty"`
-	Warnings   []string      `json:"warnings,omitempty"`
+	RunID                string        `json:"run_id"`
+	Status               string        `json:"status"`                          // "pending_approval" | "complete" | "denied"
+	Step                 *StepProposal `json:"step,omitempty"`
+	ApprovalID           string        `json:"approval_id,omitempty"`
+	Summary              string        `json:"summary,omitempty"`
+	Warnings             []string      `json:"warnings,omitempty"`
+	EffectiveApprovalMode string       `json:"effective_approval_mode,omitempty"` // resolved mode after clamping; use instead of requested mode
 }
 
 // ProceedRequest is the body for POST /api/v1/fleet/playbook-runs/{runID}/proceed.
@@ -1719,7 +1720,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	if done {
 		// Unusual: playbook declares done on first proposal (no actions needed).
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", summary, nil)
-		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings}
+		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -1753,11 +1754,12 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	approvalID := g.createStepApproval(r.Context(), runID, proposal, r.Header.Get("X-User"))
 
 	resp := ApproveRunResponse{
-		RunID:      runID,
-		Status:     "pending_approval",
-		Step:       proposal,
-		ApprovalID: approvalID,
-		Warnings:   warnings,
+		RunID:                runID,
+		Status:               "pending_approval",
+		Step:                 proposal,
+		ApprovalID:           approvalID,
+		Warnings:             warnings,
+		EffectiveApprovalMode: req.ApprovalMode,
 	}
 	writeJSON(w, http.StatusAccepted, resp)
 }

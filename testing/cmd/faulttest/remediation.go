@@ -138,12 +138,13 @@ func (r *Remediator) resolvePlaybookID(ctx context.Context, seriesID string) (st
 
 // approveRunResponse mirrors the gateway's ApproveRunResponse for agent_approve playbooks.
 type approveRunResponse struct {
-	RunID      string          `json:"run_id"`
-	Status     string          `json:"status"` // "pending_approval" | "complete" | "denied"
-	Step       *approveRunStep `json:"step,omitempty"`
-	ApprovalID string          `json:"approval_id,omitempty"`
-	Summary    string          `json:"summary,omitempty"`
-	Warnings   []string        `json:"warnings,omitempty"`
+	RunID                 string          `json:"run_id"`
+	Status                string          `json:"status"` // "pending_approval" | "complete" | "denied"
+	Step                  *approveRunStep `json:"step,omitempty"`
+	ApprovalID            string          `json:"approval_id,omitempty"`
+	Summary               string          `json:"summary,omitempty"`
+	Warnings              []string        `json:"warnings,omitempty"`
+	EffectiveApprovalMode string          `json:"effective_approval_mode,omitempty"`
 }
 
 type approveRunStep struct {
@@ -188,6 +189,9 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
 	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
+	}
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
 		req.Header.Set("X-Trace-ID", id)
 	}
@@ -229,7 +233,14 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResp
 
 	current := initial
 	const maxSteps = 20
+	// Use the effective mode returned by the gateway (post-clamping) so that
+	// approval_override_roles enforcement is honoured on the harness side too.
+	// Fall back to the locally configured mode if the gateway didn't return one
+	// (older gateway versions, non-agent_approve paths).
 	mode := r.cfg.ApprovalMode
+	if initial.EffectiveApprovalMode != "" {
+		mode = initial.EffectiveApprovalMode
+	}
 
 	for i := 0; i < maxSteps && current.Status == "pending_approval"; i++ {
 		if current.Step == nil {
@@ -383,6 +394,9 @@ func (r *Remediator) proceedStep(ctx context.Context, runID string, stepIndex in
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
 	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
+	}
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
 		req.Header.Set("X-Trace-ID", id)
 	}
@@ -424,6 +438,9 @@ func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string)
 	req.Header.Set("X-Purpose", "remediation")
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
 	}
 
 	resp, err := r.client.Do(req)

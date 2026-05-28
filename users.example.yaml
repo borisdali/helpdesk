@@ -14,13 +14,13 @@
 
 users:
   - id: alice@example.com
-    roles: [dba, sre, operator]
+    roles: [dba, dba_lead, sre, operator]
 
   - id: bob@example.com
     roles: [developer]
 
   - id: carol@example.com
-    roles: [sre, oncall]
+    roles: [sre, oncall, oncall_senior]
 
   - id: dave@example.com
     roles: [readonly]

@@ -149,6 +149,9 @@ spec:
             {{- if .Values.faulttest.approvalMode }}
             - --approval-mode={{ .Values.faulttest.approvalMode }}
             {{- end }}
+            {{- if .Values.faulttest.operator }}
+            - --operator={{ .Values.faulttest.operator }}
+            {{- end }}
             {{- if .Values.faulttest.remediate }}
             - --remediate
             {{- end }}
