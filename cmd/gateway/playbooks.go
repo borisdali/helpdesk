@@ -121,6 +121,45 @@ var terminalEscalations = map[string]string{
 	"requires_operator_approval": "This action requires explicit operator approval before it can proceed.",
 }
 
+// approvalModeRank defines permissiveness order for approval modes (higher = less restrictive).
+var approvalModeRank = map[string]int{
+	"":        0,
+	"manual":  0,
+	"review":  1,
+	"session": 2,
+	"auto":    3,
+	"force":   4,
+}
+
+// enforceApprovalOverride clamps *requestedMode back to playbookMode when the target
+// database restricts approval overrides and the caller lacks a required role.
+// Appends a warning to *warnings when clamping occurs; otherwise is a no-op.
+func (g *Gateway) enforceApprovalOverride(
+	principal identity.ResolvedPrincipal,
+	requestedMode *string,
+	playbookMode string,
+	connStr string,
+	warnings *[]string,
+) {
+	if g.infra == nil || approvalModeRank[*requestedMode] <= approvalModeRank[playbookMode] {
+		return
+	}
+	db, _, ok := g.infra.FindDBByConnStr(connStr)
+	if !ok || len(db.ApprovalOverrideRoles) == 0 {
+		return
+	}
+	for _, role := range db.ApprovalOverrideRoles {
+		if principal.HasRole(role) {
+			return
+		}
+	}
+	*warnings = append(*warnings, fmt.Sprintf(
+		"approval_mode clamped to %q: override to %q requires one of roles %v (caller: %s)",
+		playbookMode, *requestedMode, db.ApprovalOverrideRoles, principal.EffectiveID(),
+	))
+	*requestedMode = playbookMode
+}
+
 // approvalContext carries approval mode + session ID through the request context.
 type approvalContext struct {
 	mode      string // "auto" | "session" | "manual" | "force"
@@ -185,13 +224,15 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve effective approval mode: per-run request overrides playbook default.
+	var warnings []string
 	if req.ApprovalMode == "" {
 		req.ApprovalMode = pb.ApprovalMode
 	}
+	principal := authz.PrincipalFromContext(r.Context())
+	g.enforceApprovalOverride(principal, &req.ApprovalMode, pb.ApprovalMode, req.ConnectionString, &warnings)
 
 	// Warn when an agent-mode playbook has no connection_string — the agent
 	// will have no target and will likely ask the operator for one.
-	var warnings []string
 	if pb.ExecutionMode == "agent" && req.ConnectionString == "" {
 		slog.Warn("handlePlaybookRun: agent-mode run has no connection_string", "playbook", pb.SeriesID)
 		warnings = append(warnings, "no connection_string specified — agent will need to ask which database to investigate")
@@ -220,6 +261,11 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
+		return
+	}
+
+	if pb.ExecutionMode == "agent_approve" {
+		g.handlePlaybookRunApprove(w, r, pb, req, runID, warnings)
 		return
 	}
 
@@ -1631,4 +1677,432 @@ func parseConnFields(s string) map[string]string {
 		}
 	}
 	return m
+}
+
+// ---- agent_approve mode: step-by-step approval loop ----
+
+// ApproveRunResponse is returned by POST /run (agent_approve) and POST /proceed.
+type ApproveRunResponse struct {
+	RunID                string        `json:"run_id"`
+	Status               string        `json:"status"`                          // "pending_approval" | "complete" | "denied"
+	Step                 *StepProposal `json:"step,omitempty"`
+	ApprovalID           string        `json:"approval_id,omitempty"`
+	Summary              string        `json:"summary,omitempty"`
+	Warnings             []string      `json:"warnings,omitempty"`
+	EffectiveApprovalMode string       `json:"effective_approval_mode,omitempty"` // resolved mode after clamping; use instead of requested mode
+}
+
+// ProceedRequest is the body for POST /api/v1/fleet/playbook-runs/{runID}/proceed.
+type ProceedRequest struct {
+	Resolution       string `json:"resolution"`                  // "approved" | "denied"
+	ResolvedBy       string `json:"resolved_by,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	StepIndex        int    `json:"step_index"`
+	ConnectionString string `json:"connection_string,omitempty"` // injected into tool args and re-planner context
+}
+
+// handlePlaybookRunApprove handles POST /run for execution_mode=agent_approve.
+// It proposes the first step and returns a pending_approval response.
+func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
+	if g.plannerLLM == nil {
+		writeError(w, http.StatusServiceUnavailable, "planner LLM not configured (required for agent_approve mode)")
+		return
+	}
+
+	// Propose the first step (no history yet).
+	proposal, done, summary, err := g.proposeNextStep(r.Context(), pb, req.ConnectionString, nil)
+	if err != nil {
+		slog.Error("handlePlaybookRunApprove: step proposal failed", "playbook", pb.SeriesID, "err", err)
+		writeError(w, http.StatusInternalServerError, "step proposal failed: "+err.Error())
+		return
+	}
+
+	if done {
+		// Unusual: playbook declares done on first proposal (no actions needed).
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", summary, nil)
+		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// Inject connection_string into the proposed args so the DB agent has a target.
+	if req.ConnectionString != "" {
+		if proposal.Args == nil {
+			proposal.Args = map[string]any{}
+		}
+		if _, already := proposal.Args["connection_string"]; !already {
+			proposal.Args["connection_string"] = req.ConnectionString
+		}
+	}
+
+	// Persist the proposed step to auditd.
+	stepRec := &audit.PlaybookRunStep{
+		RunID:     runID,
+		StepIndex: proposal.Index,
+		Agent:     proposal.Agent,
+		Tool:      proposal.Tool,
+		Args:      proposal.Args,
+		Reason:    proposal.Reason,
+		Status:    "proposed",
+	}
+	if err := g.createRunStep(r.Context(), stepRec); err != nil {
+		slog.Warn("handlePlaybookRunApprove: failed to persist step", "run_id", runID, "err", err)
+		// Non-fatal: continue without persistence.
+	}
+
+	// Create a pending approval record.
+	approvalID := g.createStepApproval(r.Context(), runID, proposal, r.Header.Get("X-User"))
+
+	resp := ApproveRunResponse{
+		RunID:                runID,
+		Status:               "pending_approval",
+		Step:                 proposal,
+		ApprovalID:           approvalID,
+		Warnings:             warnings,
+		EffectiveApprovalMode: req.ApprovalMode,
+	}
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
+// handlePlaybookRunProceed handles POST /api/v1/fleet/playbook-runs/{runID}/proceed.
+// It approves (or denies) the pending step, executes it on approval, then re-plans.
+func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "missing runID")
+		return
+	}
+
+	var req ProceedRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+	}
+	if req.Resolution == "" {
+		req.Resolution = "approved"
+	}
+	resolvedBy := req.ResolvedBy
+	if resolvedBy == "" {
+		resolvedBy = r.Header.Get("X-User")
+	}
+	if resolvedBy == "" {
+		resolvedBy = "operator"
+	}
+
+	// Fetch the playbook run to get the playbook details.
+	run, err := g.fetchPlaybookRun(r.Context(), runID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found: "+err.Error())
+		return
+	}
+	pb, err := g.fetchPlaybook(r.Context(), run.PlaybookID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "playbook not found: "+err.Error())
+		return
+	}
+
+	// Fetch the pending step.
+	pendingStep, err := g.fetchPendingStep(r.Context(), runID)
+	if err != nil || pendingStep == nil {
+		writeError(w, http.StatusConflict, "no pending step found for this run")
+		return
+	}
+
+	// Validate step index if provided.
+	if req.StepIndex != 0 && req.StepIndex != pendingStep.StepIndex {
+		writeError(w, http.StatusConflict, fmt.Sprintf("step_index mismatch: expected %d, got %d", pendingStep.StepIndex, req.StepIndex))
+		return
+	}
+
+	if req.Resolution == "denied" {
+		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "step denied by operator", nil)
+		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
+		return
+	}
+
+	// Mark step as executing.
+	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "executing", pendingStep.ApprovalID, "", "")
+
+	// Inject connection_string into args if the tool accepts it and it's not already set.
+	args := pendingStep.Args
+	if args == nil {
+		args = map[string]any{}
+	}
+	if _, hasConn := args["connection_string"]; !hasConn {
+		if run.ContextID != "" {
+			// ContextID might encode a connection string — but for step runs we
+			// rely on the proposer to have included it from the playbook run request.
+		}
+	}
+
+	traceID := r.Header.Get("X-Trace-ID")
+	if traceID == "" {
+		traceID = audit.NewTraceIDWithPrefix("sa_")
+	}
+	result, toolErr := g.callToolForStep(r.Context(), r, traceID, "remediation", pendingStep.Agent, pendingStep.Tool, args)
+
+	var stepStatus, stepErrStr string
+	if toolErr != nil {
+		stepStatus = "failed"
+		stepErrStr = toolErr.Error()
+		result = ""
+		slog.Error("handlePlaybookRunProceed: tool execution failed",
+			"run_id", runID, "tool", pendingStep.Tool, "err", toolErr)
+	} else {
+		stepStatus = "succeeded"
+	}
+	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
+
+	if toolErr != nil {
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "tool execution failed: "+stepErrStr, nil)
+		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
+		return
+	}
+
+	// Fetch full history for re-planning.
+	history, err := g.fetchRunSteps(r.Context(), runID)
+	if err != nil {
+		slog.Warn("handlePlaybookRunProceed: failed to fetch step history", "run_id", runID, "err", err)
+		history = nil
+	}
+
+	// Determine connection string for the re-planner: prefer the one in the
+	// proceed request, then fall back to extracting it from the executed step args.
+	connStr := req.ConnectionString
+	if connStr == "" {
+		if cs, ok := args["connection_string"].(string); ok {
+			connStr = cs
+		}
+	}
+	// Last resort: scan history for any step that has connection_string in args.
+	if connStr == "" {
+		for _, hs := range history {
+			if cs, ok := hs.Args["connection_string"].(string); ok && cs != "" {
+				connStr = cs
+				break
+			}
+		}
+	}
+
+	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, history)
+	if err != nil {
+		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "re-planning failed: "+err.Error(), nil)
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
+		return
+	}
+
+	if done {
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", summary, nil)
+		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
+		return
+	}
+
+	// Inject connection_string into next proposal's args if we know it.
+	if connStr != "" {
+		if nextProposal.Args == nil {
+			nextProposal.Args = map[string]any{}
+		}
+		if _, already := nextProposal.Args["connection_string"]; !already {
+			nextProposal.Args["connection_string"] = connStr
+		}
+	}
+
+	// Persist next proposed step.
+	nextRec := &audit.PlaybookRunStep{
+		RunID:     runID,
+		StepIndex: nextProposal.Index,
+		Agent:     nextProposal.Agent,
+		Tool:      nextProposal.Tool,
+		Args:      nextProposal.Args,
+		Reason:    nextProposal.Reason,
+		Status:    "proposed",
+	}
+	if err := g.createRunStep(r.Context(), nextRec); err != nil {
+		slog.Warn("handlePlaybookRunProceed: failed to persist next step", "run_id", runID, "err", err)
+	}
+
+	approvalID := g.createStepApproval(r.Context(), runID, nextProposal, resolvedBy)
+	writeJSON(w, http.StatusOK, ApproveRunResponse{
+		RunID:      runID,
+		Status:     "pending_approval",
+		Step:       nextProposal,
+		ApprovalID: approvalID,
+	})
+}
+
+// ---- auditd helpers for step store ----
+
+func (g *Gateway) createRunStep(ctx context.Context, step *audit.PlaybookRunStep) error {
+	if g.auditURL == "" {
+		return nil
+	}
+	body, err := json.Marshal(step)
+	if err != nil {
+		return err
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + step.RunID + "/steps"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("auditd returned %d creating step", resp.StatusCode)
+	}
+	return nil
+}
+
+func (g *Gateway) updateRunStep(ctx context.Context, runID string, stepIndex int, status, approvalID, result, stepErr string) {
+	if g.auditURL == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]any{
+		"status":      status,
+		"approval_id": approvalID,
+		"result":      result,
+		"error":       stepErr,
+	})
+	url := fmt.Sprintf("%s/v1/fleet/playbook-runs/%s/steps/%d",
+		strings.TrimSuffix(g.auditURL, "/"), runID, stepIndex)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("updateRunStep: build request failed", "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("updateRunStep: request failed", "err", err)
+		return
+	}
+	resp.Body.Close()
+}
+
+func (g *Gateway) fetchPendingStep(ctx context.Context, runID string) (*audit.PlaybookRunStep, error) {
+	if g.auditURL == "" {
+		return nil, fmt.Errorf("auditd not configured")
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/pending-step"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var step audit.PlaybookRunStep
+	if err := json.NewDecoder(resp.Body).Decode(&step); err != nil {
+		return nil, err
+	}
+	return &step, nil
+}
+
+func (g *Gateway) fetchRunSteps(ctx context.Context, runID string) ([]*audit.PlaybookRunStep, error) {
+	if g.auditURL == "" {
+		return nil, nil
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/steps"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var result struct {
+		Steps []*audit.PlaybookRunStep `json:"steps"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Steps, nil
+}
+
+// createStepApproval creates a StoredApproval record in auditd for the given step
+// and returns the approval_id (or empty string on failure).
+func (g *Gateway) createStepApproval(ctx context.Context, runID string, proposal *StepProposal, requestedBy string) string {
+	if g.auditURL == "" {
+		return ""
+	}
+	if requestedBy == "" {
+		requestedBy = "gateway"
+	}
+	approval := audit.StoredApproval{
+		ActionClass:  "destructive",
+		ToolName:     proposal.Tool,
+		AgentName:    proposal.Agent,
+		RequestedBy:  requestedBy,
+		Status:       "pending",
+		TraceID:      runID,
+		RequestContext: map[string]any{
+			"run_id":     runID,
+			"step_index": proposal.Index,
+			"args":       proposal.Args,
+			"reason":     proposal.Reason,
+		},
+	}
+	body, err := json.Marshal(approval)
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/approvals"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("createStepApproval: request failed", "run_id", runID, "err", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return ""
+	}
+	var stored audit.StoredApproval
+	if err := json.NewDecoder(resp.Body).Decode(&stored); err != nil {
+		return ""
+	}
+
+	// Update the step record with the approval_id.
+	go g.updateRunStep(context.WithoutCancel(ctx), runID, proposal.Index, "proposed", stored.ApprovalID, "", "")
+	return stored.ApprovalID
 }

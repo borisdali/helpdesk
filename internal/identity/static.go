@@ -85,11 +85,26 @@ func (p *StaticProvider) RoleAliases() map[string]string {
 // Resolve authenticates the request.
 // Service accounts use Authorization: Bearer <api-key>.
 // Human users use X-User: <email> (must be listed in users.yaml).
+// When both are present the service account is authenticated and the human
+// operator is recorded as on-behalf-of; HasRole checks both sets of roles.
 func (p *StaticProvider) Resolve(r *http.Request) (ResolvedPrincipal, error) {
 	// Check for service account bearer token first.
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		key := strings.TrimPrefix(auth, "Bearer ")
-		return p.resolveServiceAccount(key)
+		principal, err := p.resolveServiceAccount(key)
+		if err != nil {
+			return principal, err
+		}
+		// When X-User is also present, record the operator on whose behalf the
+		// service account is acting. Their roles extend the role-check surface
+		// (e.g. approval_override_roles) without replacing the service identity.
+		if userID := r.Header.Get("X-User"); userID != "" {
+			if roles, ok := p.users[userID]; ok {
+				principal.OperatorID = userID
+				principal.OperatorRoles = p.expandRoles(roles)
+			}
+		}
+		return principal, nil
 	}
 
 	// Fall through to human user via X-User header.

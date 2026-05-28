@@ -55,13 +55,15 @@ When you create a Playbook without specifying a `series_id`, a new series is sta
 
 ### System Playbooks
 
-aiHelpDesk ships 12 expert-authored system Playbooks that are seeded into auditd on startup:
+aiHelpDesk ships 14 expert-authored system Playbooks that are seeded into auditd on startup:
 
 | Series ID | Name | Problem class | Agent | Key tools |
 |---|---|---|---|---|
 | `pbs_vacuum_triage` | Vacuum & Bloat Triage | capacity | database | `get_vacuum_status`, `get_disk_usage`, `get_pg_settings` |
 | `pbs_slow_query_triage` | Slow Query Triage | performance | database | `get_slow_queries`, `get_wait_events`, `get_blocking_queries`, `explain_query` |
 | `pbs_connection_triage` | Connection & Lock Triage | availability | database | `get_server_info`, `get_blocking_queries`, `get_session_info`, `get_lock_info` |
+| `pbs_lock_chain_triage` | Transaction Lock Chain Triage | availability | database | `get_blocking_queries`, `get_session_info`, `terminate_connection` |
+| `pbs_lock_chain_remediate` | Transaction Lock Chain — Terminate Root Blocker | availability | database | `get_blocking_queries`, `get_session_info`, `terminate_connection` |
 | `pbs_replication_lag` | Replication Lag Triage | availability | database | `get_replication_status`, `get_server_info` |
 | `pbs_checkpoint_bgwriter_triage` | Checkpoint & bgwriter Triage | performance | database | `get_bgwriter_stats`, `read_pg_log`, `get_pg_settings` |
 | `pbs_db_restart_triage` | Database Down — Restart Triage | availability | database | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
@@ -74,6 +76,10 @@ aiHelpDesk ships 12 expert-authored system Playbooks that are seeded into auditd
 
 The **Checkpoint & bgwriter Triage** Playbook (`pbs_checkpoint_bgwriter_triage`) covers performance degradation caused by misconfigured checkpoint or background-writer parameters. It is not a database-down scenario — the database stays available — but write latency degrades due to periodic I/O bursts. The canonical symptom is a PostgreSQL `LOG: checkpoints are occurring too frequently` warning accompanied by `maxwritten_clean > 0` in `pg_stat_bgwriter` (bgwriter hitting its per-round page limit) and elevated `buffers_backend` (regular backends forced to flush dirty pages themselves). The five-step guidance leads the agent from log confirmation through counter interpretation, parameter identification (`max_wal_size`, `bgwriter_lru_maxpages`, `checkpoint_completion_target`), safe `ALTER SYSTEM SET + pg_reload_conf()` recommendations presented to the operator for approval, and a post-change verification using `get_bgwriter_stats`. Escalation triggers include `buffers_backend_fsync > 0` (backends doing their own fsyncs — a severe condition requiring immediate I/O capacity review) and `checkpoint_sync_time > 30s`. This Playbook also demonstrates the Crystal Ball gap clearly: the PostgreSQL `HINT: Consider increasing max_wal_size` in the log is a shortcut that `bgwriter_lru_maxpages=2` makes misleading — an unguided agent typically follows the hint and misses the root cause, while the Playbook's systematic counter analysis surfaces it.
 
+The **Transaction Lock Chain Triage** Playbook (`pbs_lock_chain_triage`) handles lock queues whose root holder is keeping an open transaction — either `idle in transaction` (paused after DML) or `active` while executing a long-running or sleeping statement such as `pg_sleep`. The canonical symptom is multiple sessions in `Lock` wait state against the same table, with the root blocker appearing dormant or slow in `pg_stat_activity`. The critical diagnostic rule the Playbook enforces: `cancel_query` (`pg_cancel_backend`) is **unreliable** for root blockers. If the root is idle-in-transaction, SIGINT is ignored entirely. If the root is active with `pg_sleep`, SIGINT interrupts the sleep and the function returns `true` — a false positive that looks like success but leaves the transaction and its locks intact (the session moves to `idle in transaction aborted`). The Playbook explicitly directs the agent to `terminate_connection` (`pg_terminate_backend`) on the root blocker, which sends SIGTERM and unconditionally closes the connection regardless of state. This Playbook is the reference case for the Crystal Ball gap in remediation: an unguided agent presents `cancel_query` as "Option 1 (Immediate)" and declares the problem resolved — while the Playbook-guided agent proceeds directly to terminate and the lock queue clears in under a second. When an operator is ready to act on the triage findings, the companion **`pbs_lock_chain_remediate`** Playbook executes the termination under step-by-step approval.
+
+The **Transaction Lock Chain — Terminate Root Blocker** Playbook (`pbs_lock_chain_remediate`) is the remediation counterpart to `pbs_lock_chain_triage`. Where the triage Playbook runs autonomously (agent mode) to diagnose, this Playbook uses `execution_mode: agent_approve` to execute termination under explicit per-step operator approval. The LLM proposes one action at a time across a four-step sequence — map the full chain (`get_blocking_queries`), inspect the root AND each intermediate for `has_writes` (`get_session_info`), terminate the root only (`terminate_connection`), and verify the cascade cleared (`get_blocking_queries` again) — and the operator approves each step before it executes. A critical safety property: in a multi-level chain, terminating the root releases its lock and causes each intermediate session to complete and disconnect without `COMMIT`, rolling back its own open transaction as a side effect. If an intermediate has `has_writes=true`, that uncommitted work is silently discarded. The Playbook surfaces this cascade risk explicitly in the `reason` field of the termination step proposal, giving the operator full visibility before they approve. An unguided agent terminates without disclosing this. The Playbook has `approval_mode: manual` and is never auto-chained: the operator always invokes it explicitly after reviewing the triage findings. See [agent_approve execution mode](#agent_approve-execution-mode) below for the full lifecycle.
+
 The "Database Down" Playbooks form an escalating triage graph for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, was OOM-killed, or hit a WAL disk full condition, then revises the root-cause hypothesis accordingly.
 
 - **Clean shutdown or OOM kill**: Inspection escalates to **Docker Container Restart** (`pbs_db_restart_action`), which performs the actual `restart_container` call and verifies connectivity.
@@ -81,7 +87,7 @@ The "Database Down" Playbooks form an escalating triage graph for Docker-hosted 
 
 The **WAL Accumulation — Stale Replication Slot** Playbook (`pbs_wal_stale_slot`) handles the complementary scenario where the database is still up but `pg_wal` is growing without bound. It differs from `pbs_wal_disk_full` in that the database is reachable — the agent works through a four-hypothesis elimination tree (archive failure → inactive slot → long transaction → write volume) rather than reading crash logs. Dropping the slot requires `approval_mode: manual` since it permanently removes the replica's reconnection point.
 
-Both `pbs_db_restart_action`, `pbs_wal_disk_full`, and `pbs_wal_stale_slot` have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
+`pbs_db_restart_action`, `pbs_wal_disk_full`, `pbs_wal_stale_slot`, and `pbs_lock_chain_remediate` all have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
 
 Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 
@@ -275,6 +281,8 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 
 **`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms ranked hypotheses with confidence scores, backs out when evidence contradicts a hypothesis, and returns a structured diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`.
 
+**`execution_mode: agent_approve`** — the gateway drives a step-by-step execution loop with per-step operator approval. The LLM proposes a single action at a time, the gateway surfaces it to the operator, and after the operator approves, the gateway executes the tool directly and re-plans based on the result. No action is executed without explicit approval. Returns `202 Accepted` with a `pending_approval` status rather than a final result. See [agent_approve execution mode](#agent_approve-execution-mode) below.
+
 Optional request body:
 
 | Field | Description |
@@ -337,6 +345,21 @@ POST /run → outcome=unknown (run recorded)
        gateway parses signal → outcome auto-updated (resolved|escalated|unknown)
                     ↓
        operator reviews diagnosis — may patch outcome to correct it
+```
+
+**Agent-approve mode:**
+```
+POST /run → 202 Accepted
+  {status: "pending_approval", run_id, step: {tool, args, reason}, approval_id}
+                    ↓
+       operator reviews proposed step (tool + args + reason)
+                    ↓
+POST /proceed {resolution: "approved", step_index: N, resolved_by: "alice"}
+  → gateway executes tool via direct dispatch
+  → LLM re-plans based on result
+  → returns next step OR {status: "complete", summary}
+                    ↓
+       repeat until status="complete" or operator denies a step
 ```
 
 For agent-mode runs the Gateway parses the agent's structured response (see [Structured escalation signal](#structured-escalation-signal)) and calls `PATCH /playbook-runs/{runID}` automatically once the agent session completes. `findings_summary` and `escalated_to` are populated from the agent's output. Operators can always override via a manual PATCH.
@@ -453,7 +476,7 @@ Returns `204 No Content` on success.
 | `run_id` | string | Unique run identifier (`plr_` prefix) |
 | `playbook_id` | string | The specific Playbook version that was run |
 | `series_id` | string | Series the Playbook belongs to |
-| `execution_mode` | string | `fleet` or `agent` |
+| `execution_mode` | string | `fleet`, `agent`, or `agent_approve` |
 | `outcome` | string | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
 | `escalated_to` | string | Series ID of the follow-on Playbook (when `outcome=escalated`) |
 | `findings_summary` | string | Operator-provided summary of diagnosis and action taken |
@@ -719,6 +742,36 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/r
 
 `force` is intentionally named to make the operator's conscious choice visible in the audit trail. Every tool execution and policy decision event records `approval_mode: force`, so the audit log clearly shows that a human made a deliberate decision to automate the full chain, rather than the system doing it silently.
 
+#### Per-database override restrictions (`approval_override_roles`)
+
+A database entry in `infrastructure.json` can declare which roles are permitted to request an approval mode more permissive than the playbook's own `approval_mode` setting:
+
+```json
+{
+  "db_servers": {
+    "prod-primary": {
+      "name": "Production Primary",
+      "connection_string": "host=prod.internal port=5432 dbname=app user=app",
+      "tags": ["production"],
+      "sensitivity": ["pii"],
+      "approval_override_roles": ["dba_lead", "oncall_senior"]
+    }
+  }
+}
+```
+
+With this configuration: a caller requesting `approval_mode: force` against `prod-primary` must hold the `dba_lead` or `oncall_senior` role. A caller without a matching role is silently **clamped** to the playbook's declared mode (typically `manual`) — the run proceeds, but without the requested override. The response `warnings` array records what was requested, what it was clamped to, and the caller's identity:
+
+```json
+{
+  "warnings": [
+    "approval_mode clamped to \"manual\": override to \"force\" requires one of roles [dba_lead oncall_senior] (caller: bob@example.com)"
+  ]
+}
+```
+
+Databases with no `approval_override_roles` (e.g., dev or test databases) are unrestricted — any caller may pass any approval mode, as before. The restriction only applies when a caller requests a mode **more permissive** than the playbook's declared mode; requesting `manual` on a `manual` playbook is never an override and is never gated.
+
 #### Creating an approval session (`session` mode)
 
 Create a session token on auditd before starting the run. The token specifies which action classes it covers and for how long:
@@ -810,6 +863,375 @@ if [ -n "$HINT" ]; then
     | jq -r .text
 fi
 ```
+
+---
+
+## agent_approve execution mode
+
+`agent_approve` is the third execution mode for Playbooks. Where `agent` mode lets the LLM run autonomously (gathering evidence and deciding actions without human gates), `agent_approve` puts the operator in the loop at every step: the gateway proposes one action, the operator approves or denies it, the gateway executes and re-plans, and the loop continues until done.
+
+Use `agent_approve` for Playbooks that perform **mutating** operations — process terminations, setting changes, restarts — where you want a human to confirm each individual tool call before it fires. Critically, the operator sees the proposed action and its stated reason *before* it executes — this is the only point in the system where cascade risks (e.g. "terminating this session will also roll back session B's uncommitted writes") are surfaced to a human before damage is done.
+
+`agent_approve` requires the gateway to be configured with a planner LLM (the same one used by fleet planning). If no planner LLM is wired up, runs fail at the first step with `planner LLM not configured`.
+
+### Reactive re-planning
+
+The defining property of `agent_approve` — and what distinguishes it from `fleet` mode — is that the plan is not generated up front. After each step executes, its result is fed back to the LLM, which proposes the next step against the **actual observed state** rather than a frozen prediction made before the run started.
+
+Concretely, on every `/proceed` call the gateway:
+
+1. Persists the executed step's result to the run's step history.
+2. Re-invokes the planner LLM with the Playbook guidance and the **full history of executed steps and their results so far** as context.
+3. The LLM either proposes the next single tool call (with a fresh `reason`) or signals `complete` with a summary.
+
+This means the plan adapts to evidence as it arrives. A few concrete consequences:
+
+- **Step count is not fixed.** A lock-chain remediation against a 2-session chain produces fewer `get_session_info` steps than one against a 5-session chain — the LLM inspects every intermediate it discovers, and the chain depth is only known after `get_blocking_queries` returns.
+- **State changes between steps are absorbed.** If a blocked session disconnects on its own between step 1 and step 3, the LLM sees the updated `get_blocking_queries` output and skips the now-unnecessary termination.
+- **The `reason` field is grounded in real data.** Cascade warnings ("terminating root will also roll back session 92621 with `has_writes=true`") are written after the LLM has actually inspected session 92621 — they are not boilerplate from the Playbook guidance.
+- **Failures truncate the plan.** If the LLM cannot produce a valid next step (parse error, empty tool, LLM error), the run is abandoned at the current step rather than continuing on a stale plan.
+
+Contrast with `fleet`, where the planner emits the full multi-step job up front and `fleet-runner` executes it. In that mode, the only way to react to evidence is `--replan` (see [docs/FLEET.md](FLEET.md)), which regenerates the plan offline against drifted schema — not against tool results. `agent_approve` is fundamentally reactive; `fleet` is fundamentally batch.
+
+### When to use each execution mode
+
+| Mode | What the LLM does | What the operator does | When to use |
+|---|---|---|---|
+| `fleet` | Generates a full multi-step job plan | Reviews the plan, runs it via fleet-runner | Batch maintenance, scheduled tasks |
+| `agent` | Runs autonomously to diagnosis | Reviews the findings | Read-only triage and diagnosis |
+| `agent_approve` | Proposes one step at a time, re-plans after each | Approves or denies each step | Mutating remediation requiring human gates |
+
+### Starting an agent_approve run
+
+```bash
+# Find the playbook ID for the remediation series
+PB=$(curl -s "http://localhost:8080/api/v1/fleet/playbooks?series_id=pbs_lock_chain_remediate" \
+  | jq -r '.playbooks[0].playbook_id')
+
+# Start the run
+RESP=$(curl -s -X POST "http://localhost:8080/api/v1/fleet/playbooks/$PB/run" \
+  -H "Content-Type: application/json" \
+  -d '{"connection_string": "postgres://prod-db.example.com/app"}')
+
+echo "$RESP" | jq '{status, run_id, step: .step}'
+```
+
+Response (`202 Accepted`):
+
+```json
+{
+  "run_id":      "plr_3f7a2b1c",
+  "status":      "pending_approval",
+  "approval_id": "apr_9a8b7c6d",
+  "step": {
+    "index":  1,
+    "agent":  "database",
+    "tool":   "get_blocking_queries",
+    "args":   {"connection_string": "postgres://prod-db.example.com/app"},
+    "reason": "Confirm the root blocker is still present before terminating."
+  }
+}
+```
+
+The `reason` field is written by the LLM and shown to the operator to explain why this step is being proposed. The operator should read it before approving. For destructive steps, the Playbook guidance instructs the LLM to include cascade side effects in `reason` — for example, if terminating a root blocker will also roll back an intermediate session's uncommitted writes, that warning appears here before the operator approves.
+
+### Approving a step
+
+```
+POST /api/v1/fleet/playbook-runs/{runID}/proceed
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `resolution` | yes | `approved` or `denied` |
+| `resolved_by` | yes | Identity of the operator approving the step |
+| `step_index` | yes | Must match the `step.index` in the pending response (prevents double-approval races) |
+| `reason` | no | Free-form note (recorded in audit log; useful for denials) |
+
+```bash
+RUN_ID=$(echo "$RESP" | jq -r .run_id)
+STEP=$(echo "$RESP" | jq -r '.step.index')
+
+curl -s -X POST "http://localhost:8080/api/v1/fleet/playbook-runs/$RUN_ID/proceed" \
+  -H "Content-Type: application/json" \
+  -d "{\"resolution\":\"approved\",\"resolved_by\":\"alice@example.com\",\"step_index\":$STEP}"
+```
+
+If the step was the last one, the response is `200 OK` with `status: "complete"`:
+
+```json
+{
+  "run_id":  "plr_3f7a2b1c",
+  "status":  "complete",
+  "summary": "Root blocker (pid=9847) terminated. Lock queue cleared — 3 previously blocked sessions resumed."
+}
+```
+
+If more steps are needed, the response is another `pending_approval` with the next proposed step. Repeat the approve-and-proceed loop until `status: "complete"`.
+
+If the operator denies a step, the run is abandoned:
+
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/fleet/playbook-runs/$RUN_ID/proceed" \
+  -H "Content-Type: application/json" \
+  -d "{\"resolution\":\"denied\",\"resolved_by\":\"alice@example.com\",\"step_index\":$STEP,\"reason\":\"Session holds an uncommitted write — deferring to on-call DBA.\"}"
+```
+
+Response: `200 OK` with `status: "denied"`. The run is marked `outcome=abandoned` in auditd.
+
+Two other terminal failure modes exist, both of which return `422 Unprocessable Entity` and mark the run `outcome=abandoned`:
+
+- **Tool execution failed** — the operator approved the step, but the agent's tool call returned an error (network failure, agent-side validation error, policy denial). Response body: `tool execution failed: <err>`. The step's status is set to `failed` in the run's step history; no further re-planning is attempted.
+- **Re-planning failed** — the step executed successfully, but the subsequent call to the planner LLM failed (LLM unavailable, malformed response, empty tool name). Response body: `re-planning failed after step N: <err>`. The successful step is preserved in the history; only the run as a whole is abandoned.
+
+In both cases the operator must inspect the run's step history (via `GET /api/v1/fleet/playbook-runs/{runID}/steps`) to see what executed before the failure.
+
+### Full shell example
+
+```bash
+GW=http://localhost:8080
+CONN="postgres://prod-db.example.com/app"
+OPERATOR="alice@example.com"
+
+# Find the active remediation playbook
+PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_lock_chain_remediate" \
+  | jq -r '.playbooks[0].playbook_id')
+
+# Start the run
+RESP=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/$PB/run" \
+  -H "Content-Type: application/json" \
+  -d "{\"connection_string\":\"$CONN\"}")
+
+RUN_ID=$(echo "$RESP" | jq -r .run_id)
+
+# Step-by-step approval loop
+while true; do
+  STATUS=$(echo "$RESP" | jq -r .status)
+
+  if [ "$STATUS" = "complete" ]; then
+    echo "Done: $(echo "$RESP" | jq -r .summary)"
+    break
+  fi
+
+  if [ "$STATUS" != "pending_approval" ]; then
+    echo "Unexpected status: $STATUS" >&2
+    exit 1
+  fi
+
+  TOOL=$(echo "$RESP"   | jq -r '.step.tool')
+  ARGS=$(echo "$RESP"   | jq -r '.step.args | tostring')
+  REASON=$(echo "$RESP" | jq -r '.step.reason')
+  STEP=$(echo "$RESP"   | jq -r '.step.index')
+
+  echo ""
+  echo "Step $STEP: $TOOL"
+  echo "  Args:   $ARGS"
+  echo "  Reason: $REASON"
+  read -r -p "Approve? [y/n] " choice
+
+  if [ "$choice" != "y" ]; then
+    curl -s -X POST "$GW/api/v1/fleet/playbook-runs/$RUN_ID/proceed" \
+      -H "Content-Type: application/json" \
+      -d "{\"resolution\":\"denied\",\"resolved_by\":\"$OPERATOR\",\"step_index\":$STEP}" > /dev/null
+    echo "Step denied — run abandoned."
+    break
+  fi
+
+  RESP=$(curl -s -X POST "$GW/api/v1/fleet/playbook-runs/$RUN_ID/proceed" \
+    -H "Content-Type: application/json" \
+    -d "{\"resolution\":\"approved\",\"resolved_by\":\"$OPERATOR\",\"step_index\":$STEP}")
+done
+```
+
+### Automated approval (CI and fault tests)
+
+In CI or automated test harnesses, `--approval-mode force` auto-approves every step and logs each proposal before executing:
+
+```bash
+go run ./testing/cmd/faulttest run \
+  --ids db-tx-lock-chain-blocker --external --conn faulttest-db \
+  --db-agent http://localhost:8080 --via-gateway --gateway http://localhost:8080 \
+  --infra-config ~/cassiopeia/claude/infrastructure.json \
+  --remediate --approval-mode force
+```
+
+Each step appears as a structured log line before execution:
+
+```
+level=INFO msg="agent_approve: pending step" step_index=5 tool=terminate_connection \
+  pid=92612 reason="Root blocker (blocking_pid=NULL, has_writes=true, 36s idle). \
+  Terminating root will cascade to roll back session 92621 (has_writes=true, 39s idle) \
+  — operator should confirm this work can be discarded before approving."
+```
+
+The loop completes without pausing. `force` chains through all playbooks including those with `approval_mode: manual`, making it suitable for unattended regression runs where the safety story is tested rather than exercised.
+
+### Interactive approval (human-in-the-loop demo)
+
+`--approval-mode manual` turns the approval loop into a live terminal prompt. For each proposed step, `faulttest` prints the tool, its logical arguments (connection plumbing stripped), and the full reason field — then waits for `y/n` before sending `/proceed`:
+
+```bash
+go run ./testing/cmd/faulttest run \
+  --ids db-tx-lock-chain-blocker --external --conn faulttest-db \
+  --db-agent http://localhost:8080 --via-gateway --gateway http://localhost:8080 \
+  --infra-config ~/cassiopeia/claude/infrastructure.json \
+  --remediate --approval-mode manual
+```
+
+The read-only steps (`get_blocking_queries`, `get_session_info`) appear first. The number of `get_session_info` steps varies — the step proposer inspects every session it classifies as an intermediate before terminating, so a longer chain produces more inspection steps. The `terminate_connection` step always comes last before the verification. At that step the output looks like:
+
+```
+────────────────────────────────────────────────────────────────
+  Step N — terminate_connection
+
+  pid:       97617
+  reason:    Root blocker (blocking_pid=NULL, idle in transaction).
+             Root has_writes=true, idle_secs=40. WARNING:
+             terminating root will cascade to roll back session
+             97618 (has_writes=true, 43s idle) — operator should
+             confirm this work can be discarded before approving.
+             Session 97619 (has_writes=false, read-only) and 97620
+             (has_writes=false, read-only) will rollback instantly
+             with no data loss.
+────────────────────────────────────────────────────────────────
+  Approve? [y/n]:
+```
+
+The `reason` field is what the Playbook guidance instructs the LLM to produce: before the operator sees a destructive action, they see exactly why it is being proposed and what side effects to expect. If the operator types `n`, `faulttest` sends `resolution: "denied"` to `/proceed` and the gateway marks the run abandoned — nothing is executed.
+
+This is the contrast with Crystal Ball mode: an unguided agent would either terminate silently (if running autonomously) or, as observed in testing, present `cancel_query` as "Option 1 (Immediate)" with an incorrect description of its effect. The guided `agent_approve` path surfaces the correct action, its reason, and its cascade risk — all before the operator commits.
+
+### Step tracking
+
+Every proposed and executed step is recorded in auditd and accessible via the following endpoints.
+
+**List steps for a run:**
+
+```
+GET /api/v1/fleet/playbook-runs/{runID}/steps
+```
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/steps | jq .
+```
+
+Response:
+
+```json
+{
+  "steps": [
+    {
+      "run_id":      "plr_3f7a2b1c",
+      "step_index":  1,
+      "agent":       "database",
+      "tool":        "get_blocking_queries",
+      "args":        {"connection_string": "..."},
+      "reason":      "Identify the full lock chain and confirm the root blocker is still present.",
+      "status":      "succeeded",
+      "result":      "2-level chain: root pid=9847 (idle in transaction, no blocking_pid); intermediate pid=10234 (blocked by 9847, itself blocking 2 sessions)",
+      "approval_id": "apr_9a8b7c6d",
+      "created_at":  "2026-05-22T10:00:00Z",
+      "updated_at":  "2026-05-22T10:00:05Z"
+    },
+    {
+      "run_id":      "plr_3f7a2b1c",
+      "step_index":  2,
+      "agent":       "database",
+      "tool":        "get_session_info",
+      "args":        {"pid": 9847},
+      "reason":      "Inspect root blocker (pid=9847) before acting: confirm idle-in-transaction state and check has_writes. Also inspecting intermediate session (pid=10234) for cascade rollback risk.",
+      "status":      "succeeded",
+      "result":      "pid=9847: state=idle in transaction, has_open_tx=true, has_writes=true, idle_secs=47. pid=10234: has_open_tx=true, has_writes=true, idle_secs=46 (blocked victim)",
+      "approval_id": "apr_2c3d4e5f",
+      "created_at":  "2026-05-22T10:00:07Z",
+      "updated_at":  "2026-05-22T10:00:09Z"
+    },
+    {
+      "run_id":      "plr_3f7a2b1c",
+      "step_index":  3,
+      "agent":       "database",
+      "tool":        "terminate_connection",
+      "args":        {"pid": 9847},
+      "reason":      "Terminate root blocker pid=9847 (idle in transaction, has_writes=true, idle_secs=47 — under 30-min escalation threshold). WARNING: terminating root will cascade to roll back intermediate session pid=10234 (has_writes=true, 46s idle) — operator should confirm this work can be discarded before approving.",
+      "status":      "succeeded",
+      "result":      "terminated=true",
+      "approval_id": "apr_1b2c3d4e",
+      "created_at":  "2026-05-22T10:00:14Z",
+      "updated_at":  "2026-05-22T10:00:16Z"
+    },
+    {
+      "run_id":      "plr_3f7a2b1c",
+      "step_index":  4,
+      "agent":       "database",
+      "tool":        "get_blocking_queries",
+      "args":        {"connection_string": "..."},
+      "reason":      "Verify the full chain cleared — intermediate and leaf sessions should have resumed.",
+      "status":      "succeeded",
+      "result":      "no blocked sessions",
+      "approval_id": "apr_5e6f7a8b",
+      "created_at":  "2026-05-22T10:00:19Z",
+      "updated_at":  "2026-05-22T10:00:21Z"
+    }
+  ]
+}
+```
+
+**Get the current pending step:**
+
+```
+GET /api/v1/fleet/playbook-runs/{runID}/pending-step
+```
+
+Returns the single step currently awaiting approval (`status=proposed`). Returns `404` if no step is pending. Use this to poll for the next step after calling `/proceed`, or to resume an in-progress run after a gateway restart.
+
+### `PlaybookRunStep` object
+
+| Field | Type | Description |
+|---|---|---|
+| `run_id` | string | The run this step belongs to |
+| `step_index` | int | 1-based sequential index within the run |
+| `agent` | string | Agent that will execute the tool (e.g. `database`) |
+| `tool` | string | Tool name proposed by the LLM |
+| `args` | object | Arguments for the tool call |
+| `reason` | string | LLM-written explanation shown to the operator at approval time |
+| `status` | string | `proposed` → `approved` or `denied` → `executing` → `succeeded` or `failed` |
+| `approval_id` | string | `apr_*` approval record ID (set after the step is approved) |
+| `result` | string | Tool output (set after execution) |
+| `error` | string | Error message if the tool call failed |
+| `created_at` | RFC3339 | When the step was proposed |
+| `updated_at` | RFC3339 | When the step was last updated |
+
+### Diagnosis / remediation playbook split
+
+The `agent_approve` mode naturally pairs with an `agent`-mode diagnosis Playbook. The recommended pattern for a fault that requires both investigation and a mutating fix:
+
+1. Run the **diagnosis Playbook** (`execution_mode: agent`, `approval_mode: manual`) — the agent gathers evidence autonomously and returns a structured `DiagnosticReport` with findings. No mutations.
+2. Review the findings. If the agent recommends action, invoke the **remediation Playbook** (`execution_mode: agent_approve`, `approval_mode: manual`) — the gateway proposes one step at a time and you approve each one.
+
+The `pbs_lock_chain_triage` / `pbs_lock_chain_remediate` pair demonstrates this pattern:
+
+```bash
+# 1. Diagnose (autonomous, read-only)
+TRIAGE_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_lock_chain_triage" \
+  | jq -r '.playbooks[0].playbook_id')
+DIAG=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/$TRIAGE_PB/run" \
+  -H "Content-Type: application/json" \
+  -d "{\"connection_string\":\"$CONN\"}")
+
+echo "$DIAG" | jq -r .text     # agent findings
+TRIAGE_RUN=$(echo "$DIAG" | jq -r .run_id)
+
+# 2. Review — if diagnosis confirms idle-in-tx blocker, proceed to remediation
+REMED_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_lock_chain_remediate" \
+  | jq -r '.playbooks[0].playbook_id')
+curl -s -X POST "$GW/api/v1/fleet/playbooks/$REMED_PB/run" \
+  -H "Content-Type: application/json" \
+  -d "{\"connection_string\":\"$CONN\",\"prior_run_id\":\"$TRIAGE_RUN\"}"
+# → {status: "pending_approval", step: {tool: "get_blocking_queries", ...}}
+# Continue the approval loop as shown above.
+```
+
+Passing `prior_run_id` threads the triage findings into the remediation Playbook's context — the LLM knows what was already confirmed and does not repeat diagnostic steps.
 
 ---
 
@@ -919,7 +1341,7 @@ escalation:
   - "any query running > 30 minutes with writes (has_writes=true)"
   - "blocking chain involves a write transaction open > 10 minutes"
 target_hints: []
-execution_mode: fleet            # fleet (default) | agent
+execution_mode: fleet            # fleet (default) | agent | agent_approve
 entry_point: false               # true = preferred starting Playbook for this problem_class
 escalates_to: []                 # series IDs of follow-on Playbooks if hypothesis is wrong
 requires_evidence: []            # log patterns expected before selecting this Playbook
@@ -1038,8 +1460,8 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `entry_point` | bool | `true` marks this as the preferred starting Playbook for its `problem_class`. Used by the planner to resolve "where do I start?" when multiple Playbooks could apply. Only one Playbook per problem class should have `entry_point=true`. |
 | `escalates_to` | []string | Series IDs (`pbs_*`) of Playbooks to consider next if this Playbook's hypothesis is disproven by the collected evidence. Injected into the agent prompt as escalation context. |
 | `requires_evidence` | []string | Log patterns or error signals expected to be present before this Playbook is selected. Expressed as case-insensitive substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). At run time the Gateway checks these patterns against the `context` field of the run request and emits `warnings` for any that are missing. Execution is never blocked — warnings are advisory only. |
-| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to an agent as an interactive agentic session; the agent collects evidence, forms hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. The Gateway automatically parses the agent's structured response to set `outcome` and `findings_summary` on the run record. |
-| `agent_name` | string | For `execution_mode: agent` Playbooks, the agent to route to. Defaults to the database agent (`database_agent`) if omitted. Use `sysadmin_agent` for Playbooks that require host-level diagnostics. |
+| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to an agent as an autonomous triage session; the agent collects evidence, forms hypotheses, and returns a structured diagnosis with recommended (not executed) remediation steps. `agent_approve` — the gateway drives a step-by-step loop: the LLM proposes one action at a time, the operator approves each step before it executes, the gateway executes via direct tool dispatch, and the LLM re-plans based on the result; returns `202 Accepted` with `pending_approval` status until the run completes. See [agent_approve execution mode](#agent_approve-execution-mode). |
+| `agent_name` | string | For `execution_mode: agent` and `agent_approve` Playbooks, the agent to route to. Defaults to the database agent (`database_agent`) if omitted. Use `sysadmin_agent` for Playbooks that require host-level diagnostics. |
 | `approval_mode` | string | Default approval mode for runs of this Playbook: `auto`, `session`, or `manual`. Can be overridden per run via the request body. Defaults to `""` which is treated as `manual` (safe default). For Playbooks that cross agent boundaries via auto-chaining, this also gates cross-agent escalation — see [Approval modes](#approval-modes). |
 | `stats` | object | Inline run statistics for the Playbook's series. Populated by `GET /fleet/playbooks` (list); omitted when no runs have been recorded. See `PlaybookRunStats` below. Not persisted — computed on read. |
 | `created_at` | RFC3339 | Creation timestamp |

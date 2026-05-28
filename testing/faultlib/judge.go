@@ -30,8 +30,8 @@ AGENT RESPONSE:
 %s
 
 Score the agent's diagnosis on a scale of 0–3:
-3 = Correct root cause AND appropriate recommendations or remediation steps
-2 = Correct root cause identified, but incomplete or missing recommendations
+3 = Correct root cause AND all key points in EXPECTED DIAGNOSIS addressed (including any specific tool, mechanism, or nuance called out there)
+2 = Correct root cause identified, but one or more key points from EXPECTED DIAGNOSIS are missing or incomplete
 1 = Identified the symptom but missed the underlying root cause
 0 = Wrong diagnosis, irrelevant response, or no meaningful diagnosis
 

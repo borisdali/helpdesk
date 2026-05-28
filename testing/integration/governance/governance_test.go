@@ -1164,6 +1164,158 @@ func TestIntegration_VerifyTrace_SinceFilter(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// playbook_run_steps endpoints
+// =============================================================================
+
+// patchJSON sends an HTTP PATCH with a JSON body and returns the status code + body.
+func patchJSON(t *testing.T, base, path string, body any) (int, string) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal PATCH body: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPatch, base+path, bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("build PATCH request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
+}
+
+// TestPlaybookRunSteps_CRUD exercises the four playbook_run_steps HTTP endpoints
+// against a real running auditd: create, update, list, and get-pending.
+func TestPlaybookRunSteps_CRUD(t *testing.T) {
+	runID := fmt.Sprintf("plr-integ-%d", time.Now().UnixNano())
+
+	// ── create a proposed step ─────────────────────────────────────────────
+	step := post(t, auditdAddr, "/v1/fleet/playbook-runs/"+runID+"/steps", map[string]any{
+		"agent":  "database",
+		"tool":   "terminate_connection",
+		"args":   map[string]any{"pid": 1234},
+		"reason": "Terminate idle-in-transaction root blocker",
+	})
+
+	stepIndex, _ := step["step_index"].(float64)
+	if stepIndex == 0 {
+		t.Fatalf("step_index = %.0f, want non-zero (auto-assigned)", stepIndex)
+	}
+	if step["status"] != "proposed" {
+		t.Errorf("status = %q, want proposed", step["status"])
+	}
+	if step["tool"] != "terminate_connection" {
+		t.Errorf("tool = %q, want terminate_connection", step["tool"])
+	}
+	t.Logf("created step: step_index=%.0f status=%v", stepIndex, step["status"])
+
+	// ── get pending step ───────────────────────────────────────────────────
+	pending := get(t, auditdAddr, "/v1/fleet/playbook-runs/"+runID+"/pending-step")
+	if pending["tool"] != "terminate_connection" {
+		t.Errorf("pending step tool = %q, want terminate_connection", pending["tool"])
+	}
+	if pending["status"] != "proposed" {
+		t.Errorf("pending step status = %q, want proposed", pending["status"])
+	}
+	t.Logf("pending step: tool=%v status=%v", pending["tool"], pending["status"])
+
+	// ── list steps ─────────────────────────────────────────────────────────
+	listResp := get(t, auditdAddr, "/v1/fleet/playbook-runs/"+runID+"/steps")
+	count, _ := listResp["count"].(float64)
+	if count != 1 {
+		t.Errorf("count = %.0f, want 1", count)
+	}
+	steps, _ := listResp["steps"].([]any)
+	if len(steps) != 1 {
+		t.Fatalf("steps len = %d, want 1", len(steps))
+	}
+	firstStep, _ := steps[0].(map[string]any)
+	if firstStep["tool"] != "terminate_connection" {
+		t.Errorf("listed step tool = %q, want terminate_connection", firstStep["tool"])
+	}
+
+	// ── update step to succeeded ───────────────────────────────────────────
+	idxStr := fmt.Sprintf("%.0f", stepIndex)
+	patchCode, patchBody := patchJSON(t, auditdAddr,
+		"/v1/fleet/playbook-runs/"+runID+"/steps/"+idxStr,
+		map[string]any{
+			"status":      "succeeded",
+			"approval_id": "apr_integ_test",
+			"result":      "terminated 1 connection",
+		},
+	)
+	if patchCode != http.StatusNoContent {
+		t.Errorf("PATCH status = %d, want 204; body: %s", patchCode, patchBody)
+	}
+
+	// ── verify no more pending steps after update ──────────────────────────
+	resp, err := http.Get(auditdAddr + "/v1/fleet/playbook-runs/" + runID + "/pending-step")
+	if err != nil {
+		t.Fatalf("GET pending-step after update: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("pending-step after succeeded update: status = %d, want 404", resp.StatusCode)
+	}
+	t.Logf("playbook_run_steps CRUD OK: run_id=%s", runID)
+}
+
+// TestPlaybookRunSteps_AutoIndexIncrement verifies that multiple steps in the
+// same run are assigned sequential indices automatically.
+func TestPlaybookRunSteps_AutoIndexIncrement(t *testing.T) {
+	runID := fmt.Sprintf("plr-idx-%d", time.Now().UnixNano())
+
+	tools := []string{"get_blocking_queries", "get_session_info", "terminate_connection"}
+	for _, tool := range tools {
+		step := post(t, auditdAddr, "/v1/fleet/playbook-runs/"+runID+"/steps", map[string]any{
+			"agent": "database",
+			"tool":  tool,
+		})
+		if step["tool"] != tool {
+			t.Errorf("created step tool = %v, want %s", step["tool"], tool)
+		}
+	}
+
+	listResp := get(t, auditdAddr, "/v1/fleet/playbook-runs/"+runID+"/steps")
+	steps, _ := listResp["steps"].([]any)
+	if len(steps) != 3 {
+		t.Fatalf("len(steps) = %d, want 3", len(steps))
+	}
+	for i, s := range steps {
+		sm, _ := s.(map[string]any)
+		idx, _ := sm["step_index"].(float64)
+		if int(idx) != i+1 {
+			t.Errorf("steps[%d].step_index = %.0f, want %d", i, idx, i+1)
+		}
+	}
+	t.Logf("auto-index OK: 3 steps with indices 1,2,3")
+}
+
+// TestPlaybookRunSteps_MissingFields verifies that the endpoint rejects steps
+// with missing required fields.
+func TestPlaybookRunSteps_MissingFields(t *testing.T) {
+	runID := fmt.Sprintf("plr-bad-%d", time.Now().UnixNano())
+
+	// Missing agent.
+	code, _ := postStatus(t, auditdAddr, "/v1/fleet/playbook-runs/"+runID+"/steps",
+		map[string]any{"tool": "terminate_connection"})
+	if code != http.StatusBadRequest {
+		t.Errorf("missing agent: status = %d, want 400", code)
+	}
+
+	// Missing tool.
+	code, _ = postStatus(t, auditdAddr, "/v1/fleet/playbook-runs/"+runID+"/steps",
+		map[string]any{"agent": "database"})
+	if code != http.StatusBadRequest {
+		t.Errorf("missing tool: status = %d, want 400", code)
+	}
+}
+
 // TestIntegration_DelegationVerification_CleanVerification verifies that a
 // delegation_verification event with Mismatch=false records outcome "verified"
 // and does NOT elevate the journey to "unverified_claim".

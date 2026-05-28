@@ -22,7 +22,7 @@ The sample log below predates several additions and shows an earlier count — i
   go run ./testing/cmd/faulttest list
 ```
 
-The output now includes a `SOURCE` column (`builtin` for catalog entries, `custom` for entries added via `--catalog`). Pass `--source builtin` or `--source custom` to filter. Abridged sample log (see the [full log](FAULT_INJECTION_TESTING_SAMPLE.md) for details — note the sample predates the SOURCE column):
+The output now includes a `SOURCE` column (`builtin` for catalog entries, `custom` for entries added via `--catalog`). Pass `--source builtin` or `--source custom` to filter. Abridged sample log of running the internal, "base" fault injection test (by "base" we are referring to the direct agent mode, in contrast to the tests run via the Gateway) is presented [here](FAULT_INJECTION_TESTING_SAMPLE.md). The sample log of the internal faulttest-gateway (aka fault injection test running via the Gateway and exercising aiHelpDesk playbooks) is presented [here](FAULT_INJECTION_TESTING_GATEWAY_SAMPLE.md).
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest list

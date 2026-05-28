@@ -24,6 +24,9 @@ type AgentResponse struct {
 	// CrystalBall is true when the gateway ran this call in crystal-ball mode
 	// (playbook scaffolding bypassed). Set only on gateway playbook responses.
 	CrystalBall bool
+	// Warnings contains advisory messages returned by the gateway (e.g., approval_mode
+	// clamped due to insufficient roles). Empty on direct agent calls.
+	Warnings []string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.
@@ -236,7 +239,7 @@ func IsGatewayURL(ctx context.Context, baseURL string) bool {
 // agentName should be "database", "kubernetes", "sysadmin", etc.
 // apiKey is the Bearer token for gateway auth (may be empty for unauthenticated gateways).
 // purpose is the declared access purpose (e.g. "diagnostic"); an empty string omits the field.
-func SendPromptViaGateway(ctx context.Context, gatewayURL, apiKey, agentName, prompt, purpose string) AgentResponse {
+func SendPromptViaGateway(ctx context.Context, gatewayURL, apiKey, agentName, prompt, purpose, operatorID string) AgentResponse {
 	start := time.Now()
 
 	reqBody := map[string]string{
@@ -259,6 +262,9 @@ func SendPromptViaGateway(ctx context.Context, gatewayURL, apiKey, agentName, pr
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if operatorID != "" {
+		req.Header.Set("X-User", operatorID)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

@@ -38,6 +38,10 @@ type Failure struct {
 	// libpq (no Docker/OS access required). Used to filter the catalog when
 	// --external is set.
 	ExternalCompat bool `yaml:"external_compat,omitempty"`
+	// DiagnosisPlaybookSeriesID links this fault to a gateway playbook for
+	// diagnosis. When set and ViaGateway is active, the runner calls
+	// POST /api/v1/fleet/playbooks/{id}/run instead of the agent directly.
+	DiagnosisPlaybookSeriesID string `yaml:"diagnosis_playbook_series_id,omitempty"`
 	// ExternalInject/ExternalTeardown override Inject/Teardown when running in
 	// external mode. Use these to provide SQL-based equivalents for faults that
 	// are normally injected via docker_exec or ssh_exec.
@@ -165,6 +169,18 @@ type HarnessConfig struct {
 	CustomCatalogs []string
 	// SourceFilter restricts which faults are run: "" (all), "builtin", or "custom".
 	SourceFilter string
+
+	// ViaGateway routes diagnosis through the gateway's playbook endpoint when
+	// the fault has a DiagnosisPlaybookSeriesID set and GatewayURL is non-empty.
+	// This exercises the full gateway → playbook → agent path in automated tests.
+	ViaGateway bool
+	// ApprovalMode overrides the playbook's approval_mode for this run.
+	// Use "force" in automated test runs to bypass manual approval gates.
+	ApprovalMode string
+	// OperatorID is the user identity sent as X-User on gateway requests.
+	// Must match a user in users.yaml with the roles required for the run
+	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
+	OperatorID string
 
 	// AuditURL is the base URL of the audit service (e.g. "http://localhost:7070").
 	// When set, the harness queries tool execution events after each agent call

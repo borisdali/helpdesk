@@ -2005,6 +2005,71 @@ func TestCheckApprovalMode_Session_ValidSessionAllows(t *testing.T) {
 	}
 }
 
+// TestGovernanceApprovalForwarding verifies that the approve/deny handlers forward
+// the caller's HTTP method and request body to auditd unchanged.
+func TestGovernanceApprovalForwarding(t *testing.T) {
+	cases := []struct {
+		path     string
+		auditdPath string
+	}{
+		{
+			path:       "/api/v1/governance/approvals/apr_test123/approve",
+			auditdPath: "/v1/approvals/apr_test123/approve",
+		},
+		{
+			path:       "/api/v1/governance/approvals/apr_test123/deny",
+			auditdPath: "/v1/approvals/apr_test123/deny",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.auditdPath, func(t *testing.T) {
+			var (
+				gotMethod string
+				gotBody   []byte
+				gotPath   string
+			)
+
+			auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				gotPath = r.URL.Path
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
+			}))
+			defer auditdSrv.Close()
+
+			gw := &Gateway{
+				agents:   make(map[string]*discovery.Agent),
+				clients:  make(map[string]*a2aclient.Client),
+				auditURL: auditdSrv.URL,
+			}
+			mux := http.NewServeMux()
+			gw.RegisterRoutes(mux)
+
+			reqBody := `{"resolved_by":"boris","reason":"looks good"}`
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(reqBody))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+			}
+			if gotMethod != http.MethodPost {
+				t.Errorf("auditd received method %q, want POST", gotMethod)
+			}
+			if gotPath != tc.auditdPath {
+				t.Errorf("auditd received path %q, want %q", gotPath, tc.auditdPath)
+			}
+			if string(gotBody) != reqBody {
+				t.Errorf("auditd received body %q, want %q", gotBody, reqBody)
+			}
+		})
+	}
+}
+
 func TestCheckApprovalMode_Session_ExpiredSessionBlocks(t *testing.T) {
 	sess := audit.ApprovalSession{
 		SessionID:      "aps_expired",

@@ -138,10 +138,16 @@ failures:
         fi
         psql "$FAULTTEST_CONN" -c "
           SELECT pg_terminate_backend(pid)
-          FROM pg_stat_activity
-          WHERE query LIKE '%_faulttest_longquery%'
-            AND state IN ('active', 'idle in transaction')
-            AND pid <> pg_backend_pid();
+          FROM (
+            SELECT pid FROM pg_stat_activity
+            WHERE query LIKE '%_faulttest_longquery%'
+              AND state IN ('active', 'idle in transaction')
+            UNION
+            SELECT l.pid FROM pg_locks l
+            JOIN pg_class c ON c.oid = l.relation
+            WHERE c.relname = '_faulttest_longquery'
+          ) t
+          WHERE pid <> pg_backend_pid();
         "
         psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS _faulttest_longquery;"
     prompt: >
@@ -164,7 +170,7 @@ failures:
         category: "lock_blocking"
         narrative: "The agent should identify a long-running query holding an ACCESS EXCLUSIVE lock that is blocking other sessions from accessing the table, and recommend canceling or terminating the blocking query."
     remediation:
-      playbook_id: pbs_slow_query_triage
+      playbook_id: pbs_connection_triage
       agent_name: database
       agent_prompt: "A long-running query is holding an ACCESS EXCLUSIVE lock on {{connection_string}}, blocking other sessions. Please identify and cancel or terminate the blocking query."
       verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
@@ -452,7 +458,7 @@ failures:
     description: >
       The streaming replica has fallen behind the primary due to paused
       WAL replay, causing stale reads.
-    external_compat: true
+    external_compat: false  # requires a replica; set FAULTTEST_REPLICA_CONN_STR
     inject:
       type: sql
       target: replica
@@ -567,6 +573,118 @@ failures:
       verify_sql: "SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'"
       verify_timeout: "60s"
     timeout: 90s
+
+  - id: db-tx-lock-chain-blocker
+    name: "Transaction lock chain — active root blocker (pg_sleep trap)"
+    category: database
+    severity: high
+    description: >
+      A session ran an UPDATE inside a BEGIN transaction and then called pg_sleep(3600),
+      leaving it in state=active (wait_event=Timeout) while holding a row-level lock on
+      a first table (root blocker, A). A second session updates a second table and then
+      waits for A's lock — creating an intermediate blocker (B) that itself blocks two
+      leaf sessions (C, D) waiting for the second table.
+      Three Crystal Ball traps: (1) A appears to be a slow query — agent may call
+      cancel_query(A); pg_sleep is interrupted and returns true, but A's transaction
+      and row-lock persist (session moves to idle-in-transaction-aborted); (2)
+      pg_cancel_backend() returns true for idle-in-transaction sessions but releases
+      no locks; (3) terminating the intermediate session (B) frees C and D temporarily
+      but A's lock persists — anything waiting for it immediately requeues.
+      Only terminating A resolves the full chain.
+    inject:
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/inject_idle_root_blocker.sh
+      detach: true
+    teardown:
+      type: docker_exec
+      exec_via: helpdesk-test-pgloader
+      script: sql/teardown_idle_root_blocker.sh
+    external_compat: true
+    external_inject:
+      type: shell_exec
+      # Two-level lock chain:
+      #   A (root)         — BEGIN + UPDATE chain + pg_sleep(3600) → state=active/wait_event=Timeout
+      #                       (appears as a slow query, not idle-in-transaction)
+      #                       application_name=_faulttest_lock_chain_root for teardown identification
+      #   B (intermediate) — BEGIN + UPDATE chain2 (acquires lock), then SELECT chain
+      #                       FOR UPDATE → blocks on A while still holding chain2 lock
+      #   C, D (leaves)    — SELECT chain2 FOR UPDATE → blocked by B's UPDATE lock
+      script_inline: |
+        set -e
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "
+          CREATE TABLE IF NOT EXISTS _faulttest_lock_chain  (id int PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS _faulttest_lock_chain2 (id int PRIMARY KEY);
+          INSERT INTO _faulttest_lock_chain  VALUES (1) ON CONFLICT DO NOTHING;
+          INSERT INTO _faulttest_lock_chain2 VALUES (1) ON CONFLICT DO NOTHING;
+        "
+        { printf "SET application_name='_faulttest_lock_chain_root';\nBEGIN;\nUPDATE _faulttest_lock_chain SET id=1 WHERE id=1;\nSELECT pg_sleep(3600);\n" \
+          | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
+        echo $! > /tmp/faulttest_lock_chain_root.pid
+        sleep 1
+        { printf "BEGIN;\nUPDATE _faulttest_lock_chain2 SET id=1 WHERE id=1;\nSELECT * FROM _faulttest_lock_chain WHERE id=1 FOR UPDATE;\n" \
+          | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
+        sleep 1
+        for i in 1 2; do
+          psql "$FAULTTEST_CONN" \
+            -c "SELECT * FROM _faulttest_lock_chain2 WHERE id=1 FOR UPDATE;" >/dev/null 2>&1 &
+        done
+        sleep 1
+        echo "Injected: two-level lock chain — root A (active/pg_sleep on chain), intermediate B (chain2 + blocked on chain), leaves C/D (blocked on chain2)"
+    external_teardown:
+      type: shell_exec
+      script_inline: |
+        if [ -f /tmp/faulttest_lock_chain_root.pid ]; then
+          kill "$(cat /tmp/faulttest_lock_chain_root.pid)" 2>/dev/null || true
+          rm -f /tmp/faulttest_lock_chain_root.pid
+        fi
+        psql "$FAULTTEST_CONN" -c "
+          SELECT pg_terminate_backend(pid)
+          FROM pg_stat_activity
+          WHERE (query LIKE '%_faulttest_lock_chain%' OR application_name = '_faulttest_lock_chain_root')
+            AND pid <> pg_backend_pid();
+          DROP TABLE IF EXISTS _faulttest_lock_chain;
+          DROP TABLE IF EXISTS _faulttest_lock_chain2;
+        "
+    diagnosis_playbook_series_id: pbs_lock_chain_triage
+    prompt: >
+      Several database sessions appear to be blocked and not making progress.
+      The connection_string is "{{connection_string}}" — use it verbatim for
+      all tool calls. Please investigate.
+    evaluation:
+      expected_tools:
+        - get_blocking_queries
+        - get_session_info
+      expected_keywords:
+        any_of:
+          - "idle in transaction"
+          - "idle-in-transaction"
+          - "terminate"
+          - "row lock"
+          - "blocking"
+      expected_diagnosis:
+        category: lock_blocking
+        narrative: >
+          The agent should identify the two-level lock chain: a root session (A)
+          holding a lock on the first table (visible as state=active running pg_sleep),
+          an intermediate session (B) blocked by A but itself holding a lock on a
+          second table that two leaf sessions (C, D) are waiting for. The agent must
+          identify A as the root blocker (the only session with no blocking_pid) and
+          recommend terminate_connection on A specifically — NOT on B, C, or D, and
+          NOT cancel_query. The agent should NOT present cancel_query as a viable or
+          immediate option; presenting it as such is a critical failure. Additional
+          credit if the agent explicitly explains why cancel_query is ineffective
+          (pg_cancel_backend interrupts pg_sleep and returns true but the transaction
+          and row-lock persist), or notes the cascade risk (terminating A will roll
+          back B's uncommitted transaction as a side effect).
+    remediation:
+      playbook_id: pbs_lock_chain_remediate
+      verify_sql: >
+        SELECT count(*) = 0 FROM pg_stat_activity
+        WHERE (query LIKE '%_faulttest_lock_chain%' OR application_name = '_faulttest_lock_chain_root')
+        AND pid <> pg_backend_pid()
+      verify_timeout: "60s"
+    timeout: 120s
 
   - id: db-terminate-direct-command
     name: "Direct terminate — inspect-first check"
@@ -1717,17 +1835,20 @@ failures:
         ALTER SYSTEM SET bgwriter_lru_maxpages = 2;
         ALTER SYSTEM SET checkpoint_warning = '10s';
         PSQL
-        # Reload config via pg_ctl inside the CNPG primary pod.
-        # pg_reload_conf() is blocked for non-operator users in CNPG; pg_ctl
-        # reload via kubectl exec works because it runs as the postgres OS user.
-        # Override CNPG_CLUSTER / CNPG_NAMESPACE if your cluster differs.
-        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
-        NS="${CNPG_NAMESPACE:-db}"
-        POD=$(kubectl get pod -n "$NS" \
-          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
-          -o jsonpath='{.items[0].metadata.name}')
-        kubectl exec -n "$NS" "$POD" -c postgres -- \
-          sh -c 'pg_ctl reload -D "$PGDATA"'
+        # Reload config: pg_reload_conf() works on standalone Postgres and CNPG
+        # with a superuser DSN. Fall back to kubectl exec for CNPG restricted users.
+        if psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "SELECT pg_reload_conf();" 2>/dev/null; then
+          echo "Config reloaded via pg_reload_conf()"
+        else
+          CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+          NS="${CNPG_NAMESPACE:-db}"
+          POD=$(kubectl get pod -n "$NS" \
+            -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n "$NS" "$POD" -c postgres -- \
+            sh -c 'pg_ctl reload -D "$PGDATA"'
+          echo "Config reloaded via kubectl"
+        fi
         sleep 2
         # Workload: generates dirty pages and triggers checkpoint warnings.
         psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 <<'PSQL'
@@ -1752,13 +1873,18 @@ failures:
         ALTER SYSTEM RESET checkpoint_warning;
         DROP TABLE IF EXISTS _chkpt_gen;
         PSQL
-        CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
-        NS="${CNPG_NAMESPACE:-db}"
-        POD=$(kubectl get pod -n "$NS" \
-          -l "cnpg.io/cluster=${CLUSTER},role=primary" \
-          -o jsonpath='{.items[0].metadata.name}')
-        kubectl exec -n "$NS" "$POD" -c postgres -- \
-          sh -c 'pg_ctl reload -D "$PGDATA"'
+        if psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "SELECT pg_reload_conf();" 2>/dev/null; then
+          echo "Config reloaded via pg_reload_conf()"
+        else
+          CLUSTER="${CNPG_CLUSTER:-pg-cluster-minkube}"
+          NS="${CNPG_NAMESPACE:-db}"
+          POD=$(kubectl get pod -n "$NS" \
+            -l "cnpg.io/cluster=${CLUSTER},role=primary" \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n "$NS" "$POD" -c postgres -- \
+            sh -c 'pg_ctl reload -D "$PGDATA"'
+          echo "Config reloaded via kubectl"
+        fi
     prompt: >
       Performance monitoring is showing elevated write latency on
       '{{connection_string}}' and the PostgreSQL log has warning messages about

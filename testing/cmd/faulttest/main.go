@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
+	"helpdesk/internal/buildinfo"
 	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
@@ -38,6 +39,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "version":
+		fmt.Println(buildinfo.Version)
 	case "list":
 		cmdList(os.Args[2:])
 	case "run":
@@ -65,6 +68,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: faulttest <command> [options]
 
 Commands:
+  version    Print the build version and exit
   list       List all failure modes in the catalog
   run        Inject failures, run agent, evaluate, teardown
   inject     Inject a specific failure (interactive mode)
@@ -119,6 +123,8 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.GatewayURL, "gateway", "", "Gateway URL for playbook/agent remediation and vault playbook checks")
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
+	fs.StringVar(&cfg.ApprovalMode, "approval-mode", "", "Override playbook approval_mode for this run (auto|session|manual|force). Empty = playbook default. Use 'force' to bypass manual gates in automated runs.")
+	fs.StringVar(&cfg.OperatorID, "operator", os.Getenv("HELPDESK_OPERATOR"), "User identity sent as X-User on gateway requests (e.g. alice@example.com). Must have roles required by approval_override_roles to avoid mode clamping.")
 
 	// Policy safety check.
 	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")
@@ -178,6 +184,11 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	}
 
 	testutil.DockerComposeDir = filepath.Join(cfg.TestingDir, "docker")
+
+	// Resolve named infra alias (e.g. "faulttest-db") to the actual DSN so
+	// downstream injection code always gets a real connection string.
+	cfg.ConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ConnStr)
+	cfg.ReplicaConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ReplicaConnStr)
 
 	return cfg
 }
@@ -292,6 +303,11 @@ func cmdRun(args []string) {
 		// Save original conn string for config-override failures.
 		origConn := cfg.ConnStr
 
+		// Per-fault trace ID propagated as X-Trace-ID on all gateway requests so that
+		// tool execution events land under a stable ID vault synthesis can query later.
+		faultTraceID := "faulttest-" + runID + "-" + f.ID
+		faultCtx := context.WithValue(ctx, ctxKeyFaultTraceID{}, faultTraceID)
+
 		// 1. Inject.
 		if err := injector.Inject(ctx, f); err != nil {
 			slog.Error("injection failed", "id", f.ID, "err", err)
@@ -307,7 +323,7 @@ func cmdRun(args []string) {
 
 		// 2. Run agent (record call start for audit window).
 		callStart := time.Now()
-		resp := runner.Run(ctx, f)
+		resp := runner.Run(faultCtx, f)
 
 		if resp.CrystalBall {
 			slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
@@ -354,7 +370,7 @@ func cmdRun(args []string) {
 
 		// 4. Remediation phase (optional).
 		if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
-			remResult := remediator.Remediate(ctx, f)
+			remResult := remediator.Remediate(faultCtx, f)
 			evalResult.RemediationAttempted = true
 			evalResult.RemediationPassed = remResult.Passed
 			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
@@ -370,8 +386,7 @@ func cmdRun(args []string) {
 				// Auto-suggest: when remediation succeeds and a gateway is configured,
 				// synthesize a playbook draft from the fault trace and save it to the vault.
 				if cfg.GatewayURL != "" {
-					traceID := "faulttest-" + runID + "-" + f.ID
-					if pbID, vaultErr := requestVaultDraft(ctx, cfg, traceID, "resolved"); vaultErr != nil {
+					if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
 						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
 					} else if pbID != "" {
 						fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)

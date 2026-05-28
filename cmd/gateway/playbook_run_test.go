@@ -435,6 +435,87 @@ func mockAuditdPlaybookAndRun(t *testing.T, pb *audit.Playbook, run *audit.Playb
 	return srv
 }
 
+// TestHandlePlaybookRun_AgentApproveMode verifies that an agent_approve-mode
+// playbook calls the planner LLM to propose the first step and returns HTTP 202
+// with status "pending_approval" — it does NOT route to the agent or the fleet
+// planner directly.
+func TestHandlePlaybookRun_AgentApproveMode(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_approve01",
+		SeriesID:      "pbs_lock_chain_remediate",
+		Name:          "Transaction Lock Chain — Terminate Root Blocker",
+		Guidance:      "Step 1: terminate_connection on root blocker PID.",
+		ExecutionMode: "agent_approve",
+		IsActive:      true,
+	}
+
+	// Mock auditd: handles GET playbook, POST run-record, POST step, POST approval.
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_approve_test01", "approval_id": "apr_test01"}) //nolint:errcheck
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(pb) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	// Override GET to return the playbook.
+	auditSrv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(pb) //nolint:errcheck
+			return
+		}
+		// POST: run record, step create, approval create all return 201.
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_approve_test01", "approval_id": "apr_test01"}) //nolint:errcheck
+	}))
+	t.Cleanup(auditSrv2.Close)
+
+	plannerCalled := false
+	llmFn := func(ctx context.Context, prompt string) (string, error) {
+		plannerCalled = true
+		return `{
+			"action": "execute_step",
+			"agent": "database",
+			"tool": "terminate_connection",
+			"args": {"pid": 1234},
+			"reason": "Terminate the idle-in-transaction root blocker"
+		}`, nil
+	}
+
+	gw := makePlaybookRunGateway(auditSrv2.URL, llmFn)
+	rec := postPlaybookRun(t, gw, "pb_approve01",
+		`{"connection_string":"host=prod-db port=5432 dbname=postgres"}`)
+
+	if !plannerCalled {
+		t.Error("planner LLM was not called for agent_approve-mode playbook")
+	}
+	// Should return 202 Accepted with pending_approval status.
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("got %d, want 202 for agent_approve mode; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_approval" {
+		t.Errorf("status = %q, want pending_approval", resp["status"])
+	}
+	if resp["run_id"] == "" || resp["run_id"] == nil {
+		t.Error("run_id should be set in agent_approve response")
+	}
+	step, _ := resp["step"].(map[string]any)
+	if step == nil {
+		t.Fatal("step should be present in pending_approval response")
+	}
+	if step["tool"] != "terminate_connection" {
+		t.Errorf("step.tool = %v, want terminate_connection", step["tool"])
+	}
+}
+
 func TestHandlePlaybookRun_FleetMode_RequiresEvidenceWarning(t *testing.T) {
 	pb := &audit.Playbook{
 		PlaybookID:       "pb_cfg01",
@@ -1461,4 +1542,244 @@ func serveFakeToolEvents(t *testing.T, events []audit.Event) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// ── enforceApprovalOverride ───────────────────────────────────────────────────
+
+func TestEnforceApprovalOverride_NoInfra(t *testing.T) {
+	g := &Gateway{infra: nil}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(identity.ResolvedPrincipal{}, &mode, "manual", "host=db", &warnings)
+	if mode != "force" {
+		t.Errorf("mode changed without infra config: got %q", mode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestEnforceApprovalOverride_NoRestriction(t *testing.T) {
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"dev-db": {ConnectionString: "host=localhost port=5432 dbname=dev"},
+		},
+	}}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(identity.ResolvedPrincipal{}, &mode, "manual", "host=localhost port=5432 dbname=dev", &warnings)
+	if mode != "force" {
+		t.Errorf("mode should not change when no approval_override_roles set: got %q", mode)
+	}
+}
+
+func TestEnforceApprovalOverride_CallerHasRole(t *testing.T) {
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead"},
+			},
+		},
+	}}
+	principal := identity.ResolvedPrincipal{UserID: "alice", Roles: []string{"dba_lead"}}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(principal, &mode, "manual", "host=prod port=5432 dbname=app", &warnings)
+	if mode != "force" {
+		t.Errorf("mode should not change when caller has required role: got %q", mode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestEnforceApprovalOverride_CallerLacksRole(t *testing.T) {
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead", "oncall_senior"},
+			},
+		},
+	}}
+	principal := identity.ResolvedPrincipal{UserID: "bob", Roles: []string{"sre"}}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(principal, &mode, "manual", "host=prod port=5432 dbname=app", &warnings)
+	if mode != "manual" {
+		t.Errorf("mode should be clamped to 'manual': got %q", mode)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "clamped") {
+		t.Errorf("warning should mention 'clamped': %q", warnings[0])
+	}
+}
+
+func TestEnforceApprovalOverride_NotAnOverride(t *testing.T) {
+	// Requesting 'manual' against a playbook that is also 'manual' — not an override.
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead"},
+			},
+		},
+	}}
+	principal := identity.ResolvedPrincipal{UserID: "bob", Roles: []string{"sre"}}
+	mode := "manual"
+	var warnings []string
+	g.enforceApprovalOverride(principal, &mode, "manual", "host=prod port=5432 dbname=app", &warnings)
+	if mode != "manual" {
+		t.Errorf("mode should be unchanged: got %q", mode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestEnforceApprovalOverride_DBNotInInfra(t *testing.T) {
+	// Infra is configured but the connStr doesn't match any server — no clamp.
+	g := &Gateway{infra: &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead"},
+			},
+		},
+	}}
+	mode := "force"
+	var warnings []string
+	g.enforceApprovalOverride(identity.ResolvedPrincipal{}, &mode, "manual", "host=unknown port=9999 dbname=other", &warnings)
+	if mode != "force" {
+		t.Errorf("mode should be unchanged when DB not in infra: got %q", mode)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestEnforceApprovalOverride_RoleChecks(t *testing.T) {
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"prod-db": {
+				ConnectionString:      "host=prod port=5432 dbname=app",
+				ApprovalOverrideRoles: []string{"dba_lead", "oncall_senior"},
+			},
+		},
+	}
+	connStr := "host=prod port=5432 dbname=app"
+
+	cases := []struct {
+		name          string
+		roles         []string
+		requestedMode string
+		playbookMode  string
+		wantMode      string
+		wantClamped   bool
+	}{
+		{"has first role", []string{"dba_lead"}, "force", "manual", "force", false},
+		{"has second role", []string{"oncall_senior"}, "force", "manual", "force", false},
+		{"has unrelated role", []string{"sre"}, "force", "manual", "manual", true},
+		{"review override no role", []string{"sre"}, "review", "manual", "manual", true},
+		{"review override has role", []string{"dba_lead"}, "review", "manual", "review", false},
+		{"equal rank not an override", []string{}, "manual", "manual", "manual", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &Gateway{infra: cfg}
+			mode := tc.requestedMode
+			var warnings []string
+			g.enforceApprovalOverride(
+				identity.ResolvedPrincipal{Roles: tc.roles},
+				&mode, tc.playbookMode, connStr, &warnings,
+			)
+			if mode != tc.wantMode {
+				t.Errorf("mode = %q, want %q", mode, tc.wantMode)
+			}
+			gotClamped := len(warnings) > 0
+			if gotClamped != tc.wantClamped {
+				t.Errorf("clamped = %v, want %v (warnings: %v)", gotClamped, tc.wantClamped, warnings)
+			}
+		})
+	}
+}
+
+func TestHandlePlaybookRun_ApprovalOverrideClamped(t *testing.T) {
+	// Integration: force mode gets clamped to manual for a restricted DB; warning
+	// appears in the pending_approval response.
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_override01",
+		SeriesID:      "pbs_lock_chain_remediate",
+		Name:          "Lock Chain Remediate",
+		Guidance:      "Step 1: terminate root.",
+		ExecutionMode: "agent_approve",
+		ApprovalMode:  "manual",
+		IsActive:      true,
+	}
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(pb) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_override01", "approval_id": "apr_override01"}) //nolint:errcheck
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	llmFn := func(_ context.Context, _ string) (string, error) {
+		return `{"action":"execute_step","agent":"database","tool":"get_blocking_queries","args":{},"reason":"inspect"}`, nil
+	}
+
+	// Gateway with a DB that restricts override to dba_lead.
+	// The test request carries no principal (zero value, no roles).
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{})
+	gw := &Gateway{
+		agents:       make(map[string]*discovery.Agent),
+		clients:      make(map[string]*a2aclient.Client),
+		infra: &infra.Config{
+			DBServers: map[string]infra.DBServer{
+				"restricted-db": {
+					ConnectionString:      "host=restricted port=5432 dbname=app",
+					ApprovalOverrideRoles: []string{"dba_lead"},
+				},
+			},
+		},
+		toolRegistry: reg,
+		plannerLLM:   llmFn,
+		auditURL:     auditSrv.URL,
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	body := `{"connection_string":"host=restricted port=5432 dbname=app","approval_mode":"force"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/playbooks/pb_override01/run", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("playbookID", "pb_override01")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON response: %v — %s", err, rec.Body.String())
+	}
+	warnings, _ := resp["warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Fatal("expected warnings in response when approval_mode is clamped")
+	}
+	w0, _ := warnings[0].(string)
+	if !strings.Contains(w0, "clamped") {
+		t.Errorf("warning should mention 'clamped': %q", w0)
+	}
+	if !strings.Contains(w0, "dba_lead") {
+		t.Errorf("warning should mention required role: %q", w0)
+	}
 }

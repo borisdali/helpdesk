@@ -133,6 +133,14 @@ type HarnessConfig struct {
 	GatewayAPIKey string
 	// GatewayPurpose is the declared purpose sent in gateway requests (default: "diagnostic").
 	GatewayPurpose string
+	// ApprovalMode overrides the playbook's default approval_mode for this run.
+	// Values: "manual", "session", "auto", "force". Empty = use playbook default.
+	// Use "force" to bypass manual gates in automated/CI faulttest runs.
+	ApprovalMode string
+	// OperatorID is the user identity sent as X-User on gateway requests.
+	// Must match a user in users.yaml with roles required for the run
+	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
+	OperatorID string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
 	InfraConfigPath string
 	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty
@@ -313,12 +321,46 @@ func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
 	return r.Replace(prompt)
 }
 
-// infraConfig is a minimal representation of infrastructure.json for tag checking.
+// infraConfig is a minimal representation of infrastructure.json for tag checking
+// and alias resolution.
 type infraConfig struct {
 	DBServers map[string]struct {
 		ConnectionString string   `json:"connection_string"`
+		PasswordEnv      string   `json:"password_env"`
 		Tags             []string `json:"tags"`
 	} `json:"db_servers"`
+}
+
+// resolveConnAlias resolves a named infra key (e.g. "faulttest-db") to its
+// actual connection string. Returns connStr unchanged when infraConfigPath is
+// empty, connStr is already a DSN/URL, or the key is not found.
+func resolveConnAlias(infraConfigPath, connStr string) string {
+	if infraConfigPath == "" || connStr == "" {
+		return connStr
+	}
+	// If it looks like a DSN or URL, no resolution needed.
+	if strings.Contains(connStr, "=") || strings.Contains(connStr, "://") {
+		return connStr
+	}
+	data, err := os.ReadFile(infraConfigPath)
+	if err != nil {
+		return connStr
+	}
+	var cfg infraConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return connStr
+	}
+	srv, ok := cfg.DBServers[connStr]
+	if !ok {
+		return connStr
+	}
+	cs := srv.ConnectionString
+	if srv.PasswordEnv != "" {
+		if pw := os.Getenv(srv.PasswordEnv); pw != "" {
+			cs += " password=" + pw
+		}
+	}
+	return cs
 }
 
 // checkTargetSafety verifies that the target PostgreSQL host (extracted from

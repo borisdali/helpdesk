@@ -106,7 +106,11 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, playbookID string) err
 		return fmt.Errorf("gateway URL is required for playbook remediation (--gateway)")
 	}
 
-	body, _ := json.Marshal(map[string]string{"connection_string": r.cfg.ConnStr})
+	reqBody := map[string]any{"connection_string": r.cfg.ConnStr}
+	if r.cfg.ApprovalMode != "" {
+		reqBody["approval_mode"] = r.cfg.ApprovalMode
+	}
+	body, _ := json.Marshal(reqBody)
 	url := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -117,6 +121,9 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, playbookID string) err
 	req.Header.Set("X-Purpose", "remediation")
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if id := FaultTraceID(ctx); id != "" {
+		req.Header.Set("X-Trace-ID", id)
 	}
 
 	resp, err := r.client.Do(req)
@@ -178,7 +185,7 @@ func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout
 	start := time.Now()
 
 	for {
-		err := testutil.RunSQLString(ctx, r.cfg.ConnStr, verifySQL)
+		err := testutil.RunSQLBool(ctx, r.cfg.ConnStr, verifySQL)
 		if err == nil {
 			return time.Since(start).Seconds(), nil
 		}

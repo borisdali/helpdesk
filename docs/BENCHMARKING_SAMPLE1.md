@@ -1,19 +1,21 @@
-# Benchmarking diagnosis sample: Crystal Ball vs. the full power of aiHelpDesk
+# Benchmarking diagnosis sample#1: Crystal Ball vs. the full power of aiHelpDesk
 
 For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md). The Crystal Ball mode is presented [here](BENCHMARKING.md#2-crystal-ball-mode).
 
-This is an example showcasing a comparison of diagnosis of one specific database fault (Checkpoint stall / bgwriter overload that we refer to as `db-checkpoint-warning` in the catalog) by two different means. First, we run the diagnosis via the Crystal Ball mode. We then follow on with the full aiHelpDesk diagnosis according to the structured playbook guidance.
+This is an example showcasing a comparison of diagnosis of one specific database fault (Checkpoint stall / bgwriter overload that we refer to as `db-checkpoint-warning` in the catalog) by two different means. First, we run the diagnosis via the Crystal Ball mode. We then follow on with the full aiHelpDesk diagnosis according to the structured playbook guidance (and also see [another example](BENCHMARKING_SAMPLE2.md) that demonstrates the transaction lock chain fault).
 
 If you are not familiar with the Crystal Ball mode, these two blog posts [here](https://medium.com/google-cloud/dont-ask-your-ai-to-diagnose-production-unless-you-ve-given-it-a-structured-guided-playbook-46195c2aae71) and [here](https://medium.com/google-cloud/we-wanted-a-dramatic-ai-agent-failure-we-got-something-better-5d6d57135a88) go beyond our standard documentation and present a gentle introduction and the thinking behind this comparison.
 
-## Full aiHelpDesk diagnosis
+Additionally, [this blog post](https://medium.com/google-cloud/ai-database-troubleshooting-the-postgresql-stat-that-looks-like-good-news-and-aint-16f1b52143ec) adds more color and context for this test.
+
+## Full, guided, structured aiHelpDesk diagnosis
 In the examples below we inject the checkpoint stall / bgwriter overload fault test (dubbed `db-checkpoint-warning` in our [fault catalog](FAULTTEST.md#61-external-compatible-faults)) and attempt to diagnose this fault by running the Crystal Ball and the full aihelpDesk playbook-driven diagnosis. In this particular example we run both from the source code (but in the [latter section](BENCHMARKING_SAMPLE.md#running-on-k8s-via-a-helm-chart) in this document we show equivalent commands for running this test on K8s via Helm).
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault list|egrep '(FAULT|---|db-checkpoint-warning)'
-FAULT                            PLATFORM   PLAYBOOK                   FAULT TEST             INCIDENTS
-------------------------------------------------------------------------------------------------------------------------------------------------
-db-checkpoint-warning            any        pbs_checkpoint_bgwriter_triage 2026-05-14  FAIL       -
+FAULT                            PLATFORM   DIAG PLAYBOOK              REMED PLAYBOOK             FAULT TEST             INCIDENTS
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+db-checkpoint-warning            any        pbs_checkpoint_bgwriter_triage pbs_checkpoint_bgwriter_triage 2026-05-14  FAIL       -
 ```
 
 First off, start aiHelpDesk Gateway without the Crystal Ball setting (either omit it altogether or set it to false as a flag or as an env var):
@@ -172,7 +174,7 @@ ROOT_CAUSE: HYPOTHESIS_1
 
 Please note that this is just one field from the full JSON, which is `response_text`. The others fields may also be instructive, in particular `judge_reasoning` (if a test runs with the LLM-as-Judge option, see [here](https://github.com/borisdali/helpdesk/blob/main/docs/LLM_AS_JUDGE.md) for details).
 
-Also please particularly note the structured way of presenting the diagnosis: the step-by-step analysis, the list of hypotheses supported by evidence and the confidence score, the reason for rejecting the alternative hypotheses and choosing one as the root cause (there happened to be no escalation section in this particular example, but you'll see it in many others where the RCA is inconclusive).
+Also note the structured way of presenting the diagnosis: the step-by-step analysis, the list of hypotheses supported by evidence and the confidence score, the reason for rejecting the alternative hypotheses and choosing one as the root cause (there happened to be no escalation section in this particular example, but you'll see it in many others where the RCA is inconclusive).
 
 
 ## Crystal Ball diagnosis
@@ -317,7 +319,7 @@ helm upgrade helpdesk . --namespace helpdesk-system \
   --set 'infrastructure.db_servers.pg-cluster-minikube.connection_string=host=pg-cluster-minikube-rw.db.svc.cluster.local port=5432 dbname=app user=app' \
   --set 'infrastructure.db_servers.pg-cluster-minikube.password_env=CNPG_APP_PASSWORD' \
   --set 'faulttest.extraEnv[0].name=CNPG_APP_PASSWORD' \
-  --set 'faulttest.extraEnv[0]. valueFrom.secretKeyRef.name=pg-cluster-minkube-app' \
+  --set 'faulttest.extraEnv[0].valueFrom.secretKeyRef.name=pg-cluster-minkube-app' \
   --set 'faulttest.extraEnv[0].valueFrom.secretKeyRef.key=password' \
   --set image.pullPolicy=Never \
   --set image.tag=v0.13.0-a71a4ba \

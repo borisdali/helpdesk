@@ -183,6 +183,176 @@ func TestRemediate_NoAction(t *testing.T) {
 	}
 }
 
+// ── runApprovalLoop / proceedStep ────────────────────────────────────────────
+
+// newApproveRunResponse builds a minimal pending_approval response.
+func newApprovalResponse(runID string, stepIndex int, tool string) approveRunResponse {
+	return approveRunResponse{
+		RunID:      runID,
+		Status:     "pending_approval",
+		ApprovalID: "apr_test",
+		Step: &approveRunStep{
+			Index:  stepIndex,
+			Agent:  "database",
+			Tool:   tool,
+			Args:   map[string]any{"pid": 1234},
+			Reason: "Terminate root blocker",
+		},
+	}
+}
+
+func TestRunApprovalLoop_SingleStepComplete(t *testing.T) {
+	// Server: first proceed call returns complete.
+	proceedCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		proceedCalled = true
+		json.NewEncoder(w).Encode(approveRunResponse{ //nolint:errcheck
+			RunID:   "plr_loop01",
+			Status:  "complete",
+			Summary: "Root blocker terminated; locks cleared.",
+		})
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	initial := newApprovalResponse("plr_loop01", 1, "terminate_connection")
+
+	if err := r.runApprovalLoop(context.Background(), initial); err != nil {
+		t.Fatalf("runApprovalLoop: %v", err)
+	}
+	if !proceedCalled {
+		t.Error("proceed endpoint was not called")
+	}
+}
+
+func TestRunApprovalLoop_MultiStep(t *testing.T) {
+	// Server: first proceed returns another pending_approval, second returns complete.
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		callCount++
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(newApprovalResponse("plr_multi01", 2, "get_blocking_queries")) //nolint:errcheck
+			return
+		}
+		json.NewEncoder(w).Encode(approveRunResponse{RunID: "plr_multi01", Status: "complete", Summary: "done"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	initial := newApprovalResponse("plr_multi01", 1, "terminate_connection")
+
+	if err := r.runApprovalLoop(context.Background(), initial); err != nil {
+		t.Fatalf("runApprovalLoop: %v", err)
+	}
+	if callCount != 2 {
+		t.Errorf("proceed called %d times, want 2", callCount)
+	}
+}
+
+func TestRunApprovalLoop_Denial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(approveRunResponse{RunID: "plr_deny01", Status: "denied"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	initial := newApprovalResponse("plr_deny01", 1, "terminate_connection")
+
+	if err := r.runApprovalLoop(context.Background(), initial); err == nil {
+		t.Error("expected error when step is denied, got nil")
+	}
+}
+
+func TestRunApprovalLoop_PendingWithNoStep(t *testing.T) {
+	r := newTestRemediator(t, "http://localhost:19999")
+	initial := approveRunResponse{
+		RunID:   "plr_noStep",
+		Status:  "pending_approval",
+		Step:    nil, // missing step — should error immediately
+	}
+
+	if err := r.runApprovalLoop(context.Background(), initial); err == nil {
+		t.Error("expected error when pending_approval response has no step")
+	}
+}
+
+func TestTriggerPlaybook_AgentApprove_FullLoop(t *testing.T) {
+	// Simulates: resolve → run (pending_approval) → proceed (complete).
+	proceedCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+				"playbooks": []map[string]interface{}{{"playbook_id": "pb_approve_test"}},
+			})
+		case r.URL.Path == "/api/v1/fleet/playbooks/pb_approve_test/run":
+			// First call: return pending_approval.
+			json.NewEncoder(w).Encode(approveRunResponse{ //nolint:errcheck
+				RunID:      "plr_approve01",
+				Status:     "pending_approval",
+				ApprovalID: "apr_001",
+				Step: &approveRunStep{
+					Index:  1,
+					Agent:  "database",
+					Tool:   "terminate_connection",
+					Args:   map[string]any{"pid": 5555},
+					Reason: "Terminate root blocker",
+				},
+			})
+		case r.URL.Path == "/api/v1/fleet/playbook-runs/plr_approve01/proceed":
+			proceedCount++
+			json.NewEncoder(w).Encode(approveRunResponse{ //nolint:errcheck
+				RunID:   "plr_approve01",
+				Status:  "complete",
+				Summary: "Blocker terminated.",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	if err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_remediate"); err != nil {
+		t.Fatalf("triggerPlaybook: %v", err)
+	}
+	if proceedCount != 1 {
+		t.Errorf("proceed called %d times, want 1", proceedCount)
+	}
+}
+
+func TestProceedStep_SendsCorrectPayload(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewEncoder(w).Encode(approveRunResponse{Status: "complete"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	resp, err := r.proceedStep(context.Background(), "plr_payload01", 3, "approved")
+	if err != nil {
+		t.Fatalf("proceedStep: %v", err)
+	}
+	if resp.Status != "complete" {
+		t.Errorf("status = %q, want complete", resp.Status)
+	}
+	if gotBody["resolution"] != "approved" {
+		t.Errorf("resolution = %v, want approved", gotBody["resolution"])
+	}
+	if gotBody["resolved_by"] != "faulttest" {
+		t.Errorf("resolved_by = %v, want faulttest", gotBody["resolved_by"])
+	}
+	if step, _ := gotBody["step_index"].(float64); int(step) != 3 {
+		t.Errorf("step_index = %v, want 3", gotBody["step_index"])
+	}
+}
+
 func TestRemediate_PlaybookThenRecovery(t *testing.T) {
 	// Server handles: resolve (GET list) and run (POST run).
 	playbookCalled := false

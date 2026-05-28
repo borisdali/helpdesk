@@ -174,6 +174,7 @@ The `--infra-config` flag is recommended (see [section 4](#4-policy-safety-the-i
 | `db-lock-contention` | SQL: acquires `ACCESS EXCLUSIVE` lock and holds it |
 | `db-idle-in-transaction` | SQL: opens a transaction, performs a write, holds it open |
 | `db-terminate-direct-command` | Same as idle-in-transaction; tests inspect-before-act ordering |
+| `db-tx-lock-chain-blocker` | SQL: opens a transaction, performs a write, then pg_sleep(3600) — holds lock while appearing active; two-level chain of intermediate and leaf victims |
 
 All teardowns remove injected state completely: tables are dropped, held sessions are terminated, paused replay is resumed.
 
@@ -578,6 +579,7 @@ These faults work against any PostgreSQL instance accessible over libpq. No Dock
 | `db-lock-contention` | Lock contention / deadlock | high |
 | `db-idle-in-transaction` | Session stuck with uncommitted writes | high |
 | `db-terminate-direct-command` | Direct terminate — inspect-first check | high |
+| `db-tx-lock-chain-blocker` | Transaction lock chain — active root blocker (pg_sleep trap) | high |
 | `db-wal-stale-slot` | WAL accumulation — stale replication slot | high |
 
 ### 6.2 Docker Compose faults (internal only)
@@ -625,6 +627,7 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | `db-pg-hba-corrupt` | `pbs_db_config_recovery` | db |
 | `db-process-kill` | `pbs_db_restart_triage` | db |
 | `db-checkpoint-warning` | `pbs_checkpoint_bgwriter_triage` | db |
+| `db-tx-lock-chain-blocker` | `pbs_lock_chain_triage` | db |
 | `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin |
 | `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s |
 | `db-wal-stale-slot` | `pbs_wal_stale_slot` | postgres_database_agent |
@@ -637,6 +640,7 @@ Each fault's `remediation` block specifies a `verify_sql` query that confirms th
 |-------|-----------|
 | `db-max-connections` | `SELECT count(*) < current_setting('max_connections')::int - 5 FROM pg_stat_activity WHERE state = 'idle'` |
 | `db-idle-in-transaction` | `SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'` |
+| `db-tx-lock-chain-blocker` | `SELECT count(*) = 0 FROM pg_stat_activity WHERE (query LIKE '%_faulttest_lock_chain%' OR application_name = '_faulttest_lock_chain_root') AND pid <> pg_backend_pid()` |
 | `db-lock-contention` | `SELECT count(*) = 0 FROM pg_locks WHERE NOT granted` |
 | `db-connection-refused` | `SELECT 1` (connectivity check is sufficient — the fault kills the postmaster) |
 | `db-checkpoint-warning` | Verifies `bgwriter_lru_maxpages = '100'` AND `max_wal_size = '1048576'` (1 GB in 8 kB pages) are back at PostgreSQL defaults via `pg_settings` |

@@ -11,7 +11,7 @@ for f in /tmp/lock_sess_a_pid.txt /tmp/lock_sess_b_pid.txt; do
     fi
 done
 
-psql -h postgres -U postgres -d testdb -c "
+psql -h host.docker.internal -p 15432 -U postgres -d testdb -c "
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity
 WHERE query LIKE '%test_lock_table%'

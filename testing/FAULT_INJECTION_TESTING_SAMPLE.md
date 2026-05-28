@@ -1,6 +1,6 @@
-# aiHelpDesk: Fault Injection Testing: Sample Run
+# aiHelpDesk: Fault Injection Testing (base, direct agent mode): Sample Run
 
-This is a sample run of aiHelpDesk internal Fault Injection test.
+This is a sample run of aiHelpDesk internal Fault Injection test (base, direct agent mode). A similar sample for the Fault-Gateway Injection Test is available [here](FAULT_INJECTION_TESTING_GATEWAY_SAMPLE.md).
 See the Fault Injection documentation [here](FAULT_INJECTION_TESTING.md),
 the external (aka embeded) page [here](../docs/FAULT.md)
 and the overall aiHelpDesk Testing approach [here](README.md).

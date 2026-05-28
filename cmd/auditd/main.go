@@ -132,6 +132,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create playbook run step store (shares the same database connection)
+	playbookRunStepStore, err := audit.NewPlaybookRunStepStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create playbook run step store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create approval session store (shares the same database connection)
 	approvalSessionStore, err := audit.NewApprovalSessionStore(store.DB())
 	if err != nil {
@@ -234,6 +241,7 @@ func main() {
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
 	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore}
+	playbookRunStepSrv := &playbookRunStepServer{store: playbookRunStepStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
 	mux := http.NewServeMux()
@@ -293,6 +301,12 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/runs", auth("GET /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleList))
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/stats", auth("GET /v1/fleet/playbooks/{playbookID}/stats", playbookRunSrv.handleStats))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}", auth("GET /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleGetRun))
+
+	// Playbook run step endpoints (agent_approve mode)
+	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/steps", auth("POST /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleCreateStep))
+	mux.HandleFunc("PATCH /v1/fleet/playbook-runs/{runID}/steps/{stepIndex}", auth("PATCH /v1/fleet/playbook-runs/{runID}/steps/{stepIndex}", playbookRunStepSrv.handleUpdateStep))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/steps", auth("GET /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleListSteps))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/pending-step", auth("GET /v1/fleet/playbook-runs/{runID}/pending-step", playbookRunStepSrv.handleGetPendingStep))
 
 	// Approval session endpoints
 	mux.HandleFunc("POST /v1/approval/sessions", auth("POST /v1/approval/sessions", approvalSessionSrv.handleCreate))

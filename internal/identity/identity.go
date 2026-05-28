@@ -33,6 +33,12 @@ type ResolvedPrincipal struct {
 	// AuthMethod records how identity was established.
 	// One of: "api_key", "jwt", "header" (legacy no-auth).
 	AuthMethod string `json:"auth_method,omitempty"`
+
+	// OperatorID is the verified human operator acting through a service account.
+	// Set when a service account authenticates via Bearer token AND supplies X-User.
+	// HasRole and EffectiveID both reflect the operator identity when set.
+	OperatorID    string   `json:"operator_id,omitempty"`
+	OperatorRoles []string `json:"operator_roles,omitempty"`
 }
 
 // IsAnonymous returns true when identity was not verified
@@ -42,8 +48,15 @@ func (p ResolvedPrincipal) IsAnonymous() bool {
 }
 
 // HasRole returns true if the principal has the given role.
+// When a service account acts on behalf of a human operator (OperatorID set),
+// the operator's roles are checked too.
 func (p ResolvedPrincipal) HasRole(role string) bool {
 	for _, r := range p.Roles {
+		if r == role {
+			return true
+		}
+	}
+	for _, r := range p.OperatorRoles {
 		if r == role {
 			return true
 		}
@@ -51,9 +64,13 @@ func (p ResolvedPrincipal) HasRole(role string) bool {
 	return false
 }
 
-// EffectiveID returns the best available identifier for logging and audit:
-// Service if set, otherwise UserID.
+// EffectiveID returns the best available identifier for logging and audit.
+// Returns OperatorID when a service account is acting on behalf of a human,
+// otherwise Service, otherwise UserID.
 func (p ResolvedPrincipal) EffectiveID() string {
+	if p.OperatorID != "" {
+		return p.OperatorID
+	}
 	if p.Service != "" {
 		return p.Service
 	}

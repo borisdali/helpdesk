@@ -1,0 +1,75 @@
+series_id: pbs_lock_chain_remediate
+name: Transaction Lock Chain — Terminate Root Blocker
+version: "1.4"
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Terminate the root blocker in a transaction lock chain. Handles both simple
+  (one root, N direct victims) and multi-level chains (root → intermediate →
+  leaves). The root may be idle-in-transaction or actively executing a statement
+  (e.g. pg_sleep) that holds an open transaction. Uses terminate_connection
+  (pg_terminate_backend) — not cancel_query (pg_cancel_backend) — which closes
+  the connection unconditionally and releases all held locks. In a multi-level
+  chain, terminating the root triggers a cascade: intermediate sessions acquire
+  their pending locks and exit, rolling back their own open transactions. If any
+  intermediate session has uncommitted writes, that work is silently discarded —
+  the operator must see this before approving.
+symptoms:
+  - "lock chain still blocking after diagnosis"
+  - "root blocker identified — ready to terminate"
+guidance: |
+  Step 1: Confirm the chain and identify all participants.
+  Call get_blocking_queries. Classify each session:
+    - Root: blocking_pid = NULL — the sole termination target.
+    - Intermediates: have a blocking_pid AND appear as a blocker for others.
+      They hold locks acquired before they became blocked. They are victims,
+      not causes, but their open transactions are at risk (see Step 2).
+    - Leaves: have a blocking_pid but no downstream victims.
+  Record the root PID and the PID of every intermediate session.
+
+  Step 2: Inspect root AND all intermediate sessions before acting.
+  Call get_session_info with pid=<root_pid> (the parameter is named "pid", NOT
+  "pid_filter" — there is no pid_filter parameter). Confirm has_open_tx = true.
+  Note state: may be 'idle in transaction' or 'active' (e.g. pg_sleep) — both
+  require terminate_connection; cancel_query does not release the lock in either
+  case.
+  Escalate (do NOT terminate) if root has_writes = true AND idle_secs > 1800
+  (30 minutes) — uncommitted DML may be significant.
+
+  Also call get_session_info with pid=<intermediate_pid> for each intermediate
+  session. Cascade risk:
+  when the root is terminated, its lock is released and each intermediate's
+  blocked query completes. The intermediate's connection then exits without
+  COMMIT, rolling back its own transaction. If an intermediate has has_writes =
+  true, its uncommitted work is silently discarded as a side effect — not
+  because it was terminated, but because the lock it was waiting for finally
+  arrived and its connection closed normally. The operator must be aware of this
+  before approving the termination.
+
+  Step 3: Terminate the root, with explicit cascade disclosure before acting.
+  Call terminate_connection with pid=<root_pid> only (parameters: connection_string
+  and pid — there is no "reason" parameter on this tool).
+  Before requesting approval, your response text MUST include:
+    - Confirmation that this is the root (blocking_pid = NULL)
+    - Root's state (idle in transaction or active), has_writes status, idle_secs
+    - For each intermediate with has_writes = true: "WARNING: terminating root
+      will cascade to roll back session <pid> (has_writes=true, <idle_secs>s
+      idle) — operator should confirm this work can be discarded before approving"
+  If no intermediate has has_writes, state that explicitly: "no intermediate
+  sessions have uncommitted writes; cascade rollback risk is low."
+  Do NOT call cancel_query — it does not release the lock regardless of whether
+  the root is idle-in-transaction or active.
+
+  Step 4: Verify the cascade cleared.
+  Call get_blocking_queries. Confirm no sessions remain in a Lock wait state
+  related to the affected tables. If any Lock waits persist, a second root
+  blocker may be present — repeat from Step 1.
+escalation:
+  - "root blocker has has_writes=true and has been idle > 30 minutes — risk of significant data loss on terminate"
+  - "any intermediate session has has_writes=true and its uncommitted work is operationally significant — surface to operator and do not proceed without explicit confirmation"
+  - "blocking table is a system catalog (pg_class, pg_attribute, etc.)"
+  - "lock queue exceeds 20 sessions — assess blast radius before proceeding"
+target_hints: []

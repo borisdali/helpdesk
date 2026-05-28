@@ -48,6 +48,12 @@ var externalInjectCases = map[string]string{
 	"db-wal-stale-slot": `
 		SELECT count(*) FROM pg_replication_slots
 		WHERE slot_name = 'old_standby' AND active = false`,
+
+	// After injecting the lock chain fault, the test table must exist and
+	// have its seed row (psql errors if the relation is missing, which would
+	// indicate the inject shell_exec failed before creating the table).
+	"db-tx-lock-chain-blocker": `
+		SELECT 1 FROM _faulttest_lock_chain WHERE id = 1`,
 }
 
 func TestExternalInjectSpecs(t *testing.T) {

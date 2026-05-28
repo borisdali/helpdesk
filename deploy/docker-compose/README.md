@@ -773,6 +773,8 @@ docker run --rm \
     --api-key $HELPDESK_CLIENT_API_KEY \
     --infra-config /infrastructure.json \
     --gateway http://gateway:8080 \
+    --operator alice@example.com \
+    --approval-mode force \
     --remediate
 
 # Validate a specific fault+playbook pair
@@ -788,6 +790,8 @@ docker run --rm \
     --api-key $HELPDESK_CLIENT_API_KEY \
     --infra-config /infrastructure.json \
     --gateway http://gateway:8080 \
+    --operator alice@example.com \
+    --approval-mode force \
     --remediate \
     --id db-max-connections
 ```

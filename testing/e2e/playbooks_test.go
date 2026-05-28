@@ -47,6 +47,8 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		"pbs_vacuum_triage",
 		"pbs_slow_query_triage",
 		"pbs_connection_triage",
+		"pbs_lock_chain_triage",
+		"pbs_lock_chain_remediate",
 		"pbs_replication_lag",
 		"pbs_db_restart_triage",
 		"pbs_db_config_recovery",
@@ -795,11 +797,29 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		}
 	})
 
+	t.Run("lock_chain_remediate_is_agent_approve", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_lock_chain_remediate")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent_approve" {
+			t.Errorf("execution_mode = %q, want agent_approve", mode)
+		}
+		if am, _ := pb["approval_mode"].(string); am != "manual" {
+			t.Errorf("approval_mode = %q, want manual", am)
+		}
+		if sys, _ := pb["is_system"].(bool); !sys {
+			t.Error("is_system = false, want true for seeded system playbook")
+		}
+		if ep, _ := pb["entry_point"].(bool); ep {
+			t.Error("entry_point = true; remediation playbook should not be an entry point")
+		}
+		t.Logf("lock_chain_remediate: execution_mode=agent_approve approval_mode=manual")
+	})
+
 	t.Run("operational_playbooks_are_fleet", func(t *testing.T) {
 		for _, sid := range []string{
 			"pbs_vacuum_triage",
 			"pbs_slow_query_triage",
 			"pbs_connection_triage",
+			"pbs_lock_chain_triage",
 			"pbs_replication_lag",
 		} {
 			pbID, ok := idBySeries[sid]
@@ -865,4 +885,67 @@ func TestPlaybooks_RunAgentMode(t *testing.T) {
 		t.Error("agent-mode run should not return fleet 'job_def_raw' field")
 	}
 	t.Logf("agent run OK: playbook_id=%s text_len=%d", restartID, len(fmt.Sprintf("%v", resp["text"])))
+}
+
+// TestPlaybooks_RunAgentApproveMode calls POST /run on the pbs_lock_chain_remediate
+// system playbook (execution_mode=agent_approve) and verifies the gateway returns
+// HTTP 202 with status="pending_approval" and a non-nil step proposal. The LLM is
+// called to propose the first remediation step; no database agent or live database
+// connection is required beyond the LLM API key.
+func TestPlaybooks_RunAgentApproveMode(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var remedID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_lock_chain_remediate" {
+			remedID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if remedID == "" {
+		t.Skip("pbs_lock_chain_remediate system playbook not found — stack may not be seeded")
+	}
+
+	resp, err := client.PlaybookRun(ctx, remedID, map[string]any{
+		"connection_string": cfg.ConnStr,
+	})
+	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
+		t.Fatalf("PlaybookRun (agent_approve mode): %v", err)
+	}
+
+	// agent_approve response: status must be "pending_approval", not agent text or fleet plan.
+	if resp["status"] != "pending_approval" {
+		t.Errorf("status = %q, want pending_approval; full response: %v", resp["status"], resp)
+	}
+	if resp["run_id"] == nil || resp["run_id"] == "" {
+		t.Error("run_id should be set in agent_approve response")
+	}
+	step, _ := resp["step"].(map[string]any)
+	if step == nil {
+		t.Fatal("step field should be present in pending_approval response")
+	}
+	if step["tool"] == nil || step["tool"] == "" {
+		t.Error("step.tool should be non-empty — LLM should propose a concrete tool call")
+	}
+	if resp["text"] != nil {
+		t.Error("agent_approve run should not return agent 'text' field")
+	}
+	if resp["job_def_raw"] != nil {
+		t.Error("agent_approve run should not return fleet 'job_def_raw' field")
+	}
+	t.Logf("agent_approve run OK: playbook_id=%s run_id=%v step.tool=%v approval_id=%v",
+		remedID, resp["run_id"], step["tool"], resp["approval_id"])
 }
