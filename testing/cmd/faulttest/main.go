@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
+	"helpdesk/internal/buildinfo"
 	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
@@ -38,6 +39,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "version":
+		fmt.Println(buildinfo.Version)
 	case "list":
 		cmdList(os.Args[2:])
 	case "run":
@@ -65,6 +68,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: faulttest <command> [options]
 
 Commands:
+  version    Print the build version and exit
   list       List all failure modes in the catalog
   run        Inject failures, run agent, evaluate, teardown
   inject     Inject a specific failure (interactive mode)
