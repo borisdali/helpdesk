@@ -185,7 +185,7 @@ func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout
 	start := time.Now()
 
 	for {
-		err := testutil.RunSQLString(ctx, r.cfg.ConnStr, verifySQL)
+		err := testutil.RunSQLBool(ctx, r.cfg.ConnStr, verifySQL)
 		if err == nil {
 			return time.Since(start).Seconds(), nil
 		}

@@ -424,13 +424,18 @@ faulttest:
   viaGateway: false
 
   # Override the playbook's approval_mode for this run (--approval-mode).
-  # Empty (default) = use the playbook's own approval_mode declaration.
-  # "force"  — auto-approve all steps; use for fully automated CI/faulttest runs.
-  # "auto"   — no gate on any tool; permits cross-playbook auto-chaining.
-  # "review" — prompts for write/destructive steps (requires an interactive terminal; not for K8s Jobs).
-  # "manual" — prompts for every step (requires an interactive terminal; not for K8s Jobs).
-  # Note: databases with approval_override_roles restrict who may escalate beyond
-  # the playbook default — the gateway clamps the mode if the caller lacks the role.
+  # Controls both what the gateway sees AND how the faulttest harness behaves locally:
+  #
+  #   ""       (default) — gateway uses the playbook's own approval_mode; harness
+  #            auto-approves all steps (needsPrompt is never triggered). Safe for
+  #            K8s Jobs. Cannot be clamped by approval_override_roles.
+  #   "force"  — gateway uses force mode; harness auto-approves all steps.
+  #            Subject to approval_override_roles clamping if caller lacks the role.
+  #   "auto"   — gateway permits cross-playbook auto-chaining; harness auto-approves.
+  #   "review" — harness prompts for write/destructive steps; read steps auto-approved.
+  #            Requires an interactive terminal — not for K8s Jobs.
+  #   "manual" — harness prompts for every step.
+  #            Requires an interactive terminal — not for K8s Jobs.
   approvalMode: ""
 
   # Run the remediation phase after injection+diagnosis (--remediate).

@@ -168,7 +168,11 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 		return fmt.Errorf("resolving playbook %q: %w", seriesID, err)
 	}
 
-	remediationReq := map[string]any{"connection_string": r.cfg.ConnStr}
+	connStrForPlaybook := r.cfg.AgentConnStr
+	if connStrForPlaybook == "" {
+		connStrForPlaybook = r.cfg.ConnStr
+	}
+	remediationReq := map[string]any{"connection_string": connStrForPlaybook}
 	if r.cfg.ApprovalMode != "" {
 		remediationReq["approval_mode"] = r.cfg.ApprovalMode
 	}
@@ -463,7 +467,7 @@ func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout
 	connStr := r.resolvedConnStr()
 
 	for {
-		err := testutil.RunSQLString(ctx, connStr, verifySQL)
+		err := testutil.RunSQLBool(ctx, connStr, verifySQL)
 		if err == nil {
 			return time.Since(start).Seconds(), nil
 		}
