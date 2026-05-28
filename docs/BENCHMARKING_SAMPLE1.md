@@ -6,6 +6,8 @@ This is an example showcasing a comparison of diagnosis of one specific database
 
 If you are not familiar with the Crystal Ball mode, these two blog posts [here](https://medium.com/google-cloud/dont-ask-your-ai-to-diagnose-production-unless-you-ve-given-it-a-structured-guided-playbook-46195c2aae71) and [here](https://medium.com/google-cloud/we-wanted-a-dramatic-ai-agent-failure-we-got-something-better-5d6d57135a88) go beyond our standard documentation and present a gentle introduction and the thinking behind this comparison.
 
+Additionally, [this blog post](https://medium.com/google-cloud/ai-database-troubleshooting-the-postgresql-stat-that-looks-like-good-news-and-aint-16f1b52143ec) adds more color and context for this test.
+
 ## Full, guided, structured aiHelpDesk diagnosis
 In the examples below we inject the checkpoint stall / bgwriter overload fault test (dubbed `db-checkpoint-warning` in our [fault catalog](FAULTTEST.md#61-external-compatible-faults)) and attempt to diagnose this fault by running the Crystal Ball and the full aihelpDesk playbook-driven diagnosis. In this particular example we run both from the source code (but in the [latter section](BENCHMARKING_SAMPLE.md#running-on-k8s-via-a-helm-chart) in this document we show equivalent commands for running this test on K8s via Helm).
 
@@ -317,7 +319,7 @@ helm upgrade helpdesk . --namespace helpdesk-system \
   --set 'infrastructure.db_servers.pg-cluster-minikube.connection_string=host=pg-cluster-minikube-rw.db.svc.cluster.local port=5432 dbname=app user=app' \
   --set 'infrastructure.db_servers.pg-cluster-minikube.password_env=CNPG_APP_PASSWORD' \
   --set 'faulttest.extraEnv[0].name=CNPG_APP_PASSWORD' \
-  --set 'faulttest.extraEnv[0]. valueFrom.secretKeyRef.name=pg-cluster-minkube-app' \
+  --set 'faulttest.extraEnv[0].valueFrom.secretKeyRef.name=pg-cluster-minkube-app' \
   --set 'faulttest.extraEnv[0].valueFrom.secretKeyRef.key=password' \
   --set image.pullPolicy=Never \
   --set image.tag=v0.13.0-a71a4ba \

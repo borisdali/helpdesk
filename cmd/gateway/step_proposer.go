@@ -172,10 +172,11 @@ func (g *Gateway) callToolWithPrincipal(ctx context.Context, traceID, purpose, a
 	baseURL := strings.TrimSuffix(agentInfo.InvokeURL, "/invoke")
 
 	reqBody := directToolReq{
-		TraceID:   traceID,
-		Principal: principal,
-		Purpose:   purpose,
-		Args:      args,
+		TraceID:         traceID,
+		Principal:       principal,
+		Purpose:         purpose,
+		PurposeExplicit: purpose != "",
+		Args:            args,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

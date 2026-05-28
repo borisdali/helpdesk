@@ -130,6 +130,9 @@ spec:
             {{- if .Values.faulttest.context }}
             - --context={{ .Values.faulttest.context }}
             {{- end }}
+            {{- if .Values.faulttest.external }}
+            - --external
+            {{- end }}
             {{- if .Values.infrastructure }}
             - --infra-config=/etc/helpdesk/infrastructure.json
             {{- end }}
@@ -142,6 +145,12 @@ spec:
             {{- if .Values.faulttest.viaGateway }}
             - --via-gateway
             - --gateway=http://{{ $fullname }}-gateway:{{ .Values.gateway.port }}
+            {{- end }}
+            {{- if .Values.faulttest.approvalMode }}
+            - --approval-mode={{ .Values.faulttest.approvalMode }}
+            {{- end }}
+            {{- if .Values.faulttest.remediate }}
+            - --remediate
             {{- end }}
             - --report-dir=/reports
           env:
