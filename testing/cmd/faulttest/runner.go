@@ -71,7 +71,7 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 			slog.Warn("gateway detected but no API key set — requests may return 401; pass --api-key or set HELPDESK_CLIENT_API_KEY")
 		}
 		slog.Info("using gateway REST API", "agent_name", agentName, "purpose", r.cfg.GatewayPurpose)
-		return testutil.SendPromptViaGateway(ctx, agentURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose)
+		return testutil.SendPromptViaGateway(ctx, agentURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose, r.cfg.OperatorID)
 	}
 	return testutil.SendPrompt(ctx, agentURL, prompt)
 }
@@ -123,6 +123,9 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	req.Header.Set("X-Purpose", r.cfg.GatewayPurpose)
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
 	}
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
 		req.Header.Set("X-Trace-ID", id)
@@ -180,6 +183,9 @@ func (r *Runner) resolvePlaybookID(ctx context.Context, client *http.Client, ser
 	}
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

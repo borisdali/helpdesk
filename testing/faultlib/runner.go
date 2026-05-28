@@ -81,7 +81,7 @@ func (r *Runner) runViaGatewayQuery(ctx context.Context, f Failure) testutil.Age
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	return testutil.SendPromptViaGateway(ctx, r.cfg.GatewayURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose)
+	return testutil.SendPromptViaGateway(ctx, r.cfg.GatewayURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose, r.cfg.OperatorID)
 }
 
 // categoryToAgentName maps a fault category to a gateway agent alias.
