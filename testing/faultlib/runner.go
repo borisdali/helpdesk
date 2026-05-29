@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"helpdesk/testing/testutil"
@@ -31,18 +32,27 @@ func FaultTraceID(ctx context.Context) string {
 // Runner sends prompts to agents, routing via gateway playbook when configured.
 type Runner struct {
 	cfg *HarnessConfig
+
+	// gatewayCache memoises IsGatewayURL results per URL so we only probe once.
+	gatewayCache   map[string]bool
+	gatewayCacheMu sync.Mutex
 }
 
 // NewRunner creates a Runner backed by cfg.
 func NewRunner(cfg *HarnessConfig) *Runner {
-	return &Runner{cfg: cfg}
+	return &Runner{
+		cfg:          cfg,
+		gatewayCache: make(map[string]bool),
+	}
 }
 
 // Run sends the failure prompt to the appropriate agent or gateway and returns
-// the response. When cfg.ViaGateway is true, calls are routed through the
-// gateway: via the playbook endpoint when DiagnosisPlaybookSeriesID is set,
-// otherwise via POST /api/v1/query using the fault category as the agent name.
-// Direct agent calls are used only when ViaGateway is false.
+// the response. When ViaGateway is true and GatewayURL is set, calls are
+// routed through the gateway: via the playbook endpoint when
+// DiagnosisPlaybookSeriesID is set, otherwise via POST /api/v1/query.
+// When ViaGateway is false, the category-specific agent URL is used; if that
+// URL is itself a helpdesk gateway it is auto-detected and routed via the REST
+// API rather than A2A.
 func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 	if r.cfg.ViaGateway && r.cfg.GatewayURL != "" {
 		if f.DiagnosisPlaybookSeriesID != "" {
@@ -51,19 +61,31 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 		return r.runViaGatewayQuery(ctx, f)
 	}
 
+	prompt := ResolvePrompt(f.Prompt, r.cfg)
 	agentURL := r.agentURL(f.Category)
 	if agentURL == "" {
-		return testutil.AgentResponse{Error: fmt.Errorf("no agent URL for category %q", f.Category)}
+		return testutil.AgentResponse{Error: fmt.Errorf("no agent URL configured for category %q", f.Category)}
 	}
 
-	prompt := ResolvePrompt(f.Prompt, r.cfg)
 	slog.Info("sending prompt to agent",
-		"failure", f.ID, "category", f.Category, "agent", agentURL)
+		"failure", f.ID,
+		"category", f.Category,
+		"agent", agentURL,
+		"prompt_len", len(prompt),
+	)
 
 	timeout := f.TimeoutDuration()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	if r.isGateway(ctx, agentURL) {
+		agentName := categoryToGatewayAgent(f.Category)
+		if r.cfg.GatewayAPIKey == "" {
+			slog.Warn("gateway detected but no API key set — requests may return 401")
+		}
+		slog.Info("using gateway REST API", "agent_name", agentName, "purpose", r.cfg.GatewayPurpose)
+		return testutil.SendPromptViaGateway(ctx, agentURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose, r.cfg.OperatorID)
+	}
 	return testutil.SendPrompt(ctx, agentURL, prompt)
 }
 
@@ -71,7 +93,7 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 // /api/v1/query endpoint using the fault category as the agent name. Used when
 // ViaGateway=true but the fault has no DiagnosisPlaybookSeriesID.
 func (r *Runner) runViaGatewayQuery(ctx context.Context, f Failure) testutil.AgentResponse {
-	agentName := categoryToAgentName(f.Category)
+	agentName := categoryToGatewayAgent(f.Category)
 	prompt := ResolvePrompt(f.Prompt, r.cfg)
 
 	slog.Info("sending prompt via gateway query",
@@ -84,20 +106,6 @@ func (r *Runner) runViaGatewayQuery(ctx context.Context, f Failure) testutil.Age
 	return testutil.SendPromptViaGateway(ctx, r.cfg.GatewayURL, r.cfg.GatewayAPIKey, agentName, prompt, r.cfg.GatewayPurpose, r.cfg.OperatorID)
 }
 
-// categoryToAgentName maps a fault category to a gateway agent alias.
-func categoryToAgentName(category string) string {
-	switch category {
-	case "database":
-		return "database"
-	case "kubernetes":
-		return "k8s"
-	case "host":
-		return "host"
-	default:
-		return "database"
-	}
-}
-
 // runViaPlaybook routes diagnosis through the gateway's playbook endpoint.
 func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentResponse {
 	start := time.Now()
@@ -107,11 +115,11 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	if err != nil {
 		return testutil.AgentResponse{
 			Duration: time.Since(start),
-			Error:    fmt.Errorf("resolving playbook %q: %w", f.DiagnosisPlaybookSeriesID, err),
+			Error:    fmt.Errorf("resolving diagnosis playbook %q: %w", f.DiagnosisPlaybookSeriesID, err),
 		}
 	}
 
-	slog.Info("sending prompt via playbook",
+	slog.Info("sending prompt to agent via playbook",
 		"failure", f.ID,
 		"series_id", f.DiagnosisPlaybookSeriesID,
 		"playbook_id", playbookID,
@@ -139,16 +147,14 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		return testutil.AgentResponse{Duration: time.Since(start), Error: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if r.cfg.GatewayPurpose != "" {
-		req.Header.Set("X-Purpose", r.cfg.GatewayPurpose)
-	}
+	req.Header.Set("X-Purpose", r.cfg.GatewayPurpose)
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
 	}
 	if r.cfg.OperatorID != "" {
 		req.Header.Set("X-User", r.cfg.OperatorID)
 	}
-	if id := FaultTraceID(ctx); id != "" {
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
 		req.Header.Set("X-Trace-ID", id)
 	}
 
@@ -161,7 +167,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	duration := time.Since(start)
 
 	if resp.StatusCode >= 300 {
-		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("playbook returned %d: %s", resp.StatusCode, string(respBody))}
+		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("playbook run returned %d: %s", resp.StatusCode, string(respBody))}
 	}
 
 	var result struct {
@@ -173,7 +179,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		RunID       string   `json:"run_id"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding response: %w", err)}
+		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
 	}
 	if result.Error != "" {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("playbook error: %s", result.Error)}
@@ -181,7 +187,13 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	for _, w := range result.Warnings {
 		slog.Warn("gateway warning", "failure", f.ID, "warning", w)
 	}
-	ar := testutil.AgentResponse{Text: result.Text, CrystalBall: result.CrystalBall, Duration: duration, Warnings: result.Warnings, RunID: result.RunID}
+	ar := testutil.AgentResponse{
+		Text:        result.Text,
+		CrystalBall: result.CrystalBall,
+		Duration:    duration,
+		Warnings:    result.Warnings,
+		RunID:       result.RunID,
+	}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)
 		ar.ToolCalls = make([]testutil.ToolCallResult, len(result.ToolCalls))
@@ -206,6 +218,9 @@ func (r *Runner) resolvePlaybookID(ctx context.Context, client *http.Client, ser
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
 	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -223,9 +238,21 @@ func (r *Runner) resolvePlaybookID(ctx context.Context, client *http.Client, ser
 		return "", err
 	}
 	if len(result.Playbooks) == 0 {
-		return "", fmt.Errorf("no active playbook for series %q", seriesID)
+		return "", fmt.Errorf("no active playbook found for series %q", seriesID)
 	}
 	return result.Playbooks[0].PlaybookID, nil
+}
+
+// isGateway returns true if url is a helpdesk gateway, caching the result.
+func (r *Runner) isGateway(ctx context.Context, url string) bool {
+	r.gatewayCacheMu.Lock()
+	defer r.gatewayCacheMu.Unlock()
+	if cached, ok := r.gatewayCache[url]; ok {
+		return cached
+	}
+	result := testutil.IsGatewayURL(ctx, url)
+	r.gatewayCache[url] = result
+	return result
 }
 
 // agentURL returns the configured agent URL for the given fault category.
@@ -244,5 +271,22 @@ func (r *Runner) agentURL(category string) string {
 		return r.cfg.DBAgentURL
 	default:
 		return ""
+	}
+}
+
+// categoryToGatewayAgent maps a fault category to the gateway's agent name.
+// "k8s" and "sysadmin" match the gateway's agentAliases map.
+func categoryToGatewayAgent(category string) string {
+	switch category {
+	case "database":
+		return "database"
+	case "kubernetes":
+		return "k8s"
+	case "host":
+		return "sysadmin"
+	case "compound":
+		return "database"
+	default:
+		return "database"
 	}
 }

@@ -39,7 +39,7 @@ func TestTriggerPlaybook_Success(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_restart"); err != nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestTriggerPlaybook_ServerError(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_restart"); err == nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err == nil {
 		t.Error("expected error for 500 response, got nil")
 	}
 }
@@ -142,7 +142,7 @@ func TestResolvePlaybookID_SendsAuth(t *testing.T) {
 
 func TestTriggerPlaybook_NoGateway(t *testing.T) {
 	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
-	if err := r.triggerPlaybook(context.Background(), "pbs_restart"); err == nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err == nil {
 		t.Error("expected error when GatewayURL is empty, got nil")
 	}
 }
@@ -177,7 +177,7 @@ func TestRemediate_NoAction(t *testing.T) {
 	result := r.Remediate(context.Background(), Failure{
 		ID:          "no-action",
 		Remediation: RemediationSpec{}, // no playbook, no agent
-	})
+	}, "")
 	if result.Err == nil {
 		t.Error("expected error when no remediation action is configured")
 	}
@@ -317,7 +317,7 @@ func TestTriggerPlaybook_AgentApprove_FullLoop(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_remediate"); err != nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_remediate", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if proceedCount != 1 {
@@ -391,7 +391,7 @@ func TestRemediate_PlaybookThenRecovery(t *testing.T) {
 			VerifySQL:     "SELECT 1",
 			VerifyTimeout: "1s",
 		},
-	})
+	}, "")
 
 	if !playbookCalled {
 		t.Error("playbook endpoint was not called")

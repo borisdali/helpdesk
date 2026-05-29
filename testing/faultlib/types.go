@@ -186,6 +186,22 @@ type HarnessConfig struct {
 	// When set, the harness queries tool execution events after each agent call
 	// to get structured tool evidence from the audit trail instead of text matching.
 	AuditURL string
+
+	// ReportDir is the directory where the JSON report is written (default: ".").
+	ReportDir string
+
+	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
+	JudgeEnabled bool
+	// JudgeModel is the model name for the LLM judge (default: HELPDESK_MODEL_NAME).
+	JudgeModel string
+	// JudgeVendor is the model vendor for the LLM judge (default: HELPDESK_MODEL_VENDOR).
+	JudgeVendor string
+	// JudgeAPIKey is the API key for the LLM judge (default: HELPDESK_API_KEY).
+	JudgeAPIKey string
+
+	// NotifyURL is an optional webhook URL. When set, the harness POSTs the full
+	// JSON report to this URL after the run completes (e.g. a Slack webhook).
+	NotifyURL string
 }
 
 // EvalResult contains the evaluation outcome for a single failure test.
