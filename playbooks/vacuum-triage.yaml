@@ -30,6 +30,10 @@ guidance: |
   If autovacuum_count has not changed in the last check and dead_ratio keeps
   growing, autovacuum may be blocked by a long-running transaction — check
   get_blocking_queries.
+
+  Final step: after your analysis, output exactly one line in this format
+  (no markdown, no extra text on the line):
+  FINDINGS: worst table <schema.table> dead_ratio=<N> (<size>); autovacuum=<running|stuck|blocked|not_needed>; blocker_pid=<pid | none>; recommended=<manual_vacuum|tune_autovacuum|escalate|monitor>
 escalation:
   - "dead_ratio > 0.5 on any table larger than 1GB"
   - "autovacuum_count has not increased over two consecutive checks"

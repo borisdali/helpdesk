@@ -279,7 +279,7 @@ func TestFaultInjection(t *testing.T) {
 			if cfg.RemediateEnabled && f.Remediation.PlaybookID != "" {
 				t.Log("Running remediation...")
 				remediator := faultlib.NewRemediator(cfg)
-				remResult := remediator.Remediate(faultCtx, f)
+				remResult := remediator.Remediate(faultCtx, f, resp.RunID)
 				if remResult.Err != nil {
 					t.Errorf("Remediation failed: %v", remResult.Err)
 				} else {

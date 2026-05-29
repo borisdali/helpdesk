@@ -71,6 +71,10 @@ guidance: |
     fix archiving, or simply restart)
   Do NOT attempt the restart — describe the recommended action for operator approval.
 
+  Final step: after your root cause summary, output exactly one line in this
+  format (no markdown, no extra text on the line):
+  FINDINGS: exit_code=<N> reason=<OOMKilled|Completed|Error>; root_cause=<brief phrase>; action=<restart|expand_disk|increase_memory_limit|data_recovery|investigate>
+
 escalation:
   - "log file shows data corruption (invalid page, checksum failure)"
   - "OOMKilled repeatedly — memory limit needs tuning before restart"

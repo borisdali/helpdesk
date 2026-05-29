@@ -149,6 +149,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		Error       string   `json:"error"`
 		ToolCalls   []string `json:"tool_calls"`
 		Warnings    []string `json:"warnings"`
+		RunID       string   `json:"run_id"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -159,7 +160,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	for _, w := range result.Warnings {
 		slog.Warn("gateway warning", "failure", f.ID, "warning", w)
 	}
-	ar := testutil.AgentResponse{Text: result.Text, CrystalBall: result.CrystalBall, Duration: duration, Warnings: result.Warnings}
+	ar := testutil.AgentResponse{Text: result.Text, CrystalBall: result.CrystalBall, Duration: duration, Warnings: result.Warnings, RunID: result.RunID}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)
 		ar.ToolCalls = make([]testutil.ToolCallResult, len(result.ToolCalls))

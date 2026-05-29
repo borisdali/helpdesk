@@ -27,6 +27,9 @@ type AgentResponse struct {
 	// Warnings contains advisory messages returned by the gateway (e.g., approval_mode
 	// clamped due to insufficient roles). Empty on direct agent calls.
 	Warnings []string
+	// RunID is the gateway playbook run ID for this response.
+	// Pass as prior_run_id to a remediation playbook so it starts with triage context.
+	RunID string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

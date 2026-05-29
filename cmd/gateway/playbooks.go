@@ -1710,7 +1710,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Propose the first step (no history yet).
-	proposal, done, summary, err := g.proposeNextStep(r.Context(), pb, req.ConnectionString, nil)
+	proposal, done, summary, err := g.proposeNextStep(r.Context(), pb, req.ConnectionString, req.PriorFindings, nil)
 	if err != nil {
 		slog.Error("handlePlaybookRunApprove: step proposal failed", "playbook", pb.SeriesID, "err", err)
 		writeError(w, http.StatusInternalServerError, "step proposal failed: "+err.Error())
@@ -1887,7 +1887,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, history)
+	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, "", history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "re-planning failed: "+err.Error(), nil)

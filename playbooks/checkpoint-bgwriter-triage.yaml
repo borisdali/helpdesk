@@ -109,6 +109,10 @@ guidance: |
   Note: stats_reset shows when counters were last zeroed. If stats_reset was
   recent, wait for meaningful data to accumulate before judging improvement.
 
+  Final step: after your analysis and parameter recommendations, output exactly
+  one line in this format (no markdown, no extra text on the line):
+  FINDINGS: checkpoints_req=<N> timed=<N>; maxwritten_clean=<N>; buffers_backend_fsync=<N>; recommended=<param=value[, param=value]* | no_changes_needed>
+
 escalation:
   - "buffers_backend_fsync > 0 — backends are doing their own fsyncs; immediate I/O capacity review needed"
   - "checkpoint_sync_time > 30s — checkpoint sync is blocking writes for extended periods"

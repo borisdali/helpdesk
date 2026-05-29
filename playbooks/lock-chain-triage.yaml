@@ -63,6 +63,10 @@ guidance: |
   Common misdiagnosis: terminating an intermediate victim instead of the root
   blocker. The intermediate will re-queue (or a replacement session will queue)
   immediately. The root blocker is always the sole target.
+
+  Final step: after your ROOT_CAUSE line, output exactly one line in this format
+  (no markdown, no extra text on the line):
+  FINDINGS: Root blocker PID <pid> (<state>, has_writes=<true|false>); <N>-level chain; terminate_connection required.
 escalation:
   - "root blocker has has_writes=true (uncommitted DML) and has been idle > 30 minutes"
   - "lock queue exceeds 20 sessions"

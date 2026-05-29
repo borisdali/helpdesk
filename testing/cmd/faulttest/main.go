@@ -370,7 +370,7 @@ func cmdRun(args []string) {
 
 		// 4. Remediation phase (optional).
 		if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
-			remResult := remediator.Remediate(faultCtx, f)
+			remResult := remediator.Remediate(faultCtx, f, resp.RunID)
 			evalResult.RemediationAttempted = true
 			evalResult.RemediationPassed = remResult.Passed
 			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs

@@ -45,18 +45,21 @@ func NewRemediator(cfg *HarnessConfig) *Remediator {
 }
 
 // Remediate triggers remediation for the failure and polls for recovery.
-func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult {
+// priorRunID is the triage playbook run ID from diagnosis; when non-empty it is
+// forwarded as prior_run_id so the remediation agent starts with triage context.
+func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string) RemediationResult {
 	spec := f.Remediation
 
 	slog.Info("starting remediation", "failure", f.ID,
-		"playbook", spec.PlaybookID, "agent_prompt", spec.AgentPrompt != "")
+		"playbook", spec.PlaybookID, "agent_prompt", spec.AgentPrompt != "",
+		"prior_run_id", priorRunID)
 
 	// Determine method.
 	var method string
 	var triggerErr error
 	if spec.PlaybookID != "" {
 		method = "playbook"
-		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID)
+		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
 	} else if spec.AgentPrompt != "" {
 		method = "agent_prompt"
 		agentName := spec.AgentName
@@ -156,7 +159,7 @@ type approveRunStep struct {
 	ActionClass string         `json:"action_class,omitempty"`
 }
 
-func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error {
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) error {
 	if r.cfg.GatewayURL == "" {
 		return fmt.Errorf("gateway URL is required for playbook remediation (--gateway)")
 	}
@@ -176,6 +179,9 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error
 	remediationReq := map[string]any{"connection_string": connStrForPlaybook}
 	if r.cfg.ApprovalMode != "" {
 		remediationReq["approval_mode"] = r.cfg.ApprovalMode
+	}
+	if priorRunID != "" {
+		remediationReq["prior_run_id"] = priorRunID
 	}
 	body, _ := json.Marshal(remediationReq)
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"

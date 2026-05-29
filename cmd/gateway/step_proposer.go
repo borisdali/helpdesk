@@ -42,7 +42,7 @@ GUIDANCE:
 %s
 
 TARGET: %s
-
+%s
 TOOL CALLS EXECUTED SO FAR (in order):
 %s
 
@@ -69,9 +69,14 @@ OR when done:
 // proposeNextStep calls the planner LLM to propose the single next remediation
 // action given the playbook guidance and history of already-executed steps.
 // Returns (proposal, isDone, summary, error).
-func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connStr string, history []*audit.PlaybookRunStep) (*StepProposal, bool, string, error) {
+func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connStr, priorFindings string, history []*audit.PlaybookRunStep) (*StepProposal, bool, string, error) {
 	if g.plannerLLM == nil {
 		return nil, false, "", fmt.Errorf("planner LLM not configured")
+	}
+
+	priorFindingsSection := ""
+	if priorFindings != "" {
+		priorFindingsSection = fmt.Sprintf("\nPRIOR TRIAGE FINDINGS:\n%s\nStart from this diagnosis — verify the root blocker is still blocked, then execute the remediation steps.\n", priorFindings)
 	}
 
 	historyStr := buildHistorySection(history)
@@ -79,6 +84,7 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 		pb.Name,
 		pb.Guidance,
 		connStr,
+		priorFindingsSection,
 		historyStr,
 	)
 
