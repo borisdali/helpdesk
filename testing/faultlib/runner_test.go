@@ -394,3 +394,30 @@ func TestCategoryToGatewayAgent(t *testing.T) {
 		}
 	}
 }
+
+// ── X-Trace-ID propagation ────────────────────────────────────────────────────
+
+func TestRunViaPlaybook_SendsXTraceID(t *testing.T) {
+	var gotTraceID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_x"}},
+			})
+			return
+		}
+		gotTraceID = r.Header.Get("X-Trace-ID")
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{ID: "test", Prompt: "p", Timeout: "30s", DiagnosisPlaybookSeriesID: "pbs_x"}
+	ctx := WithFaultTraceID(context.Background(), "trace-abc123")
+	r.runViaPlaybook(ctx, f)
+
+	if gotTraceID != "trace-abc123" {
+		t.Errorf("X-Trace-ID = %q, want %q", gotTraceID, "trace-abc123")
+	}
+}
