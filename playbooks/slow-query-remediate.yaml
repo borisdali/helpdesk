@@ -1,0 +1,68 @@
+series_id: pbs_slow_query_remediate
+name: Slow Query / Lock Contention — Cancel or Terminate Blocking Session
+version: "1.0"
+entry_point: true
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: performance
+author: aiHelpDesk
+description: |
+  Cancel or terminate a long-running query or the session holding a lock that
+  is blocking other operations. Uses cancel_query (pg_cancel_backend) as the
+  first attempt — it is safer because it only interrupts the current query and
+  leaves the connection open. Falls back to terminate_connection
+  (pg_terminate_backend) if cancel does not resolve the blockage.
+symptoms:
+  - "query running longer than acceptable threshold"
+  - "lock wait timeout exceeded — queries piling up behind a blocker"
+  - "deadlock detected errors in application logs"
+  - "pg_locks shows ungranted locks waiting on a single session"
+guidance: |
+  Step 1: Identify the target session.
+  Call get_slow_queries to find long-running active queries (state='active',
+  duration > threshold). Note the pid, query text, and duration.
+  Call get_blocking_queries to find sessions holding locks that block others.
+  A session blocking others is a higher priority target than a slow query that
+  is not blocking anyone.
+
+  Select the primary target: the session with the longest duration that is also
+  blocking the most downstream sessions (or the longest single slow query if no
+  lock chain exists).
+
+  Step 2: Inspect the target session.
+  Call get_session_info with pid=<target_pid>. Confirm:
+  - state: 'active' (executing) or 'idle in transaction' (holding locks passively)
+  - has_writes: if true, termination will roll back uncommitted DML — disclose this.
+  - wait_event: if waiting on a lock itself, this session is a victim, not the root.
+    Look further up the blocking chain for the actual root.
+
+  Step 3A — Try cancel first (state='active' queries only).
+  Call cancel_query with pid=<target_pid>.
+  Note: cancel_query sends SIGINT to the backend. It works for queries in state=
+  'active' that are executing. It does NOT release locks held by an idle-in-
+  transaction session — for that, you must use terminate_connection.
+  Before requesting approval, state: query text, duration, and estimated blast
+  radius (how many sessions are unblocked if this query is cancelled).
+  After cancel, re-call get_blocking_queries to confirm the blockage cleared.
+  If the lock chain persists (session moved to 'idle in transaction' or is still
+  blocking), proceed to Step 3B.
+
+  Step 3B — Terminate if cancel was insufficient.
+  Call terminate_connection with pid=<target_pid>.
+  This closes the connection unconditionally and rolls back any open transaction.
+  Before requesting approval, disclose:
+  - Whether the session has has_writes=true (uncommitted DML will be lost)
+  - How many downstream sessions will be unblocked
+  - If the session is an idle-in-transaction, that cancel_query does not work
+    for idle-in-transaction sessions (only terminate_connection releases the lock)
+
+  Step 4: Verify the blockage cleared.
+  Call get_blocking_queries. Confirm no sessions remain waiting on locks from
+  the terminated session. If additional blockers remain, repeat from Step 1.
+escalation:
+  - "target session has has_writes=true and has been idle > 30 minutes — risk of significant data loss on terminate"
+  - "blocking table is a system catalog (pg_class, pg_attribute, etc.)"
+  - "lock queue exceeds 20 sessions — assess the full blast radius before proceeding"
+  - "session holds an ACCESS EXCLUSIVE lock on a critical table — coordinate with application team before terminating"
+target_hints: []

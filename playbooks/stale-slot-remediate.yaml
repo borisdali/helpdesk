@@ -1,0 +1,61 @@
+series_id: pbs_stale_slot_remediate
+name: Stale Replication Slot — Drop to Allow WAL Recycling
+version: "1.0"
+entry_point: true
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: capacity
+author: aiHelpDesk
+description: |
+  Drop an inactive replication slot that is preventing WAL recycling. An
+  abandoned slot holds restart_lsn fixed while the current WAL position advances,
+  causing pg_wal to grow without bound. pg_drop_replication_slot() is irreversible —
+  once dropped, the replica can no longer reconnect from that WAL position. This
+  playbook requires operator confirmation because it permanently destroys the slot.
+symptoms:
+  - "pg_wal directory growing without bound"
+  - "replication slot with active=false and lag_bytes > 0"
+  - "no active replica connected but a physical or logical slot exists"
+  - "disk usage alert on PostgreSQL data volume despite stable table sizes"
+guidance: |
+  Step 1: Confirm the inactive slot is the WAL retention cause.
+  Call get_replication_status. In the pg_replication_slots section, identify slots
+  where active=false and lag_bytes > 0. Note the slot_name and lag_bytes for each.
+  If archive_mode=on (check get_pg_settings category=wal_archiving), the WAL
+  growth may be from archiving backlog, not a stale slot — investigate archiver
+  health before proceeding to drop any slot.
+
+  Step 2: Confirm the replica is permanently decommissioned.
+  Before dropping, confirm the replica this slot belongs to is gone for good:
+  - Check pg_stat_replication: is there any active connection using this slot?
+    If active=true for a slot, do NOT drop it — the replica is still connected.
+  - The slot name often contains the replica hostname or a descriptive label.
+    Report the slot_name to the operator so they can confirm before approving.
+
+  Step 3: Drop the stale slot.
+  Call execute_sql with:
+    SELECT pg_drop_replication_slot('<slot_name>');
+  Replace <slot_name> with the actual slot name from Step 1.
+  Before requesting approval, state CLEARLY:
+  - The slot name being dropped
+  - lag_bytes retained (how much WAL is held by this slot)
+  - That this operation is irreversible — the replica cannot reconnect after
+    the slot is dropped
+  - That pg_wal segments behind this slot's restart_lsn will be recycled at
+    the next checkpoint
+  If multiple inactive slots exist, drop them one at a time — request separate
+  approval for each.
+
+  Step 4: Verify the slot is gone and WAL is being recycled.
+  Call get_replication_status again. Confirm the slot no longer appears.
+  Note: pg_wal segments are recycled at the next checkpoint — the directory
+  size may not decrease immediately. Call check_disk if available to confirm
+  the data volume has headroom.
+escalation:
+  - "slot active=true — the replica is still connected; do NOT drop"
+  - "multiple inactive slots found — drop one at a time; each requires separate operator approval"
+  - "lag_bytes > 50 GB — the disk may fill before the next checkpoint if not enough free space exists; check disk headroom first"
+  - "slot belongs to a logical replication subscriber — dropping it may break a downstream consumer; confirm the subscriber is permanently gone"
+  - "archive_mode=on and archive_status/ready count is growing — archiving backlog may be the cause, not a stale slot"
+target_hints: []
