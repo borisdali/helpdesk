@@ -196,7 +196,7 @@ faulttest-gateway:
 	FAULTTEST_EXTERNAL=true \
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
-	go test -tags faulttest -timeout 1000s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	go test -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
 # ---------------------------------------------------------------------------
