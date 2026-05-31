@@ -170,6 +170,52 @@ func TestTriggerPlaybook_SendsXTraceID(t *testing.T) {
 	}
 }
 
+func TestRunPlaybook_UsesAgentConnStr(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := resolveServer(t, "pb_test", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	})
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:   srv.URL,
+		GatewayAPIKey: "test-key",
+		ConnStr:      "host=primary",
+		AgentConnStr: "host=replica",
+	})
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", ""); err != nil {
+		t.Fatalf("RunPlaybook: %v", err)
+	}
+	if gotBody["connection_string"] != "host=replica" {
+		t.Errorf("connection_string = %v, want host=replica (AgentConnStr takes precedence)", gotBody["connection_string"])
+	}
+}
+
+func TestRunPlaybook_FallsBackToConnStr(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := resolveServer(t, "pb_test", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	})
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:   srv.URL,
+		GatewayAPIKey: "test-key",
+		ConnStr:      "host=primary",
+		// AgentConnStr intentionally empty
+	})
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", ""); err != nil {
+		t.Fatalf("RunPlaybook: %v", err)
+	}
+	if gotBody["connection_string"] != "host=primary" {
+		t.Errorf("connection_string = %v, want host=primary (ConnStr fallback)", gotBody["connection_string"])
+	}
+}
+
 // ── prior_run_id threading ────────────────────────────────────────────────────
 
 func TestTriggerPlaybook_SendsPriorRunID(t *testing.T) {

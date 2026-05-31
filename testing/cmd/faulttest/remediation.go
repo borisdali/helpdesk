@@ -101,6 +101,11 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 // triggerPlaybook calls RunPlaybook via faultlib and drives an interactive
 // approval loop when the run returns pending_approval.
 func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) error {
+	// Bridge the local trace-ID slot into faultlib's slot so that RunPlaybook
+	// and ProceedStep set X-Trace-ID on gateway requests.
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		ctx = faultlib.WithFaultTraceID(ctx, id)
+	}
 	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID)
 	if err != nil {
 		return err

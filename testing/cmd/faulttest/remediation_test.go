@@ -201,6 +201,42 @@ func TestRunApprovalLoop_PendingWithNoStep(t *testing.T) {
 	}
 }
 
+func TestRunApprovalLoop_EffectiveApprovalModeOverride(t *testing.T) {
+	// cfg.ApprovalMode is "manual" (would normally prompt via TTY), but the
+	// gateway returns effective_approval_mode="force" due to approval_override_roles
+	// clamping. The loop must use the effective mode and auto-approve without
+	// calling promptStepApproval. If the override is ignored, promptStepApproval
+	// opens /dev/tty, falls back to os.Stdin, reads EOF, and returns an error —
+	// so a passing test proves the override is honoured.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{ //nolint:errcheck
+			RunID: "plr_eff01", Status: "complete", Summary: "done",
+		})
+	}))
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "test-key",
+		ConnStr:       "host=localhost",
+		ApprovalMode:  "manual", // would prompt if EffectiveApprovalMode not honoured
+	})
+	initial := faultlib.ApproveRunResponse{
+		RunID:                 "plr_eff01",
+		Status:                "pending_approval",
+		ApprovalID:            "apr_eff",
+		EffectiveApprovalMode: "force", // gateway clamped "manual" → "force"
+		Step: &faultlib.ApproveRunStep{
+			Index: 1, Agent: "database", Tool: "terminate_connection",
+			Args: map[string]any{"pid": 1234}, Reason: "Terminate root blocker",
+		},
+	}
+	if err := r.runApprovalLoop(context.Background(), initial); err != nil {
+		t.Fatalf("runApprovalLoop: %v (EffectiveApprovalMode override not honoured?)", err)
+	}
+}
+
 func TestTriggerPlaybook_AgentApprove_FullLoop(t *testing.T) {
 	proceedCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +304,28 @@ func TestProceedStep_SendsCorrectPayload(t *testing.T) {
 	}
 	if step, _ := gotBody["step_index"].(float64); int(step) != 3 {
 		t.Errorf("step_index = %v, want 3", gotBody["step_index"])
+	}
+}
+
+// ── X-Trace-ID bridge ─────────────────────────────────────────────────────────
+
+func TestTriggerPlaybook_BridgesTraceID(t *testing.T) {
+	// Verifies that a trace ID stored under the local ctxKeyFaultTraceID{} key
+	// is bridged into faultlib's context slot so RunPlaybook sets X-Trace-ID.
+	var gotTraceID string
+	srv := httptest.NewServer(resolveHandler(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceID = r.Header.Get("X-Trace-ID")
+		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	ctx := context.WithValue(context.Background(), ctxKeyFaultTraceID{}, "trace-rem-bridge")
+	if err := r.triggerPlaybook(ctx, "pbs_test", ""); err != nil {
+		t.Fatalf("triggerPlaybook: %v", err)
+	}
+	if gotTraceID != "trace-rem-bridge" {
+		t.Errorf("X-Trace-ID = %q, want trace-rem-bridge", gotTraceID)
 	}
 }
 

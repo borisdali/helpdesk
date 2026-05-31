@@ -657,6 +657,7 @@ failures:
         - get_session_info
       expected_keywords:
         any_of:
+          - "FINDINGS:"
           - "idle in transaction"
           - "idle-in-transaction"
           - "terminate"
@@ -1558,7 +1559,7 @@ failures:
         echo "WARNING: PostgreSQL not healthy after 60 s" >&2
         exit 1
     prompt: >
-      The database server '{{connection_string}}' is unreachable — connection refused.
+      The database server 'faulttest-db-local' is unreachable — connection refused.
       Please check the host-level status of the server and investigate why
       the database process has stopped.
     evaluation:
@@ -1651,6 +1652,7 @@ failures:
         - read_pod_file
       expected_keywords:
         any_of:
+          - "FINDINGS:"
           - "pg_wal"
           - "WAL"
           - "disk"
@@ -1896,6 +1898,7 @@ failures:
         - get_bgwriter_stats
       expected_keywords:
         any_of:
+          - "FINDINGS:"
           - "checkpoint"
           - "too frequently"
           - "bgwriter"

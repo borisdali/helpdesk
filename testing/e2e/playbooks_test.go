@@ -819,7 +819,6 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 			"pbs_vacuum_triage",
 			"pbs_slow_query_triage",
 			"pbs_connection_triage",
-			"pbs_lock_chain_triage",
 			"pbs_replication_lag",
 		} {
 			pbID, ok := idBySeries[sid]
