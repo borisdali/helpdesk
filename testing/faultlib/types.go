@@ -155,6 +155,11 @@ type HarnessConfig struct {
 	// When set, the harness refuses to inject faults unless the target has a
 	// "test" or "chaos" tag.
 	InfraConfigPath string
+	// ServerID is the infrastructure config key that identifies the target
+	// database server (e.g. "faulttest-db"). When InfraConfigPath is set it is
+	// resolved automatically via ResolveServerID; callers may also set it
+	// directly. Used for {{server_id}} substitution in fault prompts.
+	ServerID string
 	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty
 	// (e.g., "ubuntu@customer-vm.example.com" or just "customer-vm").
 	// When set, ExternalInject/ExternalTeardown are used instead of Inject/Teardown.

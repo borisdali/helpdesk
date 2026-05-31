@@ -54,6 +54,7 @@ func toLFConfig(cfg *HarnessConfig) *faultlib.HarnessConfig {
 		GatewayAPIKey:    cfg.GatewayAPIKey,
 		GatewayPurpose:   cfg.GatewayPurpose,
 		InfraConfigPath:  cfg.InfraConfigPath,
+		ServerID:         faultlib.ResolveServerID(cfg.ConnStr, cfg.InfraConfigPath),
 		SSHHost:          cfg.SSHHost,
 		SSHUser:          cfg.SSHUser,
 		SSHKeyPath:       cfg.SSHKeyPath,

@@ -7,6 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"helpdesk/internal/infra"
 	"helpdesk/testing/catalog"
 )
 
@@ -133,6 +134,24 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 	return result
 }
 
+// ResolveServerID returns the infrastructure config key for the server whose
+// connection string matches connStr. Returns "" when infraConfigPath is empty,
+// the file cannot be loaded, or no matching server is found.
+func ResolveServerID(connStr, infraConfigPath string) string {
+	if infraConfigPath == "" || connStr == "" {
+		return ""
+	}
+	cfg, err := infra.Load(infraConfigPath)
+	if err != nil {
+		return ""
+	}
+	_, key, ok := cfg.FindDBByConnStr(connStr)
+	if !ok {
+		return ""
+	}
+	return key
+}
+
 // ResolvePrompt replaces template variables in the failure prompt.
 // AgentConnStr overrides ConnStr for {{connection_string}} substitution — use
 // it when the agent runs in a different network context than the test runner
@@ -146,6 +165,7 @@ func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
 		"{{connection_string}}", connStr,
 		"{{replica_connection_string}}", cfg.ReplicaConnStr,
 		"{{kube_context}}", cfg.KubeContext,
+		"{{server_id}}", cfg.ServerID,
 	)
 	return r.Replace(prompt)
 }

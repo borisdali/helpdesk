@@ -47,8 +47,9 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 	if viaGateway && approvalMode == "" {
 		approvalMode = "force"
 	}
+	connStr := os.Getenv("FAULTTEST_CONN_STR")
 	cfg := &faultlib.HarnessConfig{
-		ConnStr:          os.Getenv("FAULTTEST_CONN_STR"),
+		ConnStr:          connStr,
 		ReplicaConnStr:   os.Getenv("FAULTTEST_REPLICA_CONN_STR"),
 		AgentConnStr:     os.Getenv("FAULTTEST_AGENT_CONN_STR"),
 		DBAgentURL:       os.Getenv("FAULTTEST_DB_AGENT_URL"),
@@ -76,10 +77,18 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		cfg.FailureIDs = strings.Split(ids, ",")
 	}
 
-	// Find the testing directory.
+	// Find the testing directory and resolve paths relative to it.
 	cfg.TestingDir = findTestingDir()
 	cfg.CatalogPath = filepath.Join(cfg.TestingDir, "catalog", "failures.yaml")
 	testutil.DockerComposeDir = filepath.Join(cfg.TestingDir, "docker")
+
+	// InfraConfigPath defaults to the bundled testing.infra.json; FAULTTEST_INFRA_CONFIG overrides.
+	infraConfigPath := os.Getenv("FAULTTEST_INFRA_CONFIG")
+	if infraConfigPath == "" {
+		infraConfigPath = filepath.Join(cfg.TestingDir, "testing.infra.json")
+	}
+	cfg.InfraConfigPath = infraConfigPath
+	cfg.ServerID = faultlib.ResolveServerID(connStr, infraConfigPath)
 
 	return cfg
 }
