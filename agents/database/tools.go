@@ -1429,6 +1429,29 @@ func terminateIdleConnectionsTool(ctx tool.Context, args TerminateIdleConnection
 	return terminateIdleConnectionsImpl(ctx, args)
 }
 
+// ExecuteSQLArgs defines arguments for the execute_sql tool.
+type ExecuteSQLArgs struct {
+	ConnectionString string `json:"connection_string" jsonschema:"PostgreSQL connection string or server ID from infrastructure config."`
+	SQL              string `json:"sql" jsonschema:"SQL statement(s) to execute. Multiple statements can be separated by semicolons."`
+	Reason           string `json:"reason" jsonschema:"Explanation of why this SQL is being executed. Required for audit trail."`
+}
+
+func executeSQLImpl(ctx context.Context, args ExecuteSQLArgs) (PsqlResult, error) {
+	if strings.TrimSpace(args.SQL) == "" {
+		return errorResult("execute_sql", args.ConnectionString, fmt.Errorf("sql must not be empty")), nil
+	}
+	plan := "Reason: " + args.Reason
+	output, err := runPsqlAs(ctx, args.ConnectionString, args.SQL, "execute_sql", policy.ActionDestructive, plan)
+	if err != nil {
+		return errorResult("execute_sql", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func executeSQLTool(ctx tool.Context, args ExecuteSQLArgs) (PsqlResult, error) {
+	return executeSQLImpl(ctx, args)
+}
+
 // argsToStruct converts a map[string]any to a typed struct via JSON round-trip.
 // Used by the direct tool registry to adapt gateway requests to typed tool args.
 func argsToStruct[T any](args map[string]any) (T, error) {
@@ -2603,6 +2626,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := getSavedSnapshotsImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("execute_sql", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ExecuteSQLArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := executeSQLImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r

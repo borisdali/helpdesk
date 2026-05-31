@@ -1,7 +1,10 @@
 series_id: pbs_vacuum_triage
 name: Vacuum & Bloat Triage
-version: "1.0"
-execution_mode: fleet
+version: "1.1"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
 problem_class: capacity
 author: aiHelpDesk
 description: |

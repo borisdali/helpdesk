@@ -44,6 +44,7 @@ var ToolClassification = map[string]ActionClass{
 	"cancel_query":                ActionWrite,
 	"terminate_connection":        ActionDestructive,
 	"terminate_idle_connections":  ActionDestructive,
+	"execute_sql":                 ActionDestructive,
 	"get_status_summary":          ActionRead,
 	"get_pg_settings":             ActionRead,
 	"get_extensions":              ActionRead,

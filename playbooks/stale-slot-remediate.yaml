@@ -1,6 +1,6 @@
 series_id: pbs_stale_slot_remediate
 name: Stale Replication Slot — Drop to Allow WAL Recycling
-version: "1.0"
+version: "1.1"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent

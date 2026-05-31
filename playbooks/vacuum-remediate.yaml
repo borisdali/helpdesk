@@ -1,6 +1,6 @@
 series_id: pbs_vacuum_remediate
 name: Table Bloat / Dead Tuples — Run VACUUM
-version: "1.0"
+version: "1.1"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -21,10 +21,11 @@ symptoms:
   - "query plans degrading due to stale statistics"
 guidance: |
   Step 1: Identify affected tables.
-  Call get_dead_tuples. Find tables where n_dead_tup is above threshold
-  (typically > 10% of n_live_tup, or an absolute count > 100,000 for large tables).
-  Note the relname, n_dead_tup, n_live_tup, and last_autovacuum for each table.
-  If last_autovacuum is NULL or very old, autovacuum is not reaching this table.
+  Call get_vacuum_status with min_dead_ratio=0.05. Find tables where n_dead_tup
+  is above threshold (typically > 10% of total rows, or an absolute count > 100,000
+  for large tables). Note the table, n_dead_tup, dead_ratio, and last_autovacuum
+  for each table. If last_autovacuum is NULL or very old, autovacuum is not reaching
+  this table.
 
   Step 2: Check for blockers before vacuuming.
   VACUUM cannot remove dead tuples that are still visible to open transactions
@@ -46,7 +47,7 @@ guidance: |
   - Whether autovacuum is disabled on this table (check reloptions in pg_class)
 
   Step 4: Verify dead tuples reduced.
-  After VACUUM completes, call get_dead_tuples again. Confirm n_dead_tup has
+  After VACUUM completes, call get_vacuum_status again. Confirm n_dead_tup has
   dropped significantly for the treated tables. A complete drop to zero is
   not expected if there are open transactions; a reduction of > 80% is normal.
 

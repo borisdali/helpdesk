@@ -477,6 +477,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	executeSQLToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "execute_sql",
+		Description: "Execute a SQL statement on the target database. Use for administrative operations that have no dedicated tool: VACUUM ANALYZE, ALTER SYSTEM, pg_drop_replication_slot, pg_reload_conf, etc. Requires operator approval (Destructive action). Always supply a reason explaining why this SQL is necessary.",
+	}, executeSQLTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -506,6 +514,7 @@ func createTools() ([]tool.Tool, error) {
 		getPgLogToolDef,
 		readUploadedFileToolDef,
 		getSavedSnapshotsToolDef,
+		executeSQLToolDef,
 	}, nil
 }
 

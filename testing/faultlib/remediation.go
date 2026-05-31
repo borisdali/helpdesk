@@ -264,11 +264,15 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunRes
 // ProceedStep calls POST /api/v1/fleet/playbook-runs/{runID}/proceed.
 // resolution is "approved" or "denied".
 func (r *Remediator) ProceedStep(ctx context.Context, runID string, stepIndex int, resolution string) (*ApproveRunResponse, error) {
+	connStr := r.cfg.ConnStr
+	if r.cfg.AgentConnStr != "" {
+		connStr = r.cfg.AgentConnStr
+	}
 	proceedBody, _ := json.Marshal(map[string]any{
 		"resolution":        resolution,
 		"resolved_by":       "faulttest",
 		"step_index":        stepIndex,
-		"connection_string": r.cfg.ConnStr,
+		"connection_string": connStr,
 	})
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + runID + "/proceed"
 

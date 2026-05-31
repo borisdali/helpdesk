@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -76,6 +77,23 @@ func TestExtractFirstJSON_NoJSON(t *testing.T) {
 	// No JSON — returns original string (trimmed), no crash.
 	if got != input {
 		t.Errorf("no-JSON input should be returned unchanged, got: %q", got)
+	}
+}
+
+func TestExtractFirstJSON_BraceInSummary(t *testing.T) {
+	// Summary containing } must not confuse extraction (was a real bug: LastIndex
+	// found the } inside the string, truncating the JSON and leaving trailing text).
+	input := "```json\n{\"action\":\"complete\",\"summary\":\"reset bgwriter_lru_maxpages {was 2} to 100\"}\n```"
+	got := extractFirstJSON(input)
+	var result struct {
+		Action  string `json:"action"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("extracted JSON failed to unmarshal: %v (got: %q)", err, got)
+	}
+	if result.Action != "complete" {
+		t.Errorf("expected action=complete, got %q", result.Action)
 	}
 }
 

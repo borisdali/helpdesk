@@ -263,15 +263,15 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		t.Error("pbs_db_pitr_recovery: entry_point = true, want false")
 	}
 
-	// Operational playbooks: execution_mode=fleet (from YAML or migration default).
+	// Triage playbooks: execution_mode=agent (converted from fleet to return text responses).
 	for _, sid := range []string{"pbs_vacuum_triage", "pbs_slow_query_triage", "pbs_connection_triage", "pbs_replication_lag"} {
 		pb := bySeriesID[sid]
 		if pb == nil {
 			t.Errorf("%s not seeded", sid)
 			continue
 		}
-		if pb.ExecutionMode != "fleet" {
-			t.Errorf("%s: execution_mode = %q, want fleet", sid, pb.ExecutionMode)
+		if pb.ExecutionMode != "agent" {
+			t.Errorf("%s: execution_mode = %q, want agent", sid, pb.ExecutionMode)
 		}
 	}
 }

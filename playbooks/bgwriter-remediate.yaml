@@ -1,6 +1,6 @@
 series_id: pbs_bgwriter_remediate
 name: Checkpoint Warning — Reset bgwriter_lru_maxpages
-version: "1.0"
+version: "1.1"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -19,7 +19,7 @@ symptoms:
   - "bgwriter_lru_maxpages significantly below 100 (default)"
 guidance: |
   Step 1: Confirm the misconfiguration.
-  Call get_pg_settings with category="bgwriter". Verify:
+  Call get_pg_settings with category="background writer". Verify:
   - bgwriter_lru_maxpages: should be 100 (default). If it is < 10, the bgwriter
     is severely throttled and will hit its limit on nearly every wakeup cycle.
   - bgwriter_lru_multiplier: default 2.0. Unusually low values compound the effect.
@@ -40,7 +40,7 @@ guidance: |
     is not needed
 
   Step 3: Verify the reset took effect.
-  Call get_pg_settings with category="bgwriter" again. Confirm bgwriter_lru_maxpages
+  Call get_pg_settings with category="background writer" again. Confirm bgwriter_lru_maxpages
   is now 100. If it is still showing the old value, pg_reload_conf() may not have
   been called or a postgresql.conf entry (not auto.conf) is overriding it.
   If an override exists in postgresql.conf, report it and escalate — you cannot

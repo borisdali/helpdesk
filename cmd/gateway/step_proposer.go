@@ -148,12 +148,26 @@ func buildHistorySection(history []*audit.PlaybookRunStep) string {
 
 func extractFirstJSON(s string) string {
 	s = strings.TrimSpace(s)
-	if i := strings.Index(s, "{"); i >= 0 {
-		if j := strings.LastIndex(s, "}"); j >= i {
-			return s[i : j+1]
+	// Strip markdown code fences (```json ... ``` or ``` ... ```)
+	if strings.HasPrefix(s, "```") {
+		if nl := strings.Index(s, "\n"); nl >= 0 {
+			s = strings.TrimSpace(s[nl+1:])
+		}
+		if strings.HasSuffix(s, "```") {
+			s = strings.TrimSpace(s[:len(s)-3])
 		}
 	}
-	return s
+	i := strings.Index(s, "{")
+	if i < 0 {
+		return s
+	}
+	// Use json.Decoder so it stops at the end of the first complete JSON object,
+	// correctly handling nested braces and } characters inside string values.
+	var raw json.RawMessage
+	if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&raw); err == nil {
+		return string(raw)
+	}
+	return s[i:]
 }
 
 // callToolForStep calls an agent tool directly and returns its output string.
