@@ -99,6 +99,49 @@ Seeding is idempotent — restarting auditd never duplicates system Playbooks. I
 
 ---
 
+## Agent endpoint security
+
+Agent `POST /tool/{name}` endpoints are authenticated by default. The gateway
+sends a bearer token to every agent it calls; each agent validates it against
+a local users file before executing the tool.
+
+### How it works
+
+| Component | Env var | Default |
+|-----------|---------|---------|
+| Agent identity provider | `HELPDESK_IDENTITY_PROVIDER` | `static` |
+| Agent users file (inside container) | `HELPDESK_USERS_FILE` | `/etc/helpdesk/users.yaml` |
+| Users file on the host | `HELPDESK_USERS_FILE_HOST` | `./users.example.yaml` |
+| Gateway → agent bearer token | `HELPDESK_AGENT_API_KEY` | `gateway-api-key` |
+
+The default key `gateway-api-key` is pre-hashed in `users.example.yaml` (the
+`gateway` service account). This is intentionally a known example value so the
+stack works out of the box — **REMBER TO REPLACE IT IN PRODUCTION**.
+
+### Production setup
+
+1. **Generate a strong key and hash it:**
+   ```bash
+   openssl rand -hex 32 | go run ./cmd/hashapikey
+   ```
+   Copy the printed Argon2id hash.
+
+2. **Create your users file** by copying `deploy/docker-compose/users.example.yaml`
+   and replacing the `gateway` service account hash with the one you just generated.
+   Remove or update any other placeholder hashes.
+
+3. **Set env vars** (e.g. in `.env` or your secrets manager):
+   ```bash
+   HELPDESK_AGENT_API_KEY=<your-secret-key>
+   HELPDESK_USERS_FILE_HOST=/path/to/your/users.yaml
+   ```
+
+The gateway authenticates to all agents using the same `HELPDESK_AGENT_API_KEY`.
+The auditd service and the gateway's own HTTP listener do not use
+`HELPDESK_IDENTITY_PROVIDER` — they are excluded by design.
+
+---
+
 ## API
 
 All Playbook endpoints are accessible via the Gateway on port 8080. The Gateway proxies CRUD and activation calls to auditd; the import endpoint is handled entirely within the Gateway (no auditd round-trip for the LLM extraction path).

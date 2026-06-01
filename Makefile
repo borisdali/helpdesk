@@ -168,6 +168,23 @@ faulttest:
 		-f testing/docker/docker-compose.repl.yaml \
 		down -v
 
+# Target to force a fresh run by bypassing the Go test cache
+faulttest-nocache:
+	@echo "Starting test infrastructure (primary + replica)..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		up -d --wait
+	@echo "Running fault tests..."
+	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
+	go test --count=1 -tags faulttest -timeout 1000s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+	@echo "Stopping test infrastructure..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		down -v
+
 # ---------------------------------------------------------------------------
 # Fault injection tests via gateway playbooks (requires a live gateway)
 # ---------------------------------------------------------------------------
@@ -197,6 +214,24 @@ faulttest-gateway:
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
 	go test -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+
+# Target to force a fresh run by bypassing the Go test cache
+faulttest-gateway-nocache:
+	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ]; then \
+		echo "Error: FAULTTEST_GATEWAY_URL is not set"; \
+		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
+		exit 1; \
+	fi
+	@echo "Starting test database..."
+	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	@echo "Running fault tests via gateway ($(FAULTTEST_GATEWAY_URL))..."
+	-FAULTTEST_VIA_GATEWAY=true \
+	FAULTTEST_REMEDIATE=true \
+	FAULTTEST_EXTERNAL=true \
+	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
+	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
+	go test --count=1 -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
 # ---------------------------------------------------------------------------

@@ -113,6 +113,32 @@ the next. Do not recommend a fix until you know which one applies.
 4. Write volume: call get_pg_settings with category="wal". Compare max_wal_size
    against observed growth. Residual hypothesis only — reach it last.
 
+## Checkpoint / bgwriter overload diagnosis
+
+When asked to investigate checkpoint warnings ("checkpoints are occurring too
+frequently") or elevated write latency where bgwriter may be the cause:
+
+First call get_bgwriter_stats. This is the primary tool for this scenario —
+do NOT skip it. Examine:
+- maxwritten_clean > 0: bgwriter hit its bgwriter_lru_maxpages limit on a
+  wakeup cycle and stopped, forcing backends to write dirty pages themselves.
+  A non-zero value here is the key indicator of bgwriter throttling.
+- buffers_backend elevated: backends are writing pages directly because
+  bgwriter cannot keep up.
+- checkpoint_write_time and checkpoint_sync_time: high values indicate
+  checkpoint I/O pressure (separate from bgwriter throttling).
+
+Then call get_pg_settings with category="background writer" to check:
+- bgwriter_lru_maxpages: default 100. Values near 0 (e.g. 2) severely
+  throttle the bgwriter — this is the most common misconfiguration.
+- bgwriter_lru_multiplier: default 2.0.
+- checkpoint_warning: if very short (< 30s), the warnings are cosmetic and
+  the threshold may need raising rather than fixing bgwriter.
+
+Close with a structured summary that includes the keyword FINDINGS: and
+states the root cause. The diagnosis category for bgwriter throttling causing
+checkpoint warnings is: checkpoint_bgwriter_overload.
+
 ## CRITICAL: Inspect before terminating or cancelling
 
 Before calling `terminate_connection` or `cancel_query`, you MUST:
