@@ -1,6 +1,6 @@
 series_id: pbs_replication_remediate
 name: Replication Lag — Resume WAL Replay
-version: "1.0"
+version: "1.1"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -40,9 +40,8 @@ guidance: |
   pg_wal_replay_resume() on the primary — it will error with "not a standby".
 
   Step 3: Resume WAL replay on the replica.
-  Connect to the REPLICA (not the primary) and call execute_sql with:
-    SELECT pg_wal_replay_resume();
-  This resumes recovery and allows the replica to catch up.
+  Call resume_wal_replay with the REPLICA connection string (not the primary).
+  This runs pg_wal_replay_resume() and allows the replica to catch up.
   Before requesting approval, state:
   - Current replay_lag from Step 1
   - Confirm replay_paused=true (required — otherwise this call is not needed)

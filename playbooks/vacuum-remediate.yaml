@@ -1,6 +1,6 @@
 series_id: pbs_vacuum_remediate
 name: Table Bloat / Dead Tuples — Run VACUUM
-version: "1.1"
+version: "1.2"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -36,8 +36,8 @@ guidance: |
   update the visibility map.
 
   Step 3: Run VACUUM on affected tables.
-  For each table identified in Step 1, call execute_sql with:
-    VACUUM ANALYZE <schema>.<tablename>;
+  For each table identified in Step 1, call run_vacuum with table=<schema.table>
+  and analyze=true.
   VACUUM ANALYZE is preferred over plain VACUUM because it also refreshes
   planner statistics, which is usually needed when bloat has degraded query plans.
   Run tables in order from most dead tuples to least.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1351,14 +1352,14 @@ func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (Ps
 // TerminateIdleConnectionsArgs defines arguments for the terminate_idle_connections tool.
 type TerminateIdleConnectionsArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
-	IdleMinutes      int    `json:"idle_minutes" jsonschema:"required,Terminate connections idle longer than this many minutes. Minimum 5."`
+	IdleMinutes      int    `json:"idle_minutes" jsonschema:"required,Terminate connections idle longer than this many minutes. Use 0 to terminate all idle connections regardless of age (no minimum). The default recommended minimum is 5 to protect legitimate short-lived connections; use 0 only when an explicit connection overload requires terminating all idle sessions."`
 	Database         string `json:"database,omitempty" jsonschema:"Limit termination to connections in this specific database. If empty, targets all databases."`
 	DryRun           bool   `json:"dry_run,omitempty" jsonschema:"If true, only list connections that would be terminated without actually terminating them. Defaults to false."`
 }
 
 func terminateIdleConnectionsImpl(ctx context.Context, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
-	if args.IdleMinutes < 5 {
-		return PsqlResult{Output: "ERROR: idle_minutes must be at least 5 to avoid terminating legitimately short-lived connections."}, nil
+	if args.IdleMinutes < 0 {
+		return PsqlResult{Output: "ERROR: idle_minutes must be 0 or greater (0 = no age filter)."}, nil
 	}
 
 	dbFilter := ""
@@ -1429,27 +1430,123 @@ func terminateIdleConnectionsTool(ctx tool.Context, args TerminateIdleConnection
 	return terminateIdleConnectionsImpl(ctx, args)
 }
 
-// ExecuteSQLArgs defines arguments for the execute_sql tool.
-type ExecuteSQLArgs struct {
-	ConnectionString string `json:"connection_string" jsonschema:"PostgreSQL connection string or server ID from infrastructure config."`
-	SQL              string `json:"sql" jsonschema:"SQL statement(s) to execute. Multiple statements can be separated by semicolons."`
-	Reason           string `json:"reason" jsonschema:"Explanation of why this SQL is being executed. Required for audit trail."`
+// ResumeWalReplayArgs defines arguments for the resume_wal_replay tool.
+type ResumeWalReplayArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string for the REPLICA (standby) instance — not the primary."`
 }
 
-func executeSQLImpl(ctx context.Context, args ExecuteSQLArgs) (PsqlResult, error) {
-	if strings.TrimSpace(args.SQL) == "" {
-		return errorResult("execute_sql", args.ConnectionString, fmt.Errorf("sql must not be empty")), nil
-	}
-	plan := "Reason: " + args.Reason
-	output, err := runPsqlAs(ctx, args.ConnectionString, args.SQL, "execute_sql", policy.ActionDestructive, plan)
+func resumeWalReplayImpl(ctx context.Context, args ResumeWalReplayArgs) (PsqlResult, error) {
+	output, err := runPsqlAs(ctx, args.ConnectionString, "SELECT pg_wal_replay_resume();",
+		"resume_wal_replay", policy.ActionWrite,
+		"Resume WAL replay on a paused standby to reduce replication lag")
 	if err != nil {
-		return errorResult("execute_sql", args.ConnectionString, err), nil
+		return errorResult("resume_wal_replay", args.ConnectionString, err), nil
 	}
 	return PsqlResult{Output: output}, nil
 }
 
-func executeSQLTool(ctx tool.Context, args ExecuteSQLArgs) (PsqlResult, error) {
-	return executeSQLImpl(ctx, args)
+func resumeWalReplayTool(ctx tool.Context, args ResumeWalReplayArgs) (PsqlResult, error) {
+	return resumeWalReplayImpl(ctx, args)
+}
+
+// tableNameRe matches schema.table identifiers — alphanumeric and underscore only.
+// Prevents SQL injection in run_vacuum.
+var tableNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// identRe matches plain identifiers — alphanumeric and underscore only.
+// Used to validate slot names and setting names.
+var identRe = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.]*$`)
+
+// RunVacuumArgs defines arguments for the run_vacuum tool.
+type RunVacuumArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string or server ID from infrastructure config."`
+	Table            string `json:"table" jsonschema:"required,Table to vacuum in schema.table format (e.g. public.orders)."`
+	Analyze          *bool  `json:"analyze,omitempty" jsonschema:"Also run ANALYZE to refresh planner statistics. Defaults to true."`
+}
+
+func runVacuumImpl(ctx context.Context, args RunVacuumArgs) (PsqlResult, error) {
+	if !tableNameRe.MatchString(args.Table) {
+		return errorResult("run_vacuum", args.ConnectionString, fmt.Errorf("invalid table name %q: must be schema.table with alphanumeric/underscore identifiers", args.Table)), nil
+	}
+	parts := strings.SplitN(args.Table, ".", 2)
+	quoted := fmt.Sprintf(`"%s"."%s"`, parts[0], parts[1])
+
+	analyze := true
+	if args.Analyze != nil {
+		analyze = *args.Analyze
+	}
+	cmd := "VACUUM"
+	if analyze {
+		cmd = "VACUUM ANALYZE"
+	}
+	sql := fmt.Sprintf("%s %s;", cmd, quoted)
+
+	output, err := runPsqlAs(ctx, args.ConnectionString, sql, "run_vacuum", policy.ActionWrite,
+		fmt.Sprintf("Reclaim dead tuples from %s", args.Table))
+	if err != nil {
+		return errorResult("run_vacuum", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func runVacuumTool(ctx tool.Context, args RunVacuumArgs) (PsqlResult, error) {
+	return runVacuumImpl(ctx, args)
+}
+
+// DropReplicationSlotArgs defines arguments for the drop_replication_slot tool.
+type DropReplicationSlotArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string or server ID from infrastructure config."`
+	SlotName         string `json:"slot_name" jsonschema:"required,Name of the inactive replication slot to drop. Irreversible — the replica cannot reconnect after the slot is dropped."`
+}
+
+func dropReplicationSlotImpl(ctx context.Context, args DropReplicationSlotArgs) (PsqlResult, error) {
+	if !identRe.MatchString(args.SlotName) {
+		return errorResult("drop_replication_slot", args.ConnectionString, fmt.Errorf("invalid slot name %q: must contain only alphanumeric characters and underscores", args.SlotName)), nil
+	}
+	// Single-quote escape (slot names are alphanumeric only, so this is defense in depth).
+	escaped := strings.ReplaceAll(args.SlotName, "'", "''")
+	sql := fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", escaped)
+
+	output, err := runPsqlAs(ctx, args.ConnectionString, sql, "drop_replication_slot", policy.ActionDestructive,
+		fmt.Sprintf("Drop inactive replication slot %q to allow WAL recycling", args.SlotName))
+	if err != nil {
+		return errorResult("drop_replication_slot", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: output}, nil
+}
+
+func dropReplicationSlotTool(ctx tool.Context, args DropReplicationSlotArgs) (PsqlResult, error) {
+	return dropReplicationSlotImpl(ctx, args)
+}
+
+// ResetPgSettingArgs defines arguments for the reset_pg_setting tool.
+type ResetPgSettingArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string or server ID from infrastructure config."`
+	SettingName      string `json:"setting_name" jsonschema:"required,Name of the PostgreSQL setting to reset to its compiled-in default via ALTER SYSTEM RESET, followed by pg_reload_conf(). Example: bgwriter_lru_maxpages."`
+}
+
+func resetPgSettingImpl(ctx context.Context, args ResetPgSettingArgs) (PsqlResult, error) {
+	if !identRe.MatchString(args.SettingName) {
+		return errorResult("reset_pg_setting", args.ConnectionString, fmt.Errorf("invalid setting name %q: must contain only alphanumeric characters, underscores, and dots", args.SettingName)), nil
+	}
+	// ALTER SYSTEM cannot run inside a transaction block. psql -c "stmt1; stmt2"
+	// wraps multiple statements in an implicit transaction, so we split into two
+	// separate invocations: one for ALTER SYSTEM RESET, one for pg_reload_conf().
+	plan := fmt.Sprintf("Reset %s to compiled default and reload configuration", args.SettingName)
+	resetSQL := fmt.Sprintf("ALTER SYSTEM RESET %s;", args.SettingName)
+	out1, err := runPsqlAs(ctx, args.ConnectionString, resetSQL, "reset_pg_setting", policy.ActionWrite, plan)
+	if err != nil {
+		return errorResult("reset_pg_setting", args.ConnectionString, err), nil
+	}
+	out2, err := runPsqlAs(ctx, args.ConnectionString, "SELECT pg_reload_conf();", "reset_pg_setting", policy.ActionWrite, plan)
+	if err != nil {
+		return errorResult("reset_pg_setting", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: out1 + "\n" + out2}, nil
+}
+
+func resetPgSettingTool(ctx tool.Context, args ResetPgSettingArgs) (PsqlResult, error) {
+	return resetPgSettingImpl(ctx, args)
 }
 
 // argsToStruct converts a map[string]any to a typed struct via JSON round-trip.
@@ -2628,12 +2725,36 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 		result, _ := getSavedSnapshotsImpl(ctx, a)
 		return result.Output, nil
 	})
-	r.Register("execute_sql", func(ctx context.Context, args map[string]any) (string, error) {
-		a, err := argsToStruct[ExecuteSQLArgs](args)
+	r.Register("resume_wal_replay", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ResumeWalReplayArgs](args)
 		if err != nil {
 			return "", err
 		}
-		result, _ := executeSQLImpl(ctx, a)
+		result, _ := resumeWalReplayImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("run_vacuum", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RunVacuumArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := runVacuumImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("drop_replication_slot", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[DropReplicationSlotArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := dropReplicationSlotImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("reset_pg_setting", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ResetPgSettingArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := resetPgSettingImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r

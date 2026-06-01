@@ -1,6 +1,6 @@
 series_id: pbs_connection_remediate
 name: Connection Overload — Terminate Idle Sessions
-version: "1.2"
+version: "1.3"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -29,20 +29,16 @@ guidance: |
     the connection was never closed. Same lock-holding risk.
 
   Step 2A — Idle connection overload (state = 'idle').
-  If idle connections are exhausting max_connections, call terminate_idle_connections.
-  This terminates all sessions in state='idle' that have been idle for at least 5 minutes.
+  Call terminate_idle_connections with idle_minutes=5 (the safe default).
   Before requesting approval, state:
   - How many idle connections will be terminated
   - Current max_connections and how many slots will be freed
-  If terminate_idle_connections returns 0 terminated (all idle connections are newly
-  created, under 5 minutes old), fall back to execute_sql with:
-    SELECT count(*) FROM (
-      SELECT pg_terminate_backend(pid) AS t
-      FROM pg_stat_activity
-      WHERE state = 'idle' AND pid <> pg_backend_pid()
-    ) s WHERE t;
-  Before requesting approval for execute_sql, state the count of idle connections
-  that will be terminated and that they are under 5 minutes old.
+  If terminate_idle_connections returns 0 terminated (all connections are newly
+  created, under 5 minutes old), call it again with idle_minutes=0 to terminate
+  all idle connections regardless of age.
+  Before requesting approval for the idle_minutes=0 call, state the count of
+  idle connections and that they are under 5 minutes old (e.g. newly opened by
+  a pool or load test that exhausted the slot limit).
   Do NOT use this to terminate idle-in-transaction sessions — they require
   per-session inspection first (see Step 2B).
 

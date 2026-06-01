@@ -1,6 +1,6 @@
 series_id: pbs_stale_slot_remediate
 name: Stale Replication Slot — Drop to Allow WAL Recycling
-version: "1.1"
+version: "1.2"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -34,8 +34,7 @@ guidance: |
     Report the slot_name to the operator so they can confirm before approving.
 
   Step 3: Drop the stale slot.
-  Call execute_sql with:
-    SELECT pg_drop_replication_slot('<slot_name>');
+  Call drop_replication_slot with slot_name=<slot_name>.
   Replace <slot_name> with the actual slot name from Step 1.
   Before requesting approval, state CLEARLY:
   - The slot name being dropped

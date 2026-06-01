@@ -1783,17 +1783,17 @@ func TestTerminateConnectionTool_Level2_EscalationRequired(t *testing.T) {
 // terminateIdleConnectionsTool
 // =============================================================================
 
-func TestTerminateIdleConnectionsTool_TooShortIdle(t *testing.T) {
+func TestTerminateIdleConnectionsTool_NegativeIdle(t *testing.T) {
 	ctx := newTestContext()
 	result, err := terminateIdleConnectionsTool(ctx, TerminateIdleConnectionsArgs{
 		ConnectionString: "host=localhost",
-		IdleMinutes:      2, // Below minimum of 5
+		IdleMinutes:      -1, // Negative is invalid
 	})
 	if err != nil {
 		t.Fatalf("terminateIdleConnectionsTool() unexpected Go error: %v", err)
 	}
 	if !strings.Contains(result.Output, "ERROR") {
-		t.Errorf("terminateIdleConnectionsTool() output = %q, want ERROR for idle_minutes < 5", result.Output)
+		t.Errorf("terminateIdleConnectionsTool() output = %q, want ERROR for idle_minutes < 0", result.Output)
 	}
 	if !strings.Contains(result.Output, "idle_minutes") {
 		t.Errorf("terminateIdleConnectionsTool() output = %q, want idle_minutes in error", result.Output)
