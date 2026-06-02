@@ -23,6 +23,10 @@
 //   - FAULTTEST_VIA_GATEWAY: Set to "true" to route diagnosis through gateway playbooks
 //   - FAULTTEST_APPROVAL_MODE: Override playbook approval_mode (use "force" for automated runs)
 //   - FAULTTEST_REMEDIATE: Set to "true" to run remediation phase after diagnosis
+//   - FAULTTEST_AUDIT_URL: Audit service base URL (e.g., http://localhost:7070); enables structured tool evidence
+//   - FAULTTEST_OPERATOR: User identity sent as X-User on gateway requests
+//   - FAULTTEST_GATE_ESCALATION: Set to "true" to send gate_escalation=true on playbook run requests
+//   - FAULTTEST_EMIT_AND_WAIT: Set to "true" to poll for approvals instead of reading from /dev/tty
 package faulttest
 
 import (
@@ -68,6 +72,13 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		ViaGateway:       viaGateway,
 		ApprovalMode:     approvalMode,
 		RemediateEnabled: os.Getenv("FAULTTEST_REMEDIATE") == "true",
+		// Audit service — enables structured tool evidence and emit-and-wait step approvals.
+		AuditURL:  os.Getenv("FAULTTEST_AUDIT_URL"),
+		// Operator identity sent as X-User on gateway requests.
+		OperatorID: os.Getenv("FAULTTEST_OPERATOR"),
+		// Gate and emit-and-wait options (K8s/Docker safe; safe with approval_mode=force).
+		GateEscalation: os.Getenv("FAULTTEST_GATE_ESCALATION") == "true",
+		EmitAndWait:    os.Getenv("FAULTTEST_EMIT_AND_WAIT") == "true",
 	}
 
 	if categories := os.Getenv("FAULTTEST_CATEGORIES"); categories != "" {

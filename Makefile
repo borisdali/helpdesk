@@ -211,6 +211,7 @@ faulttest-gateway:
 	-FAULTTEST_VIA_GATEWAY=true \
 	FAULTTEST_REMEDIATE=true \
 	FAULTTEST_EXTERNAL=true \
+	FAULTTEST_GATE_ESCALATION=true \
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
 	go test -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
@@ -229,6 +230,7 @@ faulttest-gateway-nocache:
 	-FAULTTEST_VIA_GATEWAY=true \
 	FAULTTEST_REMEDIATE=true \
 	FAULTTEST_EXTERNAL=true \
+	FAULTTEST_GATE_ESCALATION=true \
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
 	go test --count=1 -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)

@@ -1,6 +1,6 @@
-# Decision Hub
+# aiHelpDesk Decision Hub
 
-The Decision Hub is a unified surface that aggregates every pending human decision across all helpdesk subsystems — playbook gates, fleet approvals, and per-step agent approvals — into a single list with a single resolve endpoint. Operators get one place to look; webhooks and email fire for all types.
+The Decision Hub is a unified surface that aggregates every pending human decision across all aiHelpDesk subsystems. [Playbook](PLAYBOOKS.md) gates, [Fleet](FLEET.md) approvals and per-step [agent approvals](PLAYBOOKS.md#approval-modes). All of that goes into a single list with a single resolve endpoint. Operators get one place to look. Webhooks and email fire for all types.
 
 ---
 
@@ -187,7 +187,7 @@ Operators can merge a specially-named branch to resolve a decision without calli
 1. Operator creates a branch named `approved/gate/{runID}` (or `approved/fleet/{approvalID}`)
 2. Operator merges the PR/MR into any target branch
 3. The git provider sends a merge event to `POST /api/v1/webhooks/git`
-4. The gateway extracts the branch name, maps it to a decision ID, and calls resolve
+4. The gateway extracts the branch name, maps it to a decision ID  and calls resolve
 
 The gateway itself only needs to be reachable from the git provider — no git client is needed inside the gateway.
 
@@ -246,9 +246,9 @@ This makes faulttest safe to run inside a Kubernetes Job or a Docker container w
 
 ---
 
-## Operational flywheel — fleet scenarios
+## Operational SRE/DBA Flywheel — fleet scenarios
 
-The Decision Hub is the coordination layer for all three fleet campaign scenarios:
+See [here](VAULT.md#the-operational-sredba-flywheel) for details on aiHelpDesk Operational SRE/DBA Flywheel (and for more informal context, see [this blog post](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c#7fe7)). The Decision Hub is the coordination layer for all three fleet campaign scenarios:
 
 | Scenario | Decision types involved |
 |---|---|
