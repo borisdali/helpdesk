@@ -142,6 +142,83 @@ The auditd service and the gateway's own HTTP listener do not use
 
 ---
 
+## Informed gate
+
+The informed gate is a phase-boundary checkpoint between a triage playbook and its remediation counterpart. Where the existing horizontal escalation mechanism chains one agent to another mid-diagnosis, the informed gate pauses at the **vertical handoff** — triage is fully complete, and the operator reviews the findings before the remediation playbook is invoked. Authorization happens after evidence is seen, not before.
+
+### When to use it
+
+Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook that has an `ESCALATE_TO` target. The gate fires after the triage agent completes and emits its structured report. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits, or return `suggested_next`).
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_vacuum_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "prod-primary",
+    "gate_escalation":   true
+  }'
+```
+
+### `pending_gate` response
+
+When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`:
+
+```json
+{
+  "run_id":               "plr_a3f7c1b2",
+  "status":               "pending_gate",
+  "findings":             "Table public.orders has 94% dead tuple ratio...",
+  "escalation_target":    "pbs_vacuum_remediate",
+  "escalation_findings":  "Table public.orders has 94% dead tuple ratio...",
+  "diagnostic_report":    { "hypotheses": [...], "root_cause": "..." },
+  "confidence_warning":   "Primary hypothesis confidence 55% — competing hypothesis at 42%. Uncertain diagnosis: consider step-by-step approval.",
+  "suggested_approval_mode": "manual"
+}
+```
+
+The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **non-blocking** — the operator can still proceed — but the field and a suggested approval mode are surfaced so the operator can make an informed choice. When `confidence_warning` is present, `suggested_approval_mode` is always `"manual"`.
+
+The triage run is recorded with `outcome: gate_pending`. The run ID is stable — you can use `GET /api/v1/fleet/playbook-runs/{run_id}` to retrieve findings later.
+
+### Proceeding through the gate
+
+Call `POST /api/v1/fleet/playbook-runs/{run_id}/proceed-escalation` with your decision:
+
+```bash
+# Approve — choose how closely to watch the remediation
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/proceed-escalation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resolution":       "approved",
+    "approval_mode":    "review",
+    "connection_string": "prod-primary"
+  }'
+
+# Deny — no remediation runs; triage run is marked abandoned
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/proceed-escalation \
+  -H "Content-Type: application/json" \
+  -d '{"resolution": "denied"}'
+```
+
+The `approval_mode` you choose at the gate applies to the remediation playbook only:
+
+| Choice | Effect on remediation |
+|---|---|
+| `manual` | Prompt for every step (read-only and write/destructive) |
+| `review` | Auto-approve read steps; prompt for write/destructive |
+| `auto` | Auto-approve all steps |
+| `session` | Use a pre-created approval session token |
+
+When `resolution: "approved"`, the response is whatever the remediation playbook returns — `200` with findings for `execution_mode: agent`, or `202 pending_approval` for `execution_mode: agent_approve`. Standard approval loops apply from there.
+
+The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, and any confidence warning. The triage run outcome is updated to `"escalated"`.
+
+### Relationship to the two-playbook split
+
+The gate is complementary to — not a replacement for — the triage + remediation playbook pair. Triage and remediation playbooks remain separate, composable artifacts. The gate is a request-level option that adds a human checkpoint at the handoff. `prior_run_id` threading is automatic: the remediation playbook always starts with the full triage findings in context.
+
+---
+
 ## API
 
 All Playbook endpoints are accessible via the Gateway on port 8080. The Gateway proxies CRUD and activation calls to auditd; the import endpoint is handled entirely within the Gateway (no auditd round-trip for the LLM extraction path).

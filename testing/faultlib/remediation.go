@@ -25,15 +25,32 @@ type RemediationResult struct {
 	Method string
 }
 
-// ApproveRunResponse mirrors the gateway's ApproveRunResponse for agent_approve playbooks.
+// ApproveRunResponse mirrors the gateway's ApproveRunResponse for agent_approve playbooks,
+// and also carries informed-gate fields when Status=="pending_gate".
 type ApproveRunResponse struct {
 	RunID                 string          `json:"run_id"`
-	Status                string          `json:"status"` // "pending_approval" | "complete" | "denied"
+	Status                string          `json:"status"` // "pending_approval" | "complete" | "denied" | "pending_gate"
 	Step                  *ApproveRunStep `json:"step,omitempty"`
 	ApprovalID            string          `json:"approval_id,omitempty"`
 	Summary               string          `json:"summary,omitempty"`
 	Warnings              []string        `json:"warnings,omitempty"`
 	EffectiveApprovalMode string          `json:"effective_approval_mode,omitempty"`
+
+	// Informed gate fields — populated when Status=="pending_gate".
+	EscalationTarget      string `json:"escalation_target,omitempty"`
+	EscalationFindings    string `json:"escalation_findings,omitempty"`
+	ConfidenceWarning     string `json:"confidence_warning,omitempty"`
+	SuggestedApprovalMode string `json:"suggested_approval_mode,omitempty"`
+}
+
+// ProceedEscalationRequest is the request body for
+// POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
+type ProceedEscalationRequest struct {
+	Resolution       string `json:"resolution"`                // "approved" | "denied"
+	ResolvedBy       string `json:"resolved_by,omitempty"`
+	ApprovalMode     string `json:"approval_mode,omitempty"`   // "manual"|"review"|"auto"|"session"|"force"
+	ApprovalSession  string `json:"approval_session,omitempty"`
+	ConnectionString string `json:"connection_string,omitempty"`
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.
@@ -226,8 +243,78 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	if runResp.Status == "pending_approval" {
 		return r.runApprovalLoop(ctx, runResp)
 	}
+	if runResp.Status == "pending_gate" {
+		return r.RunGateLoop(ctx, runResp)
+	}
 	slog.Info("playbook triggered", "series_id", seriesID, "status", runResp.Status)
 	return nil
+}
+
+// RunGateLoop handles a pending_gate response by auto-approving the informed gate
+// and driving any subsequent approval loop. Interactive callers (cmd/faulttest)
+// implement their own gate loop using ProceedEscalation.
+func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) error {
+	slog.Info("agent: informed gate pending",
+		"run_id", gate.RunID,
+		"escalation_target", gate.EscalationTarget,
+		"confidence_warning", gate.ConfidenceWarning,
+	)
+	approvalMode := r.cfg.ApprovalMode
+	if approvalMode == "" {
+		approvalMode = "auto"
+	}
+	connStr := r.cfg.ConnStr
+	if r.cfg.AgentConnStr != "" {
+		connStr = r.cfg.AgentConnStr
+	}
+	proceedReq := ProceedEscalationRequest{
+		Resolution:       "approved",
+		ResolvedBy:       "faulttest",
+		ApprovalMode:     approvalMode,
+		ConnectionString: connStr,
+	}
+	resp, err := r.ProceedEscalation(ctx, gate.RunID, proceedReq)
+	if err != nil {
+		return fmt.Errorf("proceed-escalation: %w", err)
+	}
+	if resp.Status == "pending_approval" {
+		return r.runApprovalLoop(ctx, resp)
+	}
+	slog.Info("gate approved: remediation triggered", "status", resp.Status, "summary", resp.Summary)
+	return nil
+}
+
+// ProceedEscalation calls POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
+func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req ProceedEscalationRequest) (*ApproveRunResponse, error) {
+	body, _ := json.Marshal(req)
+	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + runID + "/proceed-escalation"
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if r.cfg.GatewayAPIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if r.cfg.OperatorID != "" {
+		httpReq.Header.Set("X-User", r.cfg.OperatorID)
+	}
+
+	resp, err := r.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", reqURL, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("proceed-escalation returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result ApproveRunResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("decoding proceed-escalation response: %w", err)
+	}
+	return &result, nil
 }
 
 // runApprovalLoop drives a headless agent_approve loop, auto-approving every

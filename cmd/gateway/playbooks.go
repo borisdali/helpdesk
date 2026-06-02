@@ -187,6 +187,14 @@ type PlaybookRunRequest struct {
 	ApprovalMode    string `json:"approval_mode,omitempty"`
 	// ApprovalSession is the session ID for "session" mode. Required when ApprovalMode="session".
 	ApprovalSession string `json:"approval_session,omitempty"`
+
+	// GateEscalation, when true, intercepts any ESCALATE_TO signal at the end of
+	// an agent-mode triage run: instead of auto-chaining or returning suggested_next,
+	// the gateway pauses at the phase boundary and returns status="pending_gate".
+	// The operator then reviews the findings and calls proceed-escalation to chain
+	// to the remediation playbook with their chosen approval mode.
+	// Takes precedence over approval_mode=auto/force.
+	GateEscalation bool `json:"gate_escalation,omitempty"`
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -492,6 +500,28 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				"series_id", prev.escalatedTo, "trace_id", prev.traceID)
 			break
 		}
+
+		// Informed gate: operator reviews findings at the phase boundary before
+		// the remediation playbook is invoked. Takes precedence over auto-chaining.
+		if req.GateEscalation {
+			warn, suggestedMode := g.confidenceWarning(prev.diagReport)
+			extra["status"] = "pending_gate"
+			extra["escalation_target"] = prev.escalatedTo
+			extra["escalation_findings"] = prev.findings
+			if warn != "" {
+				extra["confidence_warning"] = warn
+				extra["suggested_approval_mode"] = suggestedMode
+			}
+			finalOutcome = audit.OutcomeGatePending
+			finalEscalatedTo = prev.escalatedTo
+			finalFindings = prev.findings
+			finalReport = prev.diagReport
+			slog.Info("playbook: gate pending — awaiting operator acknowledgment",
+				"run_id", prev.runID, "escalation_target", prev.escalatedTo,
+				"confidence_warning", warn)
+			break
+		}
+
 		nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), prev.escalatedTo)
 		if err != nil {
 			slog.Warn("playbook: cannot fetch escalated playbook",
@@ -658,6 +688,166 @@ func buildSuggestedNext(seriesID string, req PlaybookRunRequest, priorRunID, fin
 			"context":           findings,
 			"approval_mode":     req.ApprovalMode,
 		},
+	}
+}
+
+// confidenceWarning returns a human-readable warning and a suggested approval
+// mode when the diagnostic report shows low confidence or competing hypotheses.
+// Returns ("", "") when confidence is high and no competing hypotheses exist.
+func (g *Gateway) confidenceWarning(report *audit.DiagnosticReport) (warning, suggestedMode string) {
+	if report == nil || len(report.Hypotheses) == 0 {
+		return "", ""
+	}
+	primary := report.Hypotheses[0]
+	lowAbsolute := primary.Confidence < 0.70
+	competing := len(report.Hypotheses) > 1 &&
+		report.Hypotheses[1].Confidence > primary.Confidence*0.70
+	if !lowAbsolute && !competing {
+		return "", ""
+	}
+	msg := fmt.Sprintf("Primary hypothesis confidence %.0f%%", primary.Confidence*100)
+	if competing {
+		msg += fmt.Sprintf(" — competing hypothesis at %.0f%%", report.Hypotheses[1].Confidence*100)
+	}
+	msg += ". Uncertain diagnosis: consider step-by-step approval."
+	return msg, "manual"
+}
+
+// ProceedEscalationRequest is the request body for POST
+// /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
+type ProceedEscalationRequest struct {
+	Resolution      string `json:"resolution"`               // "approved" | "denied"
+	ResolvedBy      string `json:"resolved_by,omitempty"`
+	ApprovalMode    string `json:"approval_mode,omitempty"`  // "manual"|"review"|"auto"|"session"|"force"
+	ApprovalSession string `json:"approval_session,omitempty"`
+	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
+}
+
+// handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
+// It acknowledges an informed gate: the operator has reviewed the triage findings and either
+// approves the remediation chain (with a chosen approval mode) or denies it.
+func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "missing runID")
+		return
+	}
+
+	var req ProceedEscalationRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+	}
+	if req.Resolution == "" {
+		req.Resolution = "approved"
+	}
+	resolvedBy := req.ResolvedBy
+	if resolvedBy == "" {
+		resolvedBy = r.Header.Get("X-User")
+	}
+	if resolvedBy == "" {
+		resolvedBy = "operator"
+	}
+
+	// Fetch the triage run and validate it is in gate_pending state.
+	run, err := g.fetchPlaybookRun(r.Context(), runID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found: "+err.Error())
+		return
+	}
+	if run.Outcome != audit.OutcomeGatePending {
+		writeError(w, http.StatusConflict, fmt.Sprintf("run %q is not in gate_pending state (outcome=%q)", runID, run.Outcome))
+		return
+	}
+
+	// Emit gate_acknowledged audit event.
+	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "")
+
+	// Denied: abandon the triage run and return.
+	if req.Resolution == "denied" {
+		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "gate denied by operator", run.DiagnosticReport)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "denied", "run_id": runID})
+		return
+	}
+
+	// Approved: resolve the triage run and chain to the remediation playbook.
+	g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeEscalated, run.EscalatedTo, run.FindingsSummary, run.DiagnosticReport)
+
+	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), run.EscalatedTo)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "remediation playbook not found: "+err.Error())
+		return
+	}
+
+	// Build the remediation request, applying approval override clamping.
+	remReq := PlaybookRunRequest{
+		ConnectionString: req.ConnectionString,
+		PriorRunID:       runID,
+		ApprovalMode:     req.ApprovalMode,
+		ApprovalSession:  req.ApprovalSession,
+	}
+	if remReq.ApprovalMode == "" {
+		remReq.ApprovalMode = nextPB.ApprovalMode
+	}
+	var warnings []string
+	principal := authz.PrincipalFromContext(r.Context())
+	g.enforceApprovalOverride(principal, &remReq.ApprovalMode, nextPB.ApprovalMode, remReq.ConnectionString, &warnings)
+
+	// Thread prior findings.
+	if prior, err := g.fetchPlaybookRun(r.Context(), runID); err == nil {
+		remReq.PriorFindings = prior.FindingsSummary
+	}
+
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, resolvedBy)
+
+	slog.Info("playbook: gate approved — chaining to remediation",
+		"triage_run_id", runID, "remediation_series", run.EscalatedTo,
+		"approval_mode", remReq.ApprovalMode, "resolved_by", resolvedBy)
+
+	if nextPB.ExecutionMode == "agent_approve" {
+		g.handlePlaybookRunApprove(w, r, nextPB, remReq, remRunID, warnings)
+		return
+	}
+	g.handlePlaybookRunAsAgent(w, r, nextPB, remReq, remRunID, warnings)
+}
+
+// recordGateAcknowledged emits a gate_acknowledged audit event.
+func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.PlaybookRun, resolvedBy, resolution, approvalMode, confidenceWarning string) {
+	if g.auditor == nil {
+		return
+	}
+	reasoningChain := []string{
+		"operator " + resolvedBy + " acknowledged informed gate for run " + run.RunID,
+		"resolution: " + resolution,
+		"escalation_target: " + run.EscalatedTo,
+	}
+	if approvalMode != "" {
+		reasoningChain = append(reasoningChain, "chosen approval_mode: "+approvalMode)
+	}
+	if confidenceWarning != "" {
+		reasoningChain = append(reasoningChain, "confidence_warning: "+confidenceWarning)
+	}
+	event := &audit.Event{
+		EventID:   "ga_" + uuid.New().String()[:8],
+		Timestamp: time.Now().UTC(),
+		EventType: audit.EventTypeGateAcknowledged,
+		TraceID:   audit.NewTraceID(),
+		Input: audit.Input{
+			UserQuery: "gate acknowledged for triage run " + run.RunID,
+		},
+		Decision: &audit.Decision{
+			Agent:           run.EscalatedTo,
+			RequestCategory: audit.CategoryIncident,
+			Confidence:      1.0,
+			UserIntent:      resolution + " gate for escalation to " + run.EscalatedTo,
+			ReasoningChain:  reasoningChain,
+		},
+		Outcome: &audit.Outcome{Status: "success"},
+	}
+	if err := g.auditor.RecordEvent(ctx, event); err != nil {
+		slog.Warn("playbook: failed to record gate_acknowledged event", "run_id", run.RunID, "err", err)
 	}
 }
 

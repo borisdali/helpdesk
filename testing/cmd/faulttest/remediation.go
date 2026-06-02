@@ -119,7 +119,86 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 		return r.runApprovalLoop(ctx, *runResp)
 	}
 
+	if runResp.Status == "pending_gate" {
+		return r.runGateLoop(ctx, *runResp)
+	}
+
 	slog.Info("playbook triggered", "series_id", seriesID, "status", runResp.Status)
+	return nil
+}
+
+// runGateLoop handles an informed gate interactively: shows the triage findings
+// and confidence warning, prompts the operator to approve or deny, and if approved
+// asks which approval mode to use for the remediation playbook.
+func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunResponse) error {
+	const width = 64
+	sep := strings.Repeat("═", width)
+
+	fmt.Printf("\n%s\n", sep)
+	fmt.Println("  INFORMED GATE — review before remediation")
+	fmt.Printf("%s\n\n", sep)
+
+	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
+	if gate.EscalationFindings != "" {
+		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
+	}
+
+	if gate.ConfidenceWarning != "" {
+		warnSep := strings.Repeat("─", width)
+		fmt.Printf("\n%s\n", warnSep)
+		fmt.Printf("  ⚠  CONFIDENCE WARNING: %s\n", gate.ConfidenceWarning)
+		fmt.Printf("%s\n", warnSep)
+	}
+	fmt.Println()
+
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		// Non-interactive: auto-approve with the configured mode.
+		return r.inner.RunGateLoop(ctx, &gate)
+	}
+	defer tty.Close()
+	reader := bufio.NewReader(tty)
+
+	fmt.Print("  Approve remediation? [y/N]: ")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer != "y" && answer != "yes" {
+		fmt.Println("  Denied.")
+		_, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+			Resolution: "denied",
+			ResolvedBy: r.cfg.OperatorID,
+		})
+		return err
+	}
+
+	suggested := gate.SuggestedApprovalMode
+	if suggested == "" {
+		suggested = "review"
+	}
+	fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
+	modeInput, _ := reader.ReadString('\n')
+	modeInput = strings.TrimSpace(strings.ToLower(modeInput))
+	if modeInput == "" {
+		modeInput = suggested
+	}
+
+	connStr := r.cfg.ConnStr
+	if r.cfg.AgentConnStr != "" {
+		connStr = r.cfg.AgentConnStr
+	}
+	resp, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+		Resolution:       "approved",
+		ResolvedBy:       r.cfg.OperatorID,
+		ApprovalMode:     modeInput,
+		ConnectionString: connStr,
+	})
+	if err != nil {
+		return fmt.Errorf("proceed-escalation: %w", err)
+	}
+	if resp.Status == "pending_approval" {
+		return r.runApprovalLoop(ctx, *resp)
+	}
+	fmt.Printf("\n  Remediation complete: %s\n\n", resp.Summary)
 	return nil
 }
 

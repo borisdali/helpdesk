@@ -11,6 +11,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// Playbook run outcome constants.
+const (
+	OutcomeResolved         = "resolved"
+	OutcomeEscalated        = "escalated"
+	OutcomeAbandoned        = "abandoned"
+	OutcomeUnknown          = "unknown"
+	OutcomeGatePending      = "gate_pending" // triage complete, waiting for operator gate acknowledgment
+	OutcomeEscalatedResolved = "escalated+resolved"
+)
+
 // PlaybookRun records a single execution of a playbook.
 type PlaybookRun struct {
 	RunID           string             `json:"run_id"`
