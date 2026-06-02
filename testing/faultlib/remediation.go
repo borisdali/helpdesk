@@ -310,7 +310,10 @@ func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) 
 // run's outcome is no longer "gate_pending". It respects ctx cancellation and
 // returns an error if the gate is abandoned.
 func (r *Remediator) WaitForGateResolution(ctx context.Context, runID string) (*ApproveRunResponse, error) {
-	const pollInterval = 15 * time.Second
+	pollInterval := r.cfg.GatewayPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 15 * time.Second
+	}
 	url := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + runID
 
 	for {

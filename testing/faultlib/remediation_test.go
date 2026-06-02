@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestRemediator(t *testing.T, serverURL string) *Remediator {
@@ -588,5 +589,152 @@ func TestTriggerPlaybook_PendingGateDispatchesToRunGateLoop(t *testing.T) {
 	}
 	if !proceedCalled {
 		t.Error("proceed-escalation was not called for pending_gate response")
+	}
+}
+
+// newFastRemediator creates a Remediator with a short poll interval for tests.
+func newFastRemediator(serverURL string, extra ...func(*HarnessConfig)) *Remediator {
+	cfg := &HarnessConfig{
+		GatewayURL:          serverURL,
+		GatewayAPIKey:       "test-key",
+		EmitAndWait:         true,
+		GatewayPollInterval: 10 * time.Millisecond,
+	}
+	for _, fn := range extra {
+		fn(cfg)
+	}
+	return NewRemediator(cfg)
+}
+
+// ---- WaitForGateResolution tests ----
+
+func TestWaitForGateResolution_PollsUntilResolved(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		callCount++
+		outcome := "gate_pending"
+		if callCount >= 3 {
+			outcome = "escalated"
+		}
+		json.NewEncoder(w).Encode(map[string]string{"outcome": outcome}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newFastRemediator(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := r.WaitForGateResolution(ctx, "plr_poll01")
+	if err != nil {
+		t.Fatalf("WaitForGateResolution: %v", err)
+	}
+	if resp.Status != "escalated" {
+		t.Errorf("status = %q, want escalated", resp.Status)
+	}
+	if resp.RunID != "plr_poll01" {
+		t.Errorf("run_id = %q, want plr_poll01", resp.RunID)
+	}
+	if callCount < 3 {
+		t.Errorf("expected at least 3 poll calls (2 gate_pending + 1 escalated), got %d", callCount)
+	}
+}
+
+func TestWaitForGateResolution_AbandonedReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"outcome": "abandoned"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newFastRemediator(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := r.WaitForGateResolution(ctx, "plr_abandoned")
+	if err == nil {
+		t.Fatal("expected error for abandoned gate, got nil")
+	}
+	if !strings.Contains(err.Error(), "abandoned") {
+		t.Errorf("error = %q, want it to mention 'abandoned'", err.Error())
+	}
+}
+
+func TestWaitForGateResolution_ContextCancelled(t *testing.T) {
+	// ctx already cancelled — should return immediately without any HTTP calls.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("HTTP request was made after context cancellation")
+	}))
+	defer srv.Close()
+
+	r := newFastRemediator(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the first poll tick
+
+	_, err := r.WaitForGateResolution(ctx, "plr_cancel")
+	if err == nil {
+		t.Fatal("expected context error, got nil")
+	}
+}
+
+// ---- RunGateLoop emit-and-wait tests ----
+
+func TestRunGateLoop_EmitAndWait_PollsInsteadOfAutoApprove(t *testing.T) {
+	proceedCalled := false
+	var lastPath string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		lastPath = r.URL.Path
+		if strings.Contains(r.URL.Path, "proceed-escalation") {
+			proceedCalled = true
+		}
+		json.NewEncoder(w).Encode(map[string]string{"outcome": "escalated"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newFastRemediator(srv.URL)
+	gate := &ApproveRunResponse{
+		RunID:            "plr_ew01",
+		Status:           "pending_gate",
+		EscalationTarget: "pbs_vacuum_remediate",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := r.RunGateLoop(ctx, gate); err != nil {
+		t.Fatalf("RunGateLoop: %v", err)
+	}
+	// Emit-and-wait must not call proceed-escalation directly.
+	if proceedCalled {
+		t.Error("proceed-escalation was called — emit-and-wait should poll, not auto-approve")
+	}
+	// Must have called the poll endpoint for the run ID.
+	if !strings.Contains(lastPath, "plr_ew01") {
+		t.Errorf("poll path %q does not contain run ID plr_ew01", lastPath)
+	}
+}
+
+func TestRunGateLoop_HeadlessAutoApprove_WhenEmitAndWaitFalse(t *testing.T) {
+	proceedCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proceedCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:  srv.URL,
+		EmitAndWait: false, // headless: auto-approve immediately
+	})
+	gate := &ApproveRunResponse{RunID: "plr_headless", Status: "pending_gate"}
+
+	if err := r.RunGateLoop(context.Background(), gate); err != nil {
+		t.Fatalf("RunGateLoop: %v", err)
+	}
+	if !proceedCalled {
+		t.Error("expected proceed-escalation to be called in headless auto-approve mode")
 	}
 }

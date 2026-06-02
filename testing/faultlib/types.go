@@ -208,6 +208,10 @@ type HarnessConfig struct {
 	// JSON report to this URL after the run completes (e.g. a Slack webhook).
 	NotifyURL string
 
+	// GatewayPollInterval is the wait between poll iterations in emit-and-wait mode.
+	// Zero defaults to 15 seconds. Set to a small value in tests.
+	GatewayPollInterval time.Duration
+
 	// GateEscalation sends gate_escalation=true on every PlaybookRun request so
 	// the gateway intercepts ESCALATE_TO at the phase boundary.
 	GateEscalation bool
