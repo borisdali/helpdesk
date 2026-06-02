@@ -19,6 +19,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/buildinfo"
+	"helpdesk/internal/decisions"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
@@ -217,6 +218,29 @@ func main() {
 	gw.SetCrystalBall(crystalBall)
 	gw.SetAuthorizer(authzr)
 
+	// Git webhook adapter config.
+	gw.gitWebhookCfg = GitWebhookConfig{
+		Secret:        os.Getenv("HELPDESK_GIT_WEBHOOK_SECRET"),
+		ResolveBranch: os.Getenv("HELPDESK_GIT_RESOLVE_BRANCH"),
+	}
+
+	// Decision Hub — unified notification + base URL for absolute resolve links.
+	if baseURL := os.Getenv("HELPDESK_BASE_URL"); baseURL != "" {
+		gw.SetBaseURL(baseURL)
+		slog.Info("decision hub base URL configured", "url", baseURL)
+	}
+	gw.SetDecisionNotifier(decisions.NotifierConfig{
+		WebhookURL:    os.Getenv("HELPDESK_DECISION_WEBHOOK"),
+		WebhookSecret: os.Getenv("HELPDESK_DECISION_WEBHOOK_SECRET"),
+		BaseURL:       os.Getenv("HELPDESK_BASE_URL"),
+		SMTPHost:      os.Getenv("HELPDESK_SMTP_HOST"),
+		SMTPPort:      os.Getenv("HELPDESK_SMTP_PORT"),
+		SMTPUser:      os.Getenv("HELPDESK_SMTP_USER"),
+		SMTPPassword:  os.Getenv("HELPDESK_SMTP_PASSWORD"),
+		EmailFrom:     os.Getenv("HELPDESK_EMAIL_FROM"),
+		EmailTo:       splitEmailTo(os.Getenv("HELPDESK_EMAIL_TO")),
+	})
+
 	// Metrics are always enabled: /metrics on the same port exposes
 	// gateway_fabrication_mismatches_total and is safe to scrape without auth.
 	gw.SetMetrics(NewGatewayMetrics())
@@ -229,4 +253,18 @@ func main() {
 		slog.Error("gateway stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// splitEmailTo splits a comma-separated email list into a slice.
+func splitEmailTo(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, e := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(e); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

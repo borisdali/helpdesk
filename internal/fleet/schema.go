@@ -83,8 +83,13 @@ type Strategy struct {
 	// CountPartialAsSuccess treats servers with "continue" step failures as
 	// successful for circuit-breaker purposes (default false).
 	CountPartialAsSuccess bool `json:"count_partial_as_success"`
-	// ApprovalTimeoutSeconds is reserved for future approval gate support.
+	// ApprovalTimeoutSeconds is the max seconds to wait for a fleet approval
+	// (wave_gate or top-level). Zero uses the auditd default.
 	ApprovalTimeoutSeconds int `json:"approval_timeout_seconds,omitempty"`
+	// WaveGate, when true, submits a fleet approval request after the canary
+	// phase completes. Waves only execute after explicit operator approval.
+	// Uses the same approval mechanism as the top-level write/destructive gate.
+	WaveGate bool `json:"wave_gate,omitempty"`
 	// SchemaDrift controls behaviour when tool schema drift is detected.
 	// "abort" (default): abort before preflight if any fingerprint changed.
 	// "warn": log a warning but continue.

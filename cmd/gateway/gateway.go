@@ -21,6 +21,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/buildinfo"
+	"helpdesk/internal/decisions"
 	"helpdesk/internal/discovery"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
@@ -50,6 +51,7 @@ type Gateway struct {
 	auditor          *audit.GatewayAuditor
 	auditURL         string                  // URL to auditd service for governance queries
 	auditAPIKey      string                  // Bearer token for authenticating proxy requests to auditd
+	baseURL          string                  // Gateway's own public base URL (for building absolute links in notifications)
 	identityProvider identity.Provider       // resolves caller identity on every request
 	authzr           *authz.Authorizer       // central per-route authorizer (nil = no authz)
 	operatingMode    string                  // "readonly" or "fix"
@@ -59,6 +61,8 @@ type Gateway struct {
 	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
 	metrics          *GatewayMetrics         // Prometheus-compatible metrics endpoint
 	crystalBall       bool                    // when true, bypass playbook guidance/chaining — for demo/comparison only
+	decisionNotifier *decisions.DecisionNotifier // nil = notifications disabled
+	gitWebhookCfg    GitWebhookConfig
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -99,6 +103,21 @@ func (g *Gateway) SetAuditURL(url string) {
 // SetAuditAPIKey sets the Bearer token used when proxying requests to auditd.
 func (g *Gateway) SetAuditAPIKey(key string) {
 	g.auditAPIKey = key
+}
+
+// SetBaseURL sets the gateway's own public base URL, used to build absolute
+// links in decision notifications (e.g. "https://helpdesk.corp").
+func (g *Gateway) SetBaseURL(url string) {
+	g.baseURL = strings.TrimSuffix(url, "/")
+}
+
+// SetDecisionNotifier configures the unified Decision Hub notifier.
+// When cfg.WebhookURL and email fields are both empty this is a no-op.
+func (g *Gateway) SetDecisionNotifier(cfg decisions.NotifierConfig) {
+	if cfg.WebhookURL == "" && cfg.SMTPHost == "" {
+		return
+	}
+	g.decisionNotifier = decisions.NewDecisionNotifier(cfg)
 }
 
 // SetAgentAPIKey sets the Bearer token sent to agent POST /tool/{name} endpoints.
@@ -362,6 +381,13 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed", auth("POST /api/v1/fleet/playbook-runs/{runID}/proceed", g.handlePlaybookRunProceed))
 	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", auth("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", g.handleProceedEscalation))
+
+	// Decision Hub — unified view and resolution across all decision types.
+	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))
+	mux.HandleFunc("POST /api/v1/decisions/{id}/resolve", auth("POST /api/v1/decisions/{id}/resolve", g.handleResolveDecision))
+
+	// Git webhook adapter — HMAC-validated, no Bearer auth required.
+	mux.HandleFunc("POST /api/v1/webhooks/git", g.handleGitWebhook)
 	mux.HandleFunc("GET /api/v1/fleet/playbook-runs/{runID}/steps", auth("GET /api/v1/fleet/playbook-runs/{runID}/steps", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("runID")
 		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id+"/steps")

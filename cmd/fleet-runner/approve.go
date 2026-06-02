@@ -203,3 +203,73 @@ func getApprovalStatus(ctx context.Context, rcfg runnerConfig, approvalID string
 
 	return sr.Status, nil
 }
+
+// requestWaveGateApproval submits an approval request for the post-canary wave gate.
+// It includes canary server names and the remaining wave server count as context
+// so the approver can assess canary results before authorising the wave rollout.
+func requestWaveGateApproval(ctx context.Context, rcfg runnerConfig, def *fleet.JobDef, canaryServers []string, waveServerCount int) (string, error) {
+	if rcfg.auditURL == "" {
+		return "", fmt.Errorf("auditd URL not configured")
+	}
+
+	timeoutSecs := def.Strategy.ApprovalTimeoutSeconds
+	if timeoutSecs <= 0 {
+		timeoutSecs = 30 * 60
+	}
+	expiresAt := time.Now().UTC().Add(time.Duration(timeoutSecs) * time.Second)
+
+	submittedBy := rcfg.submittedBy
+	if submittedBy == "" {
+		submittedBy = "fleet-runner"
+	}
+
+	reqBody := approvalRequest{
+		ActionClass:  string(jobActionClass(def.Change.Steps)),
+		ResourceType: "fleet_job_wave_gate",
+		ResourceName: def.Name,
+		RequestedBy:  submittedBy,
+		Context: map[string]any{
+			"job_id":            rcfg.jobID,
+			"canary_servers":    canaryServers,
+			"wave_server_count": waveServerCount,
+			"gate_reason":       "canary phase complete — operator approval required before waves",
+		},
+		ExpiresAt: expiresAt.Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal wave gate approval request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1/fleet/jobs/%s/approval", rcfg.auditURL, rcfg.jobID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create wave gate approval request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if rcfg.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+rcfg.auditAPIKey)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("post wave gate approval request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("auditd returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var ar approvalResponse
+	if err := json.Unmarshal(respBody, &ar); err != nil {
+		return "", fmt.Errorf("decode wave gate approval response: %w", err)
+	}
+	if ar.ApprovalID == "" {
+		return "", fmt.Errorf("auditd returned empty approval_id for wave gate")
+	}
+	return ar.ApprovalID, nil
+}

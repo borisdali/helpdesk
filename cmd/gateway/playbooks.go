@@ -18,6 +18,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
+	"helpdesk/internal/decisions"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 )
@@ -519,6 +520,25 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			slog.Info("playbook: gate pending — awaiting operator acknowledgment",
 				"run_id", prev.runID, "escalation_target", prev.escalatedTo,
 				"confidence_warning", warn)
+			if g.decisionNotifier != nil && prev.runID != "" {
+				gateExtra := map[string]any{
+					"escalation_target": prev.escalatedTo,
+					"findings":          prev.findings,
+				}
+				if warn != "" {
+					gateExtra["confidence_warning"] = warn
+				}
+				g.decisionNotifier.NotifyPending(r.Context(), decisions.Decision{
+					ID:          "gate:" + prev.runID,
+					Type:        decisions.DecisionTypeGate,
+					Status:      "pending",
+					Summary:     "Triage complete — ESCALATE_TO " + prev.escalatedTo,
+					RequestedBy: r.Header.Get("X-User"),
+					RequestedAt: time.Now(),
+					ResolveURL:  strings.TrimSuffix(g.baseURL, "/") + "/api/v1/decisions/gate:" + prev.runID + "/resolve",
+					Extra:       gateExtra,
+				})
+			}
 			break
 		}
 
@@ -768,12 +788,31 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// Denied: abandon the triage run and return.
 	if req.Resolution == "denied" {
 		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "gate denied by operator", run.DiagnosticReport)
+		if g.decisionNotifier != nil {
+			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
+				ID:         "gate:" + runID,
+				Type:       decisions.DecisionTypeGate,
+				Status:     "denied",
+				Summary:    "Gate denied — remediation will not proceed",
+				ResolveURL: strings.TrimSuffix(g.baseURL, "/") + "/api/v1/decisions/gate:" + runID + "/resolve",
+				Extra:      map[string]any{"resolved_by": resolvedBy},
+			})
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "denied", "run_id": runID})
 		return
 	}
 
 	// Approved: resolve the triage run and chain to the remediation playbook.
 	g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeEscalated, run.EscalatedTo, run.FindingsSummary, run.DiagnosticReport)
+	if g.decisionNotifier != nil {
+		g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
+			ID:      "gate:" + runID,
+			Type:    decisions.DecisionTypeGate,
+			Status:  "approved",
+			Summary: "Gate approved — chaining to " + run.EscalatedTo,
+			Extra:   map[string]any{"resolved_by": resolvedBy, "approval_mode": req.ApprovalMode},
+		})
+	}
 
 	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), run.EscalatedTo)
 	if err != nil {

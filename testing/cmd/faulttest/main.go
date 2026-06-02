@@ -150,6 +150,10 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	// Gateway-routed diagnosis (A/B comparison mode).
 	fs.BoolVar(&cfg.ViaGateway, "via-gateway", false, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
 
+	// Async gate and step approvals (K8s/Docker/headless safe).
+	fs.BoolVar(&cfg.GateEscalation, "gate-escalation", false, "Send gate_escalation=true on playbook run requests so the gateway intercepts ESCALATE_TO at the phase boundary")
+	fs.BoolVar(&cfg.EmitAndWait, "emit-and-wait", false, "Poll for gate and step approvals instead of reading from /dev/tty (safe in K8s Jobs and Docker containers)")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

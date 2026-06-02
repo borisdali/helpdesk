@@ -78,6 +78,29 @@ func runStages(ctx context.Context, rcfg runnerConfig, def *fleet.JobDef, server
 		return nil
 	}
 
+	// --- Wave gate (opt-in) ---
+	if strategy.WaveGate && rcfg.auditURL != "" {
+		canaryNames := make([]string, len(canaryServers))
+		copy(canaryNames, canaryServers)
+		approvalID, err := requestWaveGateApproval(ctx, rcfg, def, canaryNames, len(waveServers))
+		if err != nil {
+			return fmt.Errorf("failed to request wave gate approval: %w", err)
+		}
+		slog.Info("fleet: wave gate approval requested — waiting for operator", "approval_id", approvalID)
+		pollInterval := rcfg.approvalPollInterval
+		if pollInterval <= 0 {
+			pollInterval = 5 * time.Second
+		}
+		approved, err := waitForFleetApproval(ctx, rcfg, approvalID, def.Strategy.ApprovalTimeoutSeconds, pollInterval)
+		if err != nil {
+			return fmt.Errorf("wave gate approval failed: %w", err)
+		}
+		if !approved {
+			return fmt.Errorf("wave gate denied by operator — canary passed but waves were not approved")
+		}
+		slog.Info("fleet: wave gate approved", "approval_id", approvalID)
+	}
+
 	// --- Wave phase ---
 	waveSize := strategy.WaveSize
 	if waveSize <= 0 {

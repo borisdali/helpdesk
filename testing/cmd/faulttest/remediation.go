@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/testing/faultlib"
 )
@@ -153,7 +154,10 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		// Non-interactive: auto-approve with the configured mode.
+		if r.cfg.EmitAndWait {
+			return r.waitForGateEmitAndWait(ctx, gate)
+		}
+		// Non-interactive without emit-and-wait: auto-approve with the configured mode.
 		return r.inner.RunGateLoop(ctx, &gate)
 	}
 	defer tty.Close()
@@ -202,6 +206,34 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	return nil
 }
 
+// waitForGateEmitAndWait prints the gate summary and polls until the operator
+// externally resolves the gate via the Decision Hub or proceed-escalation endpoint.
+func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.ApproveRunResponse) error {
+	resolveURL := r.cfg.GatewayURL + "/api/v1/decisions/gate:" + gate.RunID + "/resolve"
+	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
+	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
+	if gate.EscalationFindings != "" {
+		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
+	}
+	if gate.ConfidenceWarning != "" {
+		fmt.Printf("  WARNING           : %s\n", gate.ConfidenceWarning)
+	}
+	fmt.Printf("  Resolve at        : POST %s\n\n", resolveURL)
+
+	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
+	if err != nil {
+		return fmt.Errorf("waiting for gate resolution: %w", err)
+	}
+	if resp.Status == "pending_approval" {
+		return r.runApprovalLoop(ctx, faultlib.ApproveRunResponse{
+			RunID:  resp.RunID,
+			Status: resp.Status,
+		})
+	}
+	slog.Info("gate resolved externally", "status", resp.Status)
+	return nil
+}
+
 // runApprovalLoop drives the agent_approve step-by-step loop interactively.
 // --approval-mode force:  auto-approves every step.
 // --approval-mode review: auto-approves read-only steps, prompts for write/destructive.
@@ -227,7 +259,31 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 			(mode == "review" && current.Step.ActionClass != "read")
 
 		resolution := "approved"
-		if needsPrompt {
+		switch {
+		case r.cfg.EmitAndWait && r.cfg.AuditURL != "" && current.ApprovalID != "":
+			slog.Info("agent_approve: step approval pending — waiting for external resolution",
+				"step_index", current.Step.Index,
+				"tool", current.Step.Tool,
+				"approval_id", current.ApprovalID,
+			)
+			ac := audit.NewApprovalClient(r.cfg.AuditURL)
+			if r.cfg.GatewayAPIKey != "" {
+				ac = ac.WithAPIKey(r.cfg.GatewayAPIKey)
+			}
+			stored, err := ac.WaitForApproval(ctx, current.ApprovalID, 30*time.Minute)
+			if err != nil {
+				return fmt.Errorf("waiting for step approval (id=%s): %w", current.ApprovalID, err)
+			}
+			resolution = stored.Status
+			slog.Info("agent_approve: step approval resolved",
+				"approval_id", current.ApprovalID,
+				"resolution", resolution,
+			)
+			if resolution != "approved" {
+				fmt.Printf("  Step %d %s by operator.\n", current.Step.Index, resolution)
+				resolution = "denied"
+			}
+		case needsPrompt:
 			approved, err := r.promptStepApproval(current.Step)
 			if err != nil {
 				return fmt.Errorf("prompt: %w", err)
@@ -236,7 +292,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 				resolution = "denied"
 				fmt.Println("  Denied. Sending denial to gateway...")
 			}
-		} else {
+		default:
 			slog.Info("agent_approve: pending step",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,

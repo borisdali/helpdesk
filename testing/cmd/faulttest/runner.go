@@ -69,7 +69,9 @@ func toLFConfig(cfg *HarnessConfig) *faultlib.HarnessConfig {
 		JudgeModel:       cfg.JudgeModel,
 		JudgeVendor:      cfg.JudgeVendor,
 		JudgeAPIKey:      cfg.JudgeAPIKey,
-		NotifyURL:        cfg.NotifyURL,
+		NotifyURL:      cfg.NotifyURL,
+		GateEscalation: cfg.GateEscalation,
+		EmitAndWait:    cfg.EmitAndWait,
 	}
 }
 

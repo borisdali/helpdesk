@@ -221,6 +221,46 @@ The gateway emits a `gate_acknowledged` audit event recording the operator's ide
 
 The gate is complementary to — not a replacement for — the triage + remediation playbook pair. Triage and remediation playbooks remain separate, composable artifacts. The gate is a request-level option that adds a human checkpoint at the handoff. `prior_run_id` threading is automatic: the remediation playbook always starts with the full triage findings in context.
 
+### faulttest flags
+
+Two faulttest CLI flags exercise the gate path:
+
+| Flag | Effect |
+|---|---|
+| `--gate-escalation` | Adds `"gate_escalation": true` to every PlaybookRun request so the gateway intercepts `ESCALATE_TO` at the phase boundary. |
+| `--emit-and-wait` | Replaces TTY prompts with HTTP polling: gate polls until externally resolved; step approvals use the audit service long-poll. Safe in Kubernetes Jobs and Docker containers. |
+
+```bash
+go run ./testing/cmd/faulttest run \
+  --ids db-tx-lock-chain-blocker --external --conn faulttest-db \
+  --via-gateway --gateway http://localhost:8080 \
+  --remediate --gate-escalation --emit-and-wait \
+  --approval-mode manual --audit-url http://localhost:7070
+# → logs "Gate pending — resolve_url=..." and polls until resolved externally
+```
+
+### Gate notifications
+
+When a gate fires, the gateway can push a notification to a webhook or email. Configure via environment variables:
+
+| Variable | Description |
+|---|---|
+| `HELPDESK_DECISION_WEBHOOK` | Webhook URL; Slack incoming webhooks are auto-detected and formatted |
+| `HELPDESK_DECISION_WEBHOOK_SECRET` | HMAC-SHA256 key for `X-Helpdesk-Signature` request signing |
+| `HELPDESK_BASE_URL` | Gateway public URL; used to build absolute resolve links in notifications |
+
+See [docs/DECISIONS.md](DECISIONS.md) for the full webhook payload shape, Slack detection, HMAC signing, and email configuration.
+
+### Git opt-in
+
+Operators can resolve a gate by merging a specially-named branch:
+
+```
+approved/gate/{runID}   → approved
+```
+
+Register `POST /api/v1/webhooks/git` as a webhook in your git provider and set `HELPDESK_GIT_WEBHOOK_SECRET`. Works with GitHub, GitLab, Gitea, and any provider that sends merge events. See [docs/DECISIONS.md — Git webhook adapter](DECISIONS.md#git-webhook-adapter-opt-in) for full setup.
+
 ---
 
 ## API

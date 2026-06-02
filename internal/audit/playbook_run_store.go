@@ -278,6 +278,25 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 	return scanPlaybookRuns(rows)
 }
 
+// ListByOutcome returns runs with the given outcome, most recent first.
+func (s *PlaybookRunStore) ListByOutcome(ctx context.Context, outcome string, limit int) ([]*PlaybookRun, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
+		       escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
+		FROM playbook_runs
+		WHERE outcome = ?
+		ORDER BY started_at DESC
+		LIMIT %d`, limit), outcome)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPlaybookRuns(rows)
+}
+
 func scanPlaybookRuns(rows *sql.Rows) ([]*PlaybookRun, error) {
 	var runs []*PlaybookRun
 	for rows.Next() {

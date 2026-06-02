@@ -207,6 +207,15 @@ type HarnessConfig struct {
 	// NotifyURL is an optional webhook URL. When set, the harness POSTs the full
 	// JSON report to this URL after the run completes (e.g. a Slack webhook).
 	NotifyURL string
+
+	// GateEscalation sends gate_escalation=true on every PlaybookRun request so
+	// the gateway intercepts ESCALATE_TO at the phase boundary.
+	GateEscalation bool
+	// EmitAndWait replaces TTY prompts with HTTP polling when true:
+	//   - gate: polls GET /api/v1/fleet/playbook-runs/{id} until outcome changes
+	//   - step: uses ApprovalClient.WaitForApproval long-poll instead of /dev/tty
+	// Falls back to the existing headless auto-approve if the required URL is empty.
+	EmitAndWait bool
 }
 
 // EvalResult contains the evaluation outcome for a single failure test.

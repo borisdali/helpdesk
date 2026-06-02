@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/testing/testutil"
 )
 
@@ -196,6 +197,9 @@ func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID strin
 	if priorRunID != "" {
 		reqBody["prior_run_id"] = priorRunID
 	}
+	if r.cfg.GateEscalation {
+		reqBody["gate_escalation"] = true
+	}
 	body, _ := json.Marshal(reqBody)
 	url := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"
 
@@ -250,15 +254,33 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	return nil
 }
 
-// RunGateLoop handles a pending_gate response by auto-approving the informed gate
-// and driving any subsequent approval loop. Interactive callers (cmd/faulttest)
-// implement their own gate loop using ProceedEscalation.
+// RunGateLoop handles a pending_gate response. In emit-and-wait mode it polls
+// the gateway until an operator externally resolves the gate; otherwise it
+// auto-approves immediately (headless mode for automated test runs).
 func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) error {
 	slog.Info("agent: informed gate pending",
 		"run_id", gate.RunID,
 		"escalation_target", gate.EscalationTarget,
 		"confidence_warning", gate.ConfidenceWarning,
 	)
+
+	if r.cfg.EmitAndWait && r.cfg.GatewayURL != "" {
+		slog.Info("agent: emit-and-wait — polling for gate resolution",
+			"run_id", gate.RunID,
+			"resolve_url", r.cfg.GatewayURL+"/api/v1/decisions/gate:"+gate.RunID+"/resolve",
+		)
+		resp, err := r.WaitForGateResolution(ctx, gate.RunID)
+		if err != nil {
+			return fmt.Errorf("waiting for gate resolution: %w", err)
+		}
+		if resp.Status == "pending_approval" {
+			return r.runApprovalLoop(ctx, resp)
+		}
+		slog.Info("gate resolved externally", "status", resp.Status)
+		return nil
+	}
+
+	// Headless: auto-approve immediately.
 	approvalMode := r.cfg.ApprovalMode
 	if approvalMode == "" {
 		approvalMode = "auto"
@@ -282,6 +304,53 @@ func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) 
 	}
 	slog.Info("gate approved: remediation triggered", "status", resp.Status, "summary", resp.Summary)
 	return nil
+}
+
+// WaitForGateResolution polls GET /api/v1/fleet/playbook-runs/{runID} until the
+// run's outcome is no longer "gate_pending". It respects ctx cancellation and
+// returns an error if the gate is abandoned.
+func (r *Remediator) WaitForGateResolution(ctx context.Context, runID string) (*ApproveRunResponse, error) {
+	const pollInterval = 15 * time.Second
+	url := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + runID
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		if r.cfg.GatewayAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+		}
+		resp, err := r.client.Do(req)
+		if err != nil {
+			slog.Warn("faultlib: gate poll failed, retrying", "run_id", runID, "err", err)
+			continue
+		}
+		var run struct {
+			Outcome string `json:"outcome"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&run)
+		resp.Body.Close()
+
+		slog.Info("faultlib: gate poll", "run_id", runID, "outcome", run.Outcome)
+
+		switch run.Outcome {
+		case "gate_pending", "":
+			continue
+		case "abandoned":
+			return nil, fmt.Errorf("gate denied by operator (run_id=%s)", runID)
+		default:
+			// Gate was approved; return a synthetic response so the caller can
+			// drive any subsequent pending_approval loop.
+			return &ApproveRunResponse{RunID: runID, Status: run.Outcome}, nil
+		}
+	}
 }
 
 // ProceedEscalation calls POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -317,9 +386,10 @@ func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req Pr
 	return &result, nil
 }
 
-// runApprovalLoop drives a headless agent_approve loop, auto-approving every
-// step. Interactive callers (cmd/faulttest) implement their own loop using
-// ProceedStep.
+// runApprovalLoop drives an agent_approve loop. In emit-and-wait mode it polls
+// the audit service for each step's external resolution; otherwise it
+// auto-approves every step (headless mode for automated test runs).
+// Interactive callers (cmd/faulttest) implement their own loop using ProceedStep.
 func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunResponse) error {
 	current := initial
 	const maxSteps = 20
@@ -327,12 +397,41 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunRes
 		if current.Step == nil {
 			return fmt.Errorf("approval loop: pending_approval response has no step")
 		}
-		slog.Info("agent_approve: auto-approving step",
-			"step_index", current.Step.Index,
-			"tool", current.Step.Tool,
-			"reason", current.Step.Reason,
-		)
-		next, err := r.ProceedStep(ctx, current.RunID, current.Step.Index, "approved")
+
+		resolution := "approved"
+
+		if r.cfg.EmitAndWait && r.cfg.AuditURL != "" && current.ApprovalID != "" {
+			slog.Info("agent_approve: step approval pending — waiting for external resolution",
+				"step_index", current.Step.Index,
+				"tool", current.Step.Tool,
+				"approval_id", current.ApprovalID,
+			)
+			ac := audit.NewApprovalClient(r.cfg.AuditURL)
+			if r.cfg.GatewayAPIKey != "" {
+				ac = ac.WithAPIKey(r.cfg.GatewayAPIKey)
+			}
+			stored, err := ac.WaitForApproval(ctx, current.ApprovalID, 30*time.Minute)
+			if err != nil {
+				return fmt.Errorf("waiting for step approval (id=%s): %w", current.ApprovalID, err)
+			}
+			resolution = stored.Status
+			slog.Info("agent_approve: step approval resolved",
+				"approval_id", current.ApprovalID,
+				"resolution", resolution,
+			)
+			if resolution != "approved" {
+				_, _ = r.ProceedStep(ctx, current.RunID, current.Step.Index, "denied")
+				return fmt.Errorf("step %d %s by operator (approval_id=%s)", current.Step.Index, resolution, current.ApprovalID)
+			}
+		} else {
+			slog.Info("agent_approve: auto-approving step",
+				"step_index", current.Step.Index,
+				"tool", current.Step.Tool,
+				"reason", current.Step.Reason,
+			)
+		}
+
+		next, err := r.ProceedStep(ctx, current.RunID, current.Step.Index, resolution)
 		if err != nil {
 			return fmt.Errorf("proceed step %d: %w", current.Step.Index, err)
 		}
