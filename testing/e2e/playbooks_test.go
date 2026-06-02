@@ -424,9 +424,10 @@ func TestPlaybooks_ListQueryParams(t *testing.T) {
 		len(allDefault), len(noSystem), len(withInactive))
 }
 
-// TestPlaybooks_RunFleetMode calls POST /run on a fleet-mode system playbook
-// (Vacuum & Bloat Triage) and verifies the response has the fleet plan shape.
-// Requires LLM configuration — skipped if no API key present.
+// TestPlaybooks_RunFleetMode calls POST /run on any fleet-mode playbook and
+// verifies the response has the fleet plan shape. Skipped when no fleet-mode
+// playbook is seeded (the operational triage playbooks were converted from
+// fleet to agent in commit d013e48). Requires LLM configuration.
 func TestPlaybooks_RunFleetMode(t *testing.T) {
 	RequireAPIKey(t)
 	cfg := LoadConfig()
@@ -438,23 +439,23 @@ func TestPlaybooks_RunFleetMode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Find the vacuum triage system playbook (fleet mode, entry_point=false).
 	playbooks, err := client.PlaybookList(ctx, "")
 	if err != nil {
 		t.Fatalf("PlaybookList: %v", err)
 	}
-	var vacuumID string
+	var fleetID, fleetSeries string
 	for _, pb := range playbooks {
-		if sid, _ := pb["series_id"].(string); sid == "pbs_vacuum_triage" {
-			vacuumID, _ = pb["playbook_id"].(string)
+		if mode, _ := pb["execution_mode"].(string); mode == "fleet" {
+			fleetID, _ = pb["playbook_id"].(string)
+			fleetSeries, _ = pb["series_id"].(string)
 			break
 		}
 	}
-	if vacuumID == "" {
-		t.Skip("pbs_vacuum_triage system playbook not found — stack may not be seeded")
+	if fleetID == "" {
+		t.Skip("no fleet-mode playbook seeded — operational triage playbooks are now agent mode")
 	}
 
-	resp, err := client.PlaybookRun(ctx, vacuumID, map[string]any{
+	resp, err := client.PlaybookRun(ctx, fleetID, map[string]any{
 		"connection_string": cfg.ConnStr,
 	})
 	if err != nil {
@@ -472,7 +473,7 @@ func TestPlaybooks_RunFleetMode(t *testing.T) {
 	if resp["text"] != nil {
 		t.Error("fleet-mode run should not return agent 'text' field")
 	}
-	t.Logf("fleet run OK: playbook_id=%s has_job_def=%v", vacuumID, resp["job_def_raw"] != nil)
+	t.Logf("fleet run OK: playbook_id=%s series=%s has_job_def=%v", fleetID, fleetSeries, resp["job_def_raw"] != nil)
 }
 
 // TestPlaybooks_RunRecording verifies that the gateway records a playbook run
@@ -814,7 +815,9 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		t.Logf("lock_chain_remediate: execution_mode=agent_approve approval_mode=manual")
 	})
 
-	t.Run("operational_playbooks_are_fleet", func(t *testing.T) {
+	t.Run("operational_playbooks_are_agent", func(t *testing.T) {
+		// Converted from fleet to agent in commit d013e48 — the triage flow now
+		// runs directly through the DB agent instead of the fleet planner.
 		for _, sid := range []string{
 			"pbs_vacuum_triage",
 			"pbs_slow_query_triage",
@@ -831,8 +834,8 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 				t.Errorf("PlaybookGet(%s): %v", sid, err)
 				continue
 			}
-			if mode, _ := pb["execution_mode"].(string); mode != "fleet" {
-				t.Errorf("%s: execution_mode = %q, want fleet", sid, mode)
+			if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+				t.Errorf("%s: execution_mode = %q, want agent", sid, mode)
 			}
 		}
 	})
