@@ -291,6 +291,11 @@ func (c *GatewayClient) PlaybookRunGet(ctx context.Context, runID string) (map[s
 	return result, nil
 }
 
+// ProceedEscalation calls POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
+func (c *GatewayClient) ProceedEscalation(ctx context.Context, runID string, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/proceed-escalation", body)
+}
+
 // PlaybookStats calls GET /api/v1/fleet/playbooks/{id}/stats and returns the response map.
 func (c *GatewayClient) PlaybookStats(ctx context.Context, id string) (map[string]any, error) {
 	raw, err := c.get(ctx, "/api/v1/fleet/playbooks/"+id+"/stats")

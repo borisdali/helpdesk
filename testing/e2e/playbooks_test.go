@@ -948,3 +948,109 @@ func TestPlaybooks_RunAgentApproveMode(t *testing.T) {
 	t.Logf("agent_approve run OK: playbook_id=%s run_id=%v step.tool=%v approval_id=%v",
 		remedID, resp["run_id"], step["tool"], resp["approval_id"])
 }
+
+// TestPlaybooks_GateEscalation verifies the informed gate end-to-end:
+//   - gate_escalation:true on a triage run intercepts ESCALATE_TO and returns
+//     status="pending_gate" with escalation_target and run_id populated
+//   - the run record outcome is "gate_pending" in auditd
+//   - proceed-escalation with resolution="denied" returns status="denied" and
+//     transitions the run to outcome="abandoned"
+//
+// If the triage agent completes without emitting ESCALATE_TO (non-deterministic
+// LLM), the test logs the situation and passes — the absence of escalation is a
+// valid outcome and the unit tests already cover the gate intercept logic.
+func TestPlaybooks_GateEscalation(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Find a triage playbook that escalates — pbs_db_restart_triage is designed to
+	// diagnose and emit ESCALATE_TO when it can't recover the database itself.
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var triageID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_db_restart_triage" {
+			triageID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if triageID == "" {
+		t.Skip("pbs_db_restart_triage system playbook not found")
+	}
+
+	resp, err := client.PlaybookRun(ctx, triageID, map[string]any{
+		"connection_string": cfg.ConnStr,
+		"context":           "e2e test: gate_escalation flow",
+		"gate_escalation":   true,
+	})
+	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
+		t.Fatalf("PlaybookRun with gate_escalation: %v", err)
+	}
+
+	status, _ := resp["status"].(string)
+
+	if status != "pending_gate" {
+		// The agent completed without escalating (e.g. it resolved the issue or
+		// timed out). This is a valid outcome — gate_escalation is a no-op when
+		// ESCALATE_TO is not emitted. Log and pass; the intercept logic is covered
+		// by unit tests.
+		t.Logf("gate not triggered (agent did not escalate): status=%q — gate_escalation flag did not break the run", status)
+		return
+	}
+
+	// --- gate fired: verify pending_gate response shape ---
+
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("pending_gate response missing run_id")
+	}
+	escalationTarget, _ := resp["escalation_target"].(string)
+	if escalationTarget == "" {
+		t.Error("pending_gate response missing escalation_target")
+	}
+	t.Logf("gate pending: run_id=%s escalation_target=%s confidence_warning=%v",
+		runID, escalationTarget, resp["confidence_warning"])
+
+	// Verify the run record is stored with outcome=gate_pending.
+	runRecord, err := client.PlaybookRunGet(ctx, runID)
+	if err != nil {
+		t.Fatalf("PlaybookRunGet: %v", err)
+	}
+	if outcome, _ := runRecord["outcome"].(string); outcome != "gate_pending" {
+		t.Errorf("run record outcome = %q, want gate_pending", outcome)
+	}
+
+	// Deny the gate and verify the response and final run state.
+	denyResp, err := client.ProceedEscalation(ctx, runID, map[string]any{
+		"resolution":  "denied",
+		"resolved_by": "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("ProceedEscalation (denied): %v", err)
+	}
+	if denyResp["status"] != "denied" {
+		t.Errorf("proceed-escalation status = %q, want denied", denyResp["status"])
+	}
+
+	// Run should now be abandoned.
+	runRecord, err = client.PlaybookRunGet(ctx, runID)
+	if err != nil {
+		t.Fatalf("PlaybookRunGet after deny: %v", err)
+	}
+	if outcome, _ := runRecord["outcome"].(string); outcome != "abandoned" {
+		t.Errorf("run record outcome after deny = %q, want abandoned", outcome)
+	}
+
+	t.Logf("gate_escalation e2e OK: run_id=%s escalation_target=%s denied→abandoned",
+		runID, escalationTarget)
+}

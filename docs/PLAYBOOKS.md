@@ -148,7 +148,7 @@ The informed gate is a phase-boundary checkpoint between a triage playbook and i
 
 ### When to use it
 
-Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook that has an `ESCALATE_TO` target. The gate fires after the triage agent completes and emits its structured report. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits, or return `suggested_next`).
+Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook that has an `ESCALATE_TO` target. The gate fires after the triage agent completes and emits its structured report. If the agent does not emit `ESCALATE_TO` (e.g. it resolves the issue directly), `gate_escalation` is a no-op and the normal triage response is returned. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits, or return `suggested_next`).
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_vacuum_triage/run \
@@ -190,6 +190,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/pr
   -H "Content-Type: application/json" \
   -d '{
     "resolution":       "approved",
+    "resolved_by":      "alice",
     "approval_mode":    "review",
     "connection_string": "prod-primary"
   }'
@@ -197,8 +198,11 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/pr
 # Deny — no remediation runs; triage run is marked abandoned
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/proceed-escalation \
   -H "Content-Type: application/json" \
-  -d '{"resolution": "denied"}'
+  -d '{"resolution": "denied", "resolved_by": "alice"}'
+# → {"status": "denied", "run_id": "plr_a3f7c1b2"}
 ```
+
+`resolved_by` is optional; it defaults to the `X-User` request header if omitted. It is recorded in the `gate_acknowledged` audit event.
 
 The `approval_mode` you choose at the gate applies to the remediation playbook only:
 

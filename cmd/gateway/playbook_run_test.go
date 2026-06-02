@@ -1783,3 +1783,218 @@ func TestHandlePlaybookRun_ApprovalOverrideClamped(t *testing.T) {
 		t.Errorf("warning should mention required role: %q", w0)
 	}
 }
+
+// postProceedEscalation posts to the proceed-escalation endpoint through the mux.
+func postProceedEscalation(t *testing.T, gw *Gateway, runID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/fleet/playbook-runs/"+runID+"/proceed-escalation",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// mockGatePendingAuditd serves the auditd calls made by handleProceedEscalation:
+// GET run, PATCH run, GET playbooks?series_id=, POST runs for recordPlaybookRunStart.
+// remedPB may be nil for tests that deny or error before the playbook lookup.
+func mockGatePendingAuditd(t *testing.T, run *audit.PlaybookRun, remedPB *audit.Playbook) *httptest.Server {
+	t.Helper()
+	runData, _ := json.Marshal(run)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			if remedPB != nil {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+			} else {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+			}
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem01"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// --- confidenceWarning ---
+
+func TestConfidenceWarning_NilReport(t *testing.T) {
+	gw := &Gateway{}
+	w, m := gw.confidenceWarning(nil)
+	if w != "" || m != "" {
+		t.Errorf("nil report: got warn=%q mode=%q, want both empty", w, m)
+	}
+}
+
+func TestConfidenceWarning_EmptyHypotheses(t *testing.T) {
+	gw := &Gateway{}
+	w, m := gw.confidenceWarning(&audit.DiagnosticReport{})
+	if w != "" || m != "" {
+		t.Errorf("empty hypotheses: got warn=%q mode=%q, want both empty", w, m)
+	}
+}
+
+func TestConfidenceWarning_HighConfidence(t *testing.T) {
+	gw := &Gateway{}
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{{Rank: 1, Confidence: 0.85, IsPrimary: true}},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w != "" || m != "" {
+		t.Errorf("high-confidence single: want no warn, got warn=%q mode=%q", w, m)
+	}
+}
+
+func TestConfidenceWarning_LowAbsolute(t *testing.T) {
+	gw := &Gateway{}
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{{Rank: 1, Confidence: 0.55, IsPrimary: true}},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w == "" {
+		t.Fatal("low-confidence: want non-empty warning, got empty")
+	}
+	if m != "manual" {
+		t.Errorf("suggested mode = %q, want manual", m)
+	}
+	if !strings.Contains(w, "55%") {
+		t.Errorf("warning should contain confidence percentage, got %q", w)
+	}
+}
+
+func TestConfidenceWarning_CompetingHypotheses(t *testing.T) {
+	gw := &Gateway{}
+	// primary=0.80, secondary=0.60 → 0.60/0.80 = 0.75 > 0.70 threshold → competing triggers
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, Confidence: 0.80, IsPrimary: true},
+			{Rank: 2, Confidence: 0.60},
+		},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w == "" {
+		t.Fatal("competing hypotheses: want non-empty warning, got empty")
+	}
+	if m != "manual" {
+		t.Errorf("suggested mode = %q, want manual", m)
+	}
+	if !strings.Contains(w, "competing") {
+		t.Errorf("warning should mention competing hypothesis, got %q", w)
+	}
+}
+
+func TestConfidenceWarning_CompetingBelowThreshold(t *testing.T) {
+	gw := &Gateway{}
+	// primary=0.80, secondary=0.40 → 0.40/0.80 = 0.50 < 0.70 threshold → no warn
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, Confidence: 0.80, IsPrimary: true},
+			{Rank: 2, Confidence: 0.40},
+		},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w != "" || m != "" {
+		t.Errorf("secondary below threshold: want no warn, got warn=%q mode=%q", w, m)
+	}
+}
+
+// --- handleProceedEscalation ---
+
+func TestHandleProceedEscalation_RunNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	gw := makePlaybookRunGateway(srv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_missing", `{"resolution":"approved"}`)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404 for missing run", rec.Code)
+	}
+}
+
+func TestHandleProceedEscalation_WrongOutcome(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:       "plr_resolved01",
+		Outcome:     audit.OutcomeResolved,
+		EscalatedTo: "pbs_lock_chain_remediate",
+	}
+	auditSrv := mockGatePendingAuditd(t, run, nil)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_resolved01", `{"resolution":"approved"}`)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("got %d, want 409 for run with outcome=%q", rec.Code, audit.OutcomeResolved)
+	}
+}
+
+func TestHandleProceedEscalation_Denied(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate01",
+		Outcome:         audit.OutcomeGatePending,
+		EscalatedTo:     "pbs_lock_chain_remediate",
+		FindingsSummary: "Long-running transaction blocking replication.",
+	}
+	auditSrv := mockGatePendingAuditd(t, run, nil)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_gate01",
+		`{"resolution":"denied","resolved_by":"ops-alice"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("got %d, want 200 for denied gate", rec.Code)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp["status"] != "denied" {
+		t.Errorf("status = %q, want denied", resp["status"])
+	}
+	if resp["run_id"] != "plr_gate01" {
+		t.Errorf("run_id = %q, want plr_gate01", resp["run_id"])
+	}
+}
+
+// TestHandleProceedEscalation_Approved_ChainsToAgent verifies that an approved gate
+// resolves the triage run and chains to the remediation playbook. With no A2A client
+// wired, proxyToAgent returns 502 — confirming the agent path was reached.
+func TestHandleProceedEscalation_Approved_ChainsToAgent(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate02",
+		Outcome:         audit.OutcomeGatePending,
+		EscalatedTo:     "pbs_lock_chain_remediate",
+		FindingsSummary: "Lock chain detected; root blocker PID=1234.",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_remediate01",
+		SeriesID:      "pbs_lock_chain_remediate",
+		Name:          "Lock Chain — Terminate Root Blocker",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	auditSrv := mockGatePendingAuditd(t, run, remedPB)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_gate02",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	// No A2A client → 502 from proxyToAgent, confirming the agent path was taken.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+}

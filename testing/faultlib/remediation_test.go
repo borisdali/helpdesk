@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -415,5 +416,177 @@ func TestRemediate_NoAction(t *testing.T) {
 	}
 	if result.Method != "none" {
 		t.Errorf("method = %q, want none", result.Method)
+	}
+}
+
+// ── ProceedEscalation ─────────────────────────────────────────────────────────
+
+func TestProceedEscalation_SendsCorrectPayload(t *testing.T) {
+	var gotPath, gotAuth, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		body, _ := json.Marshal(map[string]any{})
+		_ = body
+		raw := make([]byte, r.ContentLength)
+		r.Body.Read(raw) //nolint:errcheck
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	req := ProceedEscalationRequest{
+		Resolution:       "approved",
+		ResolvedBy:       "ops-alice",
+		ApprovalMode:     "review",
+		ConnectionString: "host=localhost port=5432 dbname=testdb user=postgres",
+	}
+	resp, err := r.ProceedEscalation(context.Background(), "plr_gate01", req)
+	if err != nil {
+		t.Fatalf("ProceedEscalation: %v", err)
+	}
+	if resp.Status != "complete" {
+		t.Errorf("status = %q, want complete", resp.Status)
+	}
+	if gotPath != "/api/v1/fleet/playbook-runs/plr_gate01/proceed-escalation" {
+		t.Errorf("path = %q, want proceed-escalation path", gotPath)
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+		t.Fatalf("decoding request body: %v", err)
+	}
+	if decoded["resolution"] != "approved" {
+		t.Errorf("resolution = %v, want approved", decoded["resolution"])
+	}
+	if decoded["approval_mode"] != "review" {
+		t.Errorf("approval_mode = %v, want review", decoded["approval_mode"])
+	}
+}
+
+func TestProceedEscalation_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":"run not in gate_pending state"}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	if _, err := r.ProceedEscalation(context.Background(), "plr_bad", ProceedEscalationRequest{Resolution: "approved"}); err == nil {
+		t.Error("expected error for non-2xx response, got nil")
+	}
+}
+
+// ── RunGateLoop ───────────────────────────────────────────────────────────────
+
+func TestRunGateLoop_AutoApprovesAndComplete(t *testing.T) {
+	var gotBody map[string]any
+	proceedCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proceedCalled = true
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete", Summary: "Root blocker terminated."}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	gate := &ApproveRunResponse{
+		RunID:            "plr_gate01",
+		Status:           "pending_gate",
+		EscalationTarget: "pbs_lock_chain_remediate",
+	}
+	if err := r.RunGateLoop(context.Background(), gate); err != nil {
+		t.Fatalf("RunGateLoop: %v", err)
+	}
+	if !proceedCalled {
+		t.Error("proceed-escalation endpoint was not called")
+	}
+	if gotBody["resolution"] != "approved" {
+		t.Errorf("resolution = %v, want approved", gotBody["resolution"])
+	}
+	if gotBody["approval_mode"] != "auto" {
+		t.Errorf("approval_mode = %v, want auto (default when HarnessConfig.ApprovalMode is empty)", gotBody["approval_mode"])
+	}
+}
+
+func TestRunGateLoop_DrivesApprovalLoopOnPendingApproval(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		callCount++
+		if callCount == 1 {
+			// First call: proceed-escalation returns pending_approval
+			json.NewEncoder(w).Encode(ApproveRunResponse{ //nolint:errcheck
+				RunID:      "plr_gate01",
+				Status:     "pending_approval",
+				ApprovalID: "apr_test",
+				Step: &ApproveRunStep{
+					Index: 1, Agent: "database", Tool: "terminate_connection",
+					Args: map[string]any{"pid": 1234}, Reason: "Terminate root blocker",
+				},
+			})
+			return
+		}
+		// Second call: proceed-step returns complete
+		json.NewEncoder(w).Encode(ApproveRunResponse{RunID: "plr_gate01", Status: "complete"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	gate := &ApproveRunResponse{
+		RunID:            "plr_gate01",
+		Status:           "pending_gate",
+		EscalationTarget: "pbs_lock_chain_remediate",
+	}
+	if err := r.RunGateLoop(context.Background(), gate); err != nil {
+		t.Fatalf("RunGateLoop: %v", err)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 server calls (proceed-escalation + proceed-step), got %d", callCount)
+	}
+}
+
+// TestTriggerPlaybook_PendingGateDispatchesToRunGateLoop verifies that when the
+// playbook run endpoint returns pending_gate, triggerPlaybook calls RunGateLoop
+// which auto-approves by calling proceed-escalation.
+func TestTriggerPlaybook_PendingGateDispatchesToRunGateLoop(t *testing.T) {
+	proceedCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet:
+			// resolvePlaybookID: GET /api/v1/fleet/playbooks?series_id=...
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_triage01"}},
+			})
+		case r.URL.Path == "/api/v1/fleet/playbooks/pb_triage01/run":
+			// RunPlaybook: returns pending_gate
+			json.NewEncoder(w).Encode(ApproveRunResponse{ //nolint:errcheck
+				RunID:            "plr_gate01",
+				Status:           "pending_gate",
+				EscalationTarget: "pbs_lock_chain_remediate",
+				EscalationFindings: "Lock chain detected.",
+			})
+		case strings.Contains(r.URL.Path, "/proceed-escalation"):
+			// RunGateLoop: proceed-escalation returns complete
+			proceedCalled = true
+			json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	if err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_triage", ""); err != nil {
+		t.Fatalf("triggerPlaybook: %v", err)
+	}
+	if !proceedCalled {
+		t.Error("proceed-escalation was not called for pending_gate response")
 	}
 }
