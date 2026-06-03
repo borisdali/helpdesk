@@ -502,6 +502,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
+		// If triage found nothing actionable (recommended=monitor or
+		// no_changes_needed), skip both the gate and auto-chain: there is
+		// nothing for the remediation playbook to act on.
+		if findingsRecommendMonitor(prev.findings) {
+			finalOutcome = "resolved"
+			finalEscalatedTo = ""
+			break
+		}
+
 		// Informed gate: operator reviews findings at the phase boundary before
 		// the remediation playbook is invoked. Takes precedence over auto-chaining.
 		if req.GateEscalation {
@@ -1451,6 +1460,29 @@ func parseAgentEscalation(text string) agentEscalation {
 		result.Findings = extractConclusionFallback(result.CleanText)
 	}
 	return result
+}
+
+// findingsRecommendMonitor reports whether the FINDINGS line from a triage run
+// indicates no actionable remediation is needed. The gate and auto-chain are
+// both skipped when this returns true.
+//
+// Values that mean "nothing to do":
+//   - recommended=monitor    (vacuum, slow-query, connection triage)
+//   - recommended=no_changes_needed  (checkpoint-bgwriter triage)
+func findingsRecommendMonitor(findings string) bool {
+	if findings == "" {
+		return false
+	}
+	const key = "recommended="
+	idx := strings.Index(findings, key)
+	if idx < 0 {
+		return false
+	}
+	val := findings[idx+len(key):]
+	if end := strings.IndexAny(val, "; \t\n"); end >= 0 {
+		val = val[:end]
+	}
+	return val == "monitor" || val == "no_changes_needed"
 }
 
 // parseDiagnosticReport scans the agent response for HYPOTHESIS_N: lines and

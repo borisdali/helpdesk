@@ -687,6 +687,35 @@ func TestParseAgentEscalation_FallbackFromCleanText(t *testing.T) {
 	}
 }
 
+// --- findingsRecommendMonitor ---
+
+func TestFindingsRecommendMonitor(t *testing.T) {
+	cases := []struct {
+		findings string
+		want     bool
+	}{
+		// gate should NOT fire
+		{"worst table public.orders dead_ratio=0.03; autovacuum=running; blocker_pid=none; recommended=monitor", true},
+		{"checkpoints_req=0 timed=12; maxwritten_clean=0; buffers_backend_fsync=0; recommended=no_changes_needed", true},
+
+		// gate SHOULD fire
+		{"worst table public.orders dead_ratio=0.35; autovacuum=stuck; blocker_pid=none; recommended=manual_vacuum", false},
+		{"top query queryid=42 mean_exec_time=15000ms calls=500/hr; wait_event=Lock; lock_contention=true; recommended=cancel_query", false},
+		{"connections 198/200 (99%); blocker=PID 1234 (idle, 45m, has_writes=false); recommended=terminate_blocker", false},
+		{"checkpoints_req=142 timed=8; maxwritten_clean=5; buffers_backend_fsync=0; recommended=max_wal_size=2GB", false},
+
+		// edge cases
+		{"", false},
+		{"no recommended field at all", false},
+		{"recommended=monitored", false}, // prefix match must not trigger
+	}
+	for _, tc := range cases {
+		if got := findingsRecommendMonitor(tc.findings); got != tc.want {
+			t.Errorf("findingsRecommendMonitor(%q) = %v, want %v", tc.findings, got, tc.want)
+		}
+	}
+}
+
 // --- TestHandlePlaybookRun_FleetMode_NoLLM verifies that a fleet-mode playbook run
 // returns 503 when the planner LLM is not configured.
 func TestHandlePlaybookRun_FleetMode_NoLLM(t *testing.T) {
