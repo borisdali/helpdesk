@@ -1,6 +1,6 @@
 series_id: pbs_connection_triage
 name: Connection & Lock Triage
-version: "1.2"
+version: "1.3"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
@@ -41,7 +41,7 @@ guidance: |
   Final step: after your analysis, output exactly these two lines in this format
   (no markdown, no extra text on each line):
   FINDINGS: connections <active>/<max> (<pct>%); blocker=<PID <pid> (<state>, <duration>, has_writes=<true|false>) | none>; recommended=<terminate_blocker|kill_idle|escalate|monitor>
-  ESCALATE_TO: pbs_connection_remediate
+  TRANSITION_TO: pbs_connection_remediate
 escalation:
   - "active_connections >= max_connections (no slots remaining)"
   - "blocking chain involves a transaction open > 30 minutes"

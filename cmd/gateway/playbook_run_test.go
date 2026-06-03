@@ -687,6 +687,31 @@ func TestParseAgentEscalation_FallbackFromCleanText(t *testing.T) {
 	}
 }
 
+func TestParseAgentEscalation_TransitionTo(t *testing.T) {
+	// TRANSITION_TO: is the same-domain triage→remediate signal; must populate
+	// TransitionTo and leave EscalateTo empty.
+	text := "Lock chain diagnosed.\n\n" +
+		"FINDINGS: Root blocker PID 4321 (idle in transaction, has_writes=true); 3-level chain; terminate_connection required.\n" +
+		"TRANSITION_TO: pbs_lock_chain_remediate\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Findings == "" {
+		t.Error("Findings should be populated")
+	}
+	if esc.TransitionTo != "pbs_lock_chain_remediate" {
+		t.Errorf("TransitionTo = %q, want pbs_lock_chain_remediate", esc.TransitionTo)
+	}
+	if esc.EscalateTo != "" {
+		t.Errorf("EscalateTo = %q, want empty — TRANSITION_TO must not set EscalateTo", esc.EscalateTo)
+	}
+	if strings.Contains(esc.CleanText, "TRANSITION_TO:") {
+		t.Error("CleanText should not contain TRANSITION_TO: line")
+	}
+	if strings.Contains(esc.CleanText, "FINDINGS:") {
+		t.Error("CleanText should not contain FINDINGS: line")
+	}
+}
+
 // --- findingsRecommendMonitor ---
 
 func TestFindingsRecommendMonitor(t *testing.T) {
@@ -2106,9 +2131,9 @@ func makeGateGateway(t *testing.T, auditURL string, agentName, responseText stri
 }
 
 // TestHandlePlaybookRun_GateEscalation_Intercepts verifies that when
-// gate_escalation=true and the agent emits an actionable ESCALATE_TO (recommended
+// gate_escalation=true and the agent emits an actionable TRANSITION_TO (recommended
 // is not "monitor"), the gateway intercepts at the phase boundary and returns
-// status="pending_gate" with escalation_target populated.
+// status="pending_gate" with transition_target and gate_type="transition".
 func TestHandlePlaybookRun_GateEscalation_Intercepts(t *testing.T) {
 	pb := &audit.Playbook{
 		PlaybookID:    "pb_vac_triage01",
@@ -2121,7 +2146,7 @@ func TestHandlePlaybookRun_GateEscalation_Intercepts(t *testing.T) {
 	}
 	agentText := "Analysis complete.\n\n" +
 		"FINDINGS: worst table public.orders dead_ratio=0.32 (4.2GB); autovacuum=stuck; blocker_pid=none; recommended=manual_vacuum\n" +
-		"ESCALATE_TO: pbs_vacuum_remediate\n"
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
 
 	auditSrv := mockGateAuditdPlaybook(t, pb)
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
@@ -2139,8 +2164,11 @@ func TestHandlePlaybookRun_GateEscalation_Intercepts(t *testing.T) {
 	if resp["status"] != "pending_gate" {
 		t.Errorf("status = %q, want pending_gate", resp["status"])
 	}
-	if resp["escalation_target"] != "pbs_vacuum_remediate" {
-		t.Errorf("escalation_target = %q, want pbs_vacuum_remediate", resp["escalation_target"])
+	if resp["transition_target"] != "pbs_vacuum_remediate" {
+		t.Errorf("transition_target = %q, want pbs_vacuum_remediate", resp["transition_target"])
+	}
+	if resp["gate_type"] != "transition" {
+		t.Errorf("gate_type = %q, want transition", resp["gate_type"])
 	}
 	if resp["run_id"] == nil || resp["run_id"] == "" {
 		t.Error("run_id should be populated in pending_gate response")
@@ -2150,14 +2178,59 @@ func TestHandlePlaybookRun_GateEscalation_Intercepts(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_GateEscalation_TrueEscalation verifies that a genuine
+// ESCALATE_TO (cross-domain handoff) returns gate_type="escalation" and
+// escalation_target (not transition_target).
+func TestHandlePlaybookRun_GateEscalation_TrueEscalation(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_conn_triage01",
+		SeriesID:      "pbs_connection_triage",
+		Name:          "Connection & Lock Triage",
+		Guidance:      "Check connection pool and lock contention.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// True ESCALATE_TO: the DB triage found something requiring a different domain
+	// (e.g. sysadmin-level action). This is NOT a same-series pipeline transition.
+	agentText := "Blocker session is making external calls. OS-level escalation needed.\n\n" +
+		"FINDINGS: connections 198/200 (99%); blocker=PID 4321 (active, 45m, has_writes=true); recommended=escalate\n" +
+		"ESCALATE_TO: pbs_sysadmin_docker_inspect\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection pool exhausted","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	if resp["escalation_target"] != "pbs_sysadmin_docker_inspect" {
+		t.Errorf("escalation_target = %q, want pbs_sysadmin_docker_inspect", resp["escalation_target"])
+	}
+	if resp["gate_type"] != "escalation" {
+		t.Errorf("gate_type = %q, want escalation", resp["gate_type"])
+	}
+	if resp["transition_target"] != nil && resp["transition_target"] != "" {
+		t.Errorf("transition_target should be absent for true escalation, got %q", resp["transition_target"])
+	}
+	if resp["run_id"] == nil || resp["run_id"] == "" {
+		t.Error("run_id should be populated in pending_gate response")
+	}
+}
+
 // TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept verifies that when
 // gate_escalation=true but the agent's FINDINGS line recommends "monitor" (nothing
 // actionable found), the gateway does NOT intercept — the run completes normally
 // without creating a pending_gate that would block on operator approval.
-//
-// This test is currently expected to FAIL until the conditional gate logic is
-// implemented: today the gate fires unconditionally on any ESCALATE_TO signal,
-// even when recommended=monitor.
 func TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept(t *testing.T) {
 	pb := &audit.Playbook{
 		PlaybookID:    "pb_vac_triage02",
@@ -2172,7 +2245,7 @@ func TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept(t *testing.T) {
 	// dead_ratio is low. recommended=monitor → gate must NOT fire.
 	agentText := "All tables look healthy. Autovacuum is running normally.\n\n" +
 		"FINDINGS: worst table public.orders dead_ratio=0.03 (4.2GB); autovacuum=running; blocker_pid=none; recommended=monitor\n" +
-		"ESCALATE_TO: pbs_vacuum_remediate\n"
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
 
 	auditSrv := mockGateAuditdPlaybook(t, pb)
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)

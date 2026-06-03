@@ -316,22 +316,23 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", nil)
 	}
 }
 
 // agentRunResult holds the parsed output of a single agent-mode playbook run.
 type agentRunResult struct {
-	capture         *responseCapture
-	traceID         string
-	runStart        time.Time
-	outcome         string
-	escalatedTo     string
-	findings        string
-	diagReport      *audit.DiagnosticReport
-	runID           string
+	capture          *responseCapture
+	traceID          string
+	runStart         time.Time
+	outcome          string
+	escalatedTo      string // set when agent emits ESCALATE_TO (true out-of-scope escalation)
+	transitionTo     string // set when agent emits TRANSITION_TO (same-domain triage→remediation)
+	findings         string
+	diagReport       *audit.DiagnosticReport
+	runID            string
 	playbookSeriesID string
-	agentName       string
+	agentName        string
 }
 
 // chainEntry is one element of the per-run chain returned in API responses.
@@ -399,8 +400,13 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				res.diagReport = parseDiagnosticReport(text)
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
-				if esc.EscalateTo != "" {
-					res.outcome = "escalated"
+				if esc.TransitionTo != "" {
+					res.outcome = audit.OutcomeTransitioned
+					res.transitionTo = esc.TransitionTo
+					g.recordEscalationDecision(r.Context(), traceID,
+						authz.PrincipalFromContext(r.Context()), pb, esc.TransitionTo, esc.Findings)
+				} else if esc.EscalateTo != "" {
+					res.outcome = audit.OutcomeEscalated
 					res.escalatedTo = esc.EscalateTo
 					// Don't record a delegation event for terminal escalation tokens
 					// (e.g. requires_operator_approval) — they are human gates, not
@@ -466,14 +472,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		injectFields(w, primary.capture, extra)
 		if runID != "" {
 			go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-				runID, primary.outcome, "", primary.findings, nil)
+				runID, primary.outcome, "", "", primary.findings, nil)
 		}
 		return
 	}
 
-	// Escalation handling: auto-chain or return suggested_next.
+	// Escalation/transition handling: auto-chain or return suggested_next.
 	finalOutcome := primary.outcome
 	finalEscalatedTo := primary.escalatedTo
+	finalTransitionedTo := primary.transitionTo
 	finalFindings := primary.findings
 	finalReport := primary.diagReport
 
@@ -490,16 +497,27 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	const maxChainDepth = 5
 	prev := primary
-	for len(chain) < maxChainDepth && prev.escalatedTo != "" {
-		if msg, isTerminal := terminalEscalations[prev.escalatedTo]; isTerminal {
-			extra["suggested_next"] = map[string]any{
-				"escalation_token":             prev.escalatedTo,
-				"message":                      msg,
-				"requires_operator_approval":   true,
+	for len(chain) < maxChainDepth && (prev.escalatedTo != "" || prev.transitionTo != "") {
+		// nextSeries is the target for either signal; isTransition distinguishes them.
+		nextSeries := prev.escalatedTo
+		isTransition := false
+		if nextSeries == "" {
+			nextSeries = prev.transitionTo
+			isTransition = true
+		}
+
+		// Terminal escalation tokens only apply to true ESCALATE_TO signals.
+		if !isTransition {
+			if msg, isTerminal := terminalEscalations[nextSeries]; isTerminal {
+				extra["suggested_next"] = map[string]any{
+					"escalation_token":           nextSeries,
+					"message":                    msg,
+					"requires_operator_approval": true,
+				}
+				slog.Info("playbook: operator approval required — stopping chain",
+					"series_id", nextSeries, "trace_id", prev.traceID)
+				break
 			}
-			slog.Info("playbook: operator approval required — stopping chain",
-				"series_id", prev.escalatedTo, "trace_id", prev.traceID)
-			break
 		}
 
 		// If triage found nothing actionable (recommended=monitor or
@@ -508,40 +526,63 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		if findingsRecommendMonitor(prev.findings) {
 			finalOutcome = "resolved"
 			finalEscalatedTo = ""
+			finalTransitionedTo = ""
 			break
 		}
 
 		// Informed gate: operator reviews findings at the phase boundary before
-		// the remediation playbook is invoked. Takes precedence over auto-chaining.
+		// the next playbook is invoked. Takes precedence over auto-chaining.
 		if req.GateEscalation {
 			warn, suggestedMode := g.confidenceWarning(prev.diagReport)
 			extra["status"] = "pending_gate"
-			extra["escalation_target"] = prev.escalatedTo
 			extra["escalation_findings"] = prev.findings
+			gateType := "escalation"
+			if isTransition {
+				gateType = "transition"
+				extra["transition_target"] = nextSeries
+			} else {
+				extra["escalation_target"] = nextSeries
+			}
+			extra["gate_type"] = gateType
 			if warn != "" {
 				extra["confidence_warning"] = warn
 				extra["suggested_approval_mode"] = suggestedMode
 			}
 			finalOutcome = audit.OutcomeGatePending
-			finalEscalatedTo = prev.escalatedTo
+			if isTransition {
+				finalTransitionedTo = nextSeries
+				finalEscalatedTo = ""
+			} else {
+				finalEscalatedTo = nextSeries
+				finalTransitionedTo = ""
+			}
 			finalFindings = prev.findings
 			finalReport = prev.diagReport
 			slog.Info("playbook: gate pending — awaiting operator acknowledgment",
-				"run_id", prev.runID, "escalation_target", prev.escalatedTo,
+				"run_id", prev.runID, "gate_type", gateType, "next_series", nextSeries,
 				"confidence_warning", warn)
 			if g.decisionNotifier != nil && prev.runID != "" {
 				gateExtra := map[string]any{
-					"escalation_target": prev.escalatedTo,
-					"findings":          prev.findings,
+					"gate_type": gateType,
+					"findings":  prev.findings,
+				}
+				if isTransition {
+					gateExtra["transition_target"] = nextSeries
+				} else {
+					gateExtra["escalation_target"] = nextSeries
 				}
 				if warn != "" {
 					gateExtra["confidence_warning"] = warn
+				}
+				summary := "Triage complete — TRANSITION_TO " + nextSeries
+				if !isTransition {
+					summary = "Triage complete — ESCALATE_TO " + nextSeries
 				}
 				g.decisionNotifier.NotifyPending(r.Context(), decisions.Decision{
 					ID:          "gate:" + prev.runID,
 					Type:        decisions.DecisionTypeGate,
 					Status:      "pending",
-					Summary:     "Triage complete — ESCALATE_TO " + prev.escalatedTo,
+					Summary:     summary,
 					RequestedBy: r.Header.Get("X-User"),
 					RequestedAt: time.Now(),
 					ResolveURL:  strings.TrimSuffix(g.baseURL, "/") + "/api/v1/decisions/gate:" + prev.runID + "/resolve",
@@ -551,14 +592,14 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
-		nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), prev.escalatedTo)
+		nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeries)
 		if err != nil {
-			slog.Warn("playbook: cannot fetch escalated playbook",
-				"series_id", prev.escalatedTo, "err", err)
+			slog.Warn("playbook: cannot fetch next playbook",
+				"series_id", nextSeries, "err", err)
 			break
 		}
 		if !g.canAutoChain(r.Context(), req.ApprovalMode, req.ApprovalSession, nextPB) {
-			extra["suggested_next"] = buildSuggestedNext(prev.escalatedTo, req, prev.runID, prev.findings)
+			extra["suggested_next"] = buildSuggestedNext(nextSeries, req, prev.runID, prev.findings)
 			break
 		}
 		chained := g.chainEscalation(r, pb, req, prev, nextPB)
@@ -579,6 +620,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		if chained.findings != "" {
 			finalFindings = chained.findings
 			finalEscalatedTo = chained.escalatedTo
+			finalTransitionedTo = chained.transitionTo
 		}
 		extra["diagnostic_report"] = finalReport
 		extra["chained_run_id"] = chained.runID
@@ -595,7 +637,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	if runID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalFindings, finalReport)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, finalReport)
 	}
 }
 
@@ -657,7 +699,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 
 	if chainRunID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.findings, chainRes.diagReport)
+			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, chainRes.diagReport)
 	}
 
 	slog.Info("playbook: auto-chained escalation",
@@ -796,7 +838,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 
 	// Denied: abandon the triage run and return.
 	if req.Resolution == "denied" {
-		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "gate denied by operator", run.DiagnosticReport)
+		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", run.DiagnosticReport)
 		if g.decisionNotifier != nil {
 			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 				ID:         "gate:" + runID,
@@ -811,19 +853,26 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Approved: resolve the triage run and chain to the remediation playbook.
-	g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeEscalated, run.EscalatedTo, run.FindingsSummary, run.DiagnosticReport)
+	// Approved: resolve the triage run and chain to the next playbook.
+	// Use TransitionedTo for same-domain transitions, EscalatedTo for true escalations.
+	nextSeriesID := run.EscalatedTo
+	approvedOutcome := audit.OutcomeEscalated
+	if run.TransitionedTo != "" {
+		nextSeriesID = run.TransitionedTo
+		approvedOutcome = audit.OutcomeTransitioned
+	}
+	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, run.DiagnosticReport)
 	if g.decisionNotifier != nil {
 		g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 			ID:      "gate:" + runID,
 			Type:    decisions.DecisionTypeGate,
 			Status:  "approved",
-			Summary: "Gate approved — chaining to " + run.EscalatedTo,
+			Summary: "Gate approved — chaining to " + nextSeriesID,
 			Extra:   map[string]any{"resolved_by": resolvedBy, "approval_mode": req.ApprovalMode},
 		})
 	}
 
-	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), run.EscalatedTo)
+	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeriesID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "remediation playbook not found: "+err.Error())
 		return
@@ -1321,14 +1370,16 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 }
 
 // recordPlaybookRunComplete patches an existing run with its final outcome.
+// escalatedTo is set for ESCALATE_TO signals; transitionedTo for TRANSITION_TO.
 // Best-effort: failures are logged but not returned.
-func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, findingsSummary string, report *audit.DiagnosticReport) {
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary string, report *audit.DiagnosticReport) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
 	payload := map[string]any{
 		"outcome":          outcome,
 		"escalated_to":     escalatedTo,
+		"transitioned_to":  transitionedTo,
 		"findings_summary": findingsSummary,
 	}
 	if report != nil {
@@ -1420,9 +1471,10 @@ func injectFields(w http.ResponseWriter, capture *responseCapture, additionalFie
 
 // agentEscalation holds the structured signals parsed from an agent response.
 type agentEscalation struct {
-	EscalateTo string // series_id to pass to the next playbook, or ""
-	Findings   string // one-sentence diagnosis summary
-	CleanText  string // response text with signal lines removed
+	EscalateTo   string // series_id for out-of-scope escalations (ESCALATE_TO signal)
+	TransitionTo string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
+	Findings     string // one-sentence diagnosis summary
+	CleanText    string // response text with signal lines removed
 }
 
 // parseAgentEscalation scans the agent's response text for structured signal
@@ -1441,7 +1493,12 @@ func parseAgentEscalation(text string) agentEscalation {
 		trimmed := strings.TrimSpace(line)
 		// Normalise markdown bold: **FINDINGS:** → FINDINGS:
 		trimmed = strings.NewReplacer("**FINDINGS:**", "FINDINGS:", "**ESCALATE_TO:**", "ESCALATE_TO:").Replace(trimmed)
-		if strings.HasPrefix(trimmed, "ESCALATE_TO:") {
+		if strings.HasPrefix(trimmed, "TRANSITION_TO:") {
+			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "TRANSITION_TO:"))
+			if v != "none" && v != "" {
+				result.TransitionTo = v
+			}
+		} else if strings.HasPrefix(trimmed, "ESCALATE_TO:") {
 			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "ESCALATE_TO:"))
 			if v != "none" && v != "" {
 				result.EscalateTo = v
@@ -1980,7 +2037,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 
 	if done {
 		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", summary, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, nil)
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -2079,7 +2136,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 
 	if req.Resolution == "denied" {
 		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "step denied by operator", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
 		return
 	}
@@ -2118,7 +2175,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
 
 	if toolErr != nil {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "tool execution failed: "+stepErrStr, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, nil)
 		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
 		return
 	}
@@ -2151,13 +2208,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, "", history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "re-planning failed: "+err.Error(), nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), nil)
 		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", summary, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}

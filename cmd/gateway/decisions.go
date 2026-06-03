@@ -311,15 +311,11 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 			ID:          id,
 			Type:        decisions.DecisionTypeGate,
 			Status:      status,
-			Summary:     "Triage complete — ESCALATE_TO " + run.EscalatedTo,
+			Summary:     gateDecisionSummary(run),
 			RequestedBy: run.Operator,
 			RequestedAt: run.StartedAt,
 			ResolveURL:  baseURL + "/api/v1/decisions/" + id + "/resolve",
-			Extra: map[string]any{
-				"escalation_target": run.EscalatedTo,
-				"findings":          run.FindingsSummary,
-				"series_id":         run.SeriesID,
-			},
+			Extra:       gateDecisionExtra(run),
 		}
 		writeJSON(w, http.StatusOK, d)
 
@@ -391,6 +387,30 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func gateDecisionSummary(run *audit.PlaybookRun) string {
+	if run.TransitionedTo != "" {
+		return "Triage complete — TRANSITION_TO " + run.TransitionedTo
+	}
+	return "Triage complete — ESCALATE_TO " + run.EscalatedTo
+}
+
+func gateDecisionExtra(run *audit.PlaybookRun) map[string]any {
+	if run.TransitionedTo != "" {
+		return map[string]any{
+			"gate_type":         "transition",
+			"transition_target": run.TransitionedTo,
+			"findings":          run.FindingsSummary,
+			"series_id":         run.SeriesID,
+		}
+	}
+	return map[string]any{
+		"gate_type":         "escalation",
+		"escalation_target": run.EscalatedTo,
+		"findings":          run.FindingsSummary,
+		"series_id":         run.SeriesID,
+	}
+}
+
 // fetchPendingGates calls GET /v1/fleet/playbook-runs?outcome=gate_pending
 // on auditd and maps results to Decision values.
 func (g *Gateway) fetchPendingGates(ctx context.Context, limit int) ([]decisions.Decision, error) {
@@ -432,15 +452,11 @@ func (g *Gateway) fetchPendingGates(ctx context.Context, limit int) ([]decisions
 			ID:          resolveID,
 			Type:        decisions.DecisionTypeGate,
 			Status:      "pending",
-			Summary:     "Triage complete — ESCALATE_TO " + run.EscalatedTo,
+			Summary:     gateDecisionSummary(run),
 			RequestedBy: run.Operator,
 			RequestedAt: run.StartedAt,
 			ResolveURL:  baseURL + "/api/v1/decisions/" + resolveID + "/resolve",
-			Extra: map[string]any{
-				"escalation_target": run.EscalatedTo,
-				"findings":          run.FindingsSummary,
-				"series_id":         run.SeriesID,
-			},
+			Extra:       gateDecisionExtra(run),
 		}
 		out = append(out, d)
 	}

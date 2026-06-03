@@ -13,11 +13,12 @@ import (
 
 // Playbook run outcome constants.
 const (
-	OutcomeResolved         = "resolved"
-	OutcomeEscalated        = "escalated"
-	OutcomeAbandoned        = "abandoned"
-	OutcomeUnknown          = "unknown"
-	OutcomeGatePending      = "gate_pending" // triage complete, waiting for operator gate acknowledgment
+	OutcomeResolved          = "resolved"
+	OutcomeEscalated         = "escalated"
+	OutcomeTransitioned      = "transitioned" // triage handed off to a remediation playbook in the same series
+	OutcomeAbandoned         = "abandoned"
+	OutcomeUnknown           = "unknown"
+	OutcomeGatePending       = "gate_pending" // triage complete, waiting for operator gate acknowledgment
 	OutcomeEscalatedResolved = "escalated+resolved"
 )
 
@@ -28,7 +29,8 @@ type PlaybookRun struct {
 	SeriesID        string             `json:"series_id"`
 	ExecutionMode   string             `json:"execution_mode"`          // "fleet" | "agent"
 	Outcome         string             `json:"outcome"`                 // "resolved" | "escalated" | "abandoned" | "unknown"
-	EscalatedTo     string             `json:"escalated_to,omitempty"`  // series_id of next playbook
+	EscalatedTo     string             `json:"escalated_to,omitempty"`   // series_id for true out-of-scope escalations (ESCALATE_TO)
+	TransitionedTo  string             `json:"transitioned_to,omitempty"` // series_id for same-domain triage→remediation transitions (TRANSITION_TO)
 	FindingsSummary string             `json:"findings_summary,omitempty"` // agent summary at handoff
 	DiagnosticReport *DiagnosticReport `json:"diagnostic_report,omitempty"` // structured hypotheses when agent emits HYPOTHESIS_N: lines
 	ContextID       string             `json:"context_id,omitempty"`    // A2A session ID
@@ -104,6 +106,7 @@ func (s *PlaybookRunStore) migrate() error {
 		ddl  string
 	}{
 		{"diagnostic_report", `ALTER TABLE playbook_runs ADD COLUMN diagnostic_report TEXT NOT NULL DEFAULT ''`},
+		{"transitioned_to", `ALTER TABLE playbook_runs ADD COLUMN transitioned_to TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite returns "duplicate column name" when the column already
@@ -132,25 +135,25 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO playbook_runs
 		    (run_id, playbook_id, series_id, execution_mode, outcome,
-		     escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     escalated_to, transitioned_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.PlaybookID, r.SeriesID, r.ExecutionMode, outcome,
-		r.EscalatedTo, r.FindingsSummary, diagJSON, r.ContextID, r.Operator,
+		r.EscalatedTo, r.TransitionedTo, r.FindingsSummary, diagJSON, r.ContextID, r.Operator,
 		r.StartedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(r.CompletedAt),
 	)
 	return err
 }
 
-// Update sets outcome, escalated_to, findings_summary, diagnostic_report, and completed_at
-// for an existing run. Used when the agent session concludes.
-func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, findingsSummary string, report *DiagnosticReport) error {
+// Update sets outcome, escalated_to, transitioned_to, findings_summary, diagnostic_report,
+// and completed_at for an existing run. Used when the agent session concludes.
+func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary string, report *DiagnosticReport) error {
 	diagJSON := marshalDiagnosticReport(report)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE playbook_runs
-		 SET outcome = ?, escalated_to = ?, findings_summary = ?, diagnostic_report = ?, completed_at = ?
+		 SET outcome = ?, escalated_to = ?, transitioned_to = ?, findings_summary = ?, diagnostic_report = ?, completed_at = ?
 		 WHERE run_id = ?`,
-		outcome, escalatedTo, findingsSummary, diagJSON,
+		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON,
 		time.Now().UTC().Format("2006-01-02 15:04:05"),
 		runID,
 	)
@@ -253,7 +256,7 @@ func (s *PlaybookRunStore) StatsBatch(ctx context.Context, seriesIDs []string) (
 func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*PlaybookRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
+		       escalated_to, transitioned_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE run_id = ?`, runID)
 	return scanPlaybookRun(row)
@@ -266,7 +269,7 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
+		       escalated_to, transitioned_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE playbook_id = ?
 		ORDER BY started_at DESC
@@ -285,7 +288,7 @@ func (s *PlaybookRunStore) ListByOutcome(ctx context.Context, outcome string, li
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
+		       escalated_to, transitioned_to, findings_summary, diagnostic_report, context_id, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE outcome = ?
 		ORDER BY started_at DESC
@@ -318,7 +321,7 @@ func scanPlaybookRun(s playbookRunScanner) (*PlaybookRun, error) {
 	var startedStr, completedStr, diagJSON string
 	if err := s.Scan(
 		&r.RunID, &r.PlaybookID, &r.SeriesID, &r.ExecutionMode, &r.Outcome,
-		&r.EscalatedTo, &r.FindingsSummary, &diagJSON, &r.ContextID, &r.Operator,
+		&r.EscalatedTo, &r.TransitionedTo, &r.FindingsSummary, &diagJSON, &r.ContextID, &r.Operator,
 		&startedStr, &completedStr,
 	); err != nil {
 		return nil, err
