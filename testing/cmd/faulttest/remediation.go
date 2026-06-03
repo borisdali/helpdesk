@@ -278,10 +278,7 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 		return fmt.Errorf("waiting for gate resolution: %w", err)
 	}
 	if resp.Status == "pending_approval" {
-		return r.runApprovalLoop(ctx, faultlib.ApproveRunResponse{
-			RunID:  resp.RunID,
-			Status: resp.Status,
-		})
+		return r.runApprovalLoop(ctx, *resp)
 	}
 	slog.Info("gate resolved externally", "status", resp.Status)
 	return nil
@@ -313,21 +310,30 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 
 		resolution := "approved"
 		switch {
-		case r.cfg.EmitAndWait && r.cfg.AuditURL != "" && current.ApprovalID != "":
+		case r.cfg.EmitAndWait && current.ApprovalID != "" &&
+			(mode == "manual" || (mode == "review" && current.Step.ActionClass != "read")):
 			slog.Info("agent_approve: step approval pending — waiting for external resolution",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,
 				"approval_id", current.ApprovalID,
 			)
-			ac := audit.NewApprovalClient(r.cfg.AuditURL)
-			if r.cfg.GatewayAPIKey != "" {
-				ac = ac.WithAPIKey(r.cfg.GatewayAPIKey)
+			if r.cfg.AuditURL != "" {
+				ac := audit.NewApprovalClient(r.cfg.AuditURL)
+				if r.cfg.GatewayAPIKey != "" {
+					ac = ac.WithAPIKey(r.cfg.GatewayAPIKey)
+				}
+				stored, err := ac.WaitForApproval(ctx, current.ApprovalID, 30*time.Minute)
+				if err != nil {
+					return fmt.Errorf("waiting for step approval (id=%s): %w", current.ApprovalID, err)
+				}
+				resolution = stored.Status
+			} else if r.cfg.GatewayURL != "" {
+				var err error
+				resolution, err = r.inner.WaitForStepApprovalViaHub(ctx, current.ApprovalID)
+				if err != nil {
+					return fmt.Errorf("waiting for step approval via hub (id=%s): %w", current.ApprovalID, err)
+				}
 			}
-			stored, err := ac.WaitForApproval(ctx, current.ApprovalID, 30*time.Minute)
-			if err != nil {
-				return fmt.Errorf("waiting for step approval (id=%s): %w", current.ApprovalID, err)
-			}
-			resolution = stored.Status
 			slog.Info("agent_approve: step approval resolved",
 				"approval_id", current.ApprovalID,
 				"resolution", resolution,

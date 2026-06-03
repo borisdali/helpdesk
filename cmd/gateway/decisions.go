@@ -254,7 +254,7 @@ func (g *Gateway) fetchPendingApprovals(ctx context.Context, status string, limi
 			Extra: map[string]any{
 				"tool":          a.ToolName,
 				"agent":         a.AgentName,
-				"action_class":  a.ActionClass,
+				"action_class":  stepActionClass(a),
 				"resource_type": a.ResourceType,
 				"resource_name": a.ResourceName,
 				"run_id":        a.TraceID,
@@ -263,6 +263,16 @@ func (g *Gateway) fetchPendingApprovals(ctx context.Context, status string, limi
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// stepActionClass returns the per-step action class stored in RequestContext
+// (e.g. "read", "write", "destructive"). Falls back to the approval's
+// ActionClass field, which is hardcoded "destructive" for legacy records.
+func stepActionClass(a audit.StoredApproval) string {
+	if v, ok := a.RequestContext["action_class"].(string); ok && v != "" {
+		return v
+	}
+	return a.ActionClass
 }
 
 // handleGetDecision handles GET /api/v1/decisions/{id}.
@@ -359,7 +369,7 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 			Extra: map[string]any{
 				"tool":          a.ToolName,
 				"agent":         a.AgentName,
-				"action_class":  a.ActionClass,
+				"action_class":  stepActionClass(a),
 				"resource_type": a.ResourceType,
 				"resource_name": a.ResourceName,
 				"run_id":        a.TraceID,

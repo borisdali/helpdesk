@@ -2298,10 +2298,11 @@ func (g *Gateway) createStepApproval(ctx context.Context, runID string, proposal
 		Status:       "pending",
 		TraceID:      runID,
 		RequestContext: map[string]any{
-			"run_id":     runID,
-			"step_index": proposal.Index,
-			"args":       proposal.Args,
-			"reason":     proposal.Reason,
+			"run_id":       runID,
+			"step_index":   proposal.Index,
+			"args":         proposal.Args,
+			"reason":       proposal.Reason,
+			"action_class": proposal.ActionClass,
 		},
 	}
 	body, err := json.Marshal(approval)

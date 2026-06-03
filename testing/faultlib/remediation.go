@@ -437,7 +437,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunRes
 				resolution = stored.Status
 			} else if r.cfg.GatewayURL != "" {
 				var err error
-				resolution, err = r.waitForStepApprovalViaHub(ctx, current.ApprovalID)
+				resolution, err = r.WaitForStepApprovalViaHub(ctx, current.ApprovalID)
 				if err != nil {
 					return fmt.Errorf("waiting for step approval via hub (id=%s): %w", current.ApprovalID, err)
 				}
@@ -601,6 +601,7 @@ func (r *Remediator) findPendingStepApproval(ctx context.Context) *ApproveRunRes
 	runID, _ := d.Extra["run_id"].(string)
 	tool, _ := d.Extra["tool"].(string)
 	agent, _ := d.Extra["agent"].(string)
+	actionClass, _ := d.Extra["action_class"].(string)
 	if runID == "" || approvalID == "" {
 		return nil
 	}
@@ -609,16 +610,17 @@ func (r *Remediator) findPendingStepApproval(ctx context.Context) *ApproveRunRes
 		Status:     "pending_approval",
 		ApprovalID: approvalID,
 		Step: &ApproveRunStep{
-			Tool:  tool,
-			Agent: agent,
+			Tool:        tool,
+			Agent:       agent,
+			ActionClass: actionClass,
 		},
 	}
 }
 
-// waitForStepApprovalViaHub polls GET /api/v1/decisions/step:{approvalID} on
+// WaitForStepApprovalViaHub polls GET /api/v1/decisions/step:{approvalID} on
 // the gateway until the decision status is no longer "pending". Used when
 // AuditURL is not configured and the direct long-poll cannot be used.
-func (r *Remediator) waitForStepApprovalViaHub(ctx context.Context, approvalID string) (string, error) {
+func (r *Remediator) WaitForStepApprovalViaHub(ctx context.Context, approvalID string) (string, error) {
 	pollInterval := r.cfg.GatewayPollInterval
 	if pollInterval <= 0 {
 		pollInterval = 10 * time.Second
