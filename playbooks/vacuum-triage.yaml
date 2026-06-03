@@ -1,6 +1,6 @@
 series_id: pbs_vacuum_triage
 name: Vacuum & Bloat Triage
-version: "1.1"
+version: "1.2"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
@@ -34,9 +34,10 @@ guidance: |
   growing, autovacuum may be blocked by a long-running transaction — check
   get_blocking_queries.
 
-  Final step: after your analysis, output exactly one line in this format
-  (no markdown, no extra text on the line):
+  Final step: after your analysis, output exactly these two lines in this format
+  (no markdown, no extra text on each line):
   FINDINGS: worst table <schema.table> dead_ratio=<N> (<size>); autovacuum=<running|stuck|blocked|not_needed>; blocker_pid=<pid | none>; recommended=<manual_vacuum|tune_autovacuum|escalate|monitor>
+  ESCALATE_TO: pbs_vacuum_remediate
 escalation:
   - "dead_ratio > 0.5 on any table larger than 1GB"
   - "autovacuum_count has not increased over two consecutive checks"

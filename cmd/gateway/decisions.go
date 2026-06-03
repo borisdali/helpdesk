@@ -22,6 +22,7 @@ import (
 //
 //	status=pending (default) | approved | denied | all
 //	type=gate | fleet_approval | step_approval  (empty = all types)
+//	action_class=read | write | destructive      (empty = all classes; step_approval only)
 //	limit=50 (default)
 //
 // Fans out to auditd approvals + playbook runs, merges, and sorts by
@@ -37,6 +38,7 @@ func (g *Gateway) handleGetDecisions(w http.ResponseWriter, r *http.Request) {
 		status = "pending"
 	}
 	filterType := r.URL.Query().Get("type")
+	filterClass := r.URL.Query().Get("action_class")
 	limit := 50
 
 	ctx := r.Context()
@@ -50,14 +52,21 @@ func (g *Gateway) handleGetDecisions(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("decisions: failed to fetch approvals from auditd", "err", err)
 		}
 		for _, a := range approvals {
-			if filterType == "" || filterType == string(a.Type) {
-				all = append(all, a)
+			if filterType != "" && filterType != string(a.Type) {
+				continue
 			}
+			if filterClass != "" {
+				if ac, _ := a.Extra["action_class"].(string); ac != filterClass {
+					continue
+				}
+			}
+			all = append(all, a)
 		}
 	}
 
 	// Playbook gate decisions from the playbook_runs table.
-	if filterType == "" || filterType == string(decisions.DecisionTypeGate) {
+	// Gates have no action_class; skip if caller filtered by class.
+	if filterClass == "" && (filterType == "" || filterType == string(decisions.DecisionTypeGate)) {
 		if status == "pending" || status == "all" {
 			gates, err := g.fetchPendingGates(ctx, limit)
 			if err != nil {

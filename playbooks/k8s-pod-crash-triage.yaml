@@ -1,6 +1,6 @@
 series_id: pbs_k8s_pod_crash_triage
 name: "K8s Pod Crash — Diagnosis"
-version: "1.0"
+version: "1.1"
 entry_point: true
 execution_mode: agent
 agent_name: k8s_agent
@@ -71,9 +71,10 @@ guidance: |
     fix archiving, or simply restart)
   Do NOT attempt the restart — describe the recommended action for operator approval.
 
-  Final step: after your root cause summary, output exactly one line in this
-  format (no markdown, no extra text on the line):
+  Final step: after your root cause summary, output exactly these two lines in
+  this format (no markdown, no extra text on each line):
   FINDINGS: exit_code=<N> reason=<OOMKilled|Completed|Error>; root_cause=<brief phrase>; action=<restart|expand_disk|increase_memory_limit|data_recovery|investigate>
+  ESCALATE_TO: pbs_k8s_pod_crash_remediate
 
 escalation:
   - "log file shows data corruption (invalid page, checksum failure)"

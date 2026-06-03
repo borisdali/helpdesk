@@ -1,6 +1,6 @@
 series_id: pbs_slow_query_triage
 name: Slow Query Triage
-version: "1.1"
+version: "1.2"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
@@ -36,9 +36,10 @@ guidance: |
   Common misdiagnoses: blaming a slow query that is actually waiting for a lock
   held by a separate long-running transaction — always check blocking chains first.
 
-  Final step: after your analysis, output exactly one line in this format
-  (no markdown, no extra text on the line):
+  Final step: after your analysis, output exactly these two lines in this format
+  (no markdown, no extra text on each line):
   FINDINGS: top query queryid=<id> mean_exec_time=<N>ms calls=<N>/hr; wait_event=<type | none>; lock_contention=<true|false>; recommended=<add_index|cancel_query|escalate|monitor>
+  ESCALATE_TO: pbs_slow_query_remediate
 escalation:
   - "mean_exec_time > 10s for any query with calls > 100/hour"
   - "blocking chain involves a transaction open > 10 minutes"

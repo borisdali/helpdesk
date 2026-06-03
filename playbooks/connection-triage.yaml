@@ -1,6 +1,6 @@
 series_id: pbs_connection_triage
 name: Connection & Lock Triage
-version: "1.1"
+version: "1.2"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
@@ -38,9 +38,10 @@ guidance: |
   long-running transaction preventing autovacuum from reclaiming connection slots
   (wraparound risk). Check transaction age alongside connection count.
 
-  Final step: after your analysis, output exactly one line in this format
-  (no markdown, no extra text on the line):
+  Final step: after your analysis, output exactly these two lines in this format
+  (no markdown, no extra text on each line):
   FINDINGS: connections <active>/<max> (<pct>%); blocker=<PID <pid> (<state>, <duration>, has_writes=<true|false>) | none>; recommended=<terminate_blocker|kill_idle|escalate|monitor>
+  ESCALATE_TO: pbs_connection_remediate
 escalation:
   - "active_connections >= max_connections (no slots remaining)"
   - "blocking chain involves a transaction open > 30 minutes"
