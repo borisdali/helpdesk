@@ -15,6 +15,7 @@ import (
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
 
+	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 )
 
@@ -1996,5 +1997,169 @@ func TestHandleProceedEscalation_Approved_ChainsToAgent(t *testing.T) {
 	// No A2A client → 502 from proxyToAgent, confirming the agent path was taken.
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- gate_escalation intercept tests ---
+
+// mockA2AServerWithText starts a minimal JSON-RPC A2A server that returns responseText
+// as the completed task's status message text.
+func mockA2AServerWithText(t *testing.T, agentName, responseText string) (*httptest.Server, *a2a.AgentCard) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-gate-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": responseText},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return srv, card
+}
+
+// mockGateAuditdPlaybook starts a mock auditd that handles the calls made
+// during a gate-intercepted playbook run (playbook fetch, run start, run complete).
+func mockGateAuditdPlaybook(t *testing.T, pb *audit.Playbook) *httptest.Server {
+	t.Helper()
+	pbData, _ := json.Marshal(pb)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			// Delegation verification events query and any other reads → empty list.
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// makeGateGateway wires a gateway with a mock A2A agent for gate_escalation tests.
+func makeGateGateway(t *testing.T, auditURL string, agentName, responseText string) *Gateway {
+	t.Helper()
+	_, card := mockA2AServerWithText(t, agentName, responseText)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+	gw := makePlaybookRunGateway(auditURL, nil)
+	gw.clients = map[string]*a2aclient.Client{agentName: client}
+	return gw
+}
+
+// TestHandlePlaybookRun_GateEscalation_Intercepts verifies that when
+// gate_escalation=true and the agent emits an actionable ESCALATE_TO (recommended
+// is not "monitor"), the gateway intercepts at the phase boundary and returns
+// status="pending_gate" with escalation_target populated.
+func TestHandlePlaybookRun_GateEscalation_Intercepts(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage01",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples and autovacuum lag.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Analysis complete.\n\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.32 (4.2GB); autovacuum=stuck; blocker_pid=none; recommended=manual_vacuum\n" +
+		"ESCALATE_TO: pbs_vacuum_remediate\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"bloat alert","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	if resp["escalation_target"] != "pbs_vacuum_remediate" {
+		t.Errorf("escalation_target = %q, want pbs_vacuum_remediate", resp["escalation_target"])
+	}
+	if resp["run_id"] == nil || resp["run_id"] == "" {
+		t.Error("run_id should be populated in pending_gate response")
+	}
+	if resp["escalation_findings"] == nil || resp["escalation_findings"] == "" {
+		t.Error("escalation_findings should be populated in pending_gate response")
+	}
+}
+
+// TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept verifies that when
+// gate_escalation=true but the agent's FINDINGS line recommends "monitor" (nothing
+// actionable found), the gateway does NOT intercept — the run completes normally
+// without creating a pending_gate that would block on operator approval.
+//
+// This test is currently expected to FAIL until the conditional gate logic is
+// implemented: today the gate fires unconditionally on any ESCALATE_TO signal,
+// even when recommended=monitor.
+func TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage02",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples and autovacuum lag.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Triage completes but finds nothing actionable: autovacuum is keeping up,
+	// dead_ratio is low. recommended=monitor → gate must NOT fire.
+	agentText := "All tables look healthy. Autovacuum is running normally.\n\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.03 (4.2GB); autovacuum=running; blocker_pid=none; recommended=monitor\n" +
+		"ESCALATE_TO: pbs_vacuum_remediate\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"routine check","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	// Gate must NOT have fired: the run should complete, not pause for operator approval.
+	if resp["status"] == "pending_gate" {
+		t.Error("gate fired for recommended=monitor — should complete without operator gate")
 	}
 }

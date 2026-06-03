@@ -476,6 +476,22 @@ var gatewayRoutes = []string{
 	"GET /api/v1/fleet/playbook-runs/{runID}",
 	"GET /api/v1/tool-results",
 	"GET /api/v1/roles",
+	// Prometheus metrics (unauthenticated)
+	"GET /metrics",
+	// Governance approval actions
+	"POST /api/v1/governance/approvals/{approvalID}/approve",
+	"POST /api/v1/governance/approvals/{approvalID}/deny",
+	// Playbook-run interactive steps
+	"GET /api/v1/fleet/playbook-runs/{runID}/steps",
+	"GET /api/v1/fleet/playbook-runs/{runID}/pending-step",
+	"POST /api/v1/fleet/playbook-runs/{runID}/proceed",
+	"POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation",
+	// Decision Hub
+	"GET /api/v1/decisions",
+	"GET /api/v1/decisions/{id}",
+	"POST /api/v1/decisions/{id}/resolve",
+	// Git webhook (HMAC-validated, anonymous)
+	"POST /api/v1/webhooks/git",
 }
 
 // auditdRoutes is the authoritative list of patterns registered in
@@ -678,13 +694,23 @@ func TestAuthorizer_RoleGrants(t *testing.T) {
 	a := NewAuthorizer(DefaultGatewayPermissions, true)
 	grants := a.RoleGrants()
 
-	// "dba" should only grant POST /api/v1/db/{tool}
+	// "dba" should grant DB tools and governance approve/deny.
 	dbaGrants, ok := grants["dba"]
 	if !ok {
 		t.Fatal("RoleGrants missing 'dba' key")
 	}
-	if len(dbaGrants) != 1 || dbaGrants[0] != "POST /api/v1/db/{tool}" {
-		t.Errorf("dba grants = %v, want [POST /api/v1/db/{tool}]", dbaGrants)
+	wantDBA := map[string]bool{
+		"POST /api/v1/db/{tool}":                                 true,
+		"POST /api/v1/governance/approvals/{approvalID}/approve": true,
+		"POST /api/v1/governance/approvals/{approvalID}/deny":    true,
+	}
+	if len(dbaGrants) != len(wantDBA) {
+		t.Errorf("dba grants = %v, want %v", dbaGrants, wantDBA)
+	}
+	for _, g := range dbaGrants {
+		if !wantDBA[g] {
+			t.Errorf("unexpected dba grant: %q", g)
+		}
 	}
 
 	// "fleet-operator" should only grant POST /api/v1/fleet/jobs

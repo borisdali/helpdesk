@@ -353,15 +353,23 @@ func (r *Remediator) WaitForGateResolution(ctx context.Context, runID string) (*
 			// Gate was approved externally. The remediation run has already
 			// started; find its first pending step approval so the approval
 			// loop can drive it. Retry briefly since the run may not have
-			// initialised yet when we detect the outcome change.
+			// initialised yet when we detect the outcome change. Use the
+			// configured pollInterval (capped at 2s) so tests with fast polling
+			// don't sit through the production-sized delay.
+			retryDelay := pollInterval
+			if retryDelay > 2*time.Second {
+				retryDelay = 2 * time.Second
+			}
 			for attempt := 0; attempt < 6; attempt++ {
 				if stepResp := r.findPendingStepApproval(ctx); stepResp != nil {
 					return stepResp, nil
 				}
 				select {
 				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(2 * time.Second):
+					// Context fired mid-retry; the outcome is still valid, so
+					// return it instead of the context error.
+					return &ApproveRunResponse{RunID: runID, Status: run.Outcome}, nil
+				case <-time.After(retryDelay):
 				}
 			}
 			// No pending step approval found (remediation may have completed

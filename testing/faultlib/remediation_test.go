@@ -681,13 +681,15 @@ func TestWaitForGateResolution_ContextCancelled(t *testing.T) {
 
 func TestRunGateLoop_EmitAndWait_PollsInsteadOfAutoApprove(t *testing.T) {
 	proceedCalled := false
-	var lastPath string
+	runPolled := false
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		lastPath = r.URL.Path
 		if strings.Contains(r.URL.Path, "proceed-escalation") {
 			proceedCalled = true
+		}
+		if strings.Contains(r.URL.Path, "plr_ew01") {
+			runPolled = true
 		}
 		json.NewEncoder(w).Encode(map[string]string{"outcome": "escalated"}) //nolint:errcheck
 	}))
@@ -710,9 +712,9 @@ func TestRunGateLoop_EmitAndWait_PollsInsteadOfAutoApprove(t *testing.T) {
 	if proceedCalled {
 		t.Error("proceed-escalation was called — emit-and-wait should poll, not auto-approve")
 	}
-	// Must have called the poll endpoint for the run ID.
-	if !strings.Contains(lastPath, "plr_ew01") {
-		t.Errorf("poll path %q does not contain run ID plr_ew01", lastPath)
+	// Must have polled the run-status endpoint for the run ID at least once.
+	if !runPolled {
+		t.Error("poll endpoint for plr_ew01 was never called")
 	}
 }
 
