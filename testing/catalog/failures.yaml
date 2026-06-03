@@ -907,7 +907,7 @@ failures:
     inject:
       type: kustomize
       overlay: k8s/overlays/pvc-pending
-      wait: 15s   # Scale-to-zero takes ~5-10s; wait lets postgres-0 terminate so only the pending pod remains
+      wait: 45s   # postgres-0 needs the full 30s graceful shutdown period before it is gone; 45s matches k8s-scale-to-zero
     teardown:
       type: kustomize_delete
       overlay: k8s/overlays/pvc-pending

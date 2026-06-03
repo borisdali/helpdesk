@@ -34,6 +34,13 @@ var DefaultGatewayPermissions = map[string]Permission{
 	// Tool result query
 	"GET /api/v1/tool-results": {AdminBypass: true},
 
+	// Decision Hub: unified view and resolution of pending gates, fleet approvals, step approvals.
+	"GET /api/v1/decisions":                    {AdminBypass: true},
+	"POST /api/v1/decisions/{id}/resolve":      {AdminBypass: true},
+
+	// Git webhook adapter: HMAC-validated by the handler itself; no Bearer auth.
+	"POST /api/v1/webhooks/git": {AllowAnonymous: true},
+
 	// Fleet reads and plan (plan is a dry-run — any authenticated user may preview)
 	"POST /api/v1/fleet/plan":                                   {AdminBypass: true},
 	"POST /api/v1/fleet/snapshot":                               {AdminBypass: true},

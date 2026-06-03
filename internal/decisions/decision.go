@@ -22,17 +22,17 @@ type Decision struct {
 	//   "gate:{runID}"           — playbook phase-boundary gate
 	//   "fleet:{approvalID}"     — fleet job write/destructive approval
 	//   "step:{approvalID}"      — per-tool-call step approval inside an agent run
-	ID          string
-	Type        DecisionType
-	Status      string // "pending" | "approved" | "denied" | "expired" | "abandoned"
-	Summary     string // human-readable one-liner shown in notifications and list views
-	RequestedBy string
-	RequestedAt time.Time
-	ExpiresAt   time.Time
+	ID          string       `json:"id"`
+	Type        DecisionType `json:"type"`
+	Status      string       `json:"status"` // "pending" | "approved" | "denied" | "expired" | "abandoned"
+	Summary     string       `json:"summary"`
+	RequestedBy string       `json:"requested_by"`
+	RequestedAt time.Time    `json:"requested_at"`
+	ExpiresAt   time.Time    `json:"expires_at,omitempty"`
 	// ResolveURL is the canonical absolute URL to act on this decision.
 	// For gate decisions this is POST /api/v1/decisions/gate:{runID}/resolve.
-	ResolveURL string
+	ResolveURL string         `json:"resolve_url"`
 	// Extra holds type-specific context passed through to webhook payloads
 	// (e.g. findings, escalation_target, confidence_warning, tool name, args).
-	Extra map[string]any
+	Extra map[string]any `json:"extra,omitempty"`
 }

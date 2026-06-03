@@ -43,12 +43,17 @@ func (g *Gateway) handleGetDecisions(w http.ResponseWriter, r *http.Request) {
 	var all []decisions.Decision
 
 	// Fleet and step approvals from the auditd approval store.
+	// Both types share the same auditd endpoint; filter by type after fetching.
 	if filterType == "" || filterType == string(decisions.DecisionTypeFleetApproval) || filterType == string(decisions.DecisionTypeStepApproval) {
 		approvals, err := g.fetchPendingApprovals(ctx, status, limit)
 		if err != nil {
 			slog.Warn("decisions: failed to fetch approvals from auditd", "err", err)
 		}
-		all = append(all, approvals...)
+		for _, a := range approvals {
+			if filterType == "" || filterType == string(a.Type) {
+				all = append(all, a)
+			}
+		}
 	}
 
 	// Playbook gate decisions from the playbook_runs table.
@@ -149,11 +154,13 @@ func (g *Gateway) resolveAuditdApproval(w http.ResponseWriter, r *http.Request, 
 	if resolution == "denied" {
 		endpoint = "deny"
 	}
-	body, _ := json.Marshal(map[string]any{
-		"approved_by": resolvedBy,
-		"denied_by":   resolvedBy,
-		"reason":      reason,
-	})
+	bodyMap := map[string]any{"reason": reason}
+	if resolution == "approved" {
+		bodyMap["approved_by"] = resolvedBy
+	} else {
+		bodyMap["denied_by"] = resolvedBy
+	}
+	body, _ := json.Marshal(bodyMap)
 
 	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/approvals/" + approvalID + "/" + endpoint
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(body))
@@ -165,6 +172,15 @@ func (g *Gateway) resolveAuditdApproval(w http.ResponseWriter, r *http.Request, 
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
+	// Forward the human operator's identity so auditd can apply role checks
+	// against the actual resolver rather than the gateway service account.
+	// X-User header (authenticated identity) takes priority over resolved_by
+	// (caller-declared, unverified).
+	if xUser := r.Header.Get("X-User"); xUser != "" {
+		req.Header.Set("X-User", xUser)
+	} else if resolvedBy != "" {
+		req.Header.Set("X-User", resolvedBy)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -172,10 +188,15 @@ func (g *Gateway) resolveAuditdApproval(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody) //nolint:errcheck
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody) //nolint:errcheck
+	json.NewEncoder(w).Encode(map[string]string{"status": resolution}) //nolint:errcheck
 }
 
 // fetchPendingApprovals calls GET /v1/approvals?status=pending on auditd and
@@ -204,29 +225,32 @@ func (g *Gateway) fetchPendingApprovals(ctx context.Context, status string, limi
 		return nil, fmt.Errorf("auditd approvals returned %d", resp.StatusCode)
 	}
 
-	var result struct {
-		Approvals []audit.StoredApproval `json:"approvals"`
-	}
+	var result []audit.StoredApproval
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
 	baseURL := strings.TrimSuffix(g.baseURL, "/")
 	var out []decisions.Decision
-	for _, a := range result.Approvals {
+	for _, a := range result {
+		// ID prefix matches handleResolveDecision routing: "step:" or "fleet:".
+		// DecisionType ("step_approval" / "fleet_approval") is kept in the Type field.
 		dt := decisions.DecisionTypeStepApproval
+		idPrefix := "step"
 		if a.ActionClass == "escalation" {
 			dt = decisions.DecisionTypeFleetApproval
+			idPrefix = "fleet"
 		}
+		decisionID := idPrefix + ":" + a.ApprovalID
 		d := decisions.Decision{
-			ID:          string(dt) + ":" + a.ApprovalID,
+			ID:          decisionID,
 			Type:        dt,
 			Status:      a.Status,
 			Summary:     fmt.Sprintf("%s %s/%s", a.ActionClass, a.AgentName, a.ToolName),
 			RequestedBy: a.RequestedBy,
 			RequestedAt: a.RequestedAt,
 			ExpiresAt:   a.ExpiresAt,
-			ResolveURL:  baseURL + "/api/v1/decisions/" + string(dt) + ":" + a.ApprovalID + "/resolve",
+			ResolveURL:  baseURL + "/api/v1/decisions/" + decisionID + "/resolve",
 			Extra: map[string]any{
 				"tool":          a.ToolName,
 				"agent":         a.AgentName,

@@ -152,11 +152,14 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	}
 	fmt.Println()
 
+	// emit-and-wait: poll until operator resolves via the Decision Hub.
+	// Checked before TTY so this path works on a developer laptop too.
+	if r.cfg.EmitAndWait {
+		return r.waitForGateEmitAndWait(ctx, gate)
+	}
+
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		if r.cfg.EmitAndWait {
-			return r.waitForGateEmitAndWait(ctx, gate)
-		}
 		// Non-interactive without emit-and-wait: auto-approve with the configured mode.
 		return r.inner.RunGateLoop(ctx, &gate)
 	}
