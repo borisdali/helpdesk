@@ -148,7 +148,7 @@ The informed gate is a phase-boundary checkpoint between a triage playbook and i
 
 ### When to use it
 
-Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook that has an `ESCALATE_TO` target. The gate fires after the triage agent completes and emits its structured report. If the agent does not emit `ESCALATE_TO` (e.g. it resolves the issue directly), `gate_escalation` is a no-op and the normal triage response is returned. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits, or return `suggested_next`).
+Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook. The gate fires after the triage agent completes and emits its `TRANSITION_TO:` or `ESCALATE_TO:` signal. If neither signal is present (the agent resolved the issue directly), `gate_escalation` is a no-op and the normal response is returned. If the `FINDINGS:` line contains `recommended=monitor` or `recommended=no_changes_needed`, the gate is also skipped — nothing needs operator action. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits, or return `suggested_next`).
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_vacuum_triage/run \
@@ -161,22 +161,41 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_vacuum_triage/r
 
 ### `pending_gate` response
 
-When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`:
+When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. The response shape varies by gate type.
+
+**Transition gate** (`TRANSITION_TO:` — triage handing off to its remediation counterpart):
 
 ```json
 {
   "run_id":               "plr_a3f7c1b2",
   "status":               "pending_gate",
+  "gate_type":            "transition",
   "findings":             "Table public.orders has 94% dead tuple ratio...",
-  "escalation_target":    "pbs_vacuum_remediate",
+  "transition_target":    "pbs_vacuum_remediate",
   "escalation_findings":  "Table public.orders has 94% dead tuple ratio...",
   "diagnostic_report":    { "hypotheses": [...], "root_cause": "..." },
-  "confidence_warning":   "Primary hypothesis confidence 55% — competing hypothesis at 42%. Uncertain diagnosis: consider step-by-step approval.",
+  "confidence_warning":   "",
+  "suggested_approval_mode": ""
+}
+```
+
+**Escalation gate** (`ESCALATE_TO:` — true cross-domain handoff):
+
+```json
+{
+  "run_id":               "plr_b8e2d4f1",
+  "status":               "pending_gate",
+  "gate_type":            "escalation",
+  "findings":             "Connection refused — Docker-level investigation needed.",
+  "escalation_target":    "pbs_sysadmin_docker_inspect",
+  "escalation_findings":  "Connection refused — Docker-level investigation needed.",
+  "diagnostic_report":    { "hypotheses": [...], "root_cause": "..." },
+  "confidence_warning":   "Primary hypothesis confidence 55% — competing hypothesis at 42%.",
   "suggested_approval_mode": "manual"
 }
 ```
 
-The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **non-blocking** — the operator can still proceed — but the field and a suggested approval mode are surfaced so the operator can make an informed choice. When `confidence_warning` is present, `suggested_approval_mode` is always `"manual"`.
+`gate_type` tells operators what kind of handoff this is: `"transition"` is a routine expected pipeline step; `"escalation"` is an out-of-scope cross-domain handoff that may warrant closer scrutiny. The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **non-blocking** — the operator can still proceed — but when present, `suggested_approval_mode` is always `"manual"`.
 
 The triage run is recorded with `outcome: gate_pending`. The run ID is stable — you can use `GET /api/v1/fleet/playbook-runs/{run_id}` to retrieve findings later.
 
@@ -215,7 +234,7 @@ The `approval_mode` you choose at the gate applies to the remediation playbook o
 
 When `resolution: "approved"`, the response is whatever the remediation playbook returns — `200` with findings for `execution_mode: agent`, or `202 pending_approval` for `execution_mode: agent_approve`. Standard approval loops apply from there.
 
-The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, and any confidence warning. The triage run outcome is updated to `"escalated"`.
+The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, and any confidence warning. The triage run outcome is updated to `"transitioned"` for transition gates or `"escalated"` for escalation gates.
 
 ### Relationship to the two-playbook split
 
@@ -227,7 +246,7 @@ Two faulttest CLI flags exercise the gate path:
 
 | Flag | Effect |
 |---|---|
-| `--gate-escalation` | Adds `"gate_escalation": true` to every PlaybookRun request so the gateway intercepts `ESCALATE_TO` at the phase boundary. |
+| `--gate-escalation` | Adds `"gate_escalation": true` to every PlaybookRun request so the gateway intercepts `TRANSITION_TO` and `ESCALATE_TO` signals at the phase boundary. |
 | `--emit-and-wait` | Replaces TTY prompts with HTTP polling: gate polls until externally resolved; step approvals use the audit service long-poll. Safe in Kubernetes Jobs and Docker containers. |
 
 ```bash
@@ -504,9 +523,9 @@ PATCH /playbook-runs/{runID} → outcome=resolved|escalated|abandoned
 ```
 POST /run → outcome=unknown (run recorded)
                     ↓
-       agent investigates, emits FINDINGS / ESCALATE_TO signal
+       agent investigates, emits FINDINGS / TRANSITION_TO or ESCALATE_TO signal
                     ↓
-       gateway parses signal → outcome auto-updated (resolved|escalated|unknown)
+       gateway parses signal → outcome auto-updated (resolved|transitioned|escalated|unknown)
                     ↓
        operator reviews diagnosis — may patch outcome to correct it
 ```
@@ -725,7 +744,8 @@ HYPOTHESIS_2: <alternative> | CONFIDENCE: 0.20 | REJECTED: <one-sentence reason 
 ROOT_CAUSE: HYPOTHESIS_1
 FINDINGS: <one-sentence summary of the root cause and recommended action>
 ACTION_TAKEN: <what was done, or "none — escalation recommended">
-ESCALATE_TO: <series_id or "none">
+TRANSITION_TO: <series_id>   # same-domain triage→remediation; or
+ESCALATE_TO: <series_id>     # cross-domain escalation to a different agent
 ```
 
 Rules the agent follows:
@@ -770,18 +790,32 @@ The diagnostic report is available immediately after the agent session completes
 
 ### Structured escalation signal
 
-For agent-mode runs the Gateway parses a structured signal from the agent's response before returning it to the caller. The agent is instructed to append lines at the end of its response:
+For agent-mode runs the Gateway parses a structured signal from the agent's response before returning it to the caller. The agent appends one of two signal lines after the `FINDINGS:` line, depending on the nature of the handoff:
 
 ```
 FINDINGS: <one-sentence diagnosis and recommended action>
-ESCALATE_TO: <series_id>     # optional — only when a follow-on Playbook is needed
+TRANSITION_TO: <series_id>   # same-domain: triage → remediation within the same series family
 ```
+
+or
+
+```
+FINDINGS: <one-sentence diagnosis and recommended action>
+ESCALATE_TO: <series_id>     # cross-domain: hand off to a different agent/domain
+```
+
+**`TRANSITION_TO:`** is used when the triage playbook hands off to its remediation counterpart within the same problem domain — for example, `pbs_vacuum_triage` → `pbs_vacuum_remediate`, or `pbs_lock_chain_triage` → `pbs_lock_chain_remediate`. The two playbooks form a deliberate pair; the triage agent has done its job and the next step is the expected remediation.
+
+**`ESCALATE_TO:`** is used for true out-of-scope escalations — the diagnosis requires a different agent or domain entirely, such as a DB agent discovering a Docker-level problem and handing off to the SysAdmin agent (`ESCALATE_TO: pbs_sysadmin_docker_inspect`). These are genuinely unexpected handoffs.
 
 The Gateway strips these lines from the visible `text` returned to the operator, then uses them to:
 
-- Set `outcome=resolved` when only `FINDINGS:` is present (root cause identified)
+- Set `outcome=resolved` when only `FINDINGS:` is present, or when `FINDINGS:` contains `recommended=monitor` or `recommended=no_changes_needed` (nothing actionable found)
+- Set `outcome=transitioned` and `transitioned_to=<series_id>` when `TRANSITION_TO:` is present
 - Set `outcome=escalated` and `escalated_to=<series_id>` when `ESCALATE_TO:` is present
 - Populate `findings_summary` with the FINDINGS text
+
+**No-gate shortcut** — when `gate_escalation=true` and the agent's `FINDINGS:` line contains `recommended=monitor` or `recommended=no_changes_needed`, the gate does **not** fire regardless of signal line. The run is recorded as `outcome=resolved` immediately. This prevents operators from being asked to approve a pipeline that triage has already determined requires no action.
 
 What happens next depends on **two conditions** that the Gateway checks before auto-chaining:
 
@@ -1650,9 +1684,10 @@ Returned inline in `GET /fleet/playbooks` and by `GET /fleet/playbooks/{playbook
 
 | Outcome | How it gets recorded |
 |---|---|
-| `resolved` | Agent-mode: Gateway parses a `FINDINGS:` line (or conclusion fallback) from the agent's response and no `ESCALATE_TO:` signal is present. Fleet-mode: operator PATCHes the run after confirming the plan resolved the issue. |
-| `escalated` | Agent-mode: Gateway parses an `ESCALATE_TO: <series_id>` signal from the agent's response; `escalated_to` is set to that series ID. Fleet or agent: operator PATCHes with `outcome=escalated`. |
-| `abandoned` | Operator explicitly PATCHes the run with `outcome=abandoned` — used when an investigation was started but not completed (e.g. alert cleared before diagnosis, wrong Playbook selected). |
+| `resolved` | Agent-mode: Gateway parses a `FINDINGS:` line with no follow-on signal, **or** the `FINDINGS:` line contains `recommended=monitor` or `recommended=no_changes_needed`. Fleet-mode: operator PATCHes the run after confirming the plan resolved the issue. |
+| `transitioned` | Agent-mode: Gateway parses a `TRANSITION_TO: <series_id>` signal; `transitioned_to` is set to that series ID. Indicates the triage-to-remediation handoff completed within the same problem domain. |
+| `escalated` | Agent-mode: Gateway parses an `ESCALATE_TO: <series_id>` signal; `escalated_to` is set to that series ID. Indicates a true cross-domain handoff to a different agent. |
+| `abandoned` | Operator explicitly PATCHes the run with `outcome=abandoned` — used when an investigation was started but not completed (e.g. alert cleared before diagnosis, wrong Playbook selected). Also set when a gate is denied. |
 | `unknown` | Default at run start. Remains `unknown` if the agent's response contained no parseable signal and the operator has not yet patched the run. Runs that stay `unknown` are **not counted** in `resolution_rate` or `escalation_rate` — only the denominator `total_runs` includes them. |
 
 `resolution_rate` and `escalation_rate` use `total_runs` (not `resolved + escalated`) as the denominator, so `unknown` and `abandoned` runs dilute the rates. A low `resolution_rate` on an agent-mode Playbook often means the agent is not producing parseable `FINDINGS:` signals — check the `findings_summary` field on recent runs via `GET /playbook-runs/{runID}`.

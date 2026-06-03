@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -2051,6 +2052,69 @@ func TestHandleProceedEscalation_Approved_ChainsToAgent(t *testing.T) {
 	// No A2A client → 502 from proxyToAgent, confirming the agent path was taken.
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleProceedEscalation_Approved_Transition verifies the path where the
+// pending gate originated from a TRANSITION_TO signal (run.TransitionedTo is set,
+// run.EscalatedTo is empty). The gateway must:
+//   - resolve the triage run with outcome="transitioned" (not "escalated")
+//   - persist transitioned_to in the PATCH body
+//   - look up the remediation playbook by the transitioned_to series_id
+//   - chain to the agent (502 here — no A2A client wired)
+func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
+	var patchBody string
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate03",
+		Outcome:         audit.OutcomeGatePending,
+		TransitionedTo:  "pbs_vacuum_remediate",
+		FindingsSummary: "Vacuum lag detected; manual vacuum needed.",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_vac_rem01",
+		SeriesID:      "pbs_vacuum_remediate",
+		Name:          "Vacuum & Bloat — Remediation",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	runData, _ := json.Marshal(run)
+
+	// Custom mock so we can capture and assert the PATCH body.
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			b, _ := io.ReadAll(r.Body)
+			patchBody = string(b)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem02"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_gate03",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	// No A2A client → 502, confirming the agent chain path was reached.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the PATCH stored outcome=transitioned with transitioned_to set.
+	if !strings.Contains(patchBody, `"transitioned"`) {
+		t.Errorf("PATCH body should contain outcome=transitioned; got: %s", patchBody)
+	}
+	if !strings.Contains(patchBody, "pbs_vacuum_remediate") {
+		t.Errorf("PATCH body should contain transitioned_to=pbs_vacuum_remediate; got: %s", patchBody)
 	}
 }
 

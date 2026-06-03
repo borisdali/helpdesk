@@ -8,9 +8,16 @@ The Decision Hub is a unified surface that aggregates every pending human decisi
 
 | Type | Prefix | Raised by | Raised when |
 |---|---|---|---|
-| `gate` | `gate:{runID}` | Gateway | Triage playbook completes and `gate_escalation=true`; `ESCALATE_TO` signal present |
+| `gate` | `gate:{runID}` | Gateway | Triage playbook completes and `gate_escalation=true`; `TRANSITION_TO` or `ESCALATE_TO` signal present and `recommended` is actionable |
 | `fleet_approval` | `fleet:{approvalID}` | fleet-runner | Job contains write or destructive steps and requires top-level approval |
 | `step_approval` | `step:{approvalID}` | Gateway | `agent_approve` playbook reaches a write/destructive step |
+
+Gates have two sub-types, reflected in `extra.gate_type`:
+
+| `gate_type` | Signal | What it means |
+|---|---|---|
+| `transition` | `TRANSITION_TO:` | Triage handing off to its expected remediation counterpart within the same problem domain (e.g. `pbs_vacuum_triage` → `pbs_vacuum_remediate`). Routine pipeline step. |
+| `escalation` | `ESCALATE_TO:` | True cross-domain handoff to a different agent or domain (e.g. DB agent → SysAdmin agent). May warrant closer operator scrutiny. |
 
 ---
 
@@ -43,18 +50,35 @@ curl http://localhost:8080/api/v1/decisions | jq .
       "id":           "gate:plr_a3f7c1b2",
       "type":         "gate",
       "status":       "pending",
-      "summary":      "Triage complete — ESCALATE_TO pbs_vacuum_remediate",
+      "summary":      "Triage complete — TRANSITION_TO pbs_vacuum_remediate",
       "requested_by": "alice",
       "requested_at": "2026-06-01T14:23:01Z",
       "resolve_url":  "POST https://helpdesk.internal/api/v1/decisions/gate:plr_a3f7c1b2/resolve",
       "extra": {
-        "escalation_target": "pbs_vacuum_remediate",
-        "findings": "Table public.orders has 94% dead tuple ratio...",
+        "gate_type":         "transition",
+        "transition_target": "pbs_vacuum_remediate",
+        "findings":          "Table public.orders has 94% dead tuple ratio...",
+        "series_id":         "pbs_vacuum_triage"
+      }
+    },
+    {
+      "id":           "gate:plr_b8e2d4f1",
+      "type":         "gate",
+      "status":       "pending",
+      "summary":      "Triage complete — ESCALATE_TO pbs_sysadmin_docker_inspect",
+      "requested_by": "bob",
+      "requested_at": "2026-06-01T13:11:45Z",
+      "resolve_url":  "POST https://helpdesk.internal/api/v1/decisions/gate:plr_b8e2d4f1/resolve",
+      "extra": {
+        "gate_type":          "escalation",
+        "escalation_target":  "pbs_sysadmin_docker_inspect",
+        "findings":           "Connection refused — Docker-level investigation needed.",
+        "series_id":          "pbs_connection_triage",
         "confidence_warning": "Primary hypothesis confidence 55%"
       }
     }
   ],
-  "total": 1
+  "total": 2
 }
 ```
 
@@ -133,15 +157,15 @@ All events use the same payload shape:
   "decision_id":  "gate:plr_a3f7c1b2",
   "type":         "gate",
   "status":       "pending",
-  "summary":      "Triage complete — ESCALATE_TO pbs_vacuum_remediate",
+  "summary":      "Triage complete — TRANSITION_TO pbs_vacuum_remediate",
   "requested_by": "alice",
   "resolve_url":  "POST https://helpdesk.internal/api/v1/decisions/gate:plr_a3f7c1b2/resolve",
-  "extra":        { "escalation_target": "pbs_vacuum_remediate", "findings": "..." },
+  "extra":        { "gate_type": "transition", "transition_target": "pbs_vacuum_remediate", "findings": "..." },
   "timestamp":    "2026-06-01T14:23:01Z"
 }
 ```
 
-`event` is `decision_pending` on creation and `decision_resolved` on approval/denial.
+`event` is `decision_pending` on creation and `decision_resolved` on approval/denial. For escalation gates, `extra.gate_type` is `"escalation"` and the target field is `escalation_target` instead of `transition_target`.
 
 ### Slack detection
 

@@ -39,6 +39,9 @@ type ApproveRunResponse struct {
 	EffectiveApprovalMode string          `json:"effective_approval_mode,omitempty"`
 
 	// Informed gate fields — populated when Status=="pending_gate".
+	// GateType is "transition" (same-domain triage→remediation) or "escalation" (cross-domain).
+	GateType              string `json:"gate_type,omitempty"`
+	TransitionTarget      string `json:"transition_target,omitempty"`
 	EscalationTarget      string `json:"escalation_target,omitempty"`
 	EscalationFindings    string `json:"escalation_findings,omitempty"`
 	ConfidenceWarning     string `json:"confidence_warning,omitempty"`
@@ -259,9 +262,14 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 // the gateway until an operator externally resolves the gate; otherwise it
 // auto-approves immediately (headless mode for automated test runs).
 func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) error {
+	target := gate.TransitionTarget
+	if target == "" {
+		target = gate.EscalationTarget
+	}
 	slog.Info("agent: informed gate pending",
 		"run_id", gate.RunID,
-		"escalation_target", gate.EscalationTarget,
+		"gate_type", gate.GateType,
+		"target", target,
 		"confidence_warning", gate.ConfidenceWarning,
 	)
 

@@ -900,7 +900,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
-		"triage_run_id", runID, "remediation_series", run.EscalatedTo,
+		"triage_run_id", runID, "remediation_series", nextSeriesID,
 		"approval_mode", remReq.ApprovalMode, "resolved_by", resolvedBy)
 
 	if nextPB.ExecutionMode == "agent_approve" {
