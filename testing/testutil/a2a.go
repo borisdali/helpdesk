@@ -30,6 +30,16 @@ type AgentResponse struct {
 	// RunID is the gateway playbook run ID for this response.
 	// Pass as prior_run_id to a remediation playbook so it starts with triage context.
 	RunID string
+
+	// Status is "pending_gate" when the gateway intercepted ESCALATE_TO at the
+	// triage→remediation phase boundary (gate_escalation=true was set). All
+	// other responses leave this empty.
+	Status string
+	// Gate detail fields — populated only when Status == "pending_gate".
+	EscalationTarget   string
+	EscalationFindings string
+	ConfidenceWarning  string
+	SuggestedMode      string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

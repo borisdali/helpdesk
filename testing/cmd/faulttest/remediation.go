@@ -17,6 +17,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/testing/faultlib"
+	"helpdesk/testing/testutil"
 )
 
 // RemediationResult holds the outcome of a remediation attempt.
@@ -40,6 +41,55 @@ func NewRemediator(cfg *HarnessConfig) *Remediator {
 	return &Remediator{
 		inner: faultlib.NewRemediator(toLFConfig(cfg)),
 		cfg:   cfg,
+	}
+}
+
+// HandlePendingGate handles a pending_gate response from the triage playbook.
+// It runs the gate loop (interactive TTY or emit-and-wait), after which the
+// gateway's proceed-escalation has already started the remediation playbook.
+// Recovery is polled independently until the fault clears.
+func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp testutil.AgentResponse) RemediationResult {
+	gate := faultlib.ApproveRunResponse{
+		RunID:                 resp.RunID,
+		Status:                resp.Status,
+		EscalationTarget:      resp.EscalationTarget,
+		EscalationFindings:    resp.EscalationFindings,
+		ConfidenceWarning:     resp.ConfidenceWarning,
+		SuggestedApprovalMode: resp.SuggestedMode,
+	}
+	slog.Info("gate pending: operator review required",
+		"failure", f.ID,
+		"run_id", gate.RunID,
+		"escalation_target", gate.EscalationTarget,
+	)
+	if err := r.runGateLoop(ctx, gate); err != nil {
+		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
+	}
+
+	spec := f.Remediation
+	verifySQL := spec.VerifySQL
+	if verifySQL == "" {
+		verifySQL = "SELECT 1"
+	}
+	timeout := 120 * time.Second
+	if spec.VerifyTimeout != "" {
+		if d, err := time.ParseDuration(spec.VerifyTimeout); err == nil {
+			timeout = d
+		}
+	}
+	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
+	if err != nil {
+		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: "playbook"}
+	}
+	score := 0.75
+	if recoverySecs <= timeout.Seconds()/2 {
+		score = 1.0
+	}
+	return RemediationResult{
+		Passed:           true,
+		RecoveryTimeSecs: recoverySecs,
+		Score:            score,
+		Method:           "playbook",
 	}
 }
 

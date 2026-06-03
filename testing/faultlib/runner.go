@@ -139,6 +139,9 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	if r.cfg.ApprovalMode != "" {
 		reqBody["approval_mode"] = r.cfg.ApprovalMode
 	}
+	if r.cfg.GateEscalation {
+		reqBody["gate_escalation"] = true
+	}
 	body, _ := json.Marshal(reqBody)
 
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"
@@ -171,12 +174,17 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	}
 
 	var result struct {
-		Text        string   `json:"text"`
-		CrystalBall bool     `json:"crystal_ball"`
-		Error       string   `json:"error"`
-		ToolCalls   []string `json:"tool_calls"`
-		Warnings    []string `json:"warnings"`
-		RunID       string   `json:"run_id"`
+		Text               string   `json:"text"`
+		CrystalBall        bool     `json:"crystal_ball"`
+		Error              string   `json:"error"`
+		ToolCalls          []string `json:"tool_calls"`
+		Warnings           []string `json:"warnings"`
+		RunID              string   `json:"run_id"`
+		Status             string   `json:"status"`
+		EscalationTarget   string   `json:"escalation_target"`
+		EscalationFindings string   `json:"escalation_findings"`
+		ConfidenceWarning  string   `json:"confidence_warning"`
+		SuggestedMode      string   `json:"suggested_approval_mode"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -188,11 +196,16 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		slog.Warn("gateway warning", "failure", f.ID, "warning", w)
 	}
 	ar := testutil.AgentResponse{
-		Text:        result.Text,
-		CrystalBall: result.CrystalBall,
-		Duration:    duration,
-		Warnings:    result.Warnings,
-		RunID:       result.RunID,
+		Text:               result.Text,
+		CrystalBall:        result.CrystalBall,
+		Duration:           duration,
+		Warnings:           result.Warnings,
+		RunID:              result.RunID,
+		Status:             result.Status,
+		EscalationTarget:   result.EscalationTarget,
+		EscalationFindings: result.EscalationFindings,
+		ConfidenceWarning:  result.ConfidenceWarning,
+		SuggestedMode:      result.SuggestedMode,
 	}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)
