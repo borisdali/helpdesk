@@ -257,11 +257,119 @@ func (g *Gateway) fetchPendingApprovals(ctx context.Context, status string, limi
 				"action_class":  a.ActionClass,
 				"resource_type": a.ResourceType,
 				"resource_name": a.ResourceName,
+				"run_id":        a.TraceID,
 			},
 		}
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// handleGetDecision handles GET /api/v1/decisions/{id}.
+// Returns the current state of a single decision by ID.
+// Supports gate:{runID}, step:{approvalID}, and fleet:{approvalID} prefixes.
+func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
+	if g.auditURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "auditd URL not configured")
+		return
+	}
+	id := r.PathValue("id")
+	baseURL := strings.TrimSuffix(g.baseURL, "/")
+
+	switch {
+	case strings.HasPrefix(id, "gate:"):
+		runID := strings.TrimPrefix(id, "gate:")
+		run, err := g.fetchPlaybookRun(r.Context(), runID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "run not found: "+err.Error())
+			return
+		}
+		status := "pending"
+		if run.Outcome != audit.OutcomeGatePending {
+			status = run.Outcome
+		}
+		d := decisions.Decision{
+			ID:          id,
+			Type:        decisions.DecisionTypeGate,
+			Status:      status,
+			Summary:     "Triage complete — ESCALATE_TO " + run.EscalatedTo,
+			RequestedBy: run.Operator,
+			RequestedAt: run.StartedAt,
+			ResolveURL:  baseURL + "/api/v1/decisions/" + id + "/resolve",
+			Extra: map[string]any{
+				"escalation_target": run.EscalatedTo,
+				"findings":          run.FindingsSummary,
+				"series_id":         run.SeriesID,
+			},
+		}
+		writeJSON(w, http.StatusOK, d)
+
+	case strings.HasPrefix(id, "step:"), strings.HasPrefix(id, "fleet:"):
+		var approvalID string
+		if strings.HasPrefix(id, "step:") {
+			approvalID = strings.TrimPrefix(id, "step:")
+		} else {
+			approvalID = strings.TrimPrefix(id, "fleet:")
+		}
+		aURL := strings.TrimSuffix(g.auditURL, "/") + "/v1/approvals/" + approvalID
+		ctx2, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx2, http.MethodGet, aURL, nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if g.auditAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "auditd unreachable: "+err.Error())
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			writeError(w, http.StatusNotFound, "approval not found")
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("auditd returned %d", resp.StatusCode))
+			return
+		}
+		var a audit.StoredApproval
+		if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
+			writeError(w, http.StatusInternalServerError, "decoding approval: "+err.Error())
+			return
+		}
+		dt := decisions.DecisionTypeStepApproval
+		idPrefix := "step"
+		if a.ActionClass == "escalation" {
+			dt = decisions.DecisionTypeFleetApproval
+			idPrefix = "fleet"
+		}
+		d := decisions.Decision{
+			ID:          idPrefix + ":" + a.ApprovalID,
+			Type:        dt,
+			Status:      a.Status,
+			Summary:     fmt.Sprintf("%s %s/%s", a.ActionClass, a.AgentName, a.ToolName),
+			RequestedBy: a.RequestedBy,
+			RequestedAt: a.RequestedAt,
+			ExpiresAt:   a.ExpiresAt,
+			ResolveURL:  baseURL + "/api/v1/decisions/" + id + "/resolve",
+			Extra: map[string]any{
+				"tool":          a.ToolName,
+				"agent":         a.AgentName,
+				"action_class":  a.ActionClass,
+				"resource_type": a.ResourceType,
+				"resource_name": a.ResourceName,
+				"run_id":        a.TraceID,
+			},
+		}
+		writeJSON(w, http.StatusOK, d)
+
+	default:
+		writeError(w, http.StatusBadRequest, "unknown decision ID prefix: "+id)
+	}
 }
 
 // fetchPendingGates calls GET /v1/fleet/playbook-runs?outcome=gate_pending

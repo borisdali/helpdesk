@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"helpdesk/internal/audit"
@@ -349,8 +350,23 @@ func (r *Remediator) WaitForGateResolution(ctx context.Context, runID string) (*
 		case "abandoned":
 			return nil, fmt.Errorf("gate denied by operator (run_id=%s)", runID)
 		default:
-			// Gate was approved; return a synthetic response so the caller can
-			// drive any subsequent pending_approval loop.
+			// Gate was approved externally. The remediation run has already
+			// started; find its first pending step approval so the approval
+			// loop can drive it. Retry briefly since the run may not have
+			// initialised yet when we detect the outcome change.
+			for attempt := 0; attempt < 6; attempt++ {
+				if stepResp := r.findPendingStepApproval(ctx); stepResp != nil {
+					return stepResp, nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
+			}
+			// No pending step approval found (remediation may have completed
+			// immediately or approval_mode=auto). Return the triage run outcome
+			// so the caller proceeds to pollRecovery.
 			return &ApproveRunResponse{RunID: runID, Status: run.Outcome}, nil
 		}
 	}
@@ -403,21 +419,29 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunRes
 
 		resolution := "approved"
 
-		if r.cfg.EmitAndWait && r.cfg.AuditURL != "" && current.ApprovalID != "" {
+		if r.cfg.EmitAndWait && current.ApprovalID != "" {
 			slog.Info("agent_approve: step approval pending — waiting for external resolution",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,
 				"approval_id", current.ApprovalID,
 			)
-			ac := audit.NewApprovalClient(r.cfg.AuditURL)
-			if r.cfg.GatewayAPIKey != "" {
-				ac = ac.WithAPIKey(r.cfg.GatewayAPIKey)
+			if r.cfg.AuditURL != "" {
+				ac := audit.NewApprovalClient(r.cfg.AuditURL)
+				if r.cfg.GatewayAPIKey != "" {
+					ac = ac.WithAPIKey(r.cfg.GatewayAPIKey)
+				}
+				stored, err := ac.WaitForApproval(ctx, current.ApprovalID, 30*time.Minute)
+				if err != nil {
+					return fmt.Errorf("waiting for step approval (id=%s): %w", current.ApprovalID, err)
+				}
+				resolution = stored.Status
+			} else if r.cfg.GatewayURL != "" {
+				var err error
+				resolution, err = r.waitForStepApprovalViaHub(ctx, current.ApprovalID)
+				if err != nil {
+					return fmt.Errorf("waiting for step approval via hub (id=%s): %w", current.ApprovalID, err)
+				}
 			}
-			stored, err := ac.WaitForApproval(ctx, current.ApprovalID, 30*time.Minute)
-			if err != nil {
-				return fmt.Errorf("waiting for step approval (id=%s): %w", current.ApprovalID, err)
-			}
-			resolution = stored.Status
 			slog.Info("agent_approve: step approval resolved",
 				"approval_id", current.ApprovalID,
 				"resolution", resolution,
@@ -537,6 +561,97 @@ func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string)
 
 	slog.Info("agent remediation triggered", "agent", agentName, "status", resp.StatusCode)
 	return nil
+}
+
+// findPendingStepApproval queries the gateway's decision hub for a pending step
+// approval and returns it as an ApproveRunResponse so the approval loop can
+// drive it. Returns nil when no pending step approval is found or the gateway
+// URL is not configured.
+func (r *Remediator) findPendingStepApproval(ctx context.Context) *ApproveRunResponse {
+	if r.cfg.GatewayURL == "" {
+		return nil
+	}
+	reqURL := strings.TrimSuffix(r.cfg.GatewayURL, "/") + "/api/v1/decisions?type=step_approval&status=pending&limit=5"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Decisions []struct {
+			ID    string         `json:"id"`
+			Extra map[string]any `json:"extra"`
+		} `json:"decisions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Decisions) == 0 {
+		return nil
+	}
+	d := result.Decisions[0]
+	approvalID := strings.TrimPrefix(d.ID, "step:")
+	runID, _ := d.Extra["run_id"].(string)
+	tool, _ := d.Extra["tool"].(string)
+	agent, _ := d.Extra["agent"].(string)
+	if runID == "" || approvalID == "" {
+		return nil
+	}
+	return &ApproveRunResponse{
+		RunID:      runID,
+		Status:     "pending_approval",
+		ApprovalID: approvalID,
+		Step: &ApproveRunStep{
+			Tool:  tool,
+			Agent: agent,
+		},
+	}
+}
+
+// waitForStepApprovalViaHub polls GET /api/v1/decisions/step:{approvalID} on
+// the gateway until the decision status is no longer "pending". Used when
+// AuditURL is not configured and the direct long-poll cannot be used.
+func (r *Remediator) waitForStepApprovalViaHub(ctx context.Context, approvalID string) (string, error) {
+	pollInterval := r.cfg.GatewayPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 10 * time.Second
+	}
+	decisionURL := strings.TrimSuffix(r.cfg.GatewayURL, "/") + "/api/v1/decisions/step:" + approvalID
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, decisionURL, nil)
+		if err != nil {
+			return "", err
+		}
+		if r.cfg.GatewayAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+		}
+		resp, err := r.client.Do(req)
+		if err != nil {
+			slog.Warn("faultlib: step approval hub poll failed", "approval_id", approvalID, "err", err)
+			continue
+		}
+		var d struct {
+			Status string `json:"status"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&d)
+		resp.Body.Close()
+		slog.Info("faultlib: step approval poll", "approval_id", approvalID, "status", d.Status)
+		if d.Status != "pending" && d.Status != "" {
+			return d.Status, nil
+		}
+	}
 }
 
 // pollRecovery runs verifySQL against r.cfg.ConnStr every 5 seconds until it

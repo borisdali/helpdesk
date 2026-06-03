@@ -384,6 +384,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))
+	mux.HandleFunc("GET /api/v1/decisions/{id}", auth("GET /api/v1/decisions/{id}", g.handleGetDecision))
 	mux.HandleFunc("POST /api/v1/decisions/{id}/resolve", auth("POST /api/v1/decisions/{id}/resolve", g.handleResolveDecision))
 
 	// Git webhook adapter — HMAC-validated, no Bearer auth required.
