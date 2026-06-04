@@ -351,8 +351,14 @@ func TestAssembleTriagePrompt_ResponseProtocol(t *testing.T) {
 	if !strings.Contains(prompt, "FINDINGS:") {
 		t.Error("prompt should instruct agent to emit FINDINGS: line")
 	}
+	if !strings.Contains(prompt, "TRANSITION_TO:") {
+		t.Error("prompt should mention TRANSITION_TO: so agents follow playbook guidance")
+	}
 	if !strings.Contains(prompt, "ESCALATE_TO:") {
-		t.Error("prompt should mention ESCALATE_TO: line")
+		t.Error("prompt should mention ESCALATE_TO: for true cross-domain escalations")
+	}
+	if !strings.Contains(prompt, "Expert Guidance") {
+		t.Error("prompt should refer agent to Expert Guidance for which signal to use")
 	}
 }
 

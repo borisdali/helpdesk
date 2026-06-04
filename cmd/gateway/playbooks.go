@@ -196,6 +196,12 @@ type PlaybookRunRequest struct {
 	// to the remediation playbook with their chosen approval mode.
 	// Takes precedence over approval_mode=auto/force.
 	GateEscalation bool `json:"gate_escalation,omitempty"`
+
+	// Purpose and PurposeNote are forwarded as X-Purpose / X-Purpose-Note headers
+	// so that tool dispatch policy checks see the operator's declared intent.
+	// Use "diagnostic", "remediation", "maintenance", etc.
+	Purpose     string `json:"purpose,omitempty"`
+	PurposeNote string `json:"purpose_note,omitempty"`
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -222,6 +228,15 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+
+	// Bridge purpose fields into headers so proxyToAgentWithTool has one place
+	// to read them (same pattern as handleQuery).
+	if req.Purpose != "" && r.Header.Get("X-Purpose") == "" {
+		r.Header.Set("X-Purpose", req.Purpose)
+	}
+	if req.PurposeNote != "" && r.Header.Get("X-Purpose-Note") == "" {
+		r.Header.Set("X-Purpose-Note", req.PurposeNote)
 	}
 
 	// Fetch the playbook from auditd.
@@ -1116,7 +1131,9 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	b.WriteString("HYPOTHESIS_2: <alternative hypothesis> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason>\n")
 	b.WriteString("ROOT_CAUSE: HYPOTHESIS_1\n")
 	b.WriteString("FINDINGS: <one-sentence diagnosis and recommended action>\n")
-	b.WriteString("ESCALATE_TO: <series_id or \"none\">\n\n")
+	b.WriteString("TRANSITION_TO: <series_id>   — use this when the Expert Guidance 'Final step' specifies TRANSITION_TO (same-domain handoff to the expected remediation playbook)\n")
+	b.WriteString("ESCALATE_TO: <series_id or \"none\">   — use this for true out-of-scope escalations to a different domain; use \"none\" if no escalation is needed\n")
+	b.WriteString("Emit exactly one of TRANSITION_TO or ESCALATE_TO (not both). Follow the 'Final step' in Expert Guidance to determine which signal and which series_id.\n\n")
 	b.WriteString("Rules: list hypotheses in descending confidence order; EVIDENCE must be a short verbatim quote from a tool output; every non-primary hypothesis must have REJECTED with a reason; CONFIDENCE is 0.0–1.0.\n\n")
 
 	fmt.Fprintf(&b, "## Playbook: %s\n\n", pb.Name)
@@ -1162,7 +1179,9 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	b.WriteString("HYPOTHESIS_2: ... | CONFIDENCE: ... | REJECTED: ...\n")
 	b.WriteString("ROOT_CAUSE: HYPOTHESIS_1\n")
 	b.WriteString("FINDINGS: <one-sentence diagnosis>\n")
-	b.WriteString("ESCALATE_TO: <series_id or \"none\">\n")
+	b.WriteString("TRANSITION_TO: <series_id>   (if Expert Guidance 'Final step' says TRANSITION_TO)\n")
+	b.WriteString("ESCALATE_TO: <series_id or \"none\">   (for true cross-domain escalations; \"none\" if neither applies)\n")
+	b.WriteString("Use exactly the signal and series_id from the Expert Guidance 'Final step'. Do not substitute one signal for the other.\n")
 
 	return b.String()
 }
