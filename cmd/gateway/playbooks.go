@@ -281,7 +281,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 
 	// Record the run start. Best-effort: failure does not block execution.
 	operator := r.Header.Get("X-User")
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, operator)
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, operator)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -709,7 +709,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		}
 	}
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -893,9 +893,16 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Build the remediation request, applying approval override clamping.
+	// Build the remediation request. Prefer connection_string from the resolve
+	// request body; fall back to the one stored on the triage run so operators
+	// don't need to re-supply it when approving a gate.
+	connStr := req.ConnectionString
+	if connStr == "" {
+		connStr = run.ConnectionString
+	}
+
 	remReq := PlaybookRunRequest{
-		ConnectionString: req.ConnectionString,
+		ConnectionString: connStr,
 		PriorRunID:       runID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
@@ -912,7 +919,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		remReq.PriorFindings = prior.FindingsSummary
 	}
 
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, resolvedBy)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -1338,16 +1345,17 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, operator string) string {
 	if g.auditURL == "" {
 		return ""
 	}
 	run := audit.PlaybookRun{
-		PlaybookID:    pb.PlaybookID,
-		SeriesID:      pb.SeriesID,
-		ExecutionMode: pb.ExecutionMode,
-		ContextID:     contextID,
-		Operator:      operator,
+		PlaybookID:       pb.PlaybookID,
+		SeriesID:         pb.SeriesID,
+		ExecutionMode:    pb.ExecutionMode,
+		ContextID:        contextID,
+		ConnectionString: connStr,
+		Operator:         operator,
 	}
 	body, err := json.Marshal(run)
 	if err != nil {

@@ -394,6 +394,11 @@ func (s *approvalServer) handleWaitForApproval(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	// Extend the per-connection write deadline to cover the full long-poll
+	// duration. The server's global WriteTimeout (30s) would otherwise close
+	// the connection mid-wait.
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + 5*time.Second)) //nolint:errcheck
+
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 

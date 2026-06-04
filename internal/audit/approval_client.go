@@ -159,44 +159,70 @@ func (c *ApprovalClient) GetApproval(ctx context.Context, approvalID string) (*S
 	return &result, nil
 }
 
-// WaitForApproval waits for an approval to be resolved (approved/denied/expired).
-// timeout specifies how long to wait before returning the current status.
+// WaitForApproval polls the audit service until the approval is resolved
+// (approved/denied/expired) or timeout elapses. The server caps each
+// individual long-poll at 120 s, so this method retries in a loop.
 func (c *ApprovalClient) WaitForApproval(ctx context.Context, approvalID string, timeout time.Duration) (*StoredApproval, error) {
-	// Create a separate client with longer timeout for long-poll
-	client := &http.Client{
-		Timeout: timeout + 5*time.Second, // Extra buffer for HTTP overhead
+	const pollChunk = 90 * time.Second // stay under the server's 120 s cap
+
+	// Preserve the auth transport from c.httpClient (set by WithAPIKey/WithUser).
+	transport := c.httpClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
 	}
 
-	u := fmt.Sprintf("%s/v1/approvals/%s/wait?timeout=%s", c.baseURL, approvalID, timeout.String())
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+	deadline := time.Now().Add(timeout)
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		chunk := remaining
+		if chunk > pollChunk {
+			chunk = pollChunk
+		}
+
+		client := &http.Client{
+			Timeout:   chunk + 10*time.Second,
+			Transport: transport,
+		}
+		u := fmt.Sprintf("%s/v1/approvals/%s/wait?timeout=%s", c.baseURL, approvalID, chunk.String())
+		httpReq, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
+		}
+		respBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read response: %w", readErr)
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("approval not found: %s", approvalID)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		var result StoredApproval
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+
+		if result.Status != "pending" {
+			return &result, nil
+		}
+		// Still pending — server's poll window elapsed; retry if time remains.
 	}
 
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("approval not found: %s", approvalID)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result StoredApproval
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
-	}
-
-	return &result, nil
+	// Timeout elapsed — return current status.
+	return c.GetApproval(ctx, approvalID)
 }
 
 // ListApprovals returns approvals matching the given filters.
