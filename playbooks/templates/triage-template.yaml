@@ -1,0 +1,124 @@
+# aiHelpDesk triage playbook template.
+#
+# Copy this file, rename it (e.g. my-thing-triage.yaml), fill in every field
+# marked REQUIRED, and remove all comment lines before submitting.
+#
+# Triage playbooks investigate a fault and produce a structured findings summary.
+# They run read-only (execution_mode: agent) — no write tools, no approval gates.
+# The final output must always be a FINDINGS line followed by a signal line
+# (TRANSITION_TO or ESCALATE_TO). The gateway reads those two lines to decide
+# what happens next; omitting or misspelling them breaks the chain.
+
+# REQUIRED. Unique identifier for this playbook series.
+# Convention: pbs_<domain>_<focus>_triage
+# Examples: pbs_vacuum_triage, pbs_connection_triage, pbs_k8s_pod_crash_triage
+# Must be stable — changing it breaks the transition chain from existing runs.
+series_id: pbs_REPLACE_ME_triage
+
+# REQUIRED. Human-readable name shown in the Decision Hub and audit trail.
+name: "REPLACE ME — Short Description Triage"
+
+# REQUIRED. Increment on every breaking change to guidance or FINDINGS format.
+# Start at "1.0". Use semver-style strings ("1.0", "1.1", "2.0").
+version: "1.0"
+
+# true  → selectable directly via the gateway UI / API / faulttest
+# false → only reachable by being chained from another playbook (rare for triage)
+entry_point: true
+
+# REQUIRED. How the playbook runs.
+# agent        → read-only investigation; no approval gates. Use for triage.
+# agent_approve → every write/destructive tool call requires operator approval.
+#                 Use for remediation, not triage.
+execution_mode: agent
+
+# REQUIRED. Which agent handles this playbook.
+# Available: postgres_database_agent | k8s_agent | sysadmin_agent
+agent_name: postgres_database_agent
+
+# Controls whether the triggered remediation run requires an approval gate.
+# manual → operator must approve each write step (recommended for production)
+# auto   → steps execute without per-step approval (safe for read-only triage,
+#          but avoid on remediation playbooks)
+approval_mode: manual
+
+# REQUIRED. Broad category used for filtering and dashboards.
+# One of: availability | capacity | performance
+problem_class: availability
+
+# REQUIRED. Your name or organisation. Used in the audit trail.
+author: YOUR_NAME_OR_ORG
+
+# REQUIRED. One or two sentences describing what this playbook investigates
+# and what evidence it collects. Do not describe the remediation action here.
+description: |
+  REPLACE ME. Describe the fault class being investigated and the key evidence
+  this playbook collects (e.g. which tools it calls, what hypothesis it forms).
+
+# REQUIRED. Observable symptoms that should trigger this playbook.
+# At least two entries. Use the language operators and monitoring systems use.
+symptoms:
+  - "REPLACE ME — symptom visible in monitoring"
+  - "REPLACE ME — symptom visible in application logs"
+
+# REQUIRED. Step-by-step investigation guidance for the agent.
+#
+# Structure:
+#   Step 1: [first tool call — establish baseline / confirm connectivity]
+#   Step 2: [deeper investigation — collect the key evidence]
+#   ...
+#   Final step: [mandatory — see format below]
+#
+# The Final step block is the most important part. It tells the agent exactly
+# what to emit. The gateway parses FINDINGS and the signal line verbatim.
+#
+# Signal rules:
+#   TRANSITION_TO: <series_id>  — use when this triage has a known remediation
+#       counterpart in the same domain (same agent, same DB/cluster). This is
+#       the normal case. The series_id must match the remediation playbook's
+#       series_id exactly.
+#   ESCALATE_TO: <series_id>    — use when the investigation reveals a problem
+#       outside this agent's domain (e.g. DB agent handing off to sysadmin agent).
+#   ESCALATE_TO: none           — use when no action is recommended (monitor only)
+#       OR when the investigation was incomplete (connection failure, policy denial,
+#       insufficient evidence). The gateway suppresses the gate in this case.
+#
+# EXCEPTION: if the agent was unable to complete the investigation (connection
+# failure, tool policy denial, insufficient evidence), it must emit
+# ESCALATE_TO: none regardless of what the Final step specifies.
+#
+# Do NOT use TRANSITION_TO and ESCALATE_TO on the same run.
+guidance: |
+  Step 1: REPLACE ME. Describe the first tool call. What does it confirm?
+  What are you looking for? What threshold or condition triggers the next step?
+
+  Step 2: REPLACE ME. Deeper investigation. Describe which tool to call, what
+  parameters to use, and what evidence to extract. Be specific about field names
+  and threshold values — the agent reads this as authoritative guidance.
+
+  Add more steps as needed. Each step should have a clear purpose and a clear
+  "done" condition. Avoid open-ended steps ("check if anything looks wrong").
+
+  Final step: after your ROOT_CAUSE line, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: REPLACE ME — define the exact format here. Example:
+    FINDINGS: table=<schema.table> dead_ratio=<N>; autovacuum=<running|stuck|blocked>; recommended=<action>
+  TRANSITION_TO: pbs_REPLACE_ME_remediate
+  #
+  # If this triage has no paired remediation (monitor-only or cross-domain):
+  #   Replace the TRANSITION_TO line with:
+  #   ESCALATE_TO: none         (monitor-only — no action required)
+  #   ESCALATE_TO: pbs_OTHER_AGENT_series_id   (cross-domain escalation)
+
+# Conditions under which the agent should stop and emit ESCALATE_TO: none
+# instead of the normal TRANSITION_TO. List the specific observable conditions
+# (tool output values, thresholds, error messages) that warrant escalation.
+# Be concrete — vague conditions ("if anything looks wrong") are ignored.
+escalation:
+  - "REPLACE ME — specific condition that warrants human review before any action"
+  - "REPLACE ME — another specific observable threshold"
+
+# Optional. Hints for the gateway to select the right target when multiple
+# targets are registered (e.g. multiple Postgres clusters). Usually empty.
+# Example: ["primary", "replica"]
+target_hints: []

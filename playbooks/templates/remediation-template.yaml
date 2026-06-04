@@ -1,0 +1,120 @@
+# aiHelpDesk remediation playbook template.
+#
+# Copy this file, rename it (e.g. my-thing-remediate.yaml), fill in every field
+# marked REQUIRED, and remove all comment lines before submitting.
+#
+# Remediation playbooks execute corrective actions. Every write or destructive
+# tool call is gated on operator approval (execution_mode: agent_approve).
+# The agent must disclose risk before requesting each approval — what will
+# change, what data may be lost, and whether the action is reversible.
+#
+# Remediation playbooks do NOT emit TRANSITION_TO or ESCALATE_TO. They end
+# when the agent confirms the fault is resolved (verification step) or when
+# it hits an escalation condition it cannot handle.
+
+# REQUIRED. Unique identifier for this playbook series.
+# Convention: pbs_<domain>_<focus>_remediate
+# Must match the series_id referenced in the paired triage playbook's
+# TRANSITION_TO line. Changing it breaks the gate chain.
+series_id: pbs_REPLACE_ME_remediate
+
+# REQUIRED. Human-readable name shown in the Decision Hub and audit trail.
+name: "REPLACE ME — Short Description Remediation"
+
+# REQUIRED. Increment on every breaking change to guidance.
+version: "1.0"
+
+# false → only reachable via a gate approval from the paired triage playbook.
+#         Use false for all remediation playbooks that follow a triage gate.
+# true  → also selectable directly (use when remediation can be run standalone,
+#          e.g. a known-good procedure that does not require prior diagnosis).
+entry_point: false
+
+# REQUIRED. How the playbook runs.
+# agent_approve → every write/destructive tool call requires operator approval.
+#                 Required for all remediation playbooks.
+execution_mode: agent_approve
+
+# REQUIRED. Which agent handles this playbook.
+# Must match the agent used by the paired triage playbook unless this is an
+# explicit cross-agent handoff (e.g. sysadmin_agent following a DB triage).
+# Available: postgres_database_agent | k8s_agent | sysadmin_agent
+agent_name: postgres_database_agent
+
+# Controls the approval gate behaviour.
+# manual → operator must approve each write/destructive step (recommended).
+# auto   → steps execute automatically. Only use for low-risk, fully reversible
+#          actions where human review adds no value.
+approval_mode: manual
+
+# REQUIRED. Must match the problem_class of the paired triage playbook.
+problem_class: availability
+
+# REQUIRED. Your name or organisation.
+author: YOUR_NAME_OR_ORG
+
+# REQUIRED. What this playbook does, not what it investigates.
+# Mention the specific tools called and the data at risk.
+# Operators read this before approving the gate — be honest about blast radius.
+description: |
+  REPLACE ME. Describe the corrective action taken (e.g. "Terminate the root
+  blocker session", "Run VACUUM ANALYZE on bloated tables"). Name any data loss
+  risk explicitly: "Terminating a session with has_writes=true will roll back
+  uncommitted DML." Do not describe the diagnosis — that is in the triage playbook.
+
+# Symptoms that indicate this remediation is appropriate.
+# Usually the same as (or a subset of) the paired triage playbook's symptoms.
+symptoms:
+  - "REPLACE ME — fault condition that this remediation resolves"
+  - "REPLACE ME — state confirmed by triage that warrants this action"
+
+# REQUIRED. Step-by-step execution guidance for the agent.
+#
+# Structure every remediation as:
+#   Step 1: Confirm current state — re-read the affected resource. Do not rely
+#           solely on triage findings; the fault may have changed since diagnosis.
+#   Step 2: Disclose risk before acting — for each write/destructive step, the
+#           agent must state in its response text: what will change, what will be
+#           lost, and whether the action is reversible. This text is shown to the
+#           operator before they approve the step.
+#   Step 3: Execute — call the write/destructive tool. Name the exact tool and
+#           parameters. Specify what "success" looks like in the tool response.
+#   Step 4: Verify — confirm the fault is resolved. Call a read tool and check
+#           a specific observable condition (not just "check if it looks better").
+#           State the expected value and what to do if it is not met.
+#
+# Per-step approval disclosure rules (enforced by the agent_approve loop):
+#   Before each write/destructive tool call, the agent's response text MUST include:
+#     - What the tool will do (specific object, specific operation)
+#     - Data loss risk: "has_writes=true — uncommitted DML will be rolled back"
+#       OR "no data loss risk — this operation is fully reversible"
+#     - Whether the action can be undone and how
+#   Approvals without this disclosure should be rejected by the operator.
+guidance: |
+  Step 1: Confirm current state.
+  REPLACE ME. Call a read tool to verify the fault is still present and to
+  collect the parameters needed for the corrective action (e.g. current PID,
+  table name, row count). Do not skip this — the fault may have resolved or
+  changed since triage ran.
+
+  Step 2: REPLACE ME — describe the write/destructive action.
+  Before requesting approval, your response text MUST include:
+    - Exactly which resource will be modified (e.g. "session PID 12345",
+      "table public.orders")
+    - Data loss risk: state explicitly whether uncommitted data will be lost
+    - Reversibility: "This action cannot be undone" OR "Undo by running <X>"
+
+  Step 3: REPLACE ME — verify the fault is resolved.
+  Call a read tool and confirm a specific observable condition. State the
+  expected value. If the condition is not met, describe what to check next.
+  Do NOT report success without evidence from a tool call.
+
+# REQUIRED. Conditions that should cause the agent to STOP and report to the
+# operator instead of proceeding. Be specific — name the observable values.
+# The agent will include these in its escalation text when it cannot proceed.
+escalation:
+  - "REPLACE ME — condition that makes this remediation unsafe to proceed"
+  - "REPLACE ME — another condition that requires operator escalation"
+
+# See triage template for usage. Usually empty for remediation playbooks.
+target_hints: []
