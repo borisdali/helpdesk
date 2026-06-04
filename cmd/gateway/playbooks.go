@@ -1182,6 +1182,7 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	b.WriteString("TRANSITION_TO: <series_id>   (if Expert Guidance 'Final step' says TRANSITION_TO)\n")
 	b.WriteString("ESCALATE_TO: <series_id or \"none\">   (for true cross-domain escalations; \"none\" if neither applies)\n")
 	b.WriteString("Use exactly the signal and series_id from the Expert Guidance 'Final step'. Do not substitute one signal for the other.\n")
+	b.WriteString("EXCEPTION: if you were unable to complete the investigation (policy denial, connection failure, or insufficient evidence to form a hypothesis), emit ESCALATE_TO: none regardless of what the Expert Guidance specifies.\n")
 
 	return b.String()
 }
