@@ -195,26 +195,36 @@ failures:
     external_compat: true
     external_inject:
       type: shell_exec
-      # Hold an ACCESS EXCLUSIVE lock in a background psql session.
+      # Produce real lock contention: a blocker session holds an ACCESS EXCLUSIVE
+      # lock on _faulttest_lock, and a waiter session SELECTs against the table
+      # and blocks on ACCESS SHARE. The remediation playbook must identify the
+      # blocker via get_blocking_queries and terminate it to unblock the waiter.
       # $FAULTTEST_CONN is injected by faulttest from the --conn flag.
       script_inline: |
         psql "$FAULTTEST_CONN" -c "
           CREATE TABLE IF NOT EXISTS _faulttest_lock (id int PRIMARY KEY);
           INSERT INTO _faulttest_lock VALUES (1) ON CONFLICT DO NOTHING;
         "
+        # Blocker: holds ACCESS EXCLUSIVE lock in an open transaction.
         { { printf "BEGIN;\nLOCK TABLE _faulttest_lock IN ACCESS EXCLUSIVE MODE;\n"; sleep 600; } \
           | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
         echo $! > /tmp/faulttest_lock_pid.txt
         sleep 1
-        echo "Injected: ACCESS EXCLUSIVE lock held by pid=$(cat /tmp/faulttest_lock_pid.txt)"
+        # Waiter: queues for ACCESS SHARE on _faulttest_lock, blocked by the blocker.
+        { psql "$FAULTTEST_CONN" -c "SELECT * FROM _faulttest_lock;" ; } >/dev/null 2>&1 &
+        echo $! > /tmp/faulttest_lock_waiter_pid.txt
+        sleep 2
+        echo "Injected: blocker pid=$(cat /tmp/faulttest_lock_pid.txt) holds ACCESS EXCLUSIVE; waiter pid=$(cat /tmp/faulttest_lock_waiter_pid.txt) blocked on ACCESS SHARE"
     external_teardown:
       type: shell_exec
       script_inline: |
-        # Kill the local background process (best-effort; psql may outlive the subshell).
-        if [ -f /tmp/faulttest_lock_pid.txt ]; then
-          kill "$(cat /tmp/faulttest_lock_pid.txt)" 2>/dev/null || true
-          rm -f /tmp/faulttest_lock_pid.txt
-        fi
+        # Kill the local background processes (best-effort; psql may outlive the subshell).
+        for f in /tmp/faulttest_lock_pid.txt /tmp/faulttest_lock_waiter_pid.txt; do
+          if [ -f "$f" ]; then
+            kill "$(cat "$f")" 2>/dev/null || true
+            rm -f "$f"
+          fi
+        done
         # Terminate the session holding the ACCESS EXCLUSIVE lock on _faulttest_lock
         # so DROP TABLE doesn't block if the local kill didn't propagate to psql.
         # LOCK TABLE doesn't set backend_xid, so we target via pg_locks instead.
