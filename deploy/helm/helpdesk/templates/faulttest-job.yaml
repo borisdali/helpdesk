@@ -155,6 +155,12 @@ spec:
             {{- if .Values.faulttest.remediate }}
             - --remediate
             {{- end }}
+            {{- if .Values.faulttest.gateEscalation }}
+            - --gate-escalation
+            {{- end }}
+            {{- if .Values.faulttest.emitAndWait }}
+            - --emit-and-wait
+            {{- end }}
             - --report-dir=/reports
           env:
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
@@ -165,6 +171,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.faulttest.gatewayAPIKeySecret }}
                   key: {{ .Values.faulttest.gatewayAPIKeyKey | default "api-key" }}
+            {{- end }}
+            {{- if .Values.faulttest.dbPasswordSecret.name }}
+            - name: {{ .Values.faulttest.dbPasswordSecret.envVar | default "PGPASSWORD" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.faulttest.dbPasswordSecret.name }}
+                  key: {{ .Values.faulttest.dbPasswordSecret.key | default "password" }}
             {{- end }}
             {{- with .Values.faulttest.extraEnv }}
             {{- toYaml . | nindent 12 }}

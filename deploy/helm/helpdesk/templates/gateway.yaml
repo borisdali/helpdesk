@@ -70,6 +70,45 @@ spec:
             - name: HELPDESK_CRYSTAL_BALL
               value: "true"
             {{- end }}
+            {{- if .Values.gateway.baseURL }}
+            - name: HELPDESK_BASE_URL
+              value: {{ .Values.gateway.baseURL | quote }}
+            {{- end }}
+            {{- if .Values.gateway.decisions.webhookURL }}
+            - name: HELPDESK_DECISION_WEBHOOK
+              value: {{ .Values.gateway.decisions.webhookURL | quote }}
+            {{- end }}
+            {{- if .Values.gateway.decisions.webhookSecret }}
+            - name: HELPDESK_DECISION_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "helpdesk.fullname" . }}-gateway-decision-secret
+                  key: webhook-secret
+            {{- end }}
+            {{- if .Values.gateway.decisions.smtpHost }}
+            - name: HELPDESK_SMTP_HOST
+              value: {{ .Values.gateway.decisions.smtpHost | quote }}
+            - name: HELPDESK_SMTP_PORT
+              value: {{ .Values.gateway.decisions.smtpPort | default "587" | quote }}
+            - name: HELPDESK_SMTP_USER
+              value: {{ .Values.gateway.decisions.smtpUser | quote }}
+            - name: HELPDESK_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "helpdesk.fullname" . }}-gateway-smtp-secret
+                  key: smtp-password
+            {{- end }}
+            {{- if .Values.gateway.gitWebhook.secret }}
+            - name: HELPDESK_GIT_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "helpdesk.fullname" . }}-gateway-git-secret
+                  key: webhook-secret
+            {{- end }}
+            {{- if .Values.gateway.gitWebhook.resolveBranch }}
+            - name: HELPDESK_GIT_RESOLVE_BRANCH
+              value: {{ .Values.gateway.gitWebhook.resolveBranch | quote }}
+            {{- end }}
             {{- if ne .Values.gateway.identity.provider "none" }}
             - name: HELPDESK_IDENTITY_PROVIDER
               value: {{ .Values.gateway.identity.provider | quote }}
