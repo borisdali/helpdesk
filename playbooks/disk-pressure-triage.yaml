@@ -1,0 +1,59 @@
+series_id: pbs_disk_pressure_triage
+name: Disk Pressure / Large Table Growth — Triage
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: capacity
+author: aiHelpDesk
+description: |
+  Diagnose disk pressure caused by large table growth. Identifies whether the
+  disk usage is driven by dead tuple accumulation (recoverable by VACUUM without
+  data loss) or live data growth (requires archival or partitioning). Also checks
+  whether autovacuum is enabled — disabled autovacuum is a common cause of
+  sustained bloat accumulation.
+symptoms:
+  - "disk usage growing faster than write volume suggests"
+  - "PostgreSQL data volume filling up"
+  - "large table sizes reported in monitoring"
+  - "queries slowing due to large table scans"
+guidance: |
+  Step 1: Call get_disk_usage to identify the largest databases and tables.
+  Note:
+  - Any individual table larger than 1GB.
+  - Any database whose size exceeds 50% of the total available disk space.
+  - The top 3–5 tables by size to understand where disk is being consumed.
+
+  Step 2: Call get_vacuum_status to check for tables with a high dead_ratio.
+  dead_ratio = n_dead_tup / (n_live_tup + n_dead_tup).
+  Thresholds:
+  - dead_ratio > 0.3 → significant bloat; VACUUM can reclaim this space without
+    touching live data. This is the recommended first action.
+  - dead_ratio 0.1–0.3 → moderate bloat; VACUUM is beneficial.
+  - dead_ratio < 0.1 → table is not significantly bloated; the data is live.
+  Note the table with the highest dead_ratio and its n_dead_tup count.
+  Also note last_autovacuum for flagged tables — NULL or very old dates indicate
+  autovacuum is not reaching these tables.
+
+  Step 3: For tables with low dead_ratio but large total size, the disk usage
+  is from live data. VACUUM cannot reclaim this space. The appropriate action
+  is data archival (moving old rows to a separate table or external storage)
+  or table partitioning to manage growth. This is outside the scope of automated
+  remediation — note the table name and its approximate row count.
+
+  Step 4: Call get_pg_settings with category="autovacuum" to check whether
+  autovacuum is globally enabled. If autovacuum = off, this is a critical
+  finding — dead tuples will accumulate indefinitely without manual VACUUM
+  runs. Report this clearly as a configuration risk.
+
+  Final step: after your analysis, output exactly two lines below. If
+  recommended=archive_live_data or recommended=monitor, use ESCALATE_TO: none
+  instead of TRANSITION_TO. Otherwise use TRANSITION_TO: pbs_vacuum_remediate.
+  Format (no markdown, no extra text on each line):
+  FINDINGS: largest_table=<schema.table> size=<size>; largest_db=<dbname> size=<size>; dead_ratio_flag=<schema.table dead_ratio=N | none>; autovacuum=<enabled|disabled>; recommended=<vacuum_large_table|archive_live_data|enable_autovacuum|monitor>
+  TRANSITION_TO: pbs_vacuum_remediate
+escalation:
+  - "disk > 90% full — risk of write failure is immediate; manual intervention required before automated remediation"
+  - "largest table has dead_ratio < 0.05 and is larger than 5GB — this is live data; archival or partitioning is required, outside the scope of this playbook"
+target_hints: []

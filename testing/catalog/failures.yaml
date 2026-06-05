@@ -225,6 +225,16 @@ failures:
           WHERE c.relname = '_faulttest_lock' AND l.granted AND l.pid <> pg_backend_pid();
           DROP TABLE IF EXISTS _faulttest_lock;
         "
+    diagnosis_playbook_series_id: pbs_lock_contention_triage
+    remediation:
+      playbook_id: pbs_slow_query_remediate
+      verify_sql: |
+        SELECT NOT EXISTS (
+          SELECT 1 FROM pg_locks l
+          JOIN pg_class c ON l.relation = c.oid
+          WHERE c.relname = '_faulttest_lock' AND l.granted AND l.pid <> pg_backend_pid()
+        )
+      verify_timeout: "60s"
     prompt: >
       The database is experiencing intermittent "deadlock detected" errors.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -245,10 +255,6 @@ failures:
       expected_diagnosis:
         category: "deadlock"
         narrative: "The agent should identify lock contention or a deadlock situation where transactions are waiting on locks held by other sessions, and recommend resolving the blocking sessions or reviewing transaction patterns."
-    remediation:
-      playbook_id: pbs_slow_query_remediate
-      verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
-      verify_timeout: "60s"
     timeout: 240s
 
   - id: db-table-bloat
@@ -342,6 +348,11 @@ failures:
       expected_diagnosis:
         category: "cache_performance"
         narrative: "The agent should identify a low buffer cache hit ratio indicating that queries are reading data from disk rather than shared_buffers, and recommend increasing shared_buffers or optimizing query access patterns."
+    diagnosis_playbook_series_id: pbs_cache_miss_triage
+    remediation:
+      playbook_id: pbs_cache_miss_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "60s"
     timeout: 60s
 
   - id: db-connection-refused
@@ -413,6 +424,7 @@ failures:
       expected_diagnosis:
         category: "authentication_failure"
         narrative: "The agent should identify that the database connection is failing due to incorrect credentials or an authentication error, and recommend verifying the username and password in the connection string."
+    diagnosis_playbook_series_id: pbs_auth_failure_triage
     timeout: 30s
 
   - id: db-not-exist
@@ -775,6 +787,10 @@ failures:
       overlay: k8s/overlays/crashloop
       restore: k8s/base
     diagnosis_playbook_series_id: pbs_k8s_pod_crash_triage
+    remediation:
+      playbook_id: pbs_k8s_pod_crash_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     prompt: >
       The database pod in namespace helpdesk-test is not running.
       Users report the database is completely unreachable.
@@ -827,6 +843,7 @@ failures:
           - "resource"
       expected_diagnosis:
         category: "pod_unschedulable"
+    diagnosis_playbook_series_id: pbs_k8s_pending_triage
     timeout: 60s
 
   - id: k8s-image-pull
@@ -861,6 +878,7 @@ failures:
           - "manifest unknown"
       expected_diagnosis:
         category: "image_pull_failure"
+    diagnosis_playbook_series_id: pbs_k8s_image_pull_triage
     timeout: 60s
 
   - id: k8s-no-endpoints
@@ -895,6 +913,7 @@ failures:
           - "empty"
       expected_diagnosis:
         category: "no_endpoints"
+    diagnosis_playbook_series_id: pbs_k8s_no_endpoints_triage
     timeout: 60s
 
   - id: k8s-pvc-pending
@@ -929,6 +948,7 @@ failures:
           - "unbound"
       expected_diagnosis:
         category: "pvc_pending"
+    diagnosis_playbook_series_id: pbs_k8s_pvc_triage
     timeout: 60s
 
   - id: k8s-oomkilled
@@ -947,6 +967,10 @@ failures:
       overlay: k8s/overlays/oomkilled
       restore: k8s/base
     diagnosis_playbook_series_id: pbs_k8s_pod_crash_triage
+    remediation:
+      playbook_id: pbs_k8s_pod_crash_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     prompt: >
       The database pod in namespace helpdesk-test keeps restarting.
       Please investigate what's causing the instability.
@@ -1005,6 +1029,11 @@ failures:
           - "not available"
       expected_diagnosis:
         category: "scaled_down"
+    diagnosis_playbook_series_id: pbs_k8s_scale_to_zero_triage
+    remediation:
+      playbook_id: pbs_k8s_scale_to_zero_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     timeout: 90s
 
   - id: db-vacuum-needed
@@ -1088,6 +1117,7 @@ failures:
       expected_diagnosis:
         category: "disk_pressure"
         narrative: "The agent should identify which databases or tables are consuming the most disk space and report on the storage situation, recommending cleanup or capacity planning."
+    diagnosis_playbook_series_id: pbs_disk_pressure_triage
     timeout: 60s
 
   # ── Host failures (1) ──────────────────────────────────────────────────
@@ -1243,6 +1273,7 @@ failures:
         cp "${PG_HBA}.faulttest.bak" "$PG_HBA"
         rm -f "${PG_HBA}.faulttest.bak"
         pg_ctl reload -D "$DATA_DIR" 2>/dev/null || kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
+    diagnosis_playbook_series_id: pbs_pg_hba_triage
     remediation:
       playbook_id: pbs_db_config_recovery
       verify_sql: "SELECT 1"

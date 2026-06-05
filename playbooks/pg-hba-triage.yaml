@@ -1,0 +1,52 @@
+series_id: pbs_pg_hba_triage
+name: pg_hba.conf Rejection — Triage
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a pg_hba.conf rejection that is preventing all non-local application
+  connections. The fault replaces pg_hba.conf with a file that rejects all
+  non-local connections. All application connections fail with "pg_hba.conf
+  rejects connection". Because the database connection itself is rejected, most
+  psql-based diagnostic tools cannot be used — diagnosis relies on capturing the
+  exact connection error and the target address from the connection string.
+symptoms:
+  - "all application connections failing with pg_hba.conf rejects connection"
+  - "psql authentication error on every non-local connection"
+  - "database unreachable from application pods"
+guidance: |
+  Step 1: Call check_connection against the connection_string in the context.
+  Capture the exact error message returned. Classify:
+  - "pg_hba.conf rejects connection for host" → confirmed HBA rejection.
+    This is the expected fault pattern. Proceed to Step 2.
+  - "password authentication failed" → this is a credential error, NOT an HBA
+    rejection. The HBA rule accepted the connection but authentication failed.
+    Escalate: use pbs_auth_failure_triage instead.
+  - "connection refused" → the PostgreSQL process is not listening. The database
+    may not be running. Escalate: use pbs_db_restart_triage instead.
+  - "SSL connection required" or SSL-related error → SSL configuration mismatch.
+    Escalate: use pbs_auth_failure_triage.
+
+  Step 2: Because pg_hba.conf is rejecting all non-local connections, no
+  psql-based tools (get_active_connections, get_slow_queries, etc.) will succeed.
+  Do NOT attempt to use them — they will all fail with the same HBA error.
+  The error from Step 1 is the primary diagnostic evidence.
+
+  Step 3: Extract the target information from the connection_string in the
+  context: the host, port, and database name. This identifies which PostgreSQL
+  instance has the misconfigured HBA file. Report the error verbatim and the
+  target host/dbname.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: error=<error text verbatim>; target=<host:port/dbname>; cause=hba_rejection
+  TRANSITION_TO: pbs_db_config_recovery
+escalation:
+  - "error is 'password authentication failed' — this is a credential issue, not HBA; use pbs_auth_failure_triage"
+  - "error is 'connection refused' — database process is not running; use pbs_db_restart_triage"
+  - "error is SSL-related — SSL configuration mismatch; use pbs_auth_failure_triage"
+target_hints: []

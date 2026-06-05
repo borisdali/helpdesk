@@ -1,0 +1,62 @@
+series_id: pbs_cache_miss_triage
+name: High Cache Miss Ratio — Triage
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: performance
+author: aiHelpDesk
+description: |
+  Diagnose elevated cache miss ratio (low buffer cache hit ratio) caused by
+  insufficient shared_buffers or large sequential scans evicting hot data from
+  the buffer pool. The fault fills a large table and runs a sequential scan,
+  then resets pg_stat, causing blks_read to be elevated relative to blks_hit.
+  Identifies whether the root cause is undersized shared_buffers or excessive
+  sequential scan activity.
+symptoms:
+  - "slow read queries despite low concurrency"
+  - "high disk I/O on the database server"
+  - "buffer cache hit ratio below 95%"
+  - "pg_stat_database shows high blks_read relative to blks_hit"
+guidance: |
+  Step 1: Call get_database_stats to retrieve blks_hit and blks_read for each
+  database. Calculate the cache hit ratio:
+    ratio = blks_hit / (blks_hit + blks_read)
+  Thresholds:
+  - ratio >= 0.99 → cache is healthy; look for other causes.
+  - ratio 0.95–0.99 → mild miss rate; monitor but not critical.
+  - ratio 0.90–0.95 → concerning; investigate further.
+  - ratio < 0.90 → serious; immediate investigation required.
+  Note the stats_reset timestamp. If stats were reset very recently (< 5
+  minutes ago), the window is too short for reliable diagnosis — flag this
+  and recommend monitoring before acting.
+
+  Step 2: Call get_slow_queries to check for queries performing large sequential
+  scans on tables that likely exceed shared_buffers in size. A seqscan on a
+  very large table reads every block from disk (or OS cache), flooding the
+  shared_buffers pool and evicting frequently-accessed hot pages. Note any query
+  with rows_examined > 1,000,000 or duration > 5 seconds that references a
+  large table.
+
+  Step 3: Call get_pg_settings with category="memory" to check the current
+  shared_buffers value. Compare it to the available RAM:
+  - If shared_buffers < 25% of total RAM and blks_read is elevated, undersized
+    shared_buffers is the likely root cause. Increasing shared_buffers would
+    reduce disk reads for frequently accessed data. Note: this requires a
+    PostgreSQL restart and must be scheduled in a maintenance window.
+  - If shared_buffers is already >= 25% of RAM, the problem is likely a
+    workload pattern (large seqscans) rather than configuration.
+
+  Note: pg_prewarm can warm frequently-accessed tables into shared_buffers
+  immediately without a restart. If a specific large table is identified as
+  the culprit, pg_prewarm is the immediate remediation option.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: cache_hit_ratio=<N>%; blks_read=<N>; blks_hit=<N>; shared_buffers=<value>; largest_seqscan_table=<schema.table | none>; recommended=<prewarm|increase_shared_buffers|investigate_queries|monitor>
+  TRANSITION_TO: pbs_cache_miss_remediate
+escalation:
+  - "cache hit ratio below 80% on a table larger than 1GB with no seqscan queries identified — may indicate a storage hardware or OS page cache issue"
+  - "stats_reset was very recent (< 5 minutes) — data window is too short for reliable diagnosis; monitor and re-triage after sufficient stats accumulate"
+target_hints: []

@@ -1,0 +1,65 @@
+series_id: pbs_k8s_image_pull_triage
+name: "K8s ImagePullBackOff — Triage"
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a pod stuck in ImagePullBackOff or ErrImagePull state. The fault
+  references a nonexistent container image tag, causing the container runtime
+  to fail every pull attempt. Identifies the exact image reference, the pull
+  failure reason (nonexistent tag, unauthorized access, or registry unreachable),
+  and determines the corrective action required (manifest change or imagePullSecret
+  creation).
+symptoms:
+  - "pod status shows ImagePullBackOff or ErrImagePull"
+  - "pod never reaches Running state"
+  - "application unavailable — container image cannot be pulled"
+  - "Back-off pulling image events in kubectl describe pod"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT query other namespaces unless fully investigating the named namespace
+  yields no results.
+
+  Step 1: Call get_pods for the ticket namespace. Find the pod in ImagePullBackOff
+  or ErrImagePull state. Note the full pod name. The STATUS column will show
+  ImagePullBackOff when Kubernetes has backed off retrying after repeated failures.
+
+  Step 2: Call get_events for the ticket namespace. Look for events with reason
+  "Failed" or "BackOff" on the pod. The event message includes the image name
+  and the specific pull error. Classify the failure:
+  - "manifest unknown" or "tag does not exist" or "not found" → the image tag
+    referenced in the manifest does not exist in the registry.
+    error = manifest_unknown.
+  - "unauthorized" or "access denied" or "authentication required" → the pull
+    requires credentials that are missing or invalid. An imagePullSecret may
+    need to be created or rotated.
+    error = unauthorized.
+  - "connection refused" or "dial tcp" or "no route to host" → the registry
+    endpoint is unreachable from the cluster. Likely a network or firewall issue.
+    error = network_unreachable.
+  Note the full image reference (registry/image:tag) from the event message.
+
+  Step 3: Based on the error classification, determine the corrective action:
+  - manifest_unknown → the image tag is wrong or the image was never pushed.
+    The Deployment manifest must be updated to reference a valid tag.
+    This is a manifest change that requires knowing the correct tag.
+  - unauthorized → an imagePullSecret referencing valid registry credentials
+    must be created in the namespace and referenced in the pod spec.
+    This is a secrets management action.
+  - network_unreachable → the registry URL may be wrong, or a firewall rule
+    is blocking outbound traffic to the registry. This requires network/
+    infrastructure investigation.
+  Remediation for all cases requires changes outside this agent's toolset.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: pod=<name>; image=<registry/image:tag>; error=<manifest_unknown|unauthorized|network_unreachable|other>; event_message=<first failure event message>
+  ESCALATE_TO: none
+escalation:
+  - "error is 'unauthorized' — an imagePullSecret with valid registry credentials must be created in the namespace and added to the pod spec"
+  - "error is network unreachable — check cluster DNS resolution and outbound firewall rules to the container registry"
+target_hints: []

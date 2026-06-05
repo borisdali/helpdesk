@@ -1,0 +1,67 @@
+series_id: pbs_k8s_scale_to_zero_triage
+name: "K8s StatefulSet Scaled to Zero — Triage"
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a StatefulSet that has been scaled to zero replicas, making the
+  database unavailable. All postgres pods have been terminated, either
+  deliberately or accidentally. If the shutdown was clean (no crash indicators
+  in recent events), scaling back up to 1 replica is a safe, reversible action.
+  Distinguishes a deliberate scale-down from a crash loop by examining recent
+  events.
+symptoms:
+  - "database unavailable — no postgres pod is running"
+  - "kubectl get pods shows no postgres pods in the namespace"
+  - "application connections refused — database unreachable"
+  - "StatefulSet exists but replica count is 0"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT query other namespaces unless fully investigating the named namespace
+  yields no results.
+
+  Step 1: Call get_pods for the ticket namespace. Confirm that no postgres pod
+  is in Running state. If zero postgres pods exist (not even in Pending or
+  Terminating), the StatefulSet has been scaled to zero or all pods have
+  terminated. Note any pods in Terminating state — if present, a scale-down is
+  still in progress and it is not safe to act yet.
+
+  Step 2: Call get_service (or describe any postgres service in the namespace)
+  to confirm the service selector — this tells you the expected pod label (e.g.
+  app=postgres) and therefore the expected pod name prefix (StatefulSet pods are
+  named <statefulset-name>-0, <statefulset-name>-1, etc.). Note the StatefulSet
+  or Deployment name inferred from the service selector.
+
+  Step 3: Call get_events for the ticket namespace. Look at the recent events
+  for the postgres pods (events referencing the pod name). Classify the shutdown:
+  - Events show "Killing" with reason "Stopping container" or "ScaleDown" →
+    clean shutdown; the StatefulSet was deliberately scaled down.
+    recent_events = clean_shutdown.
+  - Events show CrashLoopBackOff, OOMKilled, or FATAL → the pod(s) were crashing
+    and Kubernetes may have been cycling through them. Scaling up will immediately
+    crash again.
+    recent_events = crashloop.
+  - No recent events or events are too old to be informative →
+    recent_events = unknown.
+
+  Step 4: If recent_events = clean_shutdown, confirm this is a scale-to-zero:
+  no pods exist, the StatefulSet is present, and the shutdown was deliberate.
+  Scaling back to 1 replica is safe and reversible. The recommended action is
+  scale_up and the TRANSITION_TO path applies.
+
+  If recent_events = crashloop, do NOT recommend scale_up — the pod will crash
+  immediately. Escalate to pbs_k8s_pod_crash_triage to diagnose the crash root
+  cause before any scaling action.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: statefulset=<name | unknown>; replicas=0; recent_events=<clean_shutdown|crashloop|unknown>; recommended=scale_up
+  TRANSITION_TO: pbs_k8s_scale_to_zero_remediate
+escalation:
+  - "recent events show CrashLoopBackOff or FATAL errors — scaling up will immediately crash again; use pbs_k8s_pod_crash_triage to diagnose the crash root cause first"
+  - "pods are in Terminating state — scale-down is still in progress; wait for pods to fully terminate before taking any action"
+target_hints: []
