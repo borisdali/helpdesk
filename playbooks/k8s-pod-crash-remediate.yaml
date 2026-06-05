@@ -1,0 +1,153 @@
+series_id: pbs_k8s_pod_crash_remediate
+name: "K8s Pod Crash — Remediation"
+version: "1.0"
+entry_point: false
+execution_mode: agent_approve
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Remediate a crashed or restarting PostgreSQL pod based on triage findings.
+  Handles safe restart (controlled shutdown), memory limit increase (OOMKilled),
+  and escalation when disk expansion or data recovery is required.
+symptoms:
+  - "PostgreSQL pod is not Running after triage identified root cause"
+  - "OOMKilled — memory limit confirmed too low"
+  - "pod performed controlled shutdown (exit 0) — safe to restart"
+  - "transient process error — restart expected to resolve"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT operate on other namespaces.
+
+  Step 0 — Establish current pod state.
+  Call get_pods for the ticket namespace to confirm the postgres pod is still
+  not in Running state. If the pod is already Running (e.g. Kubernetes restarted
+  it automatically), verify it has been stable for > 2 minutes using describe_pod
+  (look at the restart count and last start time). If stable, skip to Step 4.
+
+  Parse the triage FINDINGS line to determine the recommended action:
+    action=restart                → proceed to Step 1
+    action=increase_memory_limit → proceed to Step 2
+    action=expand_disk           → proceed to Step 3A (escalate)
+    action=data_recovery         → proceed to Step 3B (escalate)
+    action=investigate           → proceed to Step 3C (gather more info)
+
+  Step 1 — Restart (action=restart).
+  Used when triage found: ExitCode=0 clean shutdown, or a transient process
+  error with no evidence of corruption or resource exhaustion.
+
+  1a. Confirm no data corruption indicators. Call describe_pod and check the
+  last termination message — if it mentions "checksum failure", "invalid page",
+  or "could not read block", do NOT restart. Stop and escalate (see Step 3B).
+
+  1b. Call restart_deployment for the postgres deployment in the ticket
+  namespace. Before requesting approval, state:
+  - The triage root cause (from FINDINGS)
+  - That no corruption indicators were found
+  - The expected outcome (pod returns to Running state)
+
+  1c. After approval and restart, proceed to Step 4 to verify recovery.
+
+  Step 2 — Increase memory limit (action=increase_memory_limit).
+  Used when triage found: ExitCode=137 (OOMKilled) or in-process OOM in logs.
+
+  2a. Call get_pod_resources to confirm the current memory limit. If the limit
+  is already >= 4Gi and the pod has OOMKilled more than twice in the last hour,
+  this may indicate a genuine memory leak rather than an undersized limit — note
+  this risk and proceed with a moderate increase, but flag that monitoring is
+  essential after the change.
+
+  2b. Calculate the new memory limit:
+  - Current limit < 1Gi → new limit = current × 2
+  - 1Gi ≤ current < 4Gi → new limit = current + 1Gi
+  - current ≥ 4Gi → new limit = current + 2Gi
+  Keep the request at 75% of the new limit (same ratio as current if set, else 75%).
+
+  2c. Call patch_deployment_resources for the postgres deployment with the new
+  memory limit and request. Before requesting approval, state:
+  - The current limit and how many OOMKills triggered this change
+  - The proposed new limit and request values
+  - Whether a memory leak is suspected (if so, note that this is a temporary
+    increase and the root cause must be investigated separately)
+
+  2d. After approval, the deployment rollout will restart the pod with the new
+  limit. Proceed to Step 4 to verify recovery.
+
+  Step 3A — Escalate: disk expansion required (action=expand_disk).
+  Disk expansion requires resizing the underlying PersistentVolumeClaim, which
+  may also require the StorageClass to support volume expansion. This is outside
+  the scope of this playbook.
+
+  State the following to the operator:
+  - The triage finding (pg_wal full, or insufficient data volume space)
+  - That PVC expansion is required and cannot be performed automatically
+  - Manual steps the operator should take:
+    1. kubectl get pvc -n <namespace> to identify the postgres data PVC
+    2. kubectl patch pvc <name> -n <namespace> -p '{"spec":{"resources":{"requests":{"storage":"<new_size>"}}}}'
+       (only works if StorageClass has allowVolumeExpansion=true)
+    3. After PVC expansion, delete the pod to trigger a fresh start on the
+       expanded volume
+  Do NOT call restart_deployment — restarting without resolving the disk issue
+  will put the pod back into CrashLoopBackOff immediately.
+
+  Step 3B — Escalate: data recovery required (action=data_recovery).
+  Data corruption (checksum failures, invalid page errors) requires careful
+  data recovery procedures that depend on whether a base backup is available.
+  Restarting the pod risks making corruption worse.
+
+  State the following to the operator:
+  - The specific corruption evidence from triage logs
+  - That automatic remediation is halted to prevent further damage
+  - Recommended immediate actions:
+    1. Do NOT restart the pod until the extent of corruption is known
+    2. Take a snapshot of the current PVC before any recovery attempt
+    3. Check pg_basebackup or WAL-G/pgBackRest archives for the last clean backup
+    4. Consider restoring from backup to a fresh PVC rather than in-place recovery
+  This playbook does not perform data recovery.
+
+  Step 3C — Further investigation required (action=investigate).
+  Triage was inconclusive. Gather additional diagnostic data before acting.
+
+  3C-1. Call describe_pod and look at the full event history for any
+  Kubernetes-level events (EvictedPod, NodePressure, OOMKiller at node level).
+
+  3C-2. Call get_pod_logs (previous=false) to see if the current container has
+  any startup errors (the previous container may have left clues in its
+  successor's init output).
+
+  3C-3. Call get_pod_resources to check both memory and CPU limits.
+  CPU throttling (cpuThrottlingHigh) can cause PostgreSQL to miss liveness
+  probe deadlines, triggering a restart that looks like a crash.
+
+  3C-4. Based on findings, determine whether to restart (Step 1), increase
+  resources (Step 2), or escalate (Step 3A or 3B).
+
+  Step 4 — Verify recovery.
+  After any remediation action (Step 1 or 2):
+
+  4a. Wait for the pod to reach Running state. Call get_pods every 30 seconds
+  (up to 3 checks) until the pod shows Running with READY = 1/1.
+
+  4b. Call describe_pod to confirm:
+  - STATUS is Running
+  - Restart count has not increased since the fix
+  - No new Warning events in the event log
+
+  4c. If the pod is Running and stable, state that remediation is complete and
+  note whether any follow-up is recommended (e.g. monitor memory usage after
+  limit increase, investigate pool misconfiguration after restart).
+
+  4d. If the pod is still not Running after Step 1 or 2, call get_pod_logs
+  (previous=true) on the new crash to determine if a different root cause is
+  now present. Do not apply further changes without operator guidance.
+
+  Final step: after your remediation summary, output exactly one line in this
+  format (no markdown, no extra text on the line):
+  FINDINGS: action=<restarted|memory_limit_patched|escalated_disk|escalated_corruption|investigated>; pod=<name>; outcome=<running|still_crashing|escalated>; follow_up=<none|monitor_memory|investigate_leak|manual_disk_expand|data_recovery>
+escalation:
+  - "describe_pod shows checksum or invalid page errors — halt, do not restart"
+  - "OOMKilled > 3 times with limit already >= 4Gi — memory leak suspected"
+  - "pg_wal disk full — PVC expansion required before any restart"
+  - "pod still not Running after restart_deployment — new crash with different root cause"
+target_hints: []

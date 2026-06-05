@@ -1,0 +1,65 @@
+series_id: pbs_k8s_pvc_triage
+name: "K8s PVC Pending — StorageClass Triage"
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a PersistentVolumeClaim stuck in Pending state due to a bad or
+  nonexistent StorageClass. The fault references a StorageClass that does not
+  exist in the cluster, preventing the PVC from being provisioned and leaving
+  the dependent pod in Pending state. Distinguishes between a genuinely broken
+  StorageClass reference and normal WaitForFirstConsumer binding mode behavior.
+symptoms:
+  - "pod stuck in Pending state due to unbound PVC"
+  - "PVC stays in Pending — no PersistentVolume is created"
+  - "ProvisioningFailed events for the PVC"
+  - "database pod never starts because its data volume cannot be provisioned"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT query other namespaces unless fully investigating the named namespace
+  yields no results.
+
+  Step 1: Call get_pods for the ticket namespace to identify the pod in Pending
+  state. Note the pod name. A pod waiting for a PVC to bind will show STATUS=
+  Pending with no FailedScheduling events (the scheduler accepted the pod but
+  the volume controller cannot provision the volume).
+
+  Step 2: Call get_events for the ticket namespace. Look for events related to
+  the PVC — these come from the volume controller or the CSI driver. Classify:
+  - "no volume plugin matched" or "provisioner not found" or
+    "storageclass.storage.k8s.io ... not found" → the StorageClass name
+    referenced in the PVC does not exist in the cluster, or the CSI driver
+    (provisioner) for that StorageClass is not installed.
+    error = class_not_found or error = provisioner_missing.
+  - "waiting for first consumer to be created before binding" or
+    "WaitForFirstConsumer" → the StorageClass uses Immediate=false / delayed
+    binding. The PVC is waiting for a pod to be scheduled before the volume is
+    provisioned in the correct zone. This is NORMAL behavior when WaitForFirstConsumer
+    is configured — not a fault. error = wait_first_consumer.
+  Note the StorageClass name from the event message and the full event message
+  for the FINDINGS line. Also note the PVC name referenced in the event.
+
+  Step 3: Based on the classification:
+  - class_not_found → the PVC's storageClassName field references a name that
+    does not exist. The manifest must be corrected to reference a valid
+    StorageClass, or the StorageClass must be created.
+  - provisioner_missing → the StorageClass exists but its CSI driver is not
+    installed in the cluster. The CSI driver must be deployed.
+  - wait_first_consumer → this is expected behavior; the PVC will bind once a
+    pod is scheduled to a node. If the pod itself is Pending, check pbs_k8s_pending_triage
+    for the scheduling issue.
+  Remediation for class_not_found and provisioner_missing requires infrastructure
+  or manifest changes that cannot be automated from within the cluster.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: pod=<name>; pvc=<pvc-name>; storage_class=<name>; error=<class_not_found|provisioner_missing|wait_first_consumer|other>; event_message=<first failure event>
+  ESCALATE_TO: none
+escalation:
+  - "WaitForFirstConsumer binding mode — this is expected behavior when no pod is yet scheduled; check if the pod itself is unschedulable and use pbs_k8s_pending_triage"
+  - "provisioner missing — the CSI driver for the StorageClass must be deployed cluster-wide; this is an infrastructure-level change"
+target_hints: []

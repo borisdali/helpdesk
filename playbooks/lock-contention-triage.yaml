@@ -1,0 +1,59 @@
+series_id: pbs_lock_contention_triage
+name: Lock Contention — Blocked Sessions Triage
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Investigate lock contention where one session holds a lock (typically
+  ACCESS EXCLUSIVE) on a table, blocking all other queries that need access
+  to that table. The root holder may be idle-in-transaction (connection
+  paused after acquiring the lock) or actively executing. Identify the root
+  lock holder, assess the blocked session count and lock type, and determine
+  whether cancel or terminate is required to release the lock.
+symptoms:
+  - "queries hanging on a specific table"
+  - "Lock wait events visible in pg_stat_activity"
+  - "application sessions timing out on reads or writes to one table"
+  - "multiple sessions blocked behind a single lock holder"
+guidance: |
+  Step 1: Call get_blocking_queries to find the full lock chain. The root lock
+  holder is the session with blocking_pid = NULL (it holds a lock but is not
+  itself waiting on any other session). Record its PID, state, and the table
+  it is locking.
+
+  Step 2: Call get_active_connections to list all sessions currently in a Lock
+  wait state. Count the blocked sessions. Note their wait_event (typically
+  'relation' or 'tuple' for table-level locks) and the table name.
+
+  Step 3: Call get_session_info on the root lock holder PID. Confirm:
+  - state: 'idle in transaction' means no query is executing — cancel_query
+    will not release the lock. Only terminate_connection will close the session
+    and release the lock.
+  - state: 'active' means a query is actively executing — cancel_query may
+    interrupt the query, but the transaction (and its lock) remains open unless
+    the session's full transaction is ended.
+  - has_writes: if true, terminating this session rolls back uncommitted DML.
+  - idle_secs: how long the session has been in its current state.
+
+  Step 4: Determine the correct action:
+  - If state = 'idle in transaction': cancel_query will NOT release the lock.
+    terminate_connection is required.
+  - If state = 'active' and the query itself is holding the lock (e.g. an
+    ALTER TABLE, TRUNCATE, or LOCK TABLE command): cancel_query may work if the
+    command is interruptible; terminate_connection is the reliable fallback.
+  Document the chain depth (number of blocked sessions) and the lock type
+  (ACCESS EXCLUSIVE, ROW EXCLUSIVE, etc.) from the blocking query details.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: blocker_pid=<pid> state=<state> has_writes=<true|false> idle_secs=<N>; blocked_sessions=<N>; lock_type=<AccessExclusive|RowExclusive|etc>; action=<terminate|cancel>
+  TRANSITION_TO: pbs_slow_query_remediate
+escalation:
+  - "root lock holder has has_writes=true and has been idle > 30 minutes — risk of significant data loss on terminate"
+  - "lock queue exceeds 20 sessions — assess full blast radius before any action"
+  - "blocking table is a system catalog (pg_class, pg_attribute, pg_namespace, etc.)"
+target_hints: []

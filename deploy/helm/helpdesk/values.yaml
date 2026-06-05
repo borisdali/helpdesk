@@ -125,6 +125,32 @@ gateway:
   # the agent with no structured scaffolding. Intended for LLM benchmark
   # comparisons and demos only. NOT recommended for production use.
   crystalBall: false
+
+  # Public base URL of this gateway (e.g. "https://helpdesk.example.com").
+  # Used to build absolute resolve_url links in Decision Hub API responses and
+  # webhook notification payloads. Leave empty to use relative paths (fine for
+  # CLI use; required for Slack/webhook notification links to be clickable).
+  baseURL: ""
+
+  # Decision Hub notifications — fires on gate, step-approval, and fleet-approval
+  # events. Slack incoming webhook URLs are auto-detected and formatted.
+  # All fields are optional; leave empty to disable the feature.
+  decisions:
+    webhookURL: ""           # generic JSON or Slack incoming webhook
+    webhookSecret: ""        # HMAC-SHA256 key; adds X-Helpdesk-Signature header
+    # SMTP email notifications (all four fields required when smtpHost is set).
+    smtpHost: ""
+    smtpPort: "587"
+    smtpUser: ""
+    smtpPassword: ""
+
+  # Git webhook adapter — approve a gate or fleet job by merging a branch named
+  # approved/gate/<runID> or approved/fleet/<approvalID>.
+  # Register POST /api/v1/webhooks/git in your git provider.
+  gitWebhook:
+    secret: ""           # HMAC-SHA256 key for X-Hub-Signature-256 / X-Gitlab-Token
+    resolveBranch: ""    # Branch prefix that triggers resolution (default: "approved/")
+
   identity:
     # Identity provider: none (default), static, or jwt.
     # "none"   = accept X-User / X-Roles headers without verification (dev only).
@@ -447,6 +473,31 @@ faulttest:
   # Requires viaGateway=true and a gateway API key. The remediation playbook
   # series must be defined in the fault catalog (remediation.playbook_series_id).
   remediate: false
+
+  # Informed gate: intercept ESCALATE_TO at the triage→remediation boundary and
+  # return status=pending_gate instead of auto-chaining. The Job blocks until an
+  # operator resolves the gate via the Decision Hub (POST .../proceed-escalation).
+  # Requires viaGateway=true. Pairs with emitAndWait for non-interactive runs.
+  gateEscalation: false
+
+  # Emit-and-wait: poll for gate and step approvals over HTTP instead of
+  # reading from /dev/tty. Required in K8s Jobs and Docker containers (no TTY).
+  emitAndWait: false
+
+  # DB password secret — injects a K8s Secret value as PGPASSWORD (or a custom
+  # env var name) into the faulttest Job. Required when the connection string
+  # does not embed a plain-text password and the injection scripts call psql
+  # directly (e.g. CNPG clusters where the password lives in a managed Secret).
+  #
+  # Example (CNPG):
+  #   dbPasswordSecret:
+  #     name: pg-cluster-minikube-app   # Secret created by the CNPG operator
+  #     key: password                    # key inside the Secret (default)
+  #     envVar: PGPASSWORD               # env var to inject (default)
+  dbPasswordSecret:
+    name: ""          # Set to enable; leave empty to skip
+    key: "password"
+    envVar: "PGPASSWORD"
 
   # Optional: Secret containing a gateway API key (HELPDESK_CLIENT_API_KEY).
   # Required when the gateway enforces inbound auth.

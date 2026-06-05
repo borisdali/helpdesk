@@ -1,6 +1,6 @@
 series_id: pbs_checkpoint_bgwriter_triage
 name: Checkpoint & bgwriter Triage
-version: "1.0"
+version: "1.2"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
@@ -108,6 +108,11 @@ guidance: |
 
   Note: stats_reset shows when counters were last zeroed. If stats_reset was
   recent, wait for meaningful data to accumulate before judging improvement.
+
+  Final step: after your analysis and parameter recommendations, output exactly
+  these two lines in this format (no markdown, no extra text on each line):
+  FINDINGS: checkpoints_req=<N> timed=<N>; maxwritten_clean=<N>; buffers_backend_fsync=<N>; recommended=<param=value[, param=value]* | no_changes_needed>
+  TRANSITION_TO: pbs_bgwriter_remediate
 
 escalation:
   - "buffers_backend_fsync > 0 — backends are doing their own fsyncs; immediate I/O capacity review needed"

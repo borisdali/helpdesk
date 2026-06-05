@@ -1,0 +1,60 @@
+series_id: pbs_replication_remediate
+name: Replication Lag — Resume WAL Replay
+version: "1.1"
+entry_point: true
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Resume streaming replication on a replica that has fallen behind or had its
+  WAL replay paused. pg_wal_replay_resume() is a targeted, reversible operation —
+  it resumes recovery on a standby that was paused via pg_wal_replay_pause(). It
+  has no effect on replicas that are running normally. For replicas that are
+  genuinely lagging due to write volume, there is nothing to "fix" — the lag
+  will resolve as the replica catches up.
+symptoms:
+  - "replica replay_lag growing steadily"
+  - "read replica returning stale data — recent writes on primary not visible"
+  - "pg_stat_replication.replay_paused = true on the primary"
+  - "monitoring alert: replication_lag_seconds elevated"
+guidance: |
+  Step 1: Confirm the lag cause on the primary.
+  Call get_replication_status. For each replica entry, check:
+  - replay_lag: duration since last WAL applied on the replica
+  - replay_paused: if true, WAL replay has been explicitly paused — this is
+    the case this playbook is designed to fix.
+  - state: 'streaming' means connected and receiving WAL; 'catchup' means
+    recovering from a larger gap; a missing entry means the replica disconnected.
+
+  If replay_paused is false (or null): the lag is not from a pause. The replica
+  is simply behind due to write volume or network. WAL replay will catch up on
+  its own — do NOT call pg_wal_replay_resume() as it is a no-op or may error.
+  Escalate to investigate network or replica load instead.
+
+  Step 2: Identify the replica connection string.
+  The replica is a separate PostgreSQL instance. Its connection string appears in
+  the Known Infrastructure section of your context as the replica entry for this
+  server (look for a connection string tagged as replica or standby). Do NOT run
+  pg_wal_replay_resume() on the primary — it will error with "not a standby".
+
+  Step 3: Resume WAL replay on the replica.
+  Call resume_wal_replay with the REPLICA connection string (not the primary).
+  This runs pg_wal_replay_resume() and allows the replica to catch up.
+  Before requesting approval, state:
+  - Current replay_lag from Step 1
+  - Confirm replay_paused=true (required — otherwise this call is not needed)
+  - The replica connection string you will use
+
+  Step 4: Verify lag is decreasing.
+  After resuming, call get_replication_status again on the primary. Confirm:
+  - replay_paused is now false (or null)
+  - replay_lag is decreasing (may take seconds to minutes depending on backlog)
+  A lag of 0 confirms full catch-up, but a decreasing lag confirms the fix worked.
+escalation:
+  - "replay_paused is false — lag is due to write volume or network, not a pause; do not call pg_wal_replay_resume()"
+  - "replica is not present in pg_stat_replication — it has disconnected; investigate WAL sender on primary"
+  - "replay_lag > 10 minutes — catch-up may take significant time and the replica should not be used for reads until lag is acceptable"
+  - "pg_wal_replay_resume() errors with 'recovery is paused but recovery target is not set' — requires pg_wal_replay_resume() with promote=true or manual recovery target change"
+target_hints: []

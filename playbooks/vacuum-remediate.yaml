@@ -1,0 +1,64 @@
+series_id: pbs_vacuum_remediate
+name: Table Bloat / Dead Tuples — Run VACUUM
+version: "1.2"
+entry_point: true
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: capacity
+author: aiHelpDesk
+description: |
+  Run VACUUM (or VACUUM ANALYZE) on tables with excessive dead tuples. Dead tuples
+  accumulate when autovacuum is disabled, tuned too conservatively, or cannot keep
+  up with the write rate. VACUUM reclaims the dead tuple space and updates visibility
+  maps. VACUUM ANALYZE also refreshes planner statistics. This playbook does NOT
+  reorganize the table on disk (use VACUUM FULL for that — it locks the table
+  exclusively and is not safe under normal load).
+symptoms:
+  - "table bloat increasing — disk usage elevated without write volume to explain it"
+  - "n_dead_tup growing on one or more tables"
+  - "autovacuum not keeping up — autovacuum_count not incrementing"
+  - "query plans degrading due to stale statistics"
+guidance: |
+  Step 1: Identify affected tables.
+  Call get_vacuum_status with min_dead_ratio=0.05. Find tables where n_dead_tup
+  is above threshold (typically > 10% of total rows, or an absolute count > 100,000
+  for large tables). Note the table, n_dead_tup, dead_ratio, and last_autovacuum
+  for each table. If last_autovacuum is NULL or very old, autovacuum is not reaching
+  this table.
+
+  Step 2: Check for blockers before vacuuming.
+  VACUUM cannot remove dead tuples that are still visible to open transactions
+  (they are behind the oldest xmin horizon). Call get_active_connections and look
+  for sessions with very old xact_start — if any session has been in an open
+  transaction for hours, VACUUM will make little progress on those dead tuples.
+  Flag this but proceed anyway: VACUUM will still clean newer dead tuples and
+  update the visibility map.
+
+  Step 3: Run VACUUM on affected tables.
+  For each table identified in Step 1, call run_vacuum with table=<schema.table>
+  and analyze=true.
+  VACUUM ANALYZE is preferred over plain VACUUM because it also refreshes
+  planner statistics, which is usually needed when bloat has degraded query plans.
+  Run tables in order from most dead tuples to least.
+  Before requesting approval (per table), state:
+  - Table name and dead tuple count
+  - Estimated reclaim (dead tuples × average row size)
+  - Whether autovacuum is disabled on this table (check reloptions in pg_class)
+
+  Step 4: Verify dead tuples reduced.
+  After VACUUM completes, call get_vacuum_status again. Confirm n_dead_tup has
+  dropped significantly for the treated tables. A complete drop to zero is
+  not expected if there are open transactions; a reduction of > 80% is normal.
+
+  Step 5: Check autovacuum configuration.
+  Call get_pg_settings with category="autovacuum". If autovacuum=off, report
+  this clearly — it must be re-enabled to prevent recurrence. If autovacuum
+  is enabled but the table has storage parameters (autovacuum_enabled=false
+  or very high autovacuum_vacuum_threshold), recommend adjusting them.
+escalation:
+  - "open transactions with xact_start age > 1 hour are blocking xmin horizon — VACUUM will not reclaim dead tuples older than the oldest open transaction"
+  - "table is in use by active long-running queries — VACUUM may contend for table locks"
+  - "n_dead_tup > 50% of n_live_tup and table is > 10GB — consider scheduling VACUUM FULL in a maintenance window (it will lock the table)"
+  - "autovacuum is globally disabled (autovacuum=off) — this requires a config change and service reload, not just a VACUUM run"
+target_hints: []

@@ -1,0 +1,67 @@
+series_id: pbs_k8s_pending_triage
+name: "K8s Pod Stuck in Pending — Triage"
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a Kubernetes pod stuck in Pending state. The fault requests 256Gi RAM
+  which no node can satisfy, causing the scheduler to reject the pod indefinitely.
+  Identifies the scheduling failure reason from events and resource requests, and
+  determines whether the root cause is an oversized resource request, a node
+  affinity/toleration mismatch, or an unbound PVC.
+symptoms:
+  - "pod stuck in Pending state — never transitions to Running"
+  - "kubectl get pods shows STATUS=Pending for an extended period"
+  - "application unavailable — no pod ever reached Running"
+  - "FailedScheduling events in kubectl describe pod output"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT query other namespaces unless fully investigating the named namespace
+  yields no results.
+
+  Step 1: Call get_pods for the ticket namespace to identify the pod in Pending
+  state. Note the pod name. If multiple pods are Pending, focus on the postgres
+  pod or the pod named in the ticket. Note any message visible in the STATUS
+  column.
+
+  Step 2: Call get_events for the ticket namespace. Look for FailedScheduling
+  events. The message in the event will contain the scheduling failure reason:
+  - "Insufficient memory" → the pod's memory request exceeds available capacity
+    on all nodes. reason = Insufficient_memory.
+  - "Insufficient cpu" → the pod's CPU request exceeds available capacity on
+    all nodes. reason = Insufficient_cpu.
+  - "node(s) didn't match node affinity" or "node(s) didn't match Pod's node
+    affinity/selector" → the pod has nodeAffinity or nodeSelector requirements
+    that no node satisfies. reason = node_affinity.
+  - "no nodes are available that match all of the following predicates" →
+    combination of constraints (taints, affinity, resources) that no node meets.
+    reason = no_nodes.
+  Note the full event message for the FINDINGS line.
+
+  Step 3: Call get_pod_resources for the pod to see the resource requests and
+  limits. A memory request larger than any node's total allocatable memory (e.g.
+  256Gi on a cluster with 8Gi nodes) will cause permanent Pending. Note the
+  requested_memory and requested_cpu values.
+
+  Step 4: Determine the root cause:
+  - Oversized resource request → reduce the request in the Deployment/StatefulSet
+    manifest to fit within node capacity. This is a manifest change.
+  - Node affinity/toleration mismatch → fix the affinity rules or toleration keys
+    in the manifest, or add the required label/taint to a node. This is a manifest
+    or node configuration change.
+  - PVC not bound → this is a storage provisioning issue (use pbs_k8s_pvc_triage).
+  Remediation requires a manifest change that cannot be automated without
+  further context about the intended resource requirements.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: pod=<name>; reason=<Insufficient_memory|Insufficient_cpu|node_affinity|no_nodes|other>; requested_memory=<value>; requested_cpu=<value>; scheduling_message=<first FailedScheduling event message>
+  ESCALATE_TO: none
+escalation:
+  - "PVC not bound — this is a storage provisioning issue; use pbs_k8s_pvc_triage for storage class and provisioner diagnosis"
+  - "all nodes are NotReady — this is a cluster-level problem, not a pod configuration issue; escalate to cluster operations"
+target_hints: []

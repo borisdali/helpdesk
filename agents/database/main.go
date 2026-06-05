@@ -477,6 +477,38 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	resumeWalReplayToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "resume_wal_replay",
+		Description: "Resume WAL replay on a paused standby (replica) by calling pg_wal_replay_resume(). Connect to the REPLICA connection string, not the primary. Use only when get_replication_status shows replay_paused=true on the standby. Requires operator approval (Write action).",
+	}, resumeWalReplayTool)
+	if err != nil {
+		return nil, err
+	}
+
+	runVacuumToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "run_vacuum",
+		Description: "Run VACUUM (optionally with ANALYZE) on a specific table to reclaim dead tuple space and refresh planner statistics. Requires operator approval (Write action). Table must be specified as schema.table.",
+	}, runVacuumTool)
+	if err != nil {
+		return nil, err
+	}
+
+	dropReplicationSlotToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "drop_replication_slot",
+		Description: "Drop an inactive replication slot to allow WAL recycling. Irreversible — once dropped, the replica cannot reconnect from that WAL position. Requires operator approval (Destructive action). Only call after confirming the replica is permanently decommissioned.",
+	}, dropReplicationSlotTool)
+	if err != nil {
+		return nil, err
+	}
+
+	resetPgSettingToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "reset_pg_setting",
+		Description: "Reset a PostgreSQL configuration parameter to its compiled-in default using ALTER SYSTEM RESET, then call pg_reload_conf() to apply the change without a restart. Requires operator approval (Write action). Use this to undo a misconfigured ALTER SYSTEM SET.",
+	}, resetPgSettingTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -506,6 +538,10 @@ func createTools() ([]tool.Tool, error) {
 		getPgLogToolDef,
 		readUploadedFileToolDef,
 		getSavedSnapshotsToolDef,
+		resumeWalReplayToolDef,
+		runVacuumToolDef,
+		dropReplicationSlotToolDef,
+		resetPgSettingToolDef,
 	}, nil
 }
 

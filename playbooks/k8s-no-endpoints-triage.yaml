@@ -1,0 +1,60 @@
+series_id: pbs_k8s_no_endpoints_triage
+name: "K8s Service — No Endpoints Triage"
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a Kubernetes Service with no endpoints — connection attempts from
+  applications time out because the service has no backing pods. The root cause
+  is either a label mismatch between the Service selector and pod labels, or the
+  absence of running pods in the namespace. Identifies which label key or value
+  is causing the mismatch.
+symptoms:
+  - "database connections timing out from application"
+  - "Service has no endpoints — kubectl get endpoints shows empty"
+  - "pods exist but service cannot route to them"
+  - "application gets connection timeout, not connection refused"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT query other namespaces unless fully investigating the named namespace
+  yields no results.
+
+  Step 1: Call get_service for the ticket namespace to find the postgres service
+  (or the service named in the ticket). Note the service name and its selector
+  labels (e.g. app=postgres, or role=primary). The selector defines which pod
+  labels must match for a pod to be included in the service's endpoint list.
+
+  Step 2: Call get_endpoints for the postgres service in the ticket namespace.
+  If the endpoints list is empty (or shows "<none>"), no pods are currently
+  matching the service selector. This is the confirmed fault condition.
+
+  Step 3: Call get_pods for the ticket namespace. Use the selector labels from
+  Step 1 as a label filter if the tool supports it. Check:
+  - If zero pods exist → pods were deleted or the StatefulSet/Deployment has
+    zero replicas. The service has no pods to route to.
+    mismatch = no_pods.
+  - If pods exist → check their labels against the service selector.
+    mismatch = <the label key that is absent or mismatched>.
+
+  Step 4: If pods exist, call describe_pod on the postgres pod to get its full
+  label set. Compare each label key=value in the pod's labels against the
+  service selector from Step 1. Identify:
+  - Which label key is missing from the pod labels (exists in selector but not
+    on the pod).
+  - Which label value is wrong (key exists but value differs from the selector).
+  For example: selector requires app=postgres but pod has app=postgresql →
+  the value "postgresql" does not match "postgres". Report the specific mismatch.
+  Remediation requires updating either the pod labels (in the Deployment/
+  StatefulSet template) or the Service selector — a manifest change.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: service=<name>; selector=<key=value>; endpoints=<N>; pods_with_matching_labels=<N>; mismatch=<label_key | no_pods | other>
+  ESCALATE_TO: none
+escalation:
+  - "pods exist and labels match the service selector but endpoints list is still empty — readiness probe may be failing; call describe_pod and check the readiness probe status and last failure message"
+target_hints: []

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
 
+	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 )
 
@@ -349,8 +351,14 @@ func TestAssembleTriagePrompt_ResponseProtocol(t *testing.T) {
 	if !strings.Contains(prompt, "FINDINGS:") {
 		t.Error("prompt should instruct agent to emit FINDINGS: line")
 	}
+	if !strings.Contains(prompt, "TRANSITION_TO:") {
+		t.Error("prompt should mention TRANSITION_TO: so agents follow playbook guidance")
+	}
 	if !strings.Contains(prompt, "ESCALATE_TO:") {
-		t.Error("prompt should mention ESCALATE_TO: line")
+		t.Error("prompt should mention ESCALATE_TO: for true cross-domain escalations")
+	}
+	if !strings.Contains(prompt, "Expert Guidance") {
+		t.Error("prompt should refer agent to Expert Guidance for which signal to use")
 	}
 }
 
@@ -683,6 +691,60 @@ func TestParseAgentEscalation_FallbackFromCleanText(t *testing.T) {
 	}
 	if !strings.Contains(esc.Findings, "DOWN") {
 		t.Errorf("Findings should mention DOWN, got %q", esc.Findings)
+	}
+}
+
+func TestParseAgentEscalation_TransitionTo(t *testing.T) {
+	// TRANSITION_TO: is the same-domain triage→remediate signal; must populate
+	// TransitionTo and leave EscalateTo empty.
+	text := "Lock chain diagnosed.\n\n" +
+		"FINDINGS: Root blocker PID 4321 (idle in transaction, has_writes=true); 3-level chain; terminate_connection required.\n" +
+		"TRANSITION_TO: pbs_lock_chain_remediate\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Findings == "" {
+		t.Error("Findings should be populated")
+	}
+	if esc.TransitionTo != "pbs_lock_chain_remediate" {
+		t.Errorf("TransitionTo = %q, want pbs_lock_chain_remediate", esc.TransitionTo)
+	}
+	if esc.EscalateTo != "" {
+		t.Errorf("EscalateTo = %q, want empty — TRANSITION_TO must not set EscalateTo", esc.EscalateTo)
+	}
+	if strings.Contains(esc.CleanText, "TRANSITION_TO:") {
+		t.Error("CleanText should not contain TRANSITION_TO: line")
+	}
+	if strings.Contains(esc.CleanText, "FINDINGS:") {
+		t.Error("CleanText should not contain FINDINGS: line")
+	}
+}
+
+// --- findingsRecommendMonitor ---
+
+func TestFindingsRecommendMonitor(t *testing.T) {
+	cases := []struct {
+		findings string
+		want     bool
+	}{
+		// gate should NOT fire
+		{"worst table public.orders dead_ratio=0.03; autovacuum=running; blocker_pid=none; recommended=monitor", true},
+		{"checkpoints_req=0 timed=12; maxwritten_clean=0; buffers_backend_fsync=0; recommended=no_changes_needed", true},
+
+		// gate SHOULD fire
+		{"worst table public.orders dead_ratio=0.35; autovacuum=stuck; blocker_pid=none; recommended=manual_vacuum", false},
+		{"top query queryid=42 mean_exec_time=15000ms calls=500/hr; wait_event=Lock; lock_contention=true; recommended=cancel_query", false},
+		{"connections 198/200 (99%); blocker=PID 1234 (idle, 45m, has_writes=false); recommended=terminate_blocker", false},
+		{"checkpoints_req=142 timed=8; maxwritten_clean=5; buffers_backend_fsync=0; recommended=max_wal_size=2GB", false},
+
+		// edge cases
+		{"", false},
+		{"no recommended field at all", false},
+		{"recommended=monitored", false}, // prefix match must not trigger
+	}
+	for _, tc := range cases {
+		if got := findingsRecommendMonitor(tc.findings); got != tc.want {
+			t.Errorf("findingsRecommendMonitor(%q) = %v, want %v", tc.findings, got, tc.want)
+		}
 	}
 }
 
@@ -1781,5 +1843,495 @@ func TestHandlePlaybookRun_ApprovalOverrideClamped(t *testing.T) {
 	}
 	if !strings.Contains(w0, "dba_lead") {
 		t.Errorf("warning should mention required role: %q", w0)
+	}
+}
+
+// postProceedEscalation posts to the proceed-escalation endpoint through the mux.
+func postProceedEscalation(t *testing.T, gw *Gateway, runID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/fleet/playbook-runs/"+runID+"/proceed-escalation",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// mockGatePendingAuditd serves the auditd calls made by handleProceedEscalation:
+// GET run, PATCH run, GET playbooks?series_id=, POST runs for recordPlaybookRunStart.
+// remedPB may be nil for tests that deny or error before the playbook lookup.
+func mockGatePendingAuditd(t *testing.T, run *audit.PlaybookRun, remedPB *audit.Playbook) *httptest.Server {
+	t.Helper()
+	runData, _ := json.Marshal(run)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			if remedPB != nil {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+			} else {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+			}
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem01"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// --- confidenceWarning ---
+
+func TestConfidenceWarning_NilReport(t *testing.T) {
+	gw := &Gateway{}
+	w, m := gw.confidenceWarning(nil)
+	if w != "" || m != "" {
+		t.Errorf("nil report: got warn=%q mode=%q, want both empty", w, m)
+	}
+}
+
+func TestConfidenceWarning_EmptyHypotheses(t *testing.T) {
+	gw := &Gateway{}
+	w, m := gw.confidenceWarning(&audit.DiagnosticReport{})
+	if w != "" || m != "" {
+		t.Errorf("empty hypotheses: got warn=%q mode=%q, want both empty", w, m)
+	}
+}
+
+func TestConfidenceWarning_HighConfidence(t *testing.T) {
+	gw := &Gateway{}
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{{Rank: 1, Confidence: 0.85, IsPrimary: true}},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w != "" || m != "" {
+		t.Errorf("high-confidence single: want no warn, got warn=%q mode=%q", w, m)
+	}
+}
+
+func TestConfidenceWarning_LowAbsolute(t *testing.T) {
+	gw := &Gateway{}
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{{Rank: 1, Confidence: 0.55, IsPrimary: true}},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w == "" {
+		t.Fatal("low-confidence: want non-empty warning, got empty")
+	}
+	if m != "manual" {
+		t.Errorf("suggested mode = %q, want manual", m)
+	}
+	if !strings.Contains(w, "55%") {
+		t.Errorf("warning should contain confidence percentage, got %q", w)
+	}
+}
+
+func TestConfidenceWarning_CompetingHypotheses(t *testing.T) {
+	gw := &Gateway{}
+	// primary=0.80, secondary=0.60 → 0.60/0.80 = 0.75 > 0.70 threshold → competing triggers
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, Confidence: 0.80, IsPrimary: true},
+			{Rank: 2, Confidence: 0.60},
+		},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w == "" {
+		t.Fatal("competing hypotheses: want non-empty warning, got empty")
+	}
+	if m != "manual" {
+		t.Errorf("suggested mode = %q, want manual", m)
+	}
+	if !strings.Contains(w, "competing") {
+		t.Errorf("warning should mention competing hypothesis, got %q", w)
+	}
+}
+
+func TestConfidenceWarning_CompetingBelowThreshold(t *testing.T) {
+	gw := &Gateway{}
+	// primary=0.80, secondary=0.40 → 0.40/0.80 = 0.50 < 0.70 threshold → no warn
+	report := &audit.DiagnosticReport{
+		Hypotheses: []audit.DiagnosticHypothesis{
+			{Rank: 1, Confidence: 0.80, IsPrimary: true},
+			{Rank: 2, Confidence: 0.40},
+		},
+	}
+	w, m := gw.confidenceWarning(report)
+	if w != "" || m != "" {
+		t.Errorf("secondary below threshold: want no warn, got warn=%q mode=%q", w, m)
+	}
+}
+
+// --- handleProceedEscalation ---
+
+func TestHandleProceedEscalation_RunNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	gw := makePlaybookRunGateway(srv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_missing", `{"resolution":"approved"}`)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404 for missing run", rec.Code)
+	}
+}
+
+func TestHandleProceedEscalation_WrongOutcome(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:       "plr_resolved01",
+		Outcome:     audit.OutcomeResolved,
+		EscalatedTo: "pbs_lock_chain_remediate",
+	}
+	auditSrv := mockGatePendingAuditd(t, run, nil)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_resolved01", `{"resolution":"approved"}`)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("got %d, want 409 for run with outcome=%q", rec.Code, audit.OutcomeResolved)
+	}
+}
+
+func TestHandleProceedEscalation_Denied(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate01",
+		Outcome:         audit.OutcomeGatePending,
+		EscalatedTo:     "pbs_lock_chain_remediate",
+		FindingsSummary: "Long-running transaction blocking replication.",
+	}
+	auditSrv := mockGatePendingAuditd(t, run, nil)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_gate01",
+		`{"resolution":"denied","resolved_by":"ops-alice"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("got %d, want 200 for denied gate", rec.Code)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp["status"] != "denied" {
+		t.Errorf("status = %q, want denied", resp["status"])
+	}
+	if resp["run_id"] != "plr_gate01" {
+		t.Errorf("run_id = %q, want plr_gate01", resp["run_id"])
+	}
+}
+
+// TestHandleProceedEscalation_Approved_ChainsToAgent verifies that an approved gate
+// resolves the triage run and chains to the remediation playbook. With no A2A client
+// wired, proxyToAgent returns 502 — confirming the agent path was reached.
+func TestHandleProceedEscalation_Approved_ChainsToAgent(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate02",
+		Outcome:         audit.OutcomeGatePending,
+		EscalatedTo:     "pbs_lock_chain_remediate",
+		FindingsSummary: "Lock chain detected; root blocker PID=1234.",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_remediate01",
+		SeriesID:      "pbs_lock_chain_remediate",
+		Name:          "Lock Chain — Terminate Root Blocker",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	auditSrv := mockGatePendingAuditd(t, run, remedPB)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_gate02",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	// No A2A client → 502 from proxyToAgent, confirming the agent path was taken.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleProceedEscalation_Approved_Transition verifies the path where the
+// pending gate originated from a TRANSITION_TO signal (run.TransitionedTo is set,
+// run.EscalatedTo is empty). The gateway must:
+//   - resolve the triage run with outcome="transitioned" (not "escalated")
+//   - persist transitioned_to in the PATCH body
+//   - look up the remediation playbook by the transitioned_to series_id
+//   - chain to the agent (502 here — no A2A client wired)
+func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
+	var patchBody string
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate03",
+		Outcome:         audit.OutcomeGatePending,
+		TransitionedTo:  "pbs_vacuum_remediate",
+		FindingsSummary: "Vacuum lag detected; manual vacuum needed.",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_vac_rem01",
+		SeriesID:      "pbs_vacuum_remediate",
+		Name:          "Vacuum & Bloat — Remediation",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	runData, _ := json.Marshal(run)
+
+	// Custom mock so we can capture and assert the PATCH body.
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			b, _ := io.ReadAll(r.Body)
+			patchBody = string(b)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem02"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_gate03",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	// No A2A client → 502, confirming the agent chain path was reached.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the PATCH stored outcome=transitioned with transitioned_to set.
+	if !strings.Contains(patchBody, `"transitioned"`) {
+		t.Errorf("PATCH body should contain outcome=transitioned; got: %s", patchBody)
+	}
+	if !strings.Contains(patchBody, "pbs_vacuum_remediate") {
+		t.Errorf("PATCH body should contain transitioned_to=pbs_vacuum_remediate; got: %s", patchBody)
+	}
+}
+
+// --- gate_escalation intercept tests ---
+
+// mockA2AServerWithText starts a minimal JSON-RPC A2A server that returns responseText
+// as the completed task's status message text.
+func mockA2AServerWithText(t *testing.T, agentName, responseText string) (*httptest.Server, *a2a.AgentCard) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-gate-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": responseText},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return srv, card
+}
+
+// mockGateAuditdPlaybook starts a mock auditd that handles the calls made
+// during a gate-intercepted playbook run (playbook fetch, run start, run complete).
+func mockGateAuditdPlaybook(t *testing.T, pb *audit.Playbook) *httptest.Server {
+	t.Helper()
+	pbData, _ := json.Marshal(pb)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			// Delegation verification events query and any other reads → empty list.
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// makeGateGateway wires a gateway with a mock A2A agent for gate_escalation tests.
+func makeGateGateway(t *testing.T, auditURL string, agentName, responseText string) *Gateway {
+	t.Helper()
+	_, card := mockA2AServerWithText(t, agentName, responseText)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+	gw := makePlaybookRunGateway(auditURL, nil)
+	gw.clients = map[string]*a2aclient.Client{agentName: client}
+	return gw
+}
+
+// TestHandlePlaybookRun_GateEscalation_Intercepts verifies that when
+// gate_escalation=true and the agent emits an actionable TRANSITION_TO (recommended
+// is not "monitor"), the gateway intercepts at the phase boundary and returns
+// status="pending_gate" with transition_target and gate_type="transition".
+func TestHandlePlaybookRun_GateEscalation_Intercepts(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage01",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples and autovacuum lag.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Analysis complete.\n\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.32 (4.2GB); autovacuum=stuck; blocker_pid=none; recommended=manual_vacuum\n" +
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"bloat alert","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	if resp["transition_target"] != "pbs_vacuum_remediate" {
+		t.Errorf("transition_target = %q, want pbs_vacuum_remediate", resp["transition_target"])
+	}
+	if resp["gate_type"] != "transition" {
+		t.Errorf("gate_type = %q, want transition", resp["gate_type"])
+	}
+	if resp["run_id"] == nil || resp["run_id"] == "" {
+		t.Error("run_id should be populated in pending_gate response")
+	}
+	if resp["escalation_findings"] == nil || resp["escalation_findings"] == "" {
+		t.Error("escalation_findings should be populated in pending_gate response")
+	}
+}
+
+// TestHandlePlaybookRun_GateEscalation_TrueEscalation verifies that a genuine
+// ESCALATE_TO (cross-domain handoff) returns gate_type="escalation" and
+// escalation_target (not transition_target).
+func TestHandlePlaybookRun_GateEscalation_TrueEscalation(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_conn_triage01",
+		SeriesID:      "pbs_connection_triage",
+		Name:          "Connection & Lock Triage",
+		Guidance:      "Check connection pool and lock contention.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// True ESCALATE_TO: the DB triage found something requiring a different domain
+	// (e.g. sysadmin-level action). This is NOT a same-series pipeline transition.
+	agentText := "Blocker session is making external calls. OS-level escalation needed.\n\n" +
+		"FINDINGS: connections 198/200 (99%); blocker=PID 4321 (active, 45m, has_writes=true); recommended=escalate\n" +
+		"ESCALATE_TO: pbs_sysadmin_docker_inspect\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection pool exhausted","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	if resp["escalation_target"] != "pbs_sysadmin_docker_inspect" {
+		t.Errorf("escalation_target = %q, want pbs_sysadmin_docker_inspect", resp["escalation_target"])
+	}
+	if resp["gate_type"] != "escalation" {
+		t.Errorf("gate_type = %q, want escalation", resp["gate_type"])
+	}
+	if resp["transition_target"] != nil && resp["transition_target"] != "" {
+		t.Errorf("transition_target should be absent for true escalation, got %q", resp["transition_target"])
+	}
+	if resp["run_id"] == nil || resp["run_id"] == "" {
+		t.Error("run_id should be populated in pending_gate response")
+	}
+}
+
+// TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept verifies that when
+// gate_escalation=true but the agent's FINDINGS line recommends "monitor" (nothing
+// actionable found), the gateway does NOT intercept — the run completes normally
+// without creating a pending_gate that would block on operator approval.
+func TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage02",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples and autovacuum lag.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Triage completes but finds nothing actionable: autovacuum is keeping up,
+	// dead_ratio is low. recommended=monitor → gate must NOT fire.
+	agentText := "All tables look healthy. Autovacuum is running normally.\n\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.03 (4.2GB); autovacuum=running; blocker_pid=none; recommended=monitor\n" +
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"routine check","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	// Gate must NOT have fired: the run should complete, not pause for operator approval.
+	if resp["status"] == "pending_gate" {
+		t.Error("gate fired for recommended=monitor — should complete without operator gate")
 	}
 }

@@ -73,7 +73,7 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${DB_AGENT_API_KEY:-}
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
@@ -119,7 +119,7 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${K8S_AGENT_API_KEY:-}
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
@@ -160,7 +160,7 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${SYSADMIN_AGENT_API_KEY:-}
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
@@ -200,7 +200,7 @@ services:
       HELPDESK_AUDIT_API_KEY: ${INCIDENT_AGENT_API_KEY:-}
       HELPDESK_GATEWAY_URL: http://gateway:8080
       HELPDESK_CLIENT_API_KEY: ${INCIDENT_AGENT_CLIENT_API_KEY:-}
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
@@ -238,7 +238,7 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${RESEARCH_AGENT_API_KEY:-}
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_POLICY_ENABLED: ${HELPDESK_POLICY_ENABLED:-false}
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
@@ -271,8 +271,9 @@ services:
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://auditd:1199
       HELPDESK_AUDIT_API_KEY: ${GATEWAY_API_KEY:-}
-      # Bearer token sent to agent /tool/{name} endpoints (required when agents enforce inbound auth)
-      HELPDESK_AGENT_API_KEY: ${HELPDESK_AGENT_API_KEY:-}
+      # Bearer token sent to agent /tool/{name} endpoints.
+      # Default matches the hash in users.example.yaml — CHANGE THIS IN PRODUCTION.
+      HELPDESK_AGENT_API_KEY: ${HELPDESK_AGENT_API_KEY:-gateway-api-key}
       # API key for operator CLIs exec'd inside this container (govexplain, srebot).
       HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
       # Identity & access (optional; defaults to "none" — unverified X-User headers)
@@ -286,6 +287,27 @@ services:
       # Crystal-ball mode: bypass playbook guidance, hypothesis formatting, and
       # escalation chaining. For LLM benchmarks / demos only. NOT for production.
       HELPDESK_CRYSTAL_BALL: ${HELPDESK_CRYSTAL_BALL:-}
+      # Decision Hub — public base URL used to build absolute resolve_url links in
+      # API responses and webhook notifications. Set to the externally reachable
+      # gateway URL (e.g. https://helpdesk.example.com). Leave empty to use
+      # relative paths (fine for CLI use; breaks Slack/webhook notification links).
+      HELPDESK_BASE_URL: ${HELPDESK_BASE_URL:-}
+      # Decision notifications — fires when any gate, step-approval, or fleet-approval
+      # opens or resolves. Slack incoming webhook URLs are auto-detected and formatted.
+      # Leave empty to disable. WEBHOOK_SECRET adds X-Helpdesk-Signature: sha256=<hex>.
+      HELPDESK_DECISION_WEBHOOK: ${HELPDESK_DECISION_WEBHOOK:-}
+      HELPDESK_DECISION_WEBHOOK_SECRET: ${HELPDESK_DECISION_WEBHOOK_SECRET:-}
+      # SMTP email notifications for decisions (optional — all fields required when set).
+      HELPDESK_SMTP_HOST: ${HELPDESK_SMTP_HOST:-}
+      HELPDESK_SMTP_PORT: ${HELPDESK_SMTP_PORT:-587}
+      HELPDESK_SMTP_USER: ${HELPDESK_SMTP_USER:-}
+      HELPDESK_SMTP_PASSWORD: ${HELPDESK_SMTP_PASSWORD:-}
+      # Git webhook adapter — approve a gate or fleet job by merging a branch named
+      # approved/gate/<runID> or approved/fleet/<approvalID>. Register
+      # POST /api/v1/webhooks/git in your git provider and set the secret below.
+      HELPDESK_GIT_WEBHOOK_SECRET: ${HELPDESK_GIT_WEBHOOK_SECRET:-}
+      # Branch prefix that triggers resolution (default: "approved/").
+      HELPDESK_GIT_RESOLVE_BRANCH: ${HELPDESK_GIT_RESOLVE_BRANCH:-}
     volumes:
       - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro

@@ -1,0 +1,71 @@
+series_id: pbs_connection_remediate
+name: Connection Overload — Terminate Idle Sessions
+version: "1.3"
+entry_point: true
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Remediate connection pool exhaustion or a session stuck in idle-in-transaction
+  by terminating the sessions responsible. Idle connections waste slots without
+  doing work; idle-in-transaction sessions hold locks and prevent autovacuum.
+  Both require operator confirmation before termination because an uncommitted
+  idle-in-transaction session may contain significant writes.
+symptoms:
+  - "max_connections reached — new connections refused"
+  - "too many clients already"
+  - "session stuck in idle in transaction for > threshold"
+  - "autovacuum blocked due to long-running idle transaction"
+guidance: |
+  Step 1: Confirm the nature of the overload.
+  Call get_active_connections. Count connections by state:
+  - state='idle': harmless in isolation but drain slots and may indicate pool
+    misconfiguration if count is very high.
+  - state='idle in transaction': holds an open transaction (and possibly locks).
+    More dangerous. These prevent VACUUM and can cause lock contention.
+  - state='idle in transaction (aborted)': the transaction was rolled back but
+    the connection was never closed. Same lock-holding risk.
+
+  Step 2A — Idle connection overload (state = 'idle').
+  Call terminate_idle_connections with idle_minutes=5 (the safe default).
+  Before requesting approval, state:
+  - How many idle connections will be terminated
+  - Current max_connections and how many slots will be freed
+  If terminate_idle_connections returns 0 terminated (all connections are newly
+  created, under 5 minutes old), call it again with idle_minutes=0 to terminate
+  all idle connections regardless of age.
+  Before requesting approval for the idle_minutes=0 call, state the count of
+  idle connections and that they are under 5 minutes old (e.g. newly opened by
+  a pool or load test that exhausted the slot limit).
+  Do NOT use this to terminate idle-in-transaction sessions — they require
+  per-session inspection first (see Step 2B).
+
+  Step 2B — Idle-in-transaction sessions.
+  For each session in state='idle in transaction' or 'idle in transaction (aborted)':
+  Call get_session_info with pid=<pid>. Check:
+  - has_writes: if true, terminating this session will roll back uncommitted DML.
+    Disclose the write risk explicitly before requesting approval.
+  - idle_secs: sessions idle > 300 seconds with has_writes=true are especially
+    risky; escalate rather than auto-terminating.
+  Call terminate_connection with pid=<pid> for each session after disclosing risk.
+  Terminate the longest-idle session first.
+
+  Step 3: Verify connections freed.
+  Call get_active_connections again. Confirm the total count is below
+  max_connections - 5 (enough headroom for normal operation). If idle-in-transaction
+  sessions were the target, confirm none remain with state='idle in transaction'.
+
+  Step 4: Flag root cause.
+  If idle connections dominate: the application connection pool is oversized or
+  not returning connections on close. Recommend reviewing pool max_size and
+  idle timeout settings.
+  If idle-in-transaction sessions recur: the application is beginning transactions
+  without committing them. Recommend setting idle_in_transaction_session_timeout
+  (PostgreSQL 9.6+) to auto-terminate these sessions.
+escalation:
+  - "idle-in-transaction session has has_writes=true and has been idle > 300s — risk of significant data loss on terminate"
+  - "more than 50% of max_connections are in active (non-idle) state — killing idle sessions will not help; investigate the active workload"
+  - "sessions are blocked on a lock held by an idle-in-transaction session — coordinate termination with the lock-chain remediation playbook"
+target_hints: []

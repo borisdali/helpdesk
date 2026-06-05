@@ -74,6 +74,7 @@ failures:
             WHERE state = 'idle' AND pid <> pg_backend_pid();
         " >/dev/null 2>&1 || true
         echo "Teardown: idle connections terminated"
+    diagnosis_playbook_series_id: pbs_connection_triage
     prompt: >
       Users are getting "too many clients" errors connecting to the database.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -93,9 +94,7 @@ failures:
         category: "connection_exhaustion"
         narrative: "The agent should identify that the PostgreSQL max_connections limit has been reached due to idle or sleeping sessions consuming all available connection slots, and recommend either terminating idle connections or increasing max_connections."
     remediation:
-      playbook_id: pbs_connection_triage
-      agent_name: database
-      agent_prompt: "There are too many idle connections on {{connection_string}}. Please terminate idle connections to free up connection slots."
+      playbook_id: pbs_connection_remediate
       verify_sql: "SELECT count(*) < current_setting('max_connections')::int - 5 FROM pg_stat_activity WHERE state = 'idle'"
       verify_timeout: "60s"
     timeout: 60s
@@ -150,6 +149,7 @@ failures:
           WHERE pid <> pg_backend_pid();
         "
         psql "$FAULTTEST_CONN" -c "DROP TABLE IF EXISTS _faulttest_longquery;"
+    diagnosis_playbook_series_id: pbs_slow_query_triage
     prompt: >
       Queries seem to hang indefinitely and certain tables are inaccessible.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -170,9 +170,7 @@ failures:
         category: "lock_blocking"
         narrative: "The agent should identify a long-running query holding an ACCESS EXCLUSIVE lock that is blocking other sessions from accessing the table, and recommend canceling or terminating the blocking query."
     remediation:
-      playbook_id: pbs_connection_triage
-      agent_name: database
-      agent_prompt: "A long-running query is holding an ACCESS EXCLUSIVE lock on {{connection_string}}, blocking other sessions. Please identify and cancel or terminate the blocking query."
+      playbook_id: pbs_slow_query_remediate
       verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
       verify_timeout: "60s"
     timeout: 90s
@@ -197,26 +195,36 @@ failures:
     external_compat: true
     external_inject:
       type: shell_exec
-      # Hold an ACCESS EXCLUSIVE lock in a background psql session.
+      # Produce real lock contention: a blocker session holds an ACCESS EXCLUSIVE
+      # lock on _faulttest_lock, and a waiter session SELECTs against the table
+      # and blocks on ACCESS SHARE. The remediation playbook must identify the
+      # blocker via get_blocking_queries and terminate it to unblock the waiter.
       # $FAULTTEST_CONN is injected by faulttest from the --conn flag.
       script_inline: |
         psql "$FAULTTEST_CONN" -c "
           CREATE TABLE IF NOT EXISTS _faulttest_lock (id int PRIMARY KEY);
           INSERT INTO _faulttest_lock VALUES (1) ON CONFLICT DO NOTHING;
         "
+        # Blocker: holds ACCESS EXCLUSIVE lock in an open transaction.
         { { printf "BEGIN;\nLOCK TABLE _faulttest_lock IN ACCESS EXCLUSIVE MODE;\n"; sleep 600; } \
           | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
         echo $! > /tmp/faulttest_lock_pid.txt
         sleep 1
-        echo "Injected: ACCESS EXCLUSIVE lock held by pid=$(cat /tmp/faulttest_lock_pid.txt)"
+        # Waiter: queues for ACCESS SHARE on _faulttest_lock, blocked by the blocker.
+        { psql "$FAULTTEST_CONN" -c "SELECT * FROM _faulttest_lock;" ; } >/dev/null 2>&1 &
+        echo $! > /tmp/faulttest_lock_waiter_pid.txt
+        sleep 2
+        echo "Injected: blocker pid=$(cat /tmp/faulttest_lock_pid.txt) holds ACCESS EXCLUSIVE; waiter pid=$(cat /tmp/faulttest_lock_waiter_pid.txt) blocked on ACCESS SHARE"
     external_teardown:
       type: shell_exec
       script_inline: |
-        # Kill the local background process (best-effort; psql may outlive the subshell).
-        if [ -f /tmp/faulttest_lock_pid.txt ]; then
-          kill "$(cat /tmp/faulttest_lock_pid.txt)" 2>/dev/null || true
-          rm -f /tmp/faulttest_lock_pid.txt
-        fi
+        # Kill the local background processes (best-effort; psql may outlive the subshell).
+        for f in /tmp/faulttest_lock_pid.txt /tmp/faulttest_lock_waiter_pid.txt; do
+          if [ -f "$f" ]; then
+            kill "$(cat "$f")" 2>/dev/null || true
+            rm -f "$f"
+          fi
+        done
         # Terminate the session holding the ACCESS EXCLUSIVE lock on _faulttest_lock
         # so DROP TABLE doesn't block if the local kill didn't propagate to psql.
         # LOCK TABLE doesn't set backend_xid, so we target via pg_locks instead.
@@ -227,6 +235,16 @@ failures:
           WHERE c.relname = '_faulttest_lock' AND l.granted AND l.pid <> pg_backend_pid();
           DROP TABLE IF EXISTS _faulttest_lock;
         "
+    diagnosis_playbook_series_id: pbs_lock_contention_triage
+    remediation:
+      playbook_id: pbs_slow_query_remediate
+      verify_sql: |
+        SELECT NOT EXISTS (
+          SELECT 1 FROM pg_locks l
+          JOIN pg_class c ON l.relation = c.oid
+          WHERE c.relname = '_faulttest_lock' AND l.granted AND l.pid <> pg_backend_pid()
+        )
+      verify_timeout: "60s"
     prompt: >
       The database is experiencing intermittent "deadlock detected" errors.
       The connection_string is "{{connection_string}}" — use it verbatim for
@@ -247,13 +265,7 @@ failures:
       expected_diagnosis:
         category: "deadlock"
         narrative: "The agent should identify lock contention or a deadlock situation where transactions are waiting on locks held by other sessions, and recommend resolving the blocking sessions or reviewing transaction patterns."
-    remediation:
-      playbook_id: pbs_connection_triage
-      agent_name: database
-      agent_prompt: "There is lock contention on {{connection_string}}. Please identify and terminate the blocking session to clear the deadlock."
-      verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
-      verify_timeout: "60s"
-    timeout: 180s
+    timeout: 240s
 
   - id: db-table-bloat
     name: "Table bloat / dead tuples"
@@ -280,6 +292,7 @@ failures:
     external_teardown:
       type: sql
       script_inline: "DROP TABLE IF EXISTS test_bloat_table;"
+    diagnosis_playbook_series_id: pbs_vacuum_triage
     prompt: >
       The database seems to be using more disk than expected and some queries
       are getting slower. The connection_string is "{{connection_string}}" —
@@ -298,9 +311,7 @@ failures:
         category: "table_bloat"
         narrative: "The agent should identify that a table has accumulated excessive dead tuples because autovacuum is disabled or not keeping up, causing disk bloat and query slowdowns, and recommend running VACUUM or re-enabling autovacuum."
     remediation:
-      playbook_id: pbs_vacuum_triage
-      agent_name: database
-      agent_prompt: "The table test_bloat_table on {{connection_string}} has excessive dead tuples and autovacuum is disabled. Please run VACUUM on it."
+      playbook_id: pbs_vacuum_remediate
       verify_sql: "SELECT COALESCE((SELECT n_dead_tup < 10000 FROM pg_stat_user_tables WHERE relname = 'test_bloat_table'), true)"
       verify_timeout: "120s"
     timeout: 60s
@@ -347,6 +358,11 @@ failures:
       expected_diagnosis:
         category: "cache_performance"
         narrative: "The agent should identify a low buffer cache hit ratio indicating that queries are reading data from disk rather than shared_buffers, and recommend increasing shared_buffers or optimizing query access patterns."
+    diagnosis_playbook_series_id: pbs_cache_miss_triage
+    remediation:
+      playbook_id: pbs_cache_miss_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "60s"
     timeout: 60s
 
   - id: db-connection-refused
@@ -367,6 +383,7 @@ failures:
       playbook_id: pbs_db_restart_triage
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
+    diagnosis_playbook_series_id: pbs_db_restart_triage
     prompt: >
       The database is unreachable and users are getting connection refused
       errors. The connection_string is "{{connection_string}}" — use it
@@ -417,6 +434,7 @@ failures:
       expected_diagnosis:
         category: "authentication_failure"
         narrative: "The agent should identify that the database connection is failing due to incorrect credentials or an authentication error, and recommend verifying the username and password in the connection string."
+    diagnosis_playbook_series_id: pbs_auth_failure_triage
     timeout: 30s
 
   - id: db-not-exist
@@ -486,10 +504,9 @@ failures:
       expected_diagnosis:
         category: "replication_lag"
         narrative: "The agent should identify that the streaming replica has fallen behind the primary due to paused or stalled WAL replay, and recommend resuming WAL replay or investigating the replica's replication slot."
+    diagnosis_playbook_series_id: pbs_replication_lag
     remediation:
-      playbook_id: pbs_replication_lag
-      agent_name: database
-      agent_prompt: "The streaming replica on {{connection_string}} has significant replication lag due to paused WAL replay. Please investigate and resume replication."
+      playbook_id: pbs_replication_remediate
       verify_sql: "SELECT count(*) = 0 FROM pg_stat_replication WHERE replay_lag > interval '60 seconds'"
       verify_timeout: "120s"
     timeout: 60s
@@ -542,6 +559,7 @@ failures:
             WHERE backend_xid IS NOT NULL AND pid <> pg_backend_pid();
           DROP TABLE IF EXISTS _faulttest_idle;
         "
+    diagnosis_playbook_series_id: pbs_connection_triage
     prompt: >
       A backend session appears to be stuck in a long-running transaction
       and users are experiencing write timeouts on a key table.
@@ -567,9 +585,7 @@ failures:
         category: "uncommitted_transaction"
         narrative: "The agent should identify a session stuck in idle-in-transaction state with uncommitted writes (backend_xid set), assess the rollback cost, and recommend terminating it after confirming it is safe to do so."
     remediation:
-      playbook_id: pbs_connection_triage
-      agent_name: database
-      agent_prompt: "There is a session stuck in idle-in-transaction on {{connection_string}} blocking other writes. Please terminate the stuck session to clear the transaction."
+      playbook_id: pbs_connection_remediate
       verify_sql: "SELECT count(*) = 0 FROM pg_stat_activity WHERE state = 'idle in transaction'"
       verify_timeout: "60s"
     timeout: 90s
@@ -657,6 +673,7 @@ failures:
         - get_session_info
       expected_keywords:
         any_of:
+          - "FINDINGS:"
           - "idle in transaction"
           - "idle-in-transaction"
           - "terminate"
@@ -779,6 +796,11 @@ failures:
       type: kustomize_delete
       overlay: k8s/overlays/crashloop
       restore: k8s/base
+    diagnosis_playbook_series_id: pbs_k8s_pod_crash_triage
+    remediation:
+      playbook_id: pbs_k8s_pod_crash_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     prompt: >
       The database pod in namespace helpdesk-test is not running.
       Users report the database is completely unreachable.
@@ -831,6 +853,7 @@ failures:
           - "resource"
       expected_diagnosis:
         category: "pod_unschedulable"
+    diagnosis_playbook_series_id: pbs_k8s_pending_triage
     timeout: 60s
 
   - id: k8s-image-pull
@@ -865,6 +888,7 @@ failures:
           - "manifest unknown"
       expected_diagnosis:
         category: "image_pull_failure"
+    diagnosis_playbook_series_id: pbs_k8s_image_pull_triage
     timeout: 60s
 
   - id: k8s-no-endpoints
@@ -899,6 +923,7 @@ failures:
           - "empty"
       expected_diagnosis:
         category: "no_endpoints"
+    diagnosis_playbook_series_id: pbs_k8s_no_endpoints_triage
     timeout: 60s
 
   - id: k8s-pvc-pending
@@ -911,7 +936,7 @@ failures:
     inject:
       type: kustomize
       overlay: k8s/overlays/pvc-pending
-      wait: 15s   # Scale-to-zero takes ~5-10s; wait lets postgres-0 terminate so only the pending pod remains
+      wait: 45s   # postgres-0 needs the full 30s graceful shutdown period before it is gone; 45s matches k8s-scale-to-zero
     teardown:
       type: kustomize_delete
       overlay: k8s/overlays/pvc-pending
@@ -933,6 +958,7 @@ failures:
           - "unbound"
       expected_diagnosis:
         category: "pvc_pending"
+    diagnosis_playbook_series_id: pbs_k8s_pvc_triage
     timeout: 60s
 
   - id: k8s-oomkilled
@@ -950,6 +976,11 @@ failures:
       type: kustomize_delete
       overlay: k8s/overlays/oomkilled
       restore: k8s/base
+    diagnosis_playbook_series_id: pbs_k8s_pod_crash_triage
+    remediation:
+      playbook_id: pbs_k8s_pod_crash_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     prompt: >
       The database pod in namespace helpdesk-test keeps restarting.
       Please investigate what's causing the instability.
@@ -1008,6 +1039,11 @@ failures:
           - "not available"
       expected_diagnosis:
         category: "scaled_down"
+    diagnosis_playbook_series_id: pbs_k8s_scale_to_zero_triage
+    remediation:
+      playbook_id: pbs_k8s_scale_to_zero_remediate
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     timeout: 90s
 
   - id: db-vacuum-needed
@@ -1028,6 +1064,7 @@ failures:
     teardown:
       type: sql
       script_inline: "DROP TABLE IF EXISTS vacuum_bloat;"
+    diagnosis_playbook_series_id: pbs_vacuum_triage
     prompt: >
       A DBA reports that queries on several tables are getting slower and
       autovacuum has not run recently. The connection_string is
@@ -1047,9 +1084,7 @@ failures:
         category: "vacuum_needed"
         narrative: "The agent should identify tables with high dead tuple ratios indicating they need VACUUM, and recommend running VACUUM on the affected tables or re-enabling autovacuum."
     remediation:
-      playbook_id: pbs_vacuum_triage
-      agent_name: database
-      agent_prompt: "Several tables on {{connection_string}} have excessive dead tuples and autovacuum is not keeping up. Please run VACUUM on the affected tables."
+      playbook_id: pbs_vacuum_remediate
       verify_sql: "SELECT COALESCE((SELECT n_dead_tup < 1000 FROM pg_stat_user_tables WHERE relname = 'vacuum_bloat'), true)"
       verify_timeout: "120s"
     timeout: 60s
@@ -1092,6 +1127,7 @@ failures:
       expected_diagnosis:
         category: "disk_pressure"
         narrative: "The agent should identify which databases or tables are consuming the most disk space and report on the storage situation, recommending cleanup or capacity planning."
+    diagnosis_playbook_series_id: pbs_disk_pressure_triage
     timeout: 60s
 
   # ── Host failures (1) ──────────────────────────────────────────────────
@@ -1112,8 +1148,9 @@ failures:
       type: docker
       action: start
       service: postgres
+    diagnosis_playbook_series_id: pbs_db_restart_triage
     prompt: >
-      The database server 'faulttest-db' is not responding. Please
+      The database server '{{server_id}}' is not responding. Please
       check the host-level status of the server and investigate why
       the database process is not running.
     evaluation:
@@ -1153,8 +1190,9 @@ failures:
       type: docker
       action: start
       service: postgres
+    diagnosis_playbook_series_id: pbs_db_restart_triage
     prompt: >
-      The database server 'faulttest-db' is not responding. Please
+      The database server '{{server_id}}' is not responding. Please
       check the host-level status of the server and investigate why
       the database process is not running.
     evaluation:
@@ -1245,6 +1283,7 @@ failures:
         cp "${PG_HBA}.faulttest.bak" "$PG_HBA"
         rm -f "${PG_HBA}.faulttest.bak"
         pg_ctl reload -D "$DATA_DIR" 2>/dev/null || kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
+    diagnosis_playbook_series_id: pbs_pg_hba_triage
     remediation:
       playbook_id: pbs_db_config_recovery
       verify_sql: "SELECT 1"
@@ -1308,6 +1347,7 @@ failures:
       playbook_id: pbs_db_restart_triage
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
+    diagnosis_playbook_series_id: pbs_db_restart_triage
     prompt: >
       The database server is completely unreachable — processes appear to have
       crashed. The connection_string is "{{connection_string}}" — use it
@@ -1558,7 +1598,7 @@ failures:
         echo "WARNING: PostgreSQL not healthy after 60 s" >&2
         exit 1
     prompt: >
-      The database server '{{connection_string}}' is unreachable — connection refused.
+      The database server '{{server_id}}' is unreachable — connection refused.
       Please check the host-level status of the server and investigate why
       the database process has stopped.
     evaluation:
@@ -1584,8 +1624,8 @@ failures:
           should recommend freeing disk space in pg_wal before restarting.
     timeout: 90s
     remediation:
-      playbook_id: pbs_wal_disk_full
       agent_name: sysadmin
+      agent_prompt: "The PostgreSQL server '{{server_id}}' was stopped due to WAL disk exhaustion (PANIC in pg_wal). The WAL space issue has been resolved. Please restart the database container so the server becomes reachable again."
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
 
@@ -1651,6 +1691,7 @@ failures:
         - read_pod_file
       expected_keywords:
         any_of:
+          - "FINDINGS:"
           - "pg_wal"
           - "WAL"
           - "disk"
@@ -1667,8 +1708,8 @@ failures:
           correctly diagnose WAL disk exhaustion.
     timeout: 90s
     remediation:
-      playbook_id: pbs_wal_disk_full
       agent_name: k8s
+      agent_prompt: "The PostgreSQL pod in namespace helpdesk-test crashed due to WAL disk exhaustion (PANIC: No space left on device in pg_wal). The pod should have been restarted by Kubernetes. Please confirm the pod is running and the database is accepting connections again."
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
 
@@ -1745,8 +1786,7 @@ failures:
           tuning.
     timeout: 90s
     remediation:
-      playbook_id: pbs_wal_stale_slot
-      agent_name: postgres_database_agent
+      playbook_id: pbs_stale_slot_remediate
       verify_sql: "SELECT count(*) = 0 FROM pg_replication_slots WHERE slot_name = 'old_standby'"
       verify_timeout: "30s"
 
@@ -1896,6 +1936,7 @@ failures:
         - get_bgwriter_stats
       expected_keywords:
         any_of:
+          - "FINDINGS:"
           - "checkpoint"
           - "too frequently"
           - "bgwriter"
@@ -1919,8 +1960,7 @@ failures:
           cause and recommend raising it to at least 100 (default) or higher.
     timeout: 90s
     remediation:
-      playbook_id: pbs_checkpoint_bgwriter_triage
-      agent_name: postgres_database_agent
+      playbook_id: pbs_bgwriter_remediate
       verify_sql: |
         SELECT (SELECT setting FROM pg_settings WHERE name = 'bgwriter_lru_maxpages') = '100'
       verify_timeout: "30s"

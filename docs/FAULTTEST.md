@@ -375,6 +375,8 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
 | `--source` | — | all | Filter by source: `builtin` or `custom` |
+| `--gate-escalation` | `FAULTTEST_GATE_ESCALATION` | `false` | Send `gate_escalation=true` on playbook run requests. The gateway intercepts the `ESCALATE_TO` signal at the phase boundary and opens a pending gate instead of auto-escalating. Combine with `--emit-and-wait` for non-interactive environments. |
+| `--emit-and-wait` | `FAULTTEST_EMIT_AND_WAIT` | `false` | Replace `/dev/tty` prompts with HTTP polling. Gate: polls `GET /api/v1/fleet/playbook-runs/{id}` every 15 s until resolved externally. Step: long-polls auditd `GET /v1/approvals/{id}/wait`. Required for Kubernetes Jobs and Docker containers where `/dev/tty` is unavailable. Requires `--approval-mode manual` and an external resolver (e.g. the Decision Hub or the git webhook adapter). |
 | `--report-dir` | — | `.` | Directory to write the JSON report (useful when running in a container with a mounted volume) |
 
 ¹ Default is `true` when running the standalone binary (no source tree detected). Default is `false` when running from the source tree (e.g. `go run ./testing/cmd/faulttest`). Override explicitly with `--external=false`.
@@ -762,6 +764,35 @@ docker run --rm --network host \
     --infra-config /infrastructure.json
 ```
 
+#### Approval gating without a TTY
+
+Docker containers have no `/dev/tty`, so `--approval-mode manual` and `--gate-escalation` cannot open an interactive prompt. Use `--emit-and-wait` to block on HTTP polling instead:
+
+```bash
+docker run --rm --network helpdesk_default \
+  -v "$(pwd)/infrastructure.json:/infrastructure.json:ro" \
+  -v "$(pwd):/output" -w /output \
+  -e DEV_DB_PASSWORD \
+  ghcr.io/org/helpdesk:v0.8.0 \
+  faulttest run \
+    --ids db-tx-lock-chain-blocker \
+    --via-gateway --gateway http://gateway:8080 \
+    --api-key $HELPDESK_API_KEY \
+    --infra-config /infrastructure.json \
+    --remediate --gate-escalation --emit-and-wait \
+    --approval-mode manual \
+    --audit-url http://auditd:7070
+# → logs "Gate pending — resolve_url=..."; blocks until resolved externally
+```
+
+Resolve from a separate terminal via the [Decision Hub](DECISIONS.md):
+
+```bash
+curl -X POST http://localhost:8080/api/v1/decisions/gate:plr_.../resolve \
+  -H "Content-Type: application/json" \
+  -d '{"resolution":"approved","resolved_by":"alice","approval_mode":"review"}'
+```
+
 ### 7.5 Running from Kubernetes (Helm)
 
 For Helm deployments the recommended approach is a one-off Job rather than `kubectl run`, because a Job can mount the ConfigMap and Secrets that the chart already created — giving `faulttest` access to `infrastructure.json` and any `password_env` variables without duplicating credentials:
@@ -820,6 +851,27 @@ kubectl -n helpdesk-system run faulttest --rm -it --restart=Never \
   --image=ghcr.io/org/helpdesk:v0.8.0 \
   -- faulttest list
 ```
+
+#### Approval gating in a Kubernetes Job
+
+Kubernetes Jobs also have no `/dev/tty`. Use `--emit-and-wait` so the pod blocks polling instead of hanging on a prompt. Add `FAULTTEST_GATE_ESCALATION=true` and `FAULTTEST_EMIT_AND_WAIT=true` as env vars:
+
+```yaml
+        args:
+          - faulttest
+          - run
+          - --ids=db-tx-lock-chain-blocker
+          - --via-gateway
+          - --gateway=http://helpdesk-gateway:8080
+          - --remediate
+          - --gate-escalation
+          - --emit-and-wait
+          - --approval-mode=manual
+          - --audit-url=http://helpdesk-auditd:7070
+          - --infra-config=/etc/helpdesk/infrastructure.json
+```
+
+The Job logs `Gate pending — resolve_url=...` and polls every 15 seconds. Resolve via the Decision Hub or via a [git branch merge](DECISIONS.md#git-webhook-adapter-opt-in).
 
 ### 7.6 Vault: tracking history and drift
 

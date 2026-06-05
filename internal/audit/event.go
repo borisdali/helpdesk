@@ -57,6 +57,11 @@ const (
 	// Final=true means max retries were exhausted and the suppressed response
 	// was returned to the user.
 	EventTypeNoDelegationTurn EventType = "no_delegation_turn"
+	// EventTypeGateAcknowledged is emitted when an operator approves or denies a
+	// pending_gate — the informed gate at the triage→remediation phase boundary.
+	// It records who acted, the resolution, the chosen approval mode, and any
+	// confidence warning that was surfaced.
+	EventTypeGateAcknowledged EventType = "gate_acknowledged"
 
 	// EventTypeRollbackInitiated is emitted when an operator requests rollback
 	// of a prior mutation. It carries the RollbackPlan and triggers the approval

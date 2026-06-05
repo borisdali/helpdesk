@@ -72,6 +72,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Outcome          string                  `json:"outcome"`
 		EscalatedTo      string                  `json:"escalated_to,omitempty"`
+		TransitionedTo   string                  `json:"transitioned_to,omitempty"`
 		FindingsSummary  string                  `json:"findings_summary,omitempty"`
 		DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	}
@@ -84,7 +85,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.FindingsSummary, body.DiagnosticReport); err != nil {
+	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.TransitionedTo, body.FindingsSummary, body.DiagnosticReport); err != nil {
 		slog.Error("failed to update playbook run", "run_id", runID, "err", err)
 		http.Error(w, "failed to update run", http.StatusInternalServerError)
 		return
@@ -140,6 +141,33 @@ func (s *playbookRunServer) handleGetRun(w http.ResponseWriter, r *http.Request)
 
 // handleStats handles GET /v1/fleet/playbooks/{playbookID}/stats.
 // Returns aggregated stats for the playbook's series.
+// handleListByOutcome handles GET /v1/fleet/playbook-runs?outcome=<outcome>&limit=<n>.
+// Returns runs matching the given outcome, most recent first.
+func (s *playbookRunServer) handleListByOutcome(w http.ResponseWriter, r *http.Request) {
+	outcome := r.URL.Query().Get("outcome")
+	if outcome == "" {
+		http.Error(w, "outcome query parameter is required", http.StatusBadRequest)
+		return
+	}
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil {
+			limit = n
+		}
+	}
+	runs, err := s.store.ListByOutcome(r.Context(), outcome, limit)
+	if err != nil {
+		slog.Error("failed to list playbook runs by outcome", "outcome", outcome, "err", err)
+		http.Error(w, "failed to list runs", http.StatusInternalServerError)
+		return
+	}
+	if runs == nil {
+		runs = []*audit.PlaybookRun{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"runs": runs, "count": len(runs)}) //nolint:errcheck
+}
+
 func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	playbookID := r.PathValue("playbookID")
 

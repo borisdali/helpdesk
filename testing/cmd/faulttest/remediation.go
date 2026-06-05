@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
+	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
 
@@ -23,40 +25,87 @@ type RemediationResult struct {
 	Passed           bool
 	RecoveryTimeSecs float64
 	Err              error
-	// Score is 0.0-1.0: 1.0 if recovered within half the verify timeout,
-	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
-	Score  float64
-	// Method records how remediation was triggered: "playbook", "agent_prompt", or "none".
-	Method string
+	Score            float64
+	Method           string
 }
 
-// Remediator triggers playbook or agent remediation and polls for recovery.
+// Remediator wraps faultlib.Remediator, adding interactive approval prompts
+// and infrastructure alias resolution for the CLI context.
 type Remediator struct {
-	cfg    *HarnessConfig
-	client *http.Client
+	inner *faultlib.Remediator
+	cfg   *HarnessConfig
 }
 
-// NewRemediator creates a new Remediator with the given config.
+// NewRemediator creates a Remediator backed by cfg.
 func NewRemediator(cfg *HarnessConfig) *Remediator {
 	return &Remediator{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		inner: faultlib.NewRemediator(toLFConfig(cfg)),
+		cfg:   cfg,
+	}
+}
+
+// HandlePendingGate handles a pending_gate response from the triage playbook.
+// It runs the gate loop (interactive TTY or emit-and-wait), after which the
+// gateway's proceed-escalation has already started the remediation playbook.
+// Recovery is polled independently until the fault clears.
+func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp testutil.AgentResponse) RemediationResult {
+	gate := faultlib.ApproveRunResponse{
+		RunID:                 resp.RunID,
+		Status:                resp.Status,
+		EscalationTarget:      resp.EscalationTarget,
+		EscalationFindings:    resp.EscalationFindings,
+		ConfidenceWarning:     resp.ConfidenceWarning,
+		SuggestedApprovalMode: resp.SuggestedMode,
+	}
+	slog.Info("gate pending: operator review required",
+		"failure", f.ID,
+		"run_id", gate.RunID,
+		"escalation_target", gate.EscalationTarget,
+	)
+	if err := r.runGateLoop(ctx, gate); err != nil {
+		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
+	}
+
+	spec := f.Remediation
+	verifySQL := spec.VerifySQL
+	if verifySQL == "" {
+		verifySQL = "SELECT 1"
+	}
+	timeout := 120 * time.Second
+	if spec.VerifyTimeout != "" {
+		if d, err := time.ParseDuration(spec.VerifyTimeout); err == nil {
+			timeout = d
+		}
+	}
+	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
+	if err != nil {
+		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: "playbook"}
+	}
+	score := 0.75
+	if recoverySecs <= timeout.Seconds()/2 {
+		score = 1.0
+	}
+	return RemediationResult{
+		Passed:           true,
+		RecoveryTimeSecs: recoverySecs,
+		Score:            score,
+		Method:           "playbook",
 	}
 }
 
 // Remediate triggers remediation for the failure and polls for recovery.
-func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult {
+func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string) RemediationResult {
 	spec := f.Remediation
 
 	slog.Info("starting remediation", "failure", f.ID,
-		"playbook", spec.PlaybookID, "agent_prompt", spec.AgentPrompt != "")
+		"playbook", spec.PlaybookID, "agent_prompt", spec.AgentPrompt != "",
+		"prior_run_id", priorRunID)
 
-	// Determine method.
 	var method string
 	var triggerErr error
 	if spec.PlaybookID != "" {
 		method = "playbook"
-		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID)
+		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
 	} else if spec.AgentPrompt != "" {
 		method = "agent_prompt"
 		agentName := spec.AgentName
@@ -76,7 +125,6 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 	if verifySQL == "" {
 		verifySQL = "SELECT 1"
 	}
-
 	timeout := 120 * time.Second
 	if spec.VerifyTimeout != "" {
 		if d, err := time.ParseDuration(spec.VerifyTimeout); err == nil {
@@ -89,13 +137,10 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}
 
-	// Score: 1.0 if recovered within half the timeout, 0.75 if within the full timeout.
 	score := 0.75
-	halfTimeout := timeout.Seconds() / 2
-	if recoverySecs <= halfTimeout {
+	if recoverySecs <= timeout.Seconds()/2 {
 		score = 1.0
 	}
-
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
@@ -104,139 +149,152 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure) RemediationResult
 	}
 }
 
-// resolvePlaybookID resolves a series_id to the active playbook_id via the gateway list endpoint.
-func (r *Remediator) resolvePlaybookID(ctx context.Context, seriesID string) (string, error) {
-	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks?series_id=" + seriesID
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return "", err
+// triggerPlaybook calls RunPlaybook via faultlib and drives an interactive
+// approval loop when the run returns pending_approval.
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) error {
+	// Bridge the local trace-ID slot into faultlib's slot so that RunPlaybook
+	// and ProceedStep set X-Trace-ID on gateway requests.
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		ctx = faultlib.WithFaultTraceID(ctx, id)
 	}
-	if r.cfg.GatewayAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
-	}
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("gateway returned %d", resp.StatusCode)
-	}
-	var result struct {
-		Playbooks []struct {
-			PlaybookID string `json:"playbook_id"`
-		} `json:"playbooks"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	if len(result.Playbooks) == 0 {
-		return "", fmt.Errorf("no active playbook found for series %q", seriesID)
-	}
-	return result.Playbooks[0].PlaybookID, nil
-}
-
-// approveRunResponse mirrors the gateway's ApproveRunResponse for agent_approve playbooks.
-type approveRunResponse struct {
-	RunID                 string          `json:"run_id"`
-	Status                string          `json:"status"` // "pending_approval" | "complete" | "denied"
-	Step                  *approveRunStep `json:"step,omitempty"`
-	ApprovalID            string          `json:"approval_id,omitempty"`
-	Summary               string          `json:"summary,omitempty"`
-	Warnings              []string        `json:"warnings,omitempty"`
-	EffectiveApprovalMode string          `json:"effective_approval_mode,omitempty"`
-}
-
-type approveRunStep struct {
-	Index       int            `json:"index"`
-	Agent       string         `json:"agent"`
-	Tool        string         `json:"tool"`
-	Args        map[string]any `json:"args"`
-	Reason      string         `json:"reason,omitempty"`
-	ActionClass string         `json:"action_class,omitempty"`
-}
-
-func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID string) error {
-	if r.cfg.GatewayURL == "" {
-		return fmt.Errorf("gateway URL is required for playbook remediation (--gateway)")
-	}
-
-	// The catalog stores the series_id (e.g. "pbs_db_restart_triage"), but the
-	// /run endpoint requires the versioned playbook_id (e.g. "pb_f49b5eac").
-	// Resolve via the list endpoint before running.
-	playbookID, err := r.resolvePlaybookID(ctx, seriesID)
-	if err != nil {
-		return fmt.Errorf("resolving playbook %q: %w", seriesID, err)
-	}
-
-	connStrForPlaybook := r.cfg.AgentConnStr
-	if connStrForPlaybook == "" {
-		connStrForPlaybook = r.cfg.ConnStr
-	}
-	remediationReq := map[string]any{"connection_string": connStrForPlaybook}
-	if r.cfg.ApprovalMode != "" {
-		remediationReq["approval_mode"] = r.cfg.ApprovalMode
-	}
-	body, _ := json.Marshal(remediationReq)
-	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Purpose", "remediation")
-	if r.cfg.GatewayAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
-	}
-	if r.cfg.OperatorID != "" {
-		req.Header.Set("X-User", r.cfg.OperatorID)
-	}
-	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
-		req.Header.Set("X-Trace-ID", id)
-	}
 
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("POST %s: %w", reqURL, err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("playbook run returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	// Check if this is an agent_approve response (step-by-step approval loop).
-	var runResp approveRunResponse
-	if err := json.Unmarshal(respBody, &runResp); err == nil && runResp.Status == "pending_approval" {
-		return r.runApprovalLoop(ctx, runResp)
-	}
-
-	// Surface any gateway warnings (e.g. approval_mode clamped) for agent-mode runs.
 	for _, w := range runResp.Warnings {
 		fmt.Fprintf(os.Stderr, "WARNING: %s\n", w)
 	}
 
-	slog.Info("playbook triggered", "id", playbookID, "status", resp.StatusCode)
+	if runResp.Status == "pending_approval" {
+		return r.runApprovalLoop(ctx, *runResp)
+	}
+
+	if runResp.Status == "pending_gate" {
+		return r.runGateLoop(ctx, *runResp)
+	}
+
+	slog.Info("playbook triggered", "series_id", seriesID, "status", runResp.Status)
 	return nil
 }
 
-// runApprovalLoop drives the agent_approve step-by-step loop.
-// --approval-mode force:  auto-approves every step, logs via slog.
+// runGateLoop handles an informed gate interactively: shows the triage findings
+// and confidence warning, prompts the operator to approve or deny, and if approved
+// asks which approval mode to use for the remediation playbook.
+func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunResponse) error {
+	const width = 64
+	sep := strings.Repeat("═", width)
+
+	fmt.Printf("\n%s\n", sep)
+	fmt.Println("  INFORMED GATE — review before remediation")
+	fmt.Printf("%s\n\n", sep)
+
+	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
+	if gate.EscalationFindings != "" {
+		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
+	}
+
+	if gate.ConfidenceWarning != "" {
+		warnSep := strings.Repeat("─", width)
+		fmt.Printf("\n%s\n", warnSep)
+		fmt.Printf("  ⚠  CONFIDENCE WARNING: %s\n", gate.ConfidenceWarning)
+		fmt.Printf("%s\n", warnSep)
+	}
+	fmt.Println()
+
+	// emit-and-wait: poll until operator resolves via the Decision Hub.
+	// Checked before TTY so this path works on a developer laptop too.
+	if r.cfg.EmitAndWait {
+		return r.waitForGateEmitAndWait(ctx, gate)
+	}
+
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		// Non-interactive without emit-and-wait: auto-approve with the configured mode.
+		return r.inner.RunGateLoop(ctx, &gate)
+	}
+	defer tty.Close()
+	reader := bufio.NewReader(tty)
+
+	fmt.Print("  Approve remediation? [y/N]: ")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer != "y" && answer != "yes" {
+		fmt.Println("  Denied.")
+		_, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+			Resolution: "denied",
+			ResolvedBy: r.cfg.OperatorID,
+		})
+		return err
+	}
+
+	suggested := gate.SuggestedApprovalMode
+	if suggested == "" {
+		suggested = "review"
+	}
+	fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
+	modeInput, _ := reader.ReadString('\n')
+	modeInput = strings.TrimSpace(strings.ToLower(modeInput))
+	if modeInput == "" {
+		modeInput = suggested
+	}
+
+	connStr := r.cfg.ConnStr
+	if r.cfg.AgentConnStr != "" {
+		connStr = r.cfg.AgentConnStr
+	}
+	resp, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+		Resolution:       "approved",
+		ResolvedBy:       r.cfg.OperatorID,
+		ApprovalMode:     modeInput,
+		ConnectionString: connStr,
+	})
+	if err != nil {
+		return fmt.Errorf("proceed-escalation: %w", err)
+	}
+	if resp.Status == "pending_approval" {
+		return r.runApprovalLoop(ctx, *resp)
+	}
+	fmt.Printf("\n  Remediation complete: %s\n\n", resp.Summary)
+	return nil
+}
+
+// waitForGateEmitAndWait prints the gate summary and polls until the operator
+// externally resolves the gate via the Decision Hub or proceed-escalation endpoint.
+func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.ApproveRunResponse) error {
+	resolveURL := r.cfg.GatewayURL + "/api/v1/decisions/gate:" + gate.RunID + "/resolve"
+	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
+	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
+	if gate.EscalationFindings != "" {
+		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
+	}
+	if gate.ConfidenceWarning != "" {
+		fmt.Printf("  WARNING           : %s\n", gate.ConfidenceWarning)
+	}
+	fmt.Printf("  Resolve at        : POST %s\n\n", resolveURL)
+
+	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
+	if err != nil {
+		return fmt.Errorf("waiting for gate resolution: %w", err)
+	}
+	if resp.Status == "pending_approval" {
+		return r.runApprovalLoop(ctx, *resp)
+	}
+	slog.Info("gate resolved externally", "status", resp.Status)
+	return nil
+}
+
+// runApprovalLoop drives the agent_approve step-by-step loop interactively.
+// --approval-mode force:  auto-approves every step.
 // --approval-mode review: auto-approves read-only steps, prompts for write/destructive.
 // --approval-mode manual: prompts for every step.
-func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResponse) error {
+func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.ApproveRunResponse) error {
 	for _, w := range initial.Warnings {
 		fmt.Fprintf(os.Stderr, "WARNING: %s\n", w)
 	}
 
 	current := initial
 	const maxSteps = 20
-	// Use the effective mode returned by the gateway (post-clamping) so that
-	// approval_override_roles enforcement is honoured on the harness side too.
-	// Fall back to the locally configured mode if the gateway didn't return one
-	// (older gateway versions, non-agent_approve paths).
 	mode := r.cfg.ApprovalMode
 	if initial.EffectiveApprovalMode != "" {
 		mode = initial.EffectiveApprovalMode
@@ -251,7 +309,40 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResp
 			(mode == "review" && current.Step.ActionClass != "read")
 
 		resolution := "approved"
-		if needsPrompt {
+		switch {
+		case r.cfg.EmitAndWait && current.ApprovalID != "" &&
+			(mode == "manual" || (mode == "review" && current.Step.ActionClass != "read")):
+			slog.Info("agent_approve: step approval pending — waiting for external resolution",
+				"step_index", current.Step.Index,
+				"tool", current.Step.Tool,
+				"approval_id", current.ApprovalID,
+			)
+			if r.cfg.AuditURL != "" {
+				ac := audit.NewApprovalClient(r.cfg.AuditURL)
+				if r.cfg.GatewayAPIKey != "" {
+					ac = ac.WithAPIKey(r.cfg.GatewayAPIKey)
+				}
+				stored, err := ac.WaitForApproval(ctx, current.ApprovalID, 30*time.Minute)
+				if err != nil {
+					return fmt.Errorf("waiting for step approval (id=%s): %w", current.ApprovalID, err)
+				}
+				resolution = stored.Status
+			} else if r.cfg.GatewayURL != "" {
+				var err error
+				resolution, err = r.inner.WaitForStepApprovalViaHub(ctx, current.ApprovalID)
+				if err != nil {
+					return fmt.Errorf("waiting for step approval via hub (id=%s): %w", current.ApprovalID, err)
+				}
+			}
+			slog.Info("agent_approve: step approval resolved",
+				"approval_id", current.ApprovalID,
+				"resolution", resolution,
+			)
+			if resolution != "approved" {
+				fmt.Printf("  Step %d %s by operator.\n", current.Step.Index, resolution)
+				resolution = "denied"
+			}
+		case needsPrompt:
 			approved, err := r.promptStepApproval(current.Step)
 			if err != nil {
 				return fmt.Errorf("prompt: %w", err)
@@ -260,7 +351,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResp
 				resolution = "denied"
 				fmt.Println("  Denied. Sending denial to gateway...")
 			}
-		} else {
+		default:
 			slog.Info("agent_approve: pending step",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,
@@ -270,7 +361,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResp
 			)
 		}
 
-		next, err := r.proceedStep(ctx, current.RunID, current.Step.Index, resolution)
+		next, err := r.inner.ProceedStep(ctx, current.RunID, current.Step.Index, resolution)
 		if err != nil {
 			return fmt.Errorf("proceed step %d: %w", current.Step.Index, err)
 		}
@@ -294,15 +385,14 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial approveRunResp
 // promptStepApproval prints a proposed step to stdout and reads y/n from the
 // controlling terminal (/dev/tty). Using /dev/tty rather than os.Stdin avoids
 // reading a stale EOF left on fd 0 by background bash processes spawned during
-// injection (exec.Command("bash", "-s") with a pipe stdin that closes on exit).
-func (r *Remediator) promptStepApproval(step *approveRunStep) (bool, error) {
+// injection.
+func (r *Remediator) promptStepApproval(step *faultlib.ApproveRunStep) (bool, error) {
 	const width = 64
 	sep := strings.Repeat("─", width)
 
 	fmt.Printf("\n%s\n", sep)
 	fmt.Printf("  Step %d — %s\n", step.Index, step.Tool)
 
-	// Show logical args (strip connection plumbing).
 	if display := logicalArgs(step.Args); len(display) > 0 {
 		fmt.Println()
 		keys := make([]string, 0, len(display))
@@ -317,7 +407,6 @@ func (r *Remediator) promptStepApproval(step *approveRunStep) (bool, error) {
 
 	if step.Reason != "" {
 		fmt.Println()
-		// Word-wrap reason at width-4 (leave room for the "  " indent).
 		for _, line := range wrapText(step.Reason, width-4) {
 			fmt.Printf("  %s\n", line)
 		}
@@ -327,7 +416,7 @@ func (r *Remediator) promptStepApproval(step *approveRunStep) (bool, error) {
 
 	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
 	if err != nil {
-		tty = os.Stdin // fallback for non-Unix or when no controlling terminal
+		tty = os.Stdin
 	} else {
 		defer tty.Close()
 	}
@@ -340,13 +429,72 @@ func (r *Remediator) promptStepApproval(step *approveRunStep) (bool, error) {
 	return answer == "y" || answer == "yes", nil
 }
 
+// triggerAgent calls POST /api/v1/query on the gateway.
+func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string) error {
+	if r.cfg.GatewayURL == "" {
+		return fmt.Errorf("gateway URL is required for agent remediation (--gateway)")
+	}
+
+	body, _ := json.Marshal(map[string]string{"agent": agentName, "message": prompt})
+	reqURL := r.cfg.GatewayURL + "/api/v1/query"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Purpose", "remediation")
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	if r.cfg.OperatorID != "" {
+		req.Header.Set("X-User", r.cfg.OperatorID)
+	}
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		req.Header.Set("X-Trace-ID", id)
+	}
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", reqURL, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("agent query returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	slog.Info("agent remediation triggered", "agent", agentName, "status", resp.StatusCode)
+	return nil
+}
+
+// pollRecovery uses the resolved connection string (infra alias expansion) and
+// delegates to faultlib.PollRecovery.
+func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
+	return faultlib.PollRecovery(ctx, r.resolvedConnStr(), verifySQL, timeout)
+}
+
+// resolvedConnStr resolves cfg.ConnStr through the infrastructure config so
+// that named aliases are expanded to a real DSN before being passed to psql.
+func (r *Remediator) resolvedConnStr() string {
+	if r.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(r.cfg.InfraConfigPath); err == nil {
+			if db, ok := cfg.DBServers[r.cfg.ConnStr]; ok {
+				return db.ResolvedConnectionString()
+			}
+		}
+	}
+	return r.cfg.ConnStr
+}
+
 // logicalArgs returns a copy of args with connection plumbing keys removed.
 func logicalArgs(args map[string]any) map[string]any {
 	skip := map[string]bool{
 		"connection_string": true,
 		"host": true, "port": true, "dbname": true,
 		"user": true, "password": true,
-		"reason": true, // shown separately via step.Reason
+		"reason": true,
 	}
 	out := make(map[string]any, len(args))
 	for k, v := range args {
@@ -374,131 +522,3 @@ func wrapText(s string, width int) []string {
 	return lines
 }
 
-// proceedStep calls POST /api/v1/fleet/playbook-runs/{runID}/proceed.
-// resolution is "approved" or "denied".
-func (r *Remediator) proceedStep(ctx context.Context, runID string, stepIndex int, resolution string) (*approveRunResponse, error) {
-	proceedBody, _ := json.Marshal(map[string]any{
-		"resolution":        resolution,
-		"resolved_by":       "faulttest",
-		"step_index":        stepIndex,
-		"connection_string": r.cfg.ConnStr,
-	})
-	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + runID + "/proceed"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(proceedBody))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Purpose", "remediation")
-	if r.cfg.GatewayAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
-	}
-	if r.cfg.OperatorID != "" {
-		req.Header.Set("X-User", r.cfg.OperatorID)
-	}
-	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
-		req.Header.Set("X-Trace-ID", id)
-	}
-
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", reqURL, err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("proceed returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var runResp approveRunResponse
-	if err := json.Unmarshal(respBody, &runResp); err != nil {
-		return nil, fmt.Errorf("decode proceed response: %w", err)
-	}
-	return &runResp, nil
-}
-
-func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string) error {
-	if r.cfg.GatewayURL == "" {
-		return fmt.Errorf("gateway URL is required for agent remediation (--gateway)")
-	}
-
-	body, _ := json.Marshal(map[string]string{
-		"agent":   agentName,
-		"message": prompt,
-	})
-	reqURL := r.cfg.GatewayURL + "/api/v1/query"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Purpose", "remediation")
-	if r.cfg.GatewayAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
-	}
-	if r.cfg.OperatorID != "" {
-		req.Header.Set("X-User", r.cfg.OperatorID)
-	}
-
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("POST %s: %w", reqURL, err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("agent query returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	slog.Info("agent remediation triggered", "agent", agentName, "status", resp.StatusCode)
-	return nil
-}
-
-// resolvedConnStr resolves cfg.ConnStr through the infrastructure config so
-// that named aliases (e.g. "alloydb-on-vm") are expanded to a real DSN before
-// being passed to psql. Falls back to cfg.ConnStr when no infra config is set
-// or the alias is not found.
-func (r *Remediator) resolvedConnStr() string {
-	if r.cfg.InfraConfigPath != "" {
-		if cfg, err := infra.Load(r.cfg.InfraConfigPath); err == nil {
-			if db, ok := cfg.DBServers[r.cfg.ConnStr]; ok {
-				if db.PasswordEnv != "" {
-					if pw := os.Getenv(db.PasswordEnv); pw != "" {
-						_ = pw // psql reads PGPASSWORD from env; caller sets it
-					}
-				}
-				return db.ResolvedConnectionString()
-			}
-		}
-	}
-	return r.cfg.ConnStr
-}
-
-func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
-	deadline := time.Now().Add(timeout)
-	start := time.Now()
-	connStr := r.resolvedConnStr()
-
-	for {
-		err := testutil.RunSQLBool(ctx, connStr, verifySQL)
-		if err == nil {
-			return time.Since(start).Seconds(), nil
-		}
-
-		slog.Info("recovery check failed, retrying", "err", err, "remaining", time.Until(deadline).Round(time.Second))
-
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case <-time.After(5 * time.Second):
-		}
-
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("recovery timed out after %s", timeout)
-		}
-	}
-}

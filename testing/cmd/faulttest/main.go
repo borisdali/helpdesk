@@ -150,6 +150,10 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	// Gateway-routed diagnosis (A/B comparison mode).
 	fs.BoolVar(&cfg.ViaGateway, "via-gateway", false, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
 
+	// Async gate and step approvals (K8s/Docker/headless safe).
+	fs.BoolVar(&cfg.GateEscalation, "gate-escalation", false, "Send gate_escalation=true on playbook run requests so the gateway intercepts ESCALATE_TO at the phase boundary")
+	fs.BoolVar(&cfg.EmitAndWait, "emit-and-wait", false, "Poll for gate and step approvals instead of reading from /dev/tty (safe in K8s Jobs and Docker containers)")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -369,8 +373,34 @@ func cmdRun(args []string) {
 		}
 
 		// 4. Remediation phase (optional).
-		if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
-			remResult := remediator.Remediate(faultCtx, f)
+		// When gate_escalation=true, the triage playbook may return pending_gate at
+		// the triage→remediation boundary. In that case, the gate handler drives
+		// operator approval and recovery instead of the normal Remediate path.
+		if cfg.RemediateEnabled && resp.Status == "pending_gate" {
+			remResult := remediator.HandlePendingGate(faultCtx, f, resp)
+			evalResult.RemediationAttempted = true
+			evalResult.RemediationPassed = remResult.Passed
+			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
+			evalResult.RemediationScore = remResult.Score
+			evalResult.RemediationMethod = remResult.Method
+			if remResult.Err != nil {
+				evalResult.RemediationError = remResult.Err.Error()
+			}
+			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
+			if remResult.Passed {
+				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+				if cfg.GatewayURL != "" {
+					if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
+						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
+					} else if pbID != "" {
+						fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
+					}
+				}
+			} else {
+				fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
+			}
+		} else if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
+			remResult := remediator.Remediate(faultCtx, f, resp.RunID)
 			evalResult.RemediationAttempted = true
 			evalResult.RemediationPassed = remResult.Passed
 			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs

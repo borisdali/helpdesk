@@ -424,9 +424,10 @@ func TestPlaybooks_ListQueryParams(t *testing.T) {
 		len(allDefault), len(noSystem), len(withInactive))
 }
 
-// TestPlaybooks_RunFleetMode calls POST /run on a fleet-mode system playbook
-// (Vacuum & Bloat Triage) and verifies the response has the fleet plan shape.
-// Requires LLM configuration — skipped if no API key present.
+// TestPlaybooks_RunFleetMode calls POST /run on any fleet-mode playbook and
+// verifies the response has the fleet plan shape. Skipped when no fleet-mode
+// playbook is seeded (the operational triage playbooks were converted from
+// fleet to agent in commit d013e48). Requires LLM configuration.
 func TestPlaybooks_RunFleetMode(t *testing.T) {
 	RequireAPIKey(t)
 	cfg := LoadConfig()
@@ -438,23 +439,23 @@ func TestPlaybooks_RunFleetMode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Find the vacuum triage system playbook (fleet mode, entry_point=false).
 	playbooks, err := client.PlaybookList(ctx, "")
 	if err != nil {
 		t.Fatalf("PlaybookList: %v", err)
 	}
-	var vacuumID string
+	var fleetID, fleetSeries string
 	for _, pb := range playbooks {
-		if sid, _ := pb["series_id"].(string); sid == "pbs_vacuum_triage" {
-			vacuumID, _ = pb["playbook_id"].(string)
+		if mode, _ := pb["execution_mode"].(string); mode == "fleet" {
+			fleetID, _ = pb["playbook_id"].(string)
+			fleetSeries, _ = pb["series_id"].(string)
 			break
 		}
 	}
-	if vacuumID == "" {
-		t.Skip("pbs_vacuum_triage system playbook not found — stack may not be seeded")
+	if fleetID == "" {
+		t.Skip("no fleet-mode playbook seeded — operational triage playbooks are now agent mode")
 	}
 
-	resp, err := client.PlaybookRun(ctx, vacuumID, map[string]any{
+	resp, err := client.PlaybookRun(ctx, fleetID, map[string]any{
 		"connection_string": cfg.ConnStr,
 	})
 	if err != nil {
@@ -472,7 +473,7 @@ func TestPlaybooks_RunFleetMode(t *testing.T) {
 	if resp["text"] != nil {
 		t.Error("fleet-mode run should not return agent 'text' field")
 	}
-	t.Logf("fleet run OK: playbook_id=%s has_job_def=%v", vacuumID, resp["job_def_raw"] != nil)
+	t.Logf("fleet run OK: playbook_id=%s series=%s has_job_def=%v", fleetID, fleetSeries, resp["job_def_raw"] != nil)
 }
 
 // TestPlaybooks_RunRecording verifies that the gateway records a playbook run
@@ -814,12 +815,13 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		t.Logf("lock_chain_remediate: execution_mode=agent_approve approval_mode=manual")
 	})
 
-	t.Run("operational_playbooks_are_fleet", func(t *testing.T) {
+	t.Run("operational_playbooks_are_agent", func(t *testing.T) {
+		// Converted from fleet to agent in commit d013e48 — the triage flow now
+		// runs directly through the DB agent instead of the fleet planner.
 		for _, sid := range []string{
 			"pbs_vacuum_triage",
 			"pbs_slow_query_triage",
 			"pbs_connection_triage",
-			"pbs_lock_chain_triage",
 			"pbs_replication_lag",
 		} {
 			pbID, ok := idBySeries[sid]
@@ -832,8 +834,8 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 				t.Errorf("PlaybookGet(%s): %v", sid, err)
 				continue
 			}
-			if mode, _ := pb["execution_mode"].(string); mode != "fleet" {
-				t.Errorf("%s: execution_mode = %q, want fleet", sid, mode)
+			if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+				t.Errorf("%s: execution_mode = %q, want agent", sid, mode)
 			}
 		}
 	})
@@ -948,4 +950,110 @@ func TestPlaybooks_RunAgentApproveMode(t *testing.T) {
 	}
 	t.Logf("agent_approve run OK: playbook_id=%s run_id=%v step.tool=%v approval_id=%v",
 		remedID, resp["run_id"], step["tool"], resp["approval_id"])
+}
+
+// TestPlaybooks_GateEscalation verifies the informed gate end-to-end:
+//   - gate_escalation:true on a triage run intercepts ESCALATE_TO and returns
+//     status="pending_gate" with escalation_target and run_id populated
+//   - the run record outcome is "gate_pending" in auditd
+//   - proceed-escalation with resolution="denied" returns status="denied" and
+//     transitions the run to outcome="abandoned"
+//
+// If the triage agent completes without emitting ESCALATE_TO (non-deterministic
+// LLM), the test logs the situation and passes — the absence of escalation is a
+// valid outcome and the unit tests already cover the gate intercept logic.
+func TestPlaybooks_GateEscalation(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Find a triage playbook that escalates — pbs_db_restart_triage is designed to
+	// diagnose and emit ESCALATE_TO when it can't recover the database itself.
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var triageID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_db_restart_triage" {
+			triageID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if triageID == "" {
+		t.Skip("pbs_db_restart_triage system playbook not found")
+	}
+
+	resp, err := client.PlaybookRun(ctx, triageID, map[string]any{
+		"connection_string": cfg.ConnStr,
+		"context":           "e2e test: gate_escalation flow",
+		"gate_escalation":   true,
+	})
+	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
+		t.Fatalf("PlaybookRun with gate_escalation: %v", err)
+	}
+
+	status, _ := resp["status"].(string)
+
+	if status != "pending_gate" {
+		// The agent completed without escalating (e.g. it resolved the issue or
+		// timed out). This is a valid outcome — gate_escalation is a no-op when
+		// ESCALATE_TO is not emitted. Log and pass; the intercept logic is covered
+		// by unit tests.
+		t.Logf("gate not triggered (agent did not escalate): status=%q — gate_escalation flag did not break the run", status)
+		return
+	}
+
+	// --- gate fired: verify pending_gate response shape ---
+
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("pending_gate response missing run_id")
+	}
+	escalationTarget, _ := resp["escalation_target"].(string)
+	if escalationTarget == "" {
+		t.Error("pending_gate response missing escalation_target")
+	}
+	t.Logf("gate pending: run_id=%s escalation_target=%s confidence_warning=%v",
+		runID, escalationTarget, resp["confidence_warning"])
+
+	// Verify the run record is stored with outcome=gate_pending.
+	runRecord, err := client.PlaybookRunGet(ctx, runID)
+	if err != nil {
+		t.Fatalf("PlaybookRunGet: %v", err)
+	}
+	if outcome, _ := runRecord["outcome"].(string); outcome != "gate_pending" {
+		t.Errorf("run record outcome = %q, want gate_pending", outcome)
+	}
+
+	// Deny the gate and verify the response and final run state.
+	denyResp, err := client.ProceedEscalation(ctx, runID, map[string]any{
+		"resolution":  "denied",
+		"resolved_by": "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("ProceedEscalation (denied): %v", err)
+	}
+	if denyResp["status"] != "denied" {
+		t.Errorf("proceed-escalation status = %q, want denied", denyResp["status"])
+	}
+
+	// Run should now be abandoned.
+	runRecord, err = client.PlaybookRunGet(ctx, runID)
+	if err != nil {
+		t.Fatalf("PlaybookRunGet after deny: %v", err)
+	}
+	if outcome, _ := runRecord["outcome"].(string); outcome != "abandoned" {
+		t.Errorf("run record outcome after deny = %q, want abandoned", outcome)
+	}
+
+	t.Logf("gate_escalation e2e OK: run_id=%s escalation_target=%s denied→abandoned",
+		runID, escalationTarget)
 }

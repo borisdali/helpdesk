@@ -1,6 +1,6 @@
 series_id: pbs_wal_stale_slot
 name: WAL Accumulation — Stale Replication Slot
-version: "1.1"
+version: "1.2"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
@@ -55,7 +55,7 @@ guidance: |
 
   Present the operator with:
     SELECT pg_drop_replication_slot('<slot_name>');
-  and request approval before executing. Emit ESCALATE_TO: requires_operator_approval.
+  and request approval before executing. Emit ESCALATE_TO: pbs_stale_slot_remediate.
 
   HYPOTHESIS 3 — Long-running transaction
   Call get_active_connections. Look for rows where xact_start is hours or days

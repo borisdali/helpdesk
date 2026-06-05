@@ -155,6 +155,11 @@ type HarnessConfig struct {
 	// When set, the harness refuses to inject faults unless the target has a
 	// "test" or "chaos" tag.
 	InfraConfigPath string
+	// ServerID is the infrastructure config key that identifies the target
+	// database server (e.g. "faulttest-db"). When InfraConfigPath is set it is
+	// resolved automatically via ResolveServerID; callers may also set it
+	// directly. Used for {{server_id}} substitution in fault prompts.
+	ServerID string
 	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty
 	// (e.g., "ubuntu@customer-vm.example.com" or just "customer-vm").
 	// When set, ExternalInject/ExternalTeardown are used instead of Inject/Teardown.
@@ -186,6 +191,35 @@ type HarnessConfig struct {
 	// When set, the harness queries tool execution events after each agent call
 	// to get structured tool evidence from the audit trail instead of text matching.
 	AuditURL string
+
+	// ReportDir is the directory where the JSON report is written (default: ".").
+	ReportDir string
+
+	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
+	JudgeEnabled bool
+	// JudgeModel is the model name for the LLM judge (default: HELPDESK_MODEL_NAME).
+	JudgeModel string
+	// JudgeVendor is the model vendor for the LLM judge (default: HELPDESK_MODEL_VENDOR).
+	JudgeVendor string
+	// JudgeAPIKey is the API key for the LLM judge (default: HELPDESK_API_KEY).
+	JudgeAPIKey string
+
+	// NotifyURL is an optional webhook URL. When set, the harness POSTs the full
+	// JSON report to this URL after the run completes (e.g. a Slack webhook).
+	NotifyURL string
+
+	// GatewayPollInterval is the wait between poll iterations in emit-and-wait mode.
+	// Zero defaults to 15 seconds. Set to a small value in tests.
+	GatewayPollInterval time.Duration
+
+	// GateEscalation sends gate_escalation=true on every PlaybookRun request so
+	// the gateway intercepts ESCALATE_TO at the phase boundary.
+	GateEscalation bool
+	// EmitAndWait replaces TTY prompts with HTTP polling when true:
+	//   - gate: polls GET /api/v1/fleet/playbook-runs/{id} until outcome changes
+	//   - step: uses ApprovalClient.WaitForApproval long-poll instead of /dev/tty
+	// Falls back to the existing headless auto-approve if the required URL is empty.
+	EmitAndWait bool
 }
 
 // EvalResult contains the evaluation outcome for a single failure test.

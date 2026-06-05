@@ -1,6 +1,6 @@
 series_id: pbs_lock_chain_triage
 name: Transaction Lock Chain Triage
-version: "1.1"
+version: "1.3"
 execution_mode: agent
 agent_name: postgres_database_agent
 approval_mode: manual
@@ -63,6 +63,11 @@ guidance: |
   Common misdiagnosis: terminating an intermediate victim instead of the root
   blocker. The intermediate will re-queue (or a replacement session will queue)
   immediately. The root blocker is always the sole target.
+
+  Final step: after your ROOT_CAUSE line, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: Root blocker PID <pid> (<state>, has_writes=<true|false>); <N>-level chain; terminate_connection required.
+  TRANSITION_TO: pbs_lock_chain_remediate
 escalation:
   - "root blocker has has_writes=true (uncommitted DML) and has been idle > 30 minutes"
   - "lock queue exceeds 20 sessions"

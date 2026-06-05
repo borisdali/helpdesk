@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -79,13 +80,30 @@ func TestExtractFirstJSON_NoJSON(t *testing.T) {
 	}
 }
 
+func TestExtractFirstJSON_BraceInSummary(t *testing.T) {
+	// Summary containing } must not confuse extraction (was a real bug: LastIndex
+	// found the } inside the string, truncating the JSON and leaving trailing text).
+	input := "```json\n{\"action\":\"complete\",\"summary\":\"reset bgwriter_lru_maxpages {was 2} to 100\"}\n```"
+	got := extractFirstJSON(input)
+	var result struct {
+		Action  string `json:"action"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("extracted JSON failed to unmarshal: %v (got: %q)", err, got)
+	}
+	if result.Action != "complete" {
+		t.Errorf("expected action=complete, got %q", result.Action)
+	}
+}
+
 // ── proposeNextStep ───────────────────────────────────────────────────────────
 
 func TestProposeNextStep_NoLLM(t *testing.T) {
 	gw := &Gateway{plannerLLM: nil}
 	pb := &audit.Playbook{Name: "Test", Guidance: "Step 1: do X"}
 
-	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", nil)
+	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
 	if err == nil {
 		t.Error("expected error when plannerLLM is nil")
 	}
@@ -99,7 +117,7 @@ func TestProposeNextStep_Complete(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "Idle Blocker Remediate", Guidance: "Terminate root blocker."}
 
-	proposal, done, summary, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", nil)
+	proposal, done, summary, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
@@ -128,7 +146,7 @@ func TestProposeNextStep_ExecuteStep(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "Idle Blocker Remediate", Guidance: "Terminate root blocker."}
 
-	proposal, done, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", nil)
+	proposal, done, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
@@ -157,7 +175,7 @@ func TestProposeNextStep_DefaultsAgentToDatabaseWhenEmpty(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "p", Guidance: "g"}
 
-	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", nil)
+	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
@@ -178,7 +196,7 @@ func TestProposeNextStep_IndexIncrementsByHistory(t *testing.T) {
 		{StepIndex: 2, Tool: "another_tool", Result: "done"},
 	}
 
-	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", history)
+	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", history)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
@@ -195,7 +213,7 @@ func TestProposeNextStep_BadJSON(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "p", Guidance: "g"}
 
-	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", nil)
+	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
 	if err == nil {
 		t.Error("expected error for non-JSON LLM response")
 	}
@@ -209,7 +227,7 @@ func TestProposeNextStep_EmptyToolName(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "p", Guidance: "g"}
 
-	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", nil)
+	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
 	if err == nil {
 		t.Error("expected error for empty tool name")
 	}
@@ -228,7 +246,7 @@ func TestProposeNextStep_HistoryAppearsInPrompt(t *testing.T) {
 		{StepIndex: 1, Tool: "get_blocking_queries", Args: map[string]any{}, Result: "blocker found pid=9999"},
 	}
 
-	gw.proposeNextStep(context.Background(), pb, "host=prod", history) //nolint:errcheck
+	gw.proposeNextStep(context.Background(), pb, "host=prod", "", history) //nolint:errcheck
 
 	if !strings.Contains(capturedPrompt, "blocker found pid=9999") {
 		t.Error("history result should appear in the LLM prompt")

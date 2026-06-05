@@ -860,6 +860,130 @@ Results are ordered most-recent first.
 
 ---
 
+### Decision Hub
+
+The Decision Hub aggregates every pending human decision across all subsystems — playbook gates, fleet approvals, and per-step agent approvals — into a single list with a single resolve endpoint. See [DECISIONS.md](DECISIONS.md) for full details including notification configuration, Slack integration, HMAC signing, and the git merge adapter.
+
+#### `GET /api/v1/decisions`
+
+List all pending decisions across all types.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `status` | `pending` | Filter by status: `pending`, `approved`, `denied`, `expired`, `abandoned` |
+| `type` | _(all)_ | Filter by type: `gate`, `fleet_approval`, `step_approval` |
+| `limit` | `50` | Maximum results |
+
+Requires `HELPDESK_AUDIT_URL` to be configured (used to fan out to auditd for approvals and playbook runs).
+
+```bash
+curl http://localhost:8080/api/v1/decisions | jq .
+```
+
+```json
+{
+  "decisions": [
+    {
+      "id":           "gate:plr_a3f7c1b2",
+      "type":         "gate",
+      "status":       "pending",
+      "summary":      "Triage complete — ESCALATE_TO pbs_vacuum_remediate",
+      "requested_by": "alice",
+      "requested_at": "2026-06-01T14:23:01Z",
+      "resolve_url":  "POST https://helpdesk.internal/api/v1/decisions/gate:plr_a3f7c1b2/resolve",
+      "extra": {
+        "escalation_target": "pbs_vacuum_remediate",
+        "findings": "Table public.orders has 94% dead tuple ratio..."
+      }
+    }
+  ],
+  "total": 1
+}
+```
+
+#### `POST /api/v1/decisions/{id}/resolve`
+
+Resolve any decision type. The `{id}` prefix determines routing:
+
+| Prefix | Routes to |
+|---|---|
+| `gate:{runID}` | Playbook `proceed-escalation` endpoint |
+| `fleet:{approvalID}` | `PATCH {auditURL}/v1/approvals/{approvalID}` |
+| `step:{approvalID}` | `PATCH {auditURL}/v1/approvals/{approvalID}` |
+
+```json
+{
+  "resolution":       "approved",
+  "resolved_by":      "alice",
+  "reason":           "Findings look correct, proceed",
+  "approval_mode":    "review",
+  "approval_session": ""
+}
+```
+
+`approval_mode` and `approval_session` are gate-specific; ignored for fleet/step.
+
+```bash
+# Approve a gate
+curl -X POST http://localhost:8080/api/v1/decisions/gate:plr_a3f7c1b2/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"resolution":"approved","resolved_by":"alice","approval_mode":"review"}'
+
+# Deny a fleet approval
+curl -X POST http://localhost:8080/api/v1/decisions/fleet:apr_c8d2e1f4/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"resolution":"denied","resolved_by":"oncall","reason":"Wrong maintenance window"}'
+```
+
+Fires a `decision_resolved` notification when `HELPDESK_DECISION_WEBHOOK` is configured.
+
+**Notification env vars** (fire on every create and resolve):
+
+| Variable | Description |
+|---|---|
+| `HELPDESK_DECISION_WEBHOOK` | Webhook URL for all decision events (generic JSON or Slack incoming webhook) |
+| `HELPDESK_DECISION_WEBHOOK_SECRET` | HMAC-SHA256 signing key; adds `X-Helpdesk-Signature: sha256=<hex>` header |
+| `HELPDESK_BASE_URL` | Gateway public URL; used to build `resolve_url` links in notifications |
+| `HELPDESK_SMTP_HOST` / `PORT` / `USER` / `PASSWORD` | SMTP server for email notifications |
+| `HELPDESK_EMAIL_FROM` | Sender address |
+| `HELPDESK_EMAIL_TO` | Comma-separated recipient list |
+
+---
+
+### Git webhook adapter
+
+An optional endpoint that lets operators merge a branch to approve a decision without calling the API directly. See [DECISIONS.md — Git webhook adapter](DECISIONS.md#git-webhook-adapter-opt-in) for the full branch naming convention and provider payload formats.
+
+#### `POST /api/v1/webhooks/git`
+
+Accepts merge events from GitHub, GitLab, Gitea, or any generic JSON webhook. Routes to `resolve` based on the target branch name:
+
+| Branch | Resolves |
+|---|---|
+| `approved/gate/{runID}` | `gate:{runID}` → approved |
+| `approved/fleet/{approvalID}` | `fleet:{approvalID}` → approved |
+
+Non-matching branches return `200 OK` with no action. HMAC validation returns `401` when the secret is set and the signature does not match.
+
+This endpoint is registered without the standard Bearer-token auth middleware — it uses HMAC validation from the git provider instead.
+
+**Env vars:**
+
+| Variable | Description |
+|---|---|
+| `HELPDESK_GIT_WEBHOOK_SECRET` | HMAC-SHA256 key for verifying `X-Hub-Signature-256` (GitHub/Gitea) or `X-Gitlab-Token` (GitLab). Leave empty to skip (not recommended in production). |
+| `HELPDESK_GIT_RESOLVE_BRANCH` | Branch prefix that triggers resolution (default: `approved/`). |
+
+```bash
+# Simulate a GitHub merge event
+curl -X POST http://localhost:8080/api/v1/webhooks/git \
+  -H "X-Hub-Signature-256: sha256=<hmac>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"closed","pull_request":{"merged":true,"base":{"ref":"approved/gate/plr_a3f7c1b2"}}}'
+```
+
+---
+
 ### Rollback endpoints (auditd direct)
 
 Rollback endpoints are available directly on auditd (`http://localhost:1199`). The gateway does not proxy them. See [ROLLBACK.md](ROLLBACK.md) for full semantics.

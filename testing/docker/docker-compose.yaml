@@ -11,7 +11,12 @@ services:
     command:
       - postgres
       - -c
-      - max_connections=50
+      - max_connections=100
+      - -c
+      # Reserve 5 slots for superuser (postgres) connections so the agent
+      # always has headroom to investigate a saturated connection pool.
+      # The max-connections injection auto-targets max_connections - this value.
+      - superuser_reserved_connections=5
       - -c
       - shared_buffers=32MB
       - -c

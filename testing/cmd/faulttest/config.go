@@ -184,6 +184,14 @@ type HarnessConfig struct {
 	// Enables a valid A/B comparison between scaffolded (normal) and
 	// crystal-ball (unguided) gateway runs.
 	ViaGateway bool
+
+	// GateEscalation sends gate_escalation=true on every PlaybookRun request so
+	// the gateway intercepts ESCALATE_TO at the phase boundary.
+	GateEscalation bool
+	// EmitAndWait replaces TTY prompts with HTTP polling when true:
+	//   - gate: polls GET /api/v1/fleet/playbook-runs/{id} until outcome changes
+	//   - step: uses the audit service long-poll instead of /dev/tty
+	EmitAndWait bool
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.

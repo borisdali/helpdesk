@@ -357,7 +357,7 @@ func newApproval(actionClass, tool, agent, requestedBy string) map[string]any {
 
 func TestApprovals_CreateAndGet(t *testing.T) {
 	result := post(t, auditdAddr, "/v1/approvals",
-		newApproval("write", "execute_sql", "database-agent", "alice"))
+		newApproval("write", "run_vacuum", "database-agent", "alice"))
 
 	approvalID, _ := result["approval_id"].(string)
 	if approvalID == "" {

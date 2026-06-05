@@ -1,0 +1,65 @@
+series_id: pbs_bgwriter_remediate
+name: Checkpoint Warning — Reset bgwriter_lru_maxpages
+version: "1.3"
+entry_point: true
+execution_mode: agent_approve
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: performance
+author: aiHelpDesk
+description: |
+  Restore bgwriter_lru_maxpages to its default (100) after it has been set
+  abnormally low, causing the bgwriter to be throttled and forcing backends to
+  write dirty pages themselves. Uses ALTER SYSTEM to write the default back to
+  postgresql.auto.conf, then pg_reload_conf() to apply it without a restart.
+symptoms:
+  - "checkpoint occurring too frequently warnings in pg_log"
+  - "bgwriter_stats.maxwritten_clean > 0 (bgwriter hitting its page limit)"
+  - "buffers_backend elevated (backends writing dirty pages)"
+  - "bgwriter_lru_maxpages significantly below 100 (default)"
+guidance: |
+  Step 1: Confirm the misconfiguration.
+  Call get_pg_settings with category="background writer". Verify:
+  - bgwriter_lru_maxpages: should be 100 (default). If it is < 10, the bgwriter
+    is severely throttled and will hit its limit on nearly every wakeup cycle.
+  - bgwriter_lru_multiplier: default 2.0. Unusually low values compound the effect.
+  Also check checkpoint_warning: if very short (< 60s), frequent checkpoint
+  warnings may be cosmetic (triggered by the low threshold) even if bgwriter
+  is not truly overwhelmed. Note both values before making any change.
+
+  Step 2: Reset misconfigured settings to default.
+  Use reset_pg_setting — this is the ONLY tool available for this step. Do NOT
+  attempt to use any SQL execution tool or any other tool name.
+
+  For each setting that is not at its default, call reset_pg_setting once:
+  - If bgwriter_lru_maxpages is not 100: call reset_pg_setting with
+    setting_name=bgwriter_lru_maxpages
+  - If checkpoint_warning is not its default (300): call reset_pg_setting with
+    setting_name=checkpoint_warning
+
+  Each call to reset_pg_setting runs ALTER SYSTEM RESET <setting> and then
+  pg_reload_conf() automatically — you do not need to reload config separately.
+
+  Before requesting approval, state:
+  - Current value of each setting you plan to reset
+  - Confirm each differs from its default — if already at default, skip that call
+
+  Step 3: Verify the reset took effect.
+  Call get_pg_settings with category="background writer" again. Confirm:
+  - bgwriter_lru_maxpages is now 100
+  - checkpoint_warning is now at its default (or was already correct)
+  If a setting is still showing the old value, pg_reload_conf() may not have
+  been called or a postgresql.conf entry (not auto.conf) is overriding it.
+  If an override exists in postgresql.conf, report it and escalate — you cannot
+  change postgresql.conf via ALTER SYSTEM.
+
+  Step 4: Check for lingering checkpoint warnings.
+  Call read_pg_log for recent checkpoint warning lines. After the bgwriter is
+  reset, new warnings should stop appearing. Existing warnings from before the
+  fix are expected.
+escalation:
+  - "bgwriter_lru_maxpages is already at default (100) — checkpoint warnings may be caused by checkpoint_warning threshold being too low, not by bgwriter throttling"
+  - "get_pg_settings shows the setting is not sourced from configuration file — it may be set in a session or by the connection pool; ALTER SYSTEM will not fix it"
+  - "ALTER SYSTEM is disabled (e.g. CNPG with enableAlterSystem=false) — the config must be changed via the cluster spec or a direct file edit"
+  - "pg_reload_conf() returns false — the postmaster could not re-read the config; check the log for permission or syntax errors"
+target_hints: []

@@ -113,7 +113,8 @@ If neither `tags` nor `names` is specified, all servers in `infrastructure.json`
 | `failure_threshold` | `0.5` | Fraction of failures that trips the circuit breaker (0.0–1.0). |
 | `dry_run` | `false` | Print the plan without contacting Gateway or auditd. |
 | `count_partial_as_success` | `false` | When `true`, servers with `partial` status (continue-on-failure steps) do not count toward the circuit-breaker failure rate. |
-| `approval_timeout_seconds` | `0` | How long to wait for human approval before aborting. `0` = wait indefinitely. |
+| `approval_timeout_seconds` | `0` | How long to wait for human approval before aborting. `0` = wait indefinitely. Applies to the top-level write/destructive gate and the `wave_gate`. |
+| `wave_gate` | `false` | When `true`, requires explicit operator approval after the canary phase completes and before any waves execute. Uses the same approval mechanism as the top-level write/destructive gate. Canary results (server names, wave server count) are included as context for the approver. |
 | `schema_drift` | `"abort"` | Policy for schema drift detection: `"abort"` (default), `"warn"`, or `"ignore"`. Overrides the `--schema-drift` flag and `HELPDESK_SCHEMA_DRIFT` env var for this specific job. |
 
 ### `tool_snapshots` object
@@ -246,6 +247,47 @@ Or use the `approvals` CLI:
 **Dry-run** prints `APPROVAL WOULD BE REQUIRED` without creating an approval request or contacting any server.
 
 **Timeout:** set `approval_timeout_seconds` in the strategy. If the approval is not resolved within the window, the job is aborted and the approval is cancelled. `0` (default) waits indefinitely.
+
+### Wave gate
+
+Set `"wave_gate": true` in the strategy to add a second approval gate after the canary phase and before the first wave:
+
+```json
+{
+  "strategy": {
+    "canary_count": 1,
+    "wave_size": 5,
+    "wave_gate": true,
+    "approval_timeout_seconds": 3600
+  }
+}
+```
+
+The wave gate approval record includes the canary server names and the remaining wave server count as context, so the approver can assess canary results before authorising the rollout.
+
+### Decision Hub
+
+All fleet approvals (top-level gate and wave gate) surface in the Decision Hub at `GET /api/v1/decisions` alongside playbook gates and step approvals. Operators can resolve them from a single endpoint:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/decisions/fleet:apr_abc123/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"resolution": "approved", "resolved_by": "ops-lead"}'
+```
+
+Notifications fire automatically when a decision opens. Configure:
+
+| Variable | Description |
+|---|---|
+| `HELPDESK_DECISION_WEBHOOK` | Webhook URL (Slack incoming webhooks auto-detected) |
+| `HELPDESK_DECISION_WEBHOOK_SECRET` | HMAC signing key (`X-Helpdesk-Signature` header) |
+| `HELPDESK_BASE_URL` | Gateway public URL for absolute resolve links in notifications |
+
+See [docs/DECISIONS.md](DECISIONS.md) for the full reference including Slack formatting, HMAC signing, email configuration, and the git webhook adapter.
+
+### Git merge as approval
+
+Operators can approve a fleet job by merging a branch named `approved/fleet/{approvalID}` via any git provider. Register `POST /api/v1/webhooks/git` as a webhook and set `HELPDESK_GIT_WEBHOOK_SECRET`. See [docs/DECISIONS.md — Git webhook adapter](DECISIONS.md#git-webhook-adapter-opt-in).
 
 ---
 

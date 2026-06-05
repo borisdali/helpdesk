@@ -1,7 +1,10 @@
 series_id: pbs_replication_lag
 name: Replication Lag Triage
-version: "1.0"
-execution_mode: fleet
+version: "1.1"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -38,6 +41,11 @@ guidance: |
   Common misdiagnosis: treating a replica lag spike during a large batch write
   (bulk insert/delete) as a failure — it is normal and will resolve. Only
   escalate if lag does not recover within 15 minutes of the batch completing.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: max replay_lag=<N>s (replica <app_name>); sender_state=<streaming|catchup|disconnected>; stale_slot=<slot_name | none>; recommended=<drop_slot|investigate_replica|escalate|monitor>
+  TRANSITION_TO: pbs_replication_remediate
 escalation:
   - "replay_lag > 5 minutes on any replica"
   - "replication slot with no active connection and lsn delta > 10GB"

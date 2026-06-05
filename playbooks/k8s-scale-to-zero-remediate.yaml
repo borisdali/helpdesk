@@ -1,0 +1,65 @@
+series_id: pbs_k8s_scale_to_zero_remediate
+name: "K8s StatefulSet Scaled to Zero — Scale Up"
+version: "1.0"
+entry_point: false
+execution_mode: agent_approve
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Scale a PostgreSQL StatefulSet back to 1 replica after it was scaled to zero.
+  Confirms the current state before acting, requests operator approval with full
+  context, then verifies the pod reaches Running state. The scale_up action is
+  reversible — scaling back to 0 with the same command undoes the change. Only
+  safe when triage confirmed a clean shutdown (no crash loop indicators).
+symptoms:
+  - "StatefulSet confirmed at 0 replicas after triage"
+  - "clean shutdown confirmed — safe to scale up"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT operate on other namespaces.
+
+  Step 1: Confirm current state. Call get_pods for the ticket namespace to
+  verify that zero postgres pods are currently running. If a postgres pod is
+  already in Running state (e.g. the StatefulSet was scaled up externally while
+  triage was in progress), note this and skip to Step 3 to verify stability
+  without making any changes.
+
+  If pods are in Terminating state, do NOT proceed — scale-down is still in
+  progress. Report this and wait for the pods to terminate before scaling up.
+
+  Step 2: Scale the StatefulSet back to 1 replica. Call scale_deployment for
+  the postgres StatefulSet in the ticket namespace with replicas=1.
+  Before requesting approval, state all of the following:
+  - The StatefulSet name (from triage findings or inferred from the namespace)
+  - The current replica count: 0
+  - The target replica count: 1
+  - That this action is reversible: the StatefulSet can be scaled back to 0
+    with the same command if needed
+  - That triage confirmed a clean shutdown (no crash loop or FATAL errors in
+    recent events), making this safe to proceed
+
+  Step 3: Verify recovery. After approval and the scale_deployment call, call
+  get_pods for the ticket namespace. The postgres pod (named <statefulset>-0)
+  should transition from ContainerCreating to Running. PostgreSQL initialization
+  typically takes 30–60 seconds on first start.
+
+  If the pod is still in ContainerCreating or Pending after a reasonable wait,
+  call describe_pod on the postgres pod to check for:
+  - Volume mount errors (PVC not bound)
+  - Resource scheduling failures (pod moved to Pending due to node pressure)
+  - Container startup errors (init container failures)
+  Report findings and do not make further changes without operator guidance.
+
+  If the pod enters CrashLoopBackOff after starting, do not retry — the pod
+  has a startup error that must be diagnosed first. Escalate to
+  pbs_k8s_pod_crash_triage.
+
+  Final step: after your remediation summary, output exactly one line in this
+  format (no markdown, no extra text on the line):
+  FINDINGS: action=scale_up; statefulset=<name>; pod=<name>; outcome=<running|still_pending|error>; follow_up=<none|investigate_startup>
+escalation:
+  - "pod enters CrashLoopBackOff after scale-up — root cause is a startup error, not the replica count; use pbs_k8s_pod_crash_triage to diagnose before attempting another scale-up"
+  - "pod stays Pending after scale-up — likely a resource request or storage (PVC) issue; use pbs_k8s_pending_triage or pbs_k8s_pvc_triage"
+target_hints: []

@@ -1,0 +1,71 @@
+series_id: pbs_auth_failure_triage
+name: Authentication Failure — Triage
+version: "1.0"
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a PostgreSQL authentication failure. The fault overrides the
+  connection string with wrong credentials, causing all connections to fail
+  at the authentication stage. The agent captures the exact error, identifies
+  which part of the authentication is failing (password, role, HBA, SSL), and
+  reports the diagnosis. Authentication failures cannot be remediated from
+  within the database agent — the fix requires updating credentials or
+  PostgreSQL role configuration, which is a credential management action
+  outside this agent's scope.
+symptoms:
+  - "application cannot connect to the database"
+  - "password authentication failed errors in application logs"
+  - "connection string credentials appear to be wrong"
+  - "database connections failing at login stage"
+guidance: |
+  Step 1: Call check_connection against the connection_string in the context.
+  Capture the exact error message. Classify the failure type:
+
+  - "password authentication failed for user" → wrong password. The role
+    exists, the HBA rule accepted the connection, but the password is incorrect.
+    auth_type = wrong_password.
+
+  - "no pg_hba.conf entry for host" or "pg_hba.conf rejects connection" →
+    the pg_hba.conf rule does not permit this user/host combination. This is
+    an HBA configuration issue, NOT a password issue.
+    auth_type = hba_reject.
+    Escalate: use pbs_pg_hba_triage for HBA-specific diagnosis.
+
+  - "role does not exist" or "FATAL: role \"<name>\" does not exist" → the
+    username specified in the connection string does not exist in PostgreSQL.
+    The role must be created by a DBA.
+    auth_type = role_missing.
+
+  - "SSL connection required" or "SSL off" → the server requires SSL but the
+    client is not using it, or vice versa.
+    auth_type = ssl_mismatch.
+
+  - Any other error → auth_type = other. Record the full message.
+
+  Step 2: From the error and the connection_string in the context, identify:
+  - The username being used (from connection_string or from the error message)
+  - The target host, port, and database name
+  - Which layer of authentication is failing (see Step 1 classification)
+
+  Step 3: Report the diagnosis clearly. Authentication failures cannot be
+  remediated by the database agent. The correct fix depends on the auth_type:
+  - wrong_password → update the connection string or reset the PostgreSQL role
+    password via ALTER ROLE — requires DBA or credential management action.
+  - role_missing → create the PostgreSQL role — requires DBA action.
+  - hba_reject → pg_hba.conf must be corrected — covered by pbs_pg_hba_triage.
+  - ssl_mismatch → update postgresql.conf or the client connection string to
+    align SSL settings — requires DBA or sysadmin action.
+  None of these actions can be taken from within this agent's toolset.
+
+  Final step: after your analysis, output exactly these two lines in this
+  format (no markdown, no extra text on each line):
+  FINDINGS: error=<error text verbatim>; auth_type=<wrong_password|role_missing|hba_reject|ssl_mismatch|other>; target_user=<user>; target_db=<dbname>
+  ESCALATE_TO: none
+escalation:
+  - "error is 'pg_hba.conf rejects connection' — this is an HBA configuration issue, not an auth failure; use pbs_pg_hba_triage for the correct diagnosis"
+  - "role does not exist — a DBA must create the PostgreSQL role before authentication can succeed"
+target_hints: []

@@ -6,6 +6,7 @@ package authz
 var DefaultGatewayPermissions = map[string]Permission{
 	// ── Public: no authentication required ────────────────────────────────────
 	"GET /health":                  {AllowAnonymous: true},
+	"GET /metrics":                 {AllowAnonymous: true}, // Prometheus scrapes
 	"GET /api/v1/agents":           {AllowAnonymous: true},
 	"GET /api/v1/tools":            {AllowAnonymous: true},
 	"GET /api/v1/tools/{toolName}": {AllowAnonymous: true},
@@ -31,8 +32,27 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/governance/journeys":          {AdminBypass: true},
 	"GET /api/v1/governance/govbot/runs":       {AdminBypass: true},
 
+	// Governance approval actions — mirror auditd's POST /v1/approvals/{id}/{approve,deny}
+	// (coarse gateway check; auditd applies the per-approval-type role).
+	"POST /api/v1/governance/approvals/{approvalID}/approve": {
+		RequireRoles: []string{"dba", "fleet-approver"},
+		AdminBypass:  true,
+	},
+	"POST /api/v1/governance/approvals/{approvalID}/deny": {
+		RequireRoles: []string{"dba", "fleet-approver"},
+		AdminBypass:  true,
+	},
+
 	// Tool result query
 	"GET /api/v1/tool-results": {AdminBypass: true},
+
+	// Decision Hub: unified view and resolution of pending gates, fleet approvals, step approvals.
+	"GET /api/v1/decisions":               {AdminBypass: true},
+	"GET /api/v1/decisions/{id}":          {AdminBypass: true},
+	"POST /api/v1/decisions/{id}/resolve": {AdminBypass: true},
+
+	// Git webhook adapter: HMAC-validated by the handler itself; no Bearer auth.
+	"POST /api/v1/webhooks/git": {AllowAnonymous: true},
 
 	// Fleet reads and plan (plan is a dry-run — any authenticated user may preview)
 	"POST /api/v1/fleet/plan":                                   {AdminBypass: true},
@@ -62,8 +82,12 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"POST /api/v1/fleet/playbooks/{playbookID}/run":        {AdminBypass: true},
 	"GET /api/v1/fleet/playbooks/{playbookID}/runs":        {AdminBypass: true},
 	"GET /api/v1/fleet/playbooks/{playbookID}/stats":       {AdminBypass: true},
-	"PATCH /api/v1/fleet/playbook-runs/{runID}":        {AdminBypass: true},
-	"GET /api/v1/fleet/playbook-runs/{runID}":          {AdminBypass: true},
+	"PATCH /api/v1/fleet/playbook-runs/{runID}":                    {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}":                      {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}/steps":                {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}/pending-step":         {AdminBypass: true},
+	"POST /api/v1/fleet/playbook-runs/{runID}/proceed":             {AdminBypass: true},
+	"POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation":  {AdminBypass: true},
 
 	// ── Role-required ─────────────────────────────────────────────────────────
 
