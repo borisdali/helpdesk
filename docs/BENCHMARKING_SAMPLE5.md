@@ -4,11 +4,11 @@ For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST
 
 For the background on interactive approvals see [here](PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo) and the simple interactive/approval sample running on a host/VM is available [here](BENCHMARKING_SAMPLE4.md).
 
-In this document we present four (!) sample runs on K8s that demonstrate not only the interactive async approvals via the Decision Hub, but also the practical application of aiHelpDesk defence-in-depth as it applies to running fault injection tests.
+In this document we present four (!) sample runs on K8s that demonstrate not only the interactive async approvals via the [Decision Hub](DECISIONS.md), but also the practical application of aiHelpDesk defence-in-depth as it applies to running fault injection tests.
 
-Similar to the previous example of running on host/VM (or from the code source), you need two terminals (or better three) for running this fault injection test on K8s. The first terminal runs `helm upgrade`. The second terminal runs `kubectl get logs`. And the third one is where you issue the `curl` commands to review and approve the authorization requests (to clear the gate and individual remediation steps - depending on the requested `approval_mode`). 
+Similar to the previous example of running on host/VM (or from the code source), you need two terminals (or better three) for running this fault injection test on K8s. The first terminal runs `helm upgrade`. The second terminal runs `kubectl get logs`. And the third one is where you issue the `curl` commands to review and approve the authorization requests (to clear the gate and individual remediation steps - depending on the requested `approval_mode`, see [here](PLAYBOOKS.md#proceeding-through-the-gate)). You can, of course, combine the terminals two and three into one (or fold all three of the terminals into a single one by running `helm upgrade` in the background), but it may be more convenient to run them on three separate terminals (at least until you get comfortable with the process).
 
-Let's get started:
+So let's get started:
 
 ## Run #1 - Terminal #1 (main test run):
 
@@ -19,8 +19,8 @@ Let's get started:
     --set faulttest.judge=true \
     --set faulttest.viaGateway=true \
     --set faulttest.remediate=true \
-    --set faulttest.gateEscalation=true \
-    --set faulttest.emitAndWait=true \
+    --set faulttest.gateEscalation=true \				<-- this is a new flag introduced in release 0.15
+    --set faulttest.emitAndWait=true \					<-- this is a new flag introduced in release 0.15
     --set faulttest.gatewayAPIKeySecret=<your Gateway API key> 
     --set faulttest.conn=pg-cluster-minikube \
     --set faulttest.dbPasswordSecret.name=pg-cluster-minkube-app \
@@ -28,10 +28,14 @@ Let's get started:
     --set image.tag=v0.15.0-b7c7068 \
     --timeout 15m \
     --set faulttest.targetNamespace=db \
-    --set faulttest.approvalMode=force
+    --set faulttest.approvalMode=review					<-- this is a new flag introduced in release 0.15
 ```
 
-The above command probably looks faimilar because we used it in previous examples, e.g. see [here](BENCHMARKING_SAMPLE1.md#running-on-k8s-via-a-helm-chart). Once launched, this command would stop and wait (until a timeout threshold of 15m that we requested via a command line flag) and the results of the run can be viewed in real time by observing a K8s log, as follows:
+The above command probably looks faimilar because we used it in previous examples, e.g. see [here](BENCHMARKING_SAMPLE1.md#running-on-k8s-via-a-helm-chart). But in contrast to the previous examples, there are now three additional flags here that enable interactive async approvals via a central [Decision Hub API](DECISIONS.md). All three flags are optional, but together they provide the experience of a human operator that is in full control over a test.
+
+In particular, we expect that many folks would prefer to stop and review the triage diagnosis before attempting any remediation steps because the latter can be destructive and so before launching them you may want to form an opinion as to whether or not the diagnosis is indeed correct and your AI is solving the right problem and following the right steps that you'd expect (and follow by yourself if you had to).
+
+Once this `helm upgrade` command is launched, it would stop and wait (until the test completes or until a timeout threshold of 15m is reached, as requested via a command line flag) and the results of the run can be viewed in real time by observing a K8s log, as follows:
 
 ## Run #1 - Terminal #2 (kubectl logs):
 
@@ -66,12 +70,12 @@ time=2026-06-05T16:23:43.799Z level=INFO msg="faultlib: gate poll" run_id=plr_31
 
 ```
 
-This is the [informed gate](PLAYBOOKS.md#informed-gate) in action. In this mode, a human operator is expected to review the results of the triage and, if satisfied, let aiHelpDesk proceed with actually fixing the problem (the remediation playbook). Please note that the gate is opt-in per-request (note `--set faulttest.gateEscalation=true`) in the above command and so if this behavior is not desired (e.g. for the fully automated CI runs), it can be skipped. See more on this point in the [last section](BENCHMARKING_SAMPLE5.md#control-surfaces).
+This is the [informed gate](PLAYBOOKS.md#informed-gate) in action. In this mode, a human operator is expected to review the results of the triage and, if satisfied, let aiHelpDesk proceed with actually fixing the problem (by effectively launching the remediation playbook). Please note that the gate is opt-in per-request (note `--set faulttest.gateEscalation=true`) in the above command and so if this behavior is not desired (e.g. for the fully automated CI runs), it can be skipped. See more on this point in the [last section](BENCHMARKING_SAMPLE5.md#control-surfaces).
 
 ## Run #1 - Terminal #3 (approval terminal):
 
 ```
-[boris@ ~]$ APIKEY=$(kubectl get secret -n helpdesk-system gateway-api-key -o jsonpath='{.data.api-key}' | base64 -d)
+[boris@ ~]$ APIKEY=$(k get secret -n helpdesk-system gateway-api-key -o jsonpath='{.data.api-key}' | base64 -d)
 [boris@ ~]$ curl -s -H "Authorization: Bearer $APIKEY" "http://localhost:8080/api/v1/decisions?type=gate" | jq .
 Handling connection for 8080
 {
@@ -127,7 +131,7 @@ Handling connection for 8080
 
 ## Run #1 - Back to Terminal #1 (main test run):
 
-Once a gate is cleared, the remediation phase would kick in:
+Once the triage gate is cleared, the remediation phase is free to kick in (notice how `outcome=gate_pending` switched to `outcome=transitioned` below):
 
 ```
 time=2026-06-05T16:30:24.628Z level=INFO msg="faultlib: gate poll" run_id=plr_314dd2b0 outcome=gate_pending
@@ -147,7 +151,7 @@ time=2026-06-05T16:31:56.579Z level=INFO msg="recovery check failed, retrying" e
 time=2026-06-05T16:32:01.669Z level=INFO msg="recovery check failed, retrying" err="verify_sql returned false" remaining=50s
 ```
 
-... and unfortunately in this case the remeidation fails because of a security policy in place. Please note from the above log:
+But unfortunately in this case the remeidation fails... because of a security policy in place. Two of them in fact. But let's take it slow, one step at a time. There's an interesting bit in the above log excerpt that is worth paying attention to:
 
 ```
 Step 3 termination attempted but denied by policy 'pii-data-protection' rule 2
@@ -156,9 +160,9 @@ Remediation cannot proceed without policy override or DBA+Legal approval.
 Escalation required—do not retry terminate_connection without explicit authorization and policy exception."
 ```
 
-Please note that the e2e flow worked as designed here, however the remediation "failed" because the governance policy `pii-data-protection` blocked `terminate_connection` on a database tagged with sensitivity: ["pii", "internal"].
+Aha. The e2e fault injection test flow worked as designed here, however the remediation "failed" because the governance policy `pii-data-protection` blocked `terminate_connection` on a database tagged with sensitivity: ["pii", "internal"].
 
-That's the system working correctly, but it's wrong for a chaos/test database.
+That's the system working correctly, but the target database cluster we chose as a target for this fault inject test has the wrong settinings/tags.
 
 
 Can we keep the PII tag and just get an override for this run by adding `--set faulttest.approvalMode=force` to the `helm` command? Would that `force` option bypass the policy enforcement entirely? Let's find out!
@@ -166,7 +170,7 @@ Can we keep the PII tag and just get an override for this run by adding `--set f
 
 ## Run #2 - Attempt to bypass the policy with `approval_mode=force`:
 
-So a similar run as above with three terminals: one running `helm upgrade --set faulttest.enabled=true`, one tail-ing `kubectl logs` and the third reviewing the authorization requests and granting (or denying) approvals:
+So this second run is similar to the one above, with three terminals: one running `helm upgrade --set faulttest.enabled=true`, one tail-ing `kubectl logs` and the third terminal used to review the authorization requests and granting (or denying) approvals. I'll speed up for this second run and show the relevant excerpts together, but please keep in mind that they come from three separate terminals, just like in the detailed example of run #1 above:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.15.0-deploy/helm/helpdesk]$ helm upgrade helpdesk . --namespace helpdesk-system \
@@ -267,7 +271,7 @@ Handling connection for 8080
 }
 ```
 
-Cool. Did we get it to run to the end now?
+Cool. Did it run to the end and succeeded now? Not quite:
 
 ```
 time=2026-06-05T16:36:49.307Z level=INFO msg="faultlib: gate poll" run_id=plr_1a89f306 outcome=gate_pending
@@ -288,23 +292,23 @@ So what happened here? The `approval_mode=force` didn't work?
 Well, aiHelpDesk features two separate enforcement layers blocking this and `force` doesn't bypass policy. Alas:
 
 **Layer 1**: approval mode clamped:
-The warning shows force was downgraded to manual because the caller doesn't have `dba_lead` or `oncall_senior` role.
-`force` is a privileged mode gated by `approval_override_roles` tag in the infra.json. It's missing for the target database cluster.
+The warning shows that the requested `force` mode was downgraded (aka clamped) to `manual` because the caller didn't have the `dba_lead` or `oncall_senior` role.
+`force` is a privileged mode gated by `approval_override_roles` tag in the infra.json. And the caller is missing that role for the target database cluster.
 
 **Layer 2**: policy enforcement:
 `pii-data-protection` rule 2 blocks `terminate_connection` on PII-tagged databases.
-This runs at tool execution time, independently of approval mode.
-Even if force had gotten through, policy would still deny the tool call.
+This layer 2 security enforcement runs at tool execution time, independently of approval mode.
+Even if force had gotten through, policy still denies the tool call.
 
-That is, `approvalMode=force` is for bypassing the step-approval wait loop (with appropriate role, of course), not for bypassing security policies.
+That is, `approvalMode=force` is for "bypassing" the step-approval wait loop (with appropriate role, of course), not for bypassing security policies.
 
 >
 > **Policy enforcement is unconditional**.
 >
 
-## Run #3 - Attempt to bypass the policy with `approval_mode=force` and a principal with Lead DBA/Senior Oncall role:
+## Run #3 - Attempt to bypass the policy with `approval_mode=force` and by running as a principal with Lead DBA/Senior Oncall role:
 
-Fine, let Alice run it (because she's part of the DBA team and has the power to run with `approval_mode=force`):
+Fine, let Alice run it (because she's part of the DBA team and has the power to request the `approval_mode=force`):
 
 ```
 [boris@ ~]$ kubectl get secret -n helpdesk-system helpdesk-users -o jsonpath='{.data.users\.yaml}' | base64 -d|grep -A2 alice
@@ -386,7 +390,7 @@ Handling connection for 8080
 }
 ```
 
-So now with the gate cleared the test should succeed, right? Not quite:
+So now with the gate cleared the test should succeed, right? Again, not quite:
 
 ```
 time=2026-06-05T16:46:58.946Z level=INFO msg="faultlib: gate poll" run_id=plr_739af648 outcome=gate_pending
@@ -402,7 +406,7 @@ time=2026-06-05T16:48:04.620Z level=INFO msg="recovery check failed, retrying" e
 time=2026-06-05T16:48:09.669Z level=INFO msg="recovery check failed, retrying" err="verify_sql returned false" remaining=55s
 ```
 
-So yes, there's clearly progress here, note that there's no longer the warning we saw before:
+So yes, there's clearly progress here, note that there's no longer the warning we saw earlier:
 
 ```
   level=WARN msg="gateway warning" ... "approval_mode clamped to \"manual\": override to \"force\" requires one of roles [dba_lead oncall_senior]"
@@ -412,13 +416,13 @@ In other words, the Gateway accepted `approval_mode=force` without clamping beca
 
 The step approvals also proceed automatically without any polling wait. Every `agent_approve: pending` step fires within ~8s of the previous one (just the 15s gate poll interval), whereas with `manual` mode each destructive step would require an explicit external POST to resolve. The automatic progression through all 6 steps is the behavioral confirmation that `force` is in effect.
 
-Then at step 6 (`terminate_connection`, destructive op), policy fires unconditionally. That is, aiHelpDesk Layer 2 holds regardless of alice's role or approval mode.
+Then at step 6 (`terminate_connection`, destructive op), the policy enforcement still fired unconditionally. That is, aiHelpDesk Layer 2 holds regardless of alice's role or approval mode.
 
 To summarize:
-- Layer 1 is indeed bypass-able with the right role: no clamping warning, steps auto-proceed
-- Layer 2 holds true regardless: policy blocks the tool period
+- Layer 1 is indeed bypass-able with the right role: no clamping warning, steps auto-proceed without any human review or approval
+- Layer 2 holds true regardless: policy blocks the destructive tools, period
 
-We'd like to think of these two layers as "destructive operations on PII databases require DBA + Legal contact."
+We'd like to think of these two layers as a "destructive operations on PII databases require DBA + Legal contact." Exactly as the log says :-)
 
 
 ## Run #4 - A successful fault injection test:
@@ -471,26 +475,28 @@ This is another point worth mentioning. You probably noticed the intentional asy
 
 ## The defense-in-depth that makes this safe:
 
-A gate approval can request an `approval_mode`, but the gateway clamps it against the caller's role via `enforceApprovalOverride` (see cmd/gateway/playbooks.go).
-So an API-key caller approving a gate with `approval_mode":force` (or `auto`) would get silently downgraded. 
-This the chain proceeds in `manual` or `review` mode and every destructive step still hits the role-checked step-approval gate. 
-The API-key holder can say "go ahead and try" but can't bypass the DBA at the actual destructive call.
+A gate approval can request an `approval_mode`, but the gateway clamps it against the caller's role via `enforceApprovalOverride` (see [here](../cmd/gateway/playbooks.go#L135)).
+So an API-key caller approving a gate with `approval_mode:force` (or `auto`) would get silently downgraded. 
+This makes the chain to proceed in the `manual` or `review` mode and every destructive step still hits the role-checked step-approval gate. 
+The API-key holder can say "go ahead and try", but can't bypass the DBA at the actual destructive call.
 
-This matches aiHelpDesk overal production threat model:
-- Operators / on-call who hold the gateway API key can triage broadly and unblock investigations.
-  That's low blast radius because nothing destructive has happened yet.
+>
+> This matches aiHelpDesk overal production threat model:
+> - Operators / on-call who hold the gateway API key can triage broadly and unblock investigations.
+>   That's low blast radius because nothing destructive has happened yet.
+> 
+> - DBAs / approvers are the ones who actually authorize writes. 
+>   One tool call at a time. 
+>   Regardless of how the run was kicked off.
+> 
 
-- DBAs / approvers are the ones who actually authorize writes. 
-  One tool call at a time. 
-  Regardless of how the run was kicked off.
-
-It's possible to configure aiHelpDesk to equivalent (gate also dba-gated) where you'd change `POST /api/v1/decisions/{id}/resolve` in internal/authz/gateway_routes.go from `{AdminBypass: true}` to `{RequireRoles: ["dba", "fleet-approver"], AdminBypass: true}`, but we don't recommend going down this route because it flattens the distinction. The current model is the standard "service can request, human-with-role authorizes the write" split.
+aiHelpDesk is OSS, so it's obviously possible to configure it to equivalent of DBA-gating of steps too by simply changing `POST /api/v1/decisions/{id}/resolve` [here](../internal/authz/gateway_routes.go#L52) from `{AdminBypass: true}` to `{RequireRoles: ["dba", "fleet-approver"], AdminBypass: true}`, but we don't recommend going down this route because it flattens the distinction. The current model is the standard "service can request, human-with-role authorizes the write" split.
 
 It may be also worth pointing out that a Bearer-API-key request would also have been rejected if the API key had no role mapped to it. 
-The fact that alice with X-User: alice@example.com succeeded (no Bearer at all) means she's resolved as an identity with the dba role via the users file.
+The fact that alice with X-User: alice@example.com succeeded (no Bearer at all) means she's resolved as an identity with the `dba` role via the users file (or equivalent JWT authn if it's used in favor of `static`).
 And that's the principal type the step gate is built to accept.
 
-Long story short, alice@ as a DBA can approve this destructive step:
+Long story short, alice@ as a DBA can approve this destructive step (while the "normal" authenticated user that lacks the DBA role, can't as shown above):
 
 ```
 [boris@ ~]$ curl -s -X POST -H "X-User: alice@example.com" -H "Content-Type: application/json" "http://localhost:8080/api/v1/decisions/step:apr_9115c829/resolve" -d '{"resolution":"approved","resolved_by":"boris@borisdali.com"}'
@@ -498,7 +504,7 @@ Handling connection for 8080
 {"status":"approved"}
 ```
 
-With the triage/remediation gate cleared and the destructive operation approved, we get the full fault injection run:
+And with that, with the triage/remediation gate cleared and the destructive operation approved, we finally get the full fault injection test finishig successfully, both the triage, the transition and the remedation phases:
 
 ## Full log of the successful fault injection test
 
@@ -642,7 +648,7 @@ curl -X POST .../playbooks/pb_xxx/run \
 
   In this mode the playbook still pauses at each destructive step (because `approval_mode=review` emits step approvals to the [Decision Hub](DECISIONS.md)).
 
-  Bypassing both the gate and step approvals, wich amounts for the true "trust the chain" hands-free run is also easy:
+  Bypassing both the gate and step approvals, which amounts for the true "trust the chain" hands-free run is also easy:
 
 ```
   curl -X POST .../playbooks/pb_xxx/run \
@@ -657,7 +663,7 @@ curl -X POST .../playbooks/pb_xxx/run \
 
   So an operator self-bypassing requires either `dba_lead` or `oncall_senior` (configurable in policy).
   Anyone below that gets silently downgraded back to the playbook's default approval mode, which is usually `manual` or `review`.
-  This is the "trust but verify" tier: senior roles can pre-authorize a whole run; everyone else can pre-authorize the path (skip the gate) but not the steps.
+  This is the "trust but verify" tier: senior roles can pre-authorize a whole run, while everyone else can pre-authorize the path (skip the gate), but not the (destructive) steps.
 
    Finally, all of this leads to the following practical mode combinations for operators on different trust tiers:
 
@@ -684,6 +690,6 @@ curl -X POST .../playbooks/pb_xxx/run \
 >  The tool call still gets denied, just without a human approval prompt sitting in front of it.
 >
 
-  So yes, the gate is bypassable and via `approval_mode=auto` the entire approval chain is bypassable. But only for principals the policy says are allowed to bypass and only within what the policy permits each tool to do.
-  The gate isn't a security control; it's a human-review control. The security controls are policy + audit and those are non-bypassable.
+  So yes, the gate is bypassable and via `approval_mode=auto` the entire approval chain is bypassable. But only for principals that the company's policy says are allowed to bypass and only within what the policy permits each tool to do.
+  The gate isn't a security control. It's a human-review control. The security controls are policy + audit and those are non-bypassable.
 
