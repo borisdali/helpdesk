@@ -174,17 +174,19 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	}
 
 	var result struct {
-		Text               string   `json:"text"`
-		CrystalBall        bool     `json:"crystal_ball"`
-		Error              string   `json:"error"`
-		ToolCalls          []string `json:"tool_calls"`
-		Warnings           []string `json:"warnings"`
-		RunID              string   `json:"run_id"`
-		Status             string   `json:"status"`
-		EscalationTarget   string   `json:"escalation_target"`
-		EscalationFindings string   `json:"escalation_findings"`
-		ConfidenceWarning  string   `json:"confidence_warning"`
-		SuggestedMode      string   `json:"suggested_approval_mode"`
+		Text               string         `json:"text"`
+		CrystalBall        bool           `json:"crystal_ball"`
+		Error              string         `json:"error"`
+		ToolCalls          []string       `json:"tool_calls"`
+		Warnings           []string       `json:"warnings"`
+		RunID              string         `json:"run_id"`
+		Status             string         `json:"status"`
+		EscalationTarget   string         `json:"escalation_target"`
+		EscalationFindings string         `json:"escalation_findings"`
+		ConfidenceWarning  string         `json:"confidence_warning"`
+		SuggestedMode      string         `json:"suggested_approval_mode"`
+		RemediationPreview map[string]any `json:"remediation_preview,omitempty"`
+		DiagnosticReport   map[string]any `json:"diagnostic_report,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -206,6 +208,8 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		EscalationFindings: result.EscalationFindings,
 		ConfidenceWarning:  result.ConfidenceWarning,
 		SuggestedMode:      result.SuggestedMode,
+		RemediationPreview: result.RemediationPreview,
+		DiagnosticReport:   result.DiagnosticReport,
 	}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)

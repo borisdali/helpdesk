@@ -40,12 +40,14 @@ type ApproveRunResponse struct {
 
 	// Informed gate fields — populated when Status=="pending_gate".
 	// GateType is "transition" (same-domain triage→remediation) or "escalation" (cross-domain).
-	GateType              string `json:"gate_type,omitempty"`
-	TransitionTarget      string `json:"transition_target,omitempty"`
-	EscalationTarget      string `json:"escalation_target,omitempty"`
-	EscalationFindings    string `json:"escalation_findings,omitempty"`
-	ConfidenceWarning     string `json:"confidence_warning,omitempty"`
-	SuggestedApprovalMode string `json:"suggested_approval_mode,omitempty"`
+	GateType              string         `json:"gate_type,omitempty"`
+	TransitionTarget      string         `json:"transition_target,omitempty"`
+	EscalationTarget      string         `json:"escalation_target,omitempty"`
+	EscalationFindings    string         `json:"escalation_findings,omitempty"`
+	ConfidenceWarning     string         `json:"confidence_warning,omitempty"`
+	SuggestedApprovalMode string         `json:"suggested_approval_mode,omitempty"`
+	RemediationPreview    map[string]any `json:"remediation_preview,omitempty"`
+	DiagnosticReport      map[string]any `json:"diagnostic_report,omitempty"`
 }
 
 // ProceedEscalationRequest is the request body for

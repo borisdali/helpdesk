@@ -178,6 +178,55 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	return nil
 }
 
+// printGatePreviewAndReport prints the remediation plan preview and structured
+// diagnostic hypotheses (if present) to stdout as part of the gate display.
+func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
+	if preview != nil {
+		name, _ := preview["name"].(string)
+		mode, _ := preview["approval_mode"].(string)
+		desc, _ := preview["description"].(string)
+		if name != "" {
+			line := "  Remediation plan  : " + name
+			if mode != "" {
+				line += " (" + mode + " approval)"
+			}
+			fmt.Println(line)
+			if desc != "" {
+				fmt.Printf("                       %s\n", desc)
+			}
+		}
+	}
+	if report != nil {
+		hyps, _ := report["hypotheses"].([]any)
+		if len(hyps) > 0 {
+			fmt.Println("  Hypotheses        :")
+			for _, h := range hyps {
+				hm, _ := h.(map[string]any)
+				text, _ := hm["text"].(string)
+				conf, _ := hm["confidence"].(float64)
+				isPrimary, _ := hm["is_primary"].(bool)
+				rejected, _ := hm["rejected_reason"].(string)
+
+				pct := int(conf * 100)
+				var label string
+				switch {
+				case isPrimary:
+					label = fmt.Sprintf("[PRIMARY %d%%]", pct)
+				case rejected != "":
+					label = fmt.Sprintf("[rejected %d%%]", pct)
+				default:
+					label = fmt.Sprintf("[%d%%]", pct)
+				}
+				if rejected != "" {
+					fmt.Printf("    %s %s — %s\n", label, text, rejected)
+				} else {
+					fmt.Printf("    %s %s\n", label, text)
+				}
+			}
+		}
+	}
+}
+
 // runGateLoop handles an informed gate interactively: shows the triage findings
 // and confidence warning, prompts the operator to approve or deny, and if approved
 // asks which approval mode to use for the remediation playbook.
@@ -193,6 +242,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	if gate.EscalationFindings != "" {
 		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
 	}
+	printGatePreviewAndReport(gate.RemediationPreview, gate.DiagnosticReport)
 
 	if gate.ConfidenceWarning != "" {
 		warnSep := strings.Repeat("─", width)
@@ -268,6 +318,7 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	if gate.EscalationFindings != "" {
 		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
 	}
+	printGatePreviewAndReport(gate.RemediationPreview, gate.DiagnosticReport)
 	if gate.ConfidenceWarning != "" {
 		fmt.Printf("  WARNING           : %s\n", gate.ConfidenceWarning)
 	}

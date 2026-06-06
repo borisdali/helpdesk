@@ -19,6 +19,20 @@ Gates have two sub-types, reflected in `extra.gate_type`:
 | `transition` | `TRANSITION_TO:` | Triage handing off to its expected remediation counterpart within the same problem domain (e.g. `pbs_vacuum_triage` → `pbs_vacuum_remediate`). Routine pipeline step. |
 | `escalation` | `ESCALATE_TO:` | True cross-domain handoff to a different agent or domain (e.g. DB agent → SysAdmin agent). May warrant closer operator scrutiny. |
 
+### Gate `extra` fields
+
+| Field | Always present | Description |
+|---|---|---|
+| `gate_type` | Yes | `"transition"` or `"escalation"` |
+| `findings` | Yes | Triage summary text emitted by the agent |
+| `transition_target` / `escalation_target` | Yes (one of) | Series ID of the next playbook |
+| `confidence_warning` | When confidence < 70% | Advisory; describes the primary hypothesis confidence level |
+| `suggested_approval_mode` | When `confidence_warning` present | Suggested mode for remediation (`"manual"` etc.) |
+| `remediation_preview` | When next playbook is resolvable | Object: `series_id`, `name`, `description`, `approval_mode` of the planned remediation playbook |
+| `diagnostic_report` | When triage emits `HYPOTHESIS_N:` lines | Structured diagnosis: `hypotheses[]` (each with `rank`, `text`, `confidence`, `is_primary`, `evidence`, `rejected_reason`), `root_cause` |
+
+`remediation_preview` lets operators see exactly what remediation will do — its name, intent, and default approval mode — before clicking approve. `diagnostic_report` records the structured reasoning behind the triage conclusion for later audit review.
+
 ---
 
 ## Listing pending decisions
@@ -58,7 +72,13 @@ curl http://localhost:8080/api/v1/decisions | jq .
         "gate_type":         "transition",
         "transition_target": "pbs_vacuum_remediate",
         "findings":          "Table public.orders has 94% dead tuple ratio...",
-        "series_id":         "pbs_vacuum_triage"
+        "series_id":         "pbs_vacuum_triage",
+        "remediation_preview": {
+          "series_id":     "pbs_vacuum_remediate",
+          "name":          "Vacuum Remediation",
+          "description":   "Run VACUUM ANALYZE on the bloated table and verify dead tuple ratio drops below 20%.",
+          "approval_mode": "review"
+        }
       }
     },
     {
@@ -74,7 +94,28 @@ curl http://localhost:8080/api/v1/decisions | jq .
         "escalation_target":  "pbs_sysadmin_docker_inspect",
         "findings":           "Connection refused — Docker-level investigation needed.",
         "series_id":          "pbs_connection_triage",
-        "confidence_warning": "Primary hypothesis confidence 55%"
+        "confidence_warning": "Primary hypothesis confidence 55%",
+        "remediation_preview": {
+          "series_id":     "pbs_sysadmin_docker_inspect",
+          "name":          "Docker Container Inspect",
+          "description":   "Inspect the database container for OOM kills, crash loops, or misconfig.",
+          "approval_mode": "manual"
+        },
+        "diagnostic_report": {
+          "hypotheses": [
+            {
+              "rank": 1, "text": "Container OOM-killed by cgroup memory limit",
+              "confidence": 0.55, "is_primary": true,
+              "evidence": "dmesg: oom-kill event, constraint=CONSTRAINT_MEMCG"
+            },
+            {
+              "rank": 2, "text": "Network policy blocking pod-to-pod traffic",
+              "confidence": 0.30, "is_primary": false,
+              "rejected_reason": "connection refused rather than timeout"
+            }
+          ],
+          "root_cause": "Container OOM-killed by cgroup memory limit"
+        }
       }
     }
   ],

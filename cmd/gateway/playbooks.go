@@ -563,6 +563,17 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				extra["confidence_warning"] = warn
 				extra["suggested_approval_mode"] = suggestedMode
 			}
+			if nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeries); err == nil {
+				extra["remediation_preview"] = map[string]any{
+					"series_id":     nextPB.SeriesID,
+					"name":          nextPB.Name,
+					"description":   nextPB.Description,
+					"approval_mode": nextPB.ApprovalMode,
+				}
+			}
+			if prev.diagReport != nil {
+				extra["diagnostic_report"] = prev.diagReport
+			}
 			finalOutcome = audit.OutcomeGatePending
 			if isTransition {
 				finalTransitionedTo = nextSeries

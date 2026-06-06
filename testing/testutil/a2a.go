@@ -40,6 +40,12 @@ type AgentResponse struct {
 	EscalationFindings string
 	ConfidenceWarning  string
 	SuggestedMode      string
+	// RemediationPreview describes the next playbook that would run after gate approval.
+	// Populated only when Status == "pending_gate".
+	RemediationPreview map[string]any
+	// DiagnosticReport is the structured diagnosis from triage (hypotheses, confidence).
+	// Populated when the triage playbook emits HYPOTHESIS_N: lines.
+	DiagnosticReport map[string]any
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.
