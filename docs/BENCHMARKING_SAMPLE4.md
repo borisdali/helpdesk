@@ -1,4 +1,4 @@
-# Benchmarking remediation sample#4: Informed Gate
+# Benchmarking remediation sample#4 (host/VM): Informed Gate
 
 For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md).
 
