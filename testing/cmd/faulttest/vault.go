@@ -131,11 +131,12 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|suggest|suggest-update>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
 		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
+		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
@@ -147,6 +148,8 @@ func cmdVault(args []string) {
 		vaultStatus(args[1:])
 	case "drift":
 		vaultDrift(args[1:])
+	case "accuracy":
+		vaultAccuracy(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -167,6 +170,9 @@ type playbookGatewayInfo struct {
 	resolved       int
 	resolutionRate float64 // 0.0–1.0
 	lastRunAt      string  // RFC3339 or empty
+	feedbackCount  int
+	correctCount   int
+	accuracyRate   float64 // 0.0–1.0; valid only when feedbackCount > 0
 }
 
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
@@ -205,6 +211,9 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 				Resolved       int     `json:"resolved"`
 				ResolutionRate float64 `json:"resolution_rate"`
 				LastRunAt      string  `json:"last_run_at"`
+				FeedbackCount  int     `json:"feedback_count"`
+				CorrectCount   int     `json:"correct_count"`
+				AccuracyRate   float64 `json:"accuracy_rate"`
 			} `json:"stats"`
 		} `json:"playbooks"`
 	}
@@ -217,6 +226,9 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 		info.resolved = s.Resolved
 		info.resolutionRate = s.ResolutionRate
 		info.lastRunAt = s.LastRunAt
+		info.feedbackCount = s.FeedbackCount
+		info.correctCount = s.CorrectCount
+		info.accuracyRate = s.AccuracyRate
 	}
 	return info
 }
@@ -338,8 +350,12 @@ func vaultList(args []string) {
 							lastDate = t.Format("2006-01-02")
 						}
 					}
-					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  last: %s%s",
-						info.totalRuns, info.resolutionRate*100, lastDate, sourceTag)
+					accuracyStr := "–"
+					if info.feedbackCount > 0 {
+						accuracyStr = fmt.Sprintf("%.0f%% accurate", info.accuracyRate*100)
+					}
+					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s  last: %s%s",
+						info.totalRuns, info.resolutionRate*100, accuracyStr, lastDate, sourceTag)
 				}
 			}
 		}
@@ -594,6 +610,42 @@ func passRateOf(results []bool) float64 {
 		}
 	}
 	return float64(passed) / float64(len(results))
+}
+
+// ── vault accuracy ───────────────────────────────────────────────────────────
+
+// vaultAccuracy shows diagnosis accuracy for a playbook series based on
+// operator feedback submitted after incident recovery.
+func vaultAccuracy(args []string) {
+	fs := flag.NewFlagSet("vault accuracy", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault accuracy <series_id>")
+		os.Exit(1)
+	}
+	seriesID := fs.Args()[0]
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault accuracy")
+		os.Exit(1)
+	}
+
+	// Fetch stats (includes accuracy) via the playbook list endpoint.
+	info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
+	if info.check != playbookFound {
+		fmt.Fprintf(os.Stderr, "Playbook series %q not found in gateway.\n", seriesID)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Diagnosis accuracy for series: %s\n\n", seriesID)
+	if info.feedbackCount == 0 {
+		fmt.Println("  No feedback submitted yet.")
+		fmt.Println("  Run a fault test and submit feedback after recovery to populate this report.")
+		return
+	}
+	fmt.Printf("  Feedback submitted : %d runs\n", info.feedbackCount)
+	fmt.Printf("  Correct diagnoses  : %d\n", info.correctCount)
+	fmt.Printf("  Accuracy rate      : %.0f%%\n", info.accuracyRate*100)
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────

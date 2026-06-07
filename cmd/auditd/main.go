@@ -245,7 +245,7 @@ func main() {
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
-	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore}
+	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore, feedbackStore: runFeedbackStore}
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
 	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore, feedbackStore: runFeedbackStore}

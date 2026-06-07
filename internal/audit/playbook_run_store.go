@@ -53,6 +53,10 @@ type PlaybookRunStats struct {
 	EscalationRate float64 `json:"escalation_rate"` // escalated / total_runs
 	ResolutionRate float64 `json:"resolution_rate"` // resolved / total_runs
 	LastRunAt      string  `json:"last_run_at,omitempty"`
+	// Accuracy fields — populated when feedback is available (FeedbackCount > 0).
+	FeedbackCount int     `json:"feedback_count"`
+	CorrectCount  int     `json:"correct_count"`
+	AccuracyRate  float64 `json:"accuracy_rate"` // correct_count / feedback_count; 0 when no feedback
 }
 
 // PlaybookRunStore persists playbook execution records.

@@ -200,6 +200,15 @@ func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Merge accuracy data from feedback store when available.
+	if s.feedbackStore != nil {
+		if fbStats, err := s.feedbackStore.StatsBySeries(r.Context(), pb.SeriesID); err == nil {
+			stats.FeedbackCount = fbStats.FeedbackCount
+			stats.CorrectCount = fbStats.CorrectCount
+			stats.AccuracyRate = fbStats.AccuracyRate
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats) //nolint:errcheck
 }

@@ -13,8 +13,9 @@ import (
 
 // playbookServer handles HTTP endpoints for fleet playbook management.
 type playbookServer struct {
-	store    *audit.PlaybookStore
-	runStore *audit.PlaybookRunStore
+	store         *audit.PlaybookStore
+	runStore      *audit.PlaybookRunStore
+	feedbackStore *audit.RunFeedbackStore
 }
 
 func (s *playbookServer) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +106,14 @@ func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
 		if statsMap, err := s.runStore.StatsBatch(r.Context(), seriesIDs); err == nil {
 			for _, pb := range playbooks {
 				if st, ok := statsMap[pb.SeriesID]; ok {
+					// Merge accuracy from feedback store when available.
+					if s.feedbackStore != nil {
+						if fbStats, err := s.feedbackStore.StatsBySeries(r.Context(), pb.SeriesID); err == nil {
+							st.FeedbackCount = fbStats.FeedbackCount
+							st.CorrectCount = fbStats.CorrectCount
+							st.AccuracyRate = fbStats.AccuracyRate
+						}
+					}
 					pb.Stats = st
 				}
 			}
