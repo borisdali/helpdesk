@@ -89,6 +89,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	if recoverySecs <= timeout.Seconds()/2 {
 		score = 1.0
 	}
+	r.submitFeedback(ctx, gate.RunID, gate.DiagnosticReport)
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
@@ -565,6 +566,102 @@ func logicalArgs(args map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// submitFeedback prompts the operator for diagnosis quality feedback and POSTs
+// it to the gateway. Silent no-op when non-interactive or gateway not configured.
+func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagReport map[string]any) {
+	if r.cfg.GatewayURL == "" || runID == "" {
+		return
+	}
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+	reader := bufio.NewReader(tty)
+
+	fmt.Println()
+	fmt.Print("  Was the diagnosis correct? [y/n/skip]: ")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer == "" || answer == "skip" || answer == "s" {
+		return
+	}
+	var diagCorrect *bool
+	if answer == "y" || answer == "yes" {
+		v := true
+		diagCorrect = &v
+	} else if answer == "n" || answer == "no" {
+		v := false
+		diagCorrect = &v
+	} else {
+		return
+	}
+
+	// Suggest the primary hypothesis text as the default root cause.
+	defaultRootCause := primaryHypothesisText(diagReport)
+
+	prompt := "  Actual root cause"
+	if defaultRootCause != "" {
+		prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultRootCause)
+	}
+	fmt.Print(prompt + ": ")
+	causeInput, _ := reader.ReadString('\n')
+	causeInput = strings.TrimSpace(causeInput)
+	if causeInput == "" {
+		causeInput = defaultRootCause
+	}
+
+	fb := map[string]any{
+		"run_id":            runID,
+		"diagnosis_correct": diagCorrect,
+	}
+	if causeInput != "" {
+		fb["actual_root_cause"] = causeInput
+	}
+	if r.cfg.OperatorID != "" {
+		fb["operator"] = r.cfg.OperatorID
+	}
+	body, _ := json.Marshal(fb)
+	url := strings.TrimSuffix(r.cfg.GatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("faulttest: failed to submit feedback", "run_id", runID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		fmt.Printf("  Feedback submitted (run_id=%s)\n", runID)
+	}
+}
+
+// primaryHypothesisText extracts the primary hypothesis text from a raw diagnostic
+// report map (as received from the gateway JSON response).
+func primaryHypothesisText(diagReport map[string]any) string {
+	if diagReport == nil {
+		return ""
+	}
+	hyps, _ := diagReport["hypotheses"].([]any)
+	for _, h := range hyps {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isPrimary, _ := hm["is_primary"].(bool); isPrimary {
+			text, _ := hm["text"].(string)
+			return text
+		}
+	}
+	return ""
 }
 
 // wrapText breaks s into lines of at most width runes, splitting on spaces.

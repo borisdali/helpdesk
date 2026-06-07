@@ -14,6 +14,7 @@ import (
 type playbookRunServer struct {
 	store         *audit.PlaybookRunStore
 	playbookStore *audit.PlaybookStore
+	feedbackStore *audit.RunFeedbackStore
 }
 
 // handleRecord handles POST /v1/fleet/playbooks/{playbookID}/runs.
@@ -201,4 +202,65 @@ func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats) //nolint:errcheck
+}
+
+// handleSubmitFeedback handles POST /v1/fleet/playbook-runs/{runID}/feedback.
+func (s *playbookRunServer) handleSubmitFeedback(w http.ResponseWriter, r *http.Request) {
+	if s.feedbackStore == nil {
+		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	var fb audit.RunFeedback
+	if err := json.NewDecoder(r.Body).Decode(&fb); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fb.RunID = runID
+	if operator := r.Header.Get("X-User"); operator != "" && fb.Operator == "" {
+		fb.Operator = operator
+	}
+	// Populate series_id from the run if not provided in the body.
+	if fb.SeriesID == "" {
+		if run, err := s.store.GetByRunID(r.Context(), runID); err == nil {
+			fb.SeriesID = run.SeriesID
+		}
+	}
+	if err := s.feedbackStore.Submit(r.Context(), &fb); err != nil {
+		slog.Error("failed to submit run feedback", "run_id", runID, "err", err)
+		http.Error(w, "failed to submit feedback", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(fb) //nolint:errcheck
+}
+
+// handleGetFeedback handles GET /v1/fleet/playbook-runs/{runID}/feedback.
+func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Request) {
+	if s.feedbackStore == nil {
+		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	fb, err := s.feedbackStore.GetByRunID(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "no feedback for run", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to get run feedback", "run_id", runID, "err", err)
+		http.Error(w, "failed to get feedback", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(fb) //nolint:errcheck
 }
