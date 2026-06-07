@@ -27,14 +27,17 @@ type PlaybookRun struct {
 	RunID            string             `json:"run_id"`
 	PlaybookID       string             `json:"playbook_id"`
 	SeriesID         string             `json:"series_id"`
-	ExecutionMode    string             `json:"execution_mode"`           // "fleet" | "agent"
-	Outcome          string             `json:"outcome"`                  // "resolved" | "escalated" | "abandoned" | "unknown"
-	EscalatedTo      string             `json:"escalated_to,omitempty"`   // series_id for true out-of-scope escalations (ESCALATE_TO)
+	ExecutionMode    string             `json:"execution_mode"`            // "fleet" | "agent"
+	Outcome          string             `json:"outcome"`                   // "resolved" | "escalated" | "abandoned" | "unknown"
+	EscalatedTo      string             `json:"escalated_to,omitempty"`    // series_id for true out-of-scope escalations (ESCALATE_TO)
 	TransitionedTo   string             `json:"transitioned_to,omitempty"` // series_id for same-domain triage→remediation transitions (TRANSITION_TO)
 	FindingsSummary  string             `json:"findings_summary,omitempty"` // agent summary at handoff
 	DiagnosticReport *DiagnosticReport  `json:"diagnostic_report,omitempty"` // structured hypotheses when agent emits HYPOTHESIS_N: lines
-	ContextID        string             `json:"context_id,omitempty"`    // A2A session ID
+	ContextID        string             `json:"context_id,omitempty"`      // A2A session ID
 	ConnectionString string             `json:"connection_string,omitempty"` // target DB/service; forwarded to chained runs
+	TraceID          string             `json:"trace_id,omitempty"`        // X-Trace-ID of the originating request; links to audit events
+	AgentTranscript  string             `json:"agent_transcript,omitempty"` // full agent response text — the chain-of-thought narrative
+	PriorRunID       string             `json:"prior_run_id,omitempty"`    // triage run_id that preceded this remediation run
 	Operator         string             `json:"operator"`
 	StartedAt        time.Time          `json:"started_at"`
 	CompletedAt      time.Time          `json:"completed_at,omitempty"`
@@ -99,6 +102,7 @@ CREATE TABLE IF NOT EXISTS playbook_runs (
 	return s.migrate()
 }
 
+
 // migrate applies additive schema changes to existing databases.
 // Each ALTER TABLE is swallowed if the column already exists (idempotent).
 func (s *PlaybookRunStore) migrate() error {
@@ -109,6 +113,9 @@ func (s *PlaybookRunStore) migrate() error {
 		{"diagnostic_report", `ALTER TABLE playbook_runs ADD COLUMN diagnostic_report TEXT NOT NULL DEFAULT ''`},
 		{"transitioned_to", `ALTER TABLE playbook_runs ADD COLUMN transitioned_to TEXT NOT NULL DEFAULT ''`},
 		{"connection_string", `ALTER TABLE playbook_runs ADD COLUMN connection_string TEXT NOT NULL DEFAULT ''`},
+		{"trace_id", `ALTER TABLE playbook_runs ADD COLUMN trace_id TEXT NOT NULL DEFAULT ''`},
+		{"agent_transcript", `ALTER TABLE playbook_runs ADD COLUMN agent_transcript TEXT NOT NULL DEFAULT ''`},
+		{"prior_run_id", `ALTER TABLE playbook_runs ADD COLUMN prior_run_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite returns "duplicate column name" when the column already
@@ -117,6 +124,16 @@ func (s *PlaybookRunStore) migrate() error {
 				return fmt.Errorf("migrate playbook_runs.%s: %w", col.name, err)
 			}
 		}
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_playbook_runs_trace
+    ON playbook_runs(trace_id)`)
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		return fmt.Errorf("migrate idx_playbook_runs_trace: %w", err)
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_playbook_runs_prior
+    ON playbook_runs(prior_run_id)`)
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		return fmt.Errorf("migrate idx_playbook_runs_prior: %w", err)
 	}
 	return nil
 }
@@ -138,11 +155,13 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 		`INSERT INTO playbook_runs
 		    (run_id, playbook_id, series_id, execution_mode, outcome,
 		     escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		     context_id, connection_string, operator, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     context_id, connection_string, trace_id, prior_run_id,
+		     operator, started_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.PlaybookID, r.SeriesID, r.ExecutionMode, outcome,
 		r.EscalatedTo, r.TransitionedTo, r.FindingsSummary, diagJSON,
-		r.ContextID, r.ConnectionString, r.Operator,
+		r.ContextID, r.ConnectionString, r.TraceID, r.PriorRunID,
+		r.Operator,
 		r.StartedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(r.CompletedAt),
 	)
@@ -150,14 +169,15 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 }
 
 // Update sets outcome, escalated_to, transitioned_to, findings_summary, diagnostic_report,
-// and completed_at for an existing run. Used when the agent session concludes.
-func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary string, report *DiagnosticReport) error {
+// agent_transcript, and completed_at for an existing run. Used when the agent session concludes.
+func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript string, report *DiagnosticReport) error {
 	diagJSON := marshalDiagnosticReport(report)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE playbook_runs
-		 SET outcome = ?, escalated_to = ?, transitioned_to = ?, findings_summary = ?, diagnostic_report = ?, completed_at = ?
+		 SET outcome = ?, escalated_to = ?, transitioned_to = ?, findings_summary = ?,
+		     diagnostic_report = ?, agent_transcript = ?, completed_at = ?
 		 WHERE run_id = ?`,
-		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON,
+		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON, agentTranscript,
 		time.Now().UTC().Format("2006-01-02 15:04:05"),
 		runID,
 	)
@@ -260,7 +280,9 @@ func (s *PlaybookRunStore) StatsBatch(ctx context.Context, seriesIDs []string) (
 func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*PlaybookRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, transitioned_to, findings_summary, diagnostic_report, context_id, connection_string, operator, started_at, completed_at
+		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
+		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE run_id = ?`, runID)
 	return scanPlaybookRun(row)
@@ -273,11 +295,35 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, transitioned_to, findings_summary, diagnostic_report, context_id, connection_string, operator, started_at, completed_at
+		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
+		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE playbook_id = ?
 		ORDER BY started_at DESC
 		LIMIT %d`, limit), playbookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPlaybookRuns(rows)
+}
+
+// ListByPriorRunID returns runs whose prior_run_id matches the given triage run_id,
+// most recent first. Used to find the remediation run for a given triage run.
+func (s *PlaybookRunStore) ListByPriorRunID(ctx context.Context, priorRunID string, limit int) ([]*PlaybookRun, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
+		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
+		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       operator, started_at, completed_at
+		FROM playbook_runs
+		WHERE prior_run_id = ?
+		ORDER BY started_at DESC
+		LIMIT %d`, limit), priorRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +338,9 @@ func (s *PlaybookRunStore) ListByOutcome(ctx context.Context, outcome string, li
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
-		       escalated_to, transitioned_to, findings_summary, diagnostic_report, context_id, connection_string, operator, started_at, completed_at
+		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
+		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE outcome = ?
 		ORDER BY started_at DESC
@@ -325,8 +373,9 @@ func scanPlaybookRun(s playbookRunScanner) (*PlaybookRun, error) {
 	var startedStr, completedStr, diagJSON string
 	if err := s.Scan(
 		&r.RunID, &r.PlaybookID, &r.SeriesID, &r.ExecutionMode, &r.Outcome,
-		&r.EscalatedTo, &r.TransitionedTo, &r.FindingsSummary, &diagJSON, &r.ContextID, &r.ConnectionString, &r.Operator,
-		&startedStr, &completedStr,
+		&r.EscalatedTo, &r.TransitionedTo, &r.FindingsSummary, &diagJSON,
+		&r.ContextID, &r.ConnectionString, &r.TraceID, &r.PriorRunID, &r.AgentTranscript,
+		&r.Operator, &startedStr, &completedStr,
 	); err != nil {
 		return nil, err
 	}

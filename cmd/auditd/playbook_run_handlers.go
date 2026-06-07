@@ -74,6 +74,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		EscalatedTo      string                  `json:"escalated_to,omitempty"`
 		TransitionedTo   string                  `json:"transitioned_to,omitempty"`
 		FindingsSummary  string                  `json:"findings_summary,omitempty"`
+		AgentTranscript  string                  `json:"agent_transcript,omitempty"`
 		DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -85,7 +86,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.TransitionedTo, body.FindingsSummary, body.DiagnosticReport); err != nil {
+	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.TransitionedTo, body.FindingsSummary, body.AgentTranscript, body.DiagnosticReport); err != nil {
 		slog.Error("failed to update playbook run", "run_id", runID, "err", err)
 		http.Error(w, "failed to update run", http.StatusInternalServerError)
 		return
@@ -141,26 +142,40 @@ func (s *playbookRunServer) handleGetRun(w http.ResponseWriter, r *http.Request)
 
 // handleStats handles GET /v1/fleet/playbooks/{playbookID}/stats.
 // Returns aggregated stats for the playbook's series.
-// handleListByOutcome handles GET /v1/fleet/playbook-runs?outcome=<outcome>&limit=<n>.
-// Returns runs matching the given outcome, most recent first.
+// handleListByOutcome handles GET /v1/fleet/playbook-runs.
+// Supports ?outcome=<outcome>, ?prior_run_id=<id>, and ?limit=<n>.
 func (s *playbookRunServer) handleListByOutcome(w http.ResponseWriter, r *http.Request) {
-	outcome := r.URL.Query().Get("outcome")
-	if outcome == "" {
-		http.Error(w, "outcome query parameter is required", http.StatusBadRequest)
-		return
-	}
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil {
 			limit = n
 		}
 	}
-	runs, err := s.store.ListByOutcome(r.Context(), outcome, limit)
-	if err != nil {
-		slog.Error("failed to list playbook runs by outcome", "outcome", outcome, "err", err)
-		http.Error(w, "failed to list runs", http.StatusInternalServerError)
-		return
+
+	var runs []*audit.PlaybookRun
+	var err error
+
+	if priorRunID := r.URL.Query().Get("prior_run_id"); priorRunID != "" {
+		runs, err = s.store.ListByPriorRunID(r.Context(), priorRunID, limit)
+		if err != nil {
+			slog.Error("failed to list playbook runs by prior_run_id", "prior_run_id", priorRunID, "err", err)
+			http.Error(w, "failed to list runs", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		outcome := r.URL.Query().Get("outcome")
+		if outcome == "" {
+			http.Error(w, "outcome or prior_run_id query parameter is required", http.StatusBadRequest)
+			return
+		}
+		runs, err = s.store.ListByOutcome(r.Context(), outcome, limit)
+		if err != nil {
+			slog.Error("failed to list playbook runs by outcome", "outcome", outcome, "err", err)
+			http.Error(w, "failed to list runs", http.StatusInternalServerError)
+			return
+		}
 	}
+
 	if runs == nil {
 		runs = []*audit.PlaybookRun{}
 	}
