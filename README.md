@@ -13,7 +13,7 @@ aiHelpDesk is a Go-based Agentic AI multi-agent database support system for diag
 Two things set aiHelpDesk apart from a general-purpose AI assistant:
 
 **1. Agents that act, not just advise.**
-The governed actuation arm — formal tool registry, fleet runner, playbooks, policy engine, blast-radius guards — executes remediation steps on your real infrastructure under a tamper-proof audit trail. Every tool call is logged, every destructive action requires human approval, and the governance framework enforces limits that can't be bypassed at runtime.
+The governed actuation arm — formal tool registry, fleet runner, playbooks, policy engine, blast-radius guards — executes remediation steps on your real infrastructure under a tamper-proof audit trail. Every tool call is logged, every destructive action requires human approval and the governance framework enforces limits that can't be bypassed at runtime.
 
 **2. Institutional memory that compounds.**
 Every resolved incident automatically proposes a playbook draft. Every successful faulttest remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md) — aiHelpDesk's library of fault→remedy pairings — grows richer with every incident. The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking.
@@ -26,15 +26,15 @@ Every resolved incident automatically proposes a playbook draft. Every successfu
   </a>
 </p>
 
-The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents, and proposes updates when a successful incident trace suggests a better approach. See [here](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c) for the full story.
+The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents and proposes updates when a successful incident trace suggests a better approach. See [here](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c) for the full story.
 
 ## Key Capabilities
 
 - **Fault injection testing** — inject 27 known failure modes (SQL-only, SSH, K8s) against your own staging database, score the agent's diagnosis, verify remediation recovery. The `faulttest` tool is self-contained and needs no cluster access to run against external targets.
-- **Fleet operations** — coordinate changes across multiple databases with canary phases, approval gates, schema drift detection, and full audit trails. Natural language → fleet plan via the Planner.
+- **Fleet operations** — coordinate changes across multiple databases with canary phases, approval gates, schema drift detection and full audit trails. Natural language → fleet plan via the Planner.
 - **Playbooks** — saved runbooks that combine intent with expert guidance. System playbooks ship with aiHelpDesk; custom playbooks are authored, imported, or auto-generated from incident traces.
-- **AI Governance** — eight-module framework including tamper-proof audit, blast-radius enforcement, off-hours guards, and real-time policy evaluation. Every actuation is governed.
-- **Incident diagnostics** — the incident agent collects database, K8s, OS, and storage layers into a timestamped support bundle. On resolution, it automatically synthesises a playbook draft from the audit trace.
+- **AI Governance** — eight-module framework including tamper-proof audit, blast-radius enforcement, off-hours guards and real-time policy evaluation. Every actuation is governed.
+- **Incident diagnostics** — the incident agent collects database, K8s, OS and storage layers into a timestamped support bundle. On resolution, it automatically synthesises a playbook draft from the audit trace.
 - **A2A protocol** — built on Google ADK and the Agent-to-Agent protocol. Expert agents (Database, Kubernetes, Sysadmin, Incident, Orchestrator) can be swapped or extended independently.
 
 ## AI-Assisted Database Management
@@ -43,7 +43,7 @@ While SaaS DBaaS systems are among the fastest-growing cloud sectors, many custo
 
 Enter the world of AI-Assisted Database Management products.
 
-aiHelpDesk is the first product from the DDS Group on the path of AI-Assisted Database Management: a new breed of products where intelligence, governance, and operational memory live **in your stack**, not in a vendor's cloud.
+aiHelpDesk is the first product from the DDS Group on the path of AI-Assisted Database Management: a new breed of products where intelligence, governance and operational memory live **in your stack**, not in a vendor's cloud.
 
 See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before diving in.
 
@@ -51,7 +51,7 @@ See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before di
 
 ## Deployment
 
-aiHelpDesk runs on VMs / bare metal (either directly or inside Docker/Podman containers) or on K8s. Binaries are provided for Linux x86-64 and ARM (Graviton, Ampere), and macOS (Intel and Apple Silicon).
+aiHelpDesk runs on VMs / bare metal (either directly or inside Docker/Podman containers) or on K8s. Binaries are provided for Linux x86-64 and ARM (Graviton, Ampere) and macOS (Intel and Apple Silicon).
 
 ### Docker/Podman 
 
@@ -84,31 +84,31 @@ See [here](deploy/helm/README.md) for the full instructions.
 
 ## Architecture
 
-See the primary [Architecture page](docs/ARCHITECTURE.md) for system design, configuration, and the extension guide.
+See the primary [Architecture page](docs/ARCHITECTURE.md) for system design, configuration and the extension guide.
 
 ## The Vault
 
-See the primary [Vault page](docs/VAULT.md) for how aiHelpDesk accumulates and improves operational knowledge over time: the flywheel concept, how playbook drafts are auto-generated from incident traces, the three paths into the Vault, the review-and-activate workflow, and the three core customer workflows (onboarding, acceptance, regression monitoring).
+See the primary [Vault page](docs/VAULT.md) for how aiHelpDesk accumulates and improves operational knowledge over time: the flywheel concept, how playbook drafts are auto-generated from incident traces, the three paths into the Vault, the review-and-activate workflow and the three core customer workflows (onboarding, acceptance, regression monitoring).
 
 ## AI Governance
 
-aiHelpDesk's Governance system rests on eight subsystems including full [auditing](docs/AUDIT.md), [compliance reporting](docs/COMPLIANCE.md), and the [journeys](docs/JOURNEYS.md). See the primary [AI Governance page](docs/AIGOVERNANCE.md) for the complete reference.
+aiHelpDesk's Governance system rests on eight subsystems including full [auditing](docs/AUDIT.md), [compliance reporting](docs/COMPLIANCE.md) and the [journeys](docs/JOURNEYS.md). See the primary [AI Governance page](docs/AIGOVERNANCE.md) for the complete reference.
 
 HTTP-level authorization is presented [here](docs/AUTHZ.md). Identity provider configuration (static users, JWT/OIDC, service accounts) is describe [here](docs/IDENTITY.md).
 
 ## Fleet Operations
 
-See the primary [Fleet Management page](docs/FLEET.md) for how aiHelpDesk coordinates the multi-database operations: job definitions, canary phases, approval gates, schema drift detection, the natural-language Planner, and rollback.
+See the primary [Fleet Management page](docs/FLEET.md) for how aiHelpDesk coordinates the multi-database operations: job definitions, canary phases, approval gates, schema drift detection, the natural-language Planner and rollback.
 
 ## Playbooks
 
-See the primary [Playbook page](docs/PLAYBOOKS.md) for how Playbooks take the central stage in aiHelpDesk. This page presents the Playbook schema, CRUD API, import formats (Markdown, YAML, Ansible, Rundeck), system playbooks, and versioning. See [here](docs/PLAYBOOK_OPS.md) for the Playbooks operational best practices.
+See the primary [Playbook page](docs/PLAYBOOKS.md) for how Playbooks take the central stage in aiHelpDesk. This page presents the Playbook schema, CRUD API, import formats (Markdown, YAML, Ansible, Rundeck), system playbooks and versioning. See [here](docs/PLAYBOOK_OPS.md) for the Playbooks operational best practices.
 
 ## Testing
 
 aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two guides cover fault injection testing specifically:
 
-- **[Fault Injection Testing](docs/FAULTTEST.md)** is the customer-facing guide: validate agent behavior against your own staging database using SQL-only injection, SSH-level fault injection, and automated remediation verification; no Docker or cluster access required
+- **[Fault Injection Testing](docs/FAULTTEST.md)** is the customer-facing guide: validate agent behavior against your own staging database using SQL-only injection, SSH-level fault injection and automated remediation verification; no Docker or cluster access required
 - **[Internal Fault Injection Harness](testing/FAULT_INJECTION_TESTING.md)** is the engineer-facing guide: Docker-compose test stack, full catalog of 27 failure modes, CI/CD integration
 
 ## Gateway REST API
@@ -129,7 +129,7 @@ curl -X POST http://localhost:8080/api/v1/fleet/playbooks/from-trace \
   -d '{"trace_id": "tr_abc123", "outcome": "resolved"}'
 ```
 
-See the primary [API page](docs/API.md) for the full REST API reference: all endpoints with request/response shapes, query parameters, and `curl` examples.
+See the primary [API page](docs/API.md) for the full REST API reference: all endpoints with request/response shapes, query parameters and `curl` examples.
 
 ## Helper Scripts
 
@@ -153,7 +153,11 @@ See [here](docs/INTRO_DIALOG.md) for a sample interactive dialog with a human op
 
 ## LLM Support
 
-aiHelpDesk is built on Google ADK for Go, extended to support both Anthropic and Gemini models:
+aiHelpDesk is model agnostic. It is built on Google ADK for Go and tested with the Anthropic and Gemini models, but it should work with the frontier LLMs.
+
+From our standpoint, the LLMs are a disposable commodity. Flip from Gemini to Anthropic and aiHelpDesk should continue to give you exactly the same diagnosis and remediation. Anything shorter than that is a P0 bug.
+
+[This blog post](https://medium.com/google-cloud/llms-are-functions-not-brains-aihelpdesk-perspective-e12e5432a9ed) adds some additional context for how AI models are treated at aiHelpDesk.
 
 | Vendor | Model | Notes |
 |--------|-------|-------|
@@ -166,4 +170,4 @@ aiHelpDesk is built on Google ADK for Go, extended to support both Anthropic and
 | Gemini | `gemini-3-flash-preview` | Latest 3.0 series, fast |
 | Gemini | `gemini-3-pro-preview` | Latest 3.0 series, most capable |
 
-Individual expert agents can run with different LLMs if needed. Support for additional providers can be added by implementing ADK's LLM interface. Contact aiHelpDesk for specific model support requests.
+Individual expert agents can run with different LLMs if needed. Support for additional providers can be added by implementing ADK's LLM interface. Contact us at info@aiHelpDesk.biz for specific model support requests.

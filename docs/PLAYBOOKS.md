@@ -214,17 +214,24 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/pr
     "resolution":       "approved",
     "resolved_by":      "alice",
     "approval_mode":    "review",
+    "reason":           "PID 867 confirmed idle-in-tx in pg_stat_activity — safe to terminate",
     "connection_string": "prod-primary"
   }'
 
 # Deny — no remediation runs; triage run is marked abandoned
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/proceed-escalation \
   -H "Content-Type: application/json" \
-  -d '{"resolution": "denied", "resolved_by": "alice"}'
+  -d '{"resolution": "denied", "resolved_by": "alice", "reason": "Deferring to on-call DBA — session may have uncommitted writes from a migration."}'
 # → {"status": "denied", "run_id": "plr_a3f7c1b2"}
 ```
 
-`resolved_by` is optional; it defaults to the `X-User` request header if omitted. It is recorded in the `gate_acknowledged` audit event.
+`resolved_by` is optional; it defaults to the `X-User` request header if omitted. `reason` is optional; when provided it is stored in the `gate_acknowledged` audit event and surfaced as `resolved_reason` in the Decision Hub:
+
+```bash
+curl -s http://localhost:8080/api/v1/decisions/gate:plr_a3f7c1b2 \
+  | jq '.extra.resolved_reason'
+# → "PID 867 confirmed idle-in-tx in pg_stat_activity — safe to terminate"
+```
 
 The `approval_mode` you choose at the gate applies to the remediation playbook only:
 
@@ -237,7 +244,7 @@ The `approval_mode` you choose at the gate applies to the remediation playbook o
 
 When `resolution: "approved"`, the response is whatever the remediation playbook returns — `200` with findings for `execution_mode: agent`, or `202 pending_approval` for `execution_mode: agent_approve`. Standard approval loops apply from there.
 
-The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, and any confidence warning. The triage run outcome is updated to `"transitioned"` for transition gates or `"escalated"` for escalation gates.
+The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, optional reason, and any confidence warning. The triage run outcome is updated to `"transitioned"` for transition gates or `"escalated"` for escalation gates. Once resolved, the `reason` is available at any time via `GET /api/v1/decisions/gate:{runID}` in the `extra.resolved_reason` field.
 
 ### Relationship to the two-playbook split
 
@@ -346,7 +353,10 @@ Response:
         "abandoned":        1,
         "resolution_rate":  0.833,
         "escalation_rate":  0.083,
-        "last_run_at":     "2026-04-03T10:05:00Z"
+        "last_run_at":     "2026-04-03T10:05:00Z",
+        "feedback_count":   4,
+        "correct_count":    4,
+        "accuracy_rate":    1.0
       }
     }
   ]
@@ -621,7 +631,10 @@ Response:
   "abandoned":        3,
   "resolution_rate":  0.809,
   "escalation_rate":  0.128,
-  "last_run_at":     "2026-04-03T10:05:00Z"
+  "last_run_at":     "2026-04-03T10:05:00Z",
+  "feedback_count":  12,
+  "correct_count":   11,
+  "accuracy_rate":    0.917
 }
 ```
 
@@ -655,6 +668,122 @@ curl -s -X PATCH http://localhost:8080/api/v1/fleet/playbook-runs/plr_8c9d2e3f \
 
 Returns `204 No Content` on success.
 
+### Run events (chain of thought)
+
+```
+GET /api/v1/fleet/playbook-runs/{runID}/events
+```
+
+Returns the chain-of-thought audit events for a run in chronological order — agent reasoning, tool executions, and policy decisions. Events are sourced from the audit trail using the run's `trace_id`. Returns an empty array when `trace_id` is absent (fleet-mode runs, or runs predating chain-of-thought capture).
+
+```bash
+curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/events \
+  | jq '[.[] | {event_type, timestamp, output: .output.response}]'
+```
+
+**Query parameters:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `types` | `agent_reasoning,tool_execution,policy_decision` | Comma-separated event types to include |
+| `limit` | `500` | Maximum number of events |
+
+Returns `404` if the run ID is not found.
+
+### Operator feedback
+
+After an incident resolves, operators can record whether the agent's diagnosis was correct. This closes the accuracy measurement loop: the Vault knows the resolution rate (how often remediation succeeded), and feedback tells it the diagnosis rate (how often the root-cause hypothesis was right in the first place).
+
+```
+POST /api/v1/fleet/playbook-runs/{runID}/feedback
+GET  /api/v1/fleet/playbook-runs/{runID}/feedback
+```
+
+```bash
+# Submit feedback after a resolved incident
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/feedback \
+  -H "Content-Type: application/json" \
+  -d '{
+    "diagnosis_correct": true,
+    "actual_root_cause":  "PID 867 held ShareLock on transaction 9823 — idle in transaction for 47 seconds",
+    "operator":           "alice@example.com"
+  }'
+
+# Retrieve feedback later
+curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/feedback | jq .
+```
+
+Submitting feedback twice for the same `run_id` **overwrites** the previous entry (upsert semantics). `GET` returns `404` when no feedback has been submitted for the run.
+
+**`RunFeedback` object:**
+
+| Field | Type | Description |
+|---|---|---|
+| `run_id` | string | The run the feedback refers to |
+| `series_id` | string | Playbook series (auto-populated from the run record if omitted from the body) |
+| `diagnosis_correct` | bool \| null | `true` = the agent identified the correct root cause; `false` = wrong hypothesis; `null` (omitted) = not assessed |
+| `actual_root_cause` | string | What the root cause actually was, in the operator's own words |
+| `operator` | string | Who submitted the feedback (falls back to `X-User` header) |
+| `submitted_at` | RFC3339 | When the feedback was submitted |
+
+Accuracy aggregates (across all runs in a series with `diagnosis_correct` set) are included in `GET /api/v1/fleet/playbooks/{id}/stats` — see `PlaybookRunStats` below.
+
+### Incident narrative
+
+```
+GET /api/v1/incidents/{runID}
+```
+
+Returns a unified view of a complete triage→gate→remediation incident assembled from multiple run records and audit events. `{runID}` is the `run_id` of the **triage run** that opened the incident.
+
+```bash
+curl -s http://localhost:8080/api/v1/incidents/plr_a3f7c1b2 | jq .
+```
+
+Returns `404` if no run with that ID exists.
+
+```json
+{
+  "incident_id":   "plr_a3f7c1b2",
+  "started_at":    "2026-06-01T10:00:00Z",
+  "resolved_at":   "2026-06-01T10:02:14Z",
+  "duration_sec":  134.2,
+  "operator":      "alice@example.com",
+
+  "triage": {
+    "run_id":   "plr_a3f7c1b2",
+    "playbook": "pbs_lock_chain_triage",
+    "findings": "Root blocker PID 867 idle-in-transaction for 47s, holding ShareLock on accounts",
+    "diagnostic_report": { "hypotheses": [...], "root_cause": "..." },
+    "transcript": "..."
+  },
+
+  "gate": {
+    "approved_by":    "alice@example.com",
+    "approved_at":    "2026-06-01T10:01:30Z",
+    "resolution":     "approved",
+    "reason":         "PID 867 confirmed idle-in-tx — safe to terminate",
+    "approval_mode":  "review"
+  },
+
+  "remediation": {
+    "run_id":   "plr_b8e2d4f1",
+    "playbook": "pbs_lock_chain_remediate",
+    "outcome":  "resolved",
+    "steps":    [...]
+  },
+
+  "feedback": {
+    "diagnosis_correct": true,
+    "actual_root_cause": "PID 867 held ShareLock on tx 9823 for 47s",
+    "operator":          "alice@example.com",
+    "submitted_at":      "2026-06-01T10:05:00Z"
+  }
+}
+```
+
+`gate` and `remediation` are `null` when the triage run completed without triggering a gate. `feedback` is `null` when no feedback has been submitted. `resolved_at` and `duration_sec` are populated when the remediation run has a `completed_at` timestamp.
+
 ### `PlaybookRun` object
 
 | Field | Type | Description |
@@ -665,11 +794,15 @@ Returns `204 No Content` on success.
 | `execution_mode` | string | `fleet`, `agent`, or `agent_approve` |
 | `outcome` | string | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
 | `escalated_to` | string | Series ID of the follow-on Playbook (when `outcome=escalated`) |
+| `transitioned_to` | string | Series ID of the remediation Playbook (when `outcome=transitioned`) |
 | `findings_summary` | string | Operator-provided summary of diagnosis and action taken |
 | `context_id` | string | A2A session ID (agent-mode runs only) |
 | `operator` | string | Identity from `X-User` request header |
 | `started_at` | RFC3339 | When the run was initiated |
 | `completed_at` | RFC3339 | When the run was patched with a final outcome |
+| `trace_id` | string | Audit trace ID linking this run to its chain-of-thought events. Use with `GET /api/v1/fleet/playbook-runs/{runID}/events` to retrieve the full reasoning trail. Empty for fleet-mode runs and runs predating this field. |
+| `agent_transcript` | string | Full text of the agent's response, including reasoning and evidence interpretation. Populated for agent-mode runs only. |
+| `prior_run_id` | string | `plr_*` run ID of the previous investigation this run continues. Set when the run was started with `prior_run_id` in the request body, or automatically when a gate is approved and the remediation playbook is chained. |
 | `diagnostic_report` | object | Structured hypothesis report parsed from the agent's response. `null` when the agent did not emit `HYPOTHESIS_N:` lines. See [Structured diagnostic report](#structured-diagnostic-report). |
 
 ---
@@ -1554,6 +1687,208 @@ When importing via LLM (`format=markdown`, `text`, `rundeck`, `ansible`), the im
 
 ---
 
+## Life of an Incident
+
+This section walks through a complete incident end-to-end — from the first triage run to the operator feedback that feeds back into the Vault. Each step is a real API call. The story is the `pbs_lock_chain_triage` / `pbs_lock_chain_remediate` pair against a live database.
+
+### Step 1 — Triage: the agent investigates
+
+```bash
+GW=http://localhost:8080
+CONN="postgres://prod-db.example.com/app"
+
+# Find the active triage playbook
+TRIAGE_PB=$(curl -s "$GW/api/v1/fleet/playbooks?series_id=pbs_lock_chain_triage" \
+  | jq -r '.playbooks[0].playbook_id')
+
+# Run triage with gate interception enabled
+TRIAGE=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/$TRIAGE_PB/run" \
+  -H "Content-Type: application/json" \
+  -d "{\"connection_string\":\"$CONN\",\"gate_escalation\":true}")
+
+STATUS=$(echo "$TRIAGE" | jq -r .status)
+```
+
+If the gate fires (`status=pending_gate`), the agent has finished its diagnosis and is waiting for the operator:
+
+```json
+{
+  "run_id":             "plr_a3f7c1b2",
+  "status":             "pending_gate",
+  "gate_type":          "transition",
+  "findings":           "Root blocker PID 867 idle-in-transaction for 47s, holding ShareLock on table accounts.",
+  "transition_target":  "pbs_lock_chain_remediate",
+  "diagnostic_report":  {
+    "hypotheses": [
+      { "rank": 1, "text": "PID 867 idle-in-transaction holding ShareLock", "confidence": 0.99, "is_primary": true },
+      { "rank": 2, "text": "Long-running DML query blocking readers", "confidence": 0.10, "rejected_reason": "no active DML found in pg_stat_activity" }
+    ],
+    "root_cause":   "PID 867 idle-in-transaction holding ShareLock on accounts",
+    "action_taken": "none — escalation recommended"
+  }
+}
+```
+
+```bash
+RUN_ID=$(echo "$TRIAGE" | jq -r .run_id)
+```
+
+### Step 2 — Chain of thought: what was the agent thinking?
+
+The triage run's audit trail records every reasoning step and tool call the agent made. Use the run events endpoint to review the chain of thought before approving the gate:
+
+```bash
+curl -s "$GW/api/v1/fleet/playbook-runs/$RUN_ID/events" \
+  | jq '[.[] | {event_type, ts: .timestamp, text: (.output.response // .output.result)}]'
+```
+
+Representative events in order:
+
+```json
+[
+  { "event_type": "agent_reasoning",  "text": "The blocking query shows PID 867 with state=idle in transaction. I need to inspect this session before acting — specifically whether it has uncommitted writes, to assess cascade risk." },
+  { "event_type": "tool_execution",   "text": "get_session_info pid=867 → state=idle in transaction, has_open_tx=true, has_writes=true, idle_secs=47" },
+  { "event_type": "agent_reasoning",  "text": "has_writes=true and idle_secs=47 confirms this is an abandoned transaction. pg_cancel_backend is unreliable here — idle-in-tx sessions ignore SIGINT. I will recommend terminate_connection and emit TRANSITION_TO." },
+  { "event_type": "policy_decision",  "text": "terminate_connection: class=destructive, verdict=gate_pending (gate_escalation=true)" }
+]
+```
+
+This is the deliberation trail: every hypothesis the agent weighed, every tool result it observed, every policy decision the gateway applied. It is stored permanently and retrievable at any time via `GET .../events`.
+
+### Step 3 — Gate: the operator reviews and approves
+
+The operator has read the findings and the chain of thought. They approve with an optional reason:
+
+```bash
+REMED=$(curl -s -X POST "$GW/api/v1/fleet/playbook-runs/$RUN_ID/proceed-escalation" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resolution":       "approved",
+    "resolved_by":      "alice@example.com",
+    "approval_mode":    "review",
+    "reason":           "PID 867 confirmed idle-in-tx — has_writes=true, 47s — safe to terminate, the open transaction was an abandoned migration draft",
+    "connection_string": "'"$CONN"'"
+  }')
+```
+
+The reason is stored in the `gate_acknowledged` audit event and is always retrievable:
+
+```bash
+curl -s "$GW/api/v1/decisions/gate:$RUN_ID" | jq '.extra.resolved_reason'
+# → "PID 867 confirmed idle-in-tx — has_writes=true, 47s — safe to terminate..."
+```
+
+The response is the first proposed step of the remediation playbook (`pending_approval`). The step-by-step approval loop runs from here: `get_blocking_queries` → `get_session_info` → `terminate_connection` → verify. See [agent_approve execution mode](#agent_approve-execution-mode) for the full loop.
+
+```bash
+REMED_RUN_ID=$(echo "$REMED" | jq -r .run_id)
+```
+
+### Step 4 — Remediation: step-by-step approval
+
+Each step is proposed, shown to the operator, then executed on approval. The `reason` field on each step gives the operator everything they need to decide:
+
+```
+Step 3 — terminate_connection
+  pid: 867
+  reason: Root blocker (idle in transaction, has_writes=true, 47s idle).
+           WARNING: terminating root will cascade to roll back session 931
+           (has_writes=false, read-only) — no data loss expected.
+           Session 932 (has_writes=false, read-only) same.
+Approve? [y/n]:
+```
+
+After the final step (`get_blocking_queries` confirms the chain cleared), the run completes:
+
+```json
+{ "status": "complete", "summary": "Root blocker pid=867 terminated. Lock queue cleared — 3 blocked sessions resumed." }
+```
+
+### Step 5 — Feedback: was the diagnosis right?
+
+After recovery, the operator records whether the agent's hypothesis was actually correct:
+
+```bash
+curl -s -X POST "$GW/api/v1/fleet/playbook-runs/$RUN_ID/feedback" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "diagnosis_correct": true,
+    "actual_root_cause": "PID 867 idle-in-transaction — abandoned migration draft held ShareLock on accounts for 47s",
+    "operator":          "alice@example.com"
+  }'
+```
+
+This feeds the `accuracy_rate` for the `pbs_lock_chain_triage` series. Over many incidents, you can ask: "When `pbs_lock_chain_triage` says the root cause is an idle-in-transaction session, how often is it actually right?" That question now has a data-driven answer.
+
+### Step 6 — Incident narrative: the full picture
+
+A single call assembles the complete incident view — triage findings, gate decision, remediation outcome, and operator feedback — from the run records and audit events created in steps 1–5:
+
+```bash
+curl -s "$GW/api/v1/incidents/$RUN_ID" | jq .
+```
+
+```json
+{
+  "incident_id":   "plr_a3f7c1b2",
+  "started_at":    "2026-06-01T10:00:00Z",
+  "resolved_at":   "2026-06-01T10:02:47Z",
+  "duration_sec":  167.4,
+  "operator":      "alice@example.com",
+
+  "triage": {
+    "run_id":    "plr_a3f7c1b2",
+    "playbook":  "pbs_lock_chain_triage",
+    "findings":  "Root blocker PID 867 idle-in-transaction for 47s, holding ShareLock on table accounts.",
+    "diagnostic_report": { "hypotheses": [...], "root_cause": "PID 867 idle-in-transaction" }
+  },
+
+  "gate": {
+    "approved_by":   "alice@example.com",
+    "approved_at":   "2026-06-01T10:01:30Z",
+    "resolution":    "approved",
+    "reason":        "PID 867 confirmed idle-in-tx — safe to terminate",
+    "approval_mode": "review"
+  },
+
+  "remediation": {
+    "run_id":   "plr_b8e2d4f1",
+    "playbook": "pbs_lock_chain_remediate",
+    "outcome":  "resolved"
+  },
+
+  "feedback": {
+    "diagnosis_correct": true,
+    "actual_root_cause": "PID 867 idle-in-transaction — abandoned migration draft",
+    "operator":          "alice@example.com",
+    "submitted_at":      "2026-06-01T10:05:00Z"
+  }
+}
+```
+
+### Step 7 — Vault: the knowledge compounds
+
+This incident — its chain of thought, the operator's gate reason, the remediation steps, and the confirmed diagnosis — is now part of the Vault's institutional memory.
+
+```bash
+# Check accuracy for this playbook series after the feedback lands
+faulttest vault accuracy pbs_lock_chain_triage \
+  --gateway http://localhost:8080
+```
+
+```
+=== Diagnosis Accuracy: pbs_lock_chain_triage ===
+Feedback submissions: 23
+Correct diagnoses:    22
+Accuracy rate:        95.7%
+```
+
+The next operator who encounters a lock chain gets the same agent, the same Playbook guidance, and now a 95.7% confirmed accuracy rate behind the hypothesis it produces. The drift command (`faulttest vault drift`) will flag it if that rate starts to fall — for example, if a PostgreSQL upgrade changes lock behaviour and the existing hypotheses become less reliable. That is the signal to update the Playbook guidance.
+
+The complete incident trail — from triage chain-of-thought through gate reason through remediation steps through confirmed diagnosis — is retrievable at any time from the audit events and the incident narrative endpoint. Nothing is ephemeral.
+
+---
+
 ## Authoring guidance
 
 ### Writing effective `description` fields
@@ -1682,6 +2017,9 @@ Returned inline in `GET /fleet/playbooks` and by `GET /fleet/playbooks/{playbook
 | `resolution_rate` | float | `resolved / total_runs` (0–1) |
 | `escalation_rate` | float | `escalated / total_runs` (0–1) |
 | `last_run_at` | string | Timestamp of the most recent run |
+| `feedback_count` | int | Number of feedback submissions for this series (runs where an operator answered the "was the diagnosis correct?" question) |
+| `correct_count` | int | Number of submissions with `diagnosis_correct=true` |
+| `accuracy_rate` | float | `correct_count / feedback_count` (0–1); `0` when no feedback has been submitted |
 
 **How outcomes are set:**
 

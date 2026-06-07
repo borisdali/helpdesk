@@ -250,6 +250,42 @@ The query must return successfully (exit 0 from psql) for recovery to be confirm
 | `agent_prompt` | Direct agent call via `POST /api/v1/query` with a configured prompt |
 | `none` | No remediation block configured for this fault |
 
+**Gate reason prompt:**
+
+When running with `--gate-escalation` and an interactive terminal is available, `faulttest` prompts for an optional reason before sending the gate resolution:
+
+```
+  Approve? [y/n/skip]:  y
+  Reason (optional, press Enter to skip): PID 867 confirmed idle-in-tx — safe to terminate
+```
+
+The reason is sent as `"reason"` in the `proceed-escalation` request and is stored in the `gate_acknowledged` audit event. It appears as `extra.resolved_reason` in `GET /api/v1/decisions/gate:{runID}`. In `--emit-and-wait` mode the prompt is skipped (no terminal).
+
+**Post-recovery feedback prompt:**
+
+After a successful recovery (verification SQL returns true), `faulttest` optionally prompts for diagnosis feedback when an interactive terminal is available and `--gateway` is set:
+
+```
+  Diagnosis feedback (optional)
+  Was the diagnosis correct? [y/n/skip]:  y
+  Actual root cause (Enter to confirm: "Root blocker PID 867 idle-in-transaction"):
+```
+
+Answering stores a `RunFeedback` record via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`. This feeds the `accuracy_rate` shown in `faulttest vault accuracy` and `faulttest vault list`. Skipping or running non-interactively leaves no feedback — the run still scores normally.
+
+**Post-run incident summary:**
+
+After gate resolution and recovery complete, `faulttest` prints a one-line incident summary:
+
+```
+Incident plr_a3f7c1b2 — resolved in 14.2s
+  Diagnosis  : Root blocker PID 867 [PRIMARY 99%]
+  Remediation: pbs_lock_chain_remediate — 1 step (terminate_connection)
+  Narrative  : GET /api/v1/incidents/plr_a3f7c1b2
+```
+
+The `Narrative` URL points to the incident narrative endpoint (see [Incident narrative](PLAYBOOKS.md#incident-narrative)), which assembles the full triage→gate→remediation view.
+
 ---
 
 ## 4. Policy safety: the infra-config guard

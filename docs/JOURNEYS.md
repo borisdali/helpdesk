@@ -434,7 +434,41 @@ curl "http://localhost:1199/v1/journeys?origin=direct_tool"   # always []
 curl "http://localhost:1199/v1/events?origin=direct_tool&trace_id=dt_abc12345"
 ```
 
----
+### 7.2 Playbook incident trails
+
+Playbook runs produce a parallel audit trail that is distinct from the NL-query journey view. Understanding the difference helps you find the right view for the right question.
+
+| Question | Use |
+|----------|-----|
+| "What did the agent investigate during this query session?" | `GET /v1/journeys` + drill-in |
+| "What did the agent think while running this Playbook?" | `GET /api/v1/fleet/playbook-runs/{runID}/events` |
+| "What happened across the full triage→gate→remediation incident?" | `GET /api/v1/incidents/{runID}` |
+
+**Why Playbook runs don't appear in `GET /v1/journeys`:**
+
+Every agent-mode Playbook run is assigned a `trace_id` stored on the `PlaybookRun` record. This trace ID uses the run ID as its value (`plr_*`), not the `tr_` prefix that journey anchors require. This is intentional: Playbook runs have a structured lifecycle (triage → gate → remediation → feedback) that the flat journey view cannot express. The incident narrative endpoint (`GET /api/v1/incidents/{runID}`) is the Playbook-native equivalent of `GET /v1/journeys` drilling.
+
+**Accessing the raw event trail:**
+
+```bash
+# Chain-of-thought events via the Gateway (agent_reasoning, tool_execution, policy_decision)
+curl "http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/events"
+
+# All events including gate_acknowledged and other types — via auditd directly
+curl "http://localhost:1199/v1/events?trace_id=plr_a3f7c1b2"
+
+# Filter to reasoning only
+curl "http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/events?types=agent_reasoning"
+```
+
+**The incident narrative:**
+
+```bash
+# Structured triage→gate→remediation view assembled from run records and audit events
+curl "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" | jq '{triage, gate, remediation, feedback}'
+```
+
+See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a complete walkthrough of both trails in context.
 
 ---
 

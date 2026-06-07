@@ -1057,3 +1057,308 @@ func TestPlaybooks_GateEscalation(t *testing.T) {
 	t.Logf("gate_escalation e2e OK: run_id=%s escalation_target=%s denied→abandoned",
 		runID, escalationTarget)
 }
+
+// =============================================================================
+// Feedback, events, accuracy, and incident narrative — no API key required
+// =============================================================================
+
+// TestPlaybooks_FeedbackRoundtrip verifies the operator feedback endpoints work
+// end-to-end via the gateway. No LLM is needed — the feedback store accepts any
+// run_id when series_id is provided in the body.
+func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	runID := fmt.Sprintf("plr_e2e_fb_%d", time.Now().UnixNano())
+
+	// Submit initial feedback (diagnosis_correct=true).
+	fb, err := client.SubmitFeedback(ctx, runID, map[string]any{
+		"series_id":         "pbs_lock_chain_triage",
+		"diagnosis_correct": true,
+		"actual_root_cause": "PID 867 held ShareLock on tx 9823",
+		"operator":          "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("SubmitFeedback: %v", err)
+	}
+	if fb["run_id"] != runID {
+		t.Errorf("submit response run_id = %q, want %q", fb["run_id"], runID)
+	}
+	if fb["series_id"] != "pbs_lock_chain_triage" {
+		t.Errorf("submit response series_id = %q", fb["series_id"])
+	}
+
+	// GET feedback and verify fields round-trip.
+	got, err := client.GetFeedback(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetFeedback: %v", err)
+	}
+	if got["run_id"] != runID {
+		t.Errorf("feedback run_id = %q, want %q", got["run_id"], runID)
+	}
+	if got["series_id"] != "pbs_lock_chain_triage" {
+		t.Errorf("feedback series_id = %q", got["series_id"])
+	}
+	if dc, _ := got["diagnosis_correct"].(bool); !dc {
+		t.Errorf("feedback diagnosis_correct = %v, want true", got["diagnosis_correct"])
+	}
+	if got["actual_root_cause"] != "PID 867 held ShareLock on tx 9823" {
+		t.Errorf("feedback actual_root_cause = %q", got["actual_root_cause"])
+	}
+
+	// Upsert: re-submit the same run_id with corrected values.
+	_, err = client.SubmitFeedback(ctx, runID, map[string]any{
+		"series_id":         "pbs_lock_chain_triage",
+		"diagnosis_correct": false,
+		"actual_root_cause": "wrong hypothesis — actual blocker was autovacuum",
+		"operator":          "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("SubmitFeedback (upsert): %v", err)
+	}
+
+	got2, err := client.GetFeedback(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetFeedback after upsert: %v", err)
+	}
+	if dc, _ := got2["diagnosis_correct"].(bool); dc {
+		t.Errorf("after upsert diagnosis_correct = true, want false")
+	}
+	if got2["actual_root_cause"] != "wrong hypothesis — actual blocker was autovacuum" {
+		t.Errorf("after upsert actual_root_cause = %q", got2["actual_root_cause"])
+	}
+
+	t.Logf("feedback roundtrip OK: run_id=%s", runID)
+}
+
+// TestPlaybooks_FeedbackNotFound verifies that GET feedback for a run with no
+// feedback returns HTTP 404 via the gateway.
+func TestPlaybooks_FeedbackNotFound(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.GetFeedback(ctx, "plr_e2e_no_feedback_run")
+	if err == nil {
+		t.Fatal("expected error for run with no feedback, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected HTTP 404 error, got: %v", err)
+	}
+}
+
+// TestPlaybooks_RunEventsEndpoint verifies the run events proxy route is
+// registered and returns 404 for a nonexistent run (not 500 or route-not-found).
+func TestPlaybooks_RunEventsEndpoint(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.GetRunEvents(ctx, "plr_e2e_no_events_run")
+	if err == nil {
+		t.Fatal("expected 404 for nonexistent run, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected HTTP 404 error, got: %v", err)
+	}
+}
+
+// TestPlaybooks_IncidentNarrative_NotFound verifies the incident narrative
+// endpoint is routed and returns 404 for an unknown run_id.
+func TestPlaybooks_IncidentNarrative_NotFound(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.GetIncident(ctx, "plr_e2e_no_incident")
+	if err == nil {
+		t.Fatal("expected 404 for nonexistent incident, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected HTTP 404 error, got: %v", err)
+	}
+}
+
+// TestPlaybooks_StatsIncludeAccuracy verifies that operator feedback submitted
+// for a playbook series appears in the stats response. No LLM is required —
+// feedback records are created directly without corresponding run records.
+func TestPlaybooks_StatsIncludeAccuracy(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create a throwaway playbook so we get a unique series_id.
+	uniqueName := fmt.Sprintf("e2e-accuracy-test-%d", time.Now().UnixNano())
+	created, err := client.PlaybookCreate(ctx, map[string]any{
+		"name":        uniqueName,
+		"description": "e2e accuracy stats test — safe to delete",
+	})
+	if err != nil {
+		t.Fatalf("PlaybookCreate: %v", err)
+	}
+	pbID, _ := created["playbook_id"].(string)
+	seriesID, _ := created["series_id"].(string)
+	if pbID == "" || seriesID == "" {
+		t.Fatalf("create response missing playbook_id or series_id: %v", created)
+	}
+	t.Cleanup(func() {
+		client.PlaybookDelete(context.Background(), pbID) //nolint:errcheck
+	})
+
+	// Submit 3 feedback records: 2 correct, 1 incorrect.
+	feedbacks := []struct {
+		runID   string
+		correct bool
+	}{
+		{fmt.Sprintf("plr_acc_a_%d", time.Now().UnixNano()), true},
+		{fmt.Sprintf("plr_acc_b_%d", time.Now().UnixNano()+1), true},
+		{fmt.Sprintf("plr_acc_c_%d", time.Now().UnixNano()+2), false},
+	}
+	for _, f := range feedbacks {
+		_, err := client.SubmitFeedback(ctx, f.runID, map[string]any{
+			"series_id":         seriesID,
+			"diagnosis_correct": f.correct,
+			"operator":          "e2e-test",
+		})
+		if err != nil {
+			t.Fatalf("SubmitFeedback %s: %v", f.runID, err)
+		}
+	}
+
+	// GET stats and verify accuracy fields are present and correct.
+	stats, err := client.PlaybookStats(ctx, pbID)
+	if err != nil {
+		t.Fatalf("PlaybookStats: %v", err)
+	}
+
+	fbCount, _ := stats["feedback_count"].(float64)
+	if int(fbCount) != 3 {
+		t.Errorf("feedback_count = %v, want 3", stats["feedback_count"])
+	}
+	correctCount, _ := stats["correct_count"].(float64)
+	if int(correctCount) != 2 {
+		t.Errorf("correct_count = %v, want 2", stats["correct_count"])
+	}
+	accuracyRate, _ := stats["accuracy_rate"].(float64)
+	want := 2.0 / 3.0
+	if diff := accuracyRate - want; diff < -0.001 || diff > 0.001 {
+		t.Errorf("accuracy_rate = %.4f, want %.4f", accuracyRate, want)
+	}
+
+	t.Logf("stats accuracy OK: playbook=%s series=%s feedback=%d correct=%d rate=%.2f",
+		pbID, seriesID, int(fbCount), int(correctCount), accuracyRate)
+}
+
+// =============================================================================
+// Gate reason roundtrip (API key required — LLM dependent)
+// =============================================================================
+
+// TestPlaybooks_GateWithReason verifies the gate reason field flows through the
+// full stack: ProceedEscalation with reason → resolved_reason in GET /decisions.
+//
+// If the triage agent completes without escalating (non-deterministic LLM), the
+// test logs the situation and passes — gate intercept logic is covered by unit
+// tests.
+func TestPlaybooks_GateWithReason(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var triageID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_db_restart_triage" {
+			triageID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if triageID == "" {
+		t.Skip("pbs_db_restart_triage system playbook not found")
+	}
+
+	resp, err := client.PlaybookRun(ctx, triageID, map[string]any{
+		"connection_string": cfg.ConnStr,
+		"context":           "e2e test: gate_with_reason flow",
+		"gate_escalation":   true,
+	})
+	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
+		t.Fatalf("PlaybookRun with gate_escalation: %v", err)
+	}
+
+	status, _ := resp["status"].(string)
+	if status != "pending_gate" {
+		t.Logf("gate not triggered (agent did not escalate): status=%q — gate_reason field covered by unit tests", status)
+		return
+	}
+
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("pending_gate response missing run_id")
+	}
+
+	// Deny with a reason (avoids triggering remediation playbook).
+	const testReason = "e2e-test: denied with gate reason verification"
+	denyResp, err := client.ProceedEscalation(ctx, runID, map[string]any{
+		"resolution":  "denied",
+		"resolved_by": "e2e-test",
+		"reason":      testReason,
+	})
+	if err != nil {
+		t.Fatalf("ProceedEscalation (denied with reason): %v", err)
+	}
+	if denyResp["status"] != "denied" {
+		t.Errorf("proceed-escalation status = %q, want denied", denyResp["status"])
+	}
+
+	// GET decision and verify resolved_reason is present.
+	decision, err := client.GetDecision(ctx, "gate:"+runID)
+	if err != nil {
+		t.Fatalf("GetDecision: %v", err)
+	}
+	extra, _ := decision["extra"].(map[string]any)
+	if extra == nil {
+		t.Fatal("decision response missing extra field")
+	}
+	resolvedReason, _ := extra["resolved_reason"].(string)
+	if resolvedReason != testReason {
+		t.Errorf("resolved_reason = %q, want %q", resolvedReason, testReason)
+	}
+
+	t.Logf("gate reason e2e OK: run_id=%s resolved_reason=%q", runID, resolvedReason)
+}
