@@ -36,6 +36,7 @@ type AgentResponse struct {
 	// other responses leave this empty.
 	Status string
 	// Gate detail fields — populated only when Status == "pending_gate".
+	TransitionTarget   string
 	EscalationTarget   string
 	EscalationFindings string
 	ConfidenceWarning  string

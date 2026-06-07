@@ -607,6 +607,12 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				if warn != "" {
 					gateExtra["confidence_warning"] = warn
 				}
+				if rp, ok := extra["remediation_preview"]; ok {
+					gateExtra["remediation_preview"] = rp
+				}
+				if dr, ok := extra["diagnostic_report"]; ok {
+					gateExtra["diagnostic_report"] = dr
+				}
 				summary := "Triage complete — TRANSITION_TO " + nextSeries
 				if !isTransition {
 					summary = "Triage complete — ESCALATE_TO " + nextSeries

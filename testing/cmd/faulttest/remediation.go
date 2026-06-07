@@ -52,10 +52,14 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	gate := faultlib.ApproveRunResponse{
 		RunID:                 resp.RunID,
 		Status:                resp.Status,
+		TransitionTarget:      resp.TransitionTarget,
 		EscalationTarget:      resp.EscalationTarget,
 		EscalationFindings:    resp.EscalationFindings,
 		ConfidenceWarning:     resp.ConfidenceWarning,
 		SuggestedApprovalMode: resp.SuggestedMode,
+		RemediationPreview:    resp.RemediationPreview,
+		DiagnosticReport:      resp.DiagnosticReport,
+		GateReason:            resp.GateReason,
 	}
 	slog.Info("gate pending: operator review required",
 		"failure", f.ID,
@@ -192,7 +196,7 @@ func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
 			}
 			fmt.Println(line)
 			if desc != "" {
-				fmt.Printf("                       %s\n", desc)
+				fmt.Printf("                      %s\n", desc)
 			}
 		}
 	}
@@ -213,7 +217,7 @@ func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
 				case isPrimary:
 					label = fmt.Sprintf("[PRIMARY %d%%]", pct)
 				case rejected != "":
-					label = fmt.Sprintf("[rejected %d%%]", pct)
+					label = fmt.Sprintf("[REJECTED %d%%]", pct)
 				default:
 					label = fmt.Sprintf("[%d%%]", pct)
 				}
@@ -242,7 +246,13 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	}
 	fmt.Printf("%s\n\n", sep)
 
-	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
+	gateTarget := gate.TransitionTarget
+	if gateTarget == "" {
+		gateTarget = gate.EscalationTarget
+	}
+	if gateTarget != "" {
+		fmt.Printf("  Next playbook     : %s\n", gateTarget)
+	}
 	if gate.EscalationFindings != "" {
 		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
 	}
@@ -318,14 +328,6 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.ApproveRunResponse) error {
 	resolveURL := r.cfg.GatewayURL + "/api/v1/decisions/gate:" + gate.RunID + "/resolve"
 	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
-	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
-	if gate.EscalationFindings != "" {
-		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
-	}
-	printGatePreviewAndReport(gate.RemediationPreview, gate.DiagnosticReport)
-	if gate.ConfidenceWarning != "" {
-		fmt.Printf("  WARNING           : %s\n", gate.ConfidenceWarning)
-	}
 	fmt.Printf("  Resolve at        : POST %s\n\n", resolveURL)
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)

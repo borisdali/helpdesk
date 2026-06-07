@@ -317,6 +317,20 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 			ResolveURL:  baseURL + "/api/v1/decisions/" + id + "/resolve",
 			Extra:       gateDecisionExtra(run),
 		}
+		nextSeries := run.TransitionedTo
+		if nextSeries == "" {
+			nextSeries = run.EscalatedTo
+		}
+		if nextSeries != "" {
+			if nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeries); err == nil {
+				d.Extra["remediation_preview"] = map[string]any{
+					"series_id":     nextPB.SeriesID,
+					"name":          nextPB.Name,
+					"description":   nextPB.Description,
+					"approval_mode": nextPB.ApprovalMode,
+				}
+			}
+		}
 		writeJSON(w, http.StatusOK, d)
 
 	case strings.HasPrefix(id, "step:"), strings.HasPrefix(id, "fleet:"):
@@ -395,20 +409,21 @@ func gateDecisionSummary(run *audit.PlaybookRun) string {
 }
 
 func gateDecisionExtra(run *audit.PlaybookRun) map[string]any {
+	extra := map[string]any{
+		"findings":  run.FindingsSummary,
+		"series_id": run.SeriesID,
+	}
 	if run.TransitionedTo != "" {
-		return map[string]any{
-			"gate_type":         "transition",
-			"transition_target": run.TransitionedTo,
-			"findings":          run.FindingsSummary,
-			"series_id":         run.SeriesID,
-		}
+		extra["gate_type"] = "transition"
+		extra["transition_target"] = run.TransitionedTo
+	} else {
+		extra["gate_type"] = "escalation"
+		extra["escalation_target"] = run.EscalatedTo
 	}
-	return map[string]any{
-		"gate_type":         "escalation",
-		"escalation_target": run.EscalatedTo,
-		"findings":          run.FindingsSummary,
-		"series_id":         run.SeriesID,
+	if run.DiagnosticReport != nil {
+		extra["diagnostic_report"] = run.DiagnosticReport
 	}
+	return extra
 }
 
 // fetchPendingGates calls GET /v1/fleet/playbook-runs?outcome=gate_pending
@@ -457,6 +472,20 @@ func (g *Gateway) fetchPendingGates(ctx context.Context, limit int) ([]decisions
 			RequestedAt: run.StartedAt,
 			ResolveURL:  baseURL + "/api/v1/decisions/" + resolveID + "/resolve",
 			Extra:       gateDecisionExtra(run),
+		}
+		nextSeries := run.TransitionedTo
+		if nextSeries == "" {
+			nextSeries = run.EscalatedTo
+		}
+		if nextSeries != "" {
+			if nextPB, err := g.fetchPlaybookBySeriesID(ctx, nextSeries); err == nil {
+				d.Extra["remediation_preview"] = map[string]any{
+					"series_id":     nextPB.SeriesID,
+					"name":          nextPB.Name,
+					"description":   nextPB.Description,
+					"approval_mode": nextPB.ApprovalMode,
+				}
+			}
 		}
 		out = append(out, d)
 	}

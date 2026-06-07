@@ -181,7 +181,8 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		Warnings           []string       `json:"warnings"`
 		RunID              string         `json:"run_id"`
 		Status             string         `json:"status"`
-		EscalationTarget   string         `json:"escalation_target"`
+		TransitionTarget   string         `json:"transition_target,omitempty"`
+		EscalationTarget   string         `json:"escalation_target,omitempty"`
 		EscalationFindings string         `json:"escalation_findings"`
 		ConfidenceWarning  string         `json:"confidence_warning"`
 		SuggestedMode      string         `json:"suggested_approval_mode"`
@@ -205,6 +206,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		Warnings:           result.Warnings,
 		RunID:              result.RunID,
 		Status:             result.Status,
+		TransitionTarget:   result.TransitionTarget,
 		EscalationTarget:   result.EscalationTarget,
 		EscalationFindings: result.EscalationFindings,
 		ConfidenceWarning:  result.ConfidenceWarning,
