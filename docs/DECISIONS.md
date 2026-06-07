@@ -30,8 +30,9 @@ Gates have two sub-types, reflected in `extra.gate_type`:
 | `suggested_approval_mode` | When `confidence_warning` present | Suggested mode for remediation (`"manual"` etc.) |
 | `remediation_preview` | When next playbook is resolvable | Object: `series_id`, `name`, `description`, `approval_mode` of the planned remediation playbook |
 | `diagnostic_report` | When triage emits `HYPOTHESIS_N:` lines | Structured diagnosis: `hypotheses[]` (each with `rank`, `text`, `confidence`, `is_primary`, `evidence`, `rejected_reason`), `root_cause` |
+| `gate_reason` | When gate was forced by the gateway | `"low_confidence"` — primary hypothesis confidence was below 50%; gate fired automatically even without `gate_escalation=true` |
 
-`remediation_preview` lets operators see exactly what remediation will do — its name, intent, and default approval mode — before clicking approve. `diagnostic_report` records the structured reasoning behind the triage conclusion for later audit review.
+`remediation_preview` lets operators see exactly what remediation will do — its name, intent, and default approval mode — before clicking approve. `diagnostic_report` records the structured reasoning behind the triage conclusion for later audit review. `gate_reason: "low_confidence"` signals that the gate was not requested by the caller but enforced by the gateway because the diagnosis did not reach the 50% confidence threshold required to auto-chain into remediation.
 
 ---
 

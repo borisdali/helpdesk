@@ -2480,3 +2480,52 @@ func TestLowConfidenceForceGate(t *testing.T) {
 		})
 	}
 }
+
+// TestHandlePlaybookRun_LowConfidence_ForcedGate verifies that when a triage
+// agent emits a low-confidence primary hypothesis (< 0.50), the gateway fires
+// a gate even without gate_escalation=true in the request, and sets
+// gate_reason="low_confidence" in the response.
+func TestHandlePlaybookRun_LowConfidence_ForcedGate(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage04",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Agent emits a properly structured low-confidence diagnosis.
+	// parseDiagnosticReport will parse HYPOTHESIS_1 + ROOT_CAUSE and mark
+	// Confidence=0.35, IsPrimary=true → lowConfidenceForceGate returns true.
+	agentText := "Two possible causes; I cannot determine which with confidence.\n\n" +
+		"HYPOTHESIS_1: autovacuum is genuinely stuck behind a long-running transaction | CONFIDENCE: 0.35 | EVIDENCE: \"last_autovacuum=2026-06-01\"\n" +
+		"HYPOTHESIS_2: bloat is from a single recent bulk delete, autovacuum will catch up | CONFIDENCE: 0.60 | REJECTED: autovacuum_count unchanged over two checks\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.41; autovacuum=stuck; blocker_pid=none; recommended=manual_vacuum\n" +
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	// Deliberately omit gate_escalation — forced gate must fire on its own.
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"bloat alert"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate — low-confidence gate did not fire", resp["status"])
+	}
+	if resp["gate_reason"] != "low_confidence" {
+		t.Errorf("gate_reason = %q, want low_confidence", resp["gate_reason"])
+	}
+	if resp["transition_target"] != "pbs_vacuum_remediate" {
+		t.Errorf("transition_target = %q, want pbs_vacuum_remediate", resp["transition_target"])
+	}
+}
