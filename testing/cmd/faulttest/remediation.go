@@ -235,7 +235,11 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	sep := strings.Repeat("═", width)
 
 	fmt.Printf("\n%s\n", sep)
-	fmt.Println("  INFORMED GATE — review before remediation")
+	if gate.GateReason == "low_confidence" {
+		fmt.Println("  INFORMED GATE — LOW CONFIDENCE DIAGNOSIS")
+	} else {
+		fmt.Println("  INFORMED GATE — review before remediation")
+	}
 	fmt.Printf("%s\n\n", sep)
 
 	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)

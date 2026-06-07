@@ -892,8 +892,10 @@ curl http://localhost:8080/api/v1/decisions | jq .
       "requested_at": "2026-06-01T14:23:01Z",
       "resolve_url":  "POST https://helpdesk.internal/api/v1/decisions/gate:plr_a3f7c1b2/resolve",
       "extra": {
-        "escalation_target": "pbs_vacuum_remediate",
-        "findings": "Table public.orders has 94% dead tuple ratio..."
+        "gate_type": "transition",
+        "transition_target": "pbs_vacuum_remediate",
+        "findings": "Table public.orders has 94% dead tuple ratio...",
+        "remediation_preview": { "series_id": "pbs_vacuum_remediate", "name": "Vacuum Remediation", "description": "Run VACUUM ANALYZE and verify dead tuple ratio drops below 20%.", "approval_mode": "review" }
       }
     }
   ],

@@ -55,8 +55,11 @@ guidance: |
   Remediation for class_not_found and provisioner_missing requires infrastructure
   or manifest changes that cannot be automated from within the cluster.
 
-  Final step: after your analysis, output exactly these two lines in this
+  Final step: after your analysis, output exactly these lines in this
   format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: pod=<name>; pvc=<pvc-name>; storage_class=<name>; error=<class_not_found|provisioner_missing|wait_first_consumer|other>; event_message=<first failure event>
   ESCALATE_TO: none
 escalation:

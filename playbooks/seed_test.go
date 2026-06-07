@@ -368,6 +368,33 @@ func TestPlaybookStructure_TransitionTargetsExist(t *testing.T) {
 	}
 }
 
+// TestPlaybookStructure_HypothesisFormat checks that every entry-point triage
+// playbook (execution_mode=agent, entry_point=true) instructs the agent to emit
+// HYPOTHESIS_1: lines. Without this, parseDiagnosticReport never populates and
+// lowConfidenceForceGate cannot enforce the 50% confidence gate.
+func TestPlaybookStructure_HypothesisFormat(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+	if err := playbooks.SeedSystemPlaybooks(ctx, ps); err != nil {
+		t.Fatalf("SeedSystemPlaybooks: %v", err)
+	}
+	all, err := ps.List(ctx, audit.PlaybookListQuery{ActiveOnly: false, IncludeSystem: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, pb := range all {
+		if !pb.EntryPoint || pb.ExecutionMode != "agent" {
+			continue
+		}
+		if !strings.Contains(pb.Guidance, "HYPOTHESIS_1:") {
+			t.Errorf("series %q (entry_point=true, execution_mode=agent): guidance missing HYPOTHESIS_1: — agent will not emit structured diagnostic report", pb.SeriesID)
+		}
+		if !strings.Contains(pb.Guidance, "ROOT_CAUSE:") {
+			t.Errorf("series %q: guidance missing ROOT_CAUSE: line — parseDiagnosticReport will not mark a primary hypothesis", pb.SeriesID)
+		}
+	}
+}
+
 // TestPlaybookStructure_SeriesIDConvention checks that every system playbook
 // follows the pbs_ series_id naming convention required by the gateway.
 func TestPlaybookStructure_SeriesIDConvention(t *testing.T) {

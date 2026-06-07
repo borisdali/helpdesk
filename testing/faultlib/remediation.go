@@ -48,6 +48,9 @@ type ApproveRunResponse struct {
 	SuggestedApprovalMode string         `json:"suggested_approval_mode,omitempty"`
 	RemediationPreview    map[string]any `json:"remediation_preview,omitempty"`
 	DiagnosticReport      map[string]any `json:"diagnostic_report,omitempty"`
+	// GateReason is "low_confidence" when the gate was forced by the gateway
+	// because the primary hypothesis confidence was below 50%. Empty otherwise.
+	GateReason string `json:"gate_reason,omitempty"`
 }
 
 // ProceedEscalationRequest is the request body for

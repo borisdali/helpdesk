@@ -84,8 +84,11 @@ guidance: |
   before restarting. If you see any FATAL or PANIC lines, use the config
   recovery playbook instead.
 
-  Final step: after your ESCALATE_TO line or resolution statement, output
-  exactly one line in this format (no markdown, no extra text on the line):
+  Final step: after your analysis, output exactly these lines in this format
+  (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis about failure type> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from pod logs or events>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: hosting=<k8s|docker|bare_metal>; failure_type=<clean_shutdown|oom_kill|config_error|data_corruption|unknown>; restart_safe=<true|false>; escalate_to=<pbs_series_id | none>
 escalation:
   - "pod logs contain 'invalid page in block' or 'checksum failure'"

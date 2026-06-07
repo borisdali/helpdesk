@@ -41,8 +41,11 @@ guidance: |
   instance has the misconfigured HBA file. Report the error verbatim and the
   target host/dbname.
 
-  Final step: after your analysis, output exactly these two lines in this
+  Final step: after your analysis, output exactly these lines in this
   format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: error=<error text verbatim>; target=<host:port/dbname>; cause=hba_rejection
   TRANSITION_TO: pbs_db_config_recovery
 escalation:

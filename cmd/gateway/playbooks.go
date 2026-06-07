@@ -545,6 +545,13 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
+		// Forced gate: low-confidence triage must not auto-chain into destructive
+		// remediation regardless of the caller's gate_escalation flag.
+		if !req.GateEscalation && lowConfidenceForceGate(prev.diagReport) {
+			req.GateEscalation = true
+			extra["gate_reason"] = "low_confidence"
+		}
+
 		// Informed gate: operator reviews findings at the phase boundary before
 		// the next playbook is invoked. Takes precedence over auto-chaining.
 		if req.GateEscalation {
@@ -808,6 +815,22 @@ func (g *Gateway) confidenceWarning(report *audit.DiagnosticReport) (warning, su
 	}
 	msg += ". Uncertain diagnosis: consider step-by-step approval."
 	return msg, "manual"
+}
+
+// lowConfidenceForceGate returns true when the diagnostic report shows that
+// the primary hypothesis has less than 50% confidence — a coin-flip diagnosis
+// that must not auto-chain into destructive remediation. Returns false when
+// report is nil so pre-B1 playbooks (no HYPOTHESIS_N: lines) are unaffected.
+func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
+	if report == nil {
+		return false
+	}
+	for _, h := range report.Hypotheses {
+		if h.IsPrimary {
+			return h.Confidence < 0.50
+		}
+	}
+	return true // primary hypothesis not marked — treat as uncertain
 }
 
 // ProceedEscalationRequest is the request body for POST

@@ -57,8 +57,11 @@ guidance: |
   immediately. Escalate to pbs_k8s_pod_crash_triage to diagnose the crash root
   cause before any scaling action.
 
-  Final step: after your analysis, output exactly these two lines in this
+  Final step: after your analysis, output exactly these lines in this
   format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: statefulset=<name | unknown>; replicas=0; recent_events=<clean_shutdown|crashloop|unknown>; recommended=scale_up
   TRANSITION_TO: pbs_k8s_scale_to_zero_remediate
 escalation:

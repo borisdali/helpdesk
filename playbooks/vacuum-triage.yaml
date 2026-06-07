@@ -34,8 +34,11 @@ guidance: |
   growing, autovacuum may be blocked by a long-running transaction — check
   get_blocking_queries.
 
-  Final step: after your analysis, output exactly these two lines in this format
+  Final step: after your analysis, output exactly these lines in this format
   (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: worst table <schema.table> dead_ratio=<N> (<size>); autovacuum=<running|stuck|blocked|not_needed>; blocker_pid=<pid | none>; recommended=<manual_vacuum|tune_autovacuum|escalate|monitor>
   TRANSITION_TO: pbs_vacuum_remediate
 escalation:

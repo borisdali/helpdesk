@@ -46,6 +46,9 @@ type AgentResponse struct {
 	// DiagnosticReport is the structured diagnosis from triage (hypotheses, confidence).
 	// Populated when the triage playbook emits HYPOTHESIS_N: lines.
 	DiagnosticReport map[string]any
+	// GateReason is "low_confidence" when the gate was forced by the gateway
+	// because the primary hypothesis confidence was below 50%. Empty otherwise.
+	GateReason string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

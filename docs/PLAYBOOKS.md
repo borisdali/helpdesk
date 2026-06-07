@@ -173,6 +173,7 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
   "findings":             "Table public.orders has 94% dead tuple ratio...",
   "transition_target":    "pbs_vacuum_remediate",
   "escalation_findings":  "Table public.orders has 94% dead tuple ratio...",
+  "remediation_preview":  { "series_id": "pbs_vacuum_remediate", "name": "Vacuum Remediation", "description": "Run VACUUM ANALYZE and verify dead tuple ratio drops below 20%.", "approval_mode": "review" },
   "diagnostic_report":    { "hypotheses": [...], "root_cause": "..." },
   "confidence_warning":   "",
   "suggested_approval_mode": ""
@@ -189,13 +190,14 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
   "findings":             "Connection refused — Docker-level investigation needed.",
   "escalation_target":    "pbs_sysadmin_docker_inspect",
   "escalation_findings":  "Connection refused — Docker-level investigation needed.",
+  "remediation_preview":  { "series_id": "pbs_sysadmin_docker_inspect", "name": "Docker Container Inspect", "description": "Inspect the database container for OOM kills, crash loops, or misconfig.", "approval_mode": "manual" },
   "diagnostic_report":    { "hypotheses": [...], "root_cause": "..." },
   "confidence_warning":   "Primary hypothesis confidence 55% — competing hypothesis at 42%.",
   "suggested_approval_mode": "manual"
 }
 ```
 
-`gate_type` tells operators what kind of handoff this is: `"transition"` is a routine expected pipeline step; `"escalation"` is an out-of-scope cross-domain handoff that may warrant closer scrutiny. The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **non-blocking** — the operator can still proceed — but when present, `suggested_approval_mode` is always `"manual"`.
+`gate_type` tells operators what kind of handoff this is: `"transition"` is a routine expected pipeline step; `"escalation"` is an out-of-scope cross-domain handoff that may warrant closer scrutiny. `remediation_preview` describes the next playbook that would run after approval — its name, intent description, and default `approval_mode` — so operators know exactly what they are authorising before clicking approve. `diagnostic_report` contains the structured hypothesis breakdown from triage (populated when the agent emits `HYPOTHESIS_N:` lines; `null` otherwise — see [Structured diagnostic report](#structured-diagnostic-report)). The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **non-blocking** — the operator can still proceed — but when present, `suggested_approval_mode` is always `"manual"`.
 
 The triage run is recorded with `outcome: gate_pending`. The run ID is stable — you can use `GET /api/v1/fleet/playbook-runs/{run_id}` to retrieve findings later.
 
