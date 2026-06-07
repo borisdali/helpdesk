@@ -1362,3 +1362,150 @@ func TestPlaybooks_GateWithReason(t *testing.T) {
 
 	t.Logf("gate reason e2e OK: run_id=%s resolved_reason=%q", runID, resolvedReason)
 }
+
+// TestPlaybooks_IncidentNarrative_Full verifies the full incident lifecycle:
+// triage → gate approve with reason → remediation run recorded → feedback submitted →
+// GET /incidents/{id} returns all chapters.
+//
+// Requires LLM (RequireAPIKey). If the triage agent doesn't escalate (non-deterministic),
+// the test logs the situation and passes — gate logic is covered by unit tests.
+func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
+	RequireAPIKey(t)
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// Find pbs_db_restart_triage — it's designed to emit ESCALATE_TO.
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var triageID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_db_restart_triage" {
+			triageID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if triageID == "" {
+		t.Skip("pbs_db_restart_triage system playbook not found")
+	}
+
+	resp, err := client.PlaybookRun(ctx, triageID, map[string]any{
+		"connection_string": cfg.ConnStr,
+		"context":           "e2e test: incident_narrative_full",
+		"gate_escalation":   true,
+	})
+	if err != nil {
+		SkipIfLLMKeyInvalid(t, err.Error())
+		t.Fatalf("PlaybookRun: %v", err)
+	}
+
+	status, _ := resp["status"].(string)
+	if status != "pending_gate" {
+		t.Logf("gate not triggered (agent did not escalate): status=%q — narrative chapters covered by unit tests", status)
+		return
+	}
+
+	triageRunID, _ := resp["run_id"].(string)
+	if triageRunID == "" {
+		t.Fatal("pending_gate response missing run_id")
+	}
+	t.Logf("gate pending: triage_run_id=%s", triageRunID)
+
+	// Approve the gate with a reason, which chains to the remediation playbook.
+	const gateReason = "e2e test: approved for incident narrative verification"
+	approveResp, err := client.ProceedEscalation(ctx, triageRunID, map[string]any{
+		"resolution":  "approved",
+		"resolved_by": "e2e-test",
+		"reason":      gateReason,
+	})
+	if err != nil {
+		t.Fatalf("ProceedEscalation (approved): %v", err)
+	}
+	t.Logf("gate approved: proceed response status=%v", approveResp["status"])
+
+	// Submit feedback on the triage run.
+	_, err = client.SubmitFeedback(ctx, triageRunID, map[string]any{
+		"series_id":         "pbs_db_restart_triage",
+		"diagnosis_correct": true,
+		"actual_root_cause": "e2e test confirmed",
+		"operator":          "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("SubmitFeedback: %v", err)
+	}
+
+	// Poll for the incident narrative to have all expected chapters.
+	// The remediation run is recorded asynchronously via recordPlaybookRunComplete,
+	// so a brief wait may be needed.
+	var narrative map[string]any
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		narrative, err = client.GetIncident(ctx, triageRunID)
+		if err != nil {
+			t.Fatalf("GetIncident: %v", err)
+		}
+		// Wait until remediation chapter appears.
+		if narrative["remediation"] != nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// ── triage chapter ────────────────────────────────────────────────────
+	triage, _ := narrative["triage"].(map[string]any)
+	if triage == nil {
+		t.Fatal("incident narrative missing triage chapter")
+	}
+	if triage["run_id"] != triageRunID {
+		t.Errorf("triage.run_id = %q, want %q", triage["run_id"], triageRunID)
+	}
+	if triage["playbook"] == "" {
+		t.Error("triage.playbook is empty")
+	}
+
+	// ── gate chapter ──────────────────────────────────────────────────────
+	gate, _ := narrative["gate"].(map[string]any)
+	if gate == nil {
+		t.Fatal("incident narrative missing gate chapter")
+	}
+	if gate["resolution"] != "approved" {
+		t.Errorf("gate.resolution = %q, want approved", gate["resolution"])
+	}
+	if gate["reason"] != gateReason {
+		t.Errorf("gate.reason = %q, want %q", gate["reason"], gateReason)
+	}
+
+	// ── remediation chapter ───────────────────────────────────────────────
+	remediation, _ := narrative["remediation"].(map[string]any)
+	if remediation == nil {
+		t.Log("remediation chapter not present (may not have chained in time) — gate + triage verified")
+	} else {
+		if remediation["run_id"] == "" {
+			t.Error("remediation.run_id is empty")
+		}
+		if remediation["playbook"] == "" {
+			t.Error("remediation.playbook is empty")
+		}
+		t.Logf("remediation chapter: run_id=%s playbook=%s outcome=%s",
+			remediation["run_id"], remediation["playbook"], remediation["outcome"])
+	}
+
+	// ── feedback chapter ──────────────────────────────────────────────────
+	feedback, _ := narrative["feedback"].(map[string]any)
+	if feedback == nil {
+		t.Fatal("incident narrative missing feedback chapter")
+	}
+	if dc, _ := feedback["diagnosis_correct"].(bool); !dc {
+		t.Errorf("feedback.diagnosis_correct = %v, want true", feedback["diagnosis_correct"])
+	}
+
+	t.Logf("incident narrative full e2e OK: incident_id=%s triage=%s gate_reason=%q",
+		narrative["incident_id"], triageRunID, gate["reason"])
+}

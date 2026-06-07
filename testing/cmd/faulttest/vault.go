@@ -511,9 +511,7 @@ func vaultDrift(args []string) {
 	var target string
 	fs.IntVar(&sinceDays, "since-days", 90, "Days of history to analyze")
 	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
-	}
+	cfg := loadConfig(fs, args)
 
 	runs, err := loadHistory()
 	if err != nil {
@@ -585,14 +583,60 @@ func vaultDrift(args []string) {
 
 	sort.Slice(drifted, func(i, j int) bool { return drifted[i].drop > drifted[j].drop })
 
-	fmt.Printf("%-32s %-12s %-12s %s\n", "FAULT", "FIRST HALF", "SECOND HALF", "DRIFT")
-	fmt.Println(strings.Repeat("-", 72))
+	// Build fault→diagnosis series map from the catalog (best-effort; no gateway needed).
+	faultToSeries := make(map[string]string)
+	if cat, err := loadActiveCatalog(cfg); err == nil {
+		for _, f := range cat.Failures {
+			if f.DiagnosisPlaybookSeriesID != "" {
+				faultToSeries[f.ID] = f.DiagnosisPlaybookSeriesID
+			}
+		}
+	}
+
+	// Pre-fetch accuracy from gateway when available.
+	type accuracyInfo struct {
+		rate  float64
+		count int
+	}
+	accuracy := make(map[string]accuracyInfo) // keyed by fault id
+	if cfg.GatewayURL != "" {
+		for _, d := range drifted {
+			if sid, ok := faultToSeries[d.id]; ok {
+				info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+				if info.check == playbookFound && info.feedbackCount > 0 {
+					accuracy[d.id] = accuracyInfo{rate: info.accuracyRate, count: info.feedbackCount}
+				}
+			}
+		}
+	}
+
+	withAccuracy := cfg.GatewayURL != "" && len(accuracy) > 0
+	if withAccuracy {
+		fmt.Printf("%-32s %-12s %-12s %-8s %s\n", "FAULT", "FIRST HALF", "SECOND HALF", "DRIFT", "ACCURACY")
+		fmt.Println(strings.Repeat("-", 80))
+	} else {
+		fmt.Printf("%-32s %-12s %-12s %s\n", "FAULT", "FIRST HALF", "SECOND HALF", "DRIFT")
+		fmt.Println(strings.Repeat("-", 72))
+	}
 	for _, d := range drifted {
-		fmt.Printf("%-32s %-12s %-12s -%.0f%%\n", d.id,
-			fmt.Sprintf("%.0f%%", d.firstRate*100),
-			fmt.Sprintf("%.0f%%", d.secondRate*100),
-			d.drop*100,
-		)
+		driftStr := fmt.Sprintf("-%.0f%%", d.drop*100)
+		if withAccuracy {
+			accStr := "–"
+			if a, ok := accuracy[d.id]; ok {
+				accStr = fmt.Sprintf("%.0f%% (%d)", a.rate*100, a.count)
+			}
+			fmt.Printf("%-32s %-12s %-12s %-8s %s\n", d.id,
+				fmt.Sprintf("%.0f%%", d.firstRate*100),
+				fmt.Sprintf("%.0f%%", d.secondRate*100),
+				driftStr, accStr,
+			)
+		} else {
+			fmt.Printf("%-32s %-12s %-12s %s\n", d.id,
+				fmt.Sprintf("%.0f%%", d.firstRate*100),
+				fmt.Sprintf("%.0f%%", d.secondRate*100),
+				driftStr,
+			)
+		}
 	}
 }
 

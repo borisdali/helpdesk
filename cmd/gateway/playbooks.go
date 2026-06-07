@@ -280,8 +280,15 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Record the run start. Best-effort: failure does not block execution.
+	// For agent_approve runs, generate a run-level trace ID when the caller doesn't
+	// supply one — tool execution events are emitted under this ID and must be
+	// discoverable via GET /playbook-runs/{id}/events.
 	operator := r.Header.Get("X-User")
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, r.Header.Get("X-Trace-ID"), req.PriorRunID, operator)
+	startTraceID := r.Header.Get("X-Trace-ID")
+	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
+		startTraceID = audit.NewTraceID()
+	}
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, startTraceID, req.PriorRunID, operator)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -960,7 +967,11 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		remReq.PriorFindings = prior.FindingsSummary
 	}
 
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, r.Header.Get("X-Trace-ID"), runID, resolvedBy)
+	remStartTraceID := r.Header.Get("X-Trace-ID")
+	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
+		remStartTraceID = audit.NewTraceID()
+	}
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, remStartTraceID, runID, resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -2267,7 +2278,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 
 	if req.Resolution == "denied" {
 		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
 		return
 	}
@@ -2287,7 +2298,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	traceID := r.Header.Get("X-Trace-ID")
+	// Prefer the run's stored trace_id (set at run-start for agent_approve runs)
+	// so all step events share one trace and are discoverable via /events.
+	// Fall back to the request header, then generate a fresh sa_* prefix.
+	traceID := run.TraceID
+	if traceID == "" {
+		traceID = r.Header.Get("X-Trace-ID")
+	}
 	if traceID == "" {
 		traceID = audit.NewTraceIDWithPrefix("sa_")
 	}
@@ -2306,7 +2323,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
 
 	if toolErr != nil {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil)
 		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
 		return
 	}
@@ -2339,13 +2356,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, "", history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil)
 		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}
