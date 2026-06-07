@@ -252,3 +252,151 @@ func TestPlaybookRunHandlers_Stats_NotFound(t *testing.T) {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
 }
+
+func newPlaybookRunServerWithFeedback(t *testing.T) *playbookRunServer {
+	t.Helper()
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	prs, err := audit.NewPlaybookRunStore(store.DB())
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	pbs, err := audit.NewPlaybookStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookStore: %v", err)
+	}
+	fbs, err := audit.NewRunFeedbackStore(store.DB())
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+	return &playbookRunServer{store: prs, playbookStore: pbs, feedbackStore: fbs}
+}
+
+func TestPlaybookRunHandlers_Feedback_SubmitAndGet(t *testing.T) {
+	srv := newPlaybookRunServerWithFeedback(t)
+
+	// First create a run so GetByRunID in handleSubmitFeedback can populate series_id.
+	doRunRequest(t, srv, "pb1", map[string]any{
+		"run_id":    "plr_fb01",
+		"series_id": "pbs_lock_chain_triage",
+	})
+
+	// Submit feedback.
+	body := map[string]any{
+		"diagnosis_correct": true,
+		"actual_root_cause": "PID 42 held ShareLock",
+		"operator":          "alice",
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_fb01/feedback", bytes.NewReader(data))
+	req.SetPathValue("runID", "plr_fb01")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.handleSubmitFeedback(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("submit status = %d, want 201", rec.Code)
+	}
+
+	// Retrieve feedback.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_fb01/feedback", nil)
+	req2.SetPathValue("runID", "plr_fb01")
+	rec2 := httptest.NewRecorder()
+	srv.handleGetFeedback(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Errorf("get status = %d, want 200", rec2.Code)
+	}
+	var got audit.RunFeedback
+	if err := json.NewDecoder(rec2.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.RunID != "plr_fb01" {
+		t.Errorf("RunID = %q, want plr_fb01", got.RunID)
+	}
+	if got.DiagnosisCorrect == nil || !*got.DiagnosisCorrect {
+		t.Errorf("DiagnosisCorrect = %v, want true", got.DiagnosisCorrect)
+	}
+	if got.ActualRootCause != "PID 42 held ShareLock" {
+		t.Errorf("ActualRootCause = %q", got.ActualRootCause)
+	}
+}
+
+func TestPlaybookRunHandlers_Feedback_NotFound(t *testing.T) {
+	srv := newPlaybookRunServerWithFeedback(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_ghost/feedback", nil)
+	req.SetPathValue("runID", "plr_ghost")
+	rec := httptest.NewRecorder()
+	srv.handleGetFeedback(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestPlaybookRunHandlers_Stats_IncludesAccuracy(t *testing.T) {
+	srv := newPlaybookRunServerWithFeedback(t)
+
+	// Create playbook via the handler (handler assigns IDs).
+	pbSrv := &playbookServer{store: srv.playbookStore, feedbackStore: srv.feedbackStore}
+	pbData, _ := json.Marshal(map[string]any{"name": "Accuracy Test", "description": "accuracy test playbook", "series_id": "pbs_accuracy_test"})
+	pbReq := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbooks", bytes.NewReader(pbData))
+	pbReq.Header.Set("Content-Type", "application/json")
+	pbRec := httptest.NewRecorder()
+	pbSrv.handleCreate(pbRec, pbReq)
+	if pbRec.Code != http.StatusCreated {
+		t.Fatalf("create playbook: status %d, body: %s", pbRec.Code, pbRec.Body.String())
+	}
+	var createdPB audit.Playbook
+	if err := json.NewDecoder(pbRec.Body).Decode(&createdPB); err != nil {
+		t.Fatalf("decode playbook: %v", err)
+	}
+
+	// Record a run for the series.
+	doRunRequest(t, srv, createdPB.PlaybookID, map[string]any{
+		"run_id":    "plr_acc_run1",
+		"series_id": createdPB.SeriesID,
+	})
+
+	// Submit feedback for that run.
+	fbBody := map[string]any{"diagnosis_correct": true, "operator": "test"}
+	fbData, _ := json.Marshal(fbBody)
+	fbReq := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_acc_run1/feedback", bytes.NewReader(fbData))
+	fbReq.SetPathValue("runID", "plr_acc_run1")
+	fbReq.Header.Set("Content-Type", "application/json")
+	fbRec := httptest.NewRecorder()
+	srv.handleSubmitFeedback(fbRec, fbReq)
+	if fbRec.Code != http.StatusCreated {
+		t.Fatalf("submit feedback: status %d, body: %s", fbRec.Code, fbRec.Body.String())
+	}
+
+	// Fetch stats — should include accuracy.
+	statsReq := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks/"+createdPB.PlaybookID+"/stats", nil)
+	statsReq.SetPathValue("playbookID", createdPB.PlaybookID)
+	statsRec := httptest.NewRecorder()
+	srv.handleStats(statsRec, statsReq)
+
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, body: %s", statsRec.Code, statsRec.Body.String())
+	}
+	var stats audit.PlaybookRunStats
+	if err := json.NewDecoder(statsRec.Body).Decode(&stats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if stats.FeedbackCount != 1 {
+		t.Errorf("FeedbackCount = %d, want 1", stats.FeedbackCount)
+	}
+	if stats.CorrectCount != 1 {
+		t.Errorf("CorrectCount = %d, want 1", stats.CorrectCount)
+	}
+	if stats.AccuracyRate != 1.0 {
+		t.Errorf("AccuracyRate = %f, want 1.0", stats.AccuracyRate)
+	}
+}

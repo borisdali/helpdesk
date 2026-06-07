@@ -102,8 +102,8 @@ FROM run_feedback WHERE run_id = ?`, runID)
 func (s *RunFeedbackStore) StatsBySeries(ctx context.Context, seriesID string) (*FeedbackStats, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
-    COUNT(*)                                     AS feedback_count,
-    SUM(CASE WHEN diagnosis_correct = 1 THEN 1 ELSE 0 END) AS correct_count
+    COUNT(*)                                                          AS feedback_count,
+    COALESCE(SUM(CASE WHEN diagnosis_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_count
 FROM run_feedback WHERE series_id = ?`, seriesID)
 	var total, correct int
 	if err := row.Scan(&total, &correct); err != nil {
