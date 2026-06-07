@@ -71,7 +71,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", nil)
+	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil)
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestPlaybookRunStore_DiagnosticReport_RoundTrip(t *testing.T) {
 		RootCause:  "Updated root cause",
 		Hypotheses: []DiagnosticHypothesis{{Rank: 1, Text: "Updated", Confidence: 0.99, IsPrimary: true}},
 	}
-	if err := s.Update(ctx, run.RunID, "resolved", "", "", "Updated findings", "", report2); err != nil {
+	if err := s.Update(ctx, run.RunID, "resolved", "", "", "Updated findings", "", "", report2); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	got2, err := s.GetByRunID(ctx, run.RunID)
@@ -357,7 +357,7 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 		t.Errorf("AgentTranscript should be empty before Update, got %q", got.AgentTranscript)
 	}
 
-	if err := s.Update(ctx, run.RunID, "resolved", "", "", "findings text", "full agent reasoning narrative here", nil); err != nil {
+	if err := s.Update(ctx, run.RunID, "resolved", "", "", "findings text", "full agent reasoning narrative here", "tr_abc123", nil); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 

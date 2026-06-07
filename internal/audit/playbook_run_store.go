@@ -174,15 +174,19 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 
 // Update sets outcome, escalated_to, transitioned_to, findings_summary, diagnostic_report,
 // agent_transcript, and completed_at for an existing run. Used when the agent session concludes.
-func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript string, report *DiagnosticReport) error {
+// traceID, when non-empty, updates the run's trace_id (the agent's own X-Trace-ID from the
+// response — distinct from the request trace ID stored at run start).
+func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *DiagnosticReport) error {
 	diagJSON := marshalDiagnosticReport(report)
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE playbook_runs
 		 SET outcome = ?, escalated_to = ?, transitioned_to = ?, findings_summary = ?,
-		     diagnostic_report = ?, agent_transcript = ?, completed_at = ?
+		     diagnostic_report = ?, agent_transcript = ?, completed_at = ?,
+		     trace_id = CASE WHEN ? != '' THEN ? ELSE trace_id END
 		 WHERE run_id = ?`,
 		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON, agentTranscript,
 		time.Now().UTC().Format("2006-01-02 15:04:05"),
+		traceID, traceID,
 		runID,
 	)
 	return err

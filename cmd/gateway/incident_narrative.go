@@ -46,9 +46,10 @@ type GateChapter struct {
 
 // RemediationChapter holds the remediation playbook run.
 type RemediationChapter struct {
-	RunID    string `json:"run_id"`
-	Playbook string `json:"playbook"` // series_id
-	Outcome  string `json:"outcome"`
+	RunID    string                    `json:"run_id"`
+	Playbook string                    `json:"playbook"` // series_id
+	Outcome  string                    `json:"outcome"`
+	Steps    []*audit.PlaybookRunStep  `json:"steps,omitempty"`
 }
 
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
@@ -121,10 +122,12 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Remediation run — the run that has this run as prior_run_id.
 	if remRun := g.fetchRemediationRun(r.Context(), runID); remRun != nil {
+		steps, _ := g.fetchRunSteps(r.Context(), remRun.RunID)
 		narrative.Remediation = &RemediationChapter{
 			RunID:    remRun.RunID,
 			Playbook: remRun.SeriesID,
 			Outcome:  remRun.Outcome,
+			Steps:    steps,
 		}
 		if !remRun.CompletedAt.IsZero() {
 			t := remRun.CompletedAt

@@ -331,7 +331,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil)
 	}
 }
 
@@ -487,7 +487,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		injectFields(w, primary.capture, extra)
 		if runID != "" {
 			go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-				runID, primary.outcome, "", "", primary.findings, "", nil)
+				runID, primary.outcome, "", "", primary.findings, "", primary.traceID, nil)
 		}
 		return
 	}
@@ -676,7 +676,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	if runID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, capturedText(primary.capture), finalReport)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, capturedText(primary.capture), primary.traceID, finalReport)
 	}
 }
 
@@ -738,7 +738,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 
 	if chainRunID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, capturedText(chainRes.capture), chainRes.diagReport)
+			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, capturedText(chainRes.capture), chainRes.traceID, chainRes.diagReport)
 	}
 
 	slog.Info("playbook: auto-chained escalation",
@@ -894,7 +894,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 
 	// Denied: abandon the triage run and return.
 	if req.Resolution == "denied" {
-		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", run.DiagnosticReport)
+		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport)
 		if g.decisionNotifier != nil {
 			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 				ID:         "gate:" + runID,
@@ -917,7 +917,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		nextSeriesID = run.TransitionedTo
 		approvedOutcome = audit.OutcomeTransitioned
 	}
-	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", run.DiagnosticReport)
+	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport)
 	if g.decisionNotifier != nil {
 		g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 			ID:      "gate:" + runID,
@@ -1495,8 +1495,9 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 // recordPlaybookRunComplete patches an existing run with its final outcome.
 // escalatedTo is set for ESCALATE_TO signals; transitionedTo for TRANSITION_TO.
 // agentTranscript is the full agent response text (chain of thought narrative); pass "" when not available.
+// traceID is the agent's trace ID (from response X-Trace-ID header); used to link audit events to the run.
 // Best-effort: failures are logged but not returned.
-func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript string, report *audit.DiagnosticReport) {
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
@@ -1508,6 +1509,9 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 	}
 	if agentTranscript != "" {
 		payload["agent_transcript"] = agentTranscript
+	}
+	if traceID != "" {
+		payload["trace_id"] = traceID
 	}
 	if report != nil {
 		payload["diagnostic_report"] = report
@@ -2164,7 +2168,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 
 	if done {
 		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil)
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -2263,7 +2267,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 
 	if req.Resolution == "denied" {
 		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", "", nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
 		return
 	}
@@ -2302,7 +2306,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
 
 	if toolErr != nil {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", "", nil)
 		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
 		return
 	}
@@ -2335,13 +2339,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, "", history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", "", nil)
 		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}
