@@ -381,6 +381,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed", auth("POST /api/v1/fleet/playbook-runs/{runID}/proceed", g.handlePlaybookRunProceed))
 	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", auth("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", g.handleProceedEscalation))
+	mux.HandleFunc("GET /api/v1/fleet/playbook-runs/{runID}/events", auth("GET /api/v1/fleet/playbook-runs/{runID}/events", g.handlePlaybookRunEvents))
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))

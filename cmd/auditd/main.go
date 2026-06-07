@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -490,6 +491,13 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := r.URL.Query().Get("event_type"); v != "" {
 		opts.EventType = audit.EventType(v)
+	}
+	if v := r.URL.Query().Get("types"); v != "" {
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				opts.EventTypes = append(opts.EventTypes, audit.EventType(t))
+			}
+		}
 	}
 	if v := r.URL.Query().Get("agent"); v != "" {
 		opts.Agent = v

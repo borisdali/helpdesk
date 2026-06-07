@@ -303,6 +303,10 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		modeInput = suggested
 	}
 
+	fmt.Print("  Reason (optional, press Enter to skip): ")
+	reasonInput, _ := reader.ReadString('\n')
+	reasonInput = strings.TrimSpace(reasonInput)
+
 	connStr := r.cfg.ConnStr
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
@@ -312,6 +316,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		ResolvedBy:       r.cfg.OperatorID,
 		ApprovalMode:     modeInput,
 		ConnectionString: connStr,
+		Reason:           reasonInput,
 	})
 	if err != nil {
 		return fmt.Errorf("proceed-escalation: %w", err)

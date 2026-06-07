@@ -842,11 +842,12 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 // ProceedEscalationRequest is the request body for POST
 // /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
 type ProceedEscalationRequest struct {
-	Resolution      string `json:"resolution"`               // "approved" | "denied"
-	ResolvedBy      string `json:"resolved_by,omitempty"`
-	ApprovalMode    string `json:"approval_mode,omitempty"`  // "manual"|"review"|"auto"|"session"|"force"
-	ApprovalSession string `json:"approval_session,omitempty"`
+	Resolution       string `json:"resolution"`               // "approved" | "denied"
+	ResolvedBy       string `json:"resolved_by,omitempty"`
+	ApprovalMode     string `json:"approval_mode,omitempty"`  // "manual"|"review"|"auto"|"session"|"force"
+	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
+	Reason           string `json:"reason,omitempty"`            // optional operator rationale
 }
 
 // handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -889,7 +890,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	}
 
 	// Emit gate_acknowledged audit event.
-	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "")
+	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
 
 	// Denied: abandon the triage run and return.
 	if req.Resolution == "denied" {
@@ -973,7 +974,9 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 }
 
 // recordGateAcknowledged emits a gate_acknowledged audit event.
-func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.PlaybookRun, resolvedBy, resolution, approvalMode, confidenceWarning string) {
+// The event's TraceID is set to run.RunID so it can be retrieved via
+// GET /v1/events?trace_id={runID}&event_type=gate_acknowledged.
+func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.PlaybookRun, resolvedBy, resolution, approvalMode, confidenceWarning, reason string) {
 	if g.auditor == nil {
 		return
 	}
@@ -988,11 +991,14 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 	if confidenceWarning != "" {
 		reasoningChain = append(reasoningChain, "confidence_warning: "+confidenceWarning)
 	}
+	if reason != "" {
+		reasoningChain = append(reasoningChain, "operator_reason: "+reason)
+	}
 	event := &audit.Event{
 		EventID:   "ga_" + uuid.New().String()[:8],
 		Timestamp: time.Now().UTC(),
 		EventType: audit.EventTypeGateAcknowledged,
-		TraceID:   audit.NewTraceID(),
+		TraceID:   run.RunID, // correlate back to the playbook run
 		Input: audit.Input{
 			UserQuery: "gate acknowledged for triage run " + run.RunID,
 		},
@@ -1003,6 +1009,7 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 			UserIntent:      resolution + " gate for escalation to " + run.EscalatedTo,
 			ReasoningChain:  reasoningChain,
 		},
+		Output:  &audit.Output{Response: reason},
 		Outcome: &audit.Outcome{Status: "success"},
 	}
 	if err := g.auditor.RecordEvent(ctx, event); err != nil {
@@ -1345,6 +1352,74 @@ func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook
 		return nil, fmt.Errorf("not found")
 	}
 	return wrapper.Playbooks[0], nil
+}
+
+// fetchGateAcknowledgedReason returns the operator reason stored in the
+// gate_acknowledged audit event for runID, or "" if none was recorded.
+func (g *Gateway) fetchGateAcknowledgedReason(ctx context.Context, runID string) string {
+	if g.auditURL == "" {
+		return ""
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/events?trace_id=" + runID + "&event_type=gate_acknowledged&limit=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ""
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	defer resp.Body.Close()
+	var events []audit.Event
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil || len(events) == 0 {
+		return ""
+	}
+	if events[0].Output != nil {
+		return events[0].Output.Response
+	}
+	return ""
+}
+
+// handlePlaybookRunEvents handles GET /api/v1/fleet/playbook-runs/{runID}/events.
+// Returns audit events (agent_reasoning, tool_execution, policy_decision) for the run
+// by looking up the run's trace_id and querying the audit event log.
+func (g *Gateway) handlePlaybookRunEvents(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "runID is required")
+		return
+	}
+	run, err := g.fetchPlaybookRun(r.Context(), runID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		slog.Error("handlePlaybookRunEvents: failed to fetch run", "run_id", runID, "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch run")
+		return
+	}
+	if run.TraceID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+		return
+	}
+	types := "agent_reasoning,tool_execution,policy_decision"
+	if t := r.URL.Query().Get("types"); t != "" {
+		types = t
+	}
+	limit := "500"
+	if l := r.URL.Query().Get("limit"); l != "" {
+		limit = l
+	}
+	auditPath := fmt.Sprintf("/v1/events?trace_id=%s&types=%s&limit=%s", run.TraceID, types, limit)
+	g.proxyToAuditd(w, r, auditPath)
 }
 
 // fetchPlaybookRun retrieves a single run record from auditd by run_id.

@@ -325,3 +325,115 @@ func TestPlaybookRunStore_DiagnosticReport_RoundTrip(t *testing.T) {
 		t.Errorf("DiagnosticReport not updated correctly: %+v", got2.DiagnosticReport)
 	}
 }
+
+func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	run := &PlaybookRun{
+		PlaybookID:    "pb_newfields",
+		SeriesID:      "pbs_new_triage",
+		ExecutionMode: "agent",
+		Operator:      "alice",
+		TraceID:       "tr_abc123",
+		PriorRunID:    "plr_prior001",
+		StartedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.Record(ctx, run); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, err := s.GetByRunID(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID: %v", err)
+	}
+	if got.TraceID != "tr_abc123" {
+		t.Errorf("TraceID = %q, want %q", got.TraceID, "tr_abc123")
+	}
+	if got.PriorRunID != "plr_prior001" {
+		t.Errorf("PriorRunID = %q, want %q", got.PriorRunID, "plr_prior001")
+	}
+	if got.AgentTranscript != "" {
+		t.Errorf("AgentTranscript should be empty before Update, got %q", got.AgentTranscript)
+	}
+
+	if err := s.Update(ctx, run.RunID, "resolved", "", "", "findings text", "full agent reasoning narrative here", nil); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got2, err := s.GetByRunID(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID after Update: %v", err)
+	}
+	if got2.AgentTranscript != "full agent reasoning narrative here" {
+		t.Errorf("AgentTranscript = %q, want %q", got2.AgentTranscript, "full agent reasoning narrative here")
+	}
+	// TraceID and PriorRunID are immutable — Update must not clear them.
+	if got2.TraceID != "tr_abc123" {
+		t.Errorf("TraceID changed after Update: got %q", got2.TraceID)
+	}
+	if got2.PriorRunID != "plr_prior001" {
+		t.Errorf("PriorRunID changed after Update: got %q", got2.PriorRunID)
+	}
+}
+
+func TestPlaybookRunStore_ListByPriorRunID(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	triage := &PlaybookRun{
+		PlaybookID:    "pb_triage1",
+		SeriesID:      "pbs_lock_chain_triage",
+		ExecutionMode: "agent",
+		Operator:      "alice",
+		StartedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.Record(ctx, triage); err != nil {
+		t.Fatalf("Record triage: %v", err)
+	}
+
+	rem := &PlaybookRun{
+		PlaybookID:    "pb_remediate1",
+		SeriesID:      "pbs_lock_chain_remediate",
+		ExecutionMode: "agent_approve",
+		PriorRunID:    triage.RunID,
+		Operator:      "alice",
+		StartedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.Record(ctx, rem); err != nil {
+		t.Fatalf("Record remediation: %v", err)
+	}
+
+	// Unrelated run — must not appear in results.
+	other := &PlaybookRun{
+		PlaybookID:    "pb_other1",
+		SeriesID:      "pbs_other",
+		ExecutionMode: "agent",
+		PriorRunID:    "plr_unrelated",
+		Operator:      "bob",
+		StartedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.Record(ctx, other); err != nil {
+		t.Fatalf("Record other: %v", err)
+	}
+
+	runs, err := s.ListByPriorRunID(ctx, triage.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListByPriorRunID: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("want 1 run, got %d", len(runs))
+	}
+	if runs[0].RunID != rem.RunID {
+		t.Errorf("unexpected run_id %q, want %q", runs[0].RunID, rem.RunID)
+	}
+
+	// No results for an unknown prior_run_id.
+	none, err := s.ListByPriorRunID(ctx, "plr_nonexistent", 10)
+	if err != nil {
+		t.Fatalf("ListByPriorRunID (empty): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("want 0 runs for unknown prior_run_id, got %d", len(none))
+	}
+}

@@ -331,6 +331,11 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if run.Outcome != audit.OutcomeGatePending {
+			if reason := g.fetchGateAcknowledgedReason(r.Context(), runID); reason != "" {
+				d.Extra["resolved_reason"] = reason
+			}
+		}
 		writeJSON(w, http.StatusOK, d)
 
 	case strings.HasPrefix(id, "step:"), strings.HasPrefix(id, "fleet:"):
