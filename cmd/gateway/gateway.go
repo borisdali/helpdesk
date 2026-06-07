@@ -328,6 +328,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/query", auth("POST /api/v1/query", g.handleQuery))
 	mux.HandleFunc("POST /api/v1/incidents", auth("POST /api/v1/incidents", g.handleCreateIncident))
 	mux.HandleFunc("GET /api/v1/incidents", auth("GET /api/v1/incidents", g.handleListIncidents))
+	mux.HandleFunc("GET /api/v1/incidents/{runID}", auth("GET /api/v1/incidents/{runID}", g.handleGetIncident))
 	mux.HandleFunc("POST /api/v1/db/{tool}", auth("POST /api/v1/db/{tool}", g.handleDBTool))
 	mux.HandleFunc("POST /api/v1/k8s/{tool}", auth("POST /api/v1/k8s/{tool}", g.handleK8sTool))
 	mux.HandleFunc("POST /api/v1/research", auth("POST /api/v1/research", g.handleResearch))

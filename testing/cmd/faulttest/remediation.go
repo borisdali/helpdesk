@@ -664,6 +664,28 @@ func primaryHypothesisText(diagReport map[string]any) string {
 	return ""
 }
 
+// printIncidentSummary prints a compact incident narrative link after a successful gate+recovery.
+func printIncidentSummary(resp testutil.AgentResponse, recoverySecs float64, gatewayURL string) {
+	if resp.RunID == "" {
+		return
+	}
+	fmt.Printf("Incident %s — resolved in %.1fs\n", resp.RunID, recoverySecs)
+	if diag := primaryHypothesisText(resp.DiagnosticReport); diag != "" {
+		fmt.Printf("  Diagnosis  : %s\n", diag)
+	}
+	target := resp.TransitionTarget
+	if target == "" {
+		target = resp.EscalationTarget
+	}
+	if target != "" {
+		fmt.Printf("  Remediation: %s\n", target)
+	}
+	if gatewayURL != "" {
+		base := strings.TrimSuffix(gatewayURL, "/")
+		fmt.Printf("  Narrative  : GET %s/api/v1/incidents/%s\n", base, resp.RunID)
+	}
+}
+
 // wrapText breaks s into lines of at most width runes, splitting on spaces.
 func wrapText(s string, width int) []string {
 	var lines []string

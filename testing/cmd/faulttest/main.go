@@ -389,6 +389,7 @@ func cmdRun(args []string) {
 			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
 			if remResult.Passed {
 				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+				printIncidentSummary(resp, remResult.RecoveryTimeSecs, cfg.GatewayURL)
 				if cfg.GatewayURL != "" {
 					if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
 						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)

@@ -1357,33 +1357,11 @@ func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook
 // fetchGateAcknowledgedReason returns the operator reason stored in the
 // gate_acknowledged audit event for runID, or "" if none was recorded.
 func (g *Gateway) fetchGateAcknowledgedReason(ctx context.Context, runID string) string {
-	if g.auditURL == "" {
+	event := g.fetchGateAcknowledgedEvent(ctx, runID)
+	if event == nil || event.Output == nil {
 		return ""
 	}
-	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/events?trace_id=" + runID + "&event_type=gate_acknowledged&limit=1"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return ""
-	}
-	if g.auditAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
-	}
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	req = req.WithContext(ctx2)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	defer resp.Body.Close()
-	var events []audit.Event
-	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil || len(events) == 0 {
-		return ""
-	}
-	if events[0].Output != nil {
-		return events[0].Output.Response
-	}
-	return ""
+	return event.Output.Response
 }
 
 // handlePlaybookRunEvents handles GET /api/v1/fleet/playbook-runs/{runID}/events.
