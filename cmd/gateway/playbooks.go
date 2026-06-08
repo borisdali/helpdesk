@@ -902,6 +902,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// Denied: abandon the triage run and return.
 	if req.Resolution == "denied" {
 		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport)
+		go g.submitDenialFeedback(context.WithoutCancel(r.Context()), runID, run.SeriesID, resolvedBy, req.Reason)
 		if g.decisionNotifier != nil {
 			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 				ID:         "gate:" + runID,
@@ -1553,6 +1554,47 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 			"status", resp.StatusCode,
 			"auditd_error", strings.TrimSpace(string(body)),
 		)
+	}
+}
+
+// submitDenialFeedback auto-submits a RunFeedback with diagnosis_correct=false when
+// an operator denies the gate. The denial reason, if provided, becomes actual_root_cause.
+// Best-effort: failures are logged but not returned.
+func (g *Gateway) submitDenialFeedback(ctx context.Context, runID, seriesID, operator, reason string) {
+	if g.auditURL == "" || runID == "" || seriesID == "" {
+		return
+	}
+	diagCorrect := false
+	payload := map[string]any{
+		"series_id":         seriesID,
+		"diagnosis_correct": diagCorrect,
+		"operator":          operator,
+	}
+	if reason != "" {
+		payload["actual_root_cause"] = reason
+	}
+	body, _ := json.Marshal(payload)
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("submitDenialFeedback: failed to auto-submit feedback", "run_id", runID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		slog.Warn("submitDenialFeedback: unexpected status", "run_id", runID, "status", resp.StatusCode, "body", strings.TrimSpace(string(b)))
 	}
 }
 

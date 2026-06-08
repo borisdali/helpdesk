@@ -728,6 +728,56 @@ Submitting feedback twice for the same `run_id` **overwrites** the previous entr
 
 Accuracy aggregates (across all runs in a series with `diagnosis_correct` set) are included in `GET /api/v1/fleet/playbooks/{id}/stats` — see `PlaybookRunStats` below.
 
+### Diagnosis accuracy and what counts toward it
+
+**What accuracy measures**
+
+`accuracy_rate` in `PlaybookRunStats` answers one question: when the agent named a root cause, was it right? It is computed from runs that have an explicit `diagnosis_correct` value — either `true` or `false`. Runs with no feedback entry, or entries where `diagnosis_correct` is omitted, do not affect the rate.
+
+This is entirely separate from `resolution_rate`, which measures whether the database recovered after remediation. The two signals are independent:
+
+| | Remediation succeeded | Remediation failed |
+|---|---|---|
+| **Diagnosis correct** | Ideal: agent understood the problem and the right action fixed it | Tooling gap: agent knew what was wrong but the playbook lacked an effective action |
+| **Diagnosis wrong** | Blind fix: a broad action happened to clear the symptom — will fail when the fault pattern changes | Both wrong: misdiagnosis led to an ineffective action |
+
+A system with high resolution rate and low accuracy is fixing things by brute force. That pattern breaks as soon as the fault requires a targeted response. Tracking both signals independently tells you whether to tune the playbook's diagnostic guidance or its remediation actions.
+
+**What counts toward accuracy**
+
+Two sources contribute `diagnosis_correct=false` entries:
+
+1. **Explicit post-incident feedback** — submitted by an operator via `POST .../feedback` after reviewing the incident outcome. This is the primary signal and supports both `true` and `false` values with an optional free-text `actual_root_cause`.
+
+2. **Gate denial auto-submission** — when an operator denies the gate via `POST .../proceed-escalation` with `resolution: "denied"`, the gateway automatically submits a `RunFeedback` entry with `diagnosis_correct: false` for the triage run. The denial `reason`, if provided, is stored as `actual_root_cause`. This captures the implicit signal — an operator reviewing triage findings and deciding not to proceed is a reliable indicator that the diagnosis was unconvincing or wrong.
+
+   ```bash
+   # This denial automatically records diagnosis_correct=false for plr_a3f7c1b2
+   curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/proceed-escalation \
+     -H "Content-Type: application/json" \
+     -d '{
+       "resolution":  "denied",
+       "resolved_by": "alice@example.com",
+       "reason":      "Wrong hypothesis — actual blocker was an autovacuum lock, not the reported idle-in-transaction session"
+     }'
+   ```
+
+   The auto-submitted entry uses upsert semantics: if the operator later submits explicit feedback via `POST .../feedback`, it overwrites the auto-entry.
+
+**What does not count toward accuracy**
+
+Gate **approvals** are deliberately not auto-submitted as `diagnosis_correct=true`. An approval means the operator found the diagnosis plausible enough to attempt remediation — not that they confirmed it was correct. Definitive confirmation typically only exists after remediation completes and the operator can compare the agent's hypothesis against what actually fixed the problem. Submit explicit post-incident feedback for that confirmation.
+
+**Reading the accuracy signal**
+
+```bash
+# Check accuracy for a specific series after collecting feedback
+curl -s http://localhost:8080/api/v1/fleet/playbooks/pb_<id>/stats \
+  | jq '{series_id, total_runs, resolution_rate, feedback_count, correct_count, accuracy_rate}'
+```
+
+`accuracy_rate` is `correct_count / feedback_count`. It is `0` when `feedback_count` is `0` (no feedback yet — treat as unknown, not as zero accuracy). In `faulttest vault list`, the INCIDENTS column shows `–` when `feedback_count=0` and `N% accurate` once feedback exists. Use `faulttest vault accuracy <series_id>` for a per-hypothesis breakdown across all runs that have feedback.
+
 ### Incident narrative
 
 ```
@@ -1889,7 +1939,9 @@ The complete incident trail — from triage chain-of-thought through gate reason
 
 ---
 
-## Authoring guidance
+## Playbook authoring guidance
+
+The pair of [triage](../playbooks/templates/triage-template.yaml) and [remediation](../playbooks/templates/remediation-template.yaml) templates is a good starting point for creating a new Playbook.
 
 ### Writing effective `description` fields
 

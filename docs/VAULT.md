@@ -28,7 +28,7 @@ The Vault is the engine of a feedback loop that tightens with every incident:
   └────────────────────────────────────────────────────────────────────────┘
 ```
 
-The loop now closes at two levels. **Resolution rate** (does the Playbook fix the problem?) has always been tracked. **Accuracy rate** (does the agent identify the *right* root cause?) is now measured separately — because a Playbook can achieve 100% resolution rate while the agent's diagnosis is wrong, if the remediation step happens to fix the problem anyway. Distinguishing these two signals is what makes the Vault's knowledge meaningful rather than just empirically successful.
+The loop closes at two levels. First, there's a carefully tracked **Resolution rate** (does the Playbook fix the problem?). Next, there's also an **Accuracy rate** (does the agent identify the *right* root cause?). It is measured separately because a Playbook can achieve 100% resolution rate while the agent's diagnosis is wrong, if the remediation step happens to fix the problem anyway. Distinguishing these two signals is what makes the Vault's knowledge meaningful rather than just empirically successful.
 
 See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a full walkthrough of how a single incident contributes to both signals.
 

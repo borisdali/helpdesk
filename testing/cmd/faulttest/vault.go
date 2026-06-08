@@ -325,6 +325,9 @@ func vaultList(args []string) {
 		}
 
 		// ── incidents column (gateway) ────────────────────────────────────
+		// Resolution rate comes from the remediation playbook (did it fix the problem?).
+		// Accuracy comes from the diagnosis playbook (was the root cause correct?).
+		// These are independent signals on different series.
 		incidentCol := "-"
 		if playbookID != "" && cfg.GatewayURL != "" {
 			info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID)
@@ -350,9 +353,19 @@ func vaultList(args []string) {
 							lastDate = t.Format("2006-01-02")
 						}
 					}
+					// Accuracy feedback is submitted against the triage/diagnosis series,
+					// not the remediation series — fetch it separately when available.
+					feedbackCount := info.feedbackCount
+					accuracyRate := info.accuracyRate
+					if f.DiagnosisPlaybookSeriesID != "" {
+						if diagInfo := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID); diagInfo.check == playbookFound && diagInfo.feedbackCount > 0 {
+							feedbackCount = diagInfo.feedbackCount
+							accuracyRate = diagInfo.accuracyRate
+						}
+					}
 					accuracyStr := "–"
-					if info.feedbackCount > 0 {
-						accuracyStr = fmt.Sprintf("%.0f%% accurate", info.accuracyRate*100)
+					if feedbackCount > 0 {
+						accuracyStr = fmt.Sprintf("%.0f%% accurate", accuracyRate*100)
 					}
 					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s  last: %s%s",
 						info.totalRuns, info.resolutionRate*100, accuracyStr, lastDate, sourceTag)
