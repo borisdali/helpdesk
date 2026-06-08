@@ -433,7 +433,7 @@ func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req Pr
 // Interactive callers (cmd/faulttest) implement their own loop using ProceedStep.
 func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunResponse) error {
 	current := initial
-	const maxSteps = 20
+	const maxSteps = 100
 	for i := 0; i < maxSteps && current.Status == "pending_approval"; i++ {
 		if current.Step == nil {
 			return fmt.Errorf("approval loop: pending_approval response has no step")

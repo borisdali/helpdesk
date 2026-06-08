@@ -367,7 +367,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 	}
 
 	current := initial
-	const maxSteps = 20
+	const maxSteps = 100
 	mode := r.cfg.ApprovalMode
 	if initial.EffectiveApprovalMode != "" {
 		mode = initial.EffectiveApprovalMode

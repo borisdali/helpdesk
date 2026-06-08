@@ -673,24 +673,68 @@ func passRateOf(results []bool) float64 {
 
 // vaultAccuracy shows diagnosis accuracy for a playbook series based on
 // operator feedback submitted after incident recovery.
+//
+// Called with no argument: lists all catalog faults that have a diagnosis
+// playbook, fetches feedback stats for each, and shows a discovery table.
+//
+// Called with a series_id (pbs_*) or fault ID: shows stats for that series.
+// Fault IDs are resolved to their DiagnosisPlaybookSeriesID via the catalog.
 func vaultAccuracy(args []string) {
 	fs := flag.NewFlagSet("vault accuracy", flag.ExitOnError)
 	cfg := loadConfig(fs, args)
-	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault accuracy <series_id>")
-		os.Exit(1)
-	}
-	seriesID := fs.Args()[0]
 
 	if cfg.GatewayURL == "" {
 		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault accuracy")
 		os.Exit(1)
 	}
 
-	// Fetch stats (includes accuracy) via the playbook list endpoint.
+	// No-arg: discovery mode — list all series with feedback.
+	if len(fs.Args()) == 0 {
+		vaultAccuracyAll(cfg)
+		return
+	}
+
+	arg := fs.Args()[0]
+	seriesID := arg
+
+	// If the arg doesn't look like a series_id (pbs_ prefix), treat it as a
+	// fault ID and resolve to DiagnosisPlaybookSeriesID via the catalog.
+	if !strings.HasPrefix(arg, "pbs_") {
+		cat, err := loadActiveCatalog(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+			os.Exit(1)
+		}
+		var found bool
+		for _, f := range cat.Failures {
+			if f.ID == arg {
+				if f.DiagnosisPlaybookSeriesID == "" {
+					fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook — nothing to report.\n", arg)
+					os.Exit(1)
+				}
+				seriesID = f.DiagnosisPlaybookSeriesID
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Unknown argument %q: expected a series_id (pbs_...) or a fault ID from the catalog.\n", arg)
+			fmt.Fprintln(os.Stderr, "Run `faulttest vault accuracy` with no args to list all series with feedback.")
+			os.Exit(1)
+		}
+	}
+
 	info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
 	if info.check != playbookFound {
 		fmt.Fprintf(os.Stderr, "Playbook series %q not found in gateway.\n", seriesID)
+		// Hint when the user passed a remediation series_id by mistake.
+		if strings.Contains(seriesID, "remediat") {
+			suggestion := strings.NewReplacer("_remediate", "_triage", "_remediation", "_triage").Replace(seriesID)
+			if suggestion != seriesID {
+				fmt.Fprintf(os.Stderr, "Note: feedback is recorded on the triage run, not the remediation run.\n")
+				fmt.Fprintf(os.Stderr, "Try: faulttest vault accuracy %s\n", suggestion)
+			}
+		}
 		os.Exit(1)
 	}
 
@@ -698,11 +742,91 @@ func vaultAccuracy(args []string) {
 	if info.feedbackCount == 0 {
 		fmt.Println("  No feedback submitted yet.")
 		fmt.Println("  Run a fault test and submit feedback after recovery to populate this report.")
+		// Hint when the series looks like a remediation series.
+		if strings.Contains(seriesID, "remediat") {
+			suggestion := strings.NewReplacer("_remediate", "_triage", "_remediation", "_triage").Replace(seriesID)
+			if suggestion != seriesID {
+				fmt.Println()
+				fmt.Printf("  Note: feedback is recorded on the triage run, not the remediation run.\n")
+				fmt.Printf("  Try: faulttest vault accuracy %s\n", suggestion)
+			}
+		} else {
+			fmt.Println()
+			fmt.Println("  Tip: run `faulttest vault accuracy` (no args) to list all series with feedback.")
+		}
 		return
 	}
 	fmt.Printf("  Feedback submitted : %d runs\n", info.feedbackCount)
 	fmt.Printf("  Correct diagnoses  : %d\n", info.correctCount)
 	fmt.Printf("  Accuracy rate      : %.0f%%\n", info.accuracyRate*100)
+}
+
+// vaultAccuracyAll is the no-arg mode: scans every catalog fault that has a
+// DiagnosisPlaybookSeriesID, fetches feedback stats for each, and prints a
+// summary table grouped by whether feedback has been submitted.
+func vaultAccuracyAll(cfg *HarnessConfig) {
+	cat, err := loadActiveCatalog(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+		os.Exit(1)
+	}
+
+	type entry struct {
+		faultID  string
+		seriesID string
+		count    int
+		correct  int
+		rate     float64
+	}
+
+	seen := make(map[string]bool)
+	var withFeedback, withoutFeedback []entry
+	for _, f := range cat.Failures {
+		sid := f.DiagnosisPlaybookSeriesID
+		if sid == "" || seen[sid] {
+			continue
+		}
+		seen[sid] = true
+		info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+		e := entry{faultID: f.ID, seriesID: sid}
+		if info.check == playbookFound {
+			e.count = info.feedbackCount
+			e.correct = info.correctCount
+			e.rate = info.accuracyRate
+		}
+		if e.count > 0 {
+			withFeedback = append(withFeedback, e)
+		} else {
+			withoutFeedback = append(withoutFeedback, e)
+		}
+	}
+
+	if len(withFeedback) == 0 && len(withoutFeedback) == 0 {
+		fmt.Println("No faults with diagnosis playbooks found in catalog.")
+		return
+	}
+
+	if len(withFeedback) > 0 {
+		colFault := 36
+		colSeries := 36
+		fmt.Printf("  %-*s %-*s %8s %8s %s\n", colFault, "FAULT", colSeries, "SERIES", "FEEDBACK", "CORRECT", "ACCURACY")
+		fmt.Printf("  %-*s %-*s %8s %8s %s\n", colFault, strings.Repeat("─", colFault), colSeries, strings.Repeat("─", colSeries), "────────", "───────", "────────")
+		for _, e := range withFeedback {
+			fmt.Printf("  %-*s %-*s %8d %8d   %.0f%%\n", colFault, e.faultID, colSeries, e.seriesID, e.count, e.correct, e.rate*100)
+		}
+		fmt.Println()
+		fmt.Println("  Run `faulttest vault accuracy <series_id or fault_id>` for the full breakdown.")
+	} else {
+		fmt.Println("  No feedback has been submitted yet.")
+	}
+
+	if len(withoutFeedback) > 0 {
+		noFeedbackSeries := make([]string, len(withoutFeedback))
+		for i, e := range withoutFeedback {
+			noFeedbackSeries[i] = e.seriesID
+		}
+		fmt.Printf("\n  %d series awaiting first feedback: %s\n", len(withoutFeedback), strings.Join(noFeedbackSeries, ", "))
+	}
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────
