@@ -391,6 +391,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		id := r.PathValue("runID")
 		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id+"/feedback")
 	}))
+	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/request-feedback", auth("POST /api/v1/fleet/playbook-runs/{runID}/request-feedback", g.handleRequestFeedback))
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))

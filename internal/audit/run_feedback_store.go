@@ -98,13 +98,36 @@ FROM run_feedback WHERE run_id = ?`, runID)
 	return scanRunFeedback(row)
 }
 
+// ListPending returns RunFeedback records where diagnosis_correct has not been
+// set yet (placeholder records created by request-feedback calls).
+func (s *RunFeedbackStore) ListPending(ctx context.Context) ([]*RunFeedback, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT run_id, series_id, diagnosis_correct, actual_root_cause, operator, submitted_at
+FROM run_feedback WHERE diagnosis_correct IS NULL ORDER BY submitted_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list pending feedback: %w", err)
+	}
+	defer rows.Close()
+	var out []*RunFeedback
+	for rows.Next() {
+		fb, err := scanRunFeedbackRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fb)
+	}
+	return out, rows.Err()
+}
+
 // StatsBySeries returns accuracy aggregates for a playbook series.
+// Only counts records where diagnosis_correct is set; placeholder records
+// (diagnosis_correct IS NULL) are excluded so they don't inflate feedback_count.
 func (s *RunFeedbackStore) StatsBySeries(ctx context.Context, seriesID string) (*FeedbackStats, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
     COUNT(*)                                                          AS feedback_count,
     COALESCE(SUM(CASE WHEN diagnosis_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_count
-FROM run_feedback WHERE series_id = ?`, seriesID)
+FROM run_feedback WHERE series_id = ? AND diagnosis_correct IS NOT NULL`, seriesID)
 	var total, correct int
 	if err := row.Scan(&total, &correct); err != nil {
 		return nil, fmt.Errorf("stats by series: %w", err)
@@ -121,14 +144,21 @@ FROM run_feedback WHERE series_id = ?`, seriesID)
 	}, nil
 }
 
+type feedbackScanner interface {
+	Scan(dest ...any) error
+}
+
 func scanRunFeedback(row *sql.Row) (*RunFeedback, error) {
+	return scanRunFeedbackRow(row)
+}
+
+func scanRunFeedbackRow(s feedbackScanner) (*RunFeedback, error) {
 	var (
-		fb        RunFeedback
-		diagInt   *int
+		fb           RunFeedback
+		diagInt      *int
 		submittedStr string
 	)
-	err := row.Scan(&fb.RunID, &fb.SeriesID, &diagInt, &fb.ActualRootCause, &fb.Operator, &submittedStr)
-	if err != nil {
+	if err := s.Scan(&fb.RunID, &fb.SeriesID, &diagInt, &fb.ActualRootCause, &fb.Operator, &submittedStr); err != nil {
 		return nil, err
 	}
 	if diagInt != nil {
@@ -136,8 +166,7 @@ func scanRunFeedback(row *sql.Row) (*RunFeedback, error) {
 		fb.DiagnosisCorrect = &b
 	}
 	if submittedStr != "" {
-		t, err := time.Parse(sqliteTimeFormat, submittedStr)
-		if err == nil {
+		if t, err := time.Parse(sqliteTimeFormat, submittedStr); err == nil {
 			fb.SubmittedAt = t
 		}
 	}

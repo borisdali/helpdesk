@@ -310,6 +310,7 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/stats", auth("GET /v1/fleet/playbooks/{playbookID}/stats", playbookRunSrv.handleStats))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}", auth("GET /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleGetRun))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs", auth("GET /v1/fleet/playbook-runs", playbookRunSrv.handleListByOutcome))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/feedback-pending", auth("GET /v1/fleet/playbook-runs/feedback-pending", playbookRunSrv.handleListPendingFeedback))
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/feedback", auth("POST /v1/fleet/playbook-runs/{runID}/feedback", playbookRunSrv.handleSubmitFeedback))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/feedback", auth("GET /v1/fleet/playbook-runs/{runID}/feedback", playbookRunSrv.handleGetFeedback))
 

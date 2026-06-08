@@ -1598,6 +1598,60 @@ func (g *Gateway) submitDenialFeedback(ctx context.Context, runID, seriesID, ope
 	}
 }
 
+// handleRequestFeedback handles POST /api/v1/fleet/playbook-runs/{runID}/request-feedback.
+//
+// Creates a placeholder RunFeedback record (diagnosis_correct unset) in auditd,
+// which makes the run appear as a pending "feedback" decision in the Decision Hub.
+// Faulttest calls this in --emit-and-wait mode after pollRecovery succeeds, so
+// the operator can answer the feedback card in the hub without needing a TTY.
+func (g *Gateway) handleRequestFeedback(w http.ResponseWriter, r *http.Request) {
+	if g.auditURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "auditd URL not configured")
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "runID is required")
+		return
+	}
+	operator := r.Header.Get("X-User")
+	if operator == "" {
+		operator = "faulttest"
+	}
+	payload := map[string]any{"operator": operator}
+	body, _ := json.Marshal(payload)
+
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build auditd request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "auditd request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(b) //nolint:errcheck
+		return
+	}
+	baseURL := strings.TrimSuffix(g.baseURL, "/")
+	resolveURL := baseURL + "/api/v1/decisions/feedback:" + runID + "/resolve"
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"run_id":      runID,
+		"resolve_url": resolveURL,
+	})
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // responseCapture is a minimal http.ResponseWriter that buffers the response

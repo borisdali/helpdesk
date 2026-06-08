@@ -89,7 +89,17 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	if recoverySecs <= timeout.Seconds()/2 {
 		score = 1.0
 	}
-	r.submitFeedback(ctx, gate.RunID, gate.DiagnosticReport)
+	if r.cfg.EmitAndWait {
+		if resolveURL, err := r.inner.RequestFeedback(ctx, gate.RunID); err != nil {
+			slog.Warn("faulttest: failed to request feedback via hub", "run_id", gate.RunID, "err", err)
+		} else if resolveURL != "" {
+			fmt.Printf("\n  Feedback pending — resolve at:\n")
+			fmt.Printf("  POST %s\n", resolveURL)
+			fmt.Printf("  Body: {\"resolution\":\"approved\"|\"denied\",\"resolved_by\":\"...\",\"reason\":\"...\"}\n\n")
+		}
+	} else {
+		r.submitFeedback(ctx, gate.RunID, gate.DiagnosticReport)
+	}
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,

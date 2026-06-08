@@ -205,9 +205,9 @@ func TestRunFeedbackStore_StatsBySeries_NilDiagNotCounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StatsBySeries: %v", err)
 	}
-	// total=2, correct=1 (nil doesn't count)
-	if stats.FeedbackCount != 2 {
-		t.Errorf("FeedbackCount: got %d, want 2", stats.FeedbackCount)
+	// Only the answered row counts; the nil placeholder is excluded from stats.
+	if stats.FeedbackCount != 1 {
+		t.Errorf("FeedbackCount: got %d, want 1", stats.FeedbackCount)
 	}
 	if stats.CorrectCount != 1 {
 		t.Errorf("CorrectCount: got %d, want 1", stats.CorrectCount)

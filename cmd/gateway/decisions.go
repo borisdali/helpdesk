@@ -76,6 +76,18 @@ func (g *Gateway) handleGetDecisions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Post-incident feedback requests — runs where the operator has not yet
+	// confirmed or denied the diagnosis. No action_class; skip if filtered.
+	if filterClass == "" && (filterType == "" || filterType == string(decisions.DecisionTypeFeedback)) {
+		if status == "pending" || status == "all" {
+			feedback, err := g.fetchPendingFeedback(ctx, limit)
+			if err != nil {
+				slog.Warn("decisions: failed to fetch pending feedback from auditd", "err", err)
+			}
+			all = append(all, feedback...)
+		}
+	}
+
 	// Sort by requested_at descending (most recent first).
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].RequestedAt.After(all[j].RequestedAt)
@@ -127,8 +139,12 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 		approvalID := id[strings.Index(id, ":")+1:]
 		g.resolveAuditdApproval(w, r, approvalID, req.Resolution, req.ResolvedBy, req.Reason)
 
+	case strings.HasPrefix(id, "feedback:"):
+		runID := strings.TrimPrefix(id, "feedback:")
+		g.resolveFeedback(w, r, runID, req.Resolution, req.ResolvedBy, req.Reason)
+
 	default:
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown decision ID prefix in %q; expected gate:, fleet:, or step:", id))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown decision ID prefix in %q; expected gate:, fleet:, step:, or feedback:", id))
 	}
 }
 
@@ -401,6 +417,69 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, d)
 
+	case strings.HasPrefix(id, "feedback:"):
+		runID := strings.TrimPrefix(id, "feedback:")
+		aURL := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
+		ctx2, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		req2, err := http.NewRequestWithContext(ctx2, http.MethodGet, aURL, nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if g.auditAPIKey != "" {
+			req2.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+		}
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "auditd unreachable: "+err.Error())
+			return
+		}
+		defer resp2.Body.Close()
+		if resp2.StatusCode == http.StatusNotFound {
+			writeError(w, http.StatusNotFound, "no feedback request for run")
+			return
+		}
+		if resp2.StatusCode != http.StatusOK {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("auditd returned %d", resp2.StatusCode))
+			return
+		}
+		var fb struct {
+			RunID            string  `json:"run_id"`
+			SeriesID         string  `json:"series_id"`
+			DiagnosisCorrect *bool   `json:"diagnosis_correct,omitempty"`
+			ActualRootCause  string  `json:"actual_root_cause,omitempty"`
+			Operator         string  `json:"operator"`
+		}
+		if err := json.NewDecoder(resp2.Body).Decode(&fb); err != nil {
+			writeError(w, http.StatusInternalServerError, "decoding feedback: "+err.Error())
+			return
+		}
+		status := "pending"
+		if fb.DiagnosisCorrect != nil {
+			status = "resolved"
+		}
+		d := decisions.Decision{
+			ID:          id,
+			Type:        decisions.DecisionTypeFeedback,
+			Status:      status,
+			Summary:     "Diagnosis feedback needed — " + fb.SeriesID,
+			RequestedBy: fb.Operator,
+			RequestedAt: time.Now(), // SubmittedAt not returned; approximate
+			ResolveURL:  baseURL + "/api/v1/decisions/" + id + "/resolve",
+			Extra: map[string]any{
+				"run_id":    fb.RunID,
+				"series_id": fb.SeriesID,
+			},
+		}
+		if fb.DiagnosisCorrect != nil {
+			d.Extra["diagnosis_correct"] = *fb.DiagnosisCorrect
+		}
+		if fb.ActualRootCause != "" {
+			d.Extra["actual_root_cause"] = fb.ActualRootCause
+		}
+		writeJSON(w, http.StatusOK, d)
+
 	default:
 		writeError(w, http.StatusBadRequest, "unknown decision ID prefix: "+id)
 	}
@@ -495,4 +574,115 @@ func (g *Gateway) fetchPendingGates(ctx context.Context, limit int) ([]decisions
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// fetchPendingFeedback calls GET /v1/fleet/playbook-runs/feedback-pending on
+// auditd and maps results to feedback Decision values.
+func (g *Gateway) fetchPendingFeedback(ctx context.Context, limit int) ([]decisions.Decision, error) {
+	url := fmt.Sprintf("%s/v1/fleet/playbook-runs/feedback-pending",
+		strings.TrimSuffix(g.auditURL, "/"))
+
+	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd feedback-pending returned %d", resp.StatusCode)
+	}
+
+	var items []struct {
+		RunID       string    `json:"run_id"`
+		SeriesID    string    `json:"series_id"`
+		Operator    string    `json:"operator"`
+		SubmittedAt time.Time `json:"submitted_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, err
+	}
+
+	baseURL := strings.TrimSuffix(g.baseURL, "/")
+	var out []decisions.Decision
+	for i, item := range items {
+		if i >= limit {
+			break
+		}
+		decisionID := "feedback:" + item.RunID
+		out = append(out, decisions.Decision{
+			ID:          decisionID,
+			Type:        decisions.DecisionTypeFeedback,
+			Status:      "pending",
+			Summary:     "Diagnosis feedback needed — " + item.SeriesID,
+			RequestedBy: item.Operator,
+			RequestedAt: item.SubmittedAt,
+			ResolveURL:  baseURL + "/api/v1/decisions/" + decisionID + "/resolve",
+			Extra: map[string]any{
+				"run_id":    item.RunID,
+				"series_id": item.SeriesID,
+			},
+		})
+	}
+	return out, nil
+}
+
+// resolveFeedback handles feedback decision resolution.
+// resolution="approved" → diagnosis_correct=true; "denied" → diagnosis_correct=false.
+// reason becomes actual_root_cause.
+func (g *Gateway) resolveFeedback(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, reason string) {
+	diagCorrect := resolution == "approved"
+	payload := map[string]any{
+		"diagnosis_correct": diagCorrect,
+	}
+	if resolvedBy != "" {
+		payload["operator"] = resolvedBy
+	}
+	if reason != "" {
+		payload["actual_root_cause"] = reason
+	}
+	body, _ := json.Marshal(payload)
+
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build auditd request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	if xUser := r.Header.Get("X-User"); xUser != "" {
+		req.Header.Set("X-User", xUser)
+	} else if resolvedBy != "" {
+		req.Header.Set("X-User", resolvedBy)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "auditd request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(b) //nolint:errcheck
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":            "resolved",
+		"diagnosis_correct": diagCorrect,
+	})
 }

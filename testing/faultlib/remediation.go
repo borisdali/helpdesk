@@ -711,3 +711,38 @@ func PollRecovery(ctx context.Context, connStr, verifySQL string, timeout time.D
 		}
 	}
 }
+
+// RequestFeedback creates a pending feedback placeholder for the given triage
+// run by calling POST /api/v1/fleet/playbook-runs/{runID}/request-feedback on
+// the gateway. Returns the hub resolve URL so the caller can print it.
+// Returns ("", nil) if GatewayURL is not configured.
+func (r *Remediator) RequestFeedback(ctx context.Context, runID string) (resolveURL string, err error) {
+	if r.cfg.GatewayURL == "" || runID == "" {
+		return "", nil
+	}
+	url := strings.TrimSuffix(r.cfg.GatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/request-feedback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("request-feedback returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var result struct {
+		ResolveURL string `json:"resolve_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.ResolveURL, nil
+}

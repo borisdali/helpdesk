@@ -12,6 +12,7 @@ const (
 	DecisionTypeGate          DecisionType = "gate"
 	DecisionTypeFleetApproval DecisionType = "fleet_approval"
 	DecisionTypeStepApproval  DecisionType = "step_approval"
+	DecisionTypeFeedback      DecisionType = "feedback"
 )
 
 // Decision is a normalised view of any pending operator decision, regardless

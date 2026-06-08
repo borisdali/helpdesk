@@ -274,3 +274,24 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(fb) //nolint:errcheck
 }
+
+// handleListPendingFeedback handles GET /v1/fleet/playbook-runs/feedback-pending.
+// Returns RunFeedback placeholder records where diagnosis_correct has not been
+// submitted yet — these are feedback requests awaiting operator resolution.
+func (s *playbookRunServer) handleListPendingFeedback(w http.ResponseWriter, r *http.Request) {
+	if s.feedbackStore == nil {
+		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := s.feedbackStore.ListPending(r.Context())
+	if err != nil {
+		slog.Error("failed to list pending feedback", "err", err)
+		http.Error(w, "failed to list pending feedback", http.StatusInternalServerError)
+		return
+	}
+	if items == nil {
+		items = []*audit.RunFeedback{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(items) //nolint:errcheck
+}
