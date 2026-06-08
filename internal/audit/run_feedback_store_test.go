@@ -213,3 +213,47 @@ func TestRunFeedbackStore_StatsBySeries_NilDiagNotCounted(t *testing.T) {
 		t.Errorf("CorrectCount: got %d, want 1", stats.CorrectCount)
 	}
 }
+
+func TestRunFeedbackStore_ListPending(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newRunFeedbackStore(t)
+
+	// Three records: one pending (nil), one confirmed correct, one confirmed incorrect.
+	entries := []*RunFeedback{
+		{RunID: "plr_p1", SeriesID: "pbs_s1", DiagnosisCorrect: nil, Operator: "faulttest"},
+		{RunID: "plr_p2", SeriesID: "pbs_s2", DiagnosisCorrect: boolPtr(true), Operator: "alice"},
+		{RunID: "plr_p3", SeriesID: "pbs_s1", DiagnosisCorrect: boolPtr(false), Operator: "bob"},
+	}
+	for _, fb := range entries {
+		if err := store.Submit(ctx, fb); err != nil {
+			t.Fatalf("Submit %s: %v", fb.RunID, err)
+		}
+	}
+
+	pending, err := store.ListPending(ctx)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("len(pending) = %d, want 1", len(pending))
+	}
+	if pending[0].RunID != "plr_p1" {
+		t.Errorf("RunID = %q, want plr_p1", pending[0].RunID)
+	}
+	if pending[0].DiagnosisCorrect != nil {
+		t.Errorf("DiagnosisCorrect should be nil for pending record")
+	}
+}
+
+func TestRunFeedbackStore_ListPending_Empty(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newRunFeedbackStore(t)
+
+	pending, err := store.ListPending(ctx)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected empty slice, got %d items", len(pending))
+	}
+}

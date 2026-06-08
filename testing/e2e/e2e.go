@@ -327,6 +327,38 @@ func (c *GatewayClient) GetFeedback(ctx context.Context, runID string) (map[stri
 	return result, nil
 }
 
+// RequestFeedback calls POST /api/v1/fleet/playbook-runs/{runID}/request-feedback.
+// Returns the response body map which includes "resolve_url".
+func (c *GatewayClient) RequestFeedback(ctx context.Context, runID string) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/request-feedback", map[string]any{})
+}
+
+// GetDecisions calls GET /api/v1/decisions with optional query params.
+func (c *GatewayClient) GetDecisions(ctx context.Context, params map[string]string) (map[string]any, error) {
+	path := "/api/v1/decisions"
+	if len(params) > 0 {
+		vals := make([]string, 0, len(params))
+		for k, v := range params {
+			vals = append(vals, k+"="+v)
+		}
+		path += "?" + strings.Join(vals, "&")
+	}
+	raw, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode decisions: %w", err)
+	}
+	return result, nil
+}
+
+// ResolveDecision calls POST /api/v1/decisions/{decisionID}/resolve.
+func (c *GatewayClient) ResolveDecision(ctx context.Context, decisionID string, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/decisions/"+decisionID+"/resolve", body)
+}
+
 // GetRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events.
 func (c *GatewayClient) GetRunEvents(ctx context.Context, runID string) ([]any, error) {
 	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/events")

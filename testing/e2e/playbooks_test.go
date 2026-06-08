@@ -1158,6 +1158,99 @@ func TestPlaybooks_FeedbackNotFound(t *testing.T) {
 	}
 }
 
+// TestPlaybooks_RequestFeedback_DecisionHubFlow verifies the full emit-and-wait
+// feedback path end-to-end: request-feedback creates a placeholder that appears
+// as a pending "feedback" decision in the hub, and resolving it via
+// POST /decisions/feedback:{runID}/resolve persists diagnosis_correct.
+// No LLM is needed — request-feedback works against any run_id.
+func TestPlaybooks_RequestFeedback_DecisionHubFlow(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	runID := fmt.Sprintf("plr_e2e_hub_%d", time.Now().UnixNano())
+
+	// Step 1: request-feedback creates a placeholder and returns resolve_url.
+	rfResp, err := client.RequestFeedback(ctx, runID)
+	if err != nil {
+		t.Fatalf("RequestFeedback: %v", err)
+	}
+	resolveURL, _ := rfResp["resolve_url"].(string)
+	if resolveURL == "" {
+		t.Fatalf("RequestFeedback returned no resolve_url; got %v", rfResp)
+	}
+	expectedResolveURL := cfg.GatewayURL + "/api/v1/decisions/feedback:" + runID + "/resolve"
+	// Normalize trailing slash for comparison.
+	if strings.TrimSuffix(resolveURL, "/") != strings.TrimSuffix(expectedResolveURL, "/") {
+		t.Errorf("resolve_url = %q, want %q", resolveURL, expectedResolveURL)
+	}
+
+	// Step 2: the run should appear in GET /api/v1/decisions?type=feedback.
+	decisions, err := client.GetDecisions(ctx, map[string]string{"type": "feedback"})
+	if err != nil {
+		t.Fatalf("GetDecisions: %v", err)
+	}
+	items, _ := decisions["decisions"].([]any)
+	var found bool
+	for _, item := range items {
+		d, _ := item.(map[string]any)
+		if d["id"] == "feedback:"+runID {
+			found = true
+			if d["status"] != "pending" {
+				t.Errorf("decision status = %q, want pending", d["status"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("feedback decision for run_id=%s not found in decisions list (got %d items)", runID, len(items))
+	}
+
+	// Step 3: GET /api/v1/decisions/feedback:{runID} returns pending state.
+	d, err := client.GetDecision(ctx, "feedback:"+runID)
+	if err != nil {
+		t.Fatalf("GetDecision: %v", err)
+	}
+	if d["status"] != "pending" {
+		t.Errorf("decision status = %q, want pending", d["status"])
+	}
+
+	// Step 4: resolve via the hub — approved maps to diagnosis_correct=true.
+	resolved, err := client.ResolveDecision(ctx, "feedback:"+runID, map[string]any{
+		"resolution":  "approved",
+		"resolved_by": "e2e-test",
+		"reason":      "PID 236 confirmed idle-in-transaction — diagnosis correct",
+	})
+	if err != nil {
+		t.Fatalf("ResolveDecision: %v", err)
+	}
+	if resolved["status"] != "resolved" {
+		t.Errorf("resolve response status = %q, want resolved", resolved["status"])
+	}
+	if resolved["diagnosis_correct"] != true {
+		t.Errorf("resolve response diagnosis_correct = %v, want true", resolved["diagnosis_correct"])
+	}
+
+	// Step 5: feedback is persisted — GET .../feedback returns diagnosis_correct=true.
+	fb, err := client.GetFeedback(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetFeedback after resolve: %v", err)
+	}
+	if dc, _ := fb["diagnosis_correct"].(bool); !dc {
+		t.Errorf("feedback diagnosis_correct = %v, want true", fb["diagnosis_correct"])
+	}
+	if fb["actual_root_cause"] != "PID 236 confirmed idle-in-transaction — diagnosis correct" {
+		t.Errorf("actual_root_cause = %q", fb["actual_root_cause"])
+	}
+
+	t.Logf("feedback hub flow OK: run_id=%s resolve_url=%s", runID, resolveURL)
+}
+
 // TestPlaybooks_RunEventsEndpoint verifies the run events proxy route is
 // registered and returns 404 for a nonexistent run (not 500 or route-not-found).
 func TestPlaybooks_RunEventsEndpoint(t *testing.T) {

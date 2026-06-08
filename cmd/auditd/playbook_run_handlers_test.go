@@ -400,3 +400,57 @@ func TestPlaybookRunHandlers_Stats_IncludesAccuracy(t *testing.T) {
 		t.Errorf("AccuracyRate = %f, want 1.0", stats.AccuracyRate)
 	}
 }
+
+func TestPlaybookRunHandlers_ListPendingFeedback(t *testing.T) {
+	srv := newPlaybookRunServerWithFeedback(t)
+
+	// Create two runs so series_id can be populated on submit.
+	doRunRequest(t, srv, "pb1", map[string]any{"run_id": "plr_pf01", "series_id": "pbs_triage"})
+	doRunRequest(t, srv, "pb1", map[string]any{"run_id": "plr_pf02", "series_id": "pbs_triage"})
+
+	// Submit a placeholder (no diagnosis_correct) for plr_pf01.
+	placeholder := map[string]any{"operator": "faulttest"}
+	d, _ := json.Marshal(placeholder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_pf01/feedback", bytes.NewReader(d))
+	req.SetPathValue("runID", "plr_pf01")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.handleSubmitFeedback(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("submit placeholder: status %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Submit answered feedback for plr_pf02 — should NOT appear in pending list.
+	answered := map[string]any{"diagnosis_correct": true, "operator": "alice"}
+	d2, _ := json.Marshal(answered)
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_pf02/feedback", bytes.NewReader(d2))
+	req2.SetPathValue("runID", "plr_pf02")
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	srv.handleSubmitFeedback(rec2, req2)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("submit answered: status %d", rec2.Code)
+	}
+
+	// List pending — should return only plr_pf01.
+	req3 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/feedback-pending", nil)
+	rec3 := httptest.NewRecorder()
+	srv.handleListPendingFeedback(rec3, req3)
+
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("list pending status = %d, body: %s", rec3.Code, rec3.Body.String())
+	}
+	var items []audit.RunFeedback
+	if err := json.NewDecoder(rec3.Body).Decode(&items); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0].RunID != "plr_pf01" {
+		t.Errorf("RunID = %q, want plr_pf01", items[0].RunID)
+	}
+	if items[0].DiagnosisCorrect != nil {
+		t.Errorf("DiagnosisCorrect should be nil for pending record")
+	}
+}

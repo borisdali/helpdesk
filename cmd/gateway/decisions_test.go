@@ -265,6 +265,207 @@ func TestHandleGetDecision_Gate_ResolvedNoReason(t *testing.T) {
 	}
 }
 
+// mockFeedbackAuditd returns an httptest.Server that serves a RunFeedback record
+// at GET /v1/fleet/playbook-runs/{runID}/feedback and accepts POST to the same path.
+func mockFeedbackAuditd(t *testing.T, runID string, diagCorrect *bool) *httptest.Server {
+	t.Helper()
+	submitted := map[string]any{
+		"run_id":    runID,
+		"series_id": "pbs_lock_chain_triage",
+		"operator":  "faulttest",
+	}
+	if diagCorrect != nil {
+		submitted["diagnosis_correct"] = *diagCorrect
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := "/v1/fleet/playbook-runs/" + runID + "/feedback"
+		pendingPath := "/v1/fleet/playbook-runs/feedback-pending"
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == path:
+			json.NewEncoder(w).Encode(submitted) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == path:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for k, v := range body {
+				submitted[k] = v
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(submitted) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == pendingPath:
+			if diagCorrect == nil {
+				json.NewEncoder(w).Encode([]map[string]any{submitted}) //nolint:errcheck
+			} else {
+				json.NewEncoder(w).Encode([]map[string]any{}) //nolint:errcheck
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func resolveDecision(t *testing.T, gw *Gateway, id string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/decisions/"+id+"/resolve", strings.NewReader(string(data)))
+	req.SetPathValue("id", id)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleGetDecision_Feedback_Pending(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb01", nil)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := getDecision(t, gw, "feedback:plr_fb01")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var d decisions.Decision
+	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.Type != decisions.DecisionTypeFeedback {
+		t.Errorf("Type = %q, want %q", d.Type, decisions.DecisionTypeFeedback)
+	}
+	if d.Status != "pending" {
+		t.Errorf("Status = %q, want pending", d.Status)
+	}
+	if d.ResolveURL != "http://gw/api/v1/decisions/feedback:plr_fb01/resolve" {
+		t.Errorf("ResolveURL = %q", d.ResolveURL)
+	}
+}
+
+func TestHandleGetDecision_Feedback_Resolved(t *testing.T) {
+	v := true
+	auditSrv := mockFeedbackAuditd(t, "plr_fb02", &v)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := getDecision(t, gw, "feedback:plr_fb02")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var d decisions.Decision
+	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.Status != "resolved" {
+		t.Errorf("Status = %q, want resolved", d.Status)
+	}
+	diagCorrect, _ := d.Extra["diagnosis_correct"].(bool)
+	if !diagCorrect {
+		t.Errorf("Extra[diagnosis_correct] = %v, want true", d.Extra["diagnosis_correct"])
+	}
+}
+
+func TestHandleResolveDecision_Feedback_Approved(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb03", nil)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := resolveDecision(t, gw, "feedback:plr_fb03", map[string]any{
+		"resolution":  "approved",
+		"resolved_by": "alice",
+		"reason":      "PID 236 confirmed idle-in-transaction",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["status"] != "resolved" {
+		t.Errorf("status = %v, want resolved", result["status"])
+	}
+	if result["diagnosis_correct"] != true {
+		t.Errorf("diagnosis_correct = %v, want true", result["diagnosis_correct"])
+	}
+}
+
+func TestHandleResolveDecision_Feedback_Denied(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb04", nil)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := resolveDecision(t, gw, "feedback:plr_fb04", map[string]any{
+		"resolution":  "denied",
+		"resolved_by": "bob",
+		"reason":      "Autovacuum lock, not idle-in-transaction",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["diagnosis_correct"] != false {
+		t.Errorf("diagnosis_correct = %v, want false", result["diagnosis_correct"])
+	}
+}
+
+func TestHandleGetDecisions_IncludesFeedbackType(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb05", nil)
+	// Also need to handle approvals and gate endpoints returning empty.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/fleet/playbook-runs/feedback-pending":
+			json.NewEncoder(w).Encode([]map[string]any{{ //nolint:errcheck
+				"run_id":      "plr_fb05",
+				"series_id":   "pbs_lock_chain_triage",
+				"operator":    "faulttest",
+				"submitted_at": "2026-06-08T10:00:00Z",
+			}})
+		case r.URL.Path == "/v1/approvals":
+			json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+		case strings.Contains(r.URL.Path, "/playbook-runs"):
+			json.NewEncoder(w).Encode(map[string]any{"runs": []any{}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	_ = auditSrv
+
+	gw := &Gateway{auditURL: srv.URL, baseURL: "http://gw"}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/decisions?type=feedback", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Decisions []decisions.Decision `json:"decisions"`
+		Total     int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Total != 1 {
+		t.Fatalf("total = %d, want 1", result.Total)
+	}
+	if result.Decisions[0].Type != decisions.DecisionTypeFeedback {
+		t.Errorf("Type = %q, want feedback", result.Decisions[0].Type)
+	}
+	if result.Decisions[0].Status != "pending" {
+		t.Errorf("Status = %q, want pending", result.Decisions[0].Status)
+	}
+}
+
 // TestHandleGetIncident assembles a full incident narrative from triage run,
 // gate event, remediation run, and feedback.
 func TestHandleGetIncident(t *testing.T) {
