@@ -131,12 +131,13 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|suggest|suggest-update>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
 		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
 		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
+		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
@@ -150,6 +151,8 @@ func cmdVault(args []string) {
 		vaultDrift(args[1:])
 	case "accuracy":
 		vaultAccuracy(args[1:])
+	case "incidents":
+		vaultIncidents(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -827,6 +830,256 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 		}
 		fmt.Printf("\n  %d series awaiting first feedback: %s\n", len(withoutFeedback), strings.Join(noFeedbackSeries, ", "))
 	}
+}
+
+// ── vault incidents ───────────────────────────────────────────────────────
+
+// incidentRun is a minimal view of a playbook run used for the incidents table.
+type incidentRun struct {
+	RunID           string `json:"run_id"`
+	SeriesID        string `json:"series_id"`
+	Outcome         string `json:"outcome"`
+	Operator        string `json:"operator"`
+	StartedAt       string `json:"started_at"`
+	CompletedAt     string `json:"completed_at"`
+	FindingsSummary string `json:"findings_summary"`
+	PriorRunID      string `json:"prior_run_id"`
+}
+
+// incidentFeedback is the feedback response shape from GET .../feedback.
+type incidentFeedback struct {
+	RunID            string  `json:"run_id"`
+	DiagnosisCorrect *bool   `json:"diagnosis_correct"`
+	ActualRootCause  string  `json:"actual_root_cause"`
+	Operator         string  `json:"operator"`
+}
+
+// fetchRunsBySeries calls GET /api/v1/fleet/playbook-runs?series_id=<sid>&limit=<n>.
+func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incidentRun, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") +
+		fmt.Sprintf("/api/v1/fleet/playbook-runs?series_id=%s&limit=%d", seriesID, limit)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Runs []incidentRun `json:"runs"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return result.Runs, nil
+}
+
+// fetchFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
+// Returns nil (not an error) when no feedback has been submitted.
+func fetchFeedback(gatewayURL, apiKey, runID string) *incidentFeedback {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	defer resp.Body.Close()
+	var fb incidentFeedback
+	if err := json.NewDecoder(resp.Body).Decode(&fb); err != nil {
+		return nil
+	}
+	if fb.RunID == "" {
+		return nil
+	}
+	return &fb
+}
+
+// fetchRemediationRun fetches the remediation run linked to a triage run via
+// GET /api/v1/fleet/playbook-runs?prior_run_id={triageRunID}&limit=1.
+// Returns nil when no remediation run exists for the triage run.
+func fetchRemediationRun(gatewayURL, apiKey, triageRunID string) *incidentRun {
+	url := strings.TrimSuffix(gatewayURL, "/") +
+		"/api/v1/fleet/playbook-runs?prior_run_id=" + triageRunID + "&limit=1"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Runs []incidentRun `json:"runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Runs) == 0 {
+		return nil
+	}
+	return &result.Runs[0]
+}
+
+// formatRemediationOutcome formats a remediation run as "resolved 8.1s", "abandoned", etc.
+func formatRemediationOutcome(r *incidentRun) string {
+	if r == nil {
+		return "–"
+	}
+	outcome := r.Outcome
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	if r.StartedAt != "" && r.CompletedAt != "" {
+		t0, err0 := time.Parse(time.RFC3339, r.StartedAt)
+		t1, err1 := time.Parse(time.RFC3339, r.CompletedAt)
+		if err0 == nil && err1 == nil && t1.After(t0) {
+			secs := t1.Sub(t0).Seconds()
+			if secs < 60 {
+				return fmt.Sprintf("%s %.1fs", outcome, secs)
+			}
+			return fmt.Sprintf("%s %.0fm", outcome, secs/60)
+		}
+	}
+	return outcome
+}
+
+// vaultIncidents lists incidents (triage run IDs) for a fault or playbook series,
+// including outcome, timestamp, truncated findings, and feedback status.
+// Usage: faulttest vault incidents <fault-id or series-id> [--limit N]
+func vaultIncidents(args []string) {
+	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
+	var limit int
+	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents")
+		os.Exit(1)
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault incidents <fault-id or series-id> [--limit N]")
+		os.Exit(1)
+	}
+
+	arg := fs.Args()[0]
+	seriesID := arg
+
+	// Resolve fault ID → diagnosis series ID via catalog.
+	if !strings.HasPrefix(arg, "pbs_") {
+		cat, err := loadActiveCatalog(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+			os.Exit(1)
+		}
+		var found bool
+		for _, f := range cat.Failures {
+			if f.ID == arg {
+				if f.DiagnosisPlaybookSeriesID == "" {
+					fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook.\n", arg)
+					os.Exit(1)
+				}
+				seriesID = f.DiagnosisPlaybookSeriesID
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	runs, err := fetchRunsBySeries(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID, limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching incidents: %v\n", err)
+		os.Exit(1)
+	}
+	if len(runs) == 0 {
+		fmt.Printf("No incidents found for series %q.\n", seriesID)
+		return
+	}
+
+	fmt.Printf("Incidents for %s (%s) — %d runs\n\n", arg, seriesID, len(runs))
+
+	const (
+		colRunID    = 14
+		colDate     = 16
+		colDiag     = 10
+		colRemed    = 16
+		colFeedback = 12
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colDate, "STARTED", colDiag, "DIAG", colRemed, "REMEDIATION", colFeedback, "FEEDBACK", "FINDINGS")
+	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colDiag+2+colRemed+2+colFeedback+2+46))
+
+	for _, run := range runs {
+		date := run.StartedAt
+		if t, err := time.Parse(time.RFC3339, run.StartedAt); err == nil {
+			date = t.Format("2006-01-02 15:04")
+		} else if len(run.StartedAt) >= 16 {
+			date = run.StartedAt[:16]
+		}
+
+		diagOutcome := run.Outcome
+		if diagOutcome == "" {
+			diagOutcome = "unknown"
+		}
+
+		remed := fetchRemediationRun(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		remedStr := formatRemediationOutcome(remed)
+
+		fb := fetchFeedback(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		feedbackStr := "–"
+		if fb != nil {
+			if fb.DiagnosisCorrect == nil {
+				feedbackStr = "submitted"
+			} else if *fb.DiagnosisCorrect {
+				feedbackStr = "✓ correct"
+			} else {
+				feedbackStr = "✗ wrong"
+			}
+		}
+
+		findings := run.FindingsSummary
+		if len(findings) > 46 {
+			findings = findings[:43] + "..."
+		}
+		if findings == "" {
+			findings = "–"
+		}
+
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+			colRunID, run.RunID,
+			colDate, date,
+			colDiag, diagOutcome,
+			colRemed, remedStr,
+			colFeedback, feedbackStr,
+			findings,
+		)
+	}
+
+	fmt.Println()
+	fmt.Printf("To submit feedback:\n")
+	fmt.Printf("  curl -sX POST %s/api/v1/decisions/feedback:<run_id>/resolve \\\n", cfg.GatewayURL)
+	fmt.Printf("    -H 'Authorization: Bearer $API_KEY' -H 'Content-Type: application/json' \\\n")
+	fmt.Printf("    -d '{\"resolution\": \"approved\", \"resolved_by\": \"you@example.com\", \"reason\": \"<root cause>\"}'\n")
+	fmt.Printf("  (resolution=approved → correct, resolution=denied → wrong diagnosis)\n")
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────

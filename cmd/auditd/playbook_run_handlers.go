@@ -157,17 +157,26 @@ func (s *playbookRunServer) handleListByOutcome(w http.ResponseWriter, r *http.R
 	var runs []*audit.PlaybookRun
 	var err error
 
-	if priorRunID := r.URL.Query().Get("prior_run_id"); priorRunID != "" {
-		runs, err = s.store.ListByPriorRunID(r.Context(), priorRunID, limit)
+	q := r.URL.Query()
+	switch {
+	case q.Get("series_id") != "":
+		runs, err = s.store.ListBySeriesID(r.Context(), q.Get("series_id"), limit)
 		if err != nil {
-			slog.Error("failed to list playbook runs by prior_run_id", "prior_run_id", priorRunID, "err", err)
+			slog.Error("failed to list playbook runs by series_id", "series_id", q.Get("series_id"), "err", err)
 			http.Error(w, "failed to list runs", http.StatusInternalServerError)
 			return
 		}
-	} else {
-		outcome := r.URL.Query().Get("outcome")
+	case q.Get("prior_run_id") != "":
+		runs, err = s.store.ListByPriorRunID(r.Context(), q.Get("prior_run_id"), limit)
+		if err != nil {
+			slog.Error("failed to list playbook runs by prior_run_id", "prior_run_id", q.Get("prior_run_id"), "err", err)
+			http.Error(w, "failed to list runs", http.StatusInternalServerError)
+			return
+		}
+	default:
+		outcome := q.Get("outcome")
 		if outcome == "" {
-			http.Error(w, "outcome or prior_run_id query parameter is required", http.StatusBadRequest)
+			http.Error(w, "series_id, prior_run_id, or outcome query parameter is required", http.StatusBadRequest)
 			return
 		}
 		runs, err = s.store.ListByOutcome(r.Context(), outcome, limit)
