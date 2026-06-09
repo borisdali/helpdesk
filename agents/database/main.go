@@ -133,6 +133,11 @@ func main() {
 		slog.Error("failed to create tools", "err", err)
 		os.Exit(1)
 	}
+	toolNames := make([]string, len(tools))
+	for i, t := range tools {
+		toolNames[i] = t.Name()
+	}
+	slog.Debug("tools registered", "count", len(tools), "tools", strings.Join(toolNames, ", "))
 
 	instruction := prompts.Database
 	if infraConfig != nil {
@@ -173,6 +178,7 @@ func main() {
 			"postgres_database_agent-cancel_query":               {"postgresql", "connections", "remediation"},
 			"postgres_database_agent-terminate_connection":        {"postgresql", "connections", "remediation"},
 			"postgres_database_agent-terminate_idle_connections":  {"postgresql", "connections", "remediation"},
+			"postgres_database_agent-reset_cache_stats":           {"postgresql", "performance", "remediation"},
 		},
 		SkillExamples: map[string][]string{
 			"postgres_database_agent-check_connection":       {"Check if the production database is reachable"},
@@ -509,6 +515,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	resetCacheStatsToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "reset_cache_stats",
+		Description: "Reset buffer cache statistics by calling pg_stat_reset(), clearing blks_hit and blks_read counters in pg_stat_database. Use after resolving a cache miss condition to verify the ratio recovers with normal traffic. Requires operator approval (Write action).",
+	}, resetCacheStatsTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkConnectionToolDef,
 		getServerInfoToolDef,
@@ -542,6 +556,7 @@ func createTools() ([]tool.Tool, error) {
 		runVacuumToolDef,
 		dropReplicationSlotToolDef,
 		resetPgSettingToolDef,
+		resetCacheStatsToolDef,
 	}, nil
 }
 

@@ -48,6 +48,7 @@ var ToolClassification = map[string]ActionClass{
 	"run_vacuum":                  ActionWrite,
 	"drop_replication_slot":       ActionDestructive,
 	"reset_pg_setting":            ActionWrite,
+	"reset_cache_stats":           ActionWrite,
 	"get_status_summary":          ActionRead,
 	"get_pg_settings":             ActionRead,
 	"get_extensions":              ActionRead,

@@ -13,6 +13,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/identity"
+	"helpdesk/internal/toolregistry"
 )
 
 // StepProposal is the structured output of the re-planning LLM for one action.
@@ -82,7 +83,11 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 		priorFindingsSection = fmt.Sprintf("\nPRIOR TRIAGE FINDINGS:\n%s\nStart from this diagnosis — verify the root blocker is still blocked, then execute the remediation steps.\n", priorFindings)
 	}
 
-	toolCatalog := buildPlannerToolCatalog(g.toolRegistry)
+	agentName := pb.AgentName
+	if agentName == "" {
+		agentName = "database"
+	}
+	toolCatalog := buildStepProposerToolCatalog(g.toolRegistry, agentName)
 	historyStr := buildHistorySection(history)
 	prompt := fmt.Sprintf(stepProposerPromptTemplate,
 		pb.Name,
@@ -149,6 +154,55 @@ func buildHistorySection(history []*audit.PlaybookRunStep) string {
 			s.StepIndex, s.Tool, string(argsJSON), s.Result))
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// buildStepProposerToolCatalog returns a compact, grouped tool list for the
+// step proposer prompt. It uses ListByAgent so all tools for the playbook's
+// agent are included — not just fleet-eligible tools (which is a narrower set
+// intended only for the autonomous fleet planner).
+func buildStepProposerToolCatalog(r *toolregistry.Registry, agentName string) string {
+	if r == nil {
+		return "(tool registry not available)\n"
+	}
+	entries := r.ListByAgent(agentName)
+	if len(entries) == 0 {
+		return "(no tools registered for agent " + agentName + ")\n"
+	}
+	var read, write, destructive []string
+	for _, e := range entries {
+		line := "  " + e.Name
+		if e.Description != "" {
+			line += " — " + e.Description
+		}
+		switch e.ActionClass {
+		case "write":
+			write = append(write, line)
+		case "destructive":
+			destructive = append(destructive, line)
+		default:
+			read = append(read, line)
+		}
+	}
+	var sb strings.Builder
+	if len(read) > 0 {
+		sb.WriteString("Read-only:\n")
+		for _, t := range read {
+			sb.WriteString(t + "\n")
+		}
+	}
+	if len(write) > 0 {
+		sb.WriteString("Write (require approval):\n")
+		for _, t := range write {
+			sb.WriteString(t + "\n")
+		}
+	}
+	if len(destructive) > 0 {
+		sb.WriteString("Destructive (require approval):\n")
+		for _, t := range destructive {
+			sb.WriteString(t + "\n")
+		}
+	}
+	return sb.String()
 }
 
 func extractFirstJSON(s string) string {

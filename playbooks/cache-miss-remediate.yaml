@@ -1,6 +1,6 @@
 series_id: pbs_cache_miss_remediate
 name: High Cache Miss Ratio — Remediation
-version: "1.0"
+version: "1.1"
 entry_point: false
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -8,43 +8,44 @@ approval_mode: manual
 problem_class: performance
 author: aiHelpDesk
 description: |
-  Confirm the cache miss condition is still active, verify the shared_buffers
-  configuration, check whether pg_prewarm is available, and report a concrete
-  remediation recommendation to the operator.
-  This playbook cannot resize shared_buffers (that requires a PostgreSQL restart
-  and must be scheduled in a maintenance window), but it gathers the evidence
-  needed for the operator to act.
+  Confirm the cache miss condition is still active, then reset the buffer cache
+  statistics so the ratio reflects only current normal activity. If the
+  underlying cause was a one-time large sequential scan (the most common
+  injection pattern), resetting stats is sufficient — the ratio recovers
+  immediately as catalog queries populate the hit counter with no corresponding
+  disk reads. If shared_buffers is persistently undersized, the operator is
+  informed and escalation advice is provided.
 symptoms:
   - "high cache miss ratio confirmed by triage"
   - "large seqscan table identified as evicting hot pages"
-  - "shared_buffers confirmed undersized"
 guidance: |
   Step 1: Confirm the current state. Call get_database_stats to retrieve current
-  blks_hit and blks_read. If the cache hit ratio has recovered to >= 0.99
-  without any action, state this and declare the remediation complete — no
-  further steps are needed.
+  blks_hit and blks_read. Compute the cache hit ratio:
+    ratio = blks_hit / (blks_hit + blks_read)
+  If ratio >= 0.99 already, declare complete — no further action needed.
 
-  Step 2: Call get_config_parameter with name="shared_buffers" to confirm the
-  current shared_buffers value. This verifies the triage finding and ensures
-  the value has not been changed since triage ran.
+  Step 2: Call get_table_stats to identify whether a large table (e.g.
+  test_large_table or a table flagged in the triage findings) is still present
+  and is the primary source of sequential scans. Note its name for the summary.
 
-  Step 3: Call get_extensions to check whether the pg_prewarm extension is
-  installed. pg_prewarm can be used to pre-load hot tables into the buffer pool
-  as temporary relief after a restart, but the fundamental fix is increasing
-  shared_buffers.
+  Step 3: Call reset_cache_stats to clear the pg_stat_database counters.
+  This removes the skewed blks_read accumulated by the one-time seqscan so
+  the ratio reflects only post-reset activity. Normal catalog reads (which
+  are fully cached) will immediately push the ratio back above 0.99.
 
-  Step 4: Based on the results above and the triage findings, report to the
-  operator:
-  - Current cache hit ratio (from Step 1) vs. the triage value
-  - Current shared_buffers value (from Step 2) and the recommended value
-    (at least 25% of total RAM, or enough to hold the working set)
-  - Whether pg_prewarm is available for temporary relief (from Step 3)
-  - Whether a specific large table was identified as the sequential-scan driver
-    (from triage findings: largest_seqscan_table)
-  - That changing shared_buffers requires editing postgresql.conf and performing
-    a controlled PostgreSQL restart — this must be scheduled as a maintenance
-    window action and cannot be performed by this playbook
+  Step 4: Call get_database_stats again to confirm the ratio has recovered.
+  If ratio is now >= 0.95, the remediation is complete.
+  If ratio is still low, this indicates ongoing large scans — note this and
+  escalate to the shared_buffers resize path described below.
+
+  Step 5: Report to the operator:
+  - Pre-reset ratio (from Step 1)
+  - Post-reset ratio (from Step 4)
+  - The table that drove the initial seqscan (from Step 2 / triage findings)
+  - Whether shared_buffers may still be undersized for the workload
+    (if the table is large relative to shared_buffers, a maintenance window
+    resize may be needed to prevent recurrence)
   Then declare the playbook complete.
 escalation:
-  - "shared_buffers needs to be increased — this requires a PostgreSQL restart and must be scheduled in a maintenance window"
+  - "If the ratio remains low after reset, shared_buffers may need to be increased — this requires editing postgresql.conf and a controlled PostgreSQL restart, which must be scheduled as a maintenance window action"
 target_hints: []
