@@ -46,9 +46,12 @@ TARGET: %s
 TOOL CALLS EXECUTED SO FAR (in order):
 %s
 
+AVAILABLE TOOLS (you MUST only use tools from this list — do not invent tool names):
+%s
 Based on the guidance above and the tool results so far, what is the SINGLE next tool call to make?
 Do NOT confuse the numbered tool calls above with the numbered steps in the guidance — they are independent.
 Determine what the guidance still requires that has not yet been done, and propose the next tool call for it.
+You MUST use a tool from the AVAILABLE TOOLS list above. If the guidance describes an action that has no corresponding tool, skip that action and proceed to the next one or declare complete.
 
 Only return action=complete when ALL goals in the guidance have been achieved (including any required terminations and verification).
 
@@ -79,6 +82,7 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 		priorFindingsSection = fmt.Sprintf("\nPRIOR TRIAGE FINDINGS:\n%s\nStart from this diagnosis — verify the root blocker is still blocked, then execute the remediation steps.\n", priorFindings)
 	}
 
+	toolCatalog := buildPlannerToolCatalog(g.toolRegistry)
 	historyStr := buildHistorySection(history)
 	prompt := fmt.Sprintf(stepProposerPromptTemplate,
 		pb.Name,
@@ -86,6 +90,7 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 		connStr,
 		priorFindingsSection,
 		historyStr,
+		toolCatalog,
 	)
 
 	raw, err := g.plannerLLM(ctx, prompt)

@@ -441,7 +441,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunRes
 
 		resolution := "approved"
 
-		if r.cfg.EmitAndWait && current.ApprovalID != "" {
+		if r.cfg.EmitAndWait && current.ApprovalID != "" && current.Step.ActionClass != "read" {
 			slog.Info("agent_approve: step approval pending — waiting for external resolution",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,

@@ -8,52 +8,43 @@ approval_mode: manual
 problem_class: performance
 author: aiHelpDesk
 description: |
-  Attempt to warm frequently-accessed tables into the shared buffer pool using
-  pg_prewarm. If the root cause is undersized shared_buffers, report the
-  recommended configuration change (which requires a PostgreSQL restart and
-  must be scheduled in a maintenance window — it cannot be performed here).
-  pg_prewarm loads table blocks into shared_buffers via a read-only operation;
-  it has no data modification risk but does consume I/O during the load.
+  Confirm the cache miss condition is still active, verify the shared_buffers
+  configuration, check whether pg_prewarm is available, and report a concrete
+  remediation recommendation to the operator.
+  This playbook cannot resize shared_buffers (that requires a PostgreSQL restart
+  and must be scheduled in a maintenance window), but it gathers the evidence
+  needed for the operator to act.
 symptoms:
   - "high cache miss ratio confirmed by triage"
   - "large seqscan table identified as evicting hot pages"
   - "shared_buffers confirmed undersized"
 guidance: |
-  Step 1: Confirm the current state. Call get_database_stats to get the current
-  blks_hit and blks_read. Compare these values to the triage findings — the
-  ratio may have improved under normal load since triage ran. If the ratio has
-  recovered to >= 0.99 without any action, note this and report that no
-  remediation is needed at this time.
+  Step 1: Confirm the current state. Call get_database_stats to retrieve current
+  blks_hit and blks_read. If the cache hit ratio has recovered to >= 0.99
+  without any action, state this and declare the remediation complete — no
+  further steps are needed.
 
-  Step 2: If the largest_seqscan_table from triage findings is not null (i.e.
-  a specific large table was identified as the source of seqscans that evicted
-  hot pages), call run_sql with the following query to warm that table:
-    SELECT pg_prewarm('<schema>.<table>');
-  Before requesting approval, state:
-  - The table name (substituted from triage findings)
-  - That pg_prewarm loads the table into shared_buffers via a read-only scan —
-    no data is modified; the operation is safe to run at any time
-  - That this may consume I/O during loading and briefly increase disk read
-    activity, but will reduce cache misses for subsequent queries
+  Step 2: Call get_config_parameter with name="shared_buffers" to confirm the
+  current shared_buffers value. This verifies the triage finding and ensures
+  the value has not been changed since triage ran.
 
-  Step 3: After pg_prewarm completes, call get_database_stats again and compare
-  blks_read to the value from Step 1. A reduction in the blks_read rate (not the
-  cumulative total) confirms that the buffer pool is now serving more reads from
-  memory. Report the before/after cache hit ratio.
+  Step 3: Call get_extensions to check whether the pg_prewarm extension is
+  installed. pg_prewarm can be used to pre-load hot tables into the buffer pool
+  as temporary relief after a restart, but the fundamental fix is increasing
+  shared_buffers.
 
-  Step 4: If the root cause from triage is undersized shared_buffers (i.e.
-  largest_seqscan_table is null and shared_buffers is below 25% of total RAM),
-  pg_prewarm cannot permanently resolve the issue — the buffer pool will
-  continue to be insufficient. Report the following to the operator:
-  - Current shared_buffers value (from triage findings)
-  - Recommended value: 25% of total server RAM
+  Step 4: Based on the results above and the triage findings, report to the
+  operator:
+  - Current cache hit ratio (from Step 1) vs. the triage value
+  - Current shared_buffers value (from Step 2) and the recommended value
+    (at least 25% of total RAM, or enough to hold the working set)
+  - Whether pg_prewarm is available for temporary relief (from Step 3)
+  - Whether a specific large table was identified as the sequential-scan driver
+    (from triage findings: largest_seqscan_table)
   - That changing shared_buffers requires editing postgresql.conf and performing
-    a PostgreSQL restart — this must be scheduled in a maintenance window
-  - That until the restart is performed, pg_prewarm can provide temporary relief
-    by pre-loading the most critical tables after each PostgreSQL restart
-  This playbook cannot perform the shared_buffers change; it must be handled
-  as a configuration management action.
+    a controlled PostgreSQL restart — this must be scheduled as a maintenance
+    window action and cannot be performed by this playbook
+  Then declare the playbook complete.
 escalation:
-  - "pg_prewarm extension is not installed — run CREATE EXTENSION pg_prewarm as superuser first, then re-run this playbook"
   - "shared_buffers needs to be increased — this requires a PostgreSQL restart and must be scheduled in a maintenance window"
 target_hints: []

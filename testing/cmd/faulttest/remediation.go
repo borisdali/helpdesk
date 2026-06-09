@@ -307,11 +307,20 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	if suggested == "" {
 		suggested = "review"
 	}
-	fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
-	modeInput, _ := reader.ReadString('\n')
-	modeInput = strings.TrimSpace(strings.ToLower(modeInput))
-	if modeInput == "" {
-		modeInput = suggested
+	validModes := map[string]bool{"manual": true, "review": true, "auto": true}
+	var modeInput string
+	for {
+		fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
+		modeInput, _ = reader.ReadString('\n')
+		modeInput = strings.TrimSpace(strings.ToLower(modeInput))
+		if modeInput == "" {
+			modeInput = suggested
+			break
+		}
+		if validModes[modeInput] {
+			break
+		}
+		fmt.Printf("  Invalid mode %q — enter manual, review, or auto (or press Enter for %s).\n", modeInput, suggested)
 	}
 
 	fmt.Print("  Reason (optional, press Enter to skip): ")
@@ -384,7 +393,8 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 		resolution := "approved"
 		switch {
 		case r.cfg.EmitAndWait && current.ApprovalID != "" &&
-			(mode == "manual" || (mode == "review" && current.Step.ActionClass != "read")):
+			current.Step.ActionClass != "read" &&
+			(mode == "manual" || mode == "review"):
 			slog.Info("agent_approve: step approval pending — waiting for external resolution",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,

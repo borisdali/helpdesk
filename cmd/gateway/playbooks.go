@@ -2449,7 +2449,16 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, "", history)
+	// Re-thread prior findings on every re-planning call so the planner retains
+	// triage context beyond the first step.
+	priorFindings := ""
+	if run.PriorRunID != "" {
+		if prior, err := g.fetchPlaybookRun(r.Context(), run.PriorRunID); err == nil {
+			priorFindings = prior.FindingsSummary
+		}
+	}
+
+	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, priorFindings, history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil)
