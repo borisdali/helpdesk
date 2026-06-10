@@ -1,12 +1,19 @@
 series_id: pbs_slow_query_triage
 name: Slow Query Triage
-version: "1.3"
+version: "1.4"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
 approval_mode: manual
 problem_class: performance
 author: aiHelpDesk
+# Authoritative allow-list of follow-on playbook series_ids. The gateway
+# validates TRANSITION_TO / ESCALATE_TO targets against this list and coerces
+# anything outside it to requires_operator_approval — preventing the model
+# from inventing playbook names.
+escalates_to:
+  - pbs_slow_query_remediate
+  - pbs_lock_chain_remediate
 description: |
   Investigate slow query performance on the target database. Identify the top
   queries by execution time, examine current wait events, detect blocking chains,
@@ -42,7 +49,23 @@ guidance: |
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: top query queryid=<id> mean_exec_time=<N>ms calls=<N>/hr; wait_event=<type | none>; lock_contention=<true|false>; recommended=<add_index|cancel_query|escalate|monitor>
+
+  Then emit EXACTLY ONE next-playbook directive on its own line. The series_id
+  MUST be copied verbatim from one of the three options below — do NOT invent
+  or paraphrase a playbook name.
+
+  Selection rule:
+    - If the issue is a single slow query (plan inefficiency, missing index,
+      expensive query) and no blocking chain is involved, choose slow-query remediate.
+    - If lock_contention=true AND get_blocking_queries returned a non-empty
+      chain, choose lock-chain remediate.
+    - If neither cleanly applies (ambiguous diagnosis, or the destructive action
+      requires human judgment), escalate for operator approval.
+
+  Emit exactly one of these three lines, with nothing else on the line:
   TRANSITION_TO: pbs_slow_query_remediate
+  TRANSITION_TO: pbs_lock_chain_remediate
+  ESCALATE_TO: requires_operator_approval
 escalation:
   - "mean_exec_time > 10s for any query with calls > 100/hour"
   - "blocking chain involves a transaction open > 10 minutes"

@@ -323,7 +323,7 @@ failures:
     description: >
       The database cache hit ratio is low because queries scan tables
       larger than shared_buffers, causing excessive disk I/O.
-    external_compat: false  # requires shared_buffers control; one-shot seqscan diluted by agent tool calls
+    external_compat: true
     inject:
       type: sql
       script: sql/inject_high_cache_miss.sql
@@ -1237,6 +1237,7 @@ failures:
       The pg_hba.conf file is replaced with a version that rejects all
       non-local connections. All application connections fail with
       "pg_hba.conf rejects connection".
+    external_compat: true  # SSH: edit pg_hba.conf + reload
     inject:
       type: docker_exec
       exec_via: helpdesk-test-pg
@@ -1320,6 +1321,7 @@ failures:
       The PostgreSQL postmaster is killed with SIGKILL, simulating an OS-level
       crash or forced termination. The database is completely unreachable until
       restarted.
+    external_compat: true  # SSH: kill -9 postmaster PID; teardown: restart service
     inject:
       type: docker
       action: kill
@@ -1379,6 +1381,7 @@ failures:
     description: >
       A nonsensical value is injected into postgresql.conf (shared_buffers=999GB).
       PostgreSQL refuses to start after a reload / restart.
+    external_compat: true  # SSH: edit postgresql.conf; teardown: restore + restart
     inject:
       type: shell_exec
       script_inline: |

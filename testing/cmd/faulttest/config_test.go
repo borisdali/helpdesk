@@ -347,6 +347,20 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 			t.Errorf("external filter returned non-compatible fault %q", f.ID)
 		}
 	}
+	if len(extFailures) < 17 {
+		t.Errorf("external filter count = %d, want >= 17", len(extFailures))
+	}
+
+	// Verify the four newly externalized faults are included.
+	extIDs := make(map[string]bool, len(extFailures))
+	for _, f := range extFailures {
+		extIDs[f.ID] = true
+	}
+	for _, wantID := range []string{"db-high-cache-miss", "db-pg-hba-corrupt", "db-process-kill", "db-config-bad-param"} {
+		if !extIDs[wantID] {
+			t.Errorf("external filter missing expected fault %q", wantID)
+		}
+	}
 }
 
 func TestResolvePrompt(t *testing.T) {

@@ -122,6 +122,36 @@ var terminalEscalations = map[string]string{
 	"requires_operator_approval": "This action requires explicit operator approval before it can proceed.",
 }
 
+// isAllowedNextPlaybook returns true when the emitted target is a legitimate
+// follow-on for the given triage playbook. Used to detect LLM hallucination of
+// non-existent series_ids (e.g., the agent inventing "pbs_lock_contention_remediate"
+// when the playbook only authorizes "pbs_slow_query_remediate" or
+// "pbs_lock_chain_remediate").
+//
+// Rules:
+//   - Terminal tokens (requires_operator_approval) are always allowed.
+//   - "none" / "" — caller handles separately; treated as allowed here.
+//   - If the triage playbook declares no allow-list, accept anything for
+//     backward compatibility — older playbooks predate the field.
+//   - Otherwise the emitted value must match a series_id in escalates_to.
+func isAllowedNextPlaybook(pb *audit.Playbook, emitted string) bool {
+	if emitted == "" || emitted == "none" {
+		return true
+	}
+	if _, isTerminal := terminalEscalations[emitted]; isTerminal {
+		return true
+	}
+	if pb == nil || len(pb.EscalatesTo) == 0 {
+		return true
+	}
+	for _, allowed := range pb.EscalatesTo {
+		if allowed == emitted {
+			return true
+		}
+	}
+	return false
+}
+
 // approvalModeRank defines permissiveness order for approval modes (higher = less restrictive).
 var approvalModeRank = map[string]int{
 	"":        0,
@@ -422,6 +452,24 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				res.diagReport = parseDiagnosticReport(text)
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
+				// Validate emitted next-playbook targets against the triage
+				// playbook's declared allow-list (escalates_to). If the agent
+				// hallucinates a series_id, coerce to requires_operator_approval
+				// so the chain stops cleanly rather than 404'ing at gate
+				// resolution time.
+				if esc.TransitionTo != "" && !isAllowedNextPlaybook(pb, esc.TransitionTo) {
+					slog.Warn("agent emitted disallowed TRANSITION_TO; coercing to requires_operator_approval",
+						"triage_series", pb.SeriesID, "emitted", esc.TransitionTo,
+						"allowed", pb.EscalatesTo, "trace_id", traceID)
+					esc.TransitionTo = ""
+					esc.EscalateTo = "requires_operator_approval"
+				}
+				if esc.EscalateTo != "" && !isAllowedNextPlaybook(pb, esc.EscalateTo) {
+					slog.Warn("agent emitted disallowed ESCALATE_TO; coercing to requires_operator_approval",
+						"triage_series", pb.SeriesID, "emitted", esc.EscalateTo,
+						"allowed", pb.EscalatesTo, "trace_id", traceID)
+					esc.EscalateTo = "requires_operator_approval"
+				}
 				if esc.TransitionTo != "" {
 					res.outcome = audit.OutcomeTransitioned
 					res.transitionTo = esc.TransitionTo
@@ -896,11 +944,9 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Emit gate_acknowledged audit event.
-	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
-
-	// Denied: abandon the triage run and return.
+	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
+		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
 		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport)
 		go g.submitDenialFeedback(context.WithoutCancel(r.Context()), runID, run.SeriesID, resolvedBy, req.Reason)
 		if g.decisionNotifier != nil {
@@ -917,14 +963,24 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Approved: resolve the triage run and chain to the next playbook.
-	// Use TransitionedTo for same-domain transitions, EscalatedTo for true escalations.
+	// Approved: validate the chain target BEFORE any state mutation. If the
+	// remediation playbook doesn't exist, we want a clean 404 with no audit
+	// footprint — not a half-finished gate that leaves the run marked
+	// "transitioned" but with nothing actually running.
 	nextSeriesID := run.EscalatedTo
 	approvedOutcome := audit.OutcomeEscalated
 	if run.TransitionedTo != "" {
 		nextSeriesID = run.TransitionedTo
 		approvedOutcome = audit.OutcomeTransitioned
 	}
+	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeriesID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "remediation playbook not found: "+err.Error())
+		return
+	}
+
+	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
+	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
 	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport)
 	if g.decisionNotifier != nil {
 		g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
@@ -934,12 +990,6 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 			Summary: "Gate approved — chaining to " + nextSeriesID,
 			Extra:   map[string]any{"resolved_by": resolvedBy, "approval_mode": req.ApprovalMode},
 		})
-	}
-
-	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeriesID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "remediation playbook not found: "+err.Error())
-		return
 	}
 
 	// Build the remediation request. Prefer connection_string from the resolve
