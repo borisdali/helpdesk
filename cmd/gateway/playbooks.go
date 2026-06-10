@@ -122,30 +122,52 @@ var terminalEscalations = map[string]string{
 	"requires_operator_approval": "This action requires explicit operator approval before it can proceed.",
 }
 
+// directiveTransition / directiveEscalate identify which allow-list to consult
+// when validating an emitted next-playbook target.
+const (
+	directiveTransition = "TRANSITION_TO"
+	directiveEscalate   = "ESCALATE_TO"
+)
+
 // isAllowedNextPlaybook returns true when the emitted target is a legitimate
-// follow-on for the given triage playbook. Used to detect LLM hallucination of
-// non-existent series_ids (e.g., the agent inventing "pbs_lock_contention_remediate"
-// when the playbook only authorizes "pbs_slow_query_remediate" or
-// "pbs_lock_chain_remediate").
+// follow-on for the given triage playbook under the given directive type.
+// Used to detect LLM hallucination of non-existent series_ids.
+//
+// Routing:
+//   - TRANSITION_TO is validated against pb.TransitionsTo (same-domain follow-ons)
+//   - ESCALATE_TO   is validated against pb.EscalatesTo   (cross-domain handoffs)
 //
 // Rules:
 //   - Terminal tokens (requires_operator_approval) are always allowed.
 //   - "none" / "" — caller handles separately; treated as allowed here.
-//   - If the triage playbook declares no allow-list, accept anything for
-//     backward compatibility — older playbooks predate the field.
-//   - Otherwise the emitted value must match a series_id in escalates_to.
-func isAllowedNextPlaybook(pb *audit.Playbook, emitted string) bool {
+//   - If the relevant allow-list is empty, accept anything for backward
+//     compatibility — older playbooks predate the per-directive split.
+//   - Otherwise the emitted value must match a series_id in the relevant list.
+func isAllowedNextPlaybook(pb *audit.Playbook, emitted, directive string) bool {
 	if emitted == "" || emitted == "none" {
 		return true
 	}
 	if _, isTerminal := terminalEscalations[emitted]; isTerminal {
 		return true
 	}
-	if pb == nil || len(pb.EscalatesTo) == 0 {
+	if pb == nil {
 		return true
 	}
-	for _, allowed := range pb.EscalatesTo {
-		if allowed == emitted {
+	var allowed []string
+	switch directive {
+	case directiveTransition:
+		allowed = pb.TransitionsTo
+	case directiveEscalate:
+		allowed = pb.EscalatesTo
+	default:
+		// Defensive: unknown directive treated as no allow-list.
+		return true
+	}
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, s := range allowed {
+		if s == emitted {
 			return true
 		}
 	}
@@ -453,18 +475,19 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
 				// Validate emitted next-playbook targets against the triage
-				// playbook's declared allow-list (escalates_to). If the agent
-				// hallucinates a series_id, coerce to requires_operator_approval
-				// so the chain stops cleanly rather than 404'ing at gate
-				// resolution time.
-				if esc.TransitionTo != "" && !isAllowedNextPlaybook(pb, esc.TransitionTo) {
+				// playbook's declared allow-lists. TRANSITION_TO is checked
+				// against transitions_to (same-domain follow-ons), ESCALATE_TO
+				// against escalates_to (cross-domain handoffs). On hallucination,
+				// coerce to requires_operator_approval so the chain stops cleanly
+				// rather than 404'ing at gate resolution time.
+				if esc.TransitionTo != "" && !isAllowedNextPlaybook(pb, esc.TransitionTo, directiveTransition) {
 					slog.Warn("agent emitted disallowed TRANSITION_TO; coercing to requires_operator_approval",
 						"triage_series", pb.SeriesID, "emitted", esc.TransitionTo,
-						"allowed", pb.EscalatesTo, "trace_id", traceID)
+						"allowed", pb.TransitionsTo, "trace_id", traceID)
 					esc.TransitionTo = ""
 					esc.EscalateTo = "requires_operator_approval"
 				}
-				if esc.EscalateTo != "" && !isAllowedNextPlaybook(pb, esc.EscalateTo) {
+				if esc.EscalateTo != "" && !isAllowedNextPlaybook(pb, esc.EscalateTo, directiveEscalate) {
 					slog.Warn("agent emitted disallowed ESCALATE_TO; coercing to requires_operator_approval",
 						"triage_series", pb.SeriesID, "emitted", esc.EscalateTo,
 						"allowed", pb.EscalatesTo, "trace_id", traceID)
@@ -1260,8 +1283,12 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	if pb.Guidance != "" {
 		fmt.Fprintf(&b, "## Expert Guidance\n%s\n\n", pb.Guidance)
 	}
+	if len(pb.TransitionsTo) > 0 {
+		fmt.Fprintf(&b, "## Same-domain transitions\nWhen triage completes successfully and a follow-on remediation under the same agent is appropriate, the allowed next playbooks are (by series ID): %s\n\n",
+			strings.Join(pb.TransitionsTo, ", "))
+	}
 	if len(pb.EscalatesTo) > 0 {
-		fmt.Fprintf(&b, "## Escalation paths\nIf your investigation reveals a different root cause than this playbook addresses, the next playbooks to consider are (by series ID): %s\n\n",
+		fmt.Fprintf(&b, "## Cross-domain escalations\nIf the issue is out of scope for this playbook's agent (different problem class or different agent needed), the allowed escalation targets are (by series ID): %s\n\n",
 			strings.Join(pb.EscalatesTo, ", "))
 	}
 

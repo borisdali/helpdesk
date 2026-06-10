@@ -45,8 +45,15 @@ type Playbook struct {
 	Source   string `json:"source"`               // "system" | "imported" | "manual"
 
 	// Triage routing fields
-	EntryPoint       bool     `json:"entry_point"`                // true = preferred starting point for this problem_class
-	EscalatesTo      []string `json:"escalates_to,omitempty"`     // series IDs to try if this hypothesis is disproven
+	EntryPoint  bool     `json:"entry_point"` // true = preferred starting point for this problem_class
+	EscalatesTo []string `json:"escalates_to,omitempty"`
+	// EscalatesTo: allow-list for ESCALATE_TO directives — cross-domain handoffs
+	// to a different agent / problem class. Validated server-side at emission
+	// time; targets outside this list are coerced to requires_operator_approval.
+	TransitionsTo []string `json:"transitions_to,omitempty"`
+	// TransitionsTo: allow-list for TRANSITION_TO directives — same-domain
+	// follow-ons (typically triage → remediation under the same agent).
+	// Validated server-side the same way as EscalatesTo.
 	RequiresEvidence []string `json:"requires_evidence,omitempty"` // log/error patterns expected before selecting this playbook
 	ExecutionMode    string   `json:"execution_mode"`             // "fleet" | "agent" (R/O) | "agent_approve" (mutations+approval) | "agent_auto" (pre-approved mutations)
 	PermittedTools   []string `json:"permitted_tools,omitempty"`  // agent_auto: tools allowed to execute without per-step approval
@@ -117,6 +124,9 @@ func (s *PlaybookStore) migrateSchema() error {
 		// Chaining and agent routing
 		"ALTER TABLE playbooks ADD COLUMN approval_mode      TEXT    NOT NULL DEFAULT ''",
 		"ALTER TABLE playbooks ADD COLUMN agent_name         TEXT    NOT NULL DEFAULT ''",
+		// Directive split (v0.16): same-domain follow-ons live in transitions_to,
+		// cross-domain handoffs remain in escalates_to.
+		"ALTER TABLE playbooks ADD COLUMN transitions_to     TEXT    NOT NULL DEFAULT '[]'",
 	}
 	for _, stmt := range newCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -192,6 +202,10 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 	if err != nil {
 		return fmt.Errorf("marshal escalates_to: %w", err)
 	}
+	transitionsToJSON, err := json.Marshal(pb.TransitionsTo)
+	if err != nil {
+		return fmt.Errorf("marshal transitions_to: %w", err)
+	}
 	requiresEvidenceJSON, err := json.Marshal(pb.RequiresEvidence)
 	if err != nil {
 		return fmt.Errorf("marshal requires_evidence: %w", err)
@@ -227,14 +241,14 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		     problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 		     series_id, is_active, is_system, source,
 		     entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
-		     approval_mode, agent_name)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     approval_mode, agent_name, transitions_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
 		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode, string(permittedToolsJSON),
-		pb.ApprovalMode, pb.AgentName,
+		pb.ApprovalMode, pb.AgentName, string(transitionsToJSON),
 	)
 	return err
 }
@@ -279,6 +293,10 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 	if err != nil {
 		return fmt.Errorf("marshal escalates_to: %w", err)
 	}
+	transitionsToJSON, err := json.Marshal(pb.TransitionsTo)
+	if err != nil {
+		return fmt.Errorf("marshal transitions_to: %w", err)
+	}
 	requiresEvidenceJSON, err := json.Marshal(pb.RequiresEvidence)
 	if err != nil {
 		return fmt.Errorf("marshal requires_evidence: %w", err)
@@ -311,14 +329,14 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 		    related_playbooks=?, author=?, last_validated=?, version=?,
 		    series_id=?,
 		    entry_point=?, escalates_to=?, requires_evidence=?, execution_mode=?, permitted_tools=?,
-		    approval_mode=?, agent_name=?
+		    approval_mode=?, agent_name=?, transitions_to=?
 		 WHERE playbook_id=?`,
 		pb.Name, pb.Description, string(hintsJSON), pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON),
 		string(relatedJSON), pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID,
 		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), executionMode, string(permittedToolsJSON),
-		pb.ApprovalMode, pb.AgentName,
+		pb.ApprovalMode, pb.AgentName, string(transitionsToJSON),
 		pb.PlaybookID,
 	)
 	if err != nil {
@@ -432,7 +450,7 @@ const playbookColumns = `playbook_id, name, description, target_hints, created_b
 	problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 	series_id, is_active, is_system, source,
 	entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
-	approval_mode, agent_name`
+	approval_mode, agent_name, transitions_to`
 
 // Get returns a playbook by ID, or sql.ErrNoRows if not found.
 func (s *PlaybookStore) Get(ctx context.Context, id string) (*Playbook, error) {
@@ -491,7 +509,7 @@ type scanner interface {
 func scanPlaybook(s scanner) (*Playbook, error) {
 	var pb Playbook
 	var hintsJSON, symptomsJSON, escalationJSON, relatedJSON string
-	var escalatesToJSON, requiresEvidenceJSON, permittedToolsJSON string
+	var escalatesToJSON, requiresEvidenceJSON, permittedToolsJSON, transitionsToJSON string
 	var createdAt, updatedAt string
 	var lastValidatedStr *string
 	var isActive, isSystem, entryPoint int // SQLite stores bools as INTEGER; scan into int then convert
@@ -503,7 +521,7 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 		&relatedJSON, &pb.Author, &lastValidatedStr, &pb.Version,
 		&pb.SeriesID, &isActive, &isSystem, &pb.Source,
 		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode, &permittedToolsJSON,
-		&pb.ApprovalMode, &pb.AgentName,
+		&pb.ApprovalMode, &pb.AgentName, &transitionsToJSON,
 	); err != nil {
 		return nil, err
 	}
@@ -534,6 +552,11 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 	if escalatesToJSON != "" && escalatesToJSON != "null" {
 		if err := json.Unmarshal([]byte(escalatesToJSON), &pb.EscalatesTo); err != nil {
 			pb.EscalatesTo = nil
+		}
+	}
+	if transitionsToJSON != "" && transitionsToJSON != "null" {
+		if err := json.Unmarshal([]byte(transitionsToJSON), &pb.TransitionsTo); err != nil {
+			pb.TransitionsTo = nil
 		}
 	}
 	if requiresEvidenceJSON != "" && requiresEvidenceJSON != "null" {

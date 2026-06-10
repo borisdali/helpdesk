@@ -1,17 +1,17 @@
 series_id: pbs_slow_query_triage
 name: Slow Query Triage
-version: "1.4"
+version: "1.5"
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
 approval_mode: manual
 problem_class: performance
 author: aiHelpDesk
-# Authoritative allow-list of follow-on playbook series_ids. The gateway
-# validates TRANSITION_TO / ESCALATE_TO targets against this list and coerces
-# anything outside it to requires_operator_approval — preventing the model
-# from inventing playbook names.
-escalates_to:
+# Allow-list of same-domain follow-on playbooks (TRANSITION_TO targets).
+# The gateway validates emitted TRANSITION_TO directives against this list and
+# coerces anything outside it to requires_operator_approval — preventing the
+# model from inventing playbook names. No cross-domain escalations declared.
+transitions_to:
   - pbs_slow_query_remediate
   - pbs_lock_chain_remediate
 description: |

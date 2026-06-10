@@ -25,6 +25,7 @@ type systemPlaybookYAML struct {
 	TargetHints      []string `yaml:"target_hints"`
 	EntryPoint       bool     `yaml:"entry_point"`
 	EscalatesTo      []string `yaml:"escalates_to"`
+	TransitionsTo    []string `yaml:"transitions_to"`
 	RequiresEvidence []string `yaml:"requires_evidence"`
 	ExecutionMode    string   `yaml:"execution_mode"`
 	AgentName        string   `yaml:"agent_name"`
@@ -114,6 +115,7 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 				TargetHints:      y.TargetHints,
 				EntryPoint:       y.EntryPoint,
 				EscalatesTo:      y.EscalatesTo,
+				TransitionsTo:    y.TransitionsTo,
 				RequiresEvidence: y.RequiresEvidence,
 				ExecutionMode:    y.ExecutionMode,
 				AgentName:        y.AgentName,

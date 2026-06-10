@@ -1,11 +1,14 @@
 series_id: pbs_db_restart_triage
 name: Database Down — Restart Triage
-version: "1.3"
+version: "1.4"
 entry_point: true
 execution_mode: agent
-escalates_to:
+# Same-domain follow-ons: both recoveries run under the postgres_database_agent.
+transitions_to:
   - pbs_db_config_recovery
   - pbs_db_pitr_recovery
+# Cross-domain escalation: container inspection is handled by the sysadmin agent.
+escalates_to:
   - pbs_sysadmin_docker_inspect
 problem_class: availability
 author: aiHelpDesk

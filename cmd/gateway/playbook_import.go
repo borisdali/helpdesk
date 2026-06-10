@@ -147,6 +147,7 @@ type importPlaybookYAML struct {
 	TargetHints      []string    `yaml:"target_hints"`
 	EntryPoint       bool        `yaml:"entry_point"`
 	EscalatesTo      []string    `yaml:"escalates_to"`
+	TransitionsTo    []string    `yaml:"transitions_to"`
 	RequiresEvidence []string    `yaml:"requires_evidence"`
 	ExecutionMode    string      `yaml:"execution_mode"`
 }
@@ -185,6 +186,7 @@ func parsePlaybookYAML(text string, hints PlaybookImportHints) (*PlaybookImportR
 		TargetHints:      y.TargetHints,
 		EntryPoint:       y.EntryPoint,
 		EscalatesTo:      y.EscalatesTo,
+		TransitionsTo:    y.TransitionsTo,
 		RequiresEvidence: y.RequiresEvidence,
 		ExecutionMode:    executionMode,
 		Source:           "imported",
@@ -308,6 +310,7 @@ func parseImportResponse(raw string) (*audit.Playbook, []string, float64, error)
 			ExecutionMode    string   `json:"execution_mode"`
 			EntryPoint       bool     `json:"entry_point"`
 			EscalatesTo      []string `json:"escalates_to"`
+			TransitionsTo    []string `json:"transitions_to"`
 			RequiresEvidence []string `json:"requires_evidence"`
 		} `json:"playbook"`
 		WarningMessages []string `json:"warning_messages"`
@@ -345,6 +348,7 @@ func parseImportResponse(raw string) (*audit.Playbook, []string, float64, error)
 		ExecutionMode:    executionMode,
 		EntryPoint:       p.EntryPoint,
 		EscalatesTo:      p.EscalatesTo,
+		TransitionsTo:    p.TransitionsTo,
 		RequiresEvidence: p.RequiresEvidence,
 		Source:           "imported",
 	}

@@ -1,14 +1,17 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "1.4"
+version: "1.5"
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent
 approval_mode: manual
-escalates_to:
+# Same-domain follow-ons: both handled by sysadmin_agent.
+transitions_to:
   - pbs_db_restart_action
-  - pbs_db_restart_triage
   - pbs_wal_disk_full
+# Cross-domain escalation: returning context to the DB agent.
+escalates_to:
+  - pbs_db_restart_triage
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -71,10 +74,10 @@ guidance: |
 
   Escalation rules (emit exactly one ESCALATE_TO if the condition is met):
   - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM/disk signals:
-    ESCALATE_TO: pbs_db_restart_action
+    TRANSITION_TO: pbs_db_restart_action
     (the restart playbook will perform and confirm the restart)
   - logs contain "No space left on device" with a pg_wal path:
-    ESCALATE_TO: pbs_wal_disk_full
+    TRANSITION_TO: pbs_wal_disk_full
     (disk must be freed before any restart attempt — restarting now will re-PANIC)
   - exitcode=137 / oomkilled=true:
     Do NOT escalate — describe the OOM evidence and recommend operator review
