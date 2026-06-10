@@ -248,6 +248,8 @@ func vaultList(args []string) {
 		os.Exit(1)
 	}
 
+	failures := FilterFailures(cat, cfg)
+
 	runs, _ := loadHistory()
 
 	// Build last-run lookup from faulttest history: fault_id → (timestamp, passed).
@@ -283,7 +285,7 @@ func vaultList(args []string) {
 	fmt.Printf("%-*s %-*s %-*s %-*s %-*s %s\n", colFault, "FAULT", colPlatform, "PLATFORM", colDiag, "DIAG PLAYBOOK", colRemed, "REMED PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
 	fmt.Println(strings.Repeat("-", colFault+1+colPlatform+1+colDiag+1+colRemed+1+colFaultTest+1+50))
 
-	for _, f := range cat.Failures {
+	for _, f := range failures {
 		playbookID := f.Remediation.PlaybookID
 		diagDisplay := f.DiagnosisPlaybookSeriesID
 		if diagDisplay == "" {
