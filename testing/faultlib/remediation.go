@@ -387,11 +387,66 @@ func (r *Remediator) WaitForGateResolution(ctx context.Context, runID string) (*
 				}
 			}
 			// No pending step approval found (remediation may have completed
-			// immediately or approval_mode=auto). Return the triage run outcome
-			// so the caller proceeds to pollRecovery.
+			// immediately or approval_mode=auto).
+			// Before claiming success, verify that a child remediation run was
+			// actually created. Without this check, a gate that resolved with no
+			// actual child run (e.g. historical Bug #1 partial-write) would fall
+			// through to pollRecovery and report a false PASS on self-clearing faults.
+			// Retry briefly in case auditd write hasn't committed yet.
+			// When AuditURL is not configured the check is skipped (can't verify).
+			childFound := r.cfg.AuditURL == "" // skip when audit unavailable
+			for attempt := 0; !childFound && attempt < 3; attempt++ {
+				if ok, err := r.findChildRun(ctx, runID); err != nil {
+					slog.Warn("faultlib: could not verify child run", "run_id", runID, "err", err)
+					childFound = true // treat error as "can't check, allow through"
+					break
+				} else if ok {
+					childFound = true
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return &ApproveRunResponse{RunID: runID, Status: run.Outcome}, nil
+				case <-time.After(retryDelay):
+				}
+			}
+			if !childFound {
+				return nil, fmt.Errorf("gate resolved to %q but no child remediation run started (triage_run_id=%s) — remediation did not begin", run.Outcome, runID)
+			}
 			return &ApproveRunResponse{RunID: runID, Status: run.Outcome}, nil
 		}
 	}
+}
+
+// findChildRun queries auditd for remediation runs whose prior_run_id matches
+// the given triage run ID. Returns true when at least one child run exists.
+// Returns (true, nil) immediately when AuditURL is not configured — the check
+// is skipped rather than blocking recovery.
+func (r *Remediator) findChildRun(ctx context.Context, priorRunID string) (bool, error) {
+	if r.cfg.AuditURL == "" {
+		return true, nil
+	}
+	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + priorRunID + "&limit=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("auditd request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var runs []json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil {
+		return false, fmt.Errorf("decode response: %w", err)
+	}
+	return len(runs) > 0, nil
 }
 
 // ProceedEscalation calls POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.

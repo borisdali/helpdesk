@@ -677,6 +677,75 @@ func TestWaitForGateResolution_ContextCancelled(t *testing.T) {
 	}
 }
 
+// TestWaitForGateResolution_NoChildRunFound_ReturnsError covers Fix #2: when the
+// gate resolves to "transitioned" but auditd has no child run for the triage
+// run_id, WaitForGateResolution should return an error rather than proceeding
+// to pollRecovery (which would report a false PASS on a self-clearing fault).
+func TestWaitForGateResolution_NoChildRunFound_ReturnsError(t *testing.T) {
+	// Auditd: always returns an empty run list.
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]")) //nolint:errcheck
+	}))
+	defer auditSrv.Close()
+
+	// Gateway: returns transitioned immediately (same-domain follow-on, no step approvals).
+	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"outcome": "transitioned"}) //nolint:errcheck
+	}))
+	defer gatewaySrv.Close()
+
+	r := newFastRemediator(gatewaySrv.URL, func(c *HarnessConfig) {
+		c.AuditURL = auditSrv.URL
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := r.WaitForGateResolution(ctx, "plr_nochildrun")
+	if err == nil {
+		t.Fatal("expected error when no child run found, got nil")
+	}
+	if !strings.Contains(err.Error(), "no child remediation run started") {
+		t.Errorf("error = %q, want it to mention 'no child remediation run started'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "transitioned") {
+		t.Errorf("error = %q, want it to include the actual outcome 'transitioned'", err.Error())
+	}
+}
+
+// TestWaitForGateResolution_ChildRunFound_Succeeds covers the success path of Fix #2:
+// when auditd returns at least one child run, WaitForGateResolution proceeds normally.
+func TestWaitForGateResolution_ChildRunFound_Succeeds(t *testing.T) {
+	// Auditd: returns a single child run.
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]string{{"run_id": "plr_child01"}}) //nolint:errcheck
+	}))
+	defer auditSrv.Close()
+
+	// Gateway: returns transitioned immediately (same-domain follow-on, no step approvals).
+	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"outcome": "transitioned"}) //nolint:errcheck
+	}))
+	defer gatewaySrv.Close()
+
+	r := newFastRemediator(gatewaySrv.URL, func(c *HarnessConfig) {
+		c.AuditURL = auditSrv.URL
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := r.WaitForGateResolution(ctx, "plr_withchild")
+	if err != nil {
+		t.Fatalf("WaitForGateResolution: %v", err)
+	}
+	if resp.RunID != "plr_withchild" {
+		t.Errorf("run_id = %q, want plr_withchild", resp.RunID)
+	}
+}
+
 // ---- RunGateLoop emit-and-wait tests ----
 
 func TestRunGateLoop_EmitAndWait_PollsInsteadOfAutoApprove(t *testing.T) {

@@ -123,11 +123,11 @@ failures:
           CREATE TABLE IF NOT EXISTS _faulttest_longquery (id int PRIMARY KEY);
           INSERT INTO _faulttest_longquery VALUES (1) ON CONFLICT DO NOTHING;
         "
-        { printf "BEGIN;\nLOCK TABLE _faulttest_longquery IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(300);\nCOMMIT;\n" \
+        { { printf "BEGIN;\nLOCK TABLE _faulttest_longquery IN ACCESS EXCLUSIVE MODE;\n"; sleep 600; } \
           | psql "$FAULTTEST_CONN"; } >/dev/null 2>&1 &
         echo $! > /tmp/faulttest_longquery_pid.txt
         sleep 1
-        echo "Injected: long-running query holding ACCESS EXCLUSIVE lock on _faulttest_longquery"
+        echo "Injected: ACCESS EXCLUSIVE lock on _faulttest_longquery (held until killed)"
     external_teardown:
       type: shell_exec
       script_inline: |
@@ -171,7 +171,11 @@ failures:
         narrative: "The agent should identify a long-running query holding an ACCESS EXCLUSIVE lock that is blocking other sessions from accessing the table, and recommend canceling or terminating the blocking query."
     remediation:
       playbook_id: pbs_slow_query_remediate
-      verify_sql: "SELECT count(*) = 0 FROM pg_locks WHERE NOT granted"
+      verify_sql: >
+        SELECT count(*) = 0 FROM pg_locks l
+        JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE l.mode = 'AccessExclusiveLock' AND l.granted
+          AND a.state = 'idle in transaction'
       verify_timeout: "60s"
     timeout: 90s
 
