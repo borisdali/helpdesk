@@ -2,7 +2,7 @@
 
 `faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
 
-You bring your own database server, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit), and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
+Point it at a database, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit), and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. With `--auto-db`, faulttest spins up a temporary PostgreSQL container itself — no database setup required at all. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
 
 This page covers external fault injection against customer-owned databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md). For the wider testing strategy see [here](../testing/README.md).
 
@@ -18,9 +18,10 @@ The tool was designed for two complementary use cases:
 1. [How it works](#1-how-it-works)
 2. [Prerequisites](#2-prerequisites)
 3. [Modes of operation](#3-modes-of-operation)
-   - [External mode (SQL only)](#31-external-mode-sql-only)
-   - [SSH injection mode](#32-ssh-injection-mode)
-   - [Remediation mode](#33-remediation-mode)
+   - [Auto-DB mode (zero setup)](#31-auto-db-mode-zero-setup)
+   - [External mode (BYO database)](#32-external-mode-byo-database)
+   - [SSH injection mode](#33-ssh-injection-mode)
+   - [Remediation mode](#34-remediation-mode)
 4. [Policy safety: the infra-config guard](#4-policy-safety-the-infra-config-guard)
 5. [CLI reference](#5-cli-reference)
    - [list](#51-list)
@@ -36,12 +37,13 @@ The tool was designed for two complementary use cases:
    - [Kubernetes faults](#64-kubernetes-faults)
    - [Remediation specs](#65-remediation-specs)
 7. [Example workflows](#7-example-workflows)
-   - [Smoke test a staging database](#71-smoke-test-a-staging-database)
-   - [Full run with remediation](#72-full-run-with-remediation)
-   - [Interactive single-fault injection](#73-interactive-single-fault-injection)
-   - [Running from Docker](#74-running-from-docker)
-   - [Running from Kubernetes (Helm)](#75-running-from-kubernetes-helm)
-   - [Vault: tracking history, drift, and auto-suggest](#76-vault-tracking-history-and-drift)
+   - [Zero-setup smoke test (auto-DB)](#71-zero-setup-smoke-test-auto-db)
+   - [Smoke test a staging database](#72-smoke-test-a-staging-database)
+   - [Full run with remediation](#73-full-run-with-remediation)
+   - [Interactive single-fault injection](#74-interactive-single-fault-injection)
+   - [Running from Docker](#75-running-from-docker)
+   - [Running from Kubernetes (Helm)](#76-running-from-kubernetes-helm)
+   - [Vault: tracking history, drift, and auto-suggest](#77-vault-tracking-history-and-drift)
 8. [Interpreting results](#8-interpreting-results) — including [LLM-as-judge fields](LLM_AS_JUDGE.md)
 9. [Customer fault catalogs](#9-customer-fault-catalogs)
    - [Overview](#91-overview)
@@ -138,19 +140,67 @@ Alternatively, point directly at the database agent's A2A port (default 1100).
 
 ## 3. Modes of operation
 
-### 3.1 External mode
+The `DB` column in `faulttest list` shows the database requirement for each fault:
 
-`--external` restricts the run to faults marked `external_compat: true` in the catalog. These faults use either `sql` or `shell_exec` injection — no Docker daemon, no Kubernetes control plane, and no internal Docker Compose stack required. Anything reachable from the machine running faulttest qualifies.
+| `DB` value | Meaning |
+|:---:|---------|
+| `auto` | faulttest can spin up a temporary PostgreSQL for you — no connection string needed (`--auto-db`) |
+| `byo` | requires OS/SSH access to the database host, or a Kubernetes cluster — always BYO |
+| `-` | requires the internal Docker Compose stack (internal development use only) |
 
-**This is the default when running the standalone binary.** The binary detects at startup that the internal Docker test infrastructure is not present and enables external mode automatically, so customers never see a flood of "injection failed" errors from faults that require our internal Docker stack. You can disable this with `--external=false` if you are deliberately running the full suite against the Docker compose test environment.
+### 3.1 Auto-DB mode (zero setup)
+
+`--auto-db` is the fastest way to get started. faulttest pulls a `postgres:16-alpine` container, maps a random local port, waits for it to be ready, runs the 12 auto-db-compatible faults against it, and removes the container when done. No connection string, no infrastructure config, no existing database required.
 
 ```bash
-# Standalone binary — --external is implied, these are equivalent:
-faulttest run \
-  --conn "host=staging-db port=5432 dbname=mydb user=myuser password=..." \
-  --db-agent http://gateway:8080 \
-  --infra-config infrastructure.json
+faulttest run --auto-db \
+  --db-agent http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
 
+**Requirements:** Docker must be installed and running. The `docker` CLI must be in `PATH`. The agent must be reachable from the machine running faulttest (the container itself is internal — the agent calls are made from the host, not from inside the container).
+
+**What auto-DB mode runs:**
+
+| Fault | How it injects |
+|-------|---------------|
+| `db-table-bloat` | SQL: creates table, inserts rows, disables autovacuum, deletes half |
+| `db-high-cache-miss` | SQL: creates a 50 MB table, forces a sequential scan, resets stats |
+| `db-vacuum-needed` | SQL: creates bloat table, disables autovacuum, generates dead tuples |
+| `db-disk-pressure` | SQL: inserts 10,000 rows of 2 KB each |
+| `db-checkpoint-warning` | SQL: sets `bgwriter_lru_maxpages=2` and `max_wal_size=32MB`, inserts 300 k rows |
+| `db-max-connections` | psql: opens near-`max_connections` idle sessions |
+| `db-long-running-query` | psql: `pg_sleep(300)` in a detached session |
+| `db-lock-contention` | psql: acquires `ACCESS EXCLUSIVE` lock and holds it |
+| `db-idle-in-transaction` | psql: opens a transaction, performs a write, holds it open |
+| `db-terminate-direct-command` | psql: same as idle-in-transaction; tests inspect-before-act ordering |
+| `db-tx-lock-chain-blocker` | psql: opens a transaction, writes, then pg_sleep(3600) — holds lock while appearing active; two-level victim chain |
+| `db-wal-stale-slot` | SQL: creates a replication slot and leaves it idle |
+
+All teardowns remove injected state completely: tables are dropped, held sessions are terminated.
+
+Auto-DB implies `--external`. The 4 SSH-requiring faults (`db-pg-hba-corrupt`, `db-process-kill`, `db-config-bad-param`, `db-wal-disk-full`) and the Kubernetes fault are excluded automatically — they need OS-level access to the host running PostgreSQL, which a container's port mapping does not expose.
+
+**Combining with other flags:**
+
+```bash
+# Single fault, with remediation
+faulttest run --auto-db --ids db-tx-lock-chain-blocker --remediate \
+  --gateway http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Filter to a subset of faults
+faulttest run --auto-db --ids db-lock-contention,db-idle-in-transaction \
+  --db-agent http://helpdesk-gateway:8080
+```
+
+### 3.2 External mode (BYO database)
+
+`--external` restricts the run to faults marked `external_compat: true` in the catalog. These faults inject via `sql` or `shell_exec` (psql on the local machine) or `ssh_exec` — no internal Docker Compose stack required. You supply the connection string; faulttest connects and injects.
+
+**This is the default when running the standalone binary.** The binary detects at startup that the internal Docker test infrastructure is not present and enables external mode automatically. You can disable this with `--external=false` if you are deliberately running the full suite against the Docker Compose test environment.
+
+```bash
 faulttest run --external \
   --conn "host=staging-db port=5432 dbname=mydb user=myuser password=..." \
   --db-agent http://gateway:8080 \
@@ -159,28 +209,24 @@ faulttest run --external \
 
 The `--infra-config` flag is recommended (see [section 4](#4-policy-safety-the-infra-config-guard)).
 
-**What external mode injects:**
-
-| Fault | Injection mechanism |
-|-------|---------------------|
-| `db-table-bloat` | SQL: creates table, inserts rows, disables autovacuum, deletes half |
-| `db-high-cache-miss` | SQL: creates a table larger than `shared_buffers`, forces sequential scan |
-| `db-vacuum-needed` | SQL: creates bloat table, disables autovacuum, generates dead tuples |
-| `db-disk-pressure` | SQL: inserts 10,000 rows of 2 KB each |
-| `db-checkpoint-warning` | SQL: sets `bgwriter_lru_maxpages=2` and `max_wal_size=32MB`, inserts 300k rows, forces back-to-back checkpoints |
-| `db-replication-lag` | SQL: `pg_wal_replay_pause()` on replica |
-| `db-max-connections` | SQL: opens near-`max_connections` idle sessions |
-| `db-long-running-query` | SQL: `pg_sleep(300)` in a detached session |
-| `db-lock-contention` | SQL: acquires `ACCESS EXCLUSIVE` lock and holds it |
-| `db-idle-in-transaction` | SQL: opens a transaction, performs a write, holds it open |
-| `db-terminate-direct-command` | Same as idle-in-transaction; tests inspect-before-act ordering |
-| `db-tx-lock-chain-blocker` | SQL: opens a transaction, performs a write, then pg_sleep(3600) — holds lock while appearing active; two-level chain of intermediate and leaf victims |
+External mode runs all 17 `external_compat` faults, including the 4 SSH-injectable ones if `--ssh-host` is supplied (see [§3.3](#33-ssh-injection-mode)). Without `--ssh-host`, SSH faults are attempted over the local shell and will fail unless the target is localhost.
 
 All teardowns remove injected state completely: tables are dropped, held sessions are terminated, paused replay is resumed.
 
-### 3.2 SSH injection mode
+### 3.3 SSH injection mode
 
 For OS-level faults that cannot be expressed in SQL — pg_hba.conf corruption, process kill, configuration file poisoning — `faulttest` can run scripts on a remote host via SSH. The script content is streamed over stdin; no files need to be pre-staged on the target.
+
+```bash
+faulttest run --external \
+  --conn "host=staging-db port=5432 dbname=mydb user=myuser" \
+  --ssh-host staging-vm \
+  --ssh-user ubuntu \
+  --ssh-key ~/.ssh/staging.pem \
+  --db-agent http://gateway:8080
+```
+
+Or inject a single fault interactively:
 
 ```bash
 faulttest inject --id db-pg-hba-corrupt \
@@ -192,9 +238,11 @@ faulttest inject --id db-pg-hba-corrupt \
 
 The target host in the fault spec (`exec_via`) can be overridden by `--ssh-host`. SSH options used: `-o StrictHostKeyChecking=no -o BatchMode=yes`.
 
-SSH-injectable faults for the most part are **not** marked `external_compat` because they require OS access and are excluded from `--external` runs. There are some safe exceptions thought, e.g. `db-wal-disk-full`.  See [here](FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for a sample fault injection via SSH.
+The four SSH-injectable faults (`db-pg-hba-corrupt`, `db-process-kill`, `db-config-bad-param`, `db-wal-disk-full`) are all marked `external_compat: true` and appear in `--external` runs. They show `byo` in the `DB` column of `faulttest list` because they require OS-level SSH access and cannot be run with `--auto-db`. Managed databases (RDS, Cloud SQL) that do not expose SSH cannot use these faults.
 
-### 3.3 Remediation mode
+See [here](FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for a sample fault injection via SSH.
+
+### 3.4 Remediation mode
 
 `--remediate` adds a recovery phase after injection and diagnosis. After the agent evaluates the fault, `faulttest` triggers either a fleet Playbook or a direct agent prompt, then polls a fault-specific verification SQL query until the database responds correctly or the timeout elapses.
 
@@ -358,20 +406,25 @@ If `--infra-config` is omitted the check is skipped. This is intentional for air
 faulttest list [options]
 ```
 
-Lists all faults in the catalog. Add `--external` to show only externally injectable faults; add `--categories database` to filter by category.
+Lists all faults in the catalog. Add `--external` to show only externally injectable faults; add `--auto-db` to show only faults that can run with `--auto-db`; add `--categories database` to filter by category.
 
 ```bash
 # All faults
 faulttest list
 
-# External-compatible only
+# External-compatible only (17 faults)
 faulttest list --external
+
+# Auto-DB only — faults faulttest can inject without a BYO database (12 faults)
+faulttest list --auto-db
 
 # One category
 faulttest list --categories database
 ```
 
-Output columns: `ID`, `CATEGORY`, `SEVERITY`, `EXTERNAL` (yes/blank), `SOURCE` (builtin/custom), `NAME`.
+Output columns: `ID`, `CATEGORY`, `SEVERITY`, `EXTERNAL` (yes/blank), `DB` (`auto`/`byo`/`-`), `SOURCE` (builtin/custom), `NAME`.
+
+The `DB` column indicates the database requirement. `auto` means `--auto-db` can inject the fault without a connection string. `byo` means external-compatible but needs OS/SSH access or a cluster. `-` means requires internal Docker Compose infrastructure.
 
 Add `--source builtin` or `--source custom` to restrict output to faults from one catalog only.
 
@@ -395,6 +448,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--context` | — | — | Kubernetes context |
 | `--categories` | — | all | Comma-separated categories: `database,kubernetes,host,compound` |
 | `--ids` | — | all | Comma-separated fault IDs to run |
+| `--auto-db` | — | false | Spin up a temporary `postgres:16-alpine` container; implies `--external`; no `--conn` needed. Runs the 12 auto-db-compatible faults only. Requires Docker in `PATH`. |
 | `--external` | — | true¹ | Only external_compat faults; SQL injection only |
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
@@ -631,14 +685,14 @@ These faults require the Docker Compose test environment (`testing/docker/`). Th
 
 ### 6.3 SSH-injectable faults
 
-These faults require OS-level access to the database host and are injected via SSH (either from the local machine via `--ssh-host`, or from inside a K8s Job with an SSH key Secret). Most are also marked `external_compat: true` so they are included in `--external` runs. See [§3.2](#32-ssh-injection-mode) for SSH configuration.
+These faults require OS-level access to the database host and are injected via SSH. All four are marked `external_compat: true` and appear in `--external` runs. They are **not** auto-db compatible (`DB: byo` in `faulttest list`) — they need a real host with SSH access. Managed databases (RDS, Cloud SQL) cannot use these. See [§3.3](#33-ssh-injection-mode) for SSH configuration.
 
-| ID | Name | Severity | external_compat | What it does |
-|----|------|----------|:---:|--------------|
-| `db-wal-disk-full` | WAL disk full — writes failing | critical | ✓ | Writes fake FATAL/PANIC lines to the PostgreSQL log file via `docker exec`, then SIGKILLs the container (exitcode=137). Teardown calls `docker start` and waits for `pg_isready`. No disk space is consumed — the fault is simulated entirely in the log file. |
-| `db-pg-hba-corrupt` | pg_hba.conf corrupted | critical | — | Replaces pg_hba.conf to reject all non-local connections; reloads config |
-| `db-process-kill` | PostgreSQL postmaster killed | critical | — | Sends SIGKILL to the postmaster PID |
-| `db-config-bad-param` | postgresql.conf invalid parameter | high | — | Appends `shared_buffers = 999GB` to postgresql.conf |
+| ID | Name | Severity | What it does |
+|----|------|----------|--------------|
+| `db-wal-disk-full` | WAL disk full — writes failing | critical | Writes fake FATAL/PANIC lines to the PostgreSQL log file via `docker exec`, then SIGKILLs the container (exitcode=137). Teardown calls `docker start` and waits for `pg_isready`. No disk space is consumed — the fault is simulated entirely in the log file. |
+| `db-pg-hba-corrupt` | pg_hba.conf corrupted | critical | SSH: replaces pg_hba.conf to reject all non-local connections; reloads config via `pg_ctl reload`. Teardown restores backup and reloads. |
+| `db-process-kill` | PostgreSQL postmaster killed | critical | SSH: sends SIGKILL to the postmaster PID. Teardown restarts via `pg_ctl start` or `systemctl start postgresql`. |
+| `db-config-bad-param` | postgresql.conf invalid parameter | high | SSH: appends `shared_buffers = 999GB` to postgresql.conf. Teardown restores backup and restarts PostgreSQL. |
 
 ### 6.4 Kubernetes faults
 
@@ -692,7 +746,40 @@ When writing customer catalog entries, prefer specific queries that directly ver
 
 ## 7. Example workflows
 
-### 7.1 Smoke test a staging database
+### 7.1 Zero-setup smoke test (auto-DB)
+
+The fastest way to validate the database agent works at all. faulttest pulls a `postgres:16-alpine` container, runs 12 faults against it, tears it down, and writes a report. No database setup required — just Docker and a reachable gateway.
+
+```bash
+faulttest run --auto-db \
+  --db-agent http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+To run a single fault interactively (inject, diagnose, remediate, tear down):
+
+```bash
+faulttest run --auto-db \
+  --ids db-tx-lock-chain-blocker \
+  --remediate \
+  --gateway http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+With LLM-as-judge for semantic scoring:
+
+```bash
+faulttest run --auto-db \
+  --db-agent http://helpdesk-gateway:8080 \
+  --api-key $HELPDESK_API_KEY \
+  --judge \
+  --judge-vendor anthropic \
+  --judge-model claude-haiku-4-5-20251001
+```
+
+The auto-db container is always torn down, even if the run fails mid-way. The connection string printed at startup (`Auto-DB ready: host=127.0.0.1 port=...`) is the DSN used for all injections — it can be used separately with `psql` for manual inspection during a fault if needed.
+
+### 7.2 Smoke test a staging database
 
 Run the full external-compatible suite against a staging database to confirm the database agent gives correct diagnoses. Takes roughly 10–20 minutes (one fault at a time, LLM calls included).
 
@@ -707,7 +794,7 @@ faulttest run \
 
 The report is written to `faulttest-<run-id>.json`.
 
-### 7.2 Full run with remediation
+### 7.3 Full run with remediation
 
 Same as above, but also trigger playbook-based recovery for faults that have a `remediation` spec and verify the database comes back:
 
@@ -737,7 +824,7 @@ Report: faulttest-a3f2b1c4.json
 
 The `overall_score` in the report combines `diagnosis_score × 0.6 + remediation_score × 0.4`. Faults without a remediation spec show only the diagnosis score.
 
-### 7.3 Interactive single-fault injection
+### 7.4 Interactive single-fault injection
 
 Inject one fault by hand, investigate with `helpdesk-client`, then tear down:
 
@@ -764,7 +851,7 @@ faulttest teardown --id db-idle-in-transaction \
   --conn "host=staging-db port=5432 dbname=myapp user=dbuser"
 ```
 
-### 7.4 Running from Docker
+### 7.5 Running from Docker
 
 `faulttest` is included in the standard helpdesk Docker image. Docker Compose users can run it without downloading a separate binary by using `docker run` or `docker compose run` against the same image their deployment uses.
 
@@ -829,7 +916,7 @@ curl -X POST http://localhost:8080/api/v1/decisions/gate:plr_.../resolve \
   -d '{"resolution":"approved","resolved_by":"alice","approval_mode":"review"}'
 ```
 
-### 7.5 Running from Kubernetes (Helm)
+### 7.6 Running from Kubernetes (Helm)
 
 For Helm deployments the recommended approach is a one-off Job rather than `kubectl run`, because a Job can mount the ConfigMap and Secrets that the chart already created — giving `faulttest` access to `infrastructure.json` and any `password_env` variables without duplicating credentials:
 
@@ -909,7 +996,7 @@ Kubernetes Jobs also have no `/dev/tty`. Use `--emit-and-wait` so the pod blocks
 
 The Job logs `Gate pending — resolve_url=...` and polls every 15 seconds. Resolve via the Decision Hub or via a [git branch merge](DECISIONS.md#git-webhook-adapter-opt-in).
 
-### 7.6 Vault: tracking history and drift
+### 7.7 Vault: tracking history and drift
 
 After running `faulttest run` a few times, use the vault to review trends and pairing status. For the full vault concept, lifecycle, and three customer workflows, see [VAULT.md](VAULT.md).
 
