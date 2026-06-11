@@ -159,3 +159,413 @@ func TestHandleGetDecision_UnknownPrefix(t *testing.T) {
 		t.Errorf("got %d, want 400 for unknown prefix", rec.Code)
 	}
 }
+
+// TestHandleGetDecision_Gate_ResolvedReason verifies that resolved gates include
+// resolved_reason from the gate_acknowledged event when a reason was supplied.
+func TestHandleGetDecision_Gate_ResolvedReason(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:          "plr_resolved01",
+		SeriesID:       "pbs_lock_chain_triage",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_lock_chain_remediate",
+		Operator:       "alice",
+		StartedAt:      time.Now().UTC(),
+	}
+	runData, _ := json.Marshal(run)
+
+	// The gate_acknowledged event for this run.
+	gateEvent := audit.Event{
+		EventID:   "ga_test01",
+		EventType: audit.EventTypeGateAcknowledged,
+		TraceID:   run.RunID,
+		Output:    &audit.Output{Response: "PID confirmed in pg_stat_activity"},
+	}
+	eventsData, _ := json.Marshal([]audit.Event{gateEvent})
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbook-runs/plr_resolved01") && !strings.Contains(r.URL.Path, "/events"):
+			w.Write(runData) //nolint:errcheck
+		case r.URL.Path == "/v1/events" && r.URL.Query().Get("event_type") == "gate_acknowledged":
+			w.Write(eventsData) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://localhost"}
+	rec := getDecision(t, gw, "gate:plr_resolved01")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var d decisions.Decision
+	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	reason, _ := d.Extra["resolved_reason"].(string)
+	if reason != "PID confirmed in pg_stat_activity" {
+		t.Errorf("resolved_reason = %q, want %q", reason, "PID confirmed in pg_stat_activity")
+	}
+	if d.Status != audit.OutcomeTransitioned {
+		t.Errorf("Status = %q, want %q", d.Status, audit.OutcomeTransitioned)
+	}
+}
+
+// TestHandleGetDecision_Gate_ResolvedNoReason verifies no resolved_reason key
+// is present when the gate event has no reason.
+func TestHandleGetDecision_Gate_ResolvedNoReason(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:          "plr_resolved02",
+		SeriesID:       "pbs_lock_chain_triage",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_lock_chain_remediate",
+		Operator:       "alice",
+		StartedAt:      time.Now().UTC(),
+	}
+	runData, _ := json.Marshal(run)
+
+	// Gate event with empty reason.
+	gateEvent := audit.Event{
+		EventID:   "ga_test02",
+		EventType: audit.EventTypeGateAcknowledged,
+		TraceID:   run.RunID,
+		Output:    &audit.Output{Response: ""},
+	}
+	eventsData, _ := json.Marshal([]audit.Event{gateEvent})
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbook-runs/plr_resolved02"):
+			w.Write(runData) //nolint:errcheck
+		case r.URL.Path == "/v1/events" && r.URL.Query().Get("event_type") == "gate_acknowledged":
+			w.Write(eventsData) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://localhost"}
+	rec := getDecision(t, gw, "gate:plr_resolved02")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var d decisions.Decision
+	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, hasReason := d.Extra["resolved_reason"]; hasReason {
+		t.Errorf("resolved_reason should be absent when reason is empty")
+	}
+}
+
+// mockFeedbackAuditd returns an httptest.Server that serves a RunFeedback record
+// at GET /v1/fleet/playbook-runs/{runID}/feedback and accepts POST to the same path.
+func mockFeedbackAuditd(t *testing.T, runID string, diagCorrect *bool) *httptest.Server {
+	t.Helper()
+	submitted := map[string]any{
+		"run_id":    runID,
+		"series_id": "pbs_lock_chain_triage",
+		"operator":  "faulttest",
+	}
+	if diagCorrect != nil {
+		submitted["diagnosis_correct"] = *diagCorrect
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := "/v1/fleet/playbook-runs/" + runID + "/feedback"
+		pendingPath := "/v1/fleet/playbook-runs/feedback-pending"
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == path:
+			json.NewEncoder(w).Encode(submitted) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == path:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for k, v := range body {
+				submitted[k] = v
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(submitted) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == pendingPath:
+			if diagCorrect == nil {
+				json.NewEncoder(w).Encode([]map[string]any{submitted}) //nolint:errcheck
+			} else {
+				json.NewEncoder(w).Encode([]map[string]any{}) //nolint:errcheck
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func resolveDecision(t *testing.T, gw *Gateway, id string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/decisions/"+id+"/resolve", strings.NewReader(string(data)))
+	req.SetPathValue("id", id)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleGetDecision_Feedback_Pending(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb01", nil)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := getDecision(t, gw, "feedback:plr_fb01")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var d decisions.Decision
+	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.Type != decisions.DecisionTypeFeedback {
+		t.Errorf("Type = %q, want %q", d.Type, decisions.DecisionTypeFeedback)
+	}
+	if d.Status != "pending" {
+		t.Errorf("Status = %q, want pending", d.Status)
+	}
+	if d.ResolveURL != "http://gw/api/v1/decisions/feedback:plr_fb01/resolve" {
+		t.Errorf("ResolveURL = %q", d.ResolveURL)
+	}
+}
+
+func TestHandleGetDecision_Feedback_Resolved(t *testing.T) {
+	v := true
+	auditSrv := mockFeedbackAuditd(t, "plr_fb02", &v)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := getDecision(t, gw, "feedback:plr_fb02")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var d decisions.Decision
+	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.Status != "resolved" {
+		t.Errorf("Status = %q, want resolved", d.Status)
+	}
+	diagCorrect, _ := d.Extra["diagnosis_correct"].(bool)
+	if !diagCorrect {
+		t.Errorf("Extra[diagnosis_correct] = %v, want true", d.Extra["diagnosis_correct"])
+	}
+}
+
+func TestHandleResolveDecision_Feedback_Approved(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb03", nil)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := resolveDecision(t, gw, "feedback:plr_fb03", map[string]any{
+		"resolution":  "approved",
+		"resolved_by": "alice",
+		"reason":      "PID 236 confirmed idle-in-transaction",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["status"] != "resolved" {
+		t.Errorf("status = %v, want resolved", result["status"])
+	}
+	if result["diagnosis_correct"] != true {
+		t.Errorf("diagnosis_correct = %v, want true", result["diagnosis_correct"])
+	}
+}
+
+func TestHandleResolveDecision_Feedback_Denied(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb04", nil)
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}
+
+	rec := resolveDecision(t, gw, "feedback:plr_fb04", map[string]any{
+		"resolution":  "denied",
+		"resolved_by": "bob",
+		"reason":      "Autovacuum lock, not idle-in-transaction",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["diagnosis_correct"] != false {
+		t.Errorf("diagnosis_correct = %v, want false", result["diagnosis_correct"])
+	}
+}
+
+func TestHandleGetDecisions_IncludesFeedbackType(t *testing.T) {
+	auditSrv := mockFeedbackAuditd(t, "plr_fb05", nil)
+	// Also need to handle approvals and gate endpoints returning empty.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/fleet/playbook-runs/feedback-pending":
+			json.NewEncoder(w).Encode([]map[string]any{{ //nolint:errcheck
+				"run_id":      "plr_fb05",
+				"series_id":   "pbs_lock_chain_triage",
+				"operator":    "faulttest",
+				"submitted_at": "2026-06-08T10:00:00Z",
+			}})
+		case r.URL.Path == "/v1/approvals":
+			json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+		case strings.Contains(r.URL.Path, "/playbook-runs"):
+			json.NewEncoder(w).Encode(map[string]any{"runs": []any{}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	_ = auditSrv
+
+	gw := &Gateway{auditURL: srv.URL, baseURL: "http://gw"}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/decisions?type=feedback", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Decisions []decisions.Decision `json:"decisions"`
+		Total     int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Total != 1 {
+		t.Fatalf("total = %d, want 1", result.Total)
+	}
+	if result.Decisions[0].Type != decisions.DecisionTypeFeedback {
+		t.Errorf("Type = %q, want feedback", result.Decisions[0].Type)
+	}
+	if result.Decisions[0].Status != "pending" {
+		t.Errorf("Status = %q, want pending", result.Decisions[0].Status)
+	}
+}
+
+// TestHandleGetIncident assembles a full incident narrative from triage run,
+// gate event, remediation run, and feedback.
+func TestHandleGetIncident(t *testing.T) {
+	triageRun := &audit.PlaybookRun{
+		RunID:           "plr_triage01",
+		SeriesID:        "pbs_lock_chain_triage",
+		Outcome:         audit.OutcomeTransitioned,
+		TransitionedTo:  "pbs_lock_chain_remediate",
+		FindingsSummary: "root blocker PID 867",
+		Operator:        "alice",
+		StartedAt:       time.Now().Add(-30 * time.Second).UTC(),
+		CompletedAt:     time.Now().Add(-20 * time.Second).UTC(),
+	}
+	remRun := &audit.PlaybookRun{
+		RunID:       "plr_remed01",
+		SeriesID:    "pbs_lock_chain_remediate",
+		PriorRunID:  "plr_triage01",
+		Outcome:     audit.OutcomeResolved,
+		Operator:    "alice",
+		StartedAt:   time.Now().Add(-20 * time.Second).UTC(),
+		CompletedAt: time.Now().UTC(),
+	}
+	triageData, _ := json.Marshal(triageRun)
+	remListData, _ := json.Marshal(map[string]any{"runs": []*audit.PlaybookRun{remRun}, "count": 1})
+
+	gateEvent := audit.Event{
+		EventID:   "ga_inc01",
+		Timestamp: time.Now().Add(-25 * time.Second).UTC(),
+		EventType: audit.EventTypeGateAcknowledged,
+		TraceID:   "plr_triage01",
+		Output:    &audit.Output{Response: "confirmed manually"},
+		Decision: &audit.Decision{
+			ReasoningChain: []string{"operator bob acknowledged informed gate for run plr_triage01"},
+		},
+	}
+	gateEventsData, _ := json.Marshal([]audit.Event{gateEvent})
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		switch {
+		case strings.Contains(r.URL.Path, "/playbook-runs/plr_triage01") && !strings.Contains(r.URL.Path, "/feedback"):
+			w.Write(triageData) //nolint:errcheck
+		case r.URL.Path == "/v1/fleet/playbook-runs" && q.Get("prior_run_id") == "plr_triage01":
+			w.Write(remListData) //nolint:errcheck
+		case r.URL.Path == "/v1/events" && q.Get("event_type") == "gate_acknowledged":
+			w.Write(gateEventsData) //nolint:errcheck
+		case strings.Contains(r.URL.Path, "/feedback"):
+			http.Error(w, "not found", http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://localhost"}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents/plr_triage01", nil)
+	req.SetPathValue("runID", "plr_triage01")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var narrative IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&narrative); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if narrative.IncidentID != "plr_triage01" {
+		t.Errorf("IncidentID = %q, want plr_triage01", narrative.IncidentID)
+	}
+	if narrative.Triage.RunID != "plr_triage01" {
+		t.Errorf("Triage.RunID = %q, want plr_triage01", narrative.Triage.RunID)
+	}
+	if narrative.Gate == nil {
+		t.Fatal("Gate chapter should be present")
+	}
+	if narrative.Gate.Resolution != "approved" {
+		t.Errorf("Gate.Resolution = %q, want approved", narrative.Gate.Resolution)
+	}
+	if narrative.Gate.Reason != "confirmed manually" {
+		t.Errorf("Gate.Reason = %q, want confirmed manually", narrative.Gate.Reason)
+	}
+	if narrative.Gate.ApprovedBy != "bob" {
+		t.Errorf("Gate.ApprovedBy = %q, want bob", narrative.Gate.ApprovedBy)
+	}
+	if narrative.Remediation == nil {
+		t.Fatal("Remediation chapter should be present")
+	}
+	if narrative.Remediation.RunID != "plr_remed01" {
+		t.Errorf("Remediation.RunID = %q, want plr_remed01", narrative.Remediation.RunID)
+	}
+	if narrative.Feedback != nil {
+		t.Errorf("Feedback should be nil when not submitted")
+	}
+	if narrative.DurationSec <= 0 {
+		t.Errorf("DurationSec should be positive, got %f", narrative.DurationSec)
+	}
+}

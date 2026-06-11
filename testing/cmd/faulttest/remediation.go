@@ -52,10 +52,14 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	gate := faultlib.ApproveRunResponse{
 		RunID:                 resp.RunID,
 		Status:                resp.Status,
+		TransitionTarget:      resp.TransitionTarget,
 		EscalationTarget:      resp.EscalationTarget,
 		EscalationFindings:    resp.EscalationFindings,
 		ConfidenceWarning:     resp.ConfidenceWarning,
 		SuggestedApprovalMode: resp.SuggestedMode,
+		RemediationPreview:    resp.RemediationPreview,
+		DiagnosticReport:      resp.DiagnosticReport,
+		GateReason:            resp.GateReason,
 	}
 	slog.Info("gate pending: operator review required",
 		"failure", f.ID,
@@ -84,6 +88,17 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	score := 0.75
 	if recoverySecs <= timeout.Seconds()/2 {
 		score = 1.0
+	}
+	if r.cfg.EmitAndWait {
+		if resolveURL, err := r.inner.RequestFeedback(ctx, gate.RunID); err != nil {
+			slog.Warn("faulttest: failed to request feedback via hub", "run_id", gate.RunID, "err", err)
+		} else if resolveURL != "" {
+			fmt.Printf("\n  Feedback pending — resolve at:\n")
+			fmt.Printf("  POST %s\n", resolveURL)
+			fmt.Printf("  Body: {\"resolution\":\"approved\"|\"denied\",\"resolved_by\":\"...\",\"reason\":\"...\"}\n\n")
+		}
+	} else {
+		r.submitFeedback(ctx, gate.RunID, gate.DiagnosticReport)
 	}
 	return RemediationResult{
 		Passed:           true,
@@ -178,6 +193,55 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	return nil
 }
 
+// printGatePreviewAndReport prints the remediation plan preview and structured
+// diagnostic hypotheses (if present) to stdout as part of the gate display.
+func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
+	if preview != nil {
+		name, _ := preview["name"].(string)
+		mode, _ := preview["approval_mode"].(string)
+		desc, _ := preview["description"].(string)
+		if name != "" {
+			line := "  Remediation plan  : " + name
+			if mode != "" {
+				line += " (" + mode + " approval)"
+			}
+			fmt.Println(line)
+			if desc != "" {
+				fmt.Printf("                      %s\n", desc)
+			}
+		}
+	}
+	if report != nil {
+		hyps, _ := report["hypotheses"].([]any)
+		if len(hyps) > 0 {
+			fmt.Println("  Hypotheses        :")
+			for _, h := range hyps {
+				hm, _ := h.(map[string]any)
+				text, _ := hm["text"].(string)
+				conf, _ := hm["confidence"].(float64)
+				isPrimary, _ := hm["is_primary"].(bool)
+				rejected, _ := hm["rejected_reason"].(string)
+
+				pct := int(conf * 100)
+				var label string
+				switch {
+				case isPrimary:
+					label = fmt.Sprintf("[PRIMARY %d%%]", pct)
+				case rejected != "":
+					label = fmt.Sprintf("[REJECTED %d%%]", pct)
+				default:
+					label = fmt.Sprintf("[%d%%]", pct)
+				}
+				if rejected != "" {
+					fmt.Printf("    %s %s — %s\n", label, text, rejected)
+				} else {
+					fmt.Printf("    %s %s\n", label, text)
+				}
+			}
+		}
+	}
+}
+
 // runGateLoop handles an informed gate interactively: shows the triage findings
 // and confidence warning, prompts the operator to approve or deny, and if approved
 // asks which approval mode to use for the remediation playbook.
@@ -186,13 +250,24 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	sep := strings.Repeat("═", width)
 
 	fmt.Printf("\n%s\n", sep)
-	fmt.Println("  INFORMED GATE — review before remediation")
+	if gate.GateReason == "low_confidence" {
+		fmt.Println("  INFORMED GATE — LOW CONFIDENCE DIAGNOSIS")
+	} else {
+		fmt.Println("  INFORMED GATE — review before remediation")
+	}
 	fmt.Printf("%s\n\n", sep)
 
-	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
+	gateTarget := gate.TransitionTarget
+	if gateTarget == "" {
+		gateTarget = gate.EscalationTarget
+	}
+	if gateTarget != "" {
+		fmt.Printf("  Next playbook     : %s\n", gateTarget)
+	}
 	if gate.EscalationFindings != "" {
 		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
 	}
+	printGatePreviewAndReport(gate.RemediationPreview, gate.DiagnosticReport)
 
 	if gate.ConfidenceWarning != "" {
 		warnSep := strings.Repeat("─", width)
@@ -232,12 +307,25 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	if suggested == "" {
 		suggested = "review"
 	}
-	fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
-	modeInput, _ := reader.ReadString('\n')
-	modeInput = strings.TrimSpace(strings.ToLower(modeInput))
-	if modeInput == "" {
-		modeInput = suggested
+	validModes := map[string]bool{"manual": true, "review": true, "auto": true}
+	var modeInput string
+	for {
+		fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
+		modeInput, _ = reader.ReadString('\n')
+		modeInput = strings.TrimSpace(strings.ToLower(modeInput))
+		if modeInput == "" {
+			modeInput = suggested
+			break
+		}
+		if validModes[modeInput] {
+			break
+		}
+		fmt.Printf("  Invalid mode %q — enter manual, review, or auto (or press Enter for %s).\n", modeInput, suggested)
 	}
+
+	fmt.Print("  Reason (optional, press Enter to skip): ")
+	reasonInput, _ := reader.ReadString('\n')
+	reasonInput = strings.TrimSpace(reasonInput)
 
 	connStr := r.cfg.ConnStr
 	if r.cfg.AgentConnStr != "" {
@@ -248,6 +336,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		ResolvedBy:       r.cfg.OperatorID,
 		ApprovalMode:     modeInput,
 		ConnectionString: connStr,
+		Reason:           reasonInput,
 	})
 	if err != nil {
 		return fmt.Errorf("proceed-escalation: %w", err)
@@ -264,13 +353,6 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.ApproveRunResponse) error {
 	resolveURL := r.cfg.GatewayURL + "/api/v1/decisions/gate:" + gate.RunID + "/resolve"
 	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
-	fmt.Printf("  Escalation target : %s\n", gate.EscalationTarget)
-	if gate.EscalationFindings != "" {
-		fmt.Printf("  Findings          : %s\n", gate.EscalationFindings)
-	}
-	if gate.ConfidenceWarning != "" {
-		fmt.Printf("  WARNING           : %s\n", gate.ConfidenceWarning)
-	}
 	fmt.Printf("  Resolve at        : POST %s\n\n", resolveURL)
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
@@ -294,7 +376,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 	}
 
 	current := initial
-	const maxSteps = 20
+	const maxSteps = 100
 	mode := r.cfg.ApprovalMode
 	if initial.EffectiveApprovalMode != "" {
 		mode = initial.EffectiveApprovalMode
@@ -311,7 +393,8 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 		resolution := "approved"
 		switch {
 		case r.cfg.EmitAndWait && current.ApprovalID != "" &&
-			(mode == "manual" || (mode == "review" && current.Step.ActionClass != "read")):
+			current.Step.ActionClass != "read" &&
+			(mode == "manual" || mode == "review"):
 			slog.Info("agent_approve: step approval pending — waiting for external resolution",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,
@@ -503,6 +586,124 @@ func logicalArgs(args map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// submitFeedback prompts the operator for diagnosis quality feedback and POSTs
+// it to the gateway. Silent no-op when non-interactive or gateway not configured.
+func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagReport map[string]any) {
+	if r.cfg.GatewayURL == "" || runID == "" {
+		return
+	}
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+	reader := bufio.NewReader(tty)
+
+	fmt.Println()
+	fmt.Print("  Was the diagnosis correct? [y/n/skip]: ")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer == "" || answer == "skip" || answer == "s" {
+		return
+	}
+	var diagCorrect *bool
+	if answer == "y" || answer == "yes" {
+		v := true
+		diagCorrect = &v
+	} else if answer == "n" || answer == "no" {
+		v := false
+		diagCorrect = &v
+	} else {
+		return
+	}
+
+	// Suggest the primary hypothesis text as the default root cause.
+	defaultRootCause := primaryHypothesisText(diagReport)
+
+	prompt := "  Actual root cause"
+	if defaultRootCause != "" {
+		prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultRootCause)
+	}
+	fmt.Print(prompt + ": ")
+	causeInput, _ := reader.ReadString('\n')
+	causeInput = strings.TrimSpace(causeInput)
+	if causeInput == "" {
+		causeInput = defaultRootCause
+	}
+
+	fb := map[string]any{
+		"run_id":            runID,
+		"diagnosis_correct": diagCorrect,
+	}
+	if causeInput != "" {
+		fb["actual_root_cause"] = causeInput
+	}
+	if r.cfg.OperatorID != "" {
+		fb["operator"] = r.cfg.OperatorID
+	}
+	body, _ := json.Marshal(fb)
+	url := strings.TrimSuffix(r.cfg.GatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("faulttest: failed to submit feedback", "run_id", runID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		fmt.Printf("  Feedback submitted (run_id=%s)\n", runID)
+	}
+}
+
+// primaryHypothesisText extracts the primary hypothesis text from a raw diagnostic
+// report map (as received from the gateway JSON response).
+func primaryHypothesisText(diagReport map[string]any) string {
+	if diagReport == nil {
+		return ""
+	}
+	hyps, _ := diagReport["hypotheses"].([]any)
+	for _, h := range hyps {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isPrimary, _ := hm["is_primary"].(bool); isPrimary {
+			text, _ := hm["text"].(string)
+			return text
+		}
+	}
+	return ""
+}
+
+// printIncidentSummary prints a compact incident narrative link after a successful gate+recovery.
+func printIncidentSummary(resp testutil.AgentResponse, recoverySecs float64, gatewayURL string) {
+	if resp.RunID == "" {
+		return
+	}
+	fmt.Printf("Incident %s — resolved in %.1fs\n", resp.RunID, recoverySecs)
+	if diag := primaryHypothesisText(resp.DiagnosticReport); diag != "" {
+		fmt.Printf("  Diagnosis  : %s\n", diag)
+	}
+	target := resp.TransitionTarget
+	if target == "" {
+		target = resp.EscalationTarget
+	}
+	if target != "" {
+		fmt.Printf("  Remediation: %s\n", target)
+	}
+	if gatewayURL != "" {
+		base := strings.TrimSuffix(gatewayURL, "/")
+		fmt.Printf("  Narrative  : GET %s/api/v1/incidents/%s\n", base, resp.RunID)
+	}
 }
 
 // wrapText breaks s into lines of at most width runes, splitting on spaces.

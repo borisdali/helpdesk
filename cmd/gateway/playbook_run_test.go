@@ -2335,3 +2335,197 @@ func TestHandlePlaybookRun_GateEscalation_Monitor_NoIntercept(t *testing.T) {
 		t.Error("gate fired for recommended=monitor — should complete without operator gate")
 	}
 }
+
+// TestHandlePlaybookRun_GateEscalation_RemediationPreview verifies that when
+// gate_escalation=true fires and the remediation playbook can be resolved by
+// series_id, the gate response includes a populated remediation_preview block.
+func TestHandlePlaybookRun_GateEscalation_RemediationPreview(t *testing.T) {
+	triagePB := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage03",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples and autovacuum lag.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	remPB := &audit.Playbook{
+		PlaybookID:   "pb_vac_remediate01",
+		SeriesID:     "pbs_vacuum_remediate",
+		Name:         "Vacuum Remediation",
+		Description:  "Run VACUUM ANALYZE and verify dead tuple ratio drops below 20%.",
+		ApprovalMode: "review",
+		IsActive:     true,
+	}
+	agentText := "High dead tuple ratio detected.\n\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.32; recommended=manual_vacuum\n" +
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
+
+	triageData, _ := json.Marshal(triagePB)
+	remList, _ := json.Marshal(map[string]any{"playbooks": []*audit.Playbook{remPB}})
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			// fetchPlaybookBySeriesID uses ?series_id=...; the initial triage fetch uses /id path.
+			if r.URL.Query().Get("series_id") != "" {
+				w.Write(remList) //nolint:errcheck
+			} else {
+				w.Write(triageData) //nolint:errcheck
+			}
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_preview01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	rec := postPlaybookRun(t, gw, triagePB.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"bloat alert","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	preview, ok := resp["remediation_preview"].(map[string]any)
+	if !ok {
+		t.Fatalf("remediation_preview absent or wrong type; full response: %v", resp)
+	}
+	if preview["name"] != remPB.Name {
+		t.Errorf("remediation_preview.name = %q, want %q", preview["name"], remPB.Name)
+	}
+	if preview["approval_mode"] != remPB.ApprovalMode {
+		t.Errorf("remediation_preview.approval_mode = %q, want %q", preview["approval_mode"], remPB.ApprovalMode)
+	}
+	if preview["series_id"] != remPB.SeriesID {
+		t.Errorf("remediation_preview.series_id = %q, want %q", preview["series_id"], remPB.SeriesID)
+	}
+	if preview["description"] != remPB.Description {
+		t.Errorf("remediation_preview.description = %q, want %q", preview["description"], remPB.Description)
+	}
+}
+
+// TestLowConfidenceForceGate verifies the confidence-gate enforcement boundary.
+func TestLowConfidenceForceGate(t *testing.T) {
+	cases := []struct {
+		name   string
+		report *audit.DiagnosticReport
+		want   bool
+	}{
+		{
+			name:   "nil report — pre-B1 playbook, no gate",
+			report: nil,
+			want:   false,
+		},
+		{
+			name: "primary confidence 0.45 — below threshold, force gate",
+			report: &audit.DiagnosticReport{
+				Hypotheses: []audit.DiagnosticHypothesis{
+					{Rank: 1, IsPrimary: true, Confidence: 0.45, Text: "low-confidence root cause"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "primary confidence 0.50 — exactly at threshold, no gate",
+			report: &audit.DiagnosticReport{
+				Hypotheses: []audit.DiagnosticHypothesis{
+					{Rank: 1, IsPrimary: true, Confidence: 0.50, Text: "borderline confidence"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "primary confidence 0.75 — high confidence, no gate",
+			report: &audit.DiagnosticReport{
+				Hypotheses: []audit.DiagnosticHypothesis{
+					{Rank: 1, IsPrimary: true, Confidence: 0.75, Text: "high-confidence root cause"},
+					{Rank: 2, IsPrimary: false, Confidence: 0.20, Text: "alternative", RejectedReason: "ruled out"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "no primary marked — uncertain, force gate",
+			report: &audit.DiagnosticReport{
+				Hypotheses: []audit.DiagnosticHypothesis{
+					{Rank: 1, IsPrimary: false, Confidence: 0.60, Text: "hypothesis without primary flag"},
+				},
+			},
+			want: true,
+		},
+		{
+			name:   "non-nil report with empty hypotheses — uncertain, force gate",
+			report: &audit.DiagnosticReport{},
+			want:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lowConfidenceForceGate(tc.report)
+			if got != tc.want {
+				t.Errorf("lowConfidenceForceGate(%v) = %v, want %v", tc.report, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandlePlaybookRun_LowConfidence_ForcedGate verifies that when a triage
+// agent emits a low-confidence primary hypothesis (< 0.50), the gateway fires
+// a gate even without gate_escalation=true in the request, and sets
+// gate_reason="low_confidence" in the response.
+func TestHandlePlaybookRun_LowConfidence_ForcedGate(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage04",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Agent emits a properly structured low-confidence diagnosis.
+	// parseDiagnosticReport will parse HYPOTHESIS_1 + ROOT_CAUSE and mark
+	// Confidence=0.35, IsPrimary=true → lowConfidenceForceGate returns true.
+	agentText := "Two possible causes; I cannot determine which with confidence.\n\n" +
+		"HYPOTHESIS_1: autovacuum is genuinely stuck behind a long-running transaction | CONFIDENCE: 0.35 | EVIDENCE: \"last_autovacuum=2026-06-01\"\n" +
+		"HYPOTHESIS_2: bloat is from a single recent bulk delete, autovacuum will catch up | CONFIDENCE: 0.60 | REJECTED: autovacuum_count unchanged over two checks\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.41; autovacuum=stuck; blocker_pid=none; recommended=manual_vacuum\n" +
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	// Deliberately omit gate_escalation — forced gate must fire on its own.
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"bloat alert"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate — low-confidence gate did not fire", resp["status"])
+	}
+	if resp["gate_reason"] != "low_confidence" {
+		t.Errorf("gate_reason = %q, want low_confidence", resp["gate_reason"])
+	}
+	if resp["transition_target"] != "pbs_vacuum_remediate" {
+		t.Errorf("transition_target = %q, want pbs_vacuum_remediate", resp["transition_target"])
+	}
+}

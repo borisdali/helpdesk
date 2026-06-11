@@ -79,6 +79,20 @@ func (f Failure) TimeoutDuration() time.Duration {
 	return d
 }
 
+// IsAutoDBCompat reports whether faulttest can inject this fault against a
+// temporary Docker PostgreSQL it spins up itself (--auto-db mode).
+// True when: external-compat, non-kubernetes, and inject type is not ssh_exec.
+func (f Failure) IsAutoDBCompat() bool {
+	if !f.ExternalCompat || f.Category == "kubernetes" {
+		return false
+	}
+	t := f.ExternalInject.Type
+	if t == "" {
+		t = f.Inject.Type
+	}
+	return t != "ssh_exec"
+}
+
 // InjectSpec describes how to inject or tear down a failure.
 type InjectSpec struct {
 	Type         string            `yaml:"type"`
@@ -143,6 +157,10 @@ type HarnessConfig struct {
 	// External enables external PG mode: only external_compat faults are run,
 	// and ExternalInject/ExternalTeardown specs are used instead of Inject/Teardown.
 	External bool
+	// AutoDB instructs faulttest to spin up a temporary Docker PostgreSQL container
+	// and use it as the injection target. Implies External=true. Only auto-db-compat
+	// faults are run (ExternalCompat, non-kubernetes, non-ssh_exec inject).
+	AutoDB bool
 	// RemediateEnabled runs the remediation phase after injection + diagnosis.
 	RemediateEnabled bool
 	// GatewayURL is the helpdesk gateway base URL for playbook/agent remediation.

@@ -14,6 +14,7 @@ import (
 type playbookRunServer struct {
 	store         *audit.PlaybookRunStore
 	playbookStore *audit.PlaybookStore
+	feedbackStore *audit.RunFeedbackStore
 }
 
 // handleRecord handles POST /v1/fleet/playbooks/{playbookID}/runs.
@@ -74,6 +75,8 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		EscalatedTo      string                  `json:"escalated_to,omitempty"`
 		TransitionedTo   string                  `json:"transitioned_to,omitempty"`
 		FindingsSummary  string                  `json:"findings_summary,omitempty"`
+		AgentTranscript  string                  `json:"agent_transcript,omitempty"`
+		TraceID          string                  `json:"trace_id,omitempty"`
 		DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -85,7 +88,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.TransitionedTo, body.FindingsSummary, body.DiagnosticReport); err != nil {
+	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.TransitionedTo, body.FindingsSummary, body.AgentTranscript, body.TraceID, body.DiagnosticReport); err != nil {
 		slog.Error("failed to update playbook run", "run_id", runID, "err", err)
 		http.Error(w, "failed to update run", http.StatusInternalServerError)
 		return
@@ -141,26 +144,49 @@ func (s *playbookRunServer) handleGetRun(w http.ResponseWriter, r *http.Request)
 
 // handleStats handles GET /v1/fleet/playbooks/{playbookID}/stats.
 // Returns aggregated stats for the playbook's series.
-// handleListByOutcome handles GET /v1/fleet/playbook-runs?outcome=<outcome>&limit=<n>.
-// Returns runs matching the given outcome, most recent first.
+// handleListByOutcome handles GET /v1/fleet/playbook-runs.
+// Supports ?outcome=<outcome>, ?prior_run_id=<id>, and ?limit=<n>.
 func (s *playbookRunServer) handleListByOutcome(w http.ResponseWriter, r *http.Request) {
-	outcome := r.URL.Query().Get("outcome")
-	if outcome == "" {
-		http.Error(w, "outcome query parameter is required", http.StatusBadRequest)
-		return
-	}
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil {
 			limit = n
 		}
 	}
-	runs, err := s.store.ListByOutcome(r.Context(), outcome, limit)
-	if err != nil {
-		slog.Error("failed to list playbook runs by outcome", "outcome", outcome, "err", err)
-		http.Error(w, "failed to list runs", http.StatusInternalServerError)
-		return
+
+	var runs []*audit.PlaybookRun
+	var err error
+
+	q := r.URL.Query()
+	switch {
+	case q.Get("series_id") != "":
+		runs, err = s.store.ListBySeriesID(r.Context(), q.Get("series_id"), limit)
+		if err != nil {
+			slog.Error("failed to list playbook runs by series_id", "series_id", q.Get("series_id"), "err", err)
+			http.Error(w, "failed to list runs", http.StatusInternalServerError)
+			return
+		}
+	case q.Get("prior_run_id") != "":
+		runs, err = s.store.ListByPriorRunID(r.Context(), q.Get("prior_run_id"), limit)
+		if err != nil {
+			slog.Error("failed to list playbook runs by prior_run_id", "prior_run_id", q.Get("prior_run_id"), "err", err)
+			http.Error(w, "failed to list runs", http.StatusInternalServerError)
+			return
+		}
+	default:
+		outcome := q.Get("outcome")
+		if outcome == "" {
+			http.Error(w, "series_id, prior_run_id, or outcome query parameter is required", http.StatusBadRequest)
+			return
+		}
+		runs, err = s.store.ListByOutcome(r.Context(), outcome, limit)
+		if err != nil {
+			slog.Error("failed to list playbook runs by outcome", "outcome", outcome, "err", err)
+			http.Error(w, "failed to list runs", http.StatusInternalServerError)
+			return
+		}
 	}
+
 	if runs == nil {
 		runs = []*audit.PlaybookRun{}
 	}
@@ -184,6 +210,97 @@ func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Merge accuracy data from feedback store when available.
+	if s.feedbackStore != nil {
+		if fbStats, err := s.feedbackStore.StatsBySeries(r.Context(), pb.SeriesID); err == nil {
+			stats.FeedbackCount = fbStats.FeedbackCount
+			stats.CorrectCount = fbStats.CorrectCount
+			stats.AccuracyRate = fbStats.AccuracyRate
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats) //nolint:errcheck
+}
+
+// handleSubmitFeedback handles POST /v1/fleet/playbook-runs/{runID}/feedback.
+func (s *playbookRunServer) handleSubmitFeedback(w http.ResponseWriter, r *http.Request) {
+	if s.feedbackStore == nil {
+		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	var fb audit.RunFeedback
+	if err := json.NewDecoder(r.Body).Decode(&fb); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fb.RunID = runID
+	if operator := r.Header.Get("X-User"); operator != "" && fb.Operator == "" {
+		fb.Operator = operator
+	}
+	// Populate series_id from the run if not provided in the body.
+	if fb.SeriesID == "" {
+		if run, err := s.store.GetByRunID(r.Context(), runID); err == nil {
+			fb.SeriesID = run.SeriesID
+		}
+	}
+	if err := s.feedbackStore.Submit(r.Context(), &fb); err != nil {
+		slog.Error("failed to submit run feedback", "run_id", runID, "err", err)
+		http.Error(w, "failed to submit feedback", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(fb) //nolint:errcheck
+}
+
+// handleGetFeedback handles GET /v1/fleet/playbook-runs/{runID}/feedback.
+func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Request) {
+	if s.feedbackStore == nil {
+		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	fb, err := s.feedbackStore.GetByRunID(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "no feedback for run", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to get run feedback", "run_id", runID, "err", err)
+		http.Error(w, "failed to get feedback", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(fb) //nolint:errcheck
+}
+
+// handleListPendingFeedback handles GET /v1/fleet/playbook-runs/feedback-pending.
+// Returns RunFeedback placeholder records where diagnosis_correct has not been
+// submitted yet — these are feedback requests awaiting operator resolution.
+func (s *playbookRunServer) handleListPendingFeedback(w http.ResponseWriter, r *http.Request) {
+	if s.feedbackStore == nil {
+		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	items, err := s.feedbackStore.ListPending(r.Context())
+	if err != nil {
+		slog.Error("failed to list pending feedback", "err", err)
+		http.Error(w, "failed to list pending feedback", http.StatusInternalServerError)
+		return
+	}
+	if items == nil {
+		items = []*audit.RunFeedback{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(items) //nolint:errcheck
 }

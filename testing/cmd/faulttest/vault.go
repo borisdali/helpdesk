@@ -131,11 +131,13 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|suggest|suggest-update>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
 		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
+		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
+		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
@@ -147,6 +149,10 @@ func cmdVault(args []string) {
 		vaultStatus(args[1:])
 	case "drift":
 		vaultDrift(args[1:])
+	case "accuracy":
+		vaultAccuracy(args[1:])
+	case "incidents":
+		vaultIncidents(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -167,6 +173,9 @@ type playbookGatewayInfo struct {
 	resolved       int
 	resolutionRate float64 // 0.0–1.0
 	lastRunAt      string  // RFC3339 or empty
+	feedbackCount  int
+	correctCount   int
+	accuracyRate   float64 // 0.0–1.0; valid only when feedbackCount > 0
 }
 
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
@@ -205,6 +214,9 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 				Resolved       int     `json:"resolved"`
 				ResolutionRate float64 `json:"resolution_rate"`
 				LastRunAt      string  `json:"last_run_at"`
+				FeedbackCount  int     `json:"feedback_count"`
+				CorrectCount   int     `json:"correct_count"`
+				AccuracyRate   float64 `json:"accuracy_rate"`
 			} `json:"stats"`
 		} `json:"playbooks"`
 	}
@@ -217,6 +229,9 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 		info.resolved = s.Resolved
 		info.resolutionRate = s.ResolutionRate
 		info.lastRunAt = s.LastRunAt
+		info.feedbackCount = s.FeedbackCount
+		info.correctCount = s.CorrectCount
+		info.accuracyRate = s.AccuracyRate
 	}
 	return info
 }
@@ -232,6 +247,8 @@ func vaultList(args []string) {
 		fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
 		os.Exit(1)
 	}
+
+	failures := FilterFailures(cat, cfg)
 
 	runs, _ := loadHistory()
 
@@ -268,7 +285,7 @@ func vaultList(args []string) {
 	fmt.Printf("%-*s %-*s %-*s %-*s %-*s %s\n", colFault, "FAULT", colPlatform, "PLATFORM", colDiag, "DIAG PLAYBOOK", colRemed, "REMED PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
 	fmt.Println(strings.Repeat("-", colFault+1+colPlatform+1+colDiag+1+colRemed+1+colFaultTest+1+50))
 
-	for _, f := range cat.Failures {
+	for _, f := range failures {
 		playbookID := f.Remediation.PlaybookID
 		diagDisplay := f.DiagnosisPlaybookSeriesID
 		if diagDisplay == "" {
@@ -313,6 +330,9 @@ func vaultList(args []string) {
 		}
 
 		// ── incidents column (gateway) ────────────────────────────────────
+		// Resolution rate comes from the remediation playbook (did it fix the problem?).
+		// Accuracy comes from the diagnosis playbook (was the root cause correct?).
+		// These are independent signals on different series.
 		incidentCol := "-"
 		if playbookID != "" && cfg.GatewayURL != "" {
 			info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID)
@@ -338,8 +358,22 @@ func vaultList(args []string) {
 							lastDate = t.Format("2006-01-02")
 						}
 					}
-					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  last: %s%s",
-						info.totalRuns, info.resolutionRate*100, lastDate, sourceTag)
+					// Accuracy feedback is submitted against the triage/diagnosis series,
+					// not the remediation series — fetch it separately when available.
+					feedbackCount := info.feedbackCount
+					accuracyRate := info.accuracyRate
+					if f.DiagnosisPlaybookSeriesID != "" {
+						if diagInfo := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID); diagInfo.check == playbookFound && diagInfo.feedbackCount > 0 {
+							feedbackCount = diagInfo.feedbackCount
+							accuracyRate = diagInfo.accuracyRate
+						}
+					}
+					accuracyStr := "–"
+					if feedbackCount > 0 {
+						accuracyStr = fmt.Sprintf("%.0f%% accurate", accuracyRate*100)
+					}
+					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s  last: %s%s",
+						info.totalRuns, info.resolutionRate*100, accuracyStr, lastDate, sourceTag)
 				}
 			}
 		}
@@ -495,9 +529,7 @@ func vaultDrift(args []string) {
 	var target string
 	fs.IntVar(&sinceDays, "since-days", 90, "Days of history to analyze")
 	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
-	}
+	cfg := loadConfig(fs, args)
 
 	runs, err := loadHistory()
 	if err != nil {
@@ -569,14 +601,60 @@ func vaultDrift(args []string) {
 
 	sort.Slice(drifted, func(i, j int) bool { return drifted[i].drop > drifted[j].drop })
 
-	fmt.Printf("%-32s %-12s %-12s %s\n", "FAULT", "FIRST HALF", "SECOND HALF", "DRIFT")
-	fmt.Println(strings.Repeat("-", 72))
+	// Build fault→diagnosis series map from the catalog (best-effort; no gateway needed).
+	faultToSeries := make(map[string]string)
+	if cat, err := loadActiveCatalog(cfg); err == nil {
+		for _, f := range cat.Failures {
+			if f.DiagnosisPlaybookSeriesID != "" {
+				faultToSeries[f.ID] = f.DiagnosisPlaybookSeriesID
+			}
+		}
+	}
+
+	// Pre-fetch accuracy from gateway when available.
+	type accuracyInfo struct {
+		rate  float64
+		count int
+	}
+	accuracy := make(map[string]accuracyInfo) // keyed by fault id
+	if cfg.GatewayURL != "" {
+		for _, d := range drifted {
+			if sid, ok := faultToSeries[d.id]; ok {
+				info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+				if info.check == playbookFound && info.feedbackCount > 0 {
+					accuracy[d.id] = accuracyInfo{rate: info.accuracyRate, count: info.feedbackCount}
+				}
+			}
+		}
+	}
+
+	withAccuracy := cfg.GatewayURL != "" && len(accuracy) > 0
+	if withAccuracy {
+		fmt.Printf("%-32s %-12s %-12s %-8s %s\n", "FAULT", "FIRST HALF", "SECOND HALF", "DRIFT", "ACCURACY")
+		fmt.Println(strings.Repeat("-", 80))
+	} else {
+		fmt.Printf("%-32s %-12s %-12s %s\n", "FAULT", "FIRST HALF", "SECOND HALF", "DRIFT")
+		fmt.Println(strings.Repeat("-", 72))
+	}
 	for _, d := range drifted {
-		fmt.Printf("%-32s %-12s %-12s -%.0f%%\n", d.id,
-			fmt.Sprintf("%.0f%%", d.firstRate*100),
-			fmt.Sprintf("%.0f%%", d.secondRate*100),
-			d.drop*100,
-		)
+		driftStr := fmt.Sprintf("-%.0f%%", d.drop*100)
+		if withAccuracy {
+			accStr := "–"
+			if a, ok := accuracy[d.id]; ok {
+				accStr = fmt.Sprintf("%.0f%% (%d)", a.rate*100, a.count)
+			}
+			fmt.Printf("%-32s %-12s %-12s %-8s %s\n", d.id,
+				fmt.Sprintf("%.0f%%", d.firstRate*100),
+				fmt.Sprintf("%.0f%%", d.secondRate*100),
+				driftStr, accStr,
+			)
+		} else {
+			fmt.Printf("%-32s %-12s %-12s %s\n", d.id,
+				fmt.Sprintf("%.0f%%", d.firstRate*100),
+				fmt.Sprintf("%.0f%%", d.secondRate*100),
+				driftStr,
+			)
+		}
 	}
 }
 
@@ -594,6 +672,416 @@ func passRateOf(results []bool) float64 {
 		}
 	}
 	return float64(passed) / float64(len(results))
+}
+
+// ── vault accuracy ───────────────────────────────────────────────────────────
+
+// vaultAccuracy shows diagnosis accuracy for a playbook series based on
+// operator feedback submitted after incident recovery.
+//
+// Called with no argument: lists all catalog faults that have a diagnosis
+// playbook, fetches feedback stats for each, and shows a discovery table.
+//
+// Called with a series_id (pbs_*) or fault ID: shows stats for that series.
+// Fault IDs are resolved to their DiagnosisPlaybookSeriesID via the catalog.
+func vaultAccuracy(args []string) {
+	fs := flag.NewFlagSet("vault accuracy", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault accuracy")
+		os.Exit(1)
+	}
+
+	// No-arg: discovery mode — list all series with feedback.
+	if len(fs.Args()) == 0 {
+		vaultAccuracyAll(cfg)
+		return
+	}
+
+	arg := fs.Args()[0]
+	seriesID := arg
+
+	// If the arg doesn't look like a series_id (pbs_ prefix), treat it as a
+	// fault ID and resolve to DiagnosisPlaybookSeriesID via the catalog.
+	if !strings.HasPrefix(arg, "pbs_") {
+		cat, err := loadActiveCatalog(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+			os.Exit(1)
+		}
+		var found bool
+		for _, f := range cat.Failures {
+			if f.ID == arg {
+				if f.DiagnosisPlaybookSeriesID == "" {
+					fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook — nothing to report.\n", arg)
+					os.Exit(1)
+				}
+				seriesID = f.DiagnosisPlaybookSeriesID
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Unknown argument %q: expected a series_id (pbs_...) or a fault ID from the catalog.\n", arg)
+			fmt.Fprintln(os.Stderr, "Run `faulttest vault accuracy` with no args to list all series with feedback.")
+			os.Exit(1)
+		}
+	}
+
+	info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
+	if info.check != playbookFound {
+		fmt.Fprintf(os.Stderr, "Playbook series %q not found in gateway.\n", seriesID)
+		// Hint when the user passed a remediation series_id by mistake.
+		if strings.Contains(seriesID, "remediat") {
+			suggestion := strings.NewReplacer("_remediate", "_triage", "_remediation", "_triage").Replace(seriesID)
+			if suggestion != seriesID {
+				fmt.Fprintf(os.Stderr, "Note: feedback is recorded on the triage run, not the remediation run.\n")
+				fmt.Fprintf(os.Stderr, "Try: faulttest vault accuracy %s\n", suggestion)
+			}
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("Diagnosis accuracy for series: %s\n\n", seriesID)
+	if info.feedbackCount == 0 {
+		fmt.Println("  No feedback submitted yet.")
+		fmt.Println("  Run a fault test and submit feedback after recovery to populate this report.")
+		// Hint when the series looks like a remediation series.
+		if strings.Contains(seriesID, "remediat") {
+			suggestion := strings.NewReplacer("_remediate", "_triage", "_remediation", "_triage").Replace(seriesID)
+			if suggestion != seriesID {
+				fmt.Println()
+				fmt.Printf("  Note: feedback is recorded on the triage run, not the remediation run.\n")
+				fmt.Printf("  Try: faulttest vault accuracy %s\n", suggestion)
+			}
+		} else {
+			fmt.Println()
+			fmt.Println("  Tip: run `faulttest vault accuracy` (no args) to list all series with feedback.")
+		}
+		return
+	}
+	fmt.Printf("  Feedback submitted : %d runs\n", info.feedbackCount)
+	fmt.Printf("  Correct diagnoses  : %d\n", info.correctCount)
+	fmt.Printf("  Accuracy rate      : %.0f%%\n", info.accuracyRate*100)
+}
+
+// vaultAccuracyAll is the no-arg mode: scans every catalog fault that has a
+// DiagnosisPlaybookSeriesID, fetches feedback stats for each, and prints a
+// summary table grouped by whether feedback has been submitted.
+func vaultAccuracyAll(cfg *HarnessConfig) {
+	cat, err := loadActiveCatalog(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+		os.Exit(1)
+	}
+
+	type entry struct {
+		faultID  string
+		seriesID string
+		count    int
+		correct  int
+		rate     float64
+	}
+
+	seen := make(map[string]bool)
+	var withFeedback, withoutFeedback []entry
+	for _, f := range cat.Failures {
+		sid := f.DiagnosisPlaybookSeriesID
+		if sid == "" || seen[sid] {
+			continue
+		}
+		seen[sid] = true
+		info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+		e := entry{faultID: f.ID, seriesID: sid}
+		if info.check == playbookFound {
+			e.count = info.feedbackCount
+			e.correct = info.correctCount
+			e.rate = info.accuracyRate
+		}
+		if e.count > 0 {
+			withFeedback = append(withFeedback, e)
+		} else {
+			withoutFeedback = append(withoutFeedback, e)
+		}
+	}
+
+	if len(withFeedback) == 0 && len(withoutFeedback) == 0 {
+		fmt.Println("No faults with diagnosis playbooks found in catalog.")
+		return
+	}
+
+	if len(withFeedback) > 0 {
+		colFault := 36
+		colSeries := 36
+		fmt.Printf("  %-*s %-*s %8s %8s %s\n", colFault, "FAULT", colSeries, "SERIES", "FEEDBACK", "CORRECT", "ACCURACY")
+		fmt.Printf("  %-*s %-*s %8s %8s %s\n", colFault, strings.Repeat("─", colFault), colSeries, strings.Repeat("─", colSeries), "────────", "───────", "────────")
+		for _, e := range withFeedback {
+			fmt.Printf("  %-*s %-*s %8d %8d   %.0f%%\n", colFault, e.faultID, colSeries, e.seriesID, e.count, e.correct, e.rate*100)
+		}
+		fmt.Println()
+		fmt.Println("  Run `faulttest vault accuracy <series_id or fault_id>` for the full breakdown.")
+	} else {
+		fmt.Println("  No feedback has been submitted yet.")
+	}
+
+	if len(withoutFeedback) > 0 {
+		noFeedbackSeries := make([]string, len(withoutFeedback))
+		for i, e := range withoutFeedback {
+			noFeedbackSeries[i] = e.seriesID
+		}
+		fmt.Printf("\n  %d series awaiting first feedback: %s\n", len(withoutFeedback), strings.Join(noFeedbackSeries, ", "))
+	}
+}
+
+// ── vault incidents ───────────────────────────────────────────────────────
+
+// incidentRun is a minimal view of a playbook run used for the incidents table.
+type incidentRun struct {
+	RunID           string `json:"run_id"`
+	SeriesID        string `json:"series_id"`
+	Outcome         string `json:"outcome"`
+	Operator        string `json:"operator"`
+	StartedAt       string `json:"started_at"`
+	CompletedAt     string `json:"completed_at"`
+	FindingsSummary string `json:"findings_summary"`
+	PriorRunID      string `json:"prior_run_id"`
+}
+
+// incidentFeedback is the feedback response shape from GET .../feedback.
+type incidentFeedback struct {
+	RunID            string  `json:"run_id"`
+	DiagnosisCorrect *bool   `json:"diagnosis_correct"`
+	ActualRootCause  string  `json:"actual_root_cause"`
+	Operator         string  `json:"operator"`
+}
+
+// fetchRunsBySeries calls GET /api/v1/fleet/playbook-runs?series_id=<sid>&limit=<n>.
+func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incidentRun, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") +
+		fmt.Sprintf("/api/v1/fleet/playbook-runs?series_id=%s&limit=%d", seriesID, limit)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Runs []incidentRun `json:"runs"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return result.Runs, nil
+}
+
+// fetchFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
+// Returns nil (not an error) when no feedback has been submitted.
+func fetchFeedback(gatewayURL, apiKey, runID string) *incidentFeedback {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	defer resp.Body.Close()
+	var fb incidentFeedback
+	if err := json.NewDecoder(resp.Body).Decode(&fb); err != nil {
+		return nil
+	}
+	if fb.RunID == "" {
+		return nil
+	}
+	return &fb
+}
+
+// fetchRemediationRun fetches the remediation run linked to a triage run via
+// GET /api/v1/fleet/playbook-runs?prior_run_id={triageRunID}&limit=1.
+// Returns nil when no remediation run exists for the triage run.
+func fetchRemediationRun(gatewayURL, apiKey, triageRunID string) *incidentRun {
+	url := strings.TrimSuffix(gatewayURL, "/") +
+		"/api/v1/fleet/playbook-runs?prior_run_id=" + triageRunID + "&limit=1"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Runs []incidentRun `json:"runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Runs) == 0 {
+		return nil
+	}
+	return &result.Runs[0]
+}
+
+// formatRemediationOutcome formats a remediation run as "resolved 8.1s", "abandoned", etc.
+func formatRemediationOutcome(r *incidentRun) string {
+	if r == nil {
+		return "–"
+	}
+	outcome := r.Outcome
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	if r.StartedAt != "" && r.CompletedAt != "" {
+		t0, err0 := time.Parse(time.RFC3339, r.StartedAt)
+		t1, err1 := time.Parse(time.RFC3339, r.CompletedAt)
+		if err0 == nil && err1 == nil && t1.After(t0) {
+			secs := t1.Sub(t0).Seconds()
+			if secs < 60 {
+				return fmt.Sprintf("%s %.1fs", outcome, secs)
+			}
+			return fmt.Sprintf("%s %.0fm", outcome, secs/60)
+		}
+	}
+	return outcome
+}
+
+// vaultIncidents lists incidents (triage run IDs) for a fault or playbook series,
+// including outcome, timestamp, truncated findings, and feedback status.
+// Usage: faulttest vault incidents <fault-id or series-id> [--limit N]
+func vaultIncidents(args []string) {
+	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
+	var limit int
+	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents")
+		os.Exit(1)
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault incidents <fault-id or series-id> [--limit N]")
+		os.Exit(1)
+	}
+
+	arg := fs.Args()[0]
+	seriesID := arg
+
+	// Resolve fault ID → diagnosis series ID via catalog.
+	if !strings.HasPrefix(arg, "pbs_") {
+		cat, err := loadActiveCatalog(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+			os.Exit(1)
+		}
+		var found bool
+		for _, f := range cat.Failures {
+			if f.ID == arg {
+				if f.DiagnosisPlaybookSeriesID == "" {
+					fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook.\n", arg)
+					os.Exit(1)
+				}
+				seriesID = f.DiagnosisPlaybookSeriesID
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	runs, err := fetchRunsBySeries(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID, limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching incidents: %v\n", err)
+		os.Exit(1)
+	}
+	if len(runs) == 0 {
+		fmt.Printf("No incidents found for series %q.\n", seriesID)
+		return
+	}
+
+	fmt.Printf("Incidents for %s (%s) — %d runs\n\n", arg, seriesID, len(runs))
+
+	const (
+		colRunID    = 14
+		colDate     = 16
+		colDiag     = 10
+		colRemed    = 16
+		colFeedback = 12
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colDate, "STARTED", colDiag, "DIAG", colRemed, "REMEDIATION", colFeedback, "FEEDBACK", "FINDINGS")
+	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colDiag+2+colRemed+2+colFeedback+2+46))
+
+	for _, run := range runs {
+		date := run.StartedAt
+		if t, err := time.Parse(time.RFC3339, run.StartedAt); err == nil {
+			date = t.Format("2006-01-02 15:04")
+		} else if len(run.StartedAt) >= 16 {
+			date = run.StartedAt[:16]
+		}
+
+		diagOutcome := run.Outcome
+		if diagOutcome == "" {
+			diagOutcome = "unknown"
+		}
+
+		remed := fetchRemediationRun(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		remedStr := formatRemediationOutcome(remed)
+
+		fb := fetchFeedback(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		feedbackStr := "–"
+		if fb != nil {
+			if fb.DiagnosisCorrect == nil {
+				feedbackStr = "submitted"
+			} else if *fb.DiagnosisCorrect {
+				feedbackStr = "✓ correct"
+			} else {
+				feedbackStr = "✗ wrong"
+			}
+		}
+
+		findings := run.FindingsSummary
+		if len(findings) > 46 {
+			findings = findings[:43] + "..."
+		}
+		if findings == "" {
+			findings = "–"
+		}
+
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+			colRunID, run.RunID,
+			colDate, date,
+			colDiag, diagOutcome,
+			colRemed, remedStr,
+			colFeedback, feedbackStr,
+			findings,
+		)
+	}
+
+	fmt.Println()
+	fmt.Printf("To submit feedback:\n")
+	fmt.Printf("  curl -sX POST %s/api/v1/decisions/feedback:<run_id>/resolve \\\n", cfg.GatewayURL)
+	fmt.Printf("    -H 'Authorization: Bearer $API_KEY' -H 'Content-Type: application/json' \\\n")
+	fmt.Printf("    -d '{\"resolution\": \"approved\", \"resolved_by\": \"you@example.com\", \"reason\": \"<root cause>\"}'\n")
+	fmt.Printf("  (resolution=approved → correct, resolution=denied → wrong diagnosis)\n")
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────

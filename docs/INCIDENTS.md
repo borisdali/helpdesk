@@ -96,6 +96,8 @@ When remediation succeeds, faulttest calls the same `from-trace` endpoint and sa
 
 The critical point: **from the Vault's perspective, a real Incident and an injected Incident look identical.** Both produce a draft. Both go through the same human review gate before activation. The Vault does not distinguish between production knowledge and validated synthetic knowledge — it accumulates both.
 
+See also the [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a concrete example of this path.
+
 ---
 
 ## Faults and Incidents

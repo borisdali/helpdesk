@@ -1,7 +1,7 @@
 # aiHelpDesk User Journeys: Audit Trail Across a Request
 
-This document covers the `GET /v1/journeys` endpoint and the concept of a
-journey in the aiHelpDesk [audit model](AUDIT.md). For the broader
+This document covers the `GET /v1/journeys` endpoint and the concept of an
+aiHelpDesk Journey [audit model](AUDIT.md). For the broader
 governance architecture see [AIGOVERNANCE.md](AIGOVERNANCE.md).
 For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
 
@@ -9,7 +9,7 @@ For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
 
 ## 1. What is an aiHelpDesk Journey?
 
-A **journey** is everything that happened as a result of one user request —
+A **Journey** is everything that happened as a result of one user request —
 all the audit events that share the same `trace_id`.
 
 A single natural-language query like _"show me slow queries on my-db postgres database"_
@@ -39,7 +39,7 @@ model returns a pure function call with no preceding text, nothing is recorded
 for that turn (there is no deliberation to capture).
 
 ```bash
-# Retrieve all reasoning events for a specific journey
+# Retrieve all reasoning events for a specific Journey
 curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=agent_reasoning"
 ```
 
@@ -55,7 +55,7 @@ curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=agent_reas
 
 - `session_id → trace_id` is 1:M — one agent session handles many user requests.
 - `trace_id → event_id` is 1:M — one user request produces many audit records.
-- `trace_id` is what uniquely identifies a journey.
+- `trace_id` is what uniquely identifies a Journey.
 
 ### 2.1 Trace ID prefixes
 
@@ -63,7 +63,7 @@ curl "http://localhost:1199/v1/events?trace_id=tr_7c2a1b9e&event_type=agent_reas
 |--------|--------|
 | `tr_` | Natural-language query via `POST /api/v1/query` (orchestrator-routed) |
 | `tr_flj_` | Fleet job — `tr_` + job ID (e.g. `tr_flj_4dd009b7`); one trace per job |
-| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (not a journey) |
+| `dt_` | Direct tool call via `POST /api/v1/db/{tool}` or `/api/v1/k8s/{tool}` (not a Journey) |
 
 Events without a `trace_id` are agent invocations that predate trace propagation
 or were made by scripts that bypassed the Gateway entirely.
@@ -86,7 +86,7 @@ User → Gateway :8080                  auditd :1199
          │                                │              └── pol_* events
          │                                │
          └── GET /api/v1/governance/journeys ──────────► GET /v1/journeys
-             (read journeys)                             returns []JourneySummary
+             (read Journeys)                             returns []JourneySummary
 ```
 
 The Gateway proxies all governance reads under `/api/v1/governance/...`.
@@ -96,7 +96,7 @@ The raw endpoint at `/v1/journeys` is served directly by auditd.
 
 ## 4. Accessing the API by Deployment Type
 
-The journey and events endpoints are served by **auditd** (port 1199) and
+The Journey and events endpoints are served by **auditd** (port 1199) and
 proxied by the **Gateway** (port 8080). Which address you use depends on your
 deployment.
 
@@ -151,25 +151,25 @@ request.
 ### 5.1 `GET /v1/journeys` (auditd)
 ### 5.2 `GET /api/v1/governance/journeys` (Gateway proxy)
 
-Returns an array of journey summaries, newest first.
+Returns an array of Journey summaries, newest first.
 
 ### 5.3 Query parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `user` | string | Filter to journeys initiated by this user ID |
+| `user` | string | Filter to Journeys initiated by this user ID |
 | `purpose` | string | Filter by declared purpose (e.g. `fleet_rollout`, `remediation`, `emergency`) |
-| `from` | RFC3339 | Only journeys whose anchor event is at or after this time |
-| `until` | RFC3339 | Only journeys whose anchor event is before this time |
+| `from` | RFC3339 | Only Journeys whose anchor event is at or after this time |
+| `until` | RFC3339 | Only Journeys whose anchor event is before this time |
 | `since` | duration | Shorthand for `from=now-duration` (e.g. `since=24h`, `since=7d`) |
-| `limit` | int | Maximum number of journeys to return (default: 50) |
+| `limit` | int | Maximum number of Journeys to return (default: 50) |
 | `category` | string | Filter by request category (e.g. `database`, `kubernetes`) |
-| `outcome` | string | Filter by computed journey outcome (e.g. `outcome=unverified_claim`, `outcome=error`) |
-| `has_retries` | bool | When `true`, return only journeys where at least one mutation tool had to retry |
-| `trace_id` | string | Filter to a single journey by exact trace ID |
+| `outcome` | string | Filter by computed Journey outcome (e.g. `outcome=unverified_claim`, `outcome=error`) |
+| `has_retries` | bool | When `true`, return only Journeys where at least one mutation tool had to retry |
+| `trace_id` | string | Filter to a single Journey by exact trace ID |
 | `origin` | string | Filter by dispatch path: `agent` (LLM-mediated) or `gateway`. See [§7.1](#71-origin-values-in-journeys). |
 
-All parameters are optional. With no parameters, the 50 most recent journeys
+All parameters are optional. With no parameters, the 50 most recent Journeys
 are returned.
 
 ### 5.4 Response
@@ -223,7 +223,7 @@ are returned.
 
 | Field | Description |
 |-------|-------------|
-| `trace_id` | Unique journey identifier; use this to fetch full event detail |
+| `trace_id` | Unique Journey identifier; use this to fetch full event detail |
 | `started_at` | Timestamp of the first `delegation_decision` or `gateway_request` event |
 | `ended_at` | Timestamp of the last event in the trace |
 | `duration_ms` | Wall-clock duration from first to last event |
@@ -231,12 +231,12 @@ are returned.
 | `user_query` | Original natural-language query text |
 | `agent` | Agent that handled the request |
 | `category` | Request category from the delegation event (`database`, `kubernetes`, etc.) |
-| `tools_used` | Unique tool names called during this journey, sorted alphabetically |
+| `tools_used` | Unique tool names called during this Journey, sorted alphabetically |
 | `outcome` | Highest-priority outcome across all events (see [§5.6](#56-journey-outcomes)) |
 | `event_count` | Audit events recorded under this trace (excludes `delegation_verification` and `verification_outcome` plumbing events) |
 | `retry_count` | Number of mutation-tool re-poll attempts (non-zero means a tool had to wait for state to propagate but ultimately succeeded) |
-| `origin` | Dispatch path for this journey: `"agent"` for LLM-mediated interactions, `"gateway"` for gateway-originated NL queries. Taken from the first `tool_execution` event in the trace. See [§7.1](#71-origin-values-in-journeys). |
-| `has_mismatch` | `true` when at least one `delegation_verification` event in this journey has `mismatch=true` — meaning an agent returned success but no matching tool execution appears in the audit trail. Omitted (falsy) when the journey is clean. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
+| `origin` | Dispatch path for this Journey: `"agent"` for LLM-mediated interactions, `"gateway"` for gateway-originated NL queries. Taken from the first `tool_execution` event in the trace. See [§7.1](#71-origin-values-in-journeys). |
+| `has_mismatch` | `true` when at least one `delegation_verification` event in this Journey has `mismatch=true` — meaning an agent returned success but no matching tool execution appears in the audit trail. Omitted (falsy) when the Journey is clean. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
 
 ### 5.6 Journey outcomes
 
@@ -296,7 +296,7 @@ curl -s "http://localhost:1199/v1/journeys?outcome=error"
 ### 6.4 Unverified claims — possible LLM fabrication
 
 ```bash
-# Find all journeys where the orchestrator claimed success but audit disagrees
+# Find all Journeys where the orchestrator claimed success but audit disagrees
 curl -s "http://localhost:1199/v1/journeys?outcome=unverified_claim"
 
 # Then drill into a specific trace to see the delegation_verification event
@@ -325,7 +325,7 @@ curl -s "http://localhost:1199/v1/journeys?limit=200" \
 ### 6.8 Filter by dispatch path
 
 ```bash
-# Only LLM-mediated journeys (agent selected the tools)
+# Only LLM-mediated Journeys (agent selected the tools)
 curl -s "http://localhost:1199/v1/journeys?origin=agent"
 
 # Direct-tool events for a specific fleet job trace (raw event view)
@@ -340,7 +340,7 @@ echo "direct-dispatch events since midnight: $DIRECT"
 
 ### 6.9 Drilling Into a Journey
 
-Once you have a `trace_id`, fetch every event in that journey from the events
+Once you have a `trace_id`, fetch every event in that Journey from the events
 endpoint:
 
 ```bash
@@ -366,7 +366,7 @@ See [GOVEXPLAIN.md](GOVEXPLAIN.md) for full govexplain reference.
 
 ## 7. Journey Coverage
 
-A journey appears in `GET /v1/journeys` when its trace has an **anchor event**
+A Journey appears in `GET /v1/journeys` when its trace has an **anchor event**
 with a non-empty `trace_id`. Two event types serve as anchors:
 
 | Source | Anchor event | Trace prefix |
@@ -374,30 +374,30 @@ with a non-empty `trace_id`. Two event types serve as anchors:
 | Orchestrator REPL (`cmd/helpdesk`) | `delegation_decision` | `tr_` |
 | Gateway NL query (`POST /api/v1/query`) | `gateway_request` (no tool) | `tr_` |
 
-- **NL queries via `POST /api/v1/query`** always produce a journey — the
+- **NL queries via `POST /api/v1/query`** always produce a Journey — the
   Gateway records a `gateway_request` anchor event that ties all subsequent
   agent tool calls to the trace.
 - **Direct tool calls via `POST /api/v1/db/{tool}`** produce a Gateway-side
   `gateway_request` event with a `dt_` trace and a `tool_name` set. These
   appear in `GET /v1/events` but **not** in `GET /v1/journeys`.
-- **Fleet jobs** appear as journeys. When a fleet job is created via
+- **Fleet jobs** appear as Journeys. When a fleet job is created via
   `POST /api/v1/fleet/jobs`, the gateway records a `gateway_request` anchor
   event with trace ID `tr_<jobID>` and no tool name. All subsequent tool
   calls for that job (across all servers and steps) carry the same
-  `X-Trace-ID: tr_<jobID>` header, so they are grouped under one journey.
-  The journey's `user_id` is the fleet-runner service account, `user_query` is
+  `X-Trace-ID: tr_<jobID>` header, so they are grouped under one Journey.
+  The Journey's `user_id` is the fleet-runner service account, `user_query` is
   `"fleet job: <name>"`, and `purpose` is `fleet_rollout`.
 - **Raw A2A calls** to an agent endpoint with no `trace_id` in message metadata
   appear in `GET /v1/events` with an empty `trace_id` and are not surfaced by
-  journeys at all.
+  Journeys at all.
 
-To see all events regardless of journey status, use `GET /v1/events` directly.
+To see all events regardless of Journey status, use `GET /v1/events` directly.
 
 ```bash
-# All fleet job journeys
+# All fleet job Journeys
 curl "http://localhost:1199/v1/journeys?purpose=fleet_rollout"
 
-# A specific fleet job's journey
+# A specific fleet job's Journey
 curl "http://localhost:1199/v1/journeys?trace_id=tr_flj_4dd009b7"
 
 # All events for a fleet job (full detail)
@@ -407,7 +407,7 @@ curl "http://localhost:1199/v1/events?trace_id=tr_flj_4dd009b7"
 ### 7.1 Origin values in journeys
 
 The `origin` field on a `JourneySummary` records the dispatch path used for
-the tool calls in that journey. It is taken from the **first `tool_execution`
+the tool calls in that Journey. It is taken from the **first `tool_execution`
 event** found in the trace.
 
 | Value | Meaning | Typical source |
@@ -416,31 +416,65 @@ event** found in the trace.
 | `"gateway"` | Tools were invoked by the gateway itself | Governance or policy evaluation endpoints |
 
 > **Why `direct_tool` never appears here:** Fleet-runner jobs use a `dt_` trace
-> prefix. The journey view excludes `dt_` traces (they have `tool_name` set on
-> the `gateway_request` anchor, which disqualifies them as journey anchors).
+> prefix. The Journey view excludes `dt_` traces (they have `tool_name` set on
+> the `gateway_request` anchor, which disqualifies them as Journey anchors).
 > Fleet-runner tool calls are fully auditable via `GET /v1/events?trace_id=dt_...`
-> and their individual `origin` field is `"direct_tool"` — but the journey
+> and their individual `origin` field is `"direct_tool"` — but the Journey
 > aggregation view is intentionally restricted to human-initiated or
 > orchestrator-mediated sessions.
 
 ```bash
-# Only LLM-mediated journeys (interactive operator sessions)
+# Only LLM-mediated Journeys (interactive operator sessions)
 curl "http://localhost:1199/v1/journeys?origin=agent"
 
-# Confirm no fleet-runner direct-tool journeys exist
+# Confirm no fleet-runner direct-tool Journeys exist
 curl "http://localhost:1199/v1/journeys?origin=direct_tool"   # always []
 
 # All direct-tool events for a fleet job (raw event view)
 curl "http://localhost:1199/v1/events?origin=direct_tool&trace_id=dt_abc12345"
 ```
 
----
+### 7.2 Playbook incident trails
+
+Playbook runs produce a parallel audit trail that is distinct from the NL-query Journey view. Understanding the difference helps you find the right view for the right question.
+
+| Question | Use |
+|----------|-----|
+| "What did the agent investigate during this query session?" | `GET /v1/journeys` + drill-in |
+| "What did the agent think while running this Playbook?" | `GET /api/v1/fleet/playbook-runs/{runID}/events` |
+| "What happened across the full triage→gate→remediation incident?" | `GET /api/v1/incidents/{runID}` |
+
+**Why Playbook runs don't appear in `GET /v1/journeys`:**
+
+Every agent-mode Playbook run is assigned a `trace_id` stored on the `PlaybookRun` record. This trace ID uses the run ID as its value (`plr_*`), not the `tr_` prefix that Journey anchors require. This is intentional: Playbook runs have a structured lifecycle (triage → gate → remediation → feedback) that the flat Journey view cannot express. The incident narrative endpoint (`GET /api/v1/incidents/{runID}`) is the Playbook-native equivalent of `GET /v1/journeys` drilling.
+
+**Accessing the raw event trail:**
+
+```bash
+# Chain-of-thought events via the Gateway (agent_reasoning, tool_execution, policy_decision)
+curl "http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/events"
+
+# All events including gate_acknowledged and other types — via auditd directly
+curl "http://localhost:1199/v1/events?trace_id=plr_a3f7c1b2"
+
+# Filter to reasoning only
+curl "http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/events?types=agent_reasoning"
+```
+
+**The incident narrative:**
+
+```bash
+# Structured triage→gate→remediation view assembled from run records and audit events
+curl "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" | jq '{triage, gate, remediation, feedback}'
+```
+
+See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a complete walkthrough of both trails in context.
 
 ---
 
 ## 8. Unverified Claims and LLM Fabrication Detection
 
-The `unverified_claim` outcome is the highest-severity journey outcome and
+The `unverified_claim` outcome is the highest-severity Journey outcome and
 indicates a potential **LLM fabrication** incident: the orchestrator delegated
 a destructive action (e.g. terminate a connection) to a sub-agent, but the
 audit trail shows no destructive tool was actually executed.
@@ -461,7 +495,7 @@ When `mismatch=true`, four independent signals fire simultaneously:
 
 | Signal | Where | Details |
 |--------|-------|---------|
-| **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the journey object |
+| **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the Journey object |
 | **HTTP response header** | API caller | Gateway sets `X-Audit-Mismatch: true` on the HTTP response for the offending request |
 | **Prometheus counter** | Gateway `/metrics` | `gateway_fabrication_mismatches_total{agent, action_class}` incremented |
 | **Security alert** | auditor → incident webhook | auditor fires a `CRITICAL` `fabrication_mismatch` incident to `--incident-webhook` |
@@ -472,7 +506,7 @@ user and **not** claim success.
 ### Investigating an unverified claim
 
 ```bash
-# 1. Find all unverified claim journeys — has_mismatch: true on each
+# 1. Find all unverified claim Journeys — has_mismatch: true on each
 curl -s "http://localhost:1199/v1/journeys?outcome=unverified_claim"
 
 # 2. Get the trace_id from the result, then fetch all events for that trace
@@ -487,10 +521,10 @@ The `delegation_verification` event shows:
 - `destructive_confirmed`: which of those were destructive
 - `mismatch`: whether there is a discrepancy
 
-You can also spot mismatches directly on the journey object without a separate filter — any journey with `"has_mismatch": true` had at least one fabrication event, regardless of what other outcome it carries.
+You can also spot mismatches directly on the Journey object without a separate filter — any Journey with `"has_mismatch": true` had at least one fabrication event, regardless of what other outcome it carries.
 
 ```bash
-# All recent journeys with at least one mismatch — includes cases where
+# All recent Journeys with at least one mismatch — includes cases where
 # the outcome was overridden by a higher-priority signal (e.g. "error")
 curl -s "http://localhost:1199/v1/journeys" | jq '[.[] | select(.has_mismatch)]'
 ```
@@ -596,7 +630,7 @@ curl -s "http://localhost:8080/api/v1/governance/events?event_type=delegation_de
 
 If this returns `0`, either the orchestrator is not running with
 `HELPDESK_AUDIT_URL` set, or you are querying a fresh database. Run a
-natural-language query via `POST /api/v1/query` to produce the first journey.
+natural-language query via `POST /api/v1/query` to produce the first Journey.
 
 ### 10.3 Events visible in `/v1/events` but not in `/v1/journeys`
 

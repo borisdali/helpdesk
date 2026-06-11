@@ -451,6 +451,13 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 	if opts.EventType != "" {
 		query += " AND event_type = ?"
 		args = append(args, string(opts.EventType))
+	} else if len(opts.EventTypes) > 0 {
+		placeholders := make([]string, len(opts.EventTypes))
+		for i, et := range opts.EventTypes {
+			placeholders[i] = "?"
+			args = append(args, string(et))
+		}
+		query += " AND event_type IN (" + strings.Join(placeholders, ",") + ")"
 	}
 	if opts.Agent != "" {
 		query += " AND decision_agent = ?"
@@ -537,6 +544,7 @@ type QueryOptions struct {
 	EventID        string         // filter by exact event ID (returns at most one event)
 	SessionID      string
 	EventType      EventType
+	EventTypes     []EventType    // filter by multiple event types (OR); ignored when EventType is set
 	Agent          string
 	Since          time.Time
 	MinConfidence  float64

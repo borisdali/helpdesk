@@ -57,8 +57,11 @@ guidance: |
   Remediation requires a manifest change that cannot be automated without
   further context about the intended resource requirements.
 
-  Final step: after your analysis, output exactly these two lines in this
+  Final step: after your analysis, output exactly these lines in this
   format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: pod=<name>; reason=<Insufficient_memory|Insufficient_cpu|node_affinity|no_nodes|other>; requested_memory=<value>; requested_cpu=<value>; scheduling_message=<first FailedScheduling event message>
   ESCALATE_TO: none
 escalation:

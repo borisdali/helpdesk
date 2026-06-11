@@ -75,6 +75,14 @@ guidance: |
   parameters if an inactive slot is present. Those changes have no effect while
   a stale slot retains old WAL segments.
 
+  Final step: after your analysis, output exactly these lines in this
+  format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary root cause of WAL accumulation> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: slot=<slot_name | none>; lag_bytes=<N | 0>; archive_mode=<on|off>; root_cause=<inactive_slot|archiver_failure|long_tx|write_volume>; recommended=<drop_slot|fix_archiver|tune_wal|monitor>
+  ESCALATE_TO: pbs_stale_slot_remediate
+
 escalation:
   - "archive_mode = on with evidence of archiver failure — fix archiver before touching slots"
   - "slot lag_bytes > 50 GB — disk may fill before operator approves the drop"

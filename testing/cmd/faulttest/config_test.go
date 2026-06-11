@@ -347,6 +347,67 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 			t.Errorf("external filter returned non-compatible fault %q", f.ID)
 		}
 	}
+	if len(extFailures) < 17 {
+		t.Errorf("external filter count = %d, want >= 17", len(extFailures))
+	}
+
+	// Verify the four newly externalized faults are included.
+	extIDs := make(map[string]bool, len(extFailures))
+	for _, f := range extFailures {
+		extIDs[f.ID] = true
+	}
+	for _, wantID := range []string{"db-high-cache-miss", "db-pg-hba-corrupt", "db-process-kill", "db-config-bad-param"} {
+		if !extIDs[wantID] {
+			t.Errorf("external filter missing expected fault %q", wantID)
+		}
+	}
+}
+
+func TestIsAutoDBCompat(t *testing.T) {
+	cases := []struct {
+		f    Failure
+		want bool
+	}{
+		{Failure{ExternalCompat: true, Category: "database", Inject: InjectSpec{Type: "sql"}}, true},
+		{Failure{ExternalCompat: true, Category: "database", ExternalInject: InjectSpec{Type: "shell_exec"}}, true},
+		{Failure{ExternalCompat: true, Category: "database", ExternalInject: InjectSpec{Type: "ssh_exec"}}, false},
+		{Failure{ExternalCompat: true, Category: "kubernetes", Inject: InjectSpec{Type: "shell_exec"}}, false},
+		{Failure{ExternalCompat: false, Category: "database", Inject: InjectSpec{Type: "sql"}}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.f.IsAutoDBCompat(); got != tc.want {
+			t.Errorf("IsAutoDBCompat(%+v) = %v, want %v", tc.f, got, tc.want)
+		}
+	}
+}
+
+func TestFilterFailures_AutoDB(t *testing.T) {
+	catalogPath := filepath.Join("..", "..", "catalog", "failures.yaml")
+	cat, err := LoadCatalog(catalogPath)
+	if err != nil {
+		t.Fatalf("LoadCatalog error: %v", err)
+	}
+
+	autoFaults := FilterFailures(cat, &HarnessConfig{AutoDB: true})
+	for _, f := range autoFaults {
+		if !f.IsAutoDBCompat() {
+			t.Errorf("auto-db filter returned non-auto-db-compat fault %q", f.ID)
+		}
+	}
+	if len(autoFaults) < 12 {
+		t.Errorf("auto-db filter count = %d, want >= 12", len(autoFaults))
+	}
+
+	// SSH and K8s faults must not appear.
+	autoIDs := make(map[string]bool, len(autoFaults))
+	for _, f := range autoFaults {
+		autoIDs[f.ID] = true
+	}
+	for _, excluded := range []string{"db-pg-hba-corrupt", "db-process-kill", "db-config-bad-param", "db-wal-disk-full", "db-wal-disk-full-k8s"} {
+		if autoIDs[excluded] {
+			t.Errorf("auto-db filter should not include %q", excluded)
+		}
+	}
 }
 
 func TestResolvePrompt(t *testing.T) {

@@ -122,6 +122,58 @@ var terminalEscalations = map[string]string{
 	"requires_operator_approval": "This action requires explicit operator approval before it can proceed.",
 }
 
+// directiveTransition / directiveEscalate identify which allow-list to consult
+// when validating an emitted next-playbook target.
+const (
+	directiveTransition = "TRANSITION_TO"
+	directiveEscalate   = "ESCALATE_TO"
+)
+
+// isAllowedNextPlaybook returns true when the emitted target is a legitimate
+// follow-on for the given triage playbook under the given directive type.
+// Used to detect LLM hallucination of non-existent series_ids.
+//
+// Routing:
+//   - TRANSITION_TO is validated against pb.TransitionsTo (same-domain follow-ons)
+//   - ESCALATE_TO   is validated against pb.EscalatesTo   (cross-domain handoffs)
+//
+// Rules:
+//   - Terminal tokens (requires_operator_approval) are always allowed.
+//   - "none" / "" — caller handles separately; treated as allowed here.
+//   - If the relevant allow-list is empty, accept anything for backward
+//     compatibility — older playbooks predate the per-directive split.
+//   - Otherwise the emitted value must match a series_id in the relevant list.
+func isAllowedNextPlaybook(pb *audit.Playbook, emitted, directive string) bool {
+	if emitted == "" || emitted == "none" {
+		return true
+	}
+	if _, isTerminal := terminalEscalations[emitted]; isTerminal {
+		return true
+	}
+	if pb == nil {
+		return true
+	}
+	var allowed []string
+	switch directive {
+	case directiveTransition:
+		allowed = pb.TransitionsTo
+	case directiveEscalate:
+		allowed = pb.EscalatesTo
+	default:
+		// Defensive: unknown directive treated as no allow-list.
+		return true
+	}
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, s := range allowed {
+		if s == emitted {
+			return true
+		}
+	}
+	return false
+}
+
 // approvalModeRank defines permissiveness order for approval modes (higher = less restrictive).
 var approvalModeRank = map[string]int{
 	"":        0,
@@ -280,8 +332,15 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Record the run start. Best-effort: failure does not block execution.
+	// For agent_approve runs, generate a run-level trace ID when the caller doesn't
+	// supply one — tool execution events are emitted under this ID and must be
+	// discoverable via GET /playbook-runs/{id}/events.
 	operator := r.Header.Get("X-User")
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, operator)
+	startTraceID := r.Header.Get("X-Trace-ID")
+	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
+		startTraceID = audit.NewTraceID()
+	}
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, startTraceID, req.PriorRunID, operator)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -331,7 +390,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil)
 	}
 }
 
@@ -415,6 +474,25 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				res.diagReport = parseDiagnosticReport(text)
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
+				// Validate emitted next-playbook targets against the triage
+				// playbook's declared allow-lists. TRANSITION_TO is checked
+				// against transitions_to (same-domain follow-ons), ESCALATE_TO
+				// against escalates_to (cross-domain handoffs). On hallucination,
+				// coerce to requires_operator_approval so the chain stops cleanly
+				// rather than 404'ing at gate resolution time.
+				if esc.TransitionTo != "" && !isAllowedNextPlaybook(pb, esc.TransitionTo, directiveTransition) {
+					slog.Warn("agent emitted disallowed TRANSITION_TO; coercing to requires_operator_approval",
+						"triage_series", pb.SeriesID, "emitted", esc.TransitionTo,
+						"allowed", pb.TransitionsTo, "trace_id", traceID)
+					esc.TransitionTo = ""
+					esc.EscalateTo = "requires_operator_approval"
+				}
+				if esc.EscalateTo != "" && !isAllowedNextPlaybook(pb, esc.EscalateTo, directiveEscalate) {
+					slog.Warn("agent emitted disallowed ESCALATE_TO; coercing to requires_operator_approval",
+						"triage_series", pb.SeriesID, "emitted", esc.EscalateTo,
+						"allowed", pb.EscalatesTo, "trace_id", traceID)
+					esc.EscalateTo = "requires_operator_approval"
+				}
 				if esc.TransitionTo != "" {
 					res.outcome = audit.OutcomeTransitioned
 					res.transitionTo = esc.TransitionTo
@@ -487,7 +565,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		injectFields(w, primary.capture, extra)
 		if runID != "" {
 			go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-				runID, primary.outcome, "", "", primary.findings, nil)
+				runID, primary.outcome, "", "", primary.findings, "", primary.traceID, nil)
 		}
 		return
 	}
@@ -545,6 +623,13 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
+		// Forced gate: low-confidence triage must not auto-chain into destructive
+		// remediation regardless of the caller's gate_escalation flag.
+		if !req.GateEscalation && lowConfidenceForceGate(prev.diagReport) {
+			req.GateEscalation = true
+			extra["gate_reason"] = "low_confidence"
+		}
+
 		// Informed gate: operator reviews findings at the phase boundary before
 		// the next playbook is invoked. Takes precedence over auto-chaining.
 		if req.GateEscalation {
@@ -562,6 +647,17 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			if warn != "" {
 				extra["confidence_warning"] = warn
 				extra["suggested_approval_mode"] = suggestedMode
+			}
+			if nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeries); err == nil {
+				extra["remediation_preview"] = map[string]any{
+					"series_id":     nextPB.SeriesID,
+					"name":          nextPB.Name,
+					"description":   nextPB.Description,
+					"approval_mode": nextPB.ApprovalMode,
+				}
+			}
+			if prev.diagReport != nil {
+				extra["diagnostic_report"] = prev.diagReport
 			}
 			finalOutcome = audit.OutcomeGatePending
 			if isTransition {
@@ -588,6 +684,12 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				}
 				if warn != "" {
 					gateExtra["confidence_warning"] = warn
+				}
+				if rp, ok := extra["remediation_preview"]; ok {
+					gateExtra["remediation_preview"] = rp
+				}
+				if dr, ok := extra["diagnostic_report"]; ok {
+					gateExtra["diagnostic_report"] = dr
 				}
 				summary := "Triage complete — TRANSITION_TO " + nextSeries
 				if !isTransition {
@@ -652,7 +754,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	if runID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, finalReport)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, capturedText(primary.capture), primary.traceID, finalReport)
 	}
 }
 
@@ -709,12 +811,12 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		}
 	}
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-Trace-ID"), req.PriorRunID, r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, chainRes.diagReport)
+			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, capturedText(chainRes.capture), chainRes.traceID, chainRes.diagReport)
 	}
 
 	slog.Info("playbook: auto-chained escalation",
@@ -799,14 +901,31 @@ func (g *Gateway) confidenceWarning(report *audit.DiagnosticReport) (warning, su
 	return msg, "manual"
 }
 
+// lowConfidenceForceGate returns true when the diagnostic report shows that
+// the primary hypothesis has less than 50% confidence — a coin-flip diagnosis
+// that must not auto-chain into destructive remediation. Returns false when
+// report is nil so pre-B1 playbooks (no HYPOTHESIS_N: lines) are unaffected.
+func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
+	if report == nil {
+		return false
+	}
+	for _, h := range report.Hypotheses {
+		if h.IsPrimary {
+			return h.Confidence < 0.50
+		}
+	}
+	return true // primary hypothesis not marked — treat as uncertain
+}
+
 // ProceedEscalationRequest is the request body for POST
 // /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
 type ProceedEscalationRequest struct {
-	Resolution      string `json:"resolution"`               // "approved" | "denied"
-	ResolvedBy      string `json:"resolved_by,omitempty"`
-	ApprovalMode    string `json:"approval_mode,omitempty"`  // "manual"|"review"|"auto"|"session"|"force"
-	ApprovalSession string `json:"approval_session,omitempty"`
+	Resolution       string `json:"resolution"`               // "approved" | "denied"
+	ResolvedBy       string `json:"resolved_by,omitempty"`
+	ApprovalMode     string `json:"approval_mode,omitempty"`  // "manual"|"review"|"auto"|"session"|"force"
+	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
+	Reason           string `json:"reason,omitempty"`            // optional operator rationale
 }
 
 // handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -848,12 +967,11 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Emit gate_acknowledged audit event.
-	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "")
-
-	// Denied: abandon the triage run and return.
+	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
-		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", run.DiagnosticReport)
+		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
+		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport)
+		go g.submitDenialFeedback(context.WithoutCancel(r.Context()), runID, run.SeriesID, resolvedBy, req.Reason)
 		if g.decisionNotifier != nil {
 			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 				ID:         "gate:" + runID,
@@ -868,15 +986,25 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Approved: resolve the triage run and chain to the next playbook.
-	// Use TransitionedTo for same-domain transitions, EscalatedTo for true escalations.
+	// Approved: validate the chain target BEFORE any state mutation. If the
+	// remediation playbook doesn't exist, we want a clean 404 with no audit
+	// footprint — not a half-finished gate that leaves the run marked
+	// "transitioned" but with nothing actually running.
 	nextSeriesID := run.EscalatedTo
 	approvedOutcome := audit.OutcomeEscalated
 	if run.TransitionedTo != "" {
 		nextSeriesID = run.TransitionedTo
 		approvedOutcome = audit.OutcomeTransitioned
 	}
-	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, run.DiagnosticReport)
+	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeriesID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "remediation playbook not found: "+err.Error())
+		return
+	}
+
+	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
+	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
+	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport)
 	if g.decisionNotifier != nil {
 		g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 			ID:      "gate:" + runID,
@@ -885,12 +1013,6 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 			Summary: "Gate approved — chaining to " + nextSeriesID,
 			Extra:   map[string]any{"resolved_by": resolvedBy, "approval_mode": req.ApprovalMode},
 		})
-	}
-
-	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeriesID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "remediation playbook not found: "+err.Error())
-		return
 	}
 
 	// Build the remediation request. Prefer connection_string from the resolve
@@ -919,7 +1041,11 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		remReq.PriorFindings = prior.FindingsSummary
 	}
 
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, resolvedBy)
+	remStartTraceID := r.Header.Get("X-Trace-ID")
+	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
+		remStartTraceID = audit.NewTraceID()
+	}
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, remStartTraceID, runID, resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -933,7 +1059,9 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 }
 
 // recordGateAcknowledged emits a gate_acknowledged audit event.
-func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.PlaybookRun, resolvedBy, resolution, approvalMode, confidenceWarning string) {
+// The event's TraceID is set to run.RunID so it can be retrieved via
+// GET /v1/events?trace_id={runID}&event_type=gate_acknowledged.
+func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.PlaybookRun, resolvedBy, resolution, approvalMode, confidenceWarning, reason string) {
 	if g.auditor == nil {
 		return
 	}
@@ -948,11 +1076,14 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 	if confidenceWarning != "" {
 		reasoningChain = append(reasoningChain, "confidence_warning: "+confidenceWarning)
 	}
+	if reason != "" {
+		reasoningChain = append(reasoningChain, "operator_reason: "+reason)
+	}
 	event := &audit.Event{
 		EventID:   "ga_" + uuid.New().String()[:8],
 		Timestamp: time.Now().UTC(),
 		EventType: audit.EventTypeGateAcknowledged,
-		TraceID:   audit.NewTraceID(),
+		TraceID:   run.RunID, // correlate back to the playbook run
 		Input: audit.Input{
 			UserQuery: "gate acknowledged for triage run " + run.RunID,
 		},
@@ -963,6 +1094,7 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 			UserIntent:      resolution + " gate for escalation to " + run.EscalatedTo,
 			ReasoningChain:  reasoningChain,
 		},
+		Output:  &audit.Output{Response: reason},
 		Outcome: &audit.Outcome{Status: "success"},
 	}
 	if err := g.auditor.RecordEvent(ctx, event); err != nil {
@@ -1151,8 +1283,12 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	if pb.Guidance != "" {
 		fmt.Fprintf(&b, "## Expert Guidance\n%s\n\n", pb.Guidance)
 	}
+	if len(pb.TransitionsTo) > 0 {
+		fmt.Fprintf(&b, "## Same-domain transitions\nWhen triage completes successfully and a follow-on remediation under the same agent is appropriate, the allowed next playbooks are (by series ID): %s\n\n",
+			strings.Join(pb.TransitionsTo, ", "))
+	}
 	if len(pb.EscalatesTo) > 0 {
-		fmt.Fprintf(&b, "## Escalation paths\nIf your investigation reveals a different root cause than this playbook addresses, the next playbooks to consider are (by series ID): %s\n\n",
+		fmt.Fprintf(&b, "## Cross-domain escalations\nIf the issue is out of scope for this playbook's agent (different problem class or different agent needed), the allowed escalation targets are (by series ID): %s\n\n",
 			strings.Join(pb.EscalatesTo, ", "))
 	}
 
@@ -1307,6 +1443,52 @@ func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook
 	return wrapper.Playbooks[0], nil
 }
 
+// fetchGateAcknowledgedReason returns the operator reason stored in the
+// gate_acknowledged audit event for runID, or "" if none was recorded.
+func (g *Gateway) fetchGateAcknowledgedReason(ctx context.Context, runID string) string {
+	event := g.fetchGateAcknowledgedEvent(ctx, runID)
+	if event == nil || event.Output == nil {
+		return ""
+	}
+	return event.Output.Response
+}
+
+// handlePlaybookRunEvents handles GET /api/v1/fleet/playbook-runs/{runID}/events.
+// Returns audit events (agent_reasoning, tool_execution, policy_decision) for the run
+// by looking up the run's trace_id and querying the audit event log.
+func (g *Gateway) handlePlaybookRunEvents(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "runID is required")
+		return
+	}
+	run, err := g.fetchPlaybookRun(r.Context(), runID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		slog.Error("handlePlaybookRunEvents: failed to fetch run", "run_id", runID, "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch run")
+		return
+	}
+	if run.TraceID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+		return
+	}
+	types := "agent_reasoning,tool_execution,policy_decision"
+	if t := r.URL.Query().Get("types"); t != "" {
+		types = t
+	}
+	limit := "500"
+	if l := r.URL.Query().Get("limit"); l != "" {
+		limit = l
+	}
+	auditPath := fmt.Sprintf("/v1/events?trace_id=%s&types=%s&limit=%s", run.TraceID, types, limit)
+	g.proxyToAuditd(w, r, auditPath)
+}
+
 // fetchPlaybookRun retrieves a single run record from auditd by run_id.
 func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.PlaybookRun, error) {
 	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID
@@ -1345,7 +1527,7 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, traceID, priorRunID, operator string) string {
 	if g.auditURL == "" {
 		return ""
 	}
@@ -1355,6 +1537,8 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		ExecutionMode:    pb.ExecutionMode,
 		ContextID:        contextID,
 		ConnectionString: connStr,
+		TraceID:          traceID,
+		PriorRunID:       priorRunID,
 		Operator:         operator,
 	}
 	body, err := json.Marshal(run)
@@ -1399,8 +1583,10 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 
 // recordPlaybookRunComplete patches an existing run with its final outcome.
 // escalatedTo is set for ESCALATE_TO signals; transitionedTo for TRANSITION_TO.
+// agentTranscript is the full agent response text (chain of thought narrative); pass "" when not available.
+// traceID is the agent's trace ID (from response X-Trace-ID header); used to link audit events to the run.
 // Best-effort: failures are logged but not returned.
-func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary string, report *audit.DiagnosticReport) {
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
@@ -1409,6 +1595,12 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 		"escalated_to":     escalatedTo,
 		"transitioned_to":  transitionedTo,
 		"findings_summary": findingsSummary,
+	}
+	if agentTranscript != "" {
+		payload["agent_transcript"] = agentTranscript
+	}
+	if traceID != "" {
+		payload["trace_id"] = traceID
 	}
 	if report != nil {
 		payload["diagnostic_report"] = report
@@ -1440,6 +1632,101 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 			"auditd_error", strings.TrimSpace(string(body)),
 		)
 	}
+}
+
+// submitDenialFeedback auto-submits a RunFeedback with diagnosis_correct=false when
+// an operator denies the gate. The denial reason, if provided, becomes actual_root_cause.
+// Best-effort: failures are logged but not returned.
+func (g *Gateway) submitDenialFeedback(ctx context.Context, runID, seriesID, operator, reason string) {
+	if g.auditURL == "" || runID == "" || seriesID == "" {
+		return
+	}
+	diagCorrect := false
+	payload := map[string]any{
+		"series_id":         seriesID,
+		"diagnosis_correct": diagCorrect,
+		"operator":          operator,
+	}
+	if reason != "" {
+		payload["actual_root_cause"] = reason
+	}
+	body, _ := json.Marshal(payload)
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("submitDenialFeedback: failed to auto-submit feedback", "run_id", runID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		slog.Warn("submitDenialFeedback: unexpected status", "run_id", runID, "status", resp.StatusCode, "body", strings.TrimSpace(string(b)))
+	}
+}
+
+// handleRequestFeedback handles POST /api/v1/fleet/playbook-runs/{runID}/request-feedback.
+//
+// Creates a placeholder RunFeedback record (diagnosis_correct unset) in auditd,
+// which makes the run appear as a pending "feedback" decision in the Decision Hub.
+// Faulttest calls this in --emit-and-wait mode after pollRecovery succeeds, so
+// the operator can answer the feedback card in the hub without needing a TTY.
+func (g *Gateway) handleRequestFeedback(w http.ResponseWriter, r *http.Request) {
+	if g.auditURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "auditd URL not configured")
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, "runID is required")
+		return
+	}
+	operator := r.Header.Get("X-User")
+	if operator == "" {
+		operator = "faulttest"
+	}
+	payload := map[string]any{"operator": operator}
+	body, _ := json.Marshal(payload)
+
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build auditd request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "auditd request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(b) //nolint:errcheck
+		return
+	}
+	baseURL := strings.TrimSuffix(g.baseURL, "/")
+	resolveURL := baseURL + "/api/v1/decisions/feedback:" + runID + "/resolve"
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"run_id":      runID,
+		"resolve_url": resolveURL,
+	})
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -2065,7 +2352,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 
 	if done {
 		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil)
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -2164,7 +2451,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 
 	if req.Resolution == "denied" {
 		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
 		return
 	}
@@ -2184,7 +2471,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	traceID := r.Header.Get("X-Trace-ID")
+	// Prefer the run's stored trace_id (set at run-start for agent_approve runs)
+	// so all step events share one trace and are discoverable via /events.
+	// Fall back to the request header, then generate a fresh sa_* prefix.
+	traceID := run.TraceID
+	if traceID == "" {
+		traceID = r.Header.Get("X-Trace-ID")
+	}
 	if traceID == "" {
 		traceID = audit.NewTraceIDWithPrefix("sa_")
 	}
@@ -2203,7 +2496,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
 
 	if toolErr != nil {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil)
 		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
 		return
 	}
@@ -2233,16 +2526,25 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, "", history)
+	// Re-thread prior findings on every re-planning call so the planner retains
+	// triage context beyond the first step.
+	priorFindings := ""
+	if run.PriorRunID != "" {
+		if prior, err := g.fetchPlaybookRun(r.Context(), run.PriorRunID); err == nil {
+			priorFindings = prior.FindingsSummary
+		}
+	}
+
+	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, priorFindings, history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil)
 		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}

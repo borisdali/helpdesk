@@ -40,12 +40,17 @@ type ApproveRunResponse struct {
 
 	// Informed gate fields — populated when Status=="pending_gate".
 	// GateType is "transition" (same-domain triage→remediation) or "escalation" (cross-domain).
-	GateType              string `json:"gate_type,omitempty"`
-	TransitionTarget      string `json:"transition_target,omitempty"`
-	EscalationTarget      string `json:"escalation_target,omitempty"`
-	EscalationFindings    string `json:"escalation_findings,omitempty"`
-	ConfidenceWarning     string `json:"confidence_warning,omitempty"`
-	SuggestedApprovalMode string `json:"suggested_approval_mode,omitempty"`
+	GateType              string         `json:"gate_type,omitempty"`
+	TransitionTarget      string         `json:"transition_target,omitempty"`
+	EscalationTarget      string         `json:"escalation_target,omitempty"`
+	EscalationFindings    string         `json:"escalation_findings,omitempty"`
+	ConfidenceWarning     string         `json:"confidence_warning,omitempty"`
+	SuggestedApprovalMode string         `json:"suggested_approval_mode,omitempty"`
+	RemediationPreview    map[string]any `json:"remediation_preview,omitempty"`
+	DiagnosticReport      map[string]any `json:"diagnostic_report,omitempty"`
+	// GateReason is "low_confidence" when the gate was forced by the gateway
+	// because the primary hypothesis confidence was below 50%. Empty otherwise.
+	GateReason string `json:"gate_reason,omitempty"`
 }
 
 // ProceedEscalationRequest is the request body for
@@ -56,6 +61,7 @@ type ProceedEscalationRequest struct {
 	ApprovalMode     string `json:"approval_mode,omitempty"`   // "manual"|"review"|"auto"|"session"|"force"
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"`
+	Reason           string `json:"reason,omitempty"`          // optional operator rationale
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.
@@ -381,11 +387,66 @@ func (r *Remediator) WaitForGateResolution(ctx context.Context, runID string) (*
 				}
 			}
 			// No pending step approval found (remediation may have completed
-			// immediately or approval_mode=auto). Return the triage run outcome
-			// so the caller proceeds to pollRecovery.
+			// immediately or approval_mode=auto).
+			// Before claiming success, verify that a child remediation run was
+			// actually created. Without this check, a gate that resolved with no
+			// actual child run (e.g. historical Bug #1 partial-write) would fall
+			// through to pollRecovery and report a false PASS on self-clearing faults.
+			// Retry briefly in case auditd write hasn't committed yet.
+			// When AuditURL is not configured the check is skipped (can't verify).
+			childFound := r.cfg.AuditURL == "" // skip when audit unavailable
+			for attempt := 0; !childFound && attempt < 3; attempt++ {
+				if ok, err := r.findChildRun(ctx, runID); err != nil {
+					slog.Warn("faultlib: could not verify child run", "run_id", runID, "err", err)
+					childFound = true // treat error as "can't check, allow through"
+					break
+				} else if ok {
+					childFound = true
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return &ApproveRunResponse{RunID: runID, Status: run.Outcome}, nil
+				case <-time.After(retryDelay):
+				}
+			}
+			if !childFound {
+				return nil, fmt.Errorf("gate resolved to %q but no child remediation run started (triage_run_id=%s) — remediation did not begin", run.Outcome, runID)
+			}
 			return &ApproveRunResponse{RunID: runID, Status: run.Outcome}, nil
 		}
 	}
+}
+
+// findChildRun queries auditd for remediation runs whose prior_run_id matches
+// the given triage run ID. Returns true when at least one child run exists.
+// Returns (true, nil) immediately when AuditURL is not configured — the check
+// is skipped rather than blocking recovery.
+func (r *Remediator) findChildRun(ctx context.Context, priorRunID string) (bool, error) {
+	if r.cfg.AuditURL == "" {
+		return true, nil
+	}
+	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + priorRunID + "&limit=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("auditd request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var runs []json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil {
+		return false, fmt.Errorf("decode response: %w", err)
+	}
+	return len(runs) > 0, nil
 }
 
 // ProceedEscalation calls POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -427,7 +488,7 @@ func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req Pr
 // Interactive callers (cmd/faulttest) implement their own loop using ProceedStep.
 func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunResponse) error {
 	current := initial
-	const maxSteps = 20
+	const maxSteps = 100
 	for i := 0; i < maxSteps && current.Status == "pending_approval"; i++ {
 		if current.Step == nil {
 			return fmt.Errorf("approval loop: pending_approval response has no step")
@@ -435,7 +496,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunRes
 
 		resolution := "approved"
 
-		if r.cfg.EmitAndWait && current.ApprovalID != "" {
+		if r.cfg.EmitAndWait && current.ApprovalID != "" && current.Step.ActionClass != "read" {
 			slog.Info("agent_approve: step approval pending — waiting for external resolution",
 				"step_index", current.Step.Index,
 				"tool", current.Step.Tool,
@@ -704,4 +765,39 @@ func PollRecovery(ctx context.Context, connStr, verifySQL string, timeout time.D
 			return 0, fmt.Errorf("recovery timed out after %s", timeout)
 		}
 	}
+}
+
+// RequestFeedback creates a pending feedback placeholder for the given triage
+// run by calling POST /api/v1/fleet/playbook-runs/{runID}/request-feedback on
+// the gateway. Returns the hub resolve URL so the caller can print it.
+// Returns ("", nil) if GatewayURL is not configured.
+func (r *Remediator) RequestFeedback(ctx context.Context, runID string) (resolveURL string, err error) {
+	if r.cfg.GatewayURL == "" || runID == "" {
+		return "", nil
+	}
+	url := strings.TrimSuffix(r.cfg.GatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/request-feedback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("request-feedback returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var result struct {
+		ResolveURL string `json:"resolve_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.ResolveURL, nil
 }

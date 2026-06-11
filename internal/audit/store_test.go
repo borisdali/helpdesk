@@ -2247,3 +2247,61 @@ func TestQueryJourneys_HasMismatch(t *testing.T) {
 		t.Error("tr_clean_b: expected HasMismatch=false")
 	}
 }
+
+func TestStore_Query_EventTypes_MultiType(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// Insert one event of each type.
+	for _, et := range []EventType{EventTypeDelegation, EventTypeToolExecution, EventTypeAgentReasoning, EventTypePolicyDecision} {
+		if err := store.Record(ctx, &Event{
+			EventID:   "evt_" + string(et),
+			Timestamp: time.Now(),
+			EventType: et,
+		}); err != nil {
+			t.Fatalf("Record %s: %v", et, err)
+		}
+	}
+
+	// EventTypes filter — should return only tool_execution + agent_reasoning.
+	results, err := store.Query(ctx, QueryOptions{
+		EventTypes: []EventType{EventTypeToolExecution, EventTypeAgentReasoning},
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("got %d results, want 2", len(results))
+	}
+	for _, r := range results {
+		if r.EventType != EventTypeToolExecution && r.EventType != EventTypeAgentReasoning {
+			t.Errorf("unexpected event type %q in results", r.EventType)
+		}
+	}
+
+	// EventType (single) takes precedence over EventTypes.
+	results, err = store.Query(ctx, QueryOptions{
+		EventType:  EventTypeDelegation,
+		EventTypes: []EventType{EventTypeToolExecution, EventTypeAgentReasoning},
+	})
+	if err != nil {
+		t.Fatalf("Query with both: %v", err)
+	}
+	if len(results) != 1 || results[0].EventType != EventTypeDelegation {
+		t.Errorf("single EventType should take precedence; got %d results", len(results))
+	}
+
+	// Empty EventTypes should not filter.
+	results, err = store.Query(ctx, QueryOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("Query no filter: %v", err)
+	}
+	if len(results) != 4 {
+		t.Errorf("no filter: got %d, want 4", len(results))
+	}
+}

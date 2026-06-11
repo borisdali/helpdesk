@@ -52,8 +52,11 @@ guidance: |
   immediately without a restart. If a specific large table is identified as
   the culprit, pg_prewarm is the immediate remediation option.
 
-  Final step: after your analysis, output exactly these two lines in this
+  Final step: after your analysis, output exactly these lines in this
   format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: cache_hit_ratio=<N>%; blks_read=<N>; blks_hit=<N>; shared_buffers=<value>; largest_seqscan_table=<schema.table | none>; recommended=<prewarm|increase_shared_buffers|investigate_queries|monitor>
   TRANSITION_TO: pbs_cache_miss_remediate
 escalation:

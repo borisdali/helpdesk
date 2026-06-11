@@ -309,6 +309,95 @@ func (c *GatewayClient) PlaybookStats(ctx context.Context, id string) (map[strin
 	return result, nil
 }
 
+// SubmitFeedback calls POST /api/v1/fleet/playbook-runs/{runID}/feedback.
+func (c *GatewayClient) SubmitFeedback(ctx context.Context, runID string, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback", body)
+}
+
+// GetFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
+func (c *GatewayClient) GetFeedback(ctx context.Context, runID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode feedback: %w", err)
+	}
+	return result, nil
+}
+
+// RequestFeedback calls POST /api/v1/fleet/playbook-runs/{runID}/request-feedback.
+// Returns the response body map which includes "resolve_url".
+func (c *GatewayClient) RequestFeedback(ctx context.Context, runID string) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/request-feedback", map[string]any{})
+}
+
+// GetDecisions calls GET /api/v1/decisions with optional query params.
+func (c *GatewayClient) GetDecisions(ctx context.Context, params map[string]string) (map[string]any, error) {
+	path := "/api/v1/decisions"
+	if len(params) > 0 {
+		vals := make([]string, 0, len(params))
+		for k, v := range params {
+			vals = append(vals, k+"="+v)
+		}
+		path += "?" + strings.Join(vals, "&")
+	}
+	raw, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode decisions: %w", err)
+	}
+	return result, nil
+}
+
+// ResolveDecision calls POST /api/v1/decisions/{decisionID}/resolve.
+func (c *GatewayClient) ResolveDecision(ctx context.Context, decisionID string, body map[string]any) (map[string]any, error) {
+	return c.postJSON(ctx, "/api/v1/decisions/"+decisionID+"/resolve", body)
+}
+
+// GetRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events.
+func (c *GatewayClient) GetRunEvents(ctx context.Context, runID string) ([]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/events")
+	if err != nil {
+		return nil, err
+	}
+	var result []any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode run events: %w", err)
+	}
+	return result, nil
+}
+
+// GetDecision calls GET /api/v1/decisions/{decisionID}.
+func (c *GatewayClient) GetDecision(ctx context.Context, decisionID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/decisions/"+decisionID)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode decision: %w", err)
+	}
+	return result, nil
+}
+
+// GetIncident calls GET /api/v1/incidents/{runID}.
+func (c *GatewayClient) GetIncident(ctx context.Context, runID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/incidents/"+runID)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode incident: %w", err)
+	}
+	return result, nil
+}
+
 // UploadCreate posts filename/content as multipart/form-data to POST /api/v1/fleet/uploads.
 // Returns the decoded Upload metadata map on success.
 func (c *GatewayClient) UploadCreate(ctx context.Context, filename, content string) (map[string]any, error) {

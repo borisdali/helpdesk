@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -132,6 +133,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create run feedback store (shares the same database connection)
+	runFeedbackStore, err := audit.NewRunFeedbackStore(store.DB())
+	if err != nil {
+		slog.Error("failed to create run feedback store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create playbook run step store (shares the same database connection)
 	playbookRunStepStore, err := audit.NewPlaybookRunStepStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -237,10 +245,10 @@ func main() {
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
-	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore}
+	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore, feedbackStore: runFeedbackStore}
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
-	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore}
+	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore, feedbackStore: runFeedbackStore}
 	playbookRunStepSrv := &playbookRunStepServer{store: playbookRunStepStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
@@ -302,6 +310,9 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/stats", auth("GET /v1/fleet/playbooks/{playbookID}/stats", playbookRunSrv.handleStats))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}", auth("GET /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleGetRun))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs", auth("GET /v1/fleet/playbook-runs", playbookRunSrv.handleListByOutcome))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/feedback-pending", auth("GET /v1/fleet/playbook-runs/feedback-pending", playbookRunSrv.handleListPendingFeedback))
+	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/feedback", auth("POST /v1/fleet/playbook-runs/{runID}/feedback", playbookRunSrv.handleSubmitFeedback))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/feedback", auth("GET /v1/fleet/playbook-runs/{runID}/feedback", playbookRunSrv.handleGetFeedback))
 
 	// Playbook run step endpoints (agent_approve mode)
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/steps", auth("POST /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleCreateStep))
@@ -490,6 +501,13 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := r.URL.Query().Get("event_type"); v != "" {
 		opts.EventType = audit.EventType(v)
+	}
+	if v := r.URL.Query().Get("types"); v != "" {
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				opts.EventTypes = append(opts.EventTypes, audit.EventType(t))
+			}
+		}
 	}
 	if v := r.URL.Query().Get("agent"); v != "" {
 		opts.Agent = v

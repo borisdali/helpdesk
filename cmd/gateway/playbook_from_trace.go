@@ -287,8 +287,9 @@ func parsePlaybookYAMLLenient(text string) (audit.Playbook, error) {
 		Symptoms:     strSlice("symptoms"),
 		Escalation:   strSlice("escalation"),
 		TargetHints:  strSlice("target_hints"),
-		EscalatesTo:  strSlice("escalates_to"),
-		SeriesID:     str("series_id"),
+		EscalatesTo:   strSlice("escalates_to"),
+		TransitionsTo: strSlice("transitions_to"),
+		SeriesID:      str("series_id"),
 		Author:       str("author"),
 		Version:      str("version"),
 	}, nil

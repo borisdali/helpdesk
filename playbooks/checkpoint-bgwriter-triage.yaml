@@ -110,7 +110,10 @@ guidance: |
   recent, wait for meaningful data to accumulate before judging improvement.
 
   Final step: after your analysis and parameter recommendations, output exactly
-  these two lines in this format (no markdown, no extra text on each line):
+  these lines in this format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: checkpoints_req=<N> timed=<N>; maxwritten_clean=<N>; buffers_backend_fsync=<N>; recommended=<param=value[, param=value]* | no_changes_needed>
   TRANSITION_TO: pbs_bgwriter_remediate
 

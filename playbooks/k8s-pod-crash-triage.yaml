@@ -71,8 +71,11 @@ guidance: |
     fix archiving, or simply restart)
   Do NOT attempt the restart — describe the recommended action for operator approval.
 
-  Final step: after your root cause summary, output exactly these two lines in
+  Final step: after your analysis, output exactly these lines in
   this format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: exit_code=<N> reason=<OOMKilled|Completed|Error>; root_cause=<brief phrase>; action=<restart|expand_disk|increase_memory_limit|data_recovery|investigate>
   TRANSITION_TO: pbs_k8s_pod_crash_remediate
 

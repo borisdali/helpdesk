@@ -328,6 +328,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/query", auth("POST /api/v1/query", g.handleQuery))
 	mux.HandleFunc("POST /api/v1/incidents", auth("POST /api/v1/incidents", g.handleCreateIncident))
 	mux.HandleFunc("GET /api/v1/incidents", auth("GET /api/v1/incidents", g.handleListIncidents))
+	mux.HandleFunc("GET /api/v1/incidents/{runID}", auth("GET /api/v1/incidents/{runID}", g.handleGetIncident))
 	mux.HandleFunc("POST /api/v1/db/{tool}", auth("POST /api/v1/db/{tool}", g.handleDBTool))
 	mux.HandleFunc("POST /api/v1/k8s/{tool}", auth("POST /api/v1/k8s/{tool}", g.handleK8sTool))
 	mux.HandleFunc("POST /api/v1/research", auth("POST /api/v1/research", g.handleResearch))
@@ -371,6 +372,13 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		id := r.PathValue("playbookID")
 		g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/stats")
 	}))
+	mux.HandleFunc("GET /api/v1/fleet/playbook-runs", auth("GET /api/v1/fleet/playbook-runs", func(w http.ResponseWriter, r *http.Request) {
+		path := "/v1/fleet/playbook-runs"
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery
+		}
+		g.proxyToAuditd(w, r, path)
+	}))
 	mux.HandleFunc("PATCH /api/v1/fleet/playbook-runs/{runID}", auth("PATCH /api/v1/fleet/playbook-runs/{runID}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("runID")
 		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id)
@@ -381,6 +389,16 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed", auth("POST /api/v1/fleet/playbook-runs/{runID}/proceed", g.handlePlaybookRunProceed))
 	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", auth("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", g.handleProceedEscalation))
+	mux.HandleFunc("GET /api/v1/fleet/playbook-runs/{runID}/events", auth("GET /api/v1/fleet/playbook-runs/{runID}/events", g.handlePlaybookRunEvents))
+	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/feedback", auth("POST /api/v1/fleet/playbook-runs/{runID}/feedback", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id+"/feedback")
+	}))
+	mux.HandleFunc("GET /api/v1/fleet/playbook-runs/{runID}/feedback", auth("GET /api/v1/fleet/playbook-runs/{runID}/feedback", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id+"/feedback")
+	}))
+	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/request-feedback", auth("POST /api/v1/fleet/playbook-runs/{runID}/request-feedback", g.handleRequestFeedback))
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))

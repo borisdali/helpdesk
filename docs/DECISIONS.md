@@ -11,6 +11,7 @@ The Decision Hub is a unified surface that aggregates every pending human decisi
 | `gate` | `gate:{runID}` | Gateway | Triage playbook completes and `gate_escalation=true`; `TRANSITION_TO` or `ESCALATE_TO` signal present and `recommended` is actionable |
 | `fleet_approval` | `fleet:{approvalID}` | fleet-runner | Job contains write or destructive steps and requires top-level approval |
 | `step_approval` | `step:{approvalID}` | Gateway | `agent_approve` playbook reaches a write/destructive step |
+| `feedback` | `feedback:{runID}` | faulttest (`--emit-and-wait`) | Recovery verified after a gate-escalation run; operator has not yet confirmed or denied the diagnosis |
 
 Gates have two sub-types, reflected in `extra.gate_type`:
 
@@ -18,6 +19,30 @@ Gates have two sub-types, reflected in `extra.gate_type`:
 |---|---|---|
 | `transition` | `TRANSITION_TO:` | Triage handing off to its expected remediation counterpart within the same problem domain (e.g. `pbs_vacuum_triage` → `pbs_vacuum_remediate`). Routine pipeline step. |
 | `escalation` | `ESCALATE_TO:` | True cross-domain handoff to a different agent or domain (e.g. DB agent → SysAdmin agent). May warrant closer operator scrutiny. |
+
+### Gate `extra` fields
+
+| Field | Always present | Description |
+|---|---|---|
+| `gate_type` | Yes | `"transition"` or `"escalation"` |
+| `findings` | Yes | Triage summary text emitted by the agent |
+| `transition_target` / `escalation_target` | Yes (one of) | Series ID of the next playbook |
+| `confidence_warning` | When confidence < 70% | Advisory; describes the primary hypothesis confidence level |
+| `suggested_approval_mode` | When `confidence_warning` present | Suggested mode for remediation (`"manual"` etc.) |
+| `remediation_preview` | When next playbook is resolvable | Object: `series_id`, `name`, `description`, `approval_mode` of the planned remediation playbook |
+| `diagnostic_report` | When triage emits `HYPOTHESIS_N:` lines | Structured diagnosis: `hypotheses[]` (each with `rank`, `text`, `confidence`, `is_primary`, `evidence`, `rejected_reason`), `root_cause` |
+| `gate_reason` | When gate was forced by the gateway | `"low_confidence"` — primary hypothesis confidence was below 50%; gate fired automatically even without `gate_escalation=true` |
+
+`remediation_preview` lets operators see exactly what remediation will do — its name, intent, and default approval mode — before clicking approve. `diagnostic_report` records the structured reasoning behind the triage conclusion for later audit review. `gate_reason: "low_confidence"` signals that the gate was not requested by the caller but enforced by the gateway because the diagnosis did not reach the 50% confidence threshold required to auto-chain into remediation.
+
+### Feedback `extra` fields
+
+| Field | Always present | Description |
+|---|---|---|
+| `run_id` | Yes | The triage run ID this feedback request is anchored to |
+| `series_id` | Yes | The triage playbook series ID (e.g. `pbs_lock_chain_triage`) |
+| `diagnosis_correct` | Only when resolved | `true` if the operator confirmed the diagnosis; `false` if denied |
+| `actual_root_cause` | When provided at resolve time | Free-text description of what the root cause actually was |
 
 ---
 
@@ -34,7 +59,7 @@ Returns all pending decisions across all types, sorted newest-first.
 | Parameter | Default | Description |
 |---|---|---|
 | `status` | `pending` | Filter by status: `pending`, `approved`, `denied`, `expired`, `abandoned` |
-| `type` | _(all)_ | Filter by type: `gate`, `fleet_approval`, `step_approval` |
+| `type` | _(all)_ | Filter by type: `gate`, `fleet_approval`, `step_approval`, `feedback` |
 | `limit` | `50` | Maximum results |
 
 **Example:**
@@ -58,7 +83,13 @@ curl http://localhost:8080/api/v1/decisions | jq .
         "gate_type":         "transition",
         "transition_target": "pbs_vacuum_remediate",
         "findings":          "Table public.orders has 94% dead tuple ratio...",
-        "series_id":         "pbs_vacuum_triage"
+        "series_id":         "pbs_vacuum_triage",
+        "remediation_preview": {
+          "series_id":     "pbs_vacuum_remediate",
+          "name":          "Vacuum Remediation",
+          "description":   "Run VACUUM ANALYZE on the bloated table and verify dead tuple ratio drops below 20%.",
+          "approval_mode": "review"
+        }
       }
     },
     {
@@ -74,13 +105,54 @@ curl http://localhost:8080/api/v1/decisions | jq .
         "escalation_target":  "pbs_sysadmin_docker_inspect",
         "findings":           "Connection refused — Docker-level investigation needed.",
         "series_id":          "pbs_connection_triage",
-        "confidence_warning": "Primary hypothesis confidence 55%"
+        "confidence_warning": "Primary hypothesis confidence 55%",
+        "remediation_preview": {
+          "series_id":     "pbs_sysadmin_docker_inspect",
+          "name":          "Docker Container Inspect",
+          "description":   "Inspect the database container for OOM kills, crash loops, or misconfig.",
+          "approval_mode": "manual"
+        },
+        "diagnostic_report": {
+          "hypotheses": [
+            {
+              "rank": 1, "text": "Container OOM-killed by cgroup memory limit",
+              "confidence": 0.55, "is_primary": true,
+              "evidence": "dmesg: oom-kill event, constraint=CONSTRAINT_MEMCG"
+            },
+            {
+              "rank": 2, "text": "Network policy blocking pod-to-pod traffic",
+              "confidence": 0.30, "is_primary": false,
+              "rejected_reason": "connection refused rather than timeout"
+            }
+          ],
+          "root_cause": "Container OOM-killed by cgroup memory limit"
+        }
       }
     }
   ],
   "total": 2
 }
 ```
+
+A `feedback` decision looks like this:
+
+```json
+{
+  "id":           "feedback:plr_a3f7c1b2",
+  "type":         "feedback",
+  "status":       "pending",
+  "summary":      "Diagnosis feedback needed — pbs_lock_chain_triage",
+  "requested_by": "faulttest",
+  "requested_at": "2026-06-01T14:31:05Z",
+  "resolve_url":  "POST https://helpdesk.internal/api/v1/decisions/feedback:plr_a3f7c1b2/resolve",
+  "extra": {
+    "run_id":    "plr_a3f7c1b2",
+    "series_id": "pbs_lock_chain_triage"
+  }
+}
+```
+
+Once resolved, `extra` gains `diagnosis_correct` and, if provided, `actual_root_cause`.
 
 ---
 
@@ -92,9 +164,12 @@ POST /api/v1/decisions/{id}/resolve
 
 The `{id}` prefix determines routing:
 
-- `gate:{runID}` → calls the playbook `proceed-escalation` endpoint internally
-- `fleet:{approvalID}` → patches the fleet approval in the audit store
-- `step:{approvalID}` → patches the step approval in the audit store
+| Prefix | Routes to | Notes |
+|---|---|---|
+| `gate:{runID}` | Playbook `proceed-escalation` endpoint | Triggers the remediation playbook on approval |
+| `fleet:{approvalID}` | Fleet approval in the audit store | |
+| `step:{approvalID}` | Step approval in the audit store | |
+| `feedback:{runID}` | Playbook feedback endpoint | `approved` → `diagnosis_correct=true`; `denied` → `diagnosis_correct=false` |
 
 **Request body:**
 
@@ -104,7 +179,7 @@ The `{id}` prefix determines routing:
   "resolved_by":      "alice",
   "reason":           "Findings look correct, proceed with manual review",
 
-  // Gate-specific (ignored for fleet/step):
+  // Gate-specific (ignored for other types):
   "approval_mode":    "review",
   "approval_session": ""
 }
@@ -114,7 +189,7 @@ The `{id}` prefix determines routing:
 |---|---|
 | `resolution` | `"approved"` or `"denied"` |
 | `resolved_by` | Operator identity; defaults to `X-User` header if omitted |
-| `reason` | Optional free-text reason; recorded in the audit trail |
+| `reason` | Optional free-text; for gates it is stored in the audit trail; for feedback it becomes `actual_root_cause` |
 | `approval_mode` | Gate only: approval mode for the triggered remediation playbook |
 | `approval_session` | Gate only: session token when `approval_mode=session` |
 
@@ -130,6 +205,16 @@ curl -X POST http://localhost:8080/api/v1/decisions/gate:plr_a3f7c1b2/resolve \
 curl -X POST http://localhost:8080/api/v1/decisions/fleet:apr_c8d2e1f4/resolve \
   -H "Content-Type: application/json" \
   -d '{"resolution": "denied", "resolved_by": "oncall", "reason": "Wrong maintenance window"}'
+
+# Confirm the diagnosis was correct (feedback)
+curl -X POST http://localhost:8080/api/v1/decisions/feedback:plr_a3f7c1b2/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"resolution": "approved", "resolved_by": "alice", "reason": "Root blocker PID 236 confirmed idle-in-transaction"}'
+
+# Deny — diagnosis was wrong (feedback)
+curl -X POST http://localhost:8080/api/v1/decisions/feedback:plr_a3f7c1b2/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"resolution": "denied", "resolved_by": "alice", "reason": "Actual cause was autovacuum lock, not idle-in-transaction"}'
 ```
 
 ---
@@ -197,8 +282,9 @@ The Decision Hub is an additional surface, not a replacement. The existing endpo
 | Gate | `POST /api/v1/fleet/playbook-runs/{id}/proceed-escalation` | `POST /api/v1/decisions/gate:{id}/resolve` |
 | Fleet approval | `PATCH {auditdURL}/v1/approvals/{id}` | `POST /api/v1/decisions/fleet:{id}/resolve` |
 | Step approval | `PATCH {auditdURL}/v1/approvals/{id}` | `POST /api/v1/decisions/step:{id}/resolve` |
+| Feedback | `POST /api/v1/fleet/playbook-runs/{id}/feedback` | `POST /api/v1/decisions/feedback:{id}/resolve` |
 
-The hub routes to the same backend as the type-specific endpoint — they are interchangeable.
+The hub routes to the same backend as the type-specific endpoint — they are interchangeable. The one exception is `feedback`: the direct endpoint accepts arbitrary `diagnosis_correct` values (`true`, `false`, or omitted for a placeholder), while the hub resolve endpoint maps `approved`→`true` and `denied`→`false` to fit the standard resolution model.
 
 ---
 
@@ -263,10 +349,70 @@ go run ./testing/cmd/faulttest run \
 ```
 
 With `--emit-and-wait`:
-- **Gate**: faulttest logs `Gate pending — resolve_url=...` and polls `GET /api/v1/fleet/playbook-runs/{id}` every 15 seconds until the gate is resolved externally.
+
+- **Gate**: faulttest logs `Gate pending — resolve_url=...` and polls `GET /api/v1/fleet/playbook-runs/{id}` every 15 seconds until the gate is resolved externally. The gate appears in `GET /api/v1/decisions` as a `type=gate` card until resolved.
+
 - **Step**: faulttest long-polls `GET {auditURL}/v1/approvals/{id}/wait` and proceeds once the operator resolves the approval via the Decision Hub or the type-specific endpoint.
 
+- **Post-recovery feedback**: once `pollRecovery` confirms the fault has cleared, faulttest calls `POST /api/v1/fleet/playbook-runs/{runID}/request-feedback`. This creates a `feedback` decision card in the hub and prints:
+  ```
+  Feedback pending — resolve at:
+  POST http://helpdesk:8080/api/v1/decisions/feedback:plr_a3f7c1b2/resolve
+  Body: {"resolution":"approved"|"denied","resolved_by":"...","reason":"..."}
+  ```
+  Faulttest then exits with a pass result. The card persists in the hub until an operator answers it — there is no TTY prompt and no blocking wait. Resolving it records `diagnosis_correct` and contributes to the playbook's accuracy rate in the Vault.
+
 This makes faulttest safe to run inside a Kubernetes Job or a Docker container where `/dev/tty` is not available.
+
+---
+
+## Life of a post-incident feedback
+
+The path from fault injection to a confirmed accuracy signal, showing every system involved and both the gate-denial and gate-approval branches.
+
+```mermaid
+flowchart TD
+    A([Fault injected]) --> B["Triage playbook runs\nagent diagnoses root cause\nchain-of-thought → auditd"]
+    B --> C{"Gate\noutcome: gate_pending"}
+
+    C -- "resolution: denied" --> D["Gateway auto-submits\ndiagnosis_correct = false\nreason → actual_root_cause"]
+    D --> ACC[(Accuracy updated\nin RunFeedback store)]
+
+    C -- "resolution: approved" --> E["Remediation playbook runs\nagent_approve step-by-step\nstep cards → hub"]
+    E --> F{"pollRecovery\nverify SQL every 5s"}
+    F -- "timeout / error" --> G([Run: failed\nno feedback card created])
+    F -- "success" --> H["POST .../request-feedback\nplaceholder written to auditd\ndiagnosis_correct = nil"]
+    H --> I["feedback card in hub\ntype: feedback  status: pending"]
+    H --> J([faulttest exits\npass result])
+    I --> K{"Operator resolves\nfeedback card"}
+    K -- "approved" --> L["diagnosis_correct = true\nactual_root_cause stored"]
+    K -- "denied" --> M["diagnosis_correct = false\nactual_root_cause stored"]
+    L --> ACC
+    M --> ACC
+    ACC --> V["vault list — accuracy column\nvault accuracy &lt;series_id&gt;"]
+```
+
+**Step by step:**
+
+1. **Fault injection** — faulttest injects the fault and triggers the triage playbook via the gateway.
+
+2. **Triage** — the LLM agent runs diagnostic tools; every reasoning step and tool call is written to auditd under the run's `trace_id`. The agent emits `TRANSITION_TO:` or `ESCALATE_TO:` with a `DiagnosticReport`. The gateway sets `outcome=gate_pending`.
+
+3. **Gate** — a `type=gate` card appears in the hub. The operator reviews the triage findings and diagnostic report, then resolves:
+   - **Denied**: the gateway immediately auto-submits `diagnosis_correct=false` for the triage run, using the denial reason as `actual_root_cause`. No feedback card is created — accuracy is updated at denial time and the flow ends here.
+   - **Approved**: the gateway fires the remediation playbook and the flow continues.
+
+4. **Remediation** — the `agent_approve` playbook runs step-by-step. Each write/destructive tool call appears as a `type=step_approval` card in the hub until the operator approves or the mode auto-approves it.
+
+5. **Recovery verification** — faulttest polls the verify SQL every 5 seconds until the fault clears or the timeout elapses. On failure, the run is marked failed and no feedback card is created.
+
+6. **Feedback request** — on successful recovery, faulttest calls `POST .../request-feedback`. The gateway writes a `RunFeedback` placeholder (`diagnosis_correct=nil`) to auditd. A `type=feedback, status=pending` card appears in the hub. Faulttest prints the resolve URL and exits immediately — there is no blocking wait.
+
+7. **Operator resolves the feedback card** — at any point after the faulttest job exits, the operator opens the hub card and resolves it:
+   - `resolution=approved` → the diagnosis was correct
+   - `resolution=denied` → wrong hypothesis; an optional `reason` becomes `actual_root_cause`
+
+8. **Accuracy propagates** — `diagnosis_correct` and `actual_root_cause` are persisted. `PlaybookRunStats.accuracy_rate` updates. `faulttest vault list` shows the accuracy column; `faulttest vault accuracy <series_id>` shows the per-hypothesis breakdown across all runs with feedback.
 
 ---
 

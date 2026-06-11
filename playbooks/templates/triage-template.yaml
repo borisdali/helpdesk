@@ -5,9 +5,11 @@
 #
 # Triage playbooks investigate a fault and produce a structured findings summary.
 # They run read-only (execution_mode: agent) — no write tools, no approval gates.
-# The final output must always be a FINDINGS line followed by a signal line
-# (TRANSITION_TO or ESCALATE_TO). The gateway reads those two lines to decide
-# what happens next; omitting or misspelling them breaks the chain.
+# The final output must always be a HYPOTHESIS_N: / ROOT_CAUSE: block followed
+# by a FINDINGS line and a signal line (TRANSITION_TO or ESCALATE_TO). The
+# gateway parses all of these to build the diagnostic report, populate the
+# informed gate, and enforce the low-confidence gate (< 50% primary confidence
+# blocks auto-chaining regardless of gate_escalation flag).
 
 # REQUIRED. Unique identifier for this playbook series.
 # Convention: pbs_<domain>_<focus>_triage
@@ -99,8 +101,11 @@ guidance: |
   Add more steps as needed. Each step should have a clear purpose and a clear
   "done" condition. Avoid open-ended steps ("check if anything looks wrong").
 
-  Final step: after your ROOT_CAUSE line, output exactly these two lines in this
-  format (no markdown, no extra text on each line):
+  Final step: after your analysis, output exactly these lines in this format
+  (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: REPLACE ME — define the exact format here. Example:
     FINDINGS: table=<schema.table> dead_ratio=<N>; autovacuum=<running|stuck|blocked>; recommended=<action>
   TRANSITION_TO: pbs_REPLACE_ME_remediate
@@ -109,6 +114,14 @@ guidance: |
   #   Replace the TRANSITION_TO line with:
   #   ESCALATE_TO: none         (monitor-only — no action required)
   #   ESCALATE_TO: pbs_OTHER_AGENT_series_id   (cross-domain escalation)
+  #
+  # HYPOTHESIS rules:
+  #   - List in descending confidence order (most confident first).
+  #   - EVIDENCE must be a short verbatim quote from a tool output.
+  #   - Every non-primary hypothesis must include REJECTED with a reason.
+  #   - Omit HYPOTHESIS_2 if only one root cause was ever considered.
+  #   - A primary confidence below 0.50 triggers a forced gate regardless
+  #     of whether the caller passed gate_escalation=true.
 
 # Conditions under which the agent should stop and emit ESCALATE_TO: none
 # instead of the normal TRANSITION_TO. List the specific observable conditions

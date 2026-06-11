@@ -1549,6 +1549,24 @@ func resetPgSettingTool(ctx tool.Context, args ResetPgSettingArgs) (PsqlResult, 
 	return resetPgSettingImpl(ctx, args)
 }
 
+// ResetCacheStatsArgs defines arguments for the reset_cache_stats tool.
+type ResetCacheStatsArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string or server ID from infrastructure config."`
+}
+
+func resetCacheStatsImpl(ctx context.Context, args ResetCacheStatsArgs) (PsqlResult, error) {
+	output, err := runPsqlAs(ctx, args.ConnectionString, "SELECT pg_stat_reset();", "reset_cache_stats", policy.ActionWrite,
+		"reset_cache_stats: clear pg_stat_database counters so cache hit ratio reflects current state")
+	if err != nil {
+		return errorResult("reset_cache_stats", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: "Cache statistics reset. blks_hit and blks_read counters cleared — ratio will reflect only activity after this point.\n" + output}, nil
+}
+
+func resetCacheStatsTool(ctx tool.Context, args ResetCacheStatsArgs) (PsqlResult, error) {
+	return resetCacheStatsImpl(ctx, args)
+}
+
 // argsToStruct converts a map[string]any to a typed struct via JSON round-trip.
 // Used by the direct tool registry to adapt gateway requests to typed tool args.
 func argsToStruct[T any](args map[string]any) (T, error) {
@@ -2755,6 +2773,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := resetPgSettingImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("reset_cache_stats", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[ResetCacheStatsArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := resetCacheStatsImpl(ctx, a)
 		return result.Output, nil
 	})
 	return r

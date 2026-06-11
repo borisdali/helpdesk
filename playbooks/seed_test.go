@@ -234,7 +234,7 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		t.Error("pbs_db_restart_triage: escalates_to is empty")
 	}
 
-	// Config recovery: execution_mode=agent, escalates_to and requires_evidence set.
+	// Config recovery: execution_mode=agent, transitions_to and requires_evidence set.
 	config := bySeriesID["pbs_db_config_recovery"]
 	if config == nil {
 		t.Fatal("pbs_db_config_recovery not seeded")
@@ -242,8 +242,8 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 	if config.ExecutionMode != "agent" {
 		t.Errorf("pbs_db_config_recovery: execution_mode = %q, want agent", config.ExecutionMode)
 	}
-	if len(config.EscalatesTo) == 0 {
-		t.Error("pbs_db_config_recovery: escalates_to is empty")
+	if len(config.TransitionsTo) == 0 {
+		t.Error("pbs_db_config_recovery: transitions_to is empty")
 	}
 	if len(config.RequiresEvidence) == 0 {
 		t.Error("pbs_db_config_recovery: requires_evidence is empty")
@@ -364,6 +364,33 @@ func TestPlaybookStructure_TransitionTargetsExist(t *testing.T) {
 			if !known[target] {
 				t.Errorf("series %q: TRANSITION_TO: %q — no playbook with that series_id exists in the vault", pb.SeriesID, target)
 			}
+		}
+	}
+}
+
+// TestPlaybookStructure_HypothesisFormat checks that every entry-point triage
+// playbook (execution_mode=agent, entry_point=true) instructs the agent to emit
+// HYPOTHESIS_1: lines. Without this, parseDiagnosticReport never populates and
+// lowConfidenceForceGate cannot enforce the 50% confidence gate.
+func TestPlaybookStructure_HypothesisFormat(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+	if err := playbooks.SeedSystemPlaybooks(ctx, ps); err != nil {
+		t.Fatalf("SeedSystemPlaybooks: %v", err)
+	}
+	all, err := ps.List(ctx, audit.PlaybookListQuery{ActiveOnly: false, IncludeSystem: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, pb := range all {
+		if !pb.EntryPoint || pb.ExecutionMode != "agent" {
+			continue
+		}
+		if !strings.Contains(pb.Guidance, "HYPOTHESIS_1:") {
+			t.Errorf("series %q (entry_point=true, execution_mode=agent): guidance missing HYPOTHESIS_1: — agent will not emit structured diagnostic report", pb.SeriesID)
+		}
+		if !strings.Contains(pb.Guidance, "ROOT_CAUSE:") {
+			t.Errorf("series %q: guidance missing ROOT_CAUSE: line — parseDiagnosticReport will not mark a primary hypothesis", pb.SeriesID)
 		}
 	}
 }

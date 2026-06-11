@@ -38,8 +38,11 @@ guidance: |
   long-running transaction preventing autovacuum from reclaiming connection slots
   (wraparound risk). Check transaction age alongside connection count.
 
-  Final step: after your analysis, output exactly these two lines in this format
+  Final step: after your analysis, output exactly these lines in this format
   (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: connections <active>/<max> (<pct>%); blocker=<PID <pid> (<state>, <duration>, has_writes=<true|false>) | none>; recommended=<terminate_blocker|kill_idle|escalate|monitor>
   TRANSITION_TO: pbs_connection_remediate
 escalation:

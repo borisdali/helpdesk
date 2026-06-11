@@ -47,10 +47,13 @@ guidance: |
   finding — dead tuples will accumulate indefinitely without manual VACUUM
   runs. Report this clearly as a configuration risk.
 
-  Final step: after your analysis, output exactly two lines below. If
+  Final step: after your analysis, output exactly these lines below. If
   recommended=archive_live_data or recommended=monitor, use ESCALATE_TO: none
   instead of TRANSITION_TO. Otherwise use TRANSITION_TO: pbs_vacuum_remediate.
   Format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: largest_table=<schema.table> size=<size>; largest_db=<dbname> size=<size>; dead_ratio_flag=<schema.table dead_ratio=N | none>; autovacuum=<enabled|disabled>; recommended=<vacuum_large_table|archive_live_data|enable_autovacuum|monitor>
   TRANSITION_TO: pbs_vacuum_remediate
 escalation:

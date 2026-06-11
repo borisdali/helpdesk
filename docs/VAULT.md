@@ -13,18 +13,24 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
 The Vault is the engine of a feedback loop that tightens with every incident:
 
 ```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                                                                  │
-  │         Fault          Agent diagnoses             Playbook      │
-  │   (injected or real) ──► correctly ──────────────► remediates    │
-  │          ▲                                            │          │
-  │          │                                            │          │
-  │          │                                            ▼          │
-  │   Library improves  ◄── Human approves ◄── Draft auto-saved      │
-  │     (activated)         (Vault review)        to Vault           │
-  │                                                                  │
-  └──────────────────────────────────────────────────────────────────┘
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │                                                                        │
+  │         Fault           Agent diagnoses             Playbook           │
+  │   (injected or real) ───► + chain of thought ──────► remediates        │
+  │          ▲                  captured                    │              │
+  │          │                                              │              │
+  │          │                           Operator confirms  ▼              │
+  │   Library improves  ◄── Human      ◄── diagnosis     Draft auto-saved  │
+  │   (accuracy rises)      approves       correct?      to Vault          │
+  │                         (Vault review)  ↓                              │
+  │                                    accuracy_rate                       │
+  │                                    feeds vault list                    │
+  └────────────────────────────────────────────────────────────────────────┘
 ```
+
+The loop closes at two levels. First, there's a carefully tracked **Resolution rate** (does the Playbook fix the problem?). Next, there's also an **Accuracy rate** (does the agent identify the *right* root cause?). It is measured separately because a Playbook can achieve 100% resolution rate while the agent's diagnosis is wrong, if the remediation step happens to fix the problem anyway. Distinguishing these two signals is what makes the Vault's knowledge meaningful rather than just empirically successful.
+
+See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a full walkthrough of how a single incident contributes to both signals.
 
 **Two selling points drive this loop:**
 
@@ -34,7 +40,7 @@ The Vault is the engine of a feedback loop that tightens with every incident:
 
 2. **Institutional memory that compounds.** Every resolved incident automatically proposes a Playbook draft. Every faulttest pass with remediation auto-saves a draft. Human operators review and activate. The library grows. The next similar incident is handled faster, with higher confidence, because someone already did the hard thinking.
 
-The Vault is the mechanism that makes this second point real. Without it, every operator repeats the same diagnostic steps from scratch. And in a different way, with the different mistakes. With it, the hard-won knowledge of how to fix `db-max-connections` or `db-lock-contention` formally accumulates in one place, versioned, with a known track record.
+The Vault is the mechanism that makes this second point real. Without it, every operator repeats the same diagnostic steps from scratch. And in a different way, with the different mistakes. With it, the hard-won knowledge of how to fix `db-max-connections` or `db-lock-contention` formally accumulates in one place, versioned, with a known track record — and with a measurable diagnosis accuracy rate that tells you not just whether the system is *fixing* problems but whether it is *understanding* them correctly.
 
 ---
 
@@ -148,16 +154,16 @@ faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
                      [--target staging-db]
 ```
 
-Shows the full fault catalog alongside the linked Playbook, date of last run, and pass/fail status. When `--gateway` is provided, also verifies that referenced Playbook series IDs exist on the Gateway.
+Shows the full fault catalog alongside the linked Playbook, date of last run, pass/fail status, and diagnosis accuracy. When `--gateway` is provided, also verifies that referenced Playbook series IDs exist on the Gateway and fetches live accuracy data from operator feedback.
 
 ```
-FAULT                            PLAYBOOK                     LAST RUN     STATUS
---------------------------------------------------------------------------------------------
-db-max-connections               pbs_db_conn_pooling          2026-04-16   PASS
-db-connection-refused            pbs_db_restart_triage        2026-04-15   PASS
-db-pg-hba-corrupt                pbs_db_config_recovery       (never)      -
-db-lock-contention               (none)                       2026-04-14   FAIL
-db-idle-in-transaction           pbs_db_idle_txn              2026-04-10   NO PLAYBOOK
+FAULT                            PLAYBOOK                     LAST RUN     STATUS   ACCURACY
+-------------------------------------------------------------------------------------------------------
+db-max-connections               pbs_db_conn_pooling          2026-04-16   PASS     100% accurate (4/4)
+db-connection-refused            pbs_db_restart_triage        2026-04-15   PASS     –
+db-pg-hba-corrupt                pbs_db_config_recovery       (never)      -        –
+db-lock-contention               (none)                       2026-04-14   FAIL     –
+db-idle-in-transaction           pbs_db_idle_txn              2026-04-10   NO PLAYBOOK  –
 ```
 
 | Status | Meaning |
@@ -167,7 +173,39 @@ db-idle-in-transaction           pbs_db_idle_txn              2026-04-10   NO PL
 | `NO PLAYBOOK` | No `remediation.playbook_id` configured in the catalog |
 | `PLAYBOOK NOT FOUND` | Playbook series ID configured but not found on the Gateway |
 
+The `ACCURACY` column shows the diagnosis accuracy rate for the Playbook series from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
+
 Use `--target` to filter history to a specific database server (the `--agent-conn` alias set during runs).
+
+### vault accuracy
+
+```bash
+faulttest vault accuracy <series_id> [--gateway http://gateway:8080] [--api-key sk-...]
+```
+
+Shows the per-series diagnosis accuracy breakdown — how often the agent's root-cause hypothesis was confirmed correct by operators who submitted post-incident feedback.
+
+```bash
+faulttest vault accuracy pbs_lock_chain_triage \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+```
+=== Diagnosis Accuracy: pbs_lock_chain_triage ===
+
+Feedback submissions:  12
+Correct diagnoses:     11
+Accuracy rate:         91.7%
+
+Submit feedback after an incident:
+  POST /api/v1/fleet/playbook-runs/{runID}/feedback
+  {"diagnosis_correct": true, "actual_root_cause": "PID 867 idle-in-tx 47s"}
+```
+
+Accuracy rate is `correct / total` across all runs in the series where `diagnosis_correct` was explicitly set (nil feedback is excluded). Use this alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
+
+Feedback is submitted interactively by `faulttest` after a successful recovery when running with `--remediate` and `--gateway` (see below), or manually via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`.
 
 ### vault status
 

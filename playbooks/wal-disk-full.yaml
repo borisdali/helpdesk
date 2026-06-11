@@ -1,11 +1,12 @@
 series_id: pbs_wal_disk_full
 name: WAL Disk Full — Recovery
-version: "1.0"
+version: "1.1"
 entry_point: true
 execution_mode: agent
 agent_name: sysadmin_agent
 approval_mode: manual
-escalates_to:
+# Same-domain follow-on: restart confirmation is also handled by sysadmin_agent.
+transitions_to:
   - pbs_db_restart_action
 problem_class: capacity
 author: aiHelpDesk
@@ -64,7 +65,7 @@ guidance: |
 
   Step 4 — Free enough space and restart:
   At least 3× max_wal_size (default 1 GB → 3 GB headroom) is needed to
-  restart safely. Once space is freed, emit ESCALATE_TO: pbs_db_restart_action
+  restart safely. Once space is freed, emit TRANSITION_TO: pbs_db_restart_action
   so the restart playbook confirms the database comes back cleanly.
 
   Step 5 — Post-restart validation:
@@ -73,6 +74,14 @@ guidance: |
   - get_host_logs shows "database system is ready to accept connections"
   - If archiving was the cause, verify archive_status/ready count is
     declining (archiver is making progress)
+
+  Final step: after your analysis, output exactly these lines in this
+  format (no markdown, no extra text on each line):
+  HYPOTHESIS_1: <primary root cause of WAL disk full> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from logs>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: container_state=<running|stopped>; root_cause=<archiver_failure|stale_slot|write_volume|long_tx>; wal_dir_gb=<N>; transition_to=<pbs_db_restart_action | none>
+  TRANSITION_TO: pbs_db_restart_action
 
 escalation:
   - "pg_wal directory contains active replication slots — dropping requires operator confirmation"
