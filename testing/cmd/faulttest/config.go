@@ -59,6 +59,19 @@ type RemediationSpec struct {
 	VerifyTimeout string `yaml:"verify_timeout,omitempty"`
 }
 
+// IsAutoDBCompat reports whether faulttest can inject this fault against a
+// temporary Docker PostgreSQL it spins up itself (--auto-db mode).
+func (f Failure) IsAutoDBCompat() bool {
+	if !f.ExternalCompat || f.Category == "kubernetes" {
+		return false
+	}
+	t := f.ExternalInject.Type
+	if t == "" {
+		t = f.Inject.Type
+	}
+	return t != "ssh_exec"
+}
+
 // TimeoutDuration parses the timeout string into a time.Duration.
 func (f Failure) TimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(f.Timeout)
@@ -125,6 +138,9 @@ type HarnessConfig struct {
 	// External enables external PG mode: only external_compat faults are run,
 	// and ExternalInject/ExternalTeardown specs are used instead of Inject/Teardown.
 	External bool
+	// AutoDB instructs faulttest to spin up a temporary Docker PostgreSQL and use
+	// it as the injection target. Implies External=true. Only auto-db-compat faults run.
+	AutoDB bool
 	// RemediateEnabled runs the remediation phase after injection + diagnosis.
 	RemediateEnabled bool
 	// GatewayURL is the helpdesk gateway base URL for playbook/agent remediation.
@@ -288,8 +304,12 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 
 	var result []Failure
 	for _, f := range catalog.Failures {
+		// Auto-DB mode: only faults that work against a spun-up Docker PostgreSQL.
+		if cfg.AutoDB && !f.IsAutoDBCompat() {
+			continue
+		}
 		// External mode: skip faults that don't work without Docker/OS access.
-		if cfg.External && !f.ExternalCompat {
+		if cfg.External && !cfg.AutoDB && !f.ExternalCompat {
 			continue
 		}
 		// Source filter: "builtin" or "custom".

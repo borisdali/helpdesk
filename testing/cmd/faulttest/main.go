@@ -112,6 +112,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	// External PG mode.
 	fs.BoolVar(&cfg.External, "external", false, "Only run external_compat faults using libpq (no Docker/OS access needed)")
+	fs.BoolVar(&cfg.AutoDB, "auto-db", false, "Spin up a temporary Docker PostgreSQL for injection; implies --external, no BYO database needed")
 
 	// SSH injection backend.
 	fs.StringVar(&cfg.SSHHost, "ssh-host", "", "SSH target for ssh_exec faults (user@host or host); triggers ExternalInject mode")
@@ -233,14 +234,20 @@ func cmdList(args []string) {
 
 	failures := FilterFailures(cat, cfg)
 
-	fmt.Printf("%-30s %-12s %-10s %-8s %-8s %s\n", "ID", "CATEGORY", "SEVERITY", "EXTERNAL", "SOURCE", "NAME")
-	fmt.Println(strings.Repeat("-", 100))
+	fmt.Printf("%-30s %-12s %-10s %-8s %-7s %-8s %s\n", "ID", "CATEGORY", "SEVERITY", "EXTERNAL", "DB", "SOURCE", "NAME")
+	fmt.Println(strings.Repeat("-", 107))
 	for _, f := range failures {
 		ext := ""
 		if f.ExternalCompat {
 			ext = "yes"
 		}
-		fmt.Printf("%-30s %-12s %-10s %-8s %-8s %s\n", f.ID, f.Category, f.Severity, ext, f.Source, f.Name)
+		db := "-"
+		if f.IsAutoDBCompat() {
+			db = "auto"
+		} else if f.ExternalCompat {
+			db = "byo"
+		}
+		fmt.Printf("%-30s %-12s %-10s %-8s %-7s %-8s %s\n", f.ID, f.Category, f.Severity, ext, db, f.Source, f.Name)
 	}
 	fmt.Printf("\nTotal: %d failure modes\n", len(failures))
 }
@@ -255,6 +262,20 @@ func cmdRun(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Auto-DB: spin up a temporary PostgreSQL container.
+	if cfg.AutoDB {
+		cfg.External = true
+		fmt.Printf("Starting temporary PostgreSQL container (%s)...\n", autoDBImage)
+		connStr, teardown, err := startAutoDBContainer(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --auto-db: %v\n", err)
+			os.Exit(1)
+		}
+		defer teardown()
+		cfg.ConnStr = connStr
+		fmt.Printf("Auto-DB ready: %s\n\n", connStr)
 	}
 
 	failures := FilterFailures(cat, cfg)
