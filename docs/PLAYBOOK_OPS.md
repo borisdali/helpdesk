@@ -1,8 +1,8 @@
 # aiHelpDesk Playbook Operations Guide
 
-Operational best practices for taking advantage of aiHelpDesk [Playbooks](PLAYBOOKS.md) effectively. This guide covers what to set up before an incident occurs and how to work the investigation workflow during one.
+Operational best practices for taking advantage of aiHelpDesk [Playbooks](PLAYBOOKS.md) effectively. This guide covers what to set up before an [incident](INCIDENTS.md) occurs and how to work the investigation workflow during one.
 
-> **Every resolved incident improves the Vault.** When you close a playbook run with `outcome="resolved"`, the Gateway automatically synthesises a playbook draft from the audit trace and saves it to the Vault for your review. Over time, this turns each incident into an institutional memory contribution — see the [Operational SRE/DBA Flywheel](VAULT.md) flow.
+> **Every resolved incident improves the [Vault](VAULT.md).** When you close a Playbook run with `outcome="resolved"`, the Gateway automatically synthesises a Playbook draft from the audit trace and saves it to the Vault for your review. Over time, this turns each incident into an institutional memory contribution — see the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) flow.
 
 ---
 
@@ -212,7 +212,7 @@ Always pass relevant log lines in the `context` field of your run request. This 
 
 ## 2. Running a DB-down investigation
 
-### 2.1 Step 1 — Collect the immediate evidence
+### 2.1 Step 1: Collect the immediate evidence
 
 Before triggering any playbook, grab the last 50–100 lines of the PostgreSQL log. On Kubernetes:
 
@@ -239,7 +239,7 @@ Identify the most relevant line. Common patterns and what they mean:
 | `PANIC: could not locate a valid checkpoint` | WAL corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_pitr_recovery` |
 | `invalid page in block` / `checksum failure` | Data corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_pitr_recovery` |
 
-### 2.2 Step 2 — Trigger the entry-point playbook
+### 2.2 Step 2: Trigger the entry-point triage playbook
 
 ```bash
 # Get the restart triage playbook ID
@@ -266,7 +266,7 @@ Save the `run_id` — you will need it for continuity threading in step 3.
 
 If `suggested_next` is present, the gateway has prepared the full request body for the follow-on playbook. You can fire it directly (see step 3) or let the gateway auto-chain it by re-running with `approval_mode=auto`.
 
-### 2.3 Step 3 — Follow the escalation
+### 2.3 Step 3: Follow the escalation (if needed)
 
 **Option A — manual (default, production-safe):** use the `suggested_next` field from step 2.
 
@@ -307,7 +307,20 @@ curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
   }' | jq '{chain: [.chain[] | {step, agent_name, findings}], suggested_next, diagnostic_report}'
 ```
 
-### 2.4 Step 4 — Record the outcome and trigger draft synthesis
+### 2.4 Step 4: Provide an Informed Consent (aka Review/Approve the Gate)
+Once the diagnosis is reached (by either running a single triage playbook or by auto-chaining the original playbook to others), a [gate](PLAYBOOKS.md#informed-gate) opens to allow a human operator to review the diagnosis and the proposed remediation plan.
+
+**Best Practice:** Provide feedback (we call it gate-level feedback) as to whether the diagnosis makes sense and whether you'd arrive to the same conclusion if you were to run the triage yourself. This feedback is optional, but it's critical for improving the triage playbooks over time. We highly encourage you to not skip this step.
+
+Assuming that both, the diagnosis and the remediation plan make sense, approve and let the remediation playbook kick in.
+
+### 2.5 Step 5: Decide on remediation approval mode
+There are a few `--approval-mode`s to choose from as defined at the playbook level: `manual` (often the default because it's safe), `review` (often the most practical), `auto` and `session`. See [here](PLAYBOOKS.md#proceeding-through-the-gate) for details on each.
+
+### 2.6 Step 6: Finish the remediation / Provide incident feedback
+Once the remediation is done, provide [incident-level feedback](PLAYBOOKS.md#operator-feedback) on how aiHelpDesk triage/remediation process worked out. This feedback is different from the at-the-gate feedback, that is specific to triage step and it's served to improve the overall support process. This incident-level feedback is also optional, but we strongly encourage the operational teams include it in their SoP.
+
+### 2.7 Step 7: Record the outcome and trigger draft synthesis
 
 Agent-mode runs auto-record `outcome` and `findings_summary` from the agent's structured response. Verify:
 
@@ -336,7 +349,7 @@ curl -s -H "X-User: ops@example.com" \
 
 When a run is closed with `outcome="resolved"` or `outcome="escalated"` and the Gateway has auditd configured, a playbook draft is **automatically synthesised** from the audit trace and saved to the Vault as an inactive draft. You do not need to do anything to trigger this — it happens as a side-effect of recording the outcome.
 
-### 2.5 Step 5 — Review the Vault draft
+### 2.8 Step 8: Review the Vault draft
 
 After closing the incident, check for the pending draft and decide whether to activate it:
 
