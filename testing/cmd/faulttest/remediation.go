@@ -96,6 +96,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 			fmt.Printf("\n  Feedback pending — resolve at:\n")
 			fmt.Printf("  POST %s\n", resolveURL)
 			fmt.Printf("  Body: {\"resolution\":\"approved\"|\"denied\",\"resolved_by\":\"...\",\"reason\":\"...\"}\n\n")
+			r.waitForFeedback(ctx, gate.RunID)
 		}
 	} else {
 		r.submitFeedback(ctx, gate.RunID, gate.DiagnosticReport)
@@ -586,6 +587,50 @@ func logicalArgs(args map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// waitForFeedback polls GET /api/v1/decisions/feedback:{runID} until the
+// operator submits feedback via the Decision Hub or a 10-minute timeout expires.
+func (r *Remediator) waitForFeedback(ctx context.Context, runID string) {
+	if r.cfg.GatewayURL == "" || runID == "" {
+		return
+	}
+	pollInterval := 15 * time.Second
+	deadline := time.Now().Add(10 * time.Minute)
+	fmt.Printf("  Waiting for feedback (10m timeout, Ctrl+C to skip)...\n")
+	decisionURL := strings.TrimSuffix(r.cfg.GatewayURL, "/") + "/api/v1/decisions/feedback:" + runID
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(pollInterval):
+		}
+		if time.Now().After(deadline) {
+			fmt.Printf("  Feedback timeout — continuing without feedback.\n\n")
+			return
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, decisionURL, nil)
+		if err != nil {
+			return
+		}
+		if r.cfg.GatewayAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			slog.Warn("faulttest: feedback poll failed, retrying", "run_id", runID, "err", err)
+			continue
+		}
+		var d struct {
+			Status string `json:"status"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&d)
+		resp.Body.Close()
+		if d.Status != "" && d.Status != "pending" {
+			fmt.Printf("  Feedback received — thank you.\n\n")
+			return
+		}
+	}
 }
 
 // submitFeedback prompts the operator for diagnosis quality feedback and POSTs

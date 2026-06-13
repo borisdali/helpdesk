@@ -314,7 +314,24 @@ Now we can approve it with a single command:
      -H "Authorization: Bearer $APIKEY" \
      -H "Content-Type: application/json" \
      -d '{"resolution":"approved","resolved_by":"boris@borisdali.com"}' \
-     http://localhost:8080/api/v1/decisions/gate:$RUN_ID/resolve
+     http://localhost:8080/api/v1/decisions/gate:$RUN_ID/resolve|jq .
+
+{
+  "run_id": "plr_68a3a679",
+  "status": "pending_approval",
+  "step": {
+    "index": 1,
+    "agent": "database",
+    "tool": "get_database_stats",
+    "args": {
+      "connection_string": "host=host.docker.internal port=5432 dbname=postgres user=postgres password=ChangeMe123"
+    },
+    "reason": "Step 1: Retrieve current blks_hit and blks_read to confirm the cache hit ratio state before remediation.",
+    "action_class": "read"
+  },
+  "approval_id": "apr_b8f20321",
+  "effective_approval_mode": "manual"
+}
 ```
 
 This unblocks the test, so going back to the original test terminal, we see this:
