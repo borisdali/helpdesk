@@ -93,6 +93,11 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		if resolveURL, err := r.inner.RequestFeedback(ctx, gate.RunID); err != nil {
 			slog.Warn("faulttest: failed to request feedback via hub", "run_id", gate.RunID, "err", err)
 		} else if resolveURL != "" {
+			// If the gateway returned a relative path (HELPDESK_BASE_URL not set),
+			// prefix with the gateway URL so the operator has a curl-able address.
+			if strings.HasPrefix(resolveURL, "/") && r.cfg.GatewayURL != "" {
+				resolveURL = strings.TrimSuffix(r.cfg.GatewayURL, "/") + resolveURL
+			}
 			fmt.Printf("\n  Feedback pending — resolve at:\n")
 			fmt.Printf("  POST %s\n", resolveURL)
 			fmt.Printf("  Body fields:\n")
@@ -357,7 +362,12 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.ApproveRunResponse) error {
 	resolveURL := r.cfg.GatewayURL + "/api/v1/decisions/gate:" + gate.RunID + "/resolve"
 	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
-	fmt.Printf("  Resolve at        : POST %s\n\n", resolveURL)
+	fmt.Printf("  Resolve at        : POST %s\n", resolveURL)
+	fmt.Printf("  Body fields:\n")
+	fmt.Printf("    resolution    : \"approved\" | \"denied\"\n")
+	fmt.Printf("    resolved_by   : your email or user ID\n")
+	fmt.Printf("    approval_mode : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
+	fmt.Printf("    reason        : optional — your assessment of the diagnosis\n\n")
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
 	if err != nil {
