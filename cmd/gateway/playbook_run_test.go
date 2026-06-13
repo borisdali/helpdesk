@@ -1800,7 +1800,9 @@ func TestHandlePlaybookRun_ApprovalOverrideClamped(t *testing.T) {
 
 	// Gateway with a DB that restricts override to dba_lead.
 	// The test request carries no principal (zero value, no roles).
-	reg := makeRegistryWithTools([]toolregistry.ToolEntry{})
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "get_blocking_queries", Agent: "database", ActionClass: "read"},
+	})
 	gw := &Gateway{
 		agents:       make(map[string]*discovery.Agent),
 		clients:      make(map[string]*a2aclient.Client),

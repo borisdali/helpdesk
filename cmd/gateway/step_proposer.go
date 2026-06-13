@@ -87,7 +87,13 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 	if agentName == "" {
 		agentName = "database"
 	}
+	// Normalize full A2A agent names (e.g. "postgres_database_agent") to the
+	// short names the registry stores tools under (e.g. "database").
+	agentName = toolregistry.NormalizeAgentName(agentName)
 	toolCatalog := buildStepProposerToolCatalog(g.toolRegistry, agentName)
+	if strings.HasPrefix(toolCatalog, "(no tools registered") {
+		return nil, false, "", fmt.Errorf("no tools registered for agent %q — playbook cannot run", agentName)
+	}
 	historyStr := buildHistorySection(history)
 	prompt := fmt.Sprintf(stepProposerPromptTemplate,
 		pb.Name,

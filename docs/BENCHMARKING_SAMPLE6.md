@@ -68,6 +68,7 @@ Perhaps also add the uptime and current load to the mix to make things more inte
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.16.0-deploy/docker-compose]$ docker compose --profile interactive run --rm helpdesk-client --purpose diagnostic --user alice@example.com --message "also add their uptime and current load"
+```
 
 | Database | Status | Version | Uptime | Connections | Load | Cache Hit Ratio |
 |----------|--------|---------|--------|-------------|------|-----------------|
@@ -86,6 +87,8 @@ Perhaps also add the uptime and current load to the mix to make things more inte
 - **Load**: All databases show minimal-to-light load with excellent cache performance
 
 The two local-access databases (`alloydb-on-vm-local` and `faulttest-db-local`) are not reachable from this environment, which is expected if they're configured for local host-side access only.
+
+```
 [trace: tr_e1b641c9-380  2026-06-12 21:47:05]
 [audit: check_connection (read), check_connection (read), check_connection (read), check_connection (read), check_connection (read), check_connection (read), get_status_summary (read), get_status_summary (read), get_status_summary (read), get_status_summary (read)]
 ```
@@ -132,7 +135,7 @@ Choose a failure scenario from the above list. In the example below we use `db-h
       -v "$HOME/.faulttest:/root/.faulttest" \
       -e DEV_DB_PASSWORD \
       -e ANTHROPIC_API_KEY \
-      ghcr.io/borisdali/helpdesk:v0.16.0-23a7b2e \
+      ghcr.io/borisdali/helpdesk:v0.16.0-d162aaf \
       faulttest run \
         --ids db-high-cache-miss \
         --conn "alloydb-on-vm" \
@@ -143,7 +146,7 @@ Choose a failure scenario from the above list. In the example below we use `db-h
         --judge-api-key $ANTHROPIC_API_KEY \
         --via-gateway --gateway http://gateway:8080 \
         --api-key $HELPDESK_CLIENT_API_KEY \
-        --remediate --emit-and-wait --gate-escalation \
+        --remediate --emit-and-wait --gate-escalation
 
 Fri Jun 12 18:24:34 EDT 2026
 time=2026-06-12T22:24:35.128Z level=INFO msg="using model" vendor=anthropic model=claude-haiku-4-5-20251001

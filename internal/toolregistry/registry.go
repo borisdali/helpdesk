@@ -216,6 +216,16 @@ var agentShortName = map[string]string{
 	"sysadmin_agent":          "sysadmin",
 }
 
+// NormalizeAgentName converts a full A2A agent name (e.g. "postgres_database_agent")
+// to the short registry name used in ToolEntry.Agent (e.g. "database").
+// Returns name unchanged if no mapping exists.
+func NormalizeAgentName(name string) string {
+	if short, ok := agentShortName[name]; ok {
+		return short
+	}
+	return name
+}
+
 // Build constructs a Registry from the gateway's discovered agents.
 // agentCards maps agent name → *a2a.AgentCard.
 // agentSchemas maps agent name → (tool name → JSON Schema properties); pass nil if unavailable.
