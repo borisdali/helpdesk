@@ -249,6 +249,13 @@ type PlaybookRunRequest struct {
 	// Takes precedence over approval_mode=auto/force.
 	GateEscalation bool `json:"gate_escalation,omitempty"`
 
+	// RemediationSeriesID, when non-empty and GateEscalation=true, forces a
+	// pending_gate at the triage→remediation boundary even when the triage agent
+	// did not emit a TRANSITION_TO signal. This ensures the operator always reviews
+	// triage findings before remediation runs, regardless of agent behaviour.
+	// Ignored when GateEscalation=false.
+	RemediationSeriesID string `json:"remediation_series_id,omitempty"`
+
 	// Purpose and PurposeNote are forwarded as X-Purpose / X-Purpose-Note headers
 	// so that tool dispatch policy checks see the operator's declared intent.
 	// Use "diagnostic", "remediation", "maintenance", etc.
@@ -746,6 +753,74 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		}
 		appendChainedText(primary.capture, chained.capture)
 		prev = *chained
+	}
+
+	// Fallback gate: when gate_escalation=true with an explicit remediation target,
+	// always pause at the phase boundary even if the triage agent did not emit
+	// TRANSITION_TO. This guarantees the operator reviews triage findings before
+	// remediation runs, regardless of whether the agent signalled a transition.
+	if req.GateEscalation && req.RemediationSeriesID != "" &&
+		prev.escalatedTo == "" && prev.transitionTo == "" &&
+		finalOutcome != audit.OutcomeGatePending &&
+		!findingsRecommendMonitor(prev.findings) {
+		warn, suggestedMode := g.confidenceWarning(prev.diagReport)
+		extra["status"] = "pending_gate"
+		extra["gate_type"] = "transition"
+		extra["transition_target"] = req.RemediationSeriesID
+		extra["escalation_findings"] = prev.findings
+		if warn != "" {
+			extra["confidence_warning"] = warn
+			extra["suggested_approval_mode"] = suggestedMode
+		}
+		if nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), req.RemediationSeriesID); err == nil {
+			extra["remediation_preview"] = map[string]any{
+				"series_id":     nextPB.SeriesID,
+				"name":          nextPB.Name,
+				"description":   nextPB.Description,
+				"approval_mode": nextPB.ApprovalMode,
+			}
+		}
+		if prev.diagReport != nil {
+			extra["diagnostic_report"] = prev.diagReport
+		}
+		finalOutcome = audit.OutcomeGatePending
+		finalTransitionedTo = req.RemediationSeriesID
+		finalFindings = prev.findings
+		finalReport = prev.diagReport
+		// Surface the protocol violation: every triage playbook must end with
+		// TRANSITION_TO or ESCALATE_TO. A run that omits this signal is a bug.
+		existingWarnings, _ := extra["warnings"].([]string)
+		extra["warnings"] = append(existingWarnings,
+			"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal; gate created from remediation_series_id")
+		slog.Warn("playbook: triage protocol violation — agent omitted TRANSITION_TO/ESCALATE_TO",
+			"run_id", prev.runID, "remediation_series", req.RemediationSeriesID,
+			"confidence_warning", warn)
+		if g.decisionNotifier != nil && prev.runID != "" {
+			gateExtra := map[string]any{
+				"gate_type":         "transition",
+				"transition_target": req.RemediationSeriesID,
+				"findings":          prev.findings,
+			}
+			if warn != "" {
+				gateExtra["confidence_warning"] = warn
+			}
+			if rp, ok := extra["remediation_preview"]; ok {
+				gateExtra["remediation_preview"] = rp
+			}
+			if dr, ok := extra["diagnostic_report"]; ok {
+				gateExtra["diagnostic_report"] = dr
+			}
+			g.decisionNotifier.NotifyPending(r.Context(), decisions.Decision{
+				ID:          "gate:" + prev.runID,
+				Type:        decisions.DecisionTypeGate,
+				Status:      "pending",
+				Summary:     "Triage complete — TRANSITION_TO " + req.RemediationSeriesID,
+				RequestedBy: r.Header.Get("X-User"),
+				RequestedAt: time.Now(),
+				ResolveURL:  strings.TrimSuffix(g.baseURL, "/") + "/api/v1/decisions/gate:" + prev.runID + "/resolve",
+				Extra:       gateExtra,
+			})
+		}
 	}
 
 	extra["chain"] = chain

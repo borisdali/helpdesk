@@ -2529,3 +2529,100 @@ func TestHandlePlaybookRun_LowConfidence_ForcedGate(t *testing.T) {
 		t.Errorf("transition_target = %q, want pbs_vacuum_remediate", resp["transition_target"])
 	}
 }
+
+// TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal verifies that when
+// gate_escalation=true and remediation_series_id is provided, but the triage agent
+// omits TRANSITION_TO/ESCALATE_TO (a protocol violation), the gateway still creates
+// a pending_gate using the explicit remediation target and surfaces a warning.
+func TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_cache_triage01",
+		SeriesID:      "pbs_cache_miss_triage",
+		Name:          "Cache Miss Triage",
+		Guidance:      "Check cache hit ratio and sequential scans.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Agent diagnoses correctly but omits the required TRANSITION_TO signal.
+	agentText := "Cache hit ratio is 92.8% — concerning. Sequential scans on test_large_table " +
+		"are the likely cause. shared_buffers (5.75 GB) is adequate; indexes should be added.\n\n" +
+		"HYPOTHESIS_1: sequential scans on test_large_table elevated blks_read after stat reset | CONFIDENCE: 0.85 | EVIDENCE: \"blks_read=576\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: cache_hit_ratio=0.928; blks_read=576; worst_table=test_large_table; recommended=add_index\n"
+	// Note: no TRANSITION_TO line — this is the protocol violation we are testing.
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"high cache miss","gate_escalation":true,"remediation_series_id":"pbs_cache_miss_remediate"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate — synthetic gate should fire when agent omits signal", resp["status"])
+	}
+	if resp["transition_target"] != "pbs_cache_miss_remediate" {
+		t.Errorf("transition_target = %q, want pbs_cache_miss_remediate", resp["transition_target"])
+	}
+	if resp["gate_type"] != "transition" {
+		t.Errorf("gate_type = %q, want transition", resp["gate_type"])
+	}
+	// Protocol violation must be surfaced as a warning.
+	warnings, _ := resp["warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Error("warnings should be non-empty — protocol violation must be surfaced")
+	} else {
+		found := false
+		for _, w := range warnings {
+			if s, _ := w.(string); strings.Contains(s, "omitted") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("warning should mention omitted signal, got: %v", warnings)
+		}
+	}
+}
+
+// TestHandlePlaybookRun_GateEscalation_NoSignal_NoRemediationTarget verifies that
+// when gate_escalation=true but remediation_series_id is absent and the agent omits
+// TRANSITION_TO, no synthetic gate is created — the run completes normally.
+func TestHandlePlaybookRun_GateEscalation_NoSignal_NoRemediationTarget(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_cache_triage02",
+		SeriesID:      "pbs_cache_miss_triage",
+		Name:          "Cache Miss Triage",
+		Guidance:      "Check cache hit ratio.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Cache hit ratio is 92.8%. No action needed at this time.\n\n" +
+		"FINDINGS: cache_hit_ratio=0.928; recommended=monitor\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	// gate_escalation=true but no remediation_series_id provided.
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"high cache miss","gate_escalation":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("gate fired without remediation_series_id — should not create a synthetic gate")
+	}
+}

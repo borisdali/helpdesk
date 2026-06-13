@@ -141,6 +141,9 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	}
 	if r.cfg.GateEscalation {
 		reqBody["gate_escalation"] = true
+		if f.Remediation.PlaybookID != "" {
+			reqBody["remediation_series_id"] = f.Remediation.PlaybookID
+		}
 	}
 	body, _ := json.Marshal(reqBody)
 

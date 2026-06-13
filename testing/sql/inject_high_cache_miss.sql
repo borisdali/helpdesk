@@ -1,15 +1,16 @@
 --
--- aiHelpDesk fault injection helpder script.
+-- aiHelpDesk fault injection helper script.
 --
--- Inject high cache miss ratio: create a table larger than shared_buffers (32MB)
--- and perform a sequential scan, pushing the cache hit ratio down.
+-- Inject high cache miss ratio: reset pg_stat_database counters, then force a
+-- sequential scan so that blks_read dominates blks_hit, depressing the cache
+-- hit ratio below 95%.
 
 CREATE TABLE IF NOT EXISTS test_large_table (
     id SERIAL PRIMARY KEY,
     data TEXT
 );
 
--- Insert ~50MB of data (well beyond 32MB shared_buffers).
+-- Insert ~50MB of data to ensure the sequential scan generates meaningful I/O.
 INSERT INTO test_large_table (data)
 SELECT repeat('y', 500) FROM generate_series(1, 100000);
 

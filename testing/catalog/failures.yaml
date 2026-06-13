@@ -325,8 +325,9 @@ failures:
     category: database
     severity: medium
     description: >
-      The database cache hit ratio is low because queries scan tables
-      larger than shared_buffers, causing excessive disk I/O.
+      The database cache hit ratio is low because sequential scans on a
+      large table drove blks_read high relative to blks_hit, pushing the
+      cache hit ratio below 95%.
     external_compat: true
     inject:
       type: sql
@@ -361,7 +362,7 @@ failures:
           - "blks_read"
       expected_diagnosis:
         category: "cache_performance"
-        narrative: "The agent should identify a low buffer cache hit ratio indicating that queries are reading data from disk rather than shared_buffers, and recommend increasing shared_buffers or optimizing query access patterns."
+        narrative: "The agent should identify a low buffer cache hit ratio (blks_read elevated relative to blks_hit) caused by sequential scans on the large table, and recommend optimizing query access patterns (e.g. adding indexes on scanned columns) or resetting cache statistics to establish a fresh baseline. The agent should not assume shared_buffers is undersized without evidence that the working set exceeds the configured buffer pool."
     diagnosis_playbook_series_id: pbs_cache_miss_triage
     remediation:
       playbook_id: pbs_cache_miss_remediate
