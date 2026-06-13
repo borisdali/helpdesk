@@ -135,7 +135,7 @@ Choose a failure scenario from the above list. In the example below we use `db-h
       -v "$HOME/.faulttest:/root/.faulttest" \
       -e DEV_DB_PASSWORD \
       -e ANTHROPIC_API_KEY \
-      ghcr.io/borisdali/helpdesk:v0.16.0-d162aaf \
+      ghcr.io/borisdali/helpdesk:v0.16.0-21d906a \
       faulttest run \
         --ids db-high-cache-miss \
         --conn "alloydb-on-vm" \
@@ -338,32 +338,111 @@ This unblocks the test, so going back to the original test terminal, we see this
 
 ```
 ...
-time=2026-06-12T23:49:54.740Z level=INFO msg="faultlib: gate poll" run_id=plr_68a3a679 outcome=gate_pending
-time=2026-06-12T23:50:10.330Z level=INFO msg="faultlib: gate poll" run_id=plr_68a3a679 outcome=gate_pending
-time=2026-06-12T23:50:25.819Z level=INFO msg="faultlib: gate poll" run_id=plr_68a3a679 outcome=transitioned
-time=2026-06-12T23:50:40.229Z level=INFO msg="gate resolved externally" status=transitioned
-
+time=2026-06-13T15:49:17.286Z level=INFO msg="faultlib: gate poll" run_id=plr_613eb2be outcome=gate_pending
+time=2026-06-13T15:49:32.776Z level=INFO msg="faultlib: gate poll" run_id=plr_613eb2be outcome=transitioned
+time=2026-06-13T15:49:33.377Z level=INFO msg="agent_approve: pending step" step_index=0 tool=get_database_stats action_class=read reason="" approval_id=apr_7eb5bd53
   Feedback pending — resolve at:
-  POST /api/v1/decisions/feedback:plr_68a3a679/resolve
+  POST /api/v1/decisions/feedback:plr_613eb2be/resolve
   Body: {"resolution":"approved"|"denied","resolved_by":"...","reason":"..."}
 
+  Waiting for feedback (10m timeout, Ctrl+C to skip)...
+```
+
+At this point the fault injection test stops again and wait (for up to 10 min) for the optional gate-level feedback. We strongly encourage our customers to provide one. What do they think of the diagnosis. Was it clear and concise? Was the proposed remediation plan adequate? Was the human operator clear on what's about to transpire?
+
+Logistics: providing a feedback in the non-interactive run is similar to clearing a gate. In another terminal query [Decision Hub](DECISIONS.md) API to see the pending feedback requests (or just grab the feedback:plr_<XYZ> from the test run):
+
+```
+[boris@~]$ curl -H "Authorization: Bearer $API_KEY" 'http://localhost:8080/api/v1/decisions?status=pending&type=feedback' | jq '.decisions[]  | {id,status,summary}'
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100  1901  100  1901    0     0   6341      0 --:--:-- --:--:-- --:--:--  6357
+{
+  "id": "feedback:plr_613eb2be",
+  "status": "pending",
+  "summary": "Diagnosis feedback needed — pbs_cache_miss_triage"
+}
+{
+  "id": "feedback:plr_6e0d1bd7",
+  "status": "pending",
+  "summary": "Diagnosis feedback needed — pbs_cache_miss_triage"
+}
+{
+  "id": "feedback:plr_68a3a679",
+  "status": "pending",
+  "summary": "Diagnosis feedback needed — pbs_cache_miss_triage"
+}
+{
+  "id": "feedback:plr_dee972c2",
+  "status": "pending",
+  "summary": "Diagnosis feedback needed — pbs_slow_query_triage"
+}
+{
+  "id": "feedback:plr_7bbe456d",
+  "status": "pending",
+  "summary": "Diagnosis feedback needed — pbs_cache_miss_triage"
+}
+```
+
+Once the top feedback request ID is confirmed to match the one prompted in the test run, review it and provide feedback:
+
+```
+[boris@ ~]$ RUN_ID="plr_613eb2be"
+[boris@ ~]$ curl -H "Authorization: Bearer $API_KEY"  http://localhost:8080/api/v1/decisions | jq '.decisions[] | select(.id == "feedback:'"$RUN_ID"'")'
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100 25831    0 25831    0     0  11699      0 --:--:--  0:00:02 --:--:-- 11704
+{
+  "id": "feedback:plr_613eb2be",
+  "type": "feedback",
+  "status": "pending",
+  "summary": "Diagnosis feedback needed — pbs_cache_miss_triage",
+  "requested_by": "faulttest",
+  "requested_at": "2026-06-13T15:50:22.985957967Z",
+  "expires_at": "0001-01-01T00:00:00Z",
+  "resolve_url": "/api/v1/decisions/feedback:plr_613eb2be/resolve",
+  "extra": {
+    "run_id": "plr_613eb2be",
+    "series_id": "pbs_cache_miss_triage"
+  }
+}
+```
+
+Actual at-gate feedback:
+
+```
+[boris@ ~]$ curl -X POST -H "Authorization: Bearer $APIKEY" -H "Content-Type: application/json" -d '{"resolution":"approved","resolved_by":"boris@borisdali.com"}' http://localhost:8080/api/v1/decisions/feedback:$RUN_ID/resolve|jq .
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100   108  100    47  100    61    151    197 --:--:-- --:--:-- --:--:--   349
+{
+  "diagnosis_correct": true,
+  "status": "resolved"
+}
+```
+
+Once the at-gate feedback is submitted (or the threshold of 10min expires), the fault injection test proceeds:
+
+```
+  Feedback received — thank you.
+
 Remediation: RECOVERED in 0.2s (score: 100%)
-Incident plr_68a3a679 — resolved in 0.2s
-  Diagnosis  : Excessive sequential scans on test_large_table (57 MB) are flooding the buffer pool and evicting hot data, causing elevated cache miss ratio on the postgres database despite adequate shared_buffers configuration
+Incident plr_613eb2be — resolved in 0.2s
+  Diagnosis  : Sequential scans on test_large_table (61 MB) evicted hot data from the 5.76 GB shared_buffers pool, causing elevated cache misses in the postgres database
   Remediation: pbs_cache_miss_remediate
-  Narrative  : GET http://gateway:8080/api/v1/incidents/plr_68a3a679
-Vault: draft saved → pb_56f2cada (activate with 'faulttest vault list')
-time=2026-06-12T23:51:01.227Z level=INFO msg="tearing down failure" id=db-high-cache-miss type=sql
-Diagnostic Result:   [PASS] score=73% (keywords=100% tools=100% judge=33%)
+  Narrative  : GET http://gateway:8080/api/v1/incidents/plr_613eb2be
+time=2026-06-13T15:53:38.517Z level=INFO msg="tearing down failure" id=db-high-cache-miss type=sql
+Vault: draft saved → pb_4d1ad1f1 (activate with 'faulttest vault list')
+Diagnostic Result:   [PASS] score=100% (keywords=100% tools=100% judge=100%)
 Remediation Result:  [PASS] score=100% (0.2s, playbook)
-Overall Result:      [PASS] score=83%
+Overall Result:      [PASS] score=100%
 
-=== Fault Test Report: 6cc5cf3a ===
+=== Fault Test Report: 30270444 ===
 
-[PASS] High cache miss ratio (db-high-cache-miss) - score: 73% [judge: 33%]
-       Keywords: 100% | Tools: 100% | Judge: 33%
-       Remediation: 100% (0.2s, playbook) | Overall: 83%
-       Reasoning: "Agent correctly identified the low cache hit ratio symptom (92.80%) but fundamentally misdiagnosed the root cause by rejecting the undersized shared_buffers hypothesis without proper justification—the EXPECTED DIAGNOSIS explicitly requires identifying that queries scanning tables larger than shared_buffers cause excessive disk I/O, yet the agent concluded shared_buffers (5.75 GB) is adequate and instead blamed sequential scans on a 57 MB table that easily fits in cache, contradicting the injected fault scenario."
+[PASS] High cache miss ratio (db-high-cache-miss) - score: 100% [judge: 100%]
+       Keywords: 100% | Tools: 100% | Judge: 100%
+       Remediation: 100% (0.2s, playbook) | Overall: 100%
+       Reasoning: "Agent correctly identified low cache hit ratio (92.86%) caused by sequential scans on test_large_table, properly ruled out undersized shared_buffers using evidence from sibling databases and table size comparison, and appropriately recommended optimizing query access patterns (implicitly through the root cause analysis), while correctly establishing that the issue is workload pattern not buffer pool sizing."
 
 --- Summary ---
 Total: 1 | Passed: 1 | Failed: 0 | Rate: 100%
@@ -371,35 +450,35 @@ Total: 1 | Passed: 1 | Failed: 0 | Rate: 100%
 
 LLM judge scored diagnosis for 1 fault(s). Weights: tool*0.40 + judge*0.40 + keyword*0.20.
 
-Report written to ./faulttest-6cc5cf3a.json
+Report written to ./faulttest-30270444.json
 --- BEGIN FAULTTEST REPORT JSON ---
 {
-  "id": "6cc5cf3a",
-  "timestamp": "2026-06-12T23:51:01Z",
+  "id": "30270444",
+  "timestamp": "2026-06-13T15:53:38Z",
   "results": [
     {
       "failure_id": "db-high-cache-miss",
       "failure_name": "High cache miss ratio",
       "category": "database",
-      "score": 0.732,
+      "score": 1,
       "passed": true,
       "keyword_pass": true,
-      "diagnosis_pass": false,
+      "diagnosis_pass": true,
       "tool_evidence": true,
       "tool_evidence_mode": "structured",
-      "response_text": "I'll begin the automated triage session by first checking connectivity to the target database, then proceeding with cache miss diagnosis.\nThe connection string provided does not match any registered database in the infrastructure configuration. However, based on the connection parameters (host=host.docker.internal port=5432 dbname=postgres), this matches the AlloyDB Omni container. Let me attempt to reach it using the registered alias and then proceed with diagnostics.\nGood — the database is reachable using the registered alias. Now I'll proceed with cache miss diagnosis following the Expert Guidance steps.\n\n**Step 1: Retrieve database statistics and calculate cache hit ratio**\nExcellent — I have cache statistics. The `postgres` database shows a cache hit ratio of **92.80%**, which falls into the \"concerning; investigate further\" range (0.90–0.95). The other databases show healthy ratios (99.98–99.99%). Let me now check for slow queries with large sequential scans.\n\n**Step 2: Check for large sequential scans in slow queries**\n`pg_stat_statements` is not installed. Let me check memory configuration and active connections to understand the workload pattern.\n\n**Step 3: Check memory configuration and investigate current activity**\nExcellent — I've gathered key data. Let me also check the table and disk usage to understand data sizes and identify potential large sequential scans:\nPerfect — I now have the complete picture for diagnosis. Let me convert shared_buffers to GB to compare with the large table:\n\n**Analysis:**\n- `shared_buffers = 735488 * 8KB = 5.75 GB`\n- `test_large_table = 57 MB` (table portion only)\n- `cache_hit_ratio (postgres db) = 92.80%` — concerning range\n- `blks_read = 576` for postgres database\n- `cache_hits = 7419` for postgres database\n\nThe postgres database shows a cache hit ratio of 92.80%, which is in the concerning range (0.90–0.95). However, the data reveals:\n\n1. **Undersized shared_buffers hypothesis is unlikely**: The shared_buffers is set to 5.75 GB, which is substantial. The largest table (test_large_table) is only 57 MB on disk, which easily fits within shared_buffers.\n\n2. **Large sequential scan hypothesis is plausible**: The cache miss ratio could be caused by one or more sequential scans on the test_large_table. The table is being loaded into cache but subsequent queries may be displacing earlier cached blocks if the workload pattern involves repeated full table scans.\n\n3. **Recent stats reset**: The playbook notes that if stats were reset \u003c 5 minutes ago, the window is too short. Let me check if there's evidence of a recent reset by examining the baseline or looking for timing cues.\n\nGiven the evidence:\n- The postgres database has 576 blocks read and 7419 cache hits from what appears to be test workload activity\n- The cache hit ratio of 92.80% indicates some elevated disk I/O relative to cache hits\n- The presence of test_large_table (57 MB) suggests the fault injection test populated this table\n- shared_buffers is already well-configured at 5.75 GB\n\nThe root cause is **excessive sequential scan activity on the test_large_table**, likely driven by the fault injection test, which has flooded the buffer pool with reads, causing the elevated cache miss ratio on the postgres database despite adequate shared_buffers.\n\nHYPOTHESIS_1: Excessive sequential scans on test_large_table (57 MB) are flooding the buffer pool and evicting hot data, causing elevated cache miss ratio on the postgres database despite adequate shared_buffers configuration | CONFIDENCE: 0.85 | EVIDENCE: \"cache_hit_ratio | 92.80\" for postgres database; \"test_large_table | table_size | 57 MB\" identified as largest table; shared_buffers already set to 5.75 GB (735488 * 8kB)\nHYPOTHESIS_2: Undersized shared_buffers configuration causing persistent cache misses | CONFIDENCE: 0.05 | REJECTED: shared_buffers is already set to 5.75 GB, which is 25%+ of available memory and far exceeds the largest table size of 57 MB, making undersizing an implausible cause\nROOT_CAUSE: HYPOTHESIS_1",
-      "duration": "29.094691596s",
+      "response_text": "I'll help you diagnose why the database at host=host.docker.internal port=5432 is unavailable. Let me start by checking the connection and gathering diagnostic information.\nThe connection string is not registered in the infrastructure config. However, this appears to be the AlloyDB instance (host.docker.internal:5432 matches alloydb-on-vm in the infrastructure). Let me try using the registered database name and also attempt a direct connection approach.\nGood! The database is actually reachable — check_connection succeeded using alloydb-on-vm. The database is running PostgreSQL 17.7. Now let me gather the diagnostic data according to the Expert Guidance for cache miss diagnosis. I'll use the alloydb-on-vm connection (which maps to the specified host/port).\nExcellent! I now have the key diagnostic data. Let me analyze the findings:\n\n**Database Statistics Analysis:**\n- **postgres database**: cache_hit_ratio = 92.86% (concerning, below 95%)\n  - blks_read = 571\n  - cache_hits = 7426\n  - Total blocks accessed = 571 + 7426 = 7997\n\n- **alloydbadmin database**: cache_hit_ratio = 99.98% (healthy)\n- **alloydbmetadata database**: cache_hit_ratio = 99.99% (healthy)\n\n**Memory Configuration:**\n- shared_buffers = 735,488 * 8 kB = 5,865,904 kB ≈ 5.76 GB\n\nThe postgres database shows a cache hit ratio of 92.86%, which falls into the \"concerning\" range (90–95%). This indicates elevated cache misses. Let me get more detailed information about the actual queries and any recent stats resets.\nPerfect! This is the key evidence. The table statistics reveal:\n- A table named **test_large_table** with a size of **61 MB**\n- **3 sequential scans** (seqscan = 3)\n- **0 index scans**\n- 0 live rows (table appears to be emptied after the fault injection)\n\nThis is consistent with the fault injection scenario described in the playbook: a large table was filled and sequential scans were run, which would read every block and evict hot data from the 5.76 GB shared_buffers pool.\n\nLet me verify the server information to understand the total available RAM and get additional context.\nPerfect! I now have complete diagnostic evidence. Let me summarize the key findings:\n\n## Diagnosis\n\n**Cache Hit Ratio Analysis:**\n- postgres database: 92.86% cache hit ratio (concerning range: 90–95%)\n  - blks_read = 571 blocks from disk\n  - cache_hits = 7,426 hits from cache\n  - This indicates 7.14% of block accesses required disk I/O\n\n**Root Cause Evidence:**\n1. **test_large_table** (61 MB) shows 3 sequential scans with 0 index scans\n2. **shared_buffers** is set to 5.76 GB (735,488 * 8 KB)\n3. The table size (61 MB) is small relative to shared_buffers (5.76 GB), but the sequential scans still caused elevated cache misses\n4. The postgres database was reset/fault-injected, which cleared table data but left scan statistics\n\n**Why Cache Misses Occurred:**\n- Sequential scans on test_large_table loaded all 61 MB of blocks into the buffer pool\n- This access pattern (full table scans) evicted other frequently-accessed hot pages\n- The 92.86% hit ratio reflects the period after the sequential scans completed and stats were gathered\n- The other databases (alloydbadmin at 99.98%, alloydbmetadata at 99.99%) have normal hit ratios, confirming the issue is specific to the postgres database's workload pattern\n\n**Configuration Assessment:**\n- shared_buffers of 5.76 GB is appropriately sized for a system with sufficient RAM\n- The issue is not undersized shared_buffers, but rather the workload pattern: large sequential scans evict hot data\n\nThe fault injection scenario has run as designed — a large sequential scan filled the buffer pool temporarily, causing elevated cache misses during that period. The system has since stabilized, but the postgres database still shows the residual effects (92.86% hit ratio).\n\nHYPOTHESIS_1: Sequential scans on test_large_table (61 MB) evicted hot data from the 5.76 GB shared_buffers pool, causing elevated cache misses in the postgres database | CONFIDENCE: 0.95 | EVIDENCE: \"table_name | test_large_table\\ntotal_size | 61 MB\\nseq_scan   | 3\\nidx_scan   | 0\" and \"database | postgres\\ncache_hit_ratio | 92.86\\nblocks_read | 571\\ncache_hits | 7426\"\nHYPOTHESIS_2: Undersized shared_buffers is the root cause | CONFIDENCE: 0.05 | REJECTED: shared_buffers is 5.76 GB, which is substantially larger than the 61 MB table causing the miss rate, and sibling databases show healthy 99.98% hit ratios\nROOT_CAUSE: HYPOTHESIS_1",
+      "duration": "35.940709642s",
       "keyword_score": 1,
       "tool_score": 1,
-      "diagnosis_score": 0.33,
-      "judge_reasoning": "Agent correctly identified the low cache hit ratio symptom (92.80%) but fundamentally misdiagnosed the root cause by rejecting the undersized shared_buffers hypothesis without proper justification—the EXPECTED DIAGNOSIS explicitly requires identifying that queries scanning tables larger than shared_buffers cause excessive disk I/O, yet the agent concluded shared_buffers (5.75 GB) is adequate and instead blamed sequential scans on a 57 MB table that easily fits in cache, contradicting the injected fault scenario.",
+      "diagnosis_score": 1,
+      "judge_reasoning": "Agent correctly identified low cache hit ratio (92.86%) caused by sequential scans on test_large_table, properly ruled out undersized shared_buffers using evidence from sibling databases and table size comparison, and appropriately recommended optimizing query access patterns (implicitly through the root cause analysis), while correctly establishing that the issue is workload pattern not buffer pool sizing.",
       "judge_model": "claude-haiku-4-5-20251001",
       "remediation_attempted": true,
       "remediation_passed": true,
-      "recovery_time_seconds": 0.18939,
+      "recovery_time_seconds": 0.192654667,
       "remediation_score": 1,
       "remediation_method": "playbook",
-      "overall_score": 0.8392
+      "overall_score": 1
     }
   ],
   "summary": {
@@ -417,8 +496,5 @@ Report written to ./faulttest-6cc5cf3a.json
   }
 }
 --- END FAULTTEST REPORT JSON ---
-
-real	3m27.215s
-user	0m0.238s
-sys	0m0.830s
 ```
+

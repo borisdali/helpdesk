@@ -95,7 +95,10 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		} else if resolveURL != "" {
 			fmt.Printf("\n  Feedback pending — resolve at:\n")
 			fmt.Printf("  POST %s\n", resolveURL)
-			fmt.Printf("  Body: {\"resolution\":\"approved\"|\"denied\",\"resolved_by\":\"...\",\"reason\":\"...\"}\n\n")
+			fmt.Printf("  Body fields:\n")
+			fmt.Printf("    resolution  : \"approved\" (diagnosis correct) | \"denied\" (diagnosis wrong)\n")
+			fmt.Printf("    resolved_by : your email or user ID\n")
+			fmt.Printf("    reason      : actual root cause (required when resolution=\"denied\")\n\n")
 			r.waitForFeedback(ctx, gate.RunID)
 		}
 	} else {

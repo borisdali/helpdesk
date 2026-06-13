@@ -2434,13 +2434,13 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Inject connection_string into the proposed args so the DB agent has a target.
+	// Always override — the re-planning LLM may extract a raw DSN from prior
+	// findings text rather than using the registered symbolic name.
 	if req.ConnectionString != "" {
 		if proposal.Args == nil {
 			proposal.Args = map[string]any{}
 		}
-		if _, already := proposal.Args["connection_string"]; !already {
-			proposal.Args["connection_string"] = req.ConnectionString
-		}
+		proposal.Args["connection_string"] = req.ConnectionString
 	}
 
 	// Persist the proposed step to auditd.
@@ -2534,16 +2534,15 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	// Mark step as executing.
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "executing", pendingStep.ApprovalID, "", "")
 
-	// Inject connection_string into args if the tool accepts it and it's not already set.
+	// Always override connection_string with the run's authoritative value.
+	// The stored step args may carry a raw DSN that the re-planning LLM extracted
+	// from prior findings text; force the registered symbolic name instead.
 	args := pendingStep.Args
 	if args == nil {
 		args = map[string]any{}
 	}
-	if _, hasConn := args["connection_string"]; !hasConn {
-		if run.ContextID != "" {
-			// ContextID might encode a connection string — but for step runs we
-			// rely on the proposer to have included it from the playbook run request.
-		}
+	if run.ConnectionString != "" {
+		args["connection_string"] = run.ConnectionString
 	}
 
 	// Prefer the run's stored trace_id (set at run-start for agent_approve runs)
@@ -2625,13 +2624,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Inject connection_string into next proposal's args if we know it.
+	// Always override — the re-planning LLM may extract a raw DSN from prior
+	// findings text rather than using the registered symbolic name.
 	if connStr != "" {
 		if nextProposal.Args == nil {
 			nextProposal.Args = map[string]any{}
 		}
-		if _, already := nextProposal.Args["connection_string"]; !already {
-			nextProposal.Args["connection_string"] = connStr
-		}
+		nextProposal.Args["connection_string"] = connStr
 	}
 
 	// Persist next proposed step.
