@@ -383,6 +383,7 @@ func cmdRun(args []string) {
 			evalResult.ResponseText = resp.Text
 			evalResult.Duration = resp.Duration.String()
 			evalResult.CrystalBall = resp.CrystalBall
+			evalResult.RunID = resp.RunID
 
 			// Push judge reasoning to the audit store so it appears alongside
 			// live agent_reasoning events in the governance trail.
@@ -512,6 +513,12 @@ func cmdRun(args []string) {
 	}
 	if err := appendHistory(report, target); err != nil {
 		slog.Warn("failed to append to run history", "err", err, "path", historyFilePath())
+	}
+
+	// Post evaluation scores to auditd (via gateway) so they can be joined
+	// with operator feedback for calibration. Failures are non-fatal.
+	if cfg.GatewayURL != "" {
+		postEvaluations(cfg.GatewayURL, cfg.GatewayAPIKey, report.Results)
 	}
 }
 

@@ -12,9 +12,10 @@ import (
 )
 
 type playbookRunServer struct {
-	store         *audit.PlaybookRunStore
-	playbookStore *audit.PlaybookStore
-	feedbackStore *audit.RunFeedbackStore
+	store           *audit.PlaybookRunStore
+	playbookStore   *audit.PlaybookStore
+	feedbackStore   *audit.RunFeedbackStore
+	evaluationStore *audit.RunEvaluationStore
 }
 
 // handleRecord handles POST /v1/fleet/playbooks/{playbookID}/runs.
@@ -292,6 +293,58 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(fb) //nolint:errcheck
+}
+
+// handleSubmitEvaluation handles POST /v1/fleet/playbook-runs/{runID}/evaluation.
+// Faulttest calls this after each fault to record automated scoring metrics against
+// the triage playbook run_id, making them available for calibration alongside feedback.
+func (s *playbookRunServer) handleSubmitEvaluation(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	var eval audit.RunEvaluation
+	if err := json.NewDecoder(r.Body).Decode(&eval); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	eval.RunID = runID
+	if err := s.evaluationStore.Upsert(r.Context(), &eval); err != nil {
+		slog.Error("failed to submit evaluation", "run_id", runID, "err", err)
+		http.Error(w, "failed to submit evaluation", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetEvaluation handles GET /v1/fleet/playbook-runs/{runID}/evaluation.
+func (s *playbookRunServer) handleGetEvaluation(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	eval, err := s.evaluationStore.GetByRunID(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "no evaluation for run", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to get evaluation", "run_id", runID, "err", err)
+		http.Error(w, "failed to get evaluation", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(eval) //nolint:errcheck
 }
 
 // handleListPendingFeedback handles GET /v1/fleet/playbook-runs/feedback-pending.

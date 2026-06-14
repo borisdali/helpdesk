@@ -16,6 +16,9 @@ type EvalResult struct {
 	Category     string  `json:"category"`
 	Score        float64 `json:"score"`
 	Passed       bool    `json:"passed"`
+	// RunID is the gateway playbook run_id (plr_*) for this fault's triage run.
+	// Set from resp.RunID after the agent call; empty for injection failures.
+	RunID        string  `json:"run_id,omitempty"`
 	KeywordPass  bool    `json:"keyword_pass"`
 	DiagnosisPass bool   `json:"diagnosis_pass"`
 	ToolEvidence bool    `json:"tool_evidence"`

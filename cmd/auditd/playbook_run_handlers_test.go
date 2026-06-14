@@ -539,3 +539,127 @@ func TestPlaybookRunHandlers_ListPendingFeedback(t *testing.T) {
 		t.Errorf("VerdictCorrect should be nil for pending record")
 	}
 }
+
+func newPlaybookRunServerWithEvaluation(t *testing.T) *playbookRunServer {
+	t.Helper()
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	prs, err := audit.NewPlaybookRunStore(store.DB())
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	pbs, err := audit.NewPlaybookStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookStore: %v", err)
+	}
+	evs, err := audit.NewRunEvaluationStore(store.DB())
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	return &playbookRunServer{store: prs, playbookStore: pbs, evaluationStore: evs}
+}
+
+func TestPlaybookRunHandlers_Evaluation_SubmitAndGet(t *testing.T) {
+	srv := newPlaybookRunServerWithEvaluation(t)
+
+	body := map[string]any{
+		"failure_id":      "db-tx-lock-chain-blocker",
+		"failure_name":    "Transaction lock chain blocker",
+		"keyword_score":   1.0,
+		"tool_score":      0.8,
+		"diagnosis_score": 0.9,
+		"overall_score":   0.85,
+		"judge_used":      true,
+		"passed":          true,
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_ev01/evaluation", bytes.NewReader(data))
+	req.SetPathValue("runID", "plr_ev01")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.handleSubmitEvaluation(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_ev01/evaluation", nil)
+	req2.SetPathValue("runID", "plr_ev01")
+	rec2 := httptest.NewRecorder()
+	srv.handleGetEvaluation(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body: %s", rec2.Code, rec2.Body.String())
+	}
+	var got audit.RunEvaluation
+	if err := json.NewDecoder(rec2.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.RunID != "plr_ev01" {
+		t.Errorf("RunID = %q, want plr_ev01", got.RunID)
+	}
+	if got.FailureID != "db-tx-lock-chain-blocker" {
+		t.Errorf("FailureID = %q", got.FailureID)
+	}
+	if got.KeywordScore != 1.0 {
+		t.Errorf("KeywordScore = %v, want 1.0", got.KeywordScore)
+	}
+	if got.OverallScore != 0.85 {
+		t.Errorf("OverallScore = %v, want 0.85", got.OverallScore)
+	}
+	if !got.JudgeUsed {
+		t.Error("JudgeUsed should be true")
+	}
+	if !got.Passed {
+		t.Error("Passed should be true")
+	}
+}
+
+func TestPlaybookRunHandlers_Evaluation_NotFound(t *testing.T) {
+	srv := newPlaybookRunServerWithEvaluation(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_ghost/evaluation", nil)
+	req.SetPathValue("runID", "plr_ghost")
+	rec := httptest.NewRecorder()
+	srv.handleGetEvaluation(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestPlaybookRunHandlers_Evaluation_Upsert(t *testing.T) {
+	srv := newPlaybookRunServerWithEvaluation(t)
+
+	post := func(overall float64) {
+		t.Helper()
+		data, _ := json.Marshal(map[string]any{"failure_id": "db-oom", "overall_score": overall})
+		req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_up01/evaluation", bytes.NewReader(data))
+		req.SetPathValue("runID", "plr_up01")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.handleSubmitEvaluation(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("POST status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+	}
+	post(0.5)
+	post(0.9)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_up01/evaluation", nil)
+	req.SetPathValue("runID", "plr_up01")
+	rec := httptest.NewRecorder()
+	srv.handleGetEvaluation(rec, req)
+
+	var got audit.RunEvaluation
+	json.NewDecoder(rec.Body).Decode(&got) //nolint:errcheck
+	if got.OverallScore != 0.9 {
+		t.Errorf("OverallScore after upsert = %v, want 0.9", got.OverallScore)
+	}
+}

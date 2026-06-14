@@ -140,6 +140,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create run evaluation store (shares the same database connection)
+	runEvaluationStore, err := audit.NewRunEvaluationStore(store.DB())
+	if err != nil {
+		slog.Error("failed to create run evaluation store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create playbook run step store (shares the same database connection)
 	playbookRunStepStore, err := audit.NewPlaybookRunStepStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -248,7 +255,7 @@ func main() {
 	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore, feedbackStore: runFeedbackStore}
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
-	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore, feedbackStore: runFeedbackStore}
+	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore, feedbackStore: runFeedbackStore, evaluationStore: runEvaluationStore}
 	playbookRunStepSrv := &playbookRunStepServer{store: playbookRunStepStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 
@@ -313,6 +320,8 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/feedback-pending", auth("GET /v1/fleet/playbook-runs/feedback-pending", playbookRunSrv.handleListPendingFeedback))
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/feedback", auth("POST /v1/fleet/playbook-runs/{runID}/feedback", playbookRunSrv.handleSubmitFeedback))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/feedback", auth("GET /v1/fleet/playbook-runs/{runID}/feedback", playbookRunSrv.handleGetFeedback))
+	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/evaluation", auth("POST /v1/fleet/playbook-runs/{runID}/evaluation", playbookRunSrv.handleSubmitEvaluation))
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/evaluation", auth("GET /v1/fleet/playbook-runs/{runID}/evaluation", playbookRunSrv.handleGetEvaluation))
 
 	// Playbook run step endpoints (agent_approve mode)
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/steps", auth("POST /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleCreateStep))

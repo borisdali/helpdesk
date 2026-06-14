@@ -403,6 +403,14 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		g.proxyToAuditd(w, r, auditPath)
 	}))
 	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/request-feedback", auth("POST /api/v1/fleet/playbook-runs/{runID}/request-feedback", g.handleRequestFeedback))
+	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/evaluation", auth("POST /api/v1/fleet/playbook-runs/{runID}/evaluation", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id+"/evaluation")
+	}))
+	mux.HandleFunc("GET /api/v1/fleet/playbook-runs/{runID}/evaluation", auth("GET /api/v1/fleet/playbook-runs/{runID}/evaluation", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("runID")
+		g.proxyToAuditd(w, r, "/v1/fleet/playbook-runs/"+id+"/evaluation")
+	}))
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))

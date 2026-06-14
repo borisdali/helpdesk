@@ -1025,10 +1025,12 @@ func vaultIncidents(args []string) {
 		colDiag     = 10
 		colRemed    = 16
 		colFeedback = 12
+		colScore    = 5
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colRunID, "RUN ID", colDate, "STARTED", colDiag, "DIAG", colRemed, "REMEDIATION", colFeedback, "FEEDBACK", "FINDINGS")
-	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colDiag+2+colRemed+2+colFeedback+2+46))
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colDate, "STARTED", colDiag, "DIAG", colRemed, "REMEDIATION",
+		colFeedback, "FEEDBACK", colScore, "SCORE", "FINDINGS")
+	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+40))
 
 	for _, run := range runs {
 		date := run.StartedAt
@@ -1058,20 +1060,27 @@ func vaultIncidents(args []string) {
 			}
 		}
 
+		ev := fetchEvaluation(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		scoreStr := "–"
+		if ev != nil {
+			scoreStr = fmt.Sprintf("%d%%", int(ev.OverallScore*100))
+		}
+
 		findings := run.FindingsSummary
-		if len(findings) > 46 {
-			findings = findings[:43] + "..."
+		if len(findings) > 40 {
+			findings = findings[:37] + "..."
 		}
 		if findings == "" {
 			findings = "–"
 		}
 
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colRunID, run.RunID,
 			colDate, date,
 			colDiag, diagOutcome,
 			colRemed, remedStr,
 			colFeedback, feedbackStr,
+			colScore, scoreStr,
 			findings,
 		)
 	}
@@ -1298,4 +1307,94 @@ func vaultSuggest(args []string) {
 	fmt.Printf("#   curl -X POST %s/api/v1/fleet/playbooks/import \\\n", gatewayURL)
 	fmt.Println("#     -H 'Content-Type: application/json' \\")
 	fmt.Println("#     -d '{\"text\": \"<paste YAML above>\", \"format\": \"yaml\"}'")
+}
+
+// ── Evaluation helpers ────────────────────────────────────────────────────
+
+// evaluationResult is the response shape from GET .../evaluation.
+type evaluationResult struct {
+	RunID            string  `json:"run_id"`
+	FailureID        string  `json:"failure_id"`
+	KeywordScore     float64 `json:"keyword_score"`
+	ToolScore        float64 `json:"tool_score"`
+	DiagnosisScore   float64 `json:"diagnosis_score"`
+	RemediationScore float64 `json:"remediation_score,omitempty"`
+	OverallScore     float64 `json:"overall_score"`
+	JudgeUsed        bool    `json:"judge_used,omitempty"`
+	Passed           bool    `json:"passed"`
+}
+
+// fetchEvaluation retrieves automated evaluation scores for a run from the gateway.
+// Returns nil (not an error) when no evaluation has been recorded.
+func fetchEvaluation(gatewayURL, apiKey, runID string) *evaluationResult {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/evaluation"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	defer resp.Body.Close()
+	var ev evaluationResult
+	if err := json.NewDecoder(resp.Body).Decode(&ev); err != nil {
+		return nil
+	}
+	if ev.RunID == "" {
+		return nil
+	}
+	return &ev
+}
+
+// postEvaluations posts evaluation scores for each result to auditd via the gateway.
+// Only results that have a RunID (i.e. the agent call succeeded) are posted.
+// Failures are logged but never cause the run to fail.
+func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	base := strings.TrimSuffix(gatewayURL, "/")
+	posted := 0
+	for _, r := range results {
+		if r.RunID == "" {
+			continue
+		}
+		payload := map[string]any{
+			"failure_id":        r.FailureID,
+			"failure_name":      r.FailureName,
+			"keyword_score":     r.KeywordScore,
+			"tool_score":        r.ToolScore,
+			"diagnosis_score":   r.DiagnosisScore,
+			"remediation_score": r.RemediationScore,
+			"overall_score":     r.OverallScore,
+			"judge_used":        !r.JudgeSkipped && r.JudgeModel != "",
+			"passed":            r.Passed,
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			continue
+		}
+		url := base + "/api/v1/fleet/playbook-runs/" + r.RunID + "/evaluation"
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+			posted++
+		}
+	}
+	if posted > 0 {
+		fmt.Printf("Evaluation scores posted to auditd: %d/%d runs\n", posted, len(results))
+	}
 }
