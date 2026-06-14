@@ -375,7 +375,7 @@ Actual at-gate feedback:
 [boris@ ~]$ curl -X POST -H "Authorization: Bearer $APIKEY" -H "Content-Type: application/json" \
 >     -d '{"resolution":"approved","resolved_by":"boris@borisdali.com","reason":"Sequential scans on test_large_table evicted hot data from shared_buffers"}' \
 >     http://localhost:8080/api/v1/decisions/feedback:$RUN_ID/resolve
-{"diagnosis_correct":true,"status":"resolved"}
+{"verdict_correct":true,"status":"resolved"}
 ```
 
 Once the at-gate feedback is submitted (or the threshold of 10min expires), the fault injection test proceeds:

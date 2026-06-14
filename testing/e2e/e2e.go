@@ -315,8 +315,25 @@ func (c *GatewayClient) SubmitFeedback(ctx context.Context, runID string, body m
 }
 
 // GetFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
+// Defaults to feedback_type=triage, feedback_time=post_incident.
 func (c *GatewayClient) GetFeedback(ctx context.Context, runID string) (map[string]any, error) {
 	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode feedback: %w", err)
+	}
+	return result, nil
+}
+
+// GetFeedbackByType calls GET /api/v1/fleet/playbook-runs/{runID}/feedback
+// with ?feedback_type=<feedbackType>&feedback_time=<feedbackTime>.
+func (c *GatewayClient) GetFeedbackByType(ctx context.Context, runID, feedbackType, feedbackTime string) (map[string]any, error) {
+	path := fmt.Sprintf("/api/v1/fleet/playbook-runs/%s/feedback?feedback_type=%s&feedback_time=%s",
+		runID, feedbackType, feedbackTime)
+	raw, err := c.get(ctx, path)
 	if err != nil {
 		return nil, err
 	}

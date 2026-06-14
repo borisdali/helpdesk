@@ -1141,6 +1141,97 @@ func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
 	t.Logf("feedback roundtrip OK: run_id=%s", runID)
 }
 
+// TestPlaybooks_FeedbackByType verifies that GET /feedback?feedback_type=&feedback_time=
+// returns the correct row for each combination, and that at_gate and post_incident
+// feedback for the same run_id are stored independently (no collision).
+func TestPlaybooks_FeedbackByType(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	runID := fmt.Sprintf("plr_e2e_fbtype_%d", time.Now().UnixNano())
+
+	// Submit (triage, at_gate) — mirroring what the gateway does at proceed-escalation time.
+	_, err := client.SubmitFeedback(ctx, runID, map[string]any{
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "at_gate",
+		"verdict_correct": true,
+		"verdict_notes":   "diagnosis looked right at gate",
+		"operator":        "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("SubmitFeedback (at_gate): %v", err)
+	}
+
+	// Submit (triage, post_incident) for the same run.
+	_, err = client.SubmitFeedback(ctx, runID, map[string]any{
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": false,
+		"verdict_notes":   "autovacuum was the real cause",
+		"operator":        "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("SubmitFeedback (post_incident): %v", err)
+	}
+
+	// Default GET (no params) → returns post_incident row.
+	defaultFB, err := client.GetFeedback(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetFeedback (default): %v", err)
+	}
+	if defaultFB["feedback_time"] != "post_incident" {
+		t.Errorf("default GET: feedback_time = %q, want post_incident", defaultFB["feedback_time"])
+	}
+	if dc, _ := defaultFB["verdict_correct"].(bool); dc {
+		t.Errorf("default GET: verdict_correct = true, want false")
+	}
+	if defaultFB["verdict_notes"] != "autovacuum was the real cause" {
+		t.Errorf("default GET: verdict_notes = %q", defaultFB["verdict_notes"])
+	}
+
+	// Explicit at_gate GET → returns at_gate row.
+	atGateFB, err := client.GetFeedbackByType(ctx, runID, "triage", "at_gate")
+	if err != nil {
+		t.Fatalf("GetFeedbackByType (at_gate): %v", err)
+	}
+	if atGateFB["feedback_time"] != "at_gate" {
+		t.Errorf("at_gate GET: feedback_time = %q, want at_gate", atGateFB["feedback_time"])
+	}
+	if dc, _ := atGateFB["verdict_correct"].(bool); !dc {
+		t.Errorf("at_gate GET: verdict_correct = false, want true")
+	}
+	if atGateFB["verdict_notes"] != "diagnosis looked right at gate" {
+		t.Errorf("at_gate GET: verdict_notes = %q", atGateFB["verdict_notes"])
+	}
+
+	// Explicit post_incident GET → same as default.
+	postFB, err := client.GetFeedbackByType(ctx, runID, "triage", "post_incident")
+	if err != nil {
+		t.Fatalf("GetFeedbackByType (post_incident): %v", err)
+	}
+	if postFB["feedback_time"] != "post_incident" {
+		t.Errorf("explicit post_incident GET: feedback_time = %q", postFB["feedback_time"])
+	}
+
+	// Non-existent combination → 404.
+	_, err = client.GetFeedbackByType(ctx, runID, "remediation", "post_incident")
+	if err == nil {
+		t.Error("expected 404 for remediation/post_incident, got nil error")
+	} else if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected 404, got: %v", err)
+	}
+
+	t.Logf("feedback by-type OK: run_id=%s", runID)
+}
+
 // TestPlaybooks_FeedbackNotFound verifies that GET feedback for a run with no
 // feedback returns HTTP 404 via the gateway.
 func TestPlaybooks_FeedbackNotFound(t *testing.T) {

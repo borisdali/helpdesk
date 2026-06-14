@@ -200,10 +200,10 @@ Accuracy rate:         91.7%
 
 Submit feedback after an incident:
   POST /api/v1/fleet/playbook-runs/{runID}/feedback
-  {"diagnosis_correct": true, "actual_root_cause": "PID 867 idle-in-tx 47s"}
+  {"feedback_type": "triage", "feedback_time": "post_incident", "verdict_correct": true, "verdict_notes": "PID 867 idle-in-tx 47s"}
 ```
 
-Accuracy rate is `correct / total` across all runs in the series where `diagnosis_correct` was explicitly set (nil feedback is excluded). Use this alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
+Accuracy rate is `correct / total` across all runs in the series where `verdict_correct` was explicitly set on `(triage, post_incident)` feedback (nil feedback is excluded). Use this alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
 
 Feedback is submitted interactively by `faulttest` after a successful recovery when running with `--remediate` and `--gateway` (see below), or manually via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`.
 

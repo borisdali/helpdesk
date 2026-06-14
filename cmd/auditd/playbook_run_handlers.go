@@ -260,6 +260,8 @@ func (s *playbookRunServer) handleSubmitFeedback(w http.ResponseWriter, r *http.
 }
 
 // handleGetFeedback handles GET /v1/fleet/playbook-runs/{runID}/feedback.
+// Optional query params ?feedback_type=<type>&feedback_time=<time> select a
+// specific row; defaults to feedback_type=triage, feedback_time=post_incident.
 func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.feedbackStore == nil {
 		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
@@ -270,7 +272,15 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 		http.Error(w, "runID is required", http.StatusBadRequest)
 		return
 	}
-	fb, err := s.feedbackStore.GetByRunID(r.Context(), runID)
+	feedbackType := r.URL.Query().Get("feedback_type")
+	if feedbackType == "" {
+		feedbackType = "triage"
+	}
+	feedbackTime := r.URL.Query().Get("feedback_time")
+	if feedbackTime == "" {
+		feedbackTime = "post_incident"
+	}
+	fb, err := s.feedbackStore.GetByRunIDAndType(r.Context(), runID, feedbackType, feedbackTime)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "no feedback for run", http.StatusNotFound)

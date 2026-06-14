@@ -403,6 +403,89 @@ func TestPlaybookRunHandlers_Stats_IncludesAccuracy(t *testing.T) {
 	}
 }
 
+func TestPlaybookRunHandlers_Feedback_QueryParams(t *testing.T) {
+	srv := newPlaybookRunServerWithFeedback(t)
+
+	doRunRequest(t, srv, "pb1", map[string]any{"run_id": "plr_qp01", "series_id": "pbs_lock_chain_triage"})
+
+	submitFeedback := func(t *testing.T, runID, fbType, fbTime string, verdictCorrect bool, notes string) {
+		t.Helper()
+		body := map[string]any{
+			"feedback_type":   fbType,
+			"feedback_time":   fbTime,
+			"verdict_correct": verdictCorrect,
+			"verdict_notes":   notes,
+			"operator":        "tester",
+		}
+		data, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/"+runID+"/feedback", bytes.NewReader(data))
+		req.SetPathValue("runID", runID)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.handleSubmitFeedback(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("submit feedback (%s/%s): status %d, body: %s", fbType, fbTime, rec.Code, rec.Body.String())
+		}
+	}
+
+	getFeedback := func(t *testing.T, runID, fbType, fbTime string) (audit.RunFeedback, int) {
+		t.Helper()
+		url := "/v1/fleet/playbook-runs/" + runID + "/feedback"
+		if fbType != "" || fbTime != "" {
+			url += "?feedback_type=" + fbType + "&feedback_time=" + fbTime
+		}
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req.SetPathValue("runID", runID)
+		if fbType != "" {
+			req.URL.RawQuery = "feedback_type=" + fbType + "&feedback_time=" + fbTime
+		}
+		rec := httptest.NewRecorder()
+		srv.handleGetFeedback(rec, req)
+		var fb audit.RunFeedback
+		if rec.Code == http.StatusOK {
+			json.NewDecoder(rec.Body).Decode(&fb) //nolint:errcheck
+		}
+		return fb, rec.Code
+	}
+
+	// Submit (triage, at_gate) and (triage, post_incident) for the same run.
+	submitFeedback(t, "plr_qp01", "triage", "at_gate", true, "looked correct at gate")
+	submitFeedback(t, "plr_qp01", "triage", "post_incident", false, "wrong after investigation")
+
+	// Default (no params) → post_incident.
+	fb, code := getFeedback(t, "plr_qp01", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("default GET: status %d", code)
+	}
+	if fb.FeedbackTime != "post_incident" {
+		t.Errorf("default GET: feedback_time = %q, want post_incident", fb.FeedbackTime)
+	}
+	if fb.VerdictCorrect == nil || *fb.VerdictCorrect != false {
+		t.Errorf("default GET: verdict_correct = %v, want false", fb.VerdictCorrect)
+	}
+
+	// Explicit at_gate → returns at_gate row.
+	fb2, code2 := getFeedback(t, "plr_qp01", "triage", "at_gate")
+	if code2 != http.StatusOK {
+		t.Fatalf("at_gate GET: status %d", code2)
+	}
+	if fb2.FeedbackTime != "at_gate" {
+		t.Errorf("at_gate GET: feedback_time = %q, want at_gate", fb2.FeedbackTime)
+	}
+	if fb2.VerdictCorrect == nil || *fb2.VerdictCorrect != true {
+		t.Errorf("at_gate GET: verdict_correct = %v, want true", fb2.VerdictCorrect)
+	}
+	if fb2.VerdictNotes != "looked correct at gate" {
+		t.Errorf("at_gate GET: verdict_notes = %q", fb2.VerdictNotes)
+	}
+
+	// Non-existent combination → 404.
+	_, code3 := getFeedback(t, "plr_qp01", "remediation", "post_incident")
+	if code3 != http.StatusNotFound {
+		t.Errorf("missing combination: status %d, want 404", code3)
+	}
+}
+
 func TestPlaybookRunHandlers_ListPendingFeedback(t *testing.T) {
 	srv := newPlaybookRunServerWithFeedback(t)
 
