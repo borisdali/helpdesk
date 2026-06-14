@@ -62,9 +62,9 @@ type ProceedEscalationRequest struct {
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"`
 	Reason           string `json:"reason,omitempty"`           // optional operator rationale
-	// At-gate diagnosis feedback — captured before remediation runs.
-	DiagnosisCorrect *bool  `json:"diagnosis_correct,omitempty"`
-	ActualRootCause  string `json:"actual_root_cause,omitempty"`
+	// At-gate feedback — captured before remediation runs.
+	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
+	VerdictNotes   string `json:"verdict_notes,omitempty"`
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.

@@ -7,14 +7,18 @@ import (
 	"time"
 )
 
-// RunFeedback captures operator confirmation of diagnosis quality after an incident.
+// RunFeedback captures operator assessment of a playbook run quality.
+// FeedbackType distinguishes what is being assessed: "triage" or "remediation".
+// FeedbackTime distinguishes when: "at_gate" (before remediation) or "post_incident" (after recovery).
 type RunFeedback struct {
-	RunID            string    `json:"run_id"`
-	SeriesID         string    `json:"series_id"`
-	DiagnosisCorrect *bool     `json:"diagnosis_correct,omitempty"` // nil = not submitted
-	ActualRootCause  string    `json:"actual_root_cause,omitempty"`
-	Operator         string    `json:"operator"`
-	SubmittedAt      time.Time `json:"submitted_at"`
+	RunID          string    `json:"run_id"`
+	FeedbackType   string    `json:"feedback_type"`          // "triage" | "remediation"
+	FeedbackTime   string    `json:"feedback_time"`          // "at_gate" | "post_incident"
+	SeriesID       string    `json:"series_id"`
+	VerdictCorrect *bool     `json:"verdict_correct,omitempty"` // nil = not yet submitted
+	VerdictNotes   string    `json:"verdict_notes,omitempty"`
+	Operator       string    `json:"operator"`
+	SubmittedAt    time.Time `json:"submitted_at"`
 }
 
 // FeedbackStats aggregates feedback quality metrics for a playbook series.
@@ -43,12 +47,15 @@ func NewRunFeedbackStore(db *sql.DB) (*RunFeedbackStore, error) {
 func (s *RunFeedbackStore) createSchema() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS run_feedback (
-    run_id             TEXT     NOT NULL PRIMARY KEY,
-    series_id          TEXT     NOT NULL DEFAULT '',
-    diagnosis_correct  INTEGER,
-    actual_root_cause  TEXT     NOT NULL DEFAULT '',
-    operator           TEXT     NOT NULL DEFAULT '',
-    submitted_at       DATETIME NOT NULL
+    run_id          TEXT     NOT NULL,
+    feedback_type   TEXT     NOT NULL DEFAULT 'triage',
+    feedback_time   TEXT     NOT NULL DEFAULT 'post_incident',
+    series_id       TEXT     NOT NULL DEFAULT '',
+    verdict_correct INTEGER,
+    verdict_notes   TEXT     NOT NULL DEFAULT '',
+    operator        TEXT     NOT NULL DEFAULT '',
+    submitted_at    DATETIME NOT NULL,
+    PRIMARY KEY (run_id, feedback_type, feedback_time)
 )`)
 	if err != nil {
 		return err
@@ -58,30 +65,37 @@ CREATE TABLE IF NOT EXISTS run_feedback (
 	return err
 }
 
-// Submit upserts feedback for a run. Calling Submit twice for the same run_id
-// overwrites the previous entry.
+// Submit upserts feedback for a run. Calling Submit twice for the same
+// (run_id, feedback_type, feedback_time) overwrites the previous entry;
+// different feedback_type/feedback_time combinations are stored as separate rows.
 func (s *RunFeedbackStore) Submit(ctx context.Context, fb *RunFeedback) error {
 	if fb.SubmittedAt.IsZero() {
 		fb.SubmittedAt = time.Now().UTC()
 	}
-	var diagCorrect *int
-	if fb.DiagnosisCorrect != nil {
+	if fb.FeedbackType == "" {
+		fb.FeedbackType = "triage"
+	}
+	if fb.FeedbackTime == "" {
+		fb.FeedbackTime = "post_incident"
+	}
+	var verdictInt *int
+	if fb.VerdictCorrect != nil {
 		v := 0
-		if *fb.DiagnosisCorrect {
+		if *fb.VerdictCorrect {
 			v = 1
 		}
-		diagCorrect = &v
+		verdictInt = &v
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO run_feedback (run_id, series_id, diagnosis_correct, actual_root_cause, operator, submitted_at)
-VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT(run_id) DO UPDATE SET
-    series_id         = excluded.series_id,
-    diagnosis_correct = excluded.diagnosis_correct,
-    actual_root_cause = excluded.actual_root_cause,
-    operator          = excluded.operator,
-    submitted_at      = excluded.submitted_at`,
-		fb.RunID, fb.SeriesID, diagCorrect, fb.ActualRootCause, fb.Operator,
+INSERT INTO run_feedback (run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(run_id, feedback_type, feedback_time) DO UPDATE SET
+    series_id       = excluded.series_id,
+    verdict_correct = excluded.verdict_correct,
+    verdict_notes   = excluded.verdict_notes,
+    operator        = excluded.operator,
+    submitted_at    = excluded.submitted_at`,
+		fb.RunID, fb.FeedbackType, fb.FeedbackTime, fb.SeriesID, verdictInt, fb.VerdictNotes, fb.Operator,
 		fb.SubmittedAt.UTC().Format(sqliteTimeFormat),
 	)
 	if err != nil {
@@ -90,20 +104,34 @@ ON CONFLICT(run_id) DO UPDATE SET
 	return nil
 }
 
-// GetByRunID returns the feedback for the given run, or sql.ErrNoRows if none.
-func (s *RunFeedbackStore) GetByRunID(ctx context.Context, runID string) (*RunFeedback, error) {
+// GetByRunIDAndType returns a specific feedback record by run_id, type, and time.
+// Returns sql.ErrNoRows when no matching record exists.
+func (s *RunFeedbackStore) GetByRunIDAndType(ctx context.Context, runID, feedbackType, feedbackTime string) (*RunFeedback, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT run_id, series_id, diagnosis_correct, actual_root_cause, operator, submitted_at
-FROM run_feedback WHERE run_id = ?`, runID)
+SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at
+FROM run_feedback WHERE run_id = ? AND feedback_type = ? AND feedback_time = ?`,
+		runID, feedbackType, feedbackTime)
 	return scanRunFeedback(row)
 }
 
-// ListPending returns RunFeedback records where diagnosis_correct has not been
-// set yet (placeholder records created by request-feedback calls).
+// GetByRunID returns the post-incident triage feedback for a run.
+// This is the feedback type managed via the Decision Hub pending queue.
+// Returns sql.ErrNoRows when no record exists.
+func (s *RunFeedbackStore) GetByRunID(ctx context.Context, runID string) (*RunFeedback, error) {
+	return s.GetByRunIDAndType(ctx, runID, "triage", "post_incident")
+}
+
+// ListPending returns RunFeedback records for post-incident triage feedback
+// where verdict_correct has not been set yet (placeholder records created by
+// request-feedback calls, awaiting operator resolution via the Decision Hub).
 func (s *RunFeedbackStore) ListPending(ctx context.Context) ([]*RunFeedback, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT run_id, series_id, diagnosis_correct, actual_root_cause, operator, submitted_at
-FROM run_feedback WHERE diagnosis_correct IS NULL ORDER BY submitted_at DESC`)
+SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at
+FROM run_feedback
+WHERE verdict_correct IS NULL
+  AND feedback_type = 'triage'
+  AND feedback_time = 'post_incident'
+ORDER BY submitted_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list pending feedback: %w", err)
 	}
@@ -119,15 +147,19 @@ FROM run_feedback WHERE diagnosis_correct IS NULL ORDER BY submitted_at DESC`)
 	return out, rows.Err()
 }
 
-// StatsBySeries returns accuracy aggregates for a playbook series.
-// Only counts records where diagnosis_correct is set; placeholder records
-// (diagnosis_correct IS NULL) are excluded so they don't inflate feedback_count.
+// StatsBySeries returns accuracy aggregates for post-incident triage feedback
+// for a playbook series. Only counts records where verdict_correct is set;
+// placeholder records (verdict_correct IS NULL) are excluded.
 func (s *RunFeedbackStore) StatsBySeries(ctx context.Context, seriesID string) (*FeedbackStats, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
-    COUNT(*)                                                          AS feedback_count,
-    COALESCE(SUM(CASE WHEN diagnosis_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_count
-FROM run_feedback WHERE series_id = ? AND diagnosis_correct IS NOT NULL`, seriesID)
+    COUNT(*) AS feedback_count,
+    COALESCE(SUM(CASE WHEN verdict_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_count
+FROM run_feedback
+WHERE series_id = ?
+  AND feedback_type = 'triage'
+  AND feedback_time = 'post_incident'
+  AND verdict_correct IS NOT NULL`, seriesID)
 	var total, correct int
 	if err := row.Scan(&total, &correct); err != nil {
 		return nil, fmt.Errorf("stats by series: %w", err)
@@ -155,15 +187,15 @@ func scanRunFeedback(row *sql.Row) (*RunFeedback, error) {
 func scanRunFeedbackRow(s feedbackScanner) (*RunFeedback, error) {
 	var (
 		fb           RunFeedback
-		diagInt      *int
+		verdictInt   *int
 		submittedStr string
 	)
-	if err := s.Scan(&fb.RunID, &fb.SeriesID, &diagInt, &fb.ActualRootCause, &fb.Operator, &submittedStr); err != nil {
+	if err := s.Scan(&fb.RunID, &fb.FeedbackType, &fb.FeedbackTime, &fb.SeriesID, &verdictInt, &fb.VerdictNotes, &fb.Operator, &submittedStr); err != nil {
 		return nil, err
 	}
-	if diagInt != nil {
-		b := *diagInt != 0
-		fb.DiagnosisCorrect = &b
+	if verdictInt != nil {
+		b := *verdictInt != 0
+		fb.VerdictCorrect = &b
 	}
 	if submittedStr != "" {
 		if t, err := time.Parse(sqliteTimeFormat, submittedStr); err == nil {
@@ -172,4 +204,3 @@ func scanRunFeedbackRow(s feedbackScanner) (*RunFeedback, error) {
 	}
 	return &fb, nil
 }
-

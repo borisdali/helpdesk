@@ -285,8 +285,8 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 }
 
 // handleListPendingFeedback handles GET /v1/fleet/playbook-runs/feedback-pending.
-// Returns RunFeedback placeholder records where diagnosis_correct has not been
-// submitted yet — these are feedback requests awaiting operator resolution.
+// Returns post-incident triage RunFeedback placeholder records where verdict_correct
+// has not been submitted yet — these are feedback requests awaiting operator resolution.
 func (s *playbookRunServer) handleListPendingFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.feedbackStore == nil {
 		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)

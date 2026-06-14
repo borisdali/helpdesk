@@ -275,7 +275,7 @@ func mockFeedbackAuditd(t *testing.T, runID string, diagCorrect *bool) *httptest
 		"operator":  "faulttest",
 	}
 	if diagCorrect != nil {
-		submitted["diagnosis_correct"] = *diagCorrect
+		submitted["verdict_correct"] = *diagCorrect
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -360,9 +360,9 @@ func TestHandleGetDecision_Feedback_Resolved(t *testing.T) {
 	if d.Status != "resolved" {
 		t.Errorf("Status = %q, want resolved", d.Status)
 	}
-	diagCorrect, _ := d.Extra["diagnosis_correct"].(bool)
-	if !diagCorrect {
-		t.Errorf("Extra[diagnosis_correct] = %v, want true", d.Extra["diagnosis_correct"])
+	verdictCorrect, _ := d.Extra["verdict_correct"].(bool)
+	if !verdictCorrect {
+		t.Errorf("Extra[verdict_correct] = %v, want true", d.Extra["verdict_correct"])
 	}
 }
 
@@ -386,8 +386,8 @@ func TestHandleResolveDecision_Feedback_Approved(t *testing.T) {
 	if result["status"] != "resolved" {
 		t.Errorf("status = %v, want resolved", result["status"])
 	}
-	if result["diagnosis_correct"] != true {
-		t.Errorf("diagnosis_correct = %v, want true", result["diagnosis_correct"])
+	if result["verdict_correct"] != true {
+		t.Errorf("verdict_correct = %v, want true", result["verdict_correct"])
 	}
 }
 
@@ -408,8 +408,8 @@ func TestHandleResolveDecision_Feedback_Denied(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if result["diagnosis_correct"] != false {
-		t.Errorf("diagnosis_correct = %v, want false", result["diagnosis_correct"])
+	if result["verdict_correct"] != false {
+		t.Errorf("verdict_correct = %v, want false", result["verdict_correct"])
 	}
 }
 

@@ -289,9 +289,11 @@ func TestPlaybookRunHandlers_Feedback_SubmitAndGet(t *testing.T) {
 
 	// Submit feedback.
 	body := map[string]any{
-		"diagnosis_correct": true,
-		"actual_root_cause": "PID 42 held ShareLock",
-		"operator":          "alice",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": true,
+		"verdict_notes":   "PID 42 held ShareLock",
+		"operator":        "alice",
 	}
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_fb01/feedback", bytes.NewReader(data))
@@ -320,11 +322,11 @@ func TestPlaybookRunHandlers_Feedback_SubmitAndGet(t *testing.T) {
 	if got.RunID != "plr_fb01" {
 		t.Errorf("RunID = %q, want plr_fb01", got.RunID)
 	}
-	if got.DiagnosisCorrect == nil || !*got.DiagnosisCorrect {
-		t.Errorf("DiagnosisCorrect = %v, want true", got.DiagnosisCorrect)
+	if got.VerdictCorrect == nil || !*got.VerdictCorrect {
+		t.Errorf("VerdictCorrect = %v, want true", got.VerdictCorrect)
 	}
-	if got.ActualRootCause != "PID 42 held ShareLock" {
-		t.Errorf("ActualRootCause = %q", got.ActualRootCause)
+	if got.VerdictNotes != "PID 42 held ShareLock" {
+		t.Errorf("VerdictNotes = %q", got.VerdictNotes)
 	}
 }
 
@@ -366,7 +368,7 @@ func TestPlaybookRunHandlers_Stats_IncludesAccuracy(t *testing.T) {
 	})
 
 	// Submit feedback for that run.
-	fbBody := map[string]any{"diagnosis_correct": true, "operator": "test"}
+	fbBody := map[string]any{"feedback_type": "triage", "feedback_time": "post_incident", "verdict_correct": true, "operator": "test"}
 	fbData, _ := json.Marshal(fbBody)
 	fbReq := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_acc_run1/feedback", bytes.NewReader(fbData))
 	fbReq.SetPathValue("runID", "plr_acc_run1")
@@ -421,7 +423,7 @@ func TestPlaybookRunHandlers_ListPendingFeedback(t *testing.T) {
 	}
 
 	// Submit answered feedback for plr_pf02 — should NOT appear in pending list.
-	answered := map[string]any{"diagnosis_correct": true, "operator": "alice"}
+	answered := map[string]any{"feedback_type": "triage", "feedback_time": "post_incident", "verdict_correct": true, "operator": "alice"}
 	d2, _ := json.Marshal(answered)
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_pf02/feedback", bytes.NewReader(d2))
 	req2.SetPathValue("runID", "plr_pf02")
@@ -450,7 +452,7 @@ func TestPlaybookRunHandlers_ListPendingFeedback(t *testing.T) {
 	if items[0].RunID != "plr_pf01" {
 		t.Errorf("RunID = %q, want plr_pf01", items[0].RunID)
 	}
-	if items[0].DiagnosisCorrect != nil {
-		t.Errorf("DiagnosisCorrect should be nil for pending record")
+	if items[0].VerdictCorrect != nil {
+		t.Errorf("VerdictCorrect should be nil for pending record")
 	}
 }

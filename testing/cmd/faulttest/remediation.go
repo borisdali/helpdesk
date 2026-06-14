@@ -336,21 +336,21 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	reasonInput, _ := reader.ReadString('\n')
 	reasonInput = strings.TrimSpace(reasonInput)
 
-	// At-gate diagnosis feedback — captured before remediation runs so the
-	// signal is independent of whether the fix worked.
-	var diagCorrect *bool
-	var actualRootCause string
+	// At-gate feedback — captured before remediation runs so the signal is
+	// independent of whether the fix worked.
+	var verdictCorrect *bool
+	var verdictNotes string
 	fmt.Print("  Was the diagnosis correct? [y/n/skip]: ")
 	diagAnswer, _ := reader.ReadString('\n')
 	diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
 	if diagAnswer == "y" || diagAnswer == "yes" {
 		v := true
-		diagCorrect = &v
+		verdictCorrect = &v
 	} else if diagAnswer == "n" || diagAnswer == "no" {
 		v := false
-		diagCorrect = &v
+		verdictCorrect = &v
 	}
-	if diagCorrect != nil {
+	if verdictCorrect != nil {
 		defaultCause := primaryHypothesisText(gate.DiagnosticReport)
 		prompt := "  Actual root cause"
 		if defaultCause != "" {
@@ -362,7 +362,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		if causeInput == "" {
 			causeInput = defaultCause
 		}
-		actualRootCause = causeInput
+		verdictNotes = causeInput
 	}
 
 	connStr := r.cfg.ConnStr
@@ -375,8 +375,8 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		ApprovalMode:     modeInput,
 		ConnectionString: connStr,
 		Reason:           reasonInput,
-		DiagnosisCorrect: diagCorrect,
-		ActualRootCause:  actualRootCause,
+		VerdictCorrect:   verdictCorrect,
+		VerdictNotes:     verdictNotes,
 	})
 	if err != nil {
 		return fmt.Errorf("proceed-escalation: %w", err)
@@ -399,8 +399,8 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("    resolved_by       : your email or user ID\n")
 	fmt.Printf("    approval_mode     : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
 	fmt.Printf("    reason            : optional — free-text operator comment\n")
-	fmt.Printf("    diagnosis_correct : true | false  (at-gate feedback, before remediation runs)\n")
-	fmt.Printf("    actual_root_cause : string        (required when diagnosis_correct=false)\n\n")
+	fmt.Printf("    verdict_correct : true | false  (at-gate feedback, before remediation runs)\n")
+	fmt.Printf("    verdict_notes   : string        (required when verdict_correct=false)\n\n")
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
 	if err != nil {
@@ -725,11 +725,13 @@ func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagRepor
 	}
 
 	fb := map[string]any{
-		"run_id":            runID,
-		"diagnosis_correct": diagCorrect,
+		"run_id":          runID,
+		"verdict_correct": diagCorrect,
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
 	}
 	if causeInput != "" {
-		fb["actual_root_cause"] = causeInput
+		fb["verdict_notes"] = causeInput
 	}
 	if r.cfg.OperatorID != "" {
 		fb["operator"] = r.cfg.OperatorID

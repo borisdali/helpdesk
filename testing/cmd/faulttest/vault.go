@@ -850,10 +850,10 @@ type incidentRun struct {
 
 // incidentFeedback is the feedback response shape from GET .../feedback.
 type incidentFeedback struct {
-	RunID            string  `json:"run_id"`
-	DiagnosisCorrect *bool   `json:"diagnosis_correct"`
-	ActualRootCause  string  `json:"actual_root_cause"`
-	Operator         string  `json:"operator"`
+	RunID          string `json:"run_id"`
+	VerdictCorrect *bool  `json:"verdict_correct"`
+	VerdictNotes   string `json:"verdict_notes"`
+	Operator       string `json:"operator"`
 }
 
 // fetchRunsBySeries calls GET /api/v1/fleet/playbook-runs?series_id=<sid>&limit=<n>.
@@ -1049,9 +1049,9 @@ func vaultIncidents(args []string) {
 		fb := fetchFeedback(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
 		feedbackStr := "–"
 		if fb != nil {
-			if fb.DiagnosisCorrect == nil {
+			if fb.VerdictCorrect == nil {
 				feedbackStr = "submitted"
-			} else if *fb.DiagnosisCorrect {
+			} else if *fb.VerdictCorrect {
 				feedbackStr = "✓ correct"
 			} else {
 				feedbackStr = "✗ wrong"

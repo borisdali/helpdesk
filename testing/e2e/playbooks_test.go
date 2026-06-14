@@ -1077,12 +1077,14 @@ func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
 
 	runID := fmt.Sprintf("plr_e2e_fb_%d", time.Now().UnixNano())
 
-	// Submit initial feedback (diagnosis_correct=true).
+	// Submit initial feedback (verdict_correct=true).
 	fb, err := client.SubmitFeedback(ctx, runID, map[string]any{
-		"series_id":         "pbs_lock_chain_triage",
-		"diagnosis_correct": true,
-		"actual_root_cause": "PID 867 held ShareLock on tx 9823",
-		"operator":          "e2e-test",
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": true,
+		"verdict_notes":   "PID 867 held ShareLock on tx 9823",
+		"operator":        "e2e-test",
 	})
 	if err != nil {
 		t.Fatalf("SubmitFeedback: %v", err)
@@ -1105,19 +1107,21 @@ func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
 	if got["series_id"] != "pbs_lock_chain_triage" {
 		t.Errorf("feedback series_id = %q", got["series_id"])
 	}
-	if dc, _ := got["diagnosis_correct"].(bool); !dc {
-		t.Errorf("feedback diagnosis_correct = %v, want true", got["diagnosis_correct"])
+	if dc, _ := got["verdict_correct"].(bool); !dc {
+		t.Errorf("feedback verdict_correct = %v, want true", got["verdict_correct"])
 	}
-	if got["actual_root_cause"] != "PID 867 held ShareLock on tx 9823" {
-		t.Errorf("feedback actual_root_cause = %q", got["actual_root_cause"])
+	if got["verdict_notes"] != "PID 867 held ShareLock on tx 9823" {
+		t.Errorf("feedback verdict_notes = %q", got["verdict_notes"])
 	}
 
-	// Upsert: re-submit the same run_id with corrected values.
+	// Upsert: re-submit the same (run_id, feedback_type, feedback_time) with corrected values.
 	_, err = client.SubmitFeedback(ctx, runID, map[string]any{
-		"series_id":         "pbs_lock_chain_triage",
-		"diagnosis_correct": false,
-		"actual_root_cause": "wrong hypothesis — actual blocker was autovacuum",
-		"operator":          "e2e-test",
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": false,
+		"verdict_notes":   "wrong hypothesis — actual blocker was autovacuum",
+		"operator":        "e2e-test",
 	})
 	if err != nil {
 		t.Fatalf("SubmitFeedback (upsert): %v", err)
@@ -1127,11 +1131,11 @@ func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFeedback after upsert: %v", err)
 	}
-	if dc, _ := got2["diagnosis_correct"].(bool); dc {
-		t.Errorf("after upsert diagnosis_correct = true, want false")
+	if dc, _ := got2["verdict_correct"].(bool); dc {
+		t.Errorf("after upsert verdict_correct = true, want false")
 	}
-	if got2["actual_root_cause"] != "wrong hypothesis — actual blocker was autovacuum" {
-		t.Errorf("after upsert actual_root_cause = %q", got2["actual_root_cause"])
+	if got2["verdict_notes"] != "wrong hypothesis — actual blocker was autovacuum" {
+		t.Errorf("after upsert verdict_notes = %q", got2["verdict_notes"])
 	}
 
 	t.Logf("feedback roundtrip OK: run_id=%s", runID)
@@ -1161,7 +1165,7 @@ func TestPlaybooks_FeedbackNotFound(t *testing.T) {
 // TestPlaybooks_RequestFeedback_DecisionHubFlow verifies the full emit-and-wait
 // feedback path end-to-end: request-feedback creates a placeholder that appears
 // as a pending "feedback" decision in the hub, and resolving it via
-// POST /decisions/feedback:{runID}/resolve persists diagnosis_correct.
+// POST /decisions/feedback:{runID}/resolve persists verdict_correct.
 // No LLM is needed — request-feedback works against any run_id.
 func TestPlaybooks_RequestFeedback_DecisionHubFlow(t *testing.T) {
 	cfg := LoadConfig()
@@ -1220,7 +1224,7 @@ func TestPlaybooks_RequestFeedback_DecisionHubFlow(t *testing.T) {
 		t.Errorf("decision status = %q, want pending", d["status"])
 	}
 
-	// Step 4: resolve via the hub — approved maps to diagnosis_correct=true.
+	// Step 4: resolve via the hub — approved maps to verdict_correct=true.
 	resolved, err := client.ResolveDecision(ctx, "feedback:"+runID, map[string]any{
 		"resolution":  "approved",
 		"resolved_by": "e2e-test",
@@ -1232,20 +1236,20 @@ func TestPlaybooks_RequestFeedback_DecisionHubFlow(t *testing.T) {
 	if resolved["status"] != "resolved" {
 		t.Errorf("resolve response status = %q, want resolved", resolved["status"])
 	}
-	if resolved["diagnosis_correct"] != true {
-		t.Errorf("resolve response diagnosis_correct = %v, want true", resolved["diagnosis_correct"])
+	if resolved["verdict_correct"] != true {
+		t.Errorf("resolve response verdict_correct = %v, want true", resolved["verdict_correct"])
 	}
 
-	// Step 5: feedback is persisted — GET .../feedback returns diagnosis_correct=true.
+	// Step 5: feedback is persisted — GET .../feedback returns verdict_correct=true.
 	fb, err := client.GetFeedback(ctx, runID)
 	if err != nil {
 		t.Fatalf("GetFeedback after resolve: %v", err)
 	}
-	if dc, _ := fb["diagnosis_correct"].(bool); !dc {
-		t.Errorf("feedback diagnosis_correct = %v, want true", fb["diagnosis_correct"])
+	if dc, _ := fb["verdict_correct"].(bool); !dc {
+		t.Errorf("feedback verdict_correct = %v, want true", fb["verdict_correct"])
 	}
-	if fb["actual_root_cause"] != "PID 236 confirmed idle-in-transaction — diagnosis correct" {
-		t.Errorf("actual_root_cause = %q", fb["actual_root_cause"])
+	if fb["verdict_notes"] != "PID 236 confirmed idle-in-transaction — diagnosis correct" {
+		t.Errorf("verdict_notes = %q", fb["verdict_notes"])
 	}
 
 	t.Logf("feedback hub flow OK: run_id=%s resolve_url=%s", runID, resolveURL)
@@ -1335,9 +1339,11 @@ func TestPlaybooks_StatsIncludeAccuracy(t *testing.T) {
 	}
 	for _, f := range feedbacks {
 		_, err := client.SubmitFeedback(ctx, f.runID, map[string]any{
-			"series_id":         seriesID,
-			"diagnosis_correct": f.correct,
-			"operator":          "e2e-test",
+			"series_id":       seriesID,
+			"feedback_type":   "triage",
+			"feedback_time":   "post_incident",
+			"verdict_correct": f.correct,
+			"operator":        "e2e-test",
 		})
 		if err != nil {
 			t.Fatalf("SubmitFeedback %s: %v", f.runID, err)
@@ -1525,10 +1531,12 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 
 	// Submit feedback on the triage run.
 	_, err = client.SubmitFeedback(ctx, triageRunID, map[string]any{
-		"series_id":         "pbs_db_restart_triage",
-		"diagnosis_correct": true,
-		"actual_root_cause": "e2e test confirmed",
-		"operator":          "e2e-test",
+		"series_id":       "pbs_db_restart_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": true,
+		"verdict_notes":   "e2e test confirmed",
+		"operator":        "e2e-test",
 	})
 	if err != nil {
 		t.Fatalf("SubmitFeedback: %v", err)
@@ -1595,8 +1603,8 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	if feedback == nil {
 		t.Fatal("incident narrative missing feedback chapter")
 	}
-	if dc, _ := feedback["diagnosis_correct"].(bool); !dc {
-		t.Errorf("feedback.diagnosis_correct = %v, want true", feedback["diagnosis_correct"])
+	if dc, _ := feedback["verdict_correct"].(bool); !dc {
+		t.Errorf("feedback.verdict_correct = %v, want true", feedback["verdict_correct"])
 	}
 
 	t.Logf("incident narrative full e2e OK: incident_id=%s triage=%s gate_reason=%q",
