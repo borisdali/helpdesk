@@ -336,6 +336,35 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	reasonInput, _ := reader.ReadString('\n')
 	reasonInput = strings.TrimSpace(reasonInput)
 
+	// At-gate diagnosis feedback — captured before remediation runs so the
+	// signal is independent of whether the fix worked.
+	var diagCorrect *bool
+	var actualRootCause string
+	fmt.Print("  Was the diagnosis correct? [y/n/skip]: ")
+	diagAnswer, _ := reader.ReadString('\n')
+	diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
+	if diagAnswer == "y" || diagAnswer == "yes" {
+		v := true
+		diagCorrect = &v
+	} else if diagAnswer == "n" || diagAnswer == "no" {
+		v := false
+		diagCorrect = &v
+	}
+	if diagCorrect != nil {
+		defaultCause := primaryHypothesisText(gate.DiagnosticReport)
+		prompt := "  Actual root cause"
+		if defaultCause != "" {
+			prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultCause)
+		}
+		fmt.Print(prompt + ": ")
+		causeInput, _ := reader.ReadString('\n')
+		causeInput = strings.TrimSpace(causeInput)
+		if causeInput == "" {
+			causeInput = defaultCause
+		}
+		actualRootCause = causeInput
+	}
+
 	connStr := r.cfg.ConnStr
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
@@ -346,6 +375,8 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		ApprovalMode:     modeInput,
 		ConnectionString: connStr,
 		Reason:           reasonInput,
+		DiagnosisCorrect: diagCorrect,
+		ActualRootCause:  actualRootCause,
 	})
 	if err != nil {
 		return fmt.Errorf("proceed-escalation: %w", err)
@@ -364,10 +395,12 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
 	fmt.Printf("  Resolve at        : POST %s\n", resolveURL)
 	fmt.Printf("  Body fields:\n")
-	fmt.Printf("    resolution    : \"approved\" | \"denied\"\n")
-	fmt.Printf("    resolved_by   : your email or user ID\n")
-	fmt.Printf("    approval_mode : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
-	fmt.Printf("    reason        : optional — your assessment of the diagnosis\n\n")
+	fmt.Printf("    resolution        : \"approved\" | \"denied\"\n")
+	fmt.Printf("    resolved_by       : your email or user ID\n")
+	fmt.Printf("    approval_mode     : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
+	fmt.Printf("    reason            : optional — free-text operator comment\n")
+	fmt.Printf("    diagnosis_correct : true | false  (at-gate feedback, before remediation runs)\n")
+	fmt.Printf("    actual_root_cause : string        (required when diagnosis_correct=false)\n\n")
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
 	if err != nil {

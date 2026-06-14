@@ -1001,6 +1001,10 @@ type ProceedEscalationRequest struct {
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
 	Reason           string `json:"reason,omitempty"`            // optional operator rationale
+	// At-gate diagnosis feedback — captured before remediation runs, while
+	// the hypothesis is fresh. Separate from post-incident feedback.
+	DiagnosisCorrect *bool  `json:"diagnosis_correct,omitempty"`
+	ActualRootCause  string `json:"actual_root_cause,omitempty"`
 }
 
 // handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -1080,6 +1084,13 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
 	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
 	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport)
+
+	// Store at-gate diagnosis feedback when provided. This is captured before
+	// remediation runs — a cleaner signal than post-incident feedback because
+	// the operator hasn't yet seen whether the fix worked.
+	if req.DiagnosisCorrect != nil || req.ActualRootCause != "" {
+		go g.postAtGateFeedback(context.WithoutCancel(r.Context()), runID, resolvedBy, req.DiagnosisCorrect, req.ActualRootCause)
+	}
 	if g.decisionNotifier != nil {
 		g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
 			ID:      "gate:" + runID,
@@ -1707,6 +1718,46 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 			"auditd_error", strings.TrimSpace(string(body)),
 		)
 	}
+}
+
+// postAtGateFeedback stores structured diagnosis feedback submitted at gate approval time,
+// before remediation runs. Best-effort: failures are logged but not returned.
+func (g *Gateway) postAtGateFeedback(ctx context.Context, runID, operator string, diagCorrect *bool, actualRootCause string) {
+	if g.auditURL == "" || runID == "" {
+		return
+	}
+	payload := map[string]any{"operator": operator}
+	if diagCorrect != nil {
+		payload["diagnosis_correct"] = *diagCorrect
+	}
+	if actualRootCause != "" {
+		payload["actual_root_cause"] = actualRootCause
+	}
+	body, _ := json.Marshal(payload)
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("postAtGateFeedback: failed", "run_id", runID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		slog.Warn("postAtGateFeedback: unexpected status", "run_id", runID, "status", resp.StatusCode, "body", strings.TrimSpace(string(b)))
+		return
+	}
+	slog.Info("postAtGateFeedback: at-gate feedback stored", "run_id", runID, "diagnosis_correct", diagCorrect)
 }
 
 // submitDenialFeedback auto-submits a RunFeedback with diagnosis_correct=false when
