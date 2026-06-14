@@ -216,12 +216,15 @@ func TestFaultInjection(t *testing.T) {
 			}
 
 			// Skip ssh_exec faults when no target host is configured.
-			// Check both primary and external inject specs (external mode uses ExternalInject).
+			// Use the active spec (external when FAULTTEST_EXTERNAL=true, primary otherwise)
+			// for both the type and the exec_via check — they may differ between specs.
 			activeInjectType := f.Inject.Type
+			activeExecVia := f.Inject.ExecVia
 			if cfg.External && f.ExternalInject.Type != "" {
 				activeInjectType = f.ExternalInject.Type
+				activeExecVia = f.ExternalInject.ExecVia
 			}
-			if activeInjectType == "ssh_exec" && f.Inject.ExecVia == "" && cfg.SSHHost == "" {
+			if activeInjectType == "ssh_exec" && activeExecVia == "" && cfg.SSHHost == "" {
 				t.Skip("ssh_exec fault requires a target host; set FAULTTEST_SSH_HOST or exec_via in catalog")
 			}
 

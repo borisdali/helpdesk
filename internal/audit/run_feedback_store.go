@@ -34,14 +34,88 @@ type RunFeedbackStore struct {
 	db *sql.DB
 }
 
-// NewRunFeedbackStore creates the run_feedback table (if absent) and returns a
+// NewRunFeedbackStore creates (or migrates) the run_feedback table and returns a
 // ready-to-use RunFeedbackStore.
 func NewRunFeedbackStore(db *sql.DB) (*RunFeedbackStore, error) {
 	s := &RunFeedbackStore{db: db}
+	if err := s.migrate(); err != nil {
+		return nil, fmt.Errorf("migrate run_feedback schema: %w", err)
+	}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create run_feedback schema: %w", err)
 	}
 	return s, nil
+}
+
+// migrate upgrades the run_feedback table from the v1 schema (single PK on run_id,
+// columns diagnosis_correct/actual_root_cause) to the v2 schema (composite PK on
+// run_id/feedback_type/feedback_time, columns verdict_correct/verdict_notes).
+// SQLite does not support altering a PRIMARY KEY, so migration recreates the table.
+// The function is idempotent: it is a no-op when the table is absent or already on v2.
+func (s *RunFeedbackStore) migrate() error {
+	// Nothing to migrate if the table does not exist yet.
+	var tableCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='run_feedback'`,
+	).Scan(&tableCount); err != nil || tableCount == 0 {
+		return nil
+	}
+
+	// Already on v2 if feedback_type column is present.
+	var colCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('run_feedback') WHERE name='feedback_type'`,
+	).Scan(&colCount); err != nil || colCount > 0 {
+		return nil
+	}
+
+	// v1 schema detected. Recreate in a single transaction with the new composite PK
+	// and renamed columns (diagnosis_correct→verdict_correct, actual_root_cause→verdict_notes).
+	// Existing rows are migrated as (feedback_type='triage', feedback_time='post_incident').
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS run_feedback_new`,
+		`CREATE TABLE run_feedback_new (
+		    run_id          TEXT     NOT NULL,
+		    feedback_type   TEXT     NOT NULL DEFAULT 'triage',
+		    feedback_time   TEXT     NOT NULL DEFAULT 'post_incident',
+		    series_id       TEXT     NOT NULL DEFAULT '',
+		    verdict_correct INTEGER,
+		    verdict_notes   TEXT     NOT NULL DEFAULT '',
+		    operator        TEXT     NOT NULL DEFAULT '',
+		    submitted_at    DATETIME NOT NULL,
+		    PRIMARY KEY (run_id, feedback_type, feedback_time)
+		)`,
+		`INSERT OR IGNORE INTO run_feedback_new
+		    (run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at)
+		 SELECT run_id, 'triage', 'post_incident',
+		        COALESCE(series_id, ''),
+		        diagnosis_correct,
+		        COALESCE(actual_root_cause, ''),
+		        COALESCE(operator, ''),
+		        submitted_at
+		 FROM run_feedback`,
+		`DROP TABLE run_feedback`,
+		`ALTER TABLE run_feedback_new RENAME TO run_feedback`,
+		`CREATE INDEX IF NOT EXISTS idx_run_feedback_series ON run_feedback(series_id)`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("stmt %q: %w", stmt[:min(40, len(stmt))], err)
+		}
+	}
+	return tx.Commit()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *RunFeedbackStore) createSchema() error {

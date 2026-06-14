@@ -336,3 +336,83 @@ func TestRunFeedbackStore_ListPending_Empty(t *testing.T) {
 		t.Errorf("expected empty slice, got %d items", len(pending))
 	}
 }
+
+// TestRunFeedbackStore_MigrateV1ToV2 verifies that migrate() correctly upgrades
+// a v1 run_feedback table (single PK, diagnosis_correct/actual_root_cause columns)
+// to the v2 schema (composite PK, verdict_correct/verdict_notes columns) while
+// preserving existing rows as (feedback_type=triage, feedback_time=post_incident).
+func TestRunFeedbackStore_MigrateV1ToV2(t *testing.T) {
+	auditStore, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { auditStore.Close() })
+	db := auditStore.DB()
+
+	// Seed a v1 schema table directly.
+	_, err = db.Exec(`CREATE TABLE run_feedback (
+		run_id          TEXT PRIMARY KEY,
+		series_id       TEXT NOT NULL DEFAULT '',
+		diagnosis_correct INTEGER,
+		actual_root_cause TEXT NOT NULL DEFAULT '',
+		operator        TEXT NOT NULL DEFAULT '',
+		submitted_at    DATETIME NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("create v1 table: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO run_feedback VALUES ('plr_old01','pbs_lock_chain_triage',1,'PID 867 idle-in-tx','alice','2026-01-01T00:00:00Z')`)
+	if err != nil {
+		t.Fatalf("seed v1 row: %v", err)
+	}
+
+	// Open the store — should trigger migrate().
+	store, err := NewRunFeedbackStore(db)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore (migrate): %v", err)
+	}
+
+	// Migrated row must be readable via GetByRunID (triage/post_incident).
+	ctx := context.Background()
+	fb, err := store.GetByRunID(ctx, "plr_old01")
+	if err != nil {
+		t.Fatalf("GetByRunID after migrate: %v", err)
+	}
+	if fb.FeedbackType != "triage" {
+		t.Errorf("FeedbackType = %q, want triage", fb.FeedbackType)
+	}
+	if fb.FeedbackTime != "post_incident" {
+		t.Errorf("FeedbackTime = %q, want post_incident", fb.FeedbackTime)
+	}
+	if fb.VerdictCorrect == nil || !*fb.VerdictCorrect {
+		t.Errorf("VerdictCorrect = %v, want true", fb.VerdictCorrect)
+	}
+	if fb.VerdictNotes != "PID 867 idle-in-tx" {
+		t.Errorf("VerdictNotes = %q, want 'PID 867 idle-in-tx'", fb.VerdictNotes)
+	}
+	if fb.SeriesID != "pbs_lock_chain_triage" {
+		t.Errorf("SeriesID = %q, want pbs_lock_chain_triage", fb.SeriesID)
+	}
+
+	// New rows can be inserted without collision.
+	if err := store.Submit(ctx, &RunFeedback{
+		RunID: "plr_old01", FeedbackType: "triage", FeedbackTime: "at_gate",
+		VerdictCorrect: boolPtr(false), VerdictNotes: "looked wrong at gate", Operator: "bob",
+		SubmittedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Submit at_gate after migrate: %v", err)
+	}
+
+	atGate, err := store.GetByRunIDAndType(ctx, "plr_old01", "triage", "at_gate")
+	if err != nil {
+		t.Fatalf("GetByRunIDAndType at_gate: %v", err)
+	}
+	if atGate.VerdictCorrect == nil || *atGate.VerdictCorrect {
+		t.Errorf("at_gate VerdictCorrect = %v, want false", atGate.VerdictCorrect)
+	}
+
+	// Migration is idempotent: running NewRunFeedbackStore again must not error.
+	if _, err := NewRunFeedbackStore(db); err != nil {
+		t.Fatalf("NewRunFeedbackStore (second call, idempotent): %v", err)
+	}
+}
