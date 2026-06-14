@@ -145,7 +145,7 @@ GET /api/v1/fleet/playbooks?series_id=pbs_db_restart_triage
 
 ## Vault Commands
 
-`faulttest vault` provides the operational window into the Vault from the command line. Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`.
+`faulttest vault` provides the operational window into the Vault from the command line. Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores (`keyword_score`, `tool_score`, `diagnosis_score`, `overall_score`) are also written to the auditd `run_evaluation` table via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation`, keyed by the gateway's `plr_*` playbook run ID. The local JSON file acts as a cache; auditd is the durable store.
 
 ### vault list
 
@@ -206,6 +206,37 @@ Submit feedback after an incident:
 Accuracy rate is `correct / total` across all runs in the series where `verdict_correct` was explicitly set on `(triage, post_incident)` feedback (nil feedback is excluded). Use this alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
 
 Feedback is submitted interactively by `faulttest` after a successful recovery when running with `--remediate` and `--gateway` (see below), or manually via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`.
+
+### vault incidents
+
+```bash
+faulttest vault incidents <fault-id or series-id> \
+  [--limit N] \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Lists the most recent triage runs for a fault or playbook series. Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a series ID (e.g. `pbs_lock_chain_triage`). Requires `--gateway`.
+
+```
+Incidents for db-lock-contention (pbs_lock_chain_triage) — 3 runs
+
+RUN ID          STARTED            DIAG        REMEDIATION       FEEDBACK      SCORE  FINDINGS
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+plr_a3f7c1b2   2026-06-01 14:32   resolved    resolved          ✓ correct     91%    lock_type=relation, rel...
+plr_e8c2d5a1   2026-05-28 09:11   resolved    –                 submitted     85%    blocking_pid=3421, wait...
+plr_f1b9e3c4   2026-05-14 22:45   unresolved  –                 ✗ wrong       40%    –
+```
+
+| Column | Source |
+|--------|--------|
+| `DIAG` | Triage run outcome from gateway |
+| `REMEDIATION` | Outcome of the linked remediation run (if any) |
+| `FEEDBACK` | Operator post-incident verdict via Decision Hub |
+| `SCORE` | `overall_score` from `run_evaluation` in auditd (requires `--gateway`) |
+| `FINDINGS` | Truncated `findings_summary` from the playbook run |
+
+The `SCORE` column is populated only when faulttest evaluation data has been posted to auditd (i.e., the run was triggered by `faulttest run --gateway`). Real-incident runs triggered from the product UI show `–` unless scores are manually submitted via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation`.
 
 ### vault status
 

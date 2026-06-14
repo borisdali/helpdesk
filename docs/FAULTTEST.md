@@ -81,6 +81,7 @@ faulttest run --external --conn "host=staging-db port=5432 ..."
 
   JSON report written to faulttest-<run-id>.json
   Run history appended to ~/.faulttest/history.json
+  Evaluation scores posted to auditd (when --gateway is set)
 ```
 
 Each fault is scored on three weighted dimensions. The weights depend on whether
@@ -532,10 +533,10 @@ faulttest example --category kubernetes > k8s-faults.yaml
 ### 5.6 vault
 
 ```
-faulttest vault <list|status|drift|suggest|suggest-update>
+faulttest vault <list|status|drift|accuracy|incidents|suggest|suggest-update>
 ```
 
-The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
+The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores are also posted to auditd (`run_evaluation` table) keyed by the `plr_*` playbook run ID — the local JSON file is a cache. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
 
 #### vault list
 
@@ -620,6 +621,17 @@ FAULT                            FIRST HALF   SECOND HALF  DRIFT
 db-lock-contention               100%         50%          -50%
 db-replication-lag               75%          33%          -42%
 ```
+
+#### vault incidents
+
+```bash
+faulttest vault incidents <fault-id or series-id> \
+  [--limit N] \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Lists the most recent triage runs for a fault or playbook series, with DIAG outcome, REMEDIATION outcome, operator FEEDBACK verdict, and the faulttest SCORE (from `run_evaluation` in auditd). See [VAULT.md — vault incidents](VAULT.md#vault-incidents) for full column reference and output example.
 
 #### vault suggest
 

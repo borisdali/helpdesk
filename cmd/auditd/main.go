@@ -134,14 +134,14 @@ func main() {
 	}
 
 	// Create run feedback store (shares the same database connection)
-	runFeedbackStore, err := audit.NewRunFeedbackStore(store.DB())
+	runFeedbackStore, err := audit.NewRunFeedbackStore(store.DB(), store.IsPostgres())
 	if err != nil {
 		slog.Error("failed to create run feedback store", "err", err)
 		os.Exit(1)
 	}
 
 	// Create run evaluation store (shares the same database connection)
-	runEvaluationStore, err := audit.NewRunEvaluationStore(store.DB())
+	runEvaluationStore, err := audit.NewRunEvaluationStore(store.DB(), store.IsPostgres())
 	if err != nil {
 		slog.Error("failed to create run evaluation store", "err", err)
 		os.Exit(1)

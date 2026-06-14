@@ -16,7 +16,7 @@ func newRunEvaluationStore(t *testing.T) *RunEvaluationStore {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	ev, err := NewRunEvaluationStore(store.DB())
+	ev, err := NewRunEvaluationStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewRunEvaluationStore: %v", err)
 	}

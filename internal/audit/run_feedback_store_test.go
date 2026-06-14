@@ -15,7 +15,7 @@ func newRunFeedbackStore(t *testing.T) (*RunFeedbackStore, *sql.DB) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	fb, err := NewRunFeedbackStore(store.DB())
+	fb, err := NewRunFeedbackStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewRunFeedbackStore: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestRunFeedbackStore_MigrateV1ToV2(t *testing.T) {
 	}
 
 	// Open the store — should trigger migrate().
-	store, err := NewRunFeedbackStore(db)
+	store, err := NewRunFeedbackStore(db, false)
 	if err != nil {
 		t.Fatalf("NewRunFeedbackStore (migrate): %v", err)
 	}
@@ -412,7 +412,7 @@ func TestRunFeedbackStore_MigrateV1ToV2(t *testing.T) {
 	}
 
 	// Migration is idempotent: running NewRunFeedbackStore again must not error.
-	if _, err := NewRunFeedbackStore(db); err != nil {
+	if _, err := NewRunFeedbackStore(db, false); err != nil {
 		t.Fatalf("NewRunFeedbackStore (second call, idempotent): %v", err)
 	}
 }

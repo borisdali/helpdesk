@@ -271,7 +271,7 @@ func newPlaybookRunServerWithFeedback(t *testing.T) *playbookRunServer {
 	if err != nil {
 		t.Fatalf("NewPlaybookStore: %v", err)
 	}
-	fbs, err := audit.NewRunFeedbackStore(store.DB())
+	fbs, err := audit.NewRunFeedbackStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewRunFeedbackStore: %v", err)
 	}
@@ -558,7 +558,7 @@ func newPlaybookRunServerWithEvaluation(t *testing.T) *playbookRunServer {
 	if err != nil {
 		t.Fatalf("NewPlaybookStore: %v", err)
 	}
-	evs, err := audit.NewRunEvaluationStore(store.DB())
+	evs, err := audit.NewRunEvaluationStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewRunEvaluationStore: %v", err)
 	}

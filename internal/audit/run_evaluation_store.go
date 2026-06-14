@@ -27,13 +27,14 @@ type RunEvaluation struct {
 
 // RunEvaluationStore persists automated faulttest evaluation scores.
 type RunEvaluationStore struct {
-	db *sql.DB
+	db         *sql.DB
+	isPostgres bool
 }
 
 // NewRunEvaluationStore creates the run_evaluation table if needed and returns
 // a ready-to-use RunEvaluationStore.
-func NewRunEvaluationStore(db *sql.DB) (*RunEvaluationStore, error) {
-	s := &RunEvaluationStore{db: db}
+func NewRunEvaluationStore(db *sql.DB, isPostgres bool) (*RunEvaluationStore, error) {
+	s := &RunEvaluationStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create run_evaluation schema: %w", err)
 	}
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS run_evaluation (
     overall_score     REAL    NOT NULL DEFAULT 0,
     judge_used        INTEGER NOT NULL DEFAULT 0,
     passed            INTEGER NOT NULL DEFAULT 0,
-    created_at        DATETIME NOT NULL
+    created_at        TEXT    NOT NULL DEFAULT ''
 )`)
 	return err
 }
@@ -71,7 +72,7 @@ func (s *RunEvaluationStore) Upsert(ctx context.Context, eval *RunEvaluation) er
 	if eval.Passed {
 		passedInt = 1
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 INSERT INTO run_evaluation
     (run_id, failure_id, failure_name, keyword_score, tool_score, diagnosis_score,
      remediation_score, overall_score, judge_used, passed, created_at)
@@ -86,12 +87,12 @@ ON CONFLICT(run_id) DO UPDATE SET
     overall_score     = excluded.overall_score,
     judge_used        = excluded.judge_used,
     passed            = excluded.passed,
-    created_at        = excluded.created_at`,
+    created_at        = excluded.created_at`),
 		eval.RunID, eval.FailureID, eval.FailureName,
 		eval.KeywordScore, eval.ToolScore, eval.DiagnosisScore,
 		eval.RemediationScore, eval.OverallScore,
 		judgeInt, passedInt,
-		eval.CreatedAt.UTC().Format(sqliteTimeFormat),
+		eval.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	return err
 }
@@ -99,16 +100,16 @@ ON CONFLICT(run_id) DO UPDATE SET
 // GetByRunID retrieves evaluation scores for a specific playbook run.
 // Returns sql.ErrNoRows when no evaluation has been recorded.
 func (s *RunEvaluationStore) GetByRunID(ctx context.Context, runID string) (*RunEvaluation, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 SELECT run_id, failure_id, failure_name, keyword_score, tool_score, diagnosis_score,
        remediation_score, overall_score, judge_used, passed, created_at
-FROM run_evaluation WHERE run_id = ?`, runID)
+FROM run_evaluation WHERE run_id = ?`), runID)
 
 	var (
-		eval        RunEvaluation
-		judgeInt    int
-		passedInt   int
-		createdStr  string
+		eval       RunEvaluation
+		judgeInt   int
+		passedInt  int
+		createdStr string
 	)
 	if err := row.Scan(
 		&eval.RunID, &eval.FailureID, &eval.FailureName,
@@ -121,10 +122,6 @@ FROM run_evaluation WHERE run_id = ?`, runID)
 	eval.JudgeUsed = judgeInt != 0
 	eval.Passed = passedInt != 0
 	if createdStr != "" {
-		// modernc/sqlite normalizes DATETIME strings by stripping trailing zeros
-		// in the fractional-second component, so the stored value may have fewer
-		// than 9 digits (e.g. "2026-06-14T20:33:20.886317Z"). RFC3339Nano parses
-		// both fractional and non-fractional ISO-8601 timestamps correctly.
 		if t, err := time.Parse(time.RFC3339Nano, createdStr); err == nil {
 			eval.CreatedAt = t
 		}
