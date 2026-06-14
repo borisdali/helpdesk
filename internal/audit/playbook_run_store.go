@@ -59,15 +59,31 @@ type PlaybookRunStats struct {
 	AccuracyRate  float64 `json:"accuracy_rate"` // correct_count / feedback_count; 0 when no feedback
 }
 
+// PlaybookVersionStats summarises run history broken down by playbook version.
+// Each row represents one version of a series, ordered by version string.
+type PlaybookVersionStats struct {
+	SeriesID        string  `json:"series_id"`
+	Version         string  `json:"version"`
+	IsActive        bool    `json:"is_active"`         // currently active version for this series
+	TotalRuns       int     `json:"total_runs"`
+	Resolved        int     `json:"resolved"`
+	ResolutionRate  float64 `json:"resolution_rate"`   // resolved / total_runs; 0 when no runs
+	AvgStepCount    float64 `json:"avg_step_count"`    // average steps per run; 0 when no step data
+	AvgRecoverySecs float64 `json:"avg_recovery_secs"` // average wall-clock seconds for completed runs; 0 when no data
+	AvgOverallScore float64 `json:"avg_overall_score"` // average faulttest overall_score; 0 when no eval data
+	EvalCount       int     `json:"eval_count"`        // number of runs with faulttest evaluation scores
+}
+
 // PlaybookRunStore persists playbook execution records.
 type PlaybookRunStore struct {
-	db *sql.DB
+	db         *sql.DB
+	isPostgres bool
 }
 
 // NewPlaybookRunStore creates the playbook_runs table (if absent) and returns a
 // ready-to-use PlaybookRunStore.
-func NewPlaybookRunStore(db *sql.DB) (*PlaybookRunStore, error) {
-	s := &PlaybookRunStore{db: db}
+func NewPlaybookRunStore(db *sql.DB, isPostgres bool) (*PlaybookRunStore, error) {
+	s := &PlaybookRunStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create playbook_run schema: %w", err)
 	}
@@ -446,4 +462,112 @@ func formatNullableTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// StatsByVersion returns per-version run stats for a playbook series, ordered by version.
+// Step counts come from playbook_run_steps; evaluation scores come from run_evaluation.
+// Recovery time is computed in Go from started_at/completed_at strings.
+func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) ([]*PlaybookVersionStats, error) {
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+		SELECT
+		    p.version,
+		    p.is_active,
+		    r.outcome,
+		    r.started_at,
+		    r.completed_at,
+		    COALESCE(sc.cnt, 0) AS step_count,
+		    ev.overall_score
+		FROM playbook_runs r
+		JOIN playbooks p ON r.playbook_id = p.playbook_id
+		LEFT JOIN (
+		    SELECT run_id, COUNT(*) AS cnt FROM playbook_run_steps GROUP BY run_id
+		) sc ON sc.run_id = r.run_id
+		LEFT JOIN run_evaluation ev ON ev.run_id = r.run_id
+		WHERE r.series_id = ?
+		ORDER BY p.version, r.started_at
+	`), seriesID)
+	if err != nil {
+		return nil, fmt.Errorf("query version stats: %w", err)
+	}
+	defer rows.Close()
+
+	type versionAccum struct {
+		isActive        bool
+		totalRuns       int
+		resolved        int
+		stepSum         float64
+		recoverySumSecs float64
+		recoveryCount   int
+		scoreSum        float64
+		evalCount       int
+	}
+
+	acc := map[string]*versionAccum{}
+	var orderedVersions []string
+
+	for rows.Next() {
+		var version string
+		var isActiveInt int
+		var outcome, startedStr, completedStr string
+		var stepCount int
+		var scoreNull sql.NullFloat64
+
+		if err := rows.Scan(&version, &isActiveInt, &outcome, &startedStr, &completedStr, &stepCount, &scoreNull); err != nil {
+			return nil, err
+		}
+
+		a, ok := acc[version]
+		if !ok {
+			a = &versionAccum{isActive: isActiveInt != 0}
+			acc[version] = a
+			orderedVersions = append(orderedVersions, version)
+		}
+		a.totalRuns++
+		if outcome == OutcomeResolved {
+			a.resolved++
+		}
+		a.stepSum += float64(stepCount)
+
+		if completedStr != "" && startedStr != "" {
+			started := parseFlexTime(startedStr)
+			completed := parseFlexTime(completedStr)
+			if !started.IsZero() && !completed.IsZero() && completed.After(started) {
+				a.recoverySumSecs += completed.Sub(started).Seconds()
+				a.recoveryCount++
+			}
+		}
+
+		if scoreNull.Valid {
+			a.scoreSum += scoreNull.Float64
+			a.evalCount++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]*PlaybookVersionStats, 0, len(orderedVersions))
+	for _, v := range orderedVersions {
+		a := acc[v]
+		st := &PlaybookVersionStats{
+			SeriesID:  seriesID,
+			Version:   v,
+			IsActive:  a.isActive,
+			TotalRuns: a.totalRuns,
+			Resolved:  a.resolved,
+			EvalCount: a.evalCount,
+		}
+		if a.totalRuns > 0 {
+			st.ResolutionRate = float64(a.resolved) / float64(a.totalRuns)
+			st.AvgStepCount = a.stepSum / float64(a.totalRuns)
+		}
+		if a.recoveryCount > 0 {
+			st.AvgRecoverySecs = a.recoverySumSecs / float64(a.recoveryCount)
+		}
+		if a.evalCount > 0 {
+			st.AvgOverallScore = a.scoreSum / float64(a.evalCount)
+		}
+		out = append(out, st)
+	}
+	return out, nil
 }

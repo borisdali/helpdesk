@@ -37,7 +37,7 @@ func newPlaybookServerWithRuns(t *testing.T) (*playbookServer, *audit.PlaybookRu
 	if err != nil {
 		t.Fatalf("NewPlaybookStore: %v", err)
 	}
-	rs, err := audit.NewPlaybookRunStore(store.DB())
+	rs, err := audit.NewPlaybookRunStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewPlaybookRunStore: %v", err)
 	}

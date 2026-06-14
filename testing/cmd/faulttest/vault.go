@@ -131,13 +131,14 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|versions|suggest|suggest-update>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
 		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
 		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
 		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
+		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
@@ -153,6 +154,8 @@ func cmdVault(args []string) {
 		vaultAccuracy(args[1:])
 	case "incidents":
 		vaultIncidents(args[1:])
+	case "versions":
+		vaultVersions(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -1397,4 +1400,170 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 	if posted > 0 {
 		fmt.Printf("Evaluation scores posted to auditd: %d/%d runs\n", posted, len(results))
 	}
+}
+
+// ── vault versions ────────────────────────────────────────────────────────────
+
+// versionStats mirrors the PlaybookVersionStats struct returned by the gateway.
+type versionStats struct {
+	SeriesID        string  `json:"series_id"`
+	Version         string  `json:"version"`
+	IsActive        bool    `json:"is_active"`
+	TotalRuns       int     `json:"total_runs"`
+	Resolved        int     `json:"resolved"`
+	ResolutionRate  float64 `json:"resolution_rate"`
+	AvgStepCount    float64 `json:"avg_step_count"`
+	AvgRecoverySecs float64 `json:"avg_recovery_secs"`
+	AvgOverallScore float64 `json:"avg_overall_score"`
+	EvalCount       int     `json:"eval_count"`
+}
+
+// fetchVersionStats calls GET /api/v1/fleet/series/{seriesID}/version-stats.
+// Returns nil on network error or non-200 response.
+func fetchVersionStats(gatewayURL, apiKey, seriesID string) ([]versionStats, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/series/" + seriesID + "/version-stats"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	var body struct {
+		Versions []versionStats `json:"versions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.Versions, nil
+}
+
+// formatDuration formats seconds as a compact string: 42s / 1m23s / 1h5m.
+func formatDuration(secs float64) string {
+	if secs <= 0 {
+		return "–"
+	}
+	d := time.Duration(secs * float64(time.Second))
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+// vaultVersions shows per-version run stats for a playbook series.
+// Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]
+func vaultVersions(args []string) {
+	fs := flag.NewFlagSet("vault versions", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault versions")
+		os.Exit(1)
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]")
+		os.Exit(1)
+	}
+
+	arg := fs.Args()[0]
+	seriesID := arg
+
+	// Resolve fault ID → diagnosis series ID via catalog.
+	if !strings.HasPrefix(arg, "pbs_") {
+		cat, err := loadActiveCatalog(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+			os.Exit(1)
+		}
+		var found bool
+		for _, f := range cat.Failures {
+			if f.ID == arg {
+				if f.DiagnosisPlaybookSeriesID == "" {
+					fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook.\n", arg)
+					os.Exit(1)
+				}
+				seriesID = f.DiagnosisPlaybookSeriesID
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching version stats: %v\n", err)
+		os.Exit(1)
+	}
+	if len(versions) == 0 {
+		fmt.Printf("No run history found for series %q.\n", seriesID)
+		return
+	}
+
+	fmt.Printf("Version stats for %s — %d version(s)\n\n", seriesID, len(versions))
+
+	const (
+		colVer   = 10
+		colRuns  = 6
+		colRes   = 10
+		colSteps = 10
+		colTime  = 10
+		colScore = 10
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colVer, "VERSION", colRuns, "RUNS", colRes, "RESOLVED",
+		colSteps, "AVG STEPS", colTime, "AVG TIME", "AVG SCORE")
+	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+10))
+
+	for _, v := range versions {
+		ver := v.Version
+		if v.IsActive {
+			ver += " *"
+		}
+
+		resolvedStr := "–"
+		if v.TotalRuns > 0 {
+			resolvedStr = fmt.Sprintf("%d%%", int(v.ResolutionRate*100))
+		}
+
+		stepsStr := "–"
+		if v.AvgStepCount > 0 {
+			stepsStr = fmt.Sprintf("%.1f", v.AvgStepCount)
+		}
+
+		timeStr := formatDuration(v.AvgRecoverySecs)
+
+		scoreStr := "–"
+		if v.EvalCount > 0 {
+			scoreStr = fmt.Sprintf("%d%%", int(v.AvgOverallScore*100))
+		}
+
+		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %s\n",
+			colVer, ver,
+			colRuns, v.TotalRuns,
+			colRes, resolvedStr,
+			colSteps, stepsStr,
+			colTime, timeStr,
+			scoreStr,
+		)
+	}
+	fmt.Println()
+	fmt.Println("* = currently active version")
 }

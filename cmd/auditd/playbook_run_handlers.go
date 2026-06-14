@@ -224,6 +224,30 @@ func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(stats) //nolint:errcheck
 }
 
+// handleVersionStats handles GET /v1/fleet/series/{seriesID}/version-stats.
+// Returns per-version run counts, resolution rates, step counts, recovery times,
+// and average evaluation scores for a playbook series.
+func (s *playbookRunServer) handleVersionStats(w http.ResponseWriter, r *http.Request) {
+	seriesID := r.PathValue("seriesID")
+	if seriesID == "" {
+		http.Error(w, "seriesID path parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	versions, err := s.store.StatsByVersion(r.Context(), seriesID)
+	if err != nil {
+		slog.Error("failed to get version stats", "series_id", seriesID, "err", err)
+		http.Error(w, "failed to get version stats", http.StatusInternalServerError)
+		return
+	}
+
+	if versions == nil {
+		versions = []*audit.PlaybookVersionStats{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"series_id": seriesID, "versions": versions}) //nolint:errcheck
+}
+
 // handleSubmitFeedback handles POST /v1/fleet/playbook-runs/{runID}/feedback.
 func (s *playbookRunServer) handleSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.feedbackStore == nil {

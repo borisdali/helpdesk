@@ -23,7 +23,7 @@ func newPlaybookRunServer(t *testing.T) *playbookRunServer {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	prs, err := audit.NewPlaybookRunStore(store.DB())
+	prs, err := audit.NewPlaybookRunStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewPlaybookRunStore: %v", err)
 	}
@@ -263,7 +263,7 @@ func newPlaybookRunServerWithFeedback(t *testing.T) *playbookRunServer {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	prs, err := audit.NewPlaybookRunStore(store.DB())
+	prs, err := audit.NewPlaybookRunStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewPlaybookRunStore: %v", err)
 	}
@@ -550,7 +550,7 @@ func newPlaybookRunServerWithEvaluation(t *testing.T) *playbookRunServer {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	prs, err := audit.NewPlaybookRunStore(store.DB())
+	prs, err := audit.NewPlaybookRunStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewPlaybookRunStore: %v", err)
 	}
@@ -661,5 +661,129 @@ func TestPlaybookRunHandlers_Evaluation_Upsert(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&got) //nolint:errcheck
 	if got.OverallScore != 0.9 {
 		t.Errorf("OverallScore after upsert = %v, want 0.9", got.OverallScore)
+	}
+}
+
+func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
+	ctx := context.Background()
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	prs, err := audit.NewPlaybookRunStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	pbs, err := audit.NewPlaybookStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookStore: %v", err)
+	}
+	// StatsByVersion JOINs playbook_run_steps and run_evaluation — create both tables.
+	if _, err := audit.NewPlaybookRunStepStore(store.DB(), false); err != nil {
+		t.Fatalf("NewPlaybookRunStepStore: %v", err)
+	}
+	if _, err := audit.NewRunEvaluationStore(store.DB(), false); err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	srv := &playbookRunServer{store: prs, playbookStore: pbs}
+
+	const seriesID = "pbs_ver_handler_test"
+
+	// Create two playbook versions.
+	pb10 := &audit.Playbook{
+		Name:          "Handler Test v1.0",
+		SeriesID:      seriesID,
+		Version:       "1.0",
+		IsActive:      false,
+		ExecutionMode: "agent",
+		ProblemClass:  "test",
+		Guidance:      "v1.0",
+	}
+	if err := pbs.Create(ctx, pb10); err != nil {
+		t.Fatalf("Create v1.0: %v", err)
+	}
+	pb11 := &audit.Playbook{
+		Name:          "Handler Test v1.1",
+		SeriesID:      seriesID,
+		Version:       "1.1",
+		IsActive:      true,
+		ExecutionMode: "agent",
+		ProblemClass:  "test",
+		Guidance:      "v1.1",
+	}
+	if err := pbs.Create(ctx, pb11); err != nil {
+		t.Fatalf("Create v1.1: %v", err)
+	}
+
+	// Record one run per version.
+	now := time.Now().UTC()
+	if err := prs.Record(ctx, &audit.PlaybookRun{
+		RunID: "plr_vh10", PlaybookID: pb10.PlaybookID, SeriesID: seriesID,
+		Outcome: "resolved", StartedAt: now, CompletedAt: now.Add(30 * time.Second),
+	}); err != nil {
+		t.Fatalf("Record v1.0 run: %v", err)
+	}
+	if err := prs.Record(ctx, &audit.PlaybookRun{
+		RunID: "plr_vh11", PlaybookID: pb11.PlaybookID, SeriesID: seriesID,
+		Outcome: "resolved", StartedAt: now, CompletedAt: now.Add(10 * time.Second),
+	}); err != nil {
+		t.Fatalf("Record v1.1 run: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/series/"+seriesID+"/version-stats", nil)
+	req.SetPathValue("seriesID", seriesID)
+	rec := httptest.NewRecorder()
+	srv.handleVersionStats(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		SeriesID string `json:"series_id"`
+		Versions []struct {
+			Version    string  `json:"version"`
+			IsActive   bool    `json:"is_active"`
+			TotalRuns  int     `json:"total_runs"`
+			Resolved   int     `json:"resolved"`
+		} `json:"versions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.SeriesID != seriesID {
+		t.Errorf("series_id = %q, want %q", resp.SeriesID, seriesID)
+	}
+	if len(resp.Versions) != 2 {
+		t.Fatalf("want 2 versions, got %d", len(resp.Versions))
+	}
+	if resp.Versions[0].Version != "1.0" {
+		t.Errorf("versions[0].version = %q, want 1.0", resp.Versions[0].Version)
+	}
+	if resp.Versions[0].IsActive {
+		t.Error("v1.0 should not be active")
+	}
+	if resp.Versions[1].Version != "1.1" {
+		t.Errorf("versions[1].version = %q, want 1.1", resp.Versions[1].Version)
+	}
+	if !resp.Versions[1].IsActive {
+		t.Error("v1.1 should be active")
+	}
+	if resp.Versions[1].TotalRuns != 1 || resp.Versions[1].Resolved != 1 {
+		t.Errorf("v1.1: TotalRuns=%d Resolved=%d, want 1/1",
+			resp.Versions[1].TotalRuns, resp.Versions[1].Resolved)
+	}
+
+	// Empty series → 200 with empty versions array.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/series/pbs_nonexistent/version-stats", nil)
+	req2.SetPathValue("seriesID", "pbs_nonexistent")
+	rec2 := httptest.NewRecorder()
+	srv.handleVersionStats(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Errorf("empty series status = %d, want 200", rec2.Code)
 	}
 }

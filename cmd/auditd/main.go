@@ -127,7 +127,7 @@ func main() {
 	}
 
 	// Create playbook run store (shares the same database connection)
-	playbookRunStore, err := audit.NewPlaybookRunStore(store.DB())
+	playbookRunStore, err := audit.NewPlaybookRunStore(store.DB(), store.IsPostgres())
 	if err != nil {
 		slog.Error("failed to create playbook run store", "err", err)
 		os.Exit(1)
@@ -322,6 +322,7 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/feedback", auth("GET /v1/fleet/playbook-runs/{runID}/feedback", playbookRunSrv.handleGetFeedback))
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/evaluation", auth("POST /v1/fleet/playbook-runs/{runID}/evaluation", playbookRunSrv.handleSubmitEvaluation))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/evaluation", auth("GET /v1/fleet/playbook-runs/{runID}/evaluation", playbookRunSrv.handleGetEvaluation))
+	mux.HandleFunc("GET /v1/fleet/series/{seriesID}/version-stats", auth("GET /v1/fleet/series/{seriesID}/version-stats", playbookRunSrv.handleVersionStats))
 
 	// Playbook run step endpoints (agent_approve mode)
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/steps", auth("POST /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleCreateStep))
