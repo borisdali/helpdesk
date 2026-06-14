@@ -360,6 +360,159 @@ func TestFetchActivePlaybook_InvalidJSON(t *testing.T) {
 
 // ── RemediationScore buckets ───────────────────────────────────────────────
 
+// ── postEvaluations ───────────────────────────────────────────────────────
+
+func TestPostEvaluations_PostsForEachResultWithRunID(t *testing.T) {
+	var received []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		received = append(received, body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	results := []EvalResult{
+		{FailureID: "f1", RunID: "plr_a", KeywordScore: 1.0, ToolScore: 0.8, OverallScore: 0.85, Passed: true},
+		{FailureID: "f2", RunID: "plr_b", KeywordScore: 0.5, OverallScore: 0.5, Passed: false},
+		{FailureID: "f3", RunID: "", OverallScore: 0.9}, // no RunID — should be skipped
+	}
+	postEvaluations(srv.URL, "", results)
+
+	if len(received) != 2 {
+		t.Fatalf("POSTs received = %d, want 2 (result without RunID must be skipped)", len(received))
+	}
+}
+
+func TestPostEvaluations_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	results := []EvalResult{{FailureID: "f1", RunID: "plr_x", OverallScore: 1.0}}
+	postEvaluations(srv.URL, "secret-key", results)
+
+	if gotAuth != "Bearer secret-key" {
+		t.Errorf("Authorization = %q, want Bearer secret-key", gotAuth)
+	}
+}
+
+func TestPostEvaluations_NonFatalOnServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	// Must not panic or call t.Fatal.
+	results := []EvalResult{{FailureID: "f1", RunID: "plr_x", OverallScore: 0.5}}
+	postEvaluations(srv.URL, "", results)
+}
+
+func TestPostEvaluations_NonFatalOnNetworkError(t *testing.T) {
+	results := []EvalResult{{FailureID: "f1", RunID: "plr_x", OverallScore: 0.5}}
+	postEvaluations("http://127.0.0.1:19997", "", results) // nothing listening
+}
+
+func TestPostEvaluations_BodyContainsScores(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	results := []EvalResult{{
+		FailureID:      "db-tx-lock",
+		FailureName:    "Lock chain",
+		RunID:          "plr_scores",
+		KeywordScore:   1.0,
+		ToolScore:      0.75,
+		DiagnosisScore: 0.9,
+		OverallScore:   0.85,
+		Passed:         true,
+	}}
+	postEvaluations(srv.URL, "", results)
+
+	if gotBody["failure_id"] != "db-tx-lock" {
+		t.Errorf("failure_id = %v", gotBody["failure_id"])
+	}
+	if gotBody["keyword_score"] != 1.0 {
+		t.Errorf("keyword_score = %v, want 1.0", gotBody["keyword_score"])
+	}
+	if gotBody["overall_score"] != 0.85 {
+		t.Errorf("overall_score = %v, want 0.85", gotBody["overall_score"])
+	}
+	if gotBody["passed"] != true {
+		t.Errorf("passed = %v, want true", gotBody["passed"])
+	}
+}
+
+// ── fetchEvaluation ───────────────────────────────────────────────────────
+
+func TestFetchEvaluation_Found(t *testing.T) {
+	payload := map[string]any{
+		"run_id":       "plr_ev01",
+		"failure_id":   "db-oom",
+		"overall_score": 0.9,
+		"passed":       true,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(payload) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	ev := fetchEvaluation(srv.URL, "", "plr_ev01")
+	if ev == nil {
+		t.Fatal("expected non-nil evaluation")
+	}
+	if ev.RunID != "plr_ev01" {
+		t.Errorf("RunID = %q", ev.RunID)
+	}
+	if ev.OverallScore != 0.9 {
+		t.Errorf("OverallScore = %v, want 0.9", ev.OverallScore)
+	}
+}
+
+func TestFetchEvaluation_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	ev := fetchEvaluation(srv.URL, "", "plr_ghost")
+	if ev != nil {
+		t.Errorf("expected nil for 404, got %+v", ev)
+	}
+}
+
+func TestFetchEvaluation_NetworkError(t *testing.T) {
+	ev := fetchEvaluation("http://127.0.0.1:19996", "", "plr_x")
+	if ev != nil {
+		t.Errorf("expected nil on network error")
+	}
+}
+
+func TestFetchEvaluation_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"run_id": "plr_x"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchEvaluation(srv.URL, "tok-abc", "plr_x")
+	if gotAuth != "Bearer tok-abc" {
+		t.Errorf("Authorization = %q, want Bearer tok-abc", gotAuth)
+	}
+}
+
 func TestRemediationScoreBuckets(t *testing.T) {
 	// Documents the scoring thresholds from Remediator.Remediate:
 	// 1.0 if recoverySecs ≤ timeout/2, 0.75 if ≤ timeout, 0.0 on timeout error.

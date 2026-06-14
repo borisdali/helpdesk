@@ -1701,3 +1701,84 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	t.Logf("incident narrative full e2e OK: incident_id=%s triage=%s gate_reason=%q",
 		narrative["incident_id"], triageRunID, gate["reason"])
 }
+
+// TestPlaybooks_EvaluationRoundtrip verifies that POST .../evaluation stores scores
+// and GET .../evaluation retrieves them with all fields intact.
+func TestPlaybooks_EvaluationRoundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	runID := fmt.Sprintf("plr_e2e_ev_%d", time.Now().UnixNano())
+
+	status, err := client.SubmitEvaluation(ctx, runID, map[string]any{
+		"failure_id":       "db-tx-lock-chain-blocker",
+		"failure_name":     "Transaction lock chain blocker",
+		"keyword_score":    1.0,
+		"tool_score":       0.8,
+		"diagnosis_score":  0.9,
+		"remediation_score": 0.0,
+		"overall_score":    0.85,
+		"judge_used":       true,
+		"passed":           true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitEvaluation: %v", err)
+	}
+	if status != 204 {
+		t.Fatalf("SubmitEvaluation status = %d, want 204", status)
+	}
+
+	got, err := client.GetEvaluation(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetEvaluation: %v", err)
+	}
+	if got["run_id"] != runID {
+		t.Errorf("run_id = %q, want %q", got["run_id"], runID)
+	}
+	if got["failure_id"] != "db-tx-lock-chain-blocker" {
+		t.Errorf("failure_id = %q", got["failure_id"])
+	}
+	if ks, _ := got["keyword_score"].(float64); ks != 1.0 {
+		t.Errorf("keyword_score = %v, want 1.0", got["keyword_score"])
+	}
+	if os, _ := got["overall_score"].(float64); os != 0.85 {
+		t.Errorf("overall_score = %v, want 0.85", got["overall_score"])
+	}
+	if ju, _ := got["judge_used"].(bool); !ju {
+		t.Errorf("judge_used = %v, want true", got["judge_used"])
+	}
+	if p, _ := got["passed"].(bool); !p {
+		t.Errorf("passed = %v, want true", got["passed"])
+	}
+
+	// Upsert: re-submit should overwrite.
+	status2, err := client.SubmitEvaluation(ctx, runID, map[string]any{
+		"failure_id":    "db-tx-lock-chain-blocker",
+		"overall_score": 0.95,
+		"passed":        true,
+	})
+	if err != nil || status2 != 204 {
+		t.Fatalf("SubmitEvaluation (upsert) status=%d err=%v", status2, err)
+	}
+	got2, err := client.GetEvaluation(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetEvaluation after upsert: %v", err)
+	}
+	if os2, _ := got2["overall_score"].(float64); os2 != 0.95 {
+		t.Errorf("after upsert overall_score = %v, want 0.95", got2["overall_score"])
+	}
+
+	// Not-found: separate run_id should return 404.
+	_, err = client.GetEvaluation(ctx, "plr_nonexistent_ev")
+	if err == nil {
+		t.Error("GetEvaluation for nonexistent run should return error (404)")
+	}
+
+	t.Logf("evaluation roundtrip OK: run_id=%s", runID)
+}
