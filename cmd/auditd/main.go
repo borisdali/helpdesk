@@ -323,6 +323,7 @@ func main() {
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/evaluation", auth("POST /v1/fleet/playbook-runs/{runID}/evaluation", playbookRunSrv.handleSubmitEvaluation))
 	mux.HandleFunc("GET /v1/fleet/playbook-runs/{runID}/evaluation", auth("GET /v1/fleet/playbook-runs/{runID}/evaluation", playbookRunSrv.handleGetEvaluation))
 	mux.HandleFunc("GET /v1/fleet/series/{seriesID}/version-stats", auth("GET /v1/fleet/series/{seriesID}/version-stats", playbookRunSrv.handleVersionStats))
+	mux.HandleFunc("GET /v1/fleet/calibration", auth("GET /v1/fleet/calibration", playbookRunSrv.handleCalibration))
 
 	// Playbook run step endpoints (agent_approve mode)
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/steps", auth("POST /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleCreateStep))

@@ -317,6 +317,46 @@ Data sources:
 
 The gateway endpoint backing this command: `GET /api/v1/fleet/series/{seriesID}/version-stats`.
 
+### vault calibration
+
+```bash
+# Fleet-wide calibration
+faulttest vault calibration \
+  --gateway https://gateway.internal \
+  --api-key $HELPDESK_API_KEY
+
+# Scoped to one series (or fault ID)
+faulttest vault calibration db-lock-contention \
+  --gateway https://gateway.internal \
+  --api-key $HELPDESK_API_KEY
+```
+
+Shows how well `diagnosis_score` (automated faulttest evaluation) predicts whether operators confirm the diagnosis was correct. Requires runs that have both an evaluation score (`--gateway` flag during `faulttest run`) and post-incident operator feedback (`vault incidents` → submit verdict).
+
+```
+Diagnosis calibration — fleet-wide (17 runs with eval + operator feedback)
+
+CONF BAND     RUNS    CORRECT    ACCURACY    CALIBRATION
+─────────────────────────────────────────────────────────────────
+90-100%          12         10        83%    OVERCONFIDENT
+70-89%            4          3        75%    WELL CALIBRATED
+<70%              1          1       100%    INSUFFICIENT_DATA
+```
+
+Calibration is determined by comparing `ACCURACY` against the midpoint of each band:
+
+| Band | Expected accuracy | WELL CALIBRATED range |
+|------|------------------|-----------------------|
+| `90-100%` | 95% | 85–100% |
+| `70-89%` | 80% | 70–90% |
+| `<70%` | 50% | 40–60% |
+
+**OVERCONFIDENT** — model scores high but operators disagree more than expected.  
+**UNDERCONFIDENT** — model scores low but operators agree more than expected.  
+**INSUFFICIENT_DATA** — fewer than 3 runs in this band; no reliable conclusion.
+
+The gateway endpoint backing this command: `GET /api/v1/fleet/calibration?series_id=<optional>`.
+
 ### vault suggest
 
 ```bash

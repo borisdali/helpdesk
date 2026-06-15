@@ -121,6 +121,131 @@ func TestRunEvaluationStore_GetByRunID_NotFound(t *testing.T) {
 	}
 }
 
+func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
+	ctx := context.Background()
+
+	// Need both run_evaluation and run_feedback tables in the same DB.
+	mainStore, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { mainStore.Close() })
+
+	evalStore, err := NewRunEvaluationStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	fbStore, err := NewRunFeedbackStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+
+	const seriesID = "pbs_calib_test"
+
+	// Seed: 3 runs in 90-100% band (2 correct, 1 wrong) + 3 runs in 70-89% band (3 correct).
+	type seed struct {
+		runID string
+		score float64
+		ok    bool
+	}
+	seeds := []seed{
+		{"plr_c01", 0.95, true},
+		{"plr_c02", 0.92, true},
+		{"plr_c03", 0.91, false},
+		{"plr_c04", 0.80, true},
+		{"plr_c05", 0.75, true},
+		{"plr_c06", 0.72, true},
+	}
+	tr := true
+	fa := false
+	for _, s := range seeds {
+		if err := evalStore.Upsert(ctx, &RunEvaluation{
+			RunID: s.runID, FailureID: "db-lock", DiagnosisScore: s.score, OverallScore: s.score,
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", s.runID, err)
+		}
+		v := &tr
+		if !s.ok {
+			v = &fa
+		}
+		if err := fbStore.Submit(ctx, &RunFeedback{
+			RunID: s.runID, SeriesID: seriesID, FeedbackType: "triage", FeedbackTime: "post_incident",
+			VerdictCorrect: v,
+		}); err != nil {
+			t.Fatalf("Submit %s: %v", s.runID, err)
+		}
+	}
+
+	// Fleet-wide report.
+	report, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands: %v", err)
+	}
+	if report.TotalRuns != 6 {
+		t.Errorf("TotalRuns = %d, want 6", report.TotalRuns)
+	}
+	if len(report.Bands) != 3 {
+		t.Fatalf("want 3 bands, got %d", len(report.Bands))
+	}
+
+	// Band 0: 90-100%, 3 runs, 2 correct → 66% actual vs 95% expected → OVERCONFIDENT
+	b90 := report.Bands[0]
+	if b90.Band != "90-100%" {
+		t.Errorf("Bands[0].Band = %q, want 90-100%%", b90.Band)
+	}
+	if b90.Runs != 3 || b90.Correct != 2 {
+		t.Errorf("90-100%%: Runs=%d Correct=%d, want Runs=3 Correct=2", b90.Runs, b90.Correct)
+	}
+	if b90.Calibration != "OVERCONFIDENT" {
+		t.Errorf("90-100%% Calibration = %q, want OVERCONFIDENT", b90.Calibration)
+	}
+
+	// Band 1: 70-89%, 3 runs, 3 correct → 100% actual vs 80% expected → UNDERCONFIDENT
+	b70 := report.Bands[1]
+	if b70.Band != "70-89%" {
+		t.Errorf("Bands[1].Band = %q, want 70-89%%", b70.Band)
+	}
+	if b70.Runs != 3 || b70.Correct != 3 {
+		t.Errorf("70-89%%: Runs=%d Correct=%d, want Runs=3 Correct=3", b70.Runs, b70.Correct)
+	}
+	if b70.Calibration != "UNDERCONFIDENT" {
+		t.Errorf("70-89%% Calibration = %q, want UNDERCONFIDENT", b70.Calibration)
+	}
+
+	// Band 2: <70%, 0 runs → INSUFFICIENT_DATA
+	bLow := report.Bands[2]
+	if bLow.Runs != 0 {
+		t.Errorf("<70%% Runs = %d, want 0", bLow.Runs)
+	}
+	if bLow.Calibration != "INSUFFICIENT_DATA" {
+		t.Errorf("<70%% Calibration = %q, want INSUFFICIENT_DATA", bLow.Calibration)
+	}
+
+	// Series-scoped report: same data, filtered by seriesID.
+	scoped, err := evalStore.CalibrationBands(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("CalibrationBands (scoped): %v", err)
+	}
+	if scoped.TotalRuns != 6 {
+		t.Errorf("scoped TotalRuns = %d, want 6", scoped.TotalRuns)
+	}
+
+	// Runs without feedback are excluded.
+	noFeedbackRun := &RunEvaluation{
+		RunID: "plr_c99", FailureID: "db-lock", DiagnosisScore: 0.93, OverallScore: 0.93,
+	}
+	if err := evalStore.Upsert(ctx, noFeedbackRun); err != nil {
+		t.Fatalf("Upsert no-feedback run: %v", err)
+	}
+	reportAfter, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands after extra run: %v", err)
+	}
+	if reportAfter.TotalRuns != 6 {
+		t.Errorf("TotalRuns after adding eval-only run = %d, want 6 (no feedback → excluded)", reportAfter.TotalRuns)
+	}
+}
+
 func TestRunEvaluationStore_RemediationScore(t *testing.T) {
 	ctx := context.Background()
 	store := newRunEvaluationStore(t)

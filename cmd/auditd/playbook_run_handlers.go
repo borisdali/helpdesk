@@ -374,6 +374,24 @@ func (s *playbookRunServer) handleGetEvaluation(w http.ResponseWriter, r *http.R
 // handleListPendingFeedback handles GET /v1/fleet/playbook-runs/feedback-pending.
 // Returns post-incident triage RunFeedback placeholder records where verdict_correct
 // has not been submitted yet — these are feedback requests awaiting operator resolution.
+// handleCalibration handles GET /v1/fleet/calibration.
+// Optional query param series_id scopes to a single playbook series; omit for fleet-wide.
+func (s *playbookRunServer) handleCalibration(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	seriesID := r.URL.Query().Get("series_id")
+	report, err := s.evaluationStore.CalibrationBands(r.Context(), seriesID)
+	if err != nil {
+		slog.Error("failed to compute calibration", "series_id", seriesID, "err", err)
+		http.Error(w, "failed to compute calibration", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(report) //nolint:errcheck
+}
+
 func (s *playbookRunServer) handleListPendingFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.feedbackStore == nil {
 		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)

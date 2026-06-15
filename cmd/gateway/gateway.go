@@ -415,6 +415,13 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		id := r.PathValue("seriesID")
 		g.proxyToAuditd(w, r, "/v1/fleet/series/"+id+"/version-stats")
 	}))
+	mux.HandleFunc("GET /api/v1/fleet/calibration", auth("GET /api/v1/fleet/calibration", func(w http.ResponseWriter, r *http.Request) {
+		path := "/v1/fleet/calibration"
+		if sid := r.URL.Query().Get("series_id"); sid != "" {
+			path += "?series_id=" + sid
+		}
+		g.proxyToAuditd(w, r, path)
+	}))
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))

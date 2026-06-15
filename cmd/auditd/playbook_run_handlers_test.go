@@ -787,3 +787,79 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 		t.Errorf("empty series status = %d, want 200", rec2.Code)
 	}
 }
+
+func TestPlaybookRunHandlers_Calibration(t *testing.T) {
+	ctx := context.Background()
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	evalStore, err := audit.NewRunEvaluationStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	fbStore, err := audit.NewRunFeedbackStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+	srv := &playbookRunServer{evaluationStore: evalStore, feedbackStore: fbStore}
+
+	// Seed 3 runs in 90-100% band: 3 correct.
+	tr := true
+	for i, runID := range []string{"plr_cal01", "plr_cal02", "plr_cal03"} {
+		_ = i
+		if err := evalStore.Upsert(ctx, &audit.RunEvaluation{
+			RunID: runID, FailureID: "db-lock", DiagnosisScore: 0.95, OverallScore: 0.95,
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", runID, err)
+		}
+		if err := fbStore.Submit(ctx, &audit.RunFeedback{
+			RunID: runID, SeriesID: "pbs_calib_handler", FeedbackType: "triage",
+			FeedbackTime: "post_incident", VerdictCorrect: &tr,
+		}); err != nil {
+			t.Fatalf("Submit %s: %v", runID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/calibration", nil)
+	rec := httptest.NewRecorder()
+	srv.handleCalibration(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var report struct {
+		Bands []struct {
+			Band        string `json:"band"`
+			Runs        int    `json:"runs"`
+			Correct     int    `json:"correct"`
+			Calibration string `json:"calibration"`
+		} `json:"bands"`
+		TotalRuns int `json:"total_runs"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&report); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if report.TotalRuns != 3 {
+		t.Errorf("total_runs = %d, want 3", report.TotalRuns)
+	}
+	if len(report.Bands) != 3 {
+		t.Fatalf("want 3 bands, got %d", len(report.Bands))
+	}
+	if report.Bands[0].Band != "90-100%" {
+		t.Errorf("Bands[0].Band = %q, want 90-100%%", report.Bands[0].Band)
+	}
+	if report.Bands[0].Runs != 3 || report.Bands[0].Correct != 3 {
+		t.Errorf("90-100%%: Runs=%d Correct=%d, want 3/3", report.Bands[0].Runs, report.Bands[0].Correct)
+	}
+	// 3/3 correct vs expected 95% → UNDERCONFIDENT (100% > 95%+10% boundary? no, 100-95=5 ≤ 10)
+	// Actually |1.0 - 0.95| = 0.05 ≤ 0.10 → WELL_CALIBRATED
+	if report.Bands[0].Calibration != "WELL_CALIBRATED" {
+		t.Errorf("90-100%% Calibration = %q, want WELL_CALIBRATED", report.Bands[0].Calibration)
+	}
+}

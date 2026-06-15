@@ -533,7 +533,7 @@ faulttest example --category kubernetes > k8s-faults.yaml
 ### 5.6 vault
 
 ```
-faulttest vault <list|status|drift|accuracy|incidents|versions|suggest|suggest-update>
+faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|suggest|suggest-update>
 ```
 
 The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores are also posted to auditd (`run_evaluation` table) keyed by the `plr_*` playbook run ID — the local JSON file is a cache. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
@@ -642,6 +642,22 @@ faulttest vault versions <fault-id or series-id> \
 ```
 
 Shows per-version run stats for a playbook series: resolution rate, average step count, average wall-clock recovery time, and separate average diagnosis / remediation scores (`AVG DIAG` / `AVG REMED`). Useful after a `vault suggest-update` to confirm whether the new version improved outcomes. See [VAULT.md — vault versions](VAULT.md#vault-versions) for output example and column reference.
+
+#### vault calibration
+
+```bash
+# Fleet-wide
+faulttest vault calibration \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+
+# Scoped to one fault or series
+faulttest vault calibration db-lock-contention \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Shows confidence-band calibration: how well `diagnosis_score` predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%`, and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT`, or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and post-incident feedback. See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
 
 #### vault suggest
 

@@ -631,6 +631,99 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+// ── fetchCalibration ──────────────────────────────────────────────────────
+
+func TestFetchCalibration_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/calibration" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"series_id":  "",
+			"total_runs": 9,
+			"bands": []map[string]any{
+				{"band": "90-100%", "runs": 5, "correct": 4, "actual_accuracy": 0.80, "calibration": "OVERCONFIDENT"},
+				{"band": "70-89%", "runs": 4, "correct": 3, "actual_accuracy": 0.75, "calibration": "WELL_CALIBRATED"},
+				{"band": "<70%", "runs": 0, "correct": 0, "actual_accuracy": 0.0, "calibration": "INSUFFICIENT_DATA"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	report, err := fetchCalibration(srv.URL, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.TotalRuns != 9 {
+		t.Errorf("TotalRuns = %d, want 9", report.TotalRuns)
+	}
+	if len(report.Bands) != 3 {
+		t.Fatalf("want 3 bands, got %d", len(report.Bands))
+	}
+	if report.Bands[0].Band != "90-100%" || report.Bands[0].Calibration != "OVERCONFIDENT" {
+		t.Errorf("Bands[0]: Band=%q Calibration=%q", report.Bands[0].Band, report.Bands[0].Calibration)
+	}
+	if report.Bands[1].Calibration != "WELL_CALIBRATED" {
+		t.Errorf("Bands[1].Calibration = %q, want WELL_CALIBRATED", report.Bands[1].Calibration)
+	}
+}
+
+func TestFetchCalibration_WithSeriesID(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"series_id": "pbs_test", "total_runs": 0, "bands": []any{},
+		})
+	}))
+	defer srv.Close()
+
+	_, err := fetchCalibration(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v1/fleet/calibration?series_id=pbs_test" {
+		t.Errorf("path = %q, want /api/v1/fleet/calibration?series_id=pbs_test", gotPath)
+	}
+}
+
+func TestFetchCalibration_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchCalibration(srv.URL, "", "")
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestFetchCalibration_NetworkError(t *testing.T) {
+	_, err := fetchCalibration("http://127.0.0.1:0", "", "")
+	if err == nil {
+		t.Fatal("expected error for unreachable server")
+	}
+}
+
+func TestFetchCalibration_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"total_runs": 0, "bands": []any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchCalibration(srv.URL, "tok-xyz", "") //nolint:errcheck
+	if gotAuth != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotAuth)
+	}
+}
+
 func TestRemediationScoreBuckets(t *testing.T) {
 	// Documents the scoring thresholds from Remediator.Remediate:
 	// 1.0 if recoverySecs ≤ timeout/2, 0.75 if ≤ timeout, 0.0 on timeout error.

@@ -131,7 +131,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|versions|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|suggest|suggest-update>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -139,6 +139,7 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
 		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
+		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
@@ -156,6 +157,8 @@ func cmdVault(args []string) {
 		vaultIncidents(args[1:])
 	case "versions":
 		vaultVersions(args[1:])
+	case "calibration":
+		vaultCalibration(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -1575,4 +1578,136 @@ func vaultVersions(args []string) {
 	}
 	fmt.Println()
 	fmt.Println("* = currently active version")
+}
+
+// ── vault calibration ──────────────────────────────────────────────────────
+
+// calibrationBand mirrors audit.CalibrationBand returned by the gateway.
+type calibrationBand struct {
+	Band           string  `json:"band"`
+	Runs           int     `json:"runs"`
+	Correct        int     `json:"correct"`
+	ActualAccuracy float64 `json:"actual_accuracy"`
+	Calibration    string  `json:"calibration"`
+}
+
+// calibrationReport mirrors audit.CalibrationReport.
+type calibrationReport struct {
+	SeriesID  string            `json:"series_id,omitempty"`
+	Bands     []calibrationBand `json:"bands"`
+	TotalRuns int               `json:"total_runs"`
+}
+
+// fetchCalibration calls GET /api/v1/fleet/calibration[?series_id=...].
+func fetchCalibration(gatewayURL, apiKey, seriesID string) (*calibrationReport, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/calibration"
+	if seriesID != "" {
+		url += "?series_id=" + seriesID
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	var report calibrationReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		return nil, err
+	}
+	return &report, nil
+}
+
+// vaultCalibration shows confidence-band calibration: how well diagnosis_score
+// predicts operator-confirmed correctness.
+// Usage: faulttest vault calibration [<fault-id or series-id>] [--gateway ...] [--api-key ...]
+func vaultCalibration(args []string) {
+	fs := flag.NewFlagSet("vault calibration", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault calibration")
+		os.Exit(1)
+	}
+
+	seriesID := ""
+	if len(fs.Args()) > 0 {
+		arg := fs.Args()[0]
+		seriesID = arg
+		// Resolve fault ID → series ID.
+		if !strings.HasPrefix(arg, "pbs_") {
+			cat, err := loadActiveCatalog(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+				os.Exit(1)
+			}
+			var found bool
+			for _, f := range cat.Failures {
+				if f.ID == arg {
+					if f.DiagnosisPlaybookSeriesID == "" {
+						fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook.\n", arg)
+						os.Exit(1)
+					}
+					seriesID = f.DiagnosisPlaybookSeriesID
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
+				os.Exit(1)
+			}
+		}
+	}
+
+	report, err := fetchCalibration(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching calibration: %v\n", err)
+		os.Exit(1)
+	}
+
+	scope := "fleet-wide"
+	if report.SeriesID != "" {
+		scope = report.SeriesID
+	}
+	fmt.Printf("Diagnosis calibration — %s (%d runs with eval + operator feedback)\n\n", scope, report.TotalRuns)
+
+	const (
+		colBand  = 12
+		colRuns  = 6
+		colCorr  = 9
+		colAccu  = 10
+		colCalib = 20
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
+		colBand, "CONF BAND", colRuns, "RUNS", colCorr, "CORRECT", colAccu, "ACCURACY", "CALIBRATION")
+	fmt.Println(strings.Repeat("─", colBand+2+colRuns+2+colCorr+2+colAccu+2+colCalib))
+
+	for _, b := range report.Bands {
+		accuStr := "–"
+		if b.Runs > 0 {
+			accuStr = fmt.Sprintf("%d%%", int(b.ActualAccuracy*100))
+		}
+		fmt.Printf("%-*s  %-*d  %-*d  %-*s  %s\n",
+			colBand, b.Band,
+			colRuns, b.Runs,
+			colCorr, b.Correct,
+			colAccu, accuStr,
+			b.Calibration,
+		)
+	}
+
+	if report.TotalRuns == 0 {
+		fmt.Println()
+		fmt.Println("No runs with both eval scores and operator feedback yet.")
+		fmt.Println("Run faulttest with --gateway and submit feedback via `vault incidents` to populate.")
+	}
 }
