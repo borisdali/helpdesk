@@ -513,6 +513,115 @@ func TestFetchEvaluation_SendsAuth(t *testing.T) {
 	}
 }
 
+// ── fetchVersionStats ─────────────────────────────────────────────────────
+
+func TestFetchVersionStats_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"series_id": "pbs_test",
+			"versions": []map[string]any{
+				{"version": "1.0", "is_active": false, "total_runs": 3, "resolved": 2,
+					"resolution_rate": 0.67, "avg_step_count": 4.0, "avg_recovery_secs": 42.0,
+					"avg_overall_score": 0.72, "eval_count": 2},
+				{"version": "1.1", "is_active": true, "total_runs": 2, "resolved": 2,
+					"resolution_rate": 1.0, "avg_step_count": 3.0, "avg_recovery_secs": 8.0,
+					"avg_overall_score": 0.91, "eval_count": 2},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	versions, err := fetchVersionStats(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("want 2 versions, got %d", len(versions))
+	}
+	if versions[0].Version != "1.0" || versions[0].IsActive {
+		t.Errorf("v1.0: Version=%q IsActive=%v", versions[0].Version, versions[0].IsActive)
+	}
+	if versions[1].Version != "1.1" || !versions[1].IsActive {
+		t.Errorf("v1.1: Version=%q IsActive=%v", versions[1].Version, versions[1].IsActive)
+	}
+	if versions[1].AvgOverallScore != 0.91 {
+		t.Errorf("v1.1 AvgOverallScore = %v, want 0.91", versions[1].AvgOverallScore)
+	}
+}
+
+func TestFetchVersionStats_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"series_id": "pbs_none", "versions": []any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	versions, err := fetchVersionStats(srv.URL, "", "pbs_none")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(versions) != 0 {
+		t.Errorf("want 0 versions, got %d", len(versions))
+	}
+}
+
+func TestFetchVersionStats_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchVersionStats(srv.URL, "", "pbs_test")
+	if err == nil {
+		t.Error("expected error for 500 response")
+	}
+}
+
+func TestFetchVersionStats_NetworkError(t *testing.T) {
+	_, err := fetchVersionStats("http://127.0.0.1:19997", "", "pbs_test")
+	if err == nil {
+		t.Error("expected error on network failure")
+	}
+}
+
+func TestFetchVersionStats_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"series_id": "pbs_test", "versions": []any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchVersionStats(srv.URL, "tok-xyz", "pbs_test") //nolint:errcheck
+	if gotAuth != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotAuth)
+	}
+}
+
+// ── formatDuration ────────────────────────────────────────────────────────
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		secs float64
+		want string
+	}{
+		{0, "–"},
+		{-5, "–"},
+		{42, "42s"},
+		{60, "1m0s"},
+		{83, "1m23s"},
+		{3600, "1h0m"},
+		{3661, "1h1m"},
+		{7322, "2h2m"},
+	}
+	for _, tt := range tests {
+		got := formatDuration(tt.secs)
+		if got != tt.want {
+			t.Errorf("formatDuration(%.0f) = %q, want %q", tt.secs, got, tt.want)
+		}
+	}
+}
+
 func TestRemediationScoreBuckets(t *testing.T) {
 	// Documents the scoring thresholds from Remediator.Remediate:
 	// 1.0 if recoverySecs ≤ timeout/2, 0.75 if ≤ timeout, 0.0 on timeout error.
