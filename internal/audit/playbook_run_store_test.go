@@ -547,10 +547,11 @@ func TestPlaybookRunStore_StatsByVersion(t *testing.T) {
 		}
 		// Add eval score only to v1.1 runs.
 		if err := evalStore.Upsert(ctx, &RunEvaluation{
-			RunID:        r.RunID,
-			FailureID:    "db-lock-contention",
-			OverallScore: 0.9,
-			Passed:       true,
+			RunID:          r.RunID,
+			FailureID:      "db-lock-contention",
+			DiagnosisScore: 0.9,
+			OverallScore:   0.9,
+			Passed:         true,
 		}); err != nil {
 			t.Fatalf("Upsert eval: %v", err)
 		}
@@ -577,8 +578,8 @@ func TestPlaybookRunStore_StatsByVersion(t *testing.T) {
 	if v10.Resolved != 2 {
 		t.Errorf("v1.0 Resolved = %d, want 2", v10.Resolved)
 	}
-	if v10.EvalCount != 0 {
-		t.Errorf("v1.0 EvalCount = %d, want 0", v10.EvalCount)
+	if v10.DiagEvalCount != 0 {
+		t.Errorf("v1.0 DiagEvalCount = %d, want 0", v10.DiagEvalCount)
 	}
 	// avg steps: (2+2+0)/3 = 1.33...
 	wantSteps10 := (2.0 + 2.0 + 0.0) / 3.0
@@ -599,11 +600,14 @@ func TestPlaybookRunStore_StatsByVersion(t *testing.T) {
 	if v11.Resolved != 2 {
 		t.Errorf("v1.1 Resolved = %d, want 2", v11.Resolved)
 	}
-	if v11.EvalCount != 2 {
-		t.Errorf("v1.1 EvalCount = %d, want 2", v11.EvalCount)
+	if v11.DiagEvalCount != 2 {
+		t.Errorf("v1.1 DiagEvalCount = %d, want 2", v11.DiagEvalCount)
 	}
-	if v11.AvgOverallScore < 0.89 || v11.AvgOverallScore > 0.91 {
-		t.Errorf("v1.1 AvgOverallScore = %.2f, want 0.90", v11.AvgOverallScore)
+	if v11.AvgDiagnosisScore < 0.89 || v11.AvgDiagnosisScore > 0.91 {
+		t.Errorf("v1.1 AvgDiagnosisScore = %.2f, want 0.90", v11.AvgDiagnosisScore)
+	}
+	if v11.RemedEvalCount != 0 {
+		t.Errorf("v1.1 RemedEvalCount = %d, want 0 (no remediation runs)", v11.RemedEvalCount)
 	}
 	// avg steps: 4.0
 	if v11.AvgStepCount < 3.99 || v11.AvgStepCount > 4.01 {

@@ -641,7 +641,7 @@ faulttest vault versions <fault-id or series-id> \
   --api-key sk-...
 ```
 
-Shows per-version run stats for a playbook series: resolution rate, average step count, average wall-clock recovery time, and average faulttest score. Useful after a `vault suggest-update` to confirm whether the new version improved outcomes. See [VAULT.md — vault versions](VAULT.md#vault-versions) for output example and column reference.
+Shows per-version run stats for a playbook series: resolution rate, average step count, average wall-clock recovery time, and separate average diagnosis / remediation scores (`AVG DIAG` / `AVG REMED`). Useful after a `vault suggest-update` to confirm whether the new version improved outcomes. See [VAULT.md — vault versions](VAULT.md#vault-versions) for output example and column reference.
 
 #### vault suggest
 

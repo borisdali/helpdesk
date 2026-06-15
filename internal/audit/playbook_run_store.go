@@ -70,8 +70,10 @@ type PlaybookVersionStats struct {
 	ResolutionRate  float64 `json:"resolution_rate"`   // resolved / total_runs; 0 when no runs
 	AvgStepCount    float64 `json:"avg_step_count"`    // average steps per run; 0 when no step data
 	AvgRecoverySecs float64 `json:"avg_recovery_secs"` // average wall-clock seconds for completed runs; 0 when no data
-	AvgOverallScore float64 `json:"avg_overall_score"` // average faulttest overall_score; 0 when no eval data
-	EvalCount       int     `json:"eval_count"`        // number of runs with faulttest evaluation scores
+	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`   // average diagnosis_score; 0 when no eval data
+	DiagEvalCount       int     `json:"diag_eval_count"`       // number of runs with diagnosis scores
+	AvgRemediationScore float64 `json:"avg_remediation_score"` // average remediation_score; 0 when no remediation data
+	RemedEvalCount      int     `json:"remed_eval_count"`      // number of runs with non-zero remediation scores
 }
 
 // PlaybookRunStore persists playbook execution records.
@@ -476,7 +478,8 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		    r.started_at,
 		    r.completed_at,
 		    COALESCE(sc.cnt, 0) AS step_count,
-		    ev.overall_score
+		    ev.diagnosis_score,
+		    ev.remediation_score
 		FROM playbook_runs r
 		JOIN playbooks p ON r.playbook_id = p.playbook_id
 		LEFT JOIN (
@@ -498,8 +501,10 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		stepSum         float64
 		recoverySumSecs float64
 		recoveryCount   int
-		scoreSum        float64
-		evalCount       int
+		diagScoreSum    float64
+		diagEvalCount   int
+		remedScoreSum   float64
+		remedEvalCount  int
 	}
 
 	acc := map[string]*versionAccum{}
@@ -510,9 +515,9 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		var isActiveInt int
 		var outcome, startedStr, completedStr string
 		var stepCount int
-		var scoreNull sql.NullFloat64
+		var diagScoreNull, remedScoreNull sql.NullFloat64
 
-		if err := rows.Scan(&version, &isActiveInt, &outcome, &startedStr, &completedStr, &stepCount, &scoreNull); err != nil {
+		if err := rows.Scan(&version, &isActiveInt, &outcome, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
 			return nil, err
 		}
 
@@ -537,9 +542,13 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 			}
 		}
 
-		if scoreNull.Valid {
-			a.scoreSum += scoreNull.Float64
-			a.evalCount++
+		if diagScoreNull.Valid {
+			a.diagScoreSum += diagScoreNull.Float64
+			a.diagEvalCount++
+		}
+		if remedScoreNull.Valid && remedScoreNull.Float64 > 0 {
+			a.remedScoreSum += remedScoreNull.Float64
+			a.remedEvalCount++
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -555,7 +564,8 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 			IsActive:  a.isActive,
 			TotalRuns: a.totalRuns,
 			Resolved:  a.resolved,
-			EvalCount: a.evalCount,
+			DiagEvalCount:  a.diagEvalCount,
+			RemedEvalCount: a.remedEvalCount,
 		}
 		if a.totalRuns > 0 {
 			st.ResolutionRate = float64(a.resolved) / float64(a.totalRuns)
@@ -564,8 +574,11 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		if a.recoveryCount > 0 {
 			st.AvgRecoverySecs = a.recoverySumSecs / float64(a.recoveryCount)
 		}
-		if a.evalCount > 0 {
-			st.AvgOverallScore = a.scoreSum / float64(a.evalCount)
+		if a.diagEvalCount > 0 {
+			st.AvgDiagnosisScore = a.diagScoreSum / float64(a.diagEvalCount)
+		}
+		if a.remedEvalCount > 0 {
+			st.AvgRemediationScore = a.remedScoreSum / float64(a.remedEvalCount)
 		}
 		out = append(out, st)
 	}

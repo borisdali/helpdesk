@@ -1414,8 +1414,10 @@ type versionStats struct {
 	ResolutionRate  float64 `json:"resolution_rate"`
 	AvgStepCount    float64 `json:"avg_step_count"`
 	AvgRecoverySecs float64 `json:"avg_recovery_secs"`
-	AvgOverallScore float64 `json:"avg_overall_score"`
-	EvalCount       int     `json:"eval_count"`
+	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`
+	DiagEvalCount       int     `json:"diag_eval_count"`
+	AvgRemediationScore float64 `json:"avg_remediation_score"`
+	RemedEvalCount      int     `json:"remed_eval_count"`
 }
 
 // fetchVersionStats calls GET /api/v1/fleet/series/{seriesID}/version-stats.
@@ -1525,12 +1527,13 @@ func vaultVersions(args []string) {
 		colRes   = 10
 		colSteps = 10
 		colTime  = 10
-		colScore = 10
+		colDiag  = 9
+		colRemed = 9
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colVer, "VERSION", colRuns, "RUNS", colRes, "RESOLVED",
-		colSteps, "AVG STEPS", colTime, "AVG TIME", "AVG SCORE")
-	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+10))
+		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG", "AVG REMED")
+	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+colDiag+2+colRemed))
 
 	for _, v := range versions {
 		ver := v.Version
@@ -1550,18 +1553,24 @@ func vaultVersions(args []string) {
 
 		timeStr := formatDuration(v.AvgRecoverySecs)
 
-		scoreStr := "–"
-		if v.EvalCount > 0 {
-			scoreStr = fmt.Sprintf("%d%%", int(v.AvgOverallScore*100))
+		diagStr := "–"
+		if v.DiagEvalCount > 0 {
+			diagStr = fmt.Sprintf("%d%%", int(v.AvgDiagnosisScore*100))
 		}
 
-		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %s\n",
+		remedStr := "–"
+		if v.RemedEvalCount > 0 {
+			remedStr = fmt.Sprintf("%d%%", int(v.AvgRemediationScore*100))
+		}
+
+		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colVer, ver,
 			colRuns, v.TotalRuns,
 			colRes, resolvedStr,
 			colSteps, stepsStr,
 			colTime, timeStr,
-			scoreStr,
+			colDiag, diagStr,
+			remedStr,
 		)
 	}
 	fmt.Println()

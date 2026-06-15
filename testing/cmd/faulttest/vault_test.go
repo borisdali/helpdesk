@@ -523,10 +523,12 @@ func TestFetchVersionStats_Found(t *testing.T) {
 			"versions": []map[string]any{
 				{"version": "1.0", "is_active": false, "total_runs": 3, "resolved": 2,
 					"resolution_rate": 0.67, "avg_step_count": 4.0, "avg_recovery_secs": 42.0,
-					"avg_overall_score": 0.72, "eval_count": 2},
+					"avg_diagnosis_score": 0.72, "diag_eval_count": 2,
+					"avg_remediation_score": 0.0, "remed_eval_count": 0},
 				{"version": "1.1", "is_active": true, "total_runs": 2, "resolved": 2,
 					"resolution_rate": 1.0, "avg_step_count": 3.0, "avg_recovery_secs": 8.0,
-					"avg_overall_score": 0.91, "eval_count": 2},
+					"avg_diagnosis_score": 0.91, "diag_eval_count": 2,
+					"avg_remediation_score": 0.85, "remed_eval_count": 1},
 			},
 		})
 	}))
@@ -545,8 +547,15 @@ func TestFetchVersionStats_Found(t *testing.T) {
 	if versions[1].Version != "1.1" || !versions[1].IsActive {
 		t.Errorf("v1.1: Version=%q IsActive=%v", versions[1].Version, versions[1].IsActive)
 	}
-	if versions[1].AvgOverallScore != 0.91 {
-		t.Errorf("v1.1 AvgOverallScore = %v, want 0.91", versions[1].AvgOverallScore)
+	if versions[1].AvgDiagnosisScore != 0.91 {
+		t.Errorf("v1.1 AvgDiagnosisScore = %v, want 0.91", versions[1].AvgDiagnosisScore)
+	}
+	if versions[1].RemedEvalCount != 1 || versions[1].AvgRemediationScore != 0.85 {
+		t.Errorf("v1.1 remed: count=%d score=%v, want count=1 score=0.85",
+			versions[1].RemedEvalCount, versions[1].AvgRemediationScore)
+	}
+	if versions[0].RemedEvalCount != 0 {
+		t.Errorf("v1.0 RemedEvalCount = %d, want 0", versions[0].RemedEvalCount)
 	}
 }
 

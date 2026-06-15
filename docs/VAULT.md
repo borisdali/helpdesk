@@ -292,15 +292,15 @@ faulttest vault versions <fault-id or series-id> \
   --api-key $HELPDESK_API_KEY
 ```
 
-Shows per-version run stats for a playbook series: resolution rate, average step count, average recovery time, and average faulttest score. Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a series ID (e.g. `pbs_lock_chain_triage`). Requires `--gateway`.
+Shows per-version run stats for a playbook series: resolution rate, average step count, average recovery time, and separate diagnosis / remediation scores. Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a series ID (e.g. `pbs_lock_chain_triage`). Requires `--gateway`.
 
 ```
 Version stats for pbs_cache_miss_remediate — 2 version(s)
 
-VERSION     RUNS    RESOLVED    AVG STEPS   AVG TIME    AVG SCORE
-─────────────────────────────────────────────────────────────────────────
-1.0          5      60%         6.2         42s         72%
-1.1  *       3      100%        4.0         8s          91%
+VERSION     RUNS    RESOLVED    AVG STEPS   AVG TIME    AVG DIAG   AVG REMED
+─────────────────────────────────────────────────────────────────────────────
+1.0          5      60%         6.2         42s         72%        –
+1.1  *       3      100%        4.0         8s          91%        85%
 
 * = currently active version
 ```
@@ -312,7 +312,8 @@ Data sources:
 | `RUNS` / `RESOLVED` | `playbook_runs` table in auditd, grouped by `playbook_id` |
 | `AVG STEPS` | Average number of steps recorded in `playbook_run_steps` per run |
 | `AVG TIME` | Average wall-clock time between `started_at` and `completed_at` for completed runs |
-| `AVG SCORE` | Average `overall_score` from `run_evaluation` for runs that have faulttest scores |
+| `AVG DIAG` | Average `diagnosis_score` from `run_evaluation`; `–` when no runs have eval data |
+| `AVG REMED` | Average `remediation_score` for runs where remediation was executed (score > 0); `–` when no remediation runs |
 
 The gateway endpoint backing this command: `GET /api/v1/fleet/series/{seriesID}/version-stats`.
 
