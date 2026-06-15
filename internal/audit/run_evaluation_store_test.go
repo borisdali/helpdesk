@@ -244,6 +244,49 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	if reportAfter.TotalRuns != 6 {
 		t.Errorf("TotalRuns after adding eval-only run = %d, want 6 (no feedback → excluded)", reportAfter.TotalRuns)
 	}
+
+	// at_gate feedback must NOT count — calibration uses post_incident only.
+	atGateRun := &RunEvaluation{
+		RunID: "plr_c_gate", FailureID: "db-lock", DiagnosisScore: 0.93, OverallScore: 0.93,
+	}
+	if err := evalStore.Upsert(ctx, atGateRun); err != nil {
+		t.Fatalf("Upsert at_gate run: %v", err)
+	}
+	tr2 := true
+	if err := fbStore.Submit(ctx, &RunFeedback{
+		RunID: "plr_c_gate", SeriesID: seriesID, FeedbackType: "triage", FeedbackTime: "at_gate",
+		VerdictCorrect: &tr2,
+	}); err != nil {
+		t.Fatalf("Submit at_gate feedback: %v", err)
+	}
+	reportGate, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands after at_gate: %v", err)
+	}
+	if reportGate.TotalRuns != 6 {
+		t.Errorf("TotalRuns after at_gate feedback = %d, want 6 (at_gate excluded)", reportGate.TotalRuns)
+	}
+
+	// Pending feedback (verdict_correct = NULL) must NOT count.
+	pendingRun := &RunEvaluation{
+		RunID: "plr_c_pend", FailureID: "db-lock", DiagnosisScore: 0.94, OverallScore: 0.94,
+	}
+	if err := evalStore.Upsert(ctx, pendingRun); err != nil {
+		t.Fatalf("Upsert pending run: %v", err)
+	}
+	if err := fbStore.Submit(ctx, &RunFeedback{
+		RunID: "plr_c_pend", SeriesID: seriesID, FeedbackType: "triage", FeedbackTime: "post_incident",
+		VerdictCorrect: nil, // pending
+	}); err != nil {
+		t.Fatalf("Submit pending feedback: %v", err)
+	}
+	reportPend, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands after pending: %v", err)
+	}
+	if reportPend.TotalRuns != 6 {
+		t.Errorf("TotalRuns after pending feedback = %d, want 6 (NULL verdict excluded)", reportPend.TotalRuns)
+	}
 }
 
 func TestRunEvaluationStore_RemediationScore(t *testing.T) {

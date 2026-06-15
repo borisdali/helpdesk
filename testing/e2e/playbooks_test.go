@@ -645,8 +645,12 @@ func TestPlaybooks_GetRunByID(t *testing.T) {
 		t.Skip("no playbook_id available")
 	}
 
-	// Trigger a run (ignore execution errors — recording is best-effort synchronous).
-	client.PlaybookRun(ctx, pbID, map[string]any{"connection_string": cfg.ConnStr}) //nolint:errcheck
+	// Trigger a run using a short independent context. POST /run invokes the LLM
+	// agent which can take 30+ seconds; the run start is recorded in auditd before
+	// the agent call, so we cancel early without consuming the main test budget.
+	triggerCtx, triggerCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer triggerCancel()
+	client.PlaybookRun(triggerCtx, pbID, map[string]any{"connection_string": cfg.ConnStr}) //nolint:errcheck
 
 	// List runs to get the latest run_id.
 	runsResp, err := client.PlaybookRuns(ctx, pbID)
