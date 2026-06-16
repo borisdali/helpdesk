@@ -1,11 +1,13 @@
 # aiHelpDesk Informed Consent
 
-> "You let AI operate on a production database without your consent."  
-> — [Google Cloud blog post](https://medium.com/google-cloud/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) that introduced this concept
+> "You let AI operate on a production database without your consent?
+> Stop calling it autonomous. Start calling it unaccountable. An informed consent for the 2am incident that may save or cripple your mission critical database isn’t a feature. It’s a necessity."
+>
+> This [blog post](https://medium.com/google-cloud/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) first introduced this concept.
 
-Informed Consent is aiHelpDesk's answer to the question every operator eventually asks: *how do I know I can trust what the AI just told me — and did I actually agree to let it act?*
+Informed Consent is aiHelpDesk's answer to the question every operator eventually asks: *how do I know I can trust what the AI just told me. And did I actually agree to let it act?*
 
-The concept borrows from medical ethics. Before a surgeon operates, three things must happen: the patient must be **informed** of the diagnosis and proposed treatment, must **consent** to the procedure, and must retain the **right to refuse**. Skipping any one of these is not a shortcut — it is a failure of accountability.
+The concept borrows from medical ethics. Before a surgeon operates, three things must happen: the patient must be **informed** of the diagnosis and proposed treatment, must **consent** to the procedure and must retain the **right to refuse**. Skipping any one of these is not a shortcut. It is a failure of accountability.
 
 aiHelpDesk applies the same framework to AI-driven database and infrastructure operations.
 
@@ -13,7 +15,7 @@ aiHelpDesk applies the same framework to AI-driven database and infrastructure o
 
 ## The three parts
 
-### Part 1 — Informed
+### Part 1: Informed
 
 Before any remediation step executes, the agent presents everything it knows:
 
@@ -30,7 +32,7 @@ Any system can claim to show a diagnosis. The claim only means something if the 
 
 *Without the flywheel, Informed Consent is a process claim. With it, it is a measured property.*
 
-### Part 2 — Consent
+### Part 2: Consent
 
 Consent is not a binary. aiHelpDesk offers four approval modes so operators can choose the level of oversight that matches their risk tolerance:
 
@@ -45,12 +47,12 @@ In all modes, the Decision Hub (`GET /api/v1/decisions`) gives a non-interactive
 
 The consent is also **time-bounded**: a gate that is not resolved within the configured timeout transitions to `abandoned`, not silently approved.
 
-### Part 3 — Right to Refuse
+### Part 3: Right to Refuse
 
 Denial is a first-class outcome. When an operator denies the gate:
 
 - The remediation does not execute — period
-- The denial reason (`verdict_notes`) is recorded in the audit log alongside the run ID, operator identity, and timestamp
+- The denial reason (`verdict_notes`) is recorded in the audit log alongside the run ID, operator identity and timestamp
 - The triage run is marked with the operator's verdict: the agent's diagnosis can be tagged as incorrect even without remediation proceeding
 - The hash-chained audit record cannot be modified after the fact
 
@@ -75,7 +77,7 @@ The right to refuse also applies to individual steps in `agent_approve` mode: an
 
 ## Why autonomy is not the goal
 
-A common framing of AI operations is "how much can we automate?" aiHelpDesk's framing is different: how much can we *verify*, and therefore how much can we *trust*?
+A common framing of AI operations is "how much can we automate?" aiHelpDesk's framing is different: how much can we *verify* and therefore how much can we *trust*?
 
 Full autonomy (`auto` mode) is available, but it is the end of a journey, not the starting point. The journey is:
 
