@@ -370,7 +370,7 @@ See [ROLLBACK.md](ROLLBACK.md) for the full pre-mutation state capture design, T
 
 ## 2. Two-step `review-and-confirm` process
 
-This is all about informed consent. Upstream agents and SRE frameworks
+This is all about [Informed Consent](INFORMED_CONSENT.md). Upstream agents and SRE frameworks
 calling aiHelpDesk for database troubleshooting as well as aiHelpDesk's
 own autonomous mode are a special category with no
 human-in-the-loop to confirm, but the interactive aiHelpDesk sessions

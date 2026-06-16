@@ -450,6 +450,74 @@ func TestPlaybookRunHandlers_Stats_IncludesAccuracy(t *testing.T) {
 	}
 }
 
+func TestPlaybookRunHandlers_Stats_IncludesRemediationAccuracy(t *testing.T) {
+	srv := newPlaybookRunServerWithFeedback(t)
+
+	pbSrv := &playbookServer{store: srv.playbookStore, feedbackStore: srv.feedbackStore}
+	pbData, _ := json.Marshal(map[string]any{"name": "Remed Accuracy Test", "description": "test", "series_id": "pbs_remed_accuracy_test"})
+	pbReq := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbooks", bytes.NewReader(pbData))
+	pbReq.Header.Set("Content-Type", "application/json")
+	pbRec := httptest.NewRecorder()
+	pbSrv.handleCreate(pbRec, pbReq)
+	if pbRec.Code != http.StatusCreated {
+		t.Fatalf("create playbook: %d %s", pbRec.Code, pbRec.Body.String())
+	}
+	var pb audit.Playbook
+	json.NewDecoder(pbRec.Body).Decode(&pb) //nolint:errcheck
+
+	doRunRequest(t, srv, pb.PlaybookID, map[string]any{"run_id": "plr_remed1", "series_id": pb.SeriesID})
+	doRunRequest(t, srv, pb.PlaybookID, map[string]any{"run_id": "plr_remed2", "series_id": pb.SeriesID})
+
+	submitFeedback := func(runID, fbType, fbTime string, correct bool) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"feedback_type": fbType, "feedback_time": fbTime,
+			"verdict_correct": correct, "operator": "test",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/"+runID+"/feedback", bytes.NewReader(body))
+		req.SetPathValue("runID", runID)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.handleSubmitFeedback(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("submit feedback: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// remediation/at_gate for run1 (correct), remediation/post_incident for run2 (incorrect).
+	submitFeedback("plr_remed1", "remediation", "at_gate", true)
+	submitFeedback("plr_remed2", "remediation", "post_incident", false)
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks/"+pb.PlaybookID+"/stats", nil)
+	statsReq.SetPathValue("playbookID", pb.PlaybookID)
+	statsRec := httptest.NewRecorder()
+	srv.handleStats(statsRec, statsReq)
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("stats: %d %s", statsRec.Code, statsRec.Body.String())
+	}
+	var stats audit.PlaybookRunStats
+	if err := json.NewDecoder(statsRec.Body).Decode(&stats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+
+	if stats.RemediationFeedbackCount != 2 {
+		t.Errorf("RemediationFeedbackCount = %d, want 2", stats.RemediationFeedbackCount)
+	}
+	if stats.RemediationCorrectCount != 1 {
+		t.Errorf("RemediationCorrectCount = %d, want 1", stats.RemediationCorrectCount)
+	}
+	wantRate := 0.5
+	if stats.RemediationAccuracyRate != wantRate {
+		t.Errorf("RemediationAccuracyRate = %f, want %f", stats.RemediationAccuracyRate, wantRate)
+	}
+	if stats.RemediationAtGateCount != 1 || stats.RemediationAtGateCorrect != 1 {
+		t.Errorf("RemediationAtGate = %d/%d, want 1/1", stats.RemediationAtGateCorrect, stats.RemediationAtGateCount)
+	}
+	if stats.RemediationPostIncidentCount != 1 || stats.RemediationPostIncidentCorrect != 0 {
+		t.Errorf("RemediationPostIncident = %d/%d, want 0/1", stats.RemediationPostIncidentCorrect, stats.RemediationPostIncidentCount)
+	}
+}
+
 func TestPlaybookRunHandlers_Feedback_QueryParams(t *testing.T) {
 	srv := newPlaybookRunServerWithFeedback(t)
 

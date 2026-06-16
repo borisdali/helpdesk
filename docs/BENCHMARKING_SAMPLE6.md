@@ -1,14 +1,14 @@
 # Benchmarking sample#6 (Docker/Podman): Informed Consent
 
-For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md).
+For the concept definition see [INFORMED_CONSENT.md](INFORMED_CONSENT.md). For the background on Fault Injection Testing in aiHelpDesk see [FAULTTEST.md](FAULTTEST.md).
 
 For the background on interactive approvals see [here](PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
 
 Simple interactive/approval sample running on a host/VM is available [here](BENCHMARKING_SAMPLE4.md) and its counterpart for K8s is [here](BENCHMARKING_SAMPLE5.md).
 
-In contrast to the previous samples, this one show aiHelpDesk in action on Docker. The principles are exactly the same, with the tty-less test runs asking for async approvals via the [Decision Hub](DECISIONS.md).
+In contrast to the previous samples, this one shows aiHelpDesk in action on Docker. The principles are exactly the same, with the tty-less test runs asking for async approvals via the [Decision Hub](DECISIONS.md).
 
-This [blog post](https://medium.com/@borisdali/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) provides more color and sets the stage for the commands listed below and may be a better starting point to get the context if you less familiar with aiHelpDesk.
+This [blog post](https://medium.com/@borisdali/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) provides more color and sets the stage for the commands listed below and may be a better starting point if you are less familiar with aiHelpDesk.
 
 ## Let's get started
 
