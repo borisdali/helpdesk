@@ -567,6 +567,7 @@ faulttest run \
   --external --conn "host=staging-db ..." \
   --db-agent http://helpdesk-gateway:8080 \
   --judge --judge-vendor anthropic --judge-model claude-haiku-4-5-20251001 \
+  --remediation-judge \
   --remediate --gateway http://helpdesk-gateway:8080 --api-key $HELPDESK_API_KEY \
   --notify-url https://hooks.slack.com/services/xxx/yyy/zzz
 

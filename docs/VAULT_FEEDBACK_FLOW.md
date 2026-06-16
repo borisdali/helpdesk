@@ -1,0 +1,228 @@
+# aiHelpDesk Vault Feedback & Commands: Operational Guide
+
+This document is the operational detail layer beneath the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel). The flywheel shows the high-level loop. This document explains exactly where operator feedback enters that loop, what form it takes and which `vault` commands consume it to close the cycle.
+
+The feedback model is the same whether the event is a real production incident or a `faulttest` injection: the gate schema, the endpoint, and the `run_feedback` table are shared. This document describes the **faulttest** path. For the equivalent steps in a live incident, see [PLAYBOOK_OPS.md §2.4](PLAYBOOK_OPS.md#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate) (at-gate feedback) and [§2.6](PLAYBOOK_OPS.md#26-step-6-finish-the-remediation--provide-incident-feedback) (post-incident feedback).
+
+---
+
+## The lifecycle in one picture
+
+```
+faulttest run
+    │
+    ├─ 1. Inject fault
+    │
+    ├─ 2. Agent diagnoses + proposes remediation plan
+    │        │
+    │        └── [pending_gate] ──► GATE: operator reviews diagnosis + proposed steps
+    │                                        │
+    │                              ┌─────────┴────────────────────────────────────────┐
+    │                              │  Q1: "Was the diagnosis correct?" [y/n]          │
+    │                              │      → feedback_type=triage                      │
+    │                              │        feedback_time=at_gate      ← best signal  │
+    │                              │                                                  │
+    │                              │  Q2: "Is the remediation approach appropriate?"  │
+    │                              │      → feedback_type=remediation                 │
+    │                              │        feedback_time=at_gate                     │
+    │                              └─────────┬────────────────────────────────────────┘
+    │                                        │
+    ├─ 3. Remediation executes
+    │
+    ├─ 4. Recovery verified
+    │        │
+    │        └──► POST-RECOVERY PROMPTS (interactive only, requires --gateway)
+    │                │
+    │                ├─ "Was the diagnosis correct?" [y/n]
+    │                │    → feedback_type=triage
+    │                │      feedback_time=post_incident
+    │                │
+    │                └─ "Was the remediation approach appropriate?" [y/n]
+    │                     → feedback_type=remediation
+    │                       feedback_time=post_incident
+    │
+    └─ 5. Scores & history written
+             │
+             ├─ ~/.faulttest/history.json  (local, always)
+             └─ auditd run_evaluation      (when --gateway is set)
+```
+
+---
+
+## Feedback reference
+
+Four combinations exist in the schema. Three are currently captured by faulttest; one is schema-ready for future use.
+
+| # | `feedback_type` | `feedback_time` | Question asked | When captured | Status |
+|---|-----------------|-----------------|----------------|---------------|--------|
+| 1 | `triage` | `at_gate` | Is the diagnosis correct? | At the triage→remediation gate, **before** remediation runs | ✓ implemented |
+| 2 | `triage` | `post_incident` | Was the diagnosis correct? | After recovery completes | ✓ implemented |
+| 3 | `remediation` | `post_incident` | Was the remediation approach appropriate? | After recovery completes | ✓ implemented |
+| 4 | `remediation` | `at_gate` | Is the remediation approach appropriate? | At the same gate as #1 — the proposed steps are already visible there | schema-ready, not yet captured |
+
+**Why `triage/at_gate` is the highest-quality signal:**  
+It is captured before the operator knows whether remediation succeeded. Post-incident feedback is contaminated by outcome bias — an operator who just saw a 12-second recovery is more likely to confirm the diagnosis regardless of whether it was actually correct. At-gate feedback has no such bias, so `vault calibration` prefers it over post-incident when both exist for the same run.
+
+**Why both types of post-incident feedback share `post_incident`:**  
+They are captured in the same interactive session after recovery, but stored as separate records keyed by `(run_id, feedback_type, feedback_time)`. Both are anchored to the triage `run_id` — not the remediation `run_id` — so they can be joined with `run_evaluation` (which is also keyed on the triage run_id) without a cross-table join.
+
+**Submitting feedback manually** (non-interactive / `--emit-and-wait` mode):
+
+```bash
+# triage/at_gate — include verdict_correct in the gate resolution body
+curl -sX POST "$GATEWAY/api/v1/decisions/gate:$RUN_ID/resolve" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"resolution":"approved","resolved_by":"ops@example.com",
+       "verdict_correct":true,"verdict_notes":"PID 867 was the idle-in-tx blocker"}'
+
+# triage/post_incident or remediation/post_incident — direct feedback endpoint
+curl -sX POST "$GATEWAY/api/v1/fleet/playbook-runs/$RUN_ID/feedback" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"feedback_type":"triage","feedback_time":"post_incident",
+       "verdict_correct":true,"verdict_notes":"connection exhaustion confirmed"}'
+```
+
+---
+
+## Vault command reference
+
+| Command | Question answered | Data source | Uses feedback? | Requires gateway? |
+|---------|------------------|-------------|:--------------:|:-----------------:|
+| `vault drift` | Which faults are regressing over time? | `~/.faulttest/history.json` | Optional¹ | No |
+| `vault versions` | Did a playbook version change help or hurt? | auditd `playbook_runs` + `run_evaluation` | No | Yes |
+| `vault accuracy` | How often does the agent diagnose correctly? | `run_feedback` (triage only) | Yes — triage | Yes |
+| `vault calibration` | Can I trust the automated scores? | `run_evaluation` + `run_feedback` | Yes — triage + remediation | Yes |
+
+¹ `vault drift` can optionally fetch `triage` accuracy from the gateway to show an ACCURACY column alongside drift data, but its core signal (pass-rate decline) comes from local history alone.
+
+### Which feedback each command consumes
+
+| Command | `triage/at_gate` | `triage/post_incident` | `remediation/post_incident` |
+|---------|:----------------:|:----------------------:|:---------------------------:|
+| `vault drift` | optional enrichment | optional enrichment | — |
+| `vault versions` | — | — | — |
+| `vault accuracy` | ✓ | ✓ | — |
+| `vault calibration` | ✓ preferred | ✓ fallback | ✓ |
+
+---
+
+## When to use which command
+
+### Situation 1: Routine CI / scheduled regression check
+
+**Run:** `vault drift`  
+**Needs:** Nothing beyond local history — no gateway required.  
+**How:** Run after each faulttest batch or on a weekly schedule.  
+**Tells you:** Which faults have had a >20% pass-rate drop between the first and second halves of the window. These are the ones to investigate further.
+
+```bash
+faulttest vault drift --since-days 60
+```
+
+---
+
+### Situation 2: A playbook was updated — did it improve things?
+
+**Run:** `vault versions <fault-id>`  
+**Needs:** Gateway + at least a few runs against the new version.  
+**Tells you:** Per-version resolution rate, average step count, average recovery time, average automated diagnosis and remediation scores. No operator feedback required — all signal comes from automated faulttest scores.
+
+```bash
+faulttest vault versions db-lock-contention --gateway $GATEWAY --api-key $KEY
+```
+
+If the new version shows lower `AVG DIAG` or higher step count, roll it back and use `vault suggest-update` to generate a better proposal.
+
+---
+
+### Situation 3: How accurate is the agent's diagnosis, really?
+
+**Run:** `vault accuracy <fault-id or series-id>`  
+**Needs:** Gateway + triage feedback submitted (at-gate or post-incident).  
+**Tells you:** How often operators confirm the diagnosis was correct — both overall and broken down by when they submitted the feedback (before vs after seeing remediation succeed).
+
+```bash
+faulttest vault accuracy db-lock-contention --gateway $GATEWAY --api-key $KEY
+```
+
+No args lists all faults with feedback, useful for a fleet-wide accuracy sweep:
+
+```bash
+faulttest vault accuracy --gateway $GATEWAY --api-key $KEY
+```
+
+The at-gate count is the more trustworthy signal. If post-incident accuracy is significantly higher than at-gate accuracy, operators may be confirming diagnoses they didn't fully read because remediation succeeded anyway.
+
+---
+
+### Situation 4: Are the automated scores trustworthy?
+
+**Run:** `vault calibration [fault-id or series-id]`  
+**Needs:** Gateway + both eval scores (faulttest run with `--gateway`) and operator feedback.  
+**Tells you:** Whether the model's confidence (diagnosis_score and remediation_score bands) predicts actual operator-confirmed correctness. Two sections — diagnosis calibration and, when remediation feedback exists, remediation calibration.
+
+```bash
+faulttest vault calibration --gateway $GATEWAY --api-key $KEY          # fleet-wide
+faulttest vault calibration db-lock-contention --gateway $GATEWAY ...  # one fault
+```
+
+Interpret the output:
+
+| Label | Meaning | Action |
+|-------|---------|--------|
+| `WELL_CALIBRATED` | Score band predicts accuracy within ±10 percentage points | No change needed |
+| `OVERCONFIDENT` | Agent scores high but operators disagree more than expected | Lower pass threshold or retrain guidance |
+| `UNDERCONFIDENT` | Agent scores low but operators agree more than expected | Raise pass threshold or improve narrative coverage |
+| `INSUFFICIENT_DATA` | Fewer than 3 runs in this band | Collect more feedback before acting |
+
+---
+
+## Recommended weekly workflow
+
+```
+Monday  — faulttest run (CI job, all external faults)
+                │
+                ├─ Interactive: answer at-gate + post-recovery prompts
+                │  or --emit-and-wait: resolve gates via Decision Hub
+                │
+                └─ Automated: scores written to auditd automatically
+
+Wednesday — review
+  1. vault drift           → any new regressions this week?
+  2. vault accuracy        → is at-gate accuracy holding?
+  3. vault calibration     → are automated scores still trustworthy?
+  4. vault versions        → if a playbook was updated, did it help?
+
+When drift or accuracy degrades:
+  5. vault incidents       → find the specific run IDs
+  6. vault suggest-update  → propose a guidance update from a recent good trace
+```
+
+---
+
+## Quick-reference cheat-sheet
+
+```
+FEEDBACK — what to submit and when
+───────────────────────────────────────────────────────────────────────────
+  At the escalation gate (before remediation)
+    → "Was the diagnosis correct?"           triage / at_gate      [best signal]
+
+  After recovery (interactive faulttest, or via API)
+    → "Was the diagnosis correct?"           triage / post_incident
+    → "Was the remediation appropriate?"     remediation / post_incident
+
+COMMANDS — what question each answers
+───────────────────────────────────────────────────────────────────────────
+  vault drift          Which faults are regressing?      (local history, no gateway)
+  vault versions       Did the playbook version improve? (auditd, no feedback needed)
+  vault accuracy       Is the diagnosis correct?         (triage feedback only)
+  vault calibration    Can I trust the scores?           (eval + triage + remediation feedback)
+
+DEPENDENCY CHAIN
+───────────────────────────────────────────────────────────────────────────
+  drift  →  identifies which fault to look at
+  versions  →  correlates regression to a playbook version
+  accuracy  →  checks whether diagnosis quality actually dropped
+  calibration  →  validates whether the scores you're reading are reliable
+```
