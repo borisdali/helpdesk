@@ -344,7 +344,7 @@ faulttest vault calibration db-lock-contention \
   --api-key $HELPDESK_API_KEY
 ```
 
-Shows how well `diagnosis_score` (automated faulttest evaluation) predicts whether operators confirm the diagnosis was correct. Requires runs that have both an evaluation score (`--gateway` flag during `faulttest run`) and operator triage feedback (at-gate or post-incident).
+Shows how well `diagnosis_score` and `remediation_score` predict whether operators confirm the outcome was correct. Requires runs that have both an evaluation score (`--gateway` flag during `faulttest run`) and operator feedback (at-gate or post-incident).
 
 At-gate feedback is preferred over post-incident when both exist for the same run — it is captured before the operator knows whether remediation succeeded, making it a cleaner signal. A run with only post-incident feedback still contributes.
 
@@ -354,13 +354,23 @@ Diagnosis calibration — fleet-wide (17 runs with eval + operator feedback)
 CONF BAND     RUNS    CORRECT    ACCURACY    CALIBRATION
 ─────────────────────────────────────────────────────────────────
 90-100%          12         10        83%    OVERCONFIDENT
-70-89%            4          3        75%    WELL CALIBRATED
+70-89%            4          3        75%    WELL_CALIBRATED
 <70%              1          1       100%    INSUFFICIENT_DATA
+
+Remediation calibration — fleet-wide (8 runs with remediation score + operator feedback)
+
+SCORE BAND    RUNS    CORRECT    ACCURACY    CALIBRATION
+─────────────────────────────────────────────────────────────────
+90-100%           5          4        80%    WELL_CALIBRATED
+70-89%            3          3       100%    UNDERCONFIDENT
+<70%              0          0          –    INSUFFICIENT_DATA
 ```
+
+The remediation section only appears when there are runs with both a non-zero `remediation_score` and operator remediation feedback (`feedback_type: "remediation"`).
 
 Calibration is determined by comparing `ACCURACY` against the midpoint of each band:
 
-| Band | Expected accuracy | WELL CALIBRATED range |
+| Band | Expected accuracy | WELL_CALIBRATED range |
 |------|------------------|-----------------------|
 | `90-100%` | 95% | 85–100% |
 | `70-89%` | 80% | 70–90% |

@@ -458,6 +458,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
+| `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the gateway after remediation and scores blast-radius, step efficiency, and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
 | `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
 | `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |
@@ -657,7 +658,7 @@ faulttest vault calibration db-lock-contention \
   --api-key sk-...
 ```
 
-Shows confidence-band calibration: how well `diagnosis_score` predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%`, and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT`, or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and operator triage feedback (at-gate or post-incident; at-gate is preferred when both exist for the same run). See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
+Shows confidence-band calibration: how well `diagnosis_score` (and `remediation_score` when available) predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%`, and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT`, or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and operator feedback (at-gate or post-incident; at-gate is preferred when both exist). A remediation calibration section appears automatically when runs with non-zero `remediation_score` and remediation feedback exist. See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
 
 #### vault suggest
 

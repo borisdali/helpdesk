@@ -163,6 +163,10 @@ func (r Report) PrintSummary() {
 				fmt.Printf("       Remediation: FAILED (%s) | Overall: %d%%\n",
 					method, overallPct)
 			}
+			if !res.RemediationJudgeSkipped && res.RemediationJudgeReasoning != "" {
+				fmt.Printf("       Remed-Judge: %d%% — %s\n",
+					int(res.RemediationJudgeScore*100), res.RemediationJudgeReasoning)
+			}
 		}
 
 		if res.Error != "" {

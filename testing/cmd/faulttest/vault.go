@@ -1417,15 +1417,17 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 			continue
 		}
 		payload := map[string]any{
-			"failure_id":        r.FailureID,
-			"failure_name":      r.FailureName,
-			"keyword_score":     r.KeywordScore,
-			"tool_score":        r.ToolScore,
-			"diagnosis_score":   r.DiagnosisScore,
-			"remediation_score": r.RemediationScore,
-			"overall_score":     r.OverallScore,
-			"judge_used":        !r.JudgeSkipped && r.JudgeModel != "",
-			"passed":            r.Passed,
+			"failure_id":                    r.FailureID,
+			"failure_name":                  r.FailureName,
+			"keyword_score":                 r.KeywordScore,
+			"tool_score":                    r.ToolScore,
+			"diagnosis_score":               r.DiagnosisScore,
+			"remediation_score":             r.RemediationScore,
+			"overall_score":                 r.OverallScore,
+			"judge_used":                    !r.JudgeSkipped && r.JudgeModel != "",
+			"passed":                        r.Passed,
+			"remediation_judge_score":       r.RemediationJudgeScore,
+			"remediation_judge_reasoning":   r.RemediationJudgeReasoning,
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -1642,9 +1644,11 @@ type calibrationBand struct {
 
 // calibrationReport mirrors audit.CalibrationReport.
 type calibrationReport struct {
-	SeriesID  string            `json:"series_id,omitempty"`
-	Bands     []calibrationBand `json:"bands"`
-	TotalRuns int               `json:"total_runs"`
+	SeriesID         string            `json:"series_id,omitempty"`
+	Bands            []calibrationBand `json:"bands"`
+	TotalRuns        int               `json:"total_runs"`
+	RemediationBands []calibrationBand `json:"remediation_bands,omitempty"`
+	RemediationRuns  int               `json:"remediation_runs"`
 }
 
 // fetchCalibration calls GET /api/v1/fleet/calibration[?series_id=...].
@@ -1740,23 +1744,35 @@ func vaultCalibration(args []string) {
 		colBand, "CONF BAND", colRuns, "RUNS", colCorr, "CORRECT", colAccu, "ACCURACY", "CALIBRATION")
 	fmt.Println(strings.Repeat("─", colBand+2+colRuns+2+colCorr+2+colAccu+2+colCalib))
 
-	for _, b := range report.Bands {
-		accuStr := "–"
-		if b.Runs > 0 {
-			accuStr = fmt.Sprintf("%d%%", int(b.ActualAccuracy*100))
+	printCalibBands := func(bands []calibrationBand) {
+		for _, b := range bands {
+			accuStr := "–"
+			if b.Runs > 0 {
+				accuStr = fmt.Sprintf("%d%%", int(b.ActualAccuracy*100))
+			}
+			fmt.Printf("%-*s  %-*d  %-*d  %-*s  %s\n",
+				colBand, b.Band,
+				colRuns, b.Runs,
+				colCorr, b.Correct,
+				colAccu, accuStr,
+				b.Calibration,
+			)
 		}
-		fmt.Printf("%-*s  %-*d  %-*d  %-*s  %s\n",
-			colBand, b.Band,
-			colRuns, b.Runs,
-			colCorr, b.Correct,
-			colAccu, accuStr,
-			b.Calibration,
-		)
 	}
+
+	printCalibBands(report.Bands)
 
 	if report.TotalRuns == 0 {
 		fmt.Println()
 		fmt.Println("No runs with both eval scores and operator feedback yet.")
 		fmt.Println("Run faulttest with --gateway and submit feedback via `vault incidents` to populate.")
+	}
+
+	if report.RemediationRuns > 0 {
+		fmt.Printf("\nRemediation calibration — %s (%d runs with remediation score + operator feedback)\n\n", scope, report.RemediationRuns)
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
+			colBand, "SCORE BAND", colRuns, "RUNS", colCorr, "CORRECT", colAccu, "ACCURACY", "CALIBRATION")
+		fmt.Println(strings.Repeat("─", colBand+2+colRuns+2+colCorr+2+colAccu+2+colCalib))
+		printCalibBands(report.RemediationBands)
 	}
 }

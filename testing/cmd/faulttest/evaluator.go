@@ -59,6 +59,11 @@ type EvalResult struct {
 	// OverallScore combines composite score and remediation: Score*0.6 + RemediationScore*0.4
 	// when remediation was attempted; equals Score when not attempted.
 	OverallScore float64 `json:"overall_score,omitempty"`
+
+	// Remediation judge fields — populated when --remediation-judge is set.
+	RemediationJudgeScore     float64 `json:"remediation_judge_score,omitempty"`
+	RemediationJudgeReasoning string  `json:"remediation_judge_reasoning,omitempty"`
+	RemediationJudgeSkipped   bool    `json:"remediation_judge_skipped,omitempty"`
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.

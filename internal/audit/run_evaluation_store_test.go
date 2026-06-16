@@ -315,6 +315,135 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	}
 }
 
+func TestRunEvaluationStore_RemediationCalibrationBands(t *testing.T) {
+	ctx := context.Background()
+
+	mainStore, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { mainStore.Close() })
+
+	evalStore, err := NewRunEvaluationStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	fbStore, err := NewRunFeedbackStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+
+	const seriesID = "pbs_remed_calib"
+
+	// Seed: 2 runs with high remediation score (90-100%) — 1 operator says correct, 1 wrong.
+	//       1 run with mid score (70-89%) — operator says correct.
+	//       1 run with no remediation feedback (should be excluded from RemediationBands).
+	//       1 run with zero remediation_score (should be excluded regardless).
+	tr := true
+	fa := false
+	seeds := []struct {
+		runID    string
+		diagSc   float64
+		remedSc  float64
+		feedback *bool // nil = no remediation feedback
+	}{
+		{"plr_r01", 0.9, 0.95, &tr},
+		{"plr_r02", 0.9, 0.92, &fa},
+		{"plr_r03", 0.8, 0.80, &tr},
+		{"plr_r04", 0.9, 0.91, nil}, // no remediation feedback → excluded
+		{"plr_r05", 0.9, 0.00, &tr}, // zero remediation score → excluded by WHERE clause
+	}
+	for _, s := range seeds {
+		if err := evalStore.Upsert(ctx, &RunEvaluation{
+			RunID: s.runID, FailureID: "db-lock",
+			DiagnosisScore:   s.diagSc,
+			RemediationScore: s.remedSc,
+			OverallScore:     s.diagSc,
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", s.runID, err)
+		}
+		// All runs get triage feedback (so they'd show in diagnosis bands).
+		if err := fbStore.Submit(ctx, &RunFeedback{
+			RunID: s.runID, SeriesID: seriesID, FeedbackType: "triage", FeedbackTime: "post_incident",
+			VerdictCorrect: &tr,
+		}); err != nil {
+			t.Fatalf("Submit triage feedback %s: %v", s.runID, err)
+		}
+		if s.feedback != nil {
+			if err := fbStore.Submit(ctx, &RunFeedback{
+				RunID: s.runID, SeriesID: seriesID, FeedbackType: "remediation", FeedbackTime: "post_incident",
+				VerdictCorrect: s.feedback,
+			}); err != nil {
+				t.Fatalf("Submit remediation feedback %s: %v", s.runID, err)
+			}
+		}
+	}
+
+	report, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands: %v", err)
+	}
+
+	// Diagnosis bands: 5 triage feedbacks across 5 runs.
+	if report.TotalRuns != 5 {
+		t.Errorf("TotalRuns = %d, want 5", report.TotalRuns)
+	}
+
+	// Remediation bands: only 3 runs (plr_r01–r03) qualify:
+	//   plr_r04 has no remediation feedback → excluded
+	//   plr_r05 has remediation_score=0 → excluded by WHERE ev.remediation_score > 0
+	if report.RemediationRuns != 3 {
+		t.Errorf("RemediationRuns = %d, want 3", report.RemediationRuns)
+	}
+	if len(report.RemediationBands) != 3 {
+		t.Fatalf("RemediationBands len = %d, want 3", len(report.RemediationBands))
+	}
+
+	// 90-100% band: plr_r01 (correct) + plr_r02 (wrong) = 2 runs, 1 correct.
+	b90 := report.RemediationBands[0]
+	if b90.Band != "90-100%" {
+		t.Errorf("RemediationBands[0].Band = %q, want 90-100%%", b90.Band)
+	}
+	if b90.Runs != 2 || b90.Correct != 1 {
+		t.Errorf("90-100%% remed: Runs=%d Correct=%d, want Runs=2 Correct=1", b90.Runs, b90.Correct)
+	}
+
+	// 70-89% band: plr_r03 (correct) = 1 run, 1 correct.
+	b70 := report.RemediationBands[1]
+	if b70.Band != "70-89%" {
+		t.Errorf("RemediationBands[1].Band = %q, want 70-89%%", b70.Band)
+	}
+	if b70.Runs != 1 || b70.Correct != 1 {
+		t.Errorf("70-89%% remed: Runs=%d Correct=%d, want Runs=1 Correct=1", b70.Runs, b70.Correct)
+	}
+
+	// Series-scoped: same 3 remediation runs.
+	scoped, err := evalStore.CalibrationBands(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("CalibrationBands (scoped): %v", err)
+	}
+	if scoped.RemediationRuns != 3 {
+		t.Errorf("scoped RemediationRuns = %d, want 3", scoped.RemediationRuns)
+	}
+
+	// at_gate remediation feedback preferred over post_incident.
+	// plr_r02 has post_incident=wrong; add at_gate=correct → band should flip to 2/2.
+	if err := fbStore.Submit(ctx, &RunFeedback{
+		RunID: "plr_r02", SeriesID: seriesID, FeedbackType: "remediation", FeedbackTime: "at_gate",
+		VerdictCorrect: &tr,
+	}); err != nil {
+		t.Fatalf("Submit at_gate remediation feedback: %v", err)
+	}
+	reportGate, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands after at_gate: %v", err)
+	}
+	b90Gate := reportGate.RemediationBands[0]
+	if b90Gate.Runs != 2 || b90Gate.Correct != 2 {
+		t.Errorf("90-100%% after at_gate remed: Runs=%d Correct=%d, want Runs=2 Correct=2 (at_gate preferred)", b90Gate.Runs, b90Gate.Correct)
+	}
+}
+
 func TestRunEvaluationStore_RemediationScore(t *testing.T) {
 	ctx := context.Background()
 	store := newRunEvaluationStore(t)

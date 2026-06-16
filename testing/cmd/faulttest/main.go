@@ -138,6 +138,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	// LLM judge options.
 	fs.BoolVar(&cfg.JudgeEnabled, "judge", false, "Enable LLM-as-judge for semantic diagnosis scoring")
+	fs.BoolVar(&cfg.RemediationJudgeEnabled, "remediation-judge", false, "Enable LLM-as-judge for remediation approach scoring (requires --remediate)")
 	fs.StringVar(&cfg.JudgeModel, "judge-model", "", "Model name for judge (default: HELPDESK_MODEL_NAME env var)")
 	fs.StringVar(&cfg.JudgeVendor, "judge-vendor", "", "Model vendor for judge: anthropic or google (default: HELPDESK_MODEL_VENDOR env var)")
 	fs.StringVar(&cfg.JudgeAPIKey, "judge-api-key", "", "API key for judge (default: HELPDESK_API_KEY env var)")
@@ -295,10 +296,10 @@ func cmdRun(args []string) {
 	runner := NewRunner(cfg)
 	remediator := NewRemediator(cfg)
 
-	// Initialize LLM judge completer if enabled.
+	// Initialize LLM judge completer if either judge mode is enabled.
 	var judgeCompleter faultlib.TextCompleter
 	var judgeModel string
-	if cfg.JudgeEnabled {
+	if cfg.JudgeEnabled || cfg.RemediationJudgeEnabled {
 		var err error
 		judgeCompleter, err = newJudgeCompleter(ctx, cfg)
 		if err != nil {
@@ -308,7 +309,12 @@ func cmdRun(args []string) {
 			if judgeModel == "" {
 				judgeModel = os.Getenv("HELPDESK_MODEL_NAME")
 			}
-			slog.Info("LLM judge enabled", "vendor", cfg.JudgeVendor, "model", judgeModel)
+			if cfg.JudgeEnabled {
+				slog.Info("LLM diagnosis judge enabled", "vendor", cfg.JudgeVendor, "model", judgeModel)
+			}
+			if cfg.RemediationJudgeEnabled {
+				slog.Info("LLM remediation judge enabled", "vendor", cfg.JudgeVendor, "model", judgeModel)
+			}
 		}
 	}
 
@@ -398,6 +404,27 @@ func cmdRun(args []string) {
 		// When gate_escalation=true, the triage playbook may return pending_gate at
 		// the triage→remediation boundary. In that case, the gate handler drives
 		// operator approval and recovery instead of the normal Remediate path.
+		runRemediationJudge := func(remResult RemediationResult) {
+			if !cfg.RemediationJudgeEnabled || judgeCompleter == nil || remResult.RunID == "" {
+				return
+			}
+			steps := fetchRemediationSteps(faultCtx, cfg.GatewayURL, cfg.GatewayAPIKey, remResult.RunID)
+			jr := faultlib.JudgeRemediation(faultCtx, faultlib.RemediationJudgeInput{
+				FaultName:        f.Name,
+				FaultDescription: f.Description,
+				PlaybookGuidance: f.Remediation.AgentPrompt,
+				Steps:            steps,
+				RecoveryTimeSecs: remResult.RecoveryTimeSecs,
+				Passed:           remResult.Passed,
+			}, judgeCompleter, judgeModel)
+			evalResult.RemediationJudgeScore = jr.Score
+			evalResult.RemediationJudgeReasoning = jr.Reasoning
+			evalResult.RemediationJudgeSkipped = jr.Skipped
+			if !jr.Skipped {
+				fmt.Printf("Remediation Judge:   score=%d%% — %s\n", int(jr.Score*100), jr.Reasoning)
+			}
+		}
+
 		if cfg.RemediateEnabled && resp.Status == "pending_gate" {
 			remResult := remediator.HandlePendingGate(faultCtx, f, resp)
 			evalResult.RemediationAttempted = true
@@ -409,6 +436,7 @@ func cmdRun(args []string) {
 				evalResult.RemediationError = remResult.Err.Error()
 			}
 			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
+			runRemediationJudge(remResult)
 			if remResult.Passed {
 				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 				printIncidentSummary(resp, remResult.RecoveryTimeSecs, cfg.GatewayURL)
@@ -434,6 +462,7 @@ func cmdRun(args []string) {
 			}
 			// OverallScore: 60% composite score + 40% remediation when remediation attempted.
 			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
+			runRemediationJudge(remResult)
 			if remResult.Passed {
 				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 				// Auto-suggest: when remediation succeeds and a gateway is configured,
@@ -588,6 +617,51 @@ func requestVaultDraft(ctx context.Context, cfg *HarnessConfig, traceID, outcome
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	return result.PlaybookID, nil
+}
+
+// fetchRemediationSteps retrieves the executed steps for a remediation playbook
+// run from the gateway and converts them to faultlib.RemediationStep for the
+// remediation judge. Returns nil when the gateway is unreachable or no steps
+// are recorded.
+func fetchRemediationSteps(ctx context.Context, gatewayURL, apiKey, runID string) []faultlib.RemediationStep {
+	if gatewayURL == "" || runID == "" {
+		return nil
+	}
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/steps"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var raw []struct {
+		Tool   string         `json:"tool"`
+		Args   map[string]any `json:"args"`
+		Status string         `json:"status"`
+		Result string         `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil
+	}
+	steps := make([]faultlib.RemediationStep, 0, len(raw))
+	for _, s := range raw {
+		steps = append(steps, faultlib.RemediationStep{
+			Tool:   s.Tool,
+			Args:   s.Args,
+			Status: s.Status,
+			Result: s.Result,
+		})
+	}
+	return steps
 }
 
 // ── inject ───────────────────────────────────────────────────────────────

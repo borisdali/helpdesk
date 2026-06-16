@@ -178,6 +178,10 @@ type HarnessConfig struct {
 
 	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
 	JudgeEnabled bool
+	// RemediationJudgeEnabled enables LLM-as-judge remediation approach scoring.
+	// Reuses the same judge LLM config (JudgeModel/JudgeVendor/JudgeAPIKey).
+	// Only meaningful when --remediate is also set.
+	RemediationJudgeEnabled bool
 	// JudgeModel is the model name for the LLM judge (default: HELPDESK_MODEL_NAME).
 	JudgeModel string
 	// JudgeVendor is the model vendor for the LLM judge (default: HELPDESK_MODEL_VENDOR).

@@ -27,6 +27,9 @@ type RemediationResult struct {
 	Err              error
 	Score            float64
 	Method           string
+	// RunID is the remediation playbook run_id (plr_*). Empty when unavailable
+	// (e.g. agent_prompt remediation, or auditd not configured).
+	RunID string
 }
 
 // Remediator wraps faultlib.Remediator, adding interactive approval prompts
@@ -70,6 +73,9 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
 	}
 
+	// Find the remediation run that was started by proceed-escalation.
+	remRunID := r.findChildRunID(ctx, gate.RunID)
+
 	spec := f.Remediation
 	verifySQL := spec.VerifySQL
 	if verifySQL == "" {
@@ -107,13 +113,14 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 			r.waitForFeedback(ctx, gate.RunID)
 		}
 	} else {
-		r.submitFeedback(ctx, gate.RunID, gate.DiagnosticReport)
+		r.submitFeedback(ctx, gate.RunID, remRunID, gate.DiagnosticReport)
 	}
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
 		Score:            score,
 		Method:           "playbook",
+		RunID:            remRunID,
 	}
 }
 
@@ -126,10 +133,11 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		"prior_run_id", priorRunID)
 
 	var method string
+	var remRunID string
 	var triggerErr error
 	if spec.PlaybookID != "" {
 		method = "playbook"
-		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
+		remRunID, triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
 	} else if spec.AgentPrompt != "" {
 		method = "agent_prompt"
 		agentName := spec.AgentName
@@ -170,12 +178,14 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		RecoveryTimeSecs: recoverySecs,
 		Score:            score,
 		Method:           method,
+		RunID:            remRunID,
 	}
 }
 
 // triggerPlaybook calls RunPlaybook via faultlib and drives an interactive
-// approval loop when the run returns pending_approval.
-func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) error {
+// approval loop when the run returns pending_approval. Returns the remediation
+// run_id so the caller can fetch steps for the remediation judge.
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) (string, error) {
 	// Bridge the local trace-ID slot into faultlib's slot so that RunPlaybook
 	// and ProceedStep set X-Trace-ID on gateway requests.
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
@@ -183,7 +193,7 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	}
 	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	for _, w := range runResp.Warnings {
@@ -191,15 +201,47 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	}
 
 	if runResp.Status == "pending_approval" {
-		return r.runApprovalLoop(ctx, *runResp)
+		return runResp.RunID, r.runApprovalLoop(ctx, *runResp)
 	}
 
 	if runResp.Status == "pending_gate" {
-		return r.runGateLoop(ctx, *runResp)
+		return runResp.RunID, r.runGateLoop(ctx, *runResp)
 	}
 
 	slog.Info("playbook triggered", "series_id", seriesID, "status", runResp.Status)
-	return nil
+	return runResp.RunID, nil
+}
+
+// findChildRunID queries auditd for the remediation run that was started by a
+// proceed-escalation call on the given triage run. Returns "" when the run
+// cannot be found (e.g. auditd not configured, or run not yet committed).
+func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) string {
+	if r.cfg.AuditURL == "" || priorRunID == "" {
+		return ""
+	}
+	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + priorRunID + "&limit=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ""
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var runs []struct {
+		RunID string `json:"run_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil || len(runs) == 0 {
+		return ""
+	}
+	return runs[0].RunID
 }
 
 // printGatePreviewAndReport prints the remediation plan preview and structured
@@ -679,10 +721,13 @@ func (r *Remediator) waitForFeedback(ctx context.Context, runID string) {
 	}
 }
 
-// submitFeedback prompts the operator for diagnosis quality feedback and POSTs
-// it to the gateway. Silent no-op when non-interactive or gateway not configured.
-func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagReport map[string]any) {
-	if r.cfg.GatewayURL == "" || runID == "" {
+// submitFeedback prompts the operator for diagnosis and (optionally) remediation
+// quality feedback and POSTs to the gateway. Silent no-op when non-interactive
+// or gateway not configured. triageRunID anchors both feedback records so they
+// are joinable with run_evaluation without a cross-table join. remRunID is only
+// used for logging; pass "" when remediation did not run.
+func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID string, diagReport map[string]any) {
+	if r.cfg.GatewayURL == "" || triageRunID == "" {
 		return
 	}
 	tty, err := os.Open("/dev/tty")
@@ -724,14 +769,35 @@ func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagRepor
 		causeInput = defaultRootCause
 	}
 
+	r.postFeedback(ctx, triageRunID, "triage", "post_incident", diagCorrect, causeInput)
+
+	// Remediation approach feedback — only when remediation ran.
+	if remRunID != "" {
+		fmt.Print("  Was the remediation approach appropriate? [y/n/skip]: ")
+		remAnswer, _ := reader.ReadString('\n')
+		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
+		if remAnswer == "y" || remAnswer == "yes" {
+			v := true
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, "")
+		} else if remAnswer == "n" || remAnswer == "no" {
+			v := false
+			fmt.Print("  Notes (optional): ")
+			notes, _ := reader.ReadString('\n')
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes))
+		}
+	}
+}
+
+// postFeedback POSTs a single feedback record to the gateway.
+func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feedbackTime string, verdictCorrect *bool, notes string) {
 	fb := map[string]any{
 		"run_id":          runID,
-		"verdict_correct": diagCorrect,
-		"feedback_type":   "triage",
-		"feedback_time":   "post_incident",
+		"verdict_correct": verdictCorrect,
+		"feedback_type":   feedbackType,
+		"feedback_time":   feedbackTime,
 	}
-	if causeInput != "" {
-		fb["verdict_notes"] = causeInput
+	if notes != "" {
+		fb["verdict_notes"] = notes
 	}
 	if r.cfg.OperatorID != "" {
 		fb["operator"] = r.cfg.OperatorID
@@ -748,12 +814,12 @@ func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagRepor
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Warn("faulttest: failed to submit feedback", "run_id", runID, "err", err)
+		slog.Warn("faulttest: failed to submit feedback", "run_id", runID, "feedback_type", feedbackType, "err", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		fmt.Printf("  Feedback submitted (run_id=%s)\n", runID)
+		fmt.Printf("  Feedback submitted (%s/%s run_id=%s)\n", feedbackType, feedbackTime, runID)
 	}
 }
 
