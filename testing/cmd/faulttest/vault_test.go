@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -501,6 +502,29 @@ func TestPostEvaluations_BodyContainsScores(t *testing.T) {
 	}
 }
 
+func TestPostEvaluations_IncludesRemediationJudgeFields(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	results := []EvalResult{{
+		RunID:                     "plr_rj01",
+		RemediationJudgeScore:     0.67,
+		RemediationJudgeReasoning: "correct approach, one extra step",
+	}}
+	postEvaluations(srv.URL, "", results)
+
+	if gotBody["remediation_judge_score"] != 0.67 {
+		t.Errorf("remediation_judge_score = %v, want 0.67", gotBody["remediation_judge_score"])
+	}
+	if gotBody["remediation_judge_reasoning"] != "correct approach, one extra step" {
+		t.Errorf("remediation_judge_reasoning = %v", gotBody["remediation_judge_reasoning"])
+	}
+}
+
 // ── fetchEvaluation ───────────────────────────────────────────────────────
 
 func TestFetchEvaluation_Found(t *testing.T) {
@@ -769,6 +793,141 @@ func TestFetchCalibration_SendsAuth(t *testing.T) {
 	fetchCalibration(srv.URL, "tok-xyz", "") //nolint:errcheck
 	if gotAuth != "Bearer tok-xyz" {
 		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotAuth)
+	}
+}
+
+func TestFetchCalibration_DecodesRemediationBands(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"total_runs":       5,
+			"remediation_runs": 3,
+			"bands": []map[string]any{
+				{"band": "90-100%", "runs": 5, "correct": 4, "actual_accuracy": 0.80, "calibration": "OVERCONFIDENT"},
+			},
+			"remediation_bands": []map[string]any{
+				{"band": "90-100%", "runs": 2, "correct": 2, "actual_accuracy": 1.0, "calibration": "UNDERCONFIDENT"},
+				{"band": "70-89%", "runs": 1, "correct": 1, "actual_accuracy": 1.0, "calibration": "UNDERCONFIDENT"},
+				{"band": "<70%", "runs": 0, "correct": 0, "actual_accuracy": 0.0, "calibration": "INSUFFICIENT_DATA"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	report, err := fetchCalibration(srv.URL, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.RemediationRuns != 3 {
+		t.Errorf("RemediationRuns = %d, want 3", report.RemediationRuns)
+	}
+	if len(report.RemediationBands) != 3 {
+		t.Fatalf("RemediationBands len = %d, want 3", len(report.RemediationBands))
+	}
+	if report.RemediationBands[0].Band != "90-100%" {
+		t.Errorf("RemediationBands[0].Band = %q", report.RemediationBands[0].Band)
+	}
+	if report.RemediationBands[0].Runs != 2 || report.RemediationBands[0].Correct != 2 {
+		t.Errorf("RemediationBands[0]: Runs=%d Correct=%d, want 2/2", report.RemediationBands[0].Runs, report.RemediationBands[0].Correct)
+	}
+	if report.RemediationBands[0].Calibration != "UNDERCONFIDENT" {
+		t.Errorf("RemediationBands[0].Calibration = %q, want UNDERCONFIDENT", report.RemediationBands[0].Calibration)
+	}
+}
+
+// ── fetchRemediationSteps ─────────────────────────────────────────────────
+
+func TestFetchRemediationSteps_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/playbook-runs/plr_steps01/steps" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{"tool": "kill_idle_connections", "args": map[string]any{"idle_threshold": "5m"}, "status": "succeeded", "result": "20 terminated"},
+			{"tool": "get_active_connections", "args": map[string]any{}, "status": "succeeded", "result": "count=3"},
+		})
+	}))
+	defer srv.Close()
+
+	steps := fetchRemediationSteps(context.Background(), srv.URL, "", "plr_steps01")
+	if len(steps) != 2 {
+		t.Fatalf("got %d steps, want 2", len(steps))
+	}
+	if steps[0].Tool != "kill_idle_connections" {
+		t.Errorf("steps[0].Tool = %q, want kill_idle_connections", steps[0].Tool)
+	}
+	if steps[0].Status != "succeeded" {
+		t.Errorf("steps[0].Status = %q, want succeeded", steps[0].Status)
+	}
+	if steps[0].Result != "20 terminated" {
+		t.Errorf("steps[0].Result = %q", steps[0].Result)
+	}
+	if steps[1].Tool != "get_active_connections" {
+		t.Errorf("steps[1].Tool = %q", steps[1].Tool)
+	}
+}
+
+func TestFetchRemediationSteps_EmptyRunID(t *testing.T) {
+	// runID="" → returns nil without making any HTTP request.
+	steps := fetchRemediationSteps(context.Background(), "http://localhost:9999", "", "")
+	if steps != nil {
+		t.Errorf("expected nil for empty runID, got %v", steps)
+	}
+}
+
+func TestFetchRemediationSteps_EmptyGatewayURL(t *testing.T) {
+	steps := fetchRemediationSteps(context.Background(), "", "", "plr_steps01")
+	if steps != nil {
+		t.Errorf("expected nil for empty gatewayURL, got %v", steps)
+	}
+}
+
+func TestFetchRemediationSteps_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	steps := fetchRemediationSteps(context.Background(), srv.URL, "", "plr_steps01")
+	if steps != nil {
+		t.Errorf("expected nil on server error, got %v", steps)
+	}
+}
+
+func TestFetchRemediationSteps_NetworkError(t *testing.T) {
+	steps := fetchRemediationSteps(context.Background(), "http://127.0.0.1:0", "", "plr_steps01")
+	if steps != nil {
+		t.Errorf("expected nil on network error, got %v", steps)
+	}
+}
+
+func TestFetchRemediationSteps_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRemediationSteps(context.Background(), srv.URL, "sk-auth", "plr_steps01")
+	if gotAuth != "Bearer sk-auth" {
+		t.Errorf("Authorization = %q, want Bearer sk-auth", gotAuth)
+	}
+}
+
+func TestFetchRemediationSteps_EmptyList(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	steps := fetchRemediationSteps(context.Background(), srv.URL, "", "plr_steps01")
+	if len(steps) != 0 {
+		t.Errorf("expected 0 steps for empty response, got %d", len(steps))
 	}
 }
 

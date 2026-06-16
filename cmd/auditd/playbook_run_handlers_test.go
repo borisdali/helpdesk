@@ -668,6 +668,46 @@ func TestPlaybookRunHandlers_Evaluation_SubmitAndGet(t *testing.T) {
 	}
 }
 
+func TestPlaybookRunHandlers_Evaluation_RemediationJudgeFields(t *testing.T) {
+	srv := newPlaybookRunServerWithEvaluation(t)
+
+	body := map[string]any{
+		"failure_id":                  "db-conn-limit",
+		"overall_score":               0.75,
+		"remediation_judge_score":     0.67,
+		"remediation_judge_reasoning": "correct approach, one extra step",
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_rj01/evaluation", bytes.NewReader(data))
+	req.SetPathValue("runID", "plr_rj01")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.handleSubmitEvaluation(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_rj01/evaluation", nil)
+	req2.SetPathValue("runID", "plr_rj01")
+	rec2 := httptest.NewRecorder()
+	srv.handleGetEvaluation(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body: %s", rec2.Code, rec2.Body.String())
+	}
+	var got audit.RunEvaluation
+	if err := json.NewDecoder(rec2.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.RemediationJudgeScore != 0.67 {
+		t.Errorf("RemediationJudgeScore = %v, want 0.67", got.RemediationJudgeScore)
+	}
+	if got.RemediationJudgeReasoning != "correct approach, one extra step" {
+		t.Errorf("RemediationJudgeReasoning = %q", got.RemediationJudgeReasoning)
+	}
+}
+
 func TestPlaybookRunHandlers_Evaluation_NotFound(t *testing.T) {
 	srv := newPlaybookRunServerWithEvaluation(t)
 
@@ -855,12 +895,14 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 	}
 	srv := &playbookRunServer{evaluationStore: evalStore, feedbackStore: fbStore}
 
-	// Seed 3 runs in 90-100% band: 3 correct.
+	// Seed 3 runs in 90-100% band: 3 correct triage feedbacks + remediation scores and feedback.
 	tr := true
+	fa := false
 	for i, runID := range []string{"plr_cal01", "plr_cal02", "plr_cal03"} {
 		_ = i
 		if err := evalStore.Upsert(ctx, &audit.RunEvaluation{
 			RunID: runID, FailureID: "db-lock", DiagnosisScore: 0.95, OverallScore: 0.95,
+			RemediationScore: 0.92,
 		}); err != nil {
 			t.Fatalf("Upsert %s: %v", runID, err)
 		}
@@ -868,7 +910,19 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 			RunID: runID, SeriesID: "pbs_calib_handler", FeedbackType: "triage",
 			FeedbackTime: "post_incident", VerdictCorrect: &tr,
 		}); err != nil {
-			t.Fatalf("Submit %s: %v", runID, err)
+			t.Fatalf("Submit triage %s: %v", runID, err)
+		}
+	}
+	// All 3 runs get remediation feedback: 1 correct, 2 wrong → 1/3 = 33% vs 95% expected → OVERCONFIDENT.
+	for _, pair := range []struct {
+		runID string
+		ok    *bool
+	}{{"plr_cal01", &tr}, {"plr_cal02", &fa}, {"plr_cal03", &fa}} {
+		if err := fbStore.Submit(ctx, &audit.RunFeedback{
+			RunID: pair.runID, SeriesID: "pbs_calib_handler", FeedbackType: "remediation",
+			FeedbackTime: "post_incident", VerdictCorrect: pair.ok,
+		}); err != nil {
+			t.Fatalf("Submit remediation %s: %v", pair.runID, err)
 		}
 	}
 
@@ -880,23 +934,28 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 
+	type band struct {
+		Band        string `json:"band"`
+		Runs        int    `json:"runs"`
+		Correct     int    `json:"correct"`
+		Calibration string `json:"calibration"`
+	}
 	var report struct {
-		Bands []struct {
-			Band        string `json:"band"`
-			Runs        int    `json:"runs"`
-			Correct     int    `json:"correct"`
-			Calibration string `json:"calibration"`
-		} `json:"bands"`
-		TotalRuns int `json:"total_runs"`
+		Bands            []band `json:"bands"`
+		TotalRuns        int    `json:"total_runs"`
+		RemediationBands []band `json:"remediation_bands"`
+		RemediationRuns  int    `json:"remediation_runs"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&report); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+
+	// Diagnosis bands.
 	if report.TotalRuns != 3 {
 		t.Errorf("total_runs = %d, want 3", report.TotalRuns)
 	}
 	if len(report.Bands) != 3 {
-		t.Fatalf("want 3 bands, got %d", len(report.Bands))
+		t.Fatalf("want 3 diagnosis bands, got %d", len(report.Bands))
 	}
 	if report.Bands[0].Band != "90-100%" {
 		t.Errorf("Bands[0].Band = %q, want 90-100%%", report.Bands[0].Band)
@@ -904,9 +963,26 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 	if report.Bands[0].Runs != 3 || report.Bands[0].Correct != 3 {
 		t.Errorf("90-100%%: Runs=%d Correct=%d, want 3/3", report.Bands[0].Runs, report.Bands[0].Correct)
 	}
-	// 3/3 correct vs expected 95% → UNDERCONFIDENT (100% > 95%+10% boundary? no, 100-95=5 ≤ 10)
-	// Actually |1.0 - 0.95| = 0.05 ≤ 0.10 → WELL_CALIBRATED
+	// |1.0 - 0.95| = 0.05 ≤ 0.10 → WELL_CALIBRATED
 	if report.Bands[0].Calibration != "WELL_CALIBRATED" {
 		t.Errorf("90-100%% Calibration = %q, want WELL_CALIBRATED", report.Bands[0].Calibration)
+	}
+
+	// Remediation bands: all 3 runs have feedback (1 correct, 2 wrong).
+	if report.RemediationRuns != 3 {
+		t.Errorf("remediation_runs = %d, want 3", report.RemediationRuns)
+	}
+	if len(report.RemediationBands) != 3 {
+		t.Fatalf("want 3 remediation bands, got %d", len(report.RemediationBands))
+	}
+	if report.RemediationBands[0].Band != "90-100%" {
+		t.Errorf("RemediationBands[0].Band = %q, want 90-100%%", report.RemediationBands[0].Band)
+	}
+	if report.RemediationBands[0].Runs != 3 || report.RemediationBands[0].Correct != 1 {
+		t.Errorf("remediation 90-100%%: Runs=%d Correct=%d, want 3/1", report.RemediationBands[0].Runs, report.RemediationBands[0].Correct)
+	}
+	// 1/3 = 33% actual vs 95% expected → OVERCONFIDENT
+	if report.RemediationBands[0].Calibration != "OVERCONFIDENT" {
+		t.Errorf("remediation 90-100%% Calibration = %q, want OVERCONFIDENT", report.RemediationBands[0].Calibration)
 	}
 }
