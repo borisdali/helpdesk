@@ -183,7 +183,7 @@ Use `--target` to filter history to a specific database server (the `--agent-con
 faulttest vault accuracy <series_id> [--gateway http://gateway:8080] [--api-key sk-...]
 ```
 
-Shows the per-series diagnosis accuracy breakdown — how often the agent's root-cause hypothesis was confirmed correct by operators who submitted post-incident feedback.
+Shows the per-series diagnosis accuracy breakdown — how often the agent's root-cause hypothesis was confirmed correct by operators. Counts both at-gate feedback (captured before remediation at the triage→remediation decision gate) and post-incident feedback (submitted after recovery).
 
 ```bash
 faulttest vault accuracy pbs_lock_chain_triage \
@@ -192,18 +192,31 @@ faulttest vault accuracy pbs_lock_chain_triage \
 ```
 
 ```
-=== Diagnosis Accuracy: pbs_lock_chain_triage ===
+Diagnosis accuracy for series: pbs_lock_chain_triage
 
-Feedback submissions:  12
-Correct diagnoses:     11
-Accuracy rate:         91.7%
+  Feedback submitted : 12 runs
+  Correct diagnoses  : 11
+  Accuracy rate      : 92%
 
-Submit feedback after an incident:
-  POST /api/v1/fleet/playbook-runs/{runID}/feedback
-  {"feedback_type": "triage", "feedback_time": "post_incident", "verdict_correct": true, "verdict_notes": "PID 867 idle-in-tx 47s"}
+  Breakdown by feedback time:
+    At-gate (before remediation) : 8 of 9 correct (89%)
+    Post-incident (after recovery): 3 of 3 correct (100%)
 ```
 
-Accuracy rate is `correct / total` across all runs in the series where `verdict_correct` was explicitly set on `(triage, post_incident)` feedback (nil feedback is excluded). Use this alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
+The overall accuracy rate is `correct / total` across both feedback times; nil verdicts are excluded. The breakdown section appears whenever at least one feedback type has data, letting you compare the signal quality: at-gate feedback is uncontaminated by knowledge of whether the fix worked, while post-incident feedback can be influenced by hindsight.
+
+With no argument, lists all catalog faults that have a diagnosis playbook series and shows a table with per-type counts:
+
+```
+  FAULT                                SERIES                               AT-GATE   POST-INC  ACCURACY
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  db-lock-contention                   pbs_lock_chain_triage                  8/9       3/3       92%
+  db-slow-query                        pbs_slow_query_triage                  4/5       –         80%
+```
+
+`AT-GATE` and `POST-INC` show `correct/total`; `–` means no feedback of that type has been submitted for the series yet.
+
+Use `vault accuracy` alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
 
 Feedback is submitted interactively by `faulttest` after a successful recovery when running with `--remediate` and `--gateway` (see below), or manually via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`.
 
@@ -331,7 +344,9 @@ faulttest vault calibration db-lock-contention \
   --api-key $HELPDESK_API_KEY
 ```
 
-Shows how well `diagnosis_score` (automated faulttest evaluation) predicts whether operators confirm the diagnosis was correct. Requires runs that have both an evaluation score (`--gateway` flag during `faulttest run`) and post-incident operator feedback (`vault incidents` → submit verdict).
+Shows how well `diagnosis_score` (automated faulttest evaluation) predicts whether operators confirm the diagnosis was correct. Requires runs that have both an evaluation score (`--gateway` flag during `faulttest run`) and operator triage feedback (at-gate or post-incident).
+
+At-gate feedback is preferred over post-incident when both exist for the same run — it is captured before the operator knows whether remediation succeeded, making it a cleaner signal. A run with only post-incident feedback still contributes.
 
 ```
 Diagnosis calibration — fleet-wide (17 runs with eval + operator feedback)

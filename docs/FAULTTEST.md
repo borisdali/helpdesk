@@ -320,7 +320,7 @@ After a successful recovery (verification SQL returns true), `faulttest` optiona
   Actual root cause (Enter to confirm: "Root blocker PID 867 idle-in-transaction"):
 ```
 
-Answering stores a `RunFeedback` record via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`. This feeds the `accuracy_rate` shown in `faulttest vault accuracy` and `faulttest vault list`. Skipping or running non-interactively leaves no feedback — the run still scores normally.
+Answering stores a `RunFeedback` record (`feedback_time: "post_incident"`) via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`. This feeds the accuracy breakdown shown in `faulttest vault accuracy` and `faulttest vault list`. At-gate feedback (captured earlier at the triage→remediation gate) is stored separately and is treated as the higher-quality signal in `vault calibration`. Skipping or running non-interactively leaves no feedback — the run still scores normally.
 
 **Post-run incident summary:**
 
@@ -657,7 +657,7 @@ faulttest vault calibration db-lock-contention \
   --api-key sk-...
 ```
 
-Shows confidence-band calibration: how well `diagnosis_score` predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%`, and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT`, or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and post-incident feedback. See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
+Shows confidence-band calibration: how well `diagnosis_score` predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%`, and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT`, or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and operator triage feedback (at-gate or post-incident; at-gate is preferred when both exist for the same run). See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
 
 #### vault suggest
 
