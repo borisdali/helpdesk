@@ -358,6 +358,54 @@ func TestFetchActivePlaybook_InvalidJSON(t *testing.T) {
 	}
 }
 
+// ── fetchPlaybookInfo ─────────────────────────────────────────────────────
+
+func TestFetchPlaybookInfo_DecodesBreakdown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"playbooks": []map[string]any{
+				{
+					"source": "system",
+					"stats": map[string]any{
+						"total_runs":      10,
+						"feedback_count":  6,
+						"correct_count":   5,
+						"accuracy_rate":   5.0 / 6.0,
+						"at_gate_count":        4,
+						"at_gate_correct":      4,
+						"at_gate_accuracy_rate": 1.0,
+						"post_incident_count":       2,
+						"post_incident_correct":     1,
+						"post_incident_accuracy_rate": 0.5,
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	info := fetchPlaybookInfo(srv.URL, "", "pbs_test")
+	if info.check != playbookFound {
+		t.Fatalf("check = %v, want playbookFound", info.check)
+	}
+	if info.feedbackCount != 6 {
+		t.Errorf("feedbackCount = %d, want 6", info.feedbackCount)
+	}
+	if info.atGateCount != 4 || info.atGateCorrect != 4 {
+		t.Errorf("atGate = %d/%d, want 4/4", info.atGateCorrect, info.atGateCount)
+	}
+	if info.atGateAccuracyRate != 1.0 {
+		t.Errorf("atGateAccuracyRate = %f, want 1.0", info.atGateAccuracyRate)
+	}
+	if info.postIncidentCount != 2 || info.postIncidentCorrect != 1 {
+		t.Errorf("postIncident = %d/%d, want 1/2", info.postIncidentCorrect, info.postIncidentCount)
+	}
+	if info.postIncidentAccuracyRate != 0.5 {
+		t.Errorf("postIncidentAccuracyRate = %f, want 0.5", info.postIncidentAccuracyRate)
+	}
+}
+
 // ── RemediationScore buckets ───────────────────────────────────────────────
 
 // ── postEvaluations ───────────────────────────────────────────────────────

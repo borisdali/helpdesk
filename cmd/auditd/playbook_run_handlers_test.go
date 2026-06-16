@@ -401,6 +401,53 @@ func TestPlaybookRunHandlers_Stats_IncludesAccuracy(t *testing.T) {
 	if stats.AccuracyRate != 1.0 {
 		t.Errorf("AccuracyRate = %f, want 1.0", stats.AccuracyRate)
 	}
+	// Breakdown: the single run has post_incident feedback only.
+	if stats.PostIncidentCount != 1 || stats.PostIncidentCorrect != 1 {
+		t.Errorf("PostIncident = %d/%d, want 1/1", stats.PostIncidentCorrect, stats.PostIncidentCount)
+	}
+	if stats.PostIncidentAccuracyRate != 1.0 {
+		t.Errorf("PostIncidentAccuracyRate = %f, want 1.0", stats.PostIncidentAccuracyRate)
+	}
+	if stats.AtGateCount != 0 {
+		t.Errorf("AtGateCount = %d, want 0 (no at_gate feedback submitted)", stats.AtGateCount)
+	}
+
+	// Now submit at_gate feedback for the same run (simulating pre-remediation capture).
+	fbBody2 := map[string]any{"feedback_type": "triage", "feedback_time": "at_gate", "verdict_correct": false, "operator": "test"}
+	fbData2, _ := json.Marshal(fbBody2)
+	fbReq2 := httptest.NewRequest(http.MethodPost, "/v1/fleet/playbook-runs/plr_acc_run1/feedback", bytes.NewReader(fbData2))
+	fbReq2.SetPathValue("runID", "plr_acc_run1")
+	fbReq2.Header.Set("Content-Type", "application/json")
+	fbRec2 := httptest.NewRecorder()
+	srv.handleSubmitFeedback(fbRec2, fbReq2)
+	if fbRec2.Code != http.StatusCreated {
+		t.Fatalf("submit at_gate feedback: status %d, body: %s", fbRec2.Code, fbRec2.Body.String())
+	}
+
+	// Re-fetch stats — combined total is now 2, breakdown shows both types.
+	statsReq2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbooks/"+createdPB.PlaybookID+"/stats", nil)
+	statsReq2.SetPathValue("playbookID", createdPB.PlaybookID)
+	statsRec2 := httptest.NewRecorder()
+	srv.handleStats(statsRec2, statsReq2)
+	if statsRec2.Code != http.StatusOK {
+		t.Fatalf("second stats status = %d", statsRec2.Code)
+	}
+	var stats2 audit.PlaybookRunStats
+	if err := json.NewDecoder(statsRec2.Body).Decode(&stats2); err != nil {
+		t.Fatalf("decode second stats: %v", err)
+	}
+	if stats2.FeedbackCount != 2 {
+		t.Errorf("FeedbackCount (after at_gate) = %d, want 2", stats2.FeedbackCount)
+	}
+	if stats2.AtGateCount != 1 || stats2.AtGateCorrect != 0 {
+		t.Errorf("AtGate = %d/%d, want 0/1", stats2.AtGateCorrect, stats2.AtGateCount)
+	}
+	if stats2.AtGateAccuracyRate != 0.0 {
+		t.Errorf("AtGateAccuracyRate = %f, want 0.0", stats2.AtGateAccuracyRate)
+	}
+	if stats2.PostIncidentCount != 1 || stats2.PostIncidentCorrect != 1 {
+		t.Errorf("PostIncident (second stats) = %d/%d, want 1/1", stats2.PostIncidentCorrect, stats2.PostIncidentCount)
+	}
 }
 
 func TestPlaybookRunHandlers_Feedback_QueryParams(t *testing.T) {
