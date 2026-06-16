@@ -406,3 +406,64 @@ func TestRemediate_PlaybookThenRecovery(t *testing.T) {
 	}
 	_ = result // pollRecovery will fail without a real DB — that's expected
 }
+
+// ── postFeedback remediation/at_gate tests ────────────────────────────────
+
+func TestPostFeedback_RemediationAtGate_Approved(t *testing.T) {
+	var gotBody map[string]any
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	v := true
+	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "")
+
+	wantPath := "/api/v1/fleet/playbook-runs/plr_abc123/feedback"
+	if gotPath != wantPath {
+		t.Errorf("path = %q, want %q", gotPath, wantPath)
+	}
+	if gotBody["feedback_type"] != "remediation" {
+		t.Errorf("feedback_type = %v, want remediation", gotBody["feedback_type"])
+	}
+	if gotBody["feedback_time"] != "at_gate" {
+		t.Errorf("feedback_time = %v, want at_gate", gotBody["feedback_time"])
+	}
+	if gotBody["verdict_correct"] != true {
+		t.Errorf("verdict_correct = %v, want true", gotBody["verdict_correct"])
+	}
+}
+
+func TestPostFeedback_RemediationAtGate_Denied_WithNotes(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	v := false
+	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "plan would terminate active sessions")
+
+	if gotBody["verdict_correct"] != false {
+		t.Errorf("verdict_correct = %v, want false", gotBody["verdict_correct"])
+	}
+	if gotBody["verdict_notes"] != "plan would terminate active sessions" {
+		t.Errorf("verdict_notes = %v, want notes string", gotBody["verdict_notes"])
+	}
+	if gotBody["feedback_time"] != "at_gate" {
+		t.Errorf("feedback_time = %v, want at_gate", gotBody["feedback_time"])
+	}
+}
+
+func TestPostFeedback_RemediationAtGate_NoGateway(t *testing.T) {
+	// With no gateway configured, postFeedback must be a silent no-op (no panic).
+	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
+	v := true
+	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "")
+}

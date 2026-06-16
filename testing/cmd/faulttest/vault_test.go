@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 )
 
 // ── passRateOf ────────────────────────────────────────────────────────────
@@ -373,12 +374,20 @@ func TestFetchPlaybookInfo_DecodesBreakdown(t *testing.T) {
 						"feedback_count":  6,
 						"correct_count":   5,
 						"accuracy_rate":   5.0 / 6.0,
-						"at_gate_count":        4,
-						"at_gate_correct":      4,
-						"at_gate_accuracy_rate": 1.0,
-						"post_incident_count":       2,
-						"post_incident_correct":     1,
+						"at_gate_count":               4,
+						"at_gate_correct":             4,
+						"at_gate_accuracy_rate":       1.0,
+						"post_incident_count":         2,
+						"post_incident_correct":       1,
 						"post_incident_accuracy_rate": 0.5,
+						// Remediation fields.
+						"remediation_feedback_count":        3,
+						"remediation_correct_count":         2,
+						"remediation_accuracy_rate":         2.0 / 3.0,
+						"remediation_at_gate_count":         1,
+						"remediation_at_gate_correct":       1,
+						"remediation_post_incident_count":   2,
+						"remediation_post_incident_correct": 1,
 					},
 				},
 			},
@@ -404,6 +413,19 @@ func TestFetchPlaybookInfo_DecodesBreakdown(t *testing.T) {
 	}
 	if info.postIncidentAccuracyRate != 0.5 {
 		t.Errorf("postIncidentAccuracyRate = %f, want 0.5", info.postIncidentAccuracyRate)
+	}
+	// Remediation fields.
+	if info.remediationFeedbackCount != 3 {
+		t.Errorf("remediationFeedbackCount = %d, want 3", info.remediationFeedbackCount)
+	}
+	if info.remediationCorrectCount != 2 {
+		t.Errorf("remediationCorrectCount = %d, want 2", info.remediationCorrectCount)
+	}
+	if info.remediationAtGateCount != 1 || info.remediationAtGateCorrect != 1 {
+		t.Errorf("remediationAtGate = %d/%d, want 1/1", info.remediationAtGateCorrect, info.remediationAtGateCount)
+	}
+	if info.remediationPostIncidentCount != 2 || info.remediationPostIncidentCorrect != 1 {
+		t.Errorf("remediationPostIncident = %d/%d, want 1/2", info.remediationPostIncidentCorrect, info.remediationPostIncidentCount)
 	}
 }
 
@@ -958,5 +980,85 @@ func TestRemediationScoreBuckets(t *testing.T) {
 					tt.recoverySecs, tt.timeout, score, tt.wantScore)
 			}
 		})
+	}
+}
+
+// ── fetchFaultRunHistory ───────────────────────────────────────────────────
+
+func TestFetchFaultRunHistory_Success(t *testing.T) {
+	now := "2026-01-15T12:00:00Z"
+	past := "2026-01-01T12:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("since_days") == "" {
+			t.Error("since_days param missing")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"entries": []map[string]any{
+				{"run_id": "plr_a", "failure_id": "db-lock-contention", "timestamp": now, "passed": true},
+				{"run_id": "plr_b", "failure_id": "db-lock-contention", "timestamp": past, "passed": false},
+				{"run_id": "plr_c", "failure_id": "k8s-crashloop", "timestamp": now, "passed": true},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cutoff, _ := time.Parse(time.RFC3339, "2025-12-01T00:00:00Z")
+	midPoint, _ := time.Parse(time.RFC3339, "2026-01-08T00:00:00Z")
+
+	result, err := fetchFaultRunHistory(srv.URL, "", 90, "", cutoff, midPoint)
+	if err != nil {
+		t.Fatalf("fetchFaultRunHistory: %v", err)
+	}
+	// Both db-lock-contention entries should appear (past is firstHalf, now is secondHalf).
+	dbStats, ok := result["db-lock-contention"]
+	if !ok {
+		t.Fatal("db-lock-contention not in result")
+	}
+	if len(dbStats.firstHalf) != 1 || len(dbStats.secondHalf) != 1 {
+		t.Errorf("db-lock-contention halves: first=%d second=%d, want 1/1",
+			len(dbStats.firstHalf), len(dbStats.secondHalf))
+	}
+	if _, ok := result["k8s-crashloop"]; !ok {
+		t.Error("k8s-crashloop not in result")
+	}
+}
+
+func TestFetchFaultRunHistory_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"entries": []any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	cutoff := time.Now().Add(-90 * 24 * time.Hour)
+	mid := time.Now().Add(-45 * 24 * time.Hour)
+	fetchFaultRunHistory(srv.URL, "my-key", 90, "", cutoff, mid) //nolint:errcheck
+	if gotAuth != "Bearer my-key" {
+		t.Errorf("Authorization = %q, want Bearer my-key", gotAuth)
+	}
+}
+
+func TestFetchFaultRunHistory_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	cutoff := time.Now().Add(-90 * 24 * time.Hour)
+	mid := time.Now().Add(-45 * 24 * time.Hour)
+	_, err := fetchFaultRunHistory(srv.URL, "", 90, "", cutoff, mid)
+	if err == nil {
+		t.Error("expected error for 500 response, got nil")
+	}
+}
+
+func TestFetchFaultRunHistory_NetworkError(t *testing.T) {
+	cutoff := time.Now().Add(-90 * 24 * time.Hour)
+	mid := time.Now().Add(-45 * 24 * time.Hour)
+	_, err := fetchFaultRunHistory("http://127.0.0.1:19998", "", 90, "", cutoff, mid)
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
 	}
 }

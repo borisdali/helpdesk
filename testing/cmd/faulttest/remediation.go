@@ -407,6 +407,24 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		verdictNotes = causeInput
 	}
 
+	// Remediation approach verdict — asked at the same gate, before remediation
+	// runs, so the signal is free of outcome bias (same reason as triage/at_gate).
+	var remVerdictCorrect *bool
+	var remVerdictNotes string
+	fmt.Print("  Is the remediation approach appropriate? [y/n/skip]: ")
+	remAnswer, _ := reader.ReadString('\n')
+	remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
+	if remAnswer == "y" || remAnswer == "yes" {
+		v := true
+		remVerdictCorrect = &v
+	} else if remAnswer == "n" || remAnswer == "no" {
+		v := false
+		remVerdictCorrect = &v
+		fmt.Print("  Notes (optional): ")
+		remNotes, _ := reader.ReadString('\n')
+		remVerdictNotes = strings.TrimSpace(remNotes)
+	}
+
 	connStr := r.cfg.ConnStr
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
@@ -422,6 +440,9 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	})
 	if err != nil {
 		return fmt.Errorf("proceed-escalation: %w", err)
+	}
+	if remVerdictCorrect != nil {
+		r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", remVerdictCorrect, remVerdictNotes)
 	}
 	if resp.Status == "pending_approval" {
 		return r.runApprovalLoop(ctx, *resp)
@@ -441,8 +462,12 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("    resolved_by       : your email or user ID\n")
 	fmt.Printf("    approval_mode     : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
 	fmt.Printf("    reason            : optional — free-text operator comment\n")
-	fmt.Printf("    verdict_correct : true | false  (at-gate feedback, before remediation runs)\n")
-	fmt.Printf("    verdict_notes   : string        (required when verdict_correct=false)\n\n")
+	fmt.Printf("    verdict_correct : true | false  (triage/at_gate feedback, before remediation runs)\n")
+	fmt.Printf("    verdict_notes   : string        (required when verdict_correct=false)\n")
+	feedbackURL := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + gate.RunID + "/feedback"
+	fmt.Printf("\n  Remediation feedback (separate call, same gate window):\n")
+	fmt.Printf("    POST %s\n", feedbackURL)
+	fmt.Printf("    {\"feedback_type\":\"remediation\",\"feedback_time\":\"at_gate\",\"verdict_correct\":true,\"verdict_notes\":\"...\"}\n\n")
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
 	if err != nil {

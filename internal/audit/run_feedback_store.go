@@ -22,21 +22,31 @@ type RunFeedback struct {
 }
 
 // FeedbackStats aggregates feedback quality metrics for a playbook series.
-// Both at-gate and post-incident triage feedback are counted. AccuracyRate
-// combines both; AtGate* and PostIncident* give the per-time breakdown.
+// Both at-gate and post-incident feedback are counted per type.
+// AccuracyRate covers triage only; AtGate* and PostIncident* give the per-time
+// breakdown for triage. Remediation* fields cover remediation feedback.
 type FeedbackStats struct {
 	SeriesID      string  `json:"series_id"`
-	FeedbackCount int     `json:"feedback_count"` // total across both feedback times
+	FeedbackCount int     `json:"feedback_count"` // triage total across both feedback times
 	CorrectCount  int     `json:"correct_count"`
 	AccuracyRate  float64 `json:"accuracy_rate"`
 
-	AtGateCount          int     `json:"at_gate_count"`
-	AtGateCorrect        int     `json:"at_gate_correct"`
-	AtGateAccuracyRate   float64 `json:"at_gate_accuracy_rate,omitempty"`
+	AtGateCount        int     `json:"at_gate_count"`
+	AtGateCorrect      int     `json:"at_gate_correct"`
+	AtGateAccuracyRate float64 `json:"at_gate_accuracy_rate,omitempty"`
 
-	PostIncidentCount          int     `json:"post_incident_count"`
-	PostIncidentCorrect        int     `json:"post_incident_correct"`
-	PostIncidentAccuracyRate   float64 `json:"post_incident_accuracy_rate,omitempty"`
+	PostIncidentCount        int     `json:"post_incident_count"`
+	PostIncidentCorrect      int     `json:"post_incident_correct"`
+	PostIncidentAccuracyRate float64 `json:"post_incident_accuracy_rate,omitempty"`
+
+	// Remediation feedback (feedback_type='remediation').
+	RemediationFeedbackCount      int     `json:"remediation_feedback_count"`
+	RemediationCorrectCount       int     `json:"remediation_correct_count"`
+	RemediationAccuracyRate       float64 `json:"remediation_accuracy_rate,omitempty"`
+	RemediationAtGateCount        int     `json:"remediation_at_gate_count"`
+	RemediationAtGateCorrect      int     `json:"remediation_at_gate_correct"`
+	RemediationPostIncidentCount  int     `json:"remediation_post_incident_count"`
+	RemediationPostIncidentCorrect int    `json:"remediation_post_incident_correct"`
 }
 
 // RunFeedbackStore persists operator feedback on playbook run quality.
@@ -286,6 +296,46 @@ GROUP BY feedback_time`), seriesID)
 	if stats.FeedbackCount > 0 {
 		stats.AccuracyRate = float64(stats.CorrectCount) / float64(stats.FeedbackCount)
 	}
+
+	// Second pass: remediation feedback for the same series.
+	remRows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+SELECT
+    feedback_time,
+    COUNT(*) AS total,
+    COALESCE(SUM(CASE WHEN verdict_correct = 1 THEN 1 ELSE 0 END), 0) AS correct
+FROM run_feedback
+WHERE series_id = ?
+  AND feedback_type = 'remediation'
+  AND verdict_correct IS NOT NULL
+GROUP BY feedback_time`), seriesID)
+	if err != nil {
+		return nil, fmt.Errorf("remediation stats by series: %w", err)
+	}
+	defer remRows.Close()
+	for remRows.Next() {
+		var fbTime string
+		var total, correct int
+		if err := remRows.Scan(&fbTime, &total, &correct); err != nil {
+			return nil, fmt.Errorf("scan remediation stats row: %w", err)
+		}
+		stats.RemediationFeedbackCount += total
+		stats.RemediationCorrectCount += correct
+		switch fbTime {
+		case "at_gate":
+			stats.RemediationAtGateCount = total
+			stats.RemediationAtGateCorrect = correct
+		case "post_incident":
+			stats.RemediationPostIncidentCount = total
+			stats.RemediationPostIncidentCorrect = correct
+		}
+	}
+	if err := remRows.Err(); err != nil {
+		return nil, err
+	}
+	if stats.RemediationFeedbackCount > 0 {
+		stats.RemediationAccuracyRate = float64(stats.RemediationCorrectCount) / float64(stats.RemediationFeedbackCount)
+	}
+
 	return stats, nil
 }
 

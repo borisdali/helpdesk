@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 
@@ -466,5 +467,67 @@ func TestRunEvaluationStore_RemediationScore(t *testing.T) {
 	}
 	if got.RemediationScore != 0.8 {
 		t.Errorf("RemediationScore: got %v, want 0.8", got.RemediationScore)
+	}
+}
+
+func TestRunEvaluationStore_ListHistory(t *testing.T) {
+	ctx := context.Background()
+	store := newRunEvaluationStore(t)
+
+	now := time.Now().UTC()
+	seed := func(runID, failureID string, passed bool, ago time.Duration) {
+		t.Helper()
+		eval := &RunEvaluation{
+			RunID:     runID,
+			FailureID: failureID,
+			Passed:    passed,
+			CreatedAt: now.Add(-ago),
+		}
+		if err := store.Upsert(ctx, eval); err != nil {
+			t.Fatalf("Upsert %s: %v", runID, err)
+		}
+	}
+
+	seed("plr_h1", "db-lock-contention", true, 10*24*time.Hour)
+	seed("plr_h2", "db-lock-contention", false, 5*24*time.Hour)
+	seed("plr_h3", "k8s-pod-crashloop", true, 3*24*time.Hour)
+	seed("plr_h4", "db-lock-contention", true, 1*24*time.Hour)
+	// This one is outside the 30-day window.
+	seed("plr_h5", "db-lock-contention", true, 60*24*time.Hour)
+	// This one has empty failure_id (legacy run) — must be excluded.
+	if err := store.Upsert(ctx, &RunEvaluation{RunID: "plr_legacy", FailureID: ""}); err != nil {
+		t.Fatalf("Upsert legacy: %v", err)
+	}
+
+	// All faults, 30-day window.
+	entries, err := store.ListHistory(ctx, 30, "")
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Errorf("ListHistory all: got %d entries, want 4", len(entries))
+	}
+
+	// Filter by fault_id.
+	entries2, err := store.ListHistory(ctx, 30, "db-lock-contention")
+	if err != nil {
+		t.Fatalf("ListHistory fault_id: %v", err)
+	}
+	if len(entries2) != 3 {
+		t.Errorf("ListHistory db-lock-contention: got %d entries, want 3", len(entries2))
+	}
+	for _, e := range entries2 {
+		if e.FailureID != "db-lock-contention" {
+			t.Errorf("unexpected failure_id %q in filtered result", e.FailureID)
+		}
+	}
+
+	// Narrower window excludes older entries.
+	entries3, err := store.ListHistory(ctx, 2, "")
+	if err != nil {
+		t.Fatalf("ListHistory 2 days: %v", err)
+	}
+	if len(entries3) != 1 {
+		t.Errorf("ListHistory 2 days: got %d entries, want 1", len(entries3))
 	}
 }

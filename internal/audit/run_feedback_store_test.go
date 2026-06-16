@@ -278,6 +278,75 @@ func TestRunFeedbackStore_StatsBySeries_NoFeedback(t *testing.T) {
 	}
 }
 
+func TestRunFeedbackStore_StatsBySeries_RemediationFields(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newRunFeedbackStore(t)
+
+	seriesID := "pbs_remed_stats_series"
+
+	// Two remediation/post_incident entries (1 correct, 1 wrong) + one at_gate (correct).
+	entries := []struct {
+		runID    string
+		fbType   string
+		fbTime   string
+		correct  bool
+	}{
+		{"plr_r1", "remediation", "post_incident", true},
+		{"plr_r2", "remediation", "post_incident", false},
+		{"plr_r3", "remediation", "at_gate", true},
+	}
+	for _, e := range entries {
+		if err := store.Submit(ctx, &RunFeedback{
+			RunID:          e.runID,
+			FeedbackType:   e.fbType,
+			FeedbackTime:   e.fbTime,
+			SeriesID:       seriesID,
+			VerdictCorrect: boolPtr(e.correct),
+			Operator:       "test",
+		}); err != nil {
+			t.Fatalf("Submit %s/%s/%s: %v", e.runID, e.fbType, e.fbTime, err)
+		}
+	}
+
+	// Also add a triage entry to confirm remediation fields are counted separately.
+	if err := store.Submit(ctx, &RunFeedback{
+		RunID: "plr_r1", FeedbackType: "triage", FeedbackTime: "post_incident",
+		SeriesID: seriesID, VerdictCorrect: boolPtr(true), Operator: "test",
+	}); err != nil {
+		t.Fatalf("Submit triage: %v", err)
+	}
+
+	stats, err := store.StatsBySeries(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("StatsBySeries: %v", err)
+	}
+
+	// Triage totals: 1 run.
+	if stats.FeedbackCount != 1 {
+		t.Errorf("FeedbackCount (triage): got %d, want 1", stats.FeedbackCount)
+	}
+
+	// Remediation totals: 3 runs (2 post_incident + 1 at_gate), 2 correct.
+	if stats.RemediationFeedbackCount != 3 {
+		t.Errorf("RemediationFeedbackCount: got %d, want 3", stats.RemediationFeedbackCount)
+	}
+	if stats.RemediationCorrectCount != 2 {
+		t.Errorf("RemediationCorrectCount: got %d, want 2", stats.RemediationCorrectCount)
+	}
+	wantRate := 2.0 / 3.0
+	if diff := stats.RemediationAccuracyRate - wantRate; diff < -0.001 || diff > 0.001 {
+		t.Errorf("RemediationAccuracyRate: got %.4f, want %.4f", stats.RemediationAccuracyRate, wantRate)
+	}
+
+	// Per-time breakdown.
+	if stats.RemediationAtGateCount != 1 || stats.RemediationAtGateCorrect != 1 {
+		t.Errorf("RemediationAtGate: got %d/%d, want 1/1", stats.RemediationAtGateCorrect, stats.RemediationAtGateCount)
+	}
+	if stats.RemediationPostIncidentCount != 2 || stats.RemediationPostIncidentCorrect != 1 {
+		t.Errorf("RemediationPostIncident: got %d/%d, want 1/2", stats.RemediationPostIncidentCorrect, stats.RemediationPostIncidentCount)
+	}
+}
+
 func TestRunFeedbackStore_StatsBySeries_NilVerdictNotCounted(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newRunFeedbackStore(t)

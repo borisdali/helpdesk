@@ -311,6 +311,68 @@ WHERE ev.remediation_score > 0
 
 // GetByRunID retrieves evaluation scores for a specific playbook run.
 // Returns sql.ErrNoRows when no evaluation has been recorded.
+// FaultRunEntry is a lightweight record used by the fault-run-history endpoint.
+// It carries just enough data for the drift calculation on the faulttest side.
+type FaultRunEntry struct {
+	RunID     string    `json:"run_id"`
+	FailureID string    `json:"failure_id"`
+	Timestamp time.Time `json:"timestamp"`
+	Passed    bool      `json:"passed"`
+}
+
+// ListHistory returns recent FaultRunEntry rows from run_evaluation, filtered
+// by sinceDays (required) and optionally by faultID. Only rows with a non-empty
+// failure_id are returned so that runs that predate gap-2 are excluded.
+func (s *RunEvaluationStore) ListHistory(ctx context.Context, sinceDays int, faultID string) ([]*FaultRunEntry, error) {
+	var (
+		query string
+		args  []any
+	)
+	cutoff := time.Now().UTC().AddDate(0, 0, -sinceDays).Format(time.RFC3339Nano)
+	if faultID != "" {
+		query = rebind(s.isPostgres, `
+SELECT run_id, failure_id, passed, created_at
+FROM run_evaluation
+WHERE failure_id = ?
+  AND failure_id != ''
+  AND created_at >= ?
+ORDER BY created_at ASC`)
+		args = []any{faultID, cutoff}
+	} else {
+		query = rebind(s.isPostgres, `
+SELECT run_id, failure_id, passed, created_at
+FROM run_evaluation
+WHERE failure_id != ''
+  AND created_at >= ?
+ORDER BY created_at ASC`)
+		args = []any{cutoff}
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list fault run history: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*FaultRunEntry
+	for rows.Next() {
+		var e FaultRunEntry
+		var passedInt int
+		var createdStr string
+		if err := rows.Scan(&e.RunID, &e.FailureID, &passedInt, &createdStr); err != nil {
+			return nil, fmt.Errorf("scan fault run history: %w", err)
+		}
+		e.Passed = passedInt != 0
+		if createdStr != "" {
+			if t, err := time.Parse(time.RFC3339Nano, createdStr); err == nil {
+				e.Timestamp = t
+			}
+		}
+		out = append(out, &e)
+	}
+	return out, rows.Err()
+}
+
 func (s *RunEvaluationStore) GetByRunID(ctx context.Context, runID string) (*RunEvaluation, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 SELECT run_id, failure_id, failure_name, keyword_score, tool_score, diagnosis_score,

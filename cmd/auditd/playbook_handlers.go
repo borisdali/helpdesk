@@ -112,6 +112,9 @@ func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
 							st.FeedbackCount = fbStats.FeedbackCount
 							st.CorrectCount = fbStats.CorrectCount
 							st.AccuracyRate = fbStats.AccuracyRate
+							st.RemediationFeedbackCount = fbStats.RemediationFeedbackCount
+							st.RemediationCorrectCount = fbStats.RemediationCorrectCount
+							st.RemediationAccuracyRate = fbStats.RemediationAccuracyRate
 						}
 					}
 					pb.Stats = st

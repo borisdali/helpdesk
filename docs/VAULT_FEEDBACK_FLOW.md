@@ -51,14 +51,14 @@ faulttest run
 
 ## Feedback reference
 
-Four combinations exist in the schema. Three are currently captured by faulttest; one is schema-ready for future use.
+All four combinations are implemented and captured by faulttest.
 
-| # | `feedback_type` | `feedback_time` | Question asked | When captured | Status |
-|---|-----------------|-----------------|----------------|---------------|--------|
-| 1 | `triage` | `at_gate` | Is the diagnosis correct? | At the triage→remediation gate, **before** remediation runs | ✓ implemented |
-| 2 | `triage` | `post_incident` | Was the diagnosis correct? | After recovery completes | ✓ implemented |
-| 3 | `remediation` | `post_incident` | Was the remediation approach appropriate? | After recovery completes | ✓ implemented |
-| 4 | `remediation` | `at_gate` | Is the remediation approach appropriate? | At the same gate as #1 — the proposed steps are already visible there | schema-ready, not yet captured |
+| # | `feedback_type` | `feedback_time` | Question asked | When captured |
+|---|-----------------|-----------------|----------------|---------------|
+| 1 | `triage` | `at_gate` | Was the diagnosis correct? | At the triage→remediation gate, **before** remediation runs |
+| 2 | `triage` | `post_incident` | Was the diagnosis correct? | After recovery completes |
+| 3 | `remediation` | `post_incident` | Was the remediation approach appropriate? | After recovery completes |
+| 4 | `remediation` | `at_gate` | Is the remediation approach appropriate? | At the same gate as #1 — asked immediately after Q1, before remediation runs |
 
 **Why `triage/at_gate` is the highest-quality signal:**  
 It is captured before the operator knows whether remediation succeeded. Post-incident feedback is contaminated by outcome bias — an operator who just saw a 12-second recovery is more likely to confirm the diagnosis regardless of whether it was actually correct. At-gate feedback has no such bias, so `vault calibration` prefers it over post-incident when both exist for the same run.
@@ -88,21 +88,21 @@ curl -sX POST "$GATEWAY/api/v1/fleet/playbook-runs/$RUN_ID/feedback" \
 
 | Command | Question answered | Data source | Uses feedback? | Requires gateway? |
 |---------|------------------|-------------|:--------------:|:-----------------:|
-| `vault drift` | Which faults are regressing over time? | `~/.faulttest/history.json` | Optional¹ | No |
+| `vault drift` | Which faults are regressing over time? | Local `~/.faulttest/history.json` (default) or auditd via `--gateway` | Optional¹ | No (local) / Yes (gateway) |
 | `vault versions` | Did a playbook version change help or hurt? | auditd `playbook_runs` + `run_evaluation` | No | Yes |
-| `vault accuracy` | How often does the agent diagnose correctly? | `run_feedback` (triage only) | Yes — triage | Yes |
+| `vault accuracy` | How often does the agent diagnose/remediate correctly? | `run_feedback` (triage + remediation) | Yes — triage + remediation | Yes |
 | `vault calibration` | Can I trust the automated scores? | `run_evaluation` + `run_feedback` | Yes — triage + remediation | Yes |
 
-¹ `vault drift` can optionally fetch `triage` accuracy from the gateway to show an ACCURACY column alongside drift data, but its core signal (pass-rate decline) comes from local history alone.
+¹ `vault drift` with `--gateway` reads fleet-wide run history from auditd (`fault-run-history` endpoint) instead of the local file, giving a multi-machine view. Without `--gateway` it reads local history and can optionally enrich drifted faults with triage accuracy from the gateway.
 
 ### Which feedback each command consumes
 
-| Command | `triage/at_gate` | `triage/post_incident` | `remediation/post_incident` |
-|---------|:----------------:|:----------------------:|:---------------------------:|
-| `vault drift` | optional enrichment | optional enrichment | — |
-| `vault versions` | — | — | — |
-| `vault accuracy` | ✓ | ✓ | — |
-| `vault calibration` | ✓ preferred | ✓ fallback | ✓ |
+| Command | `triage/at_gate` | `triage/post_incident` | `remediation/at_gate` | `remediation/post_incident` |
+|---------|:----------------:|:----------------------:|:---------------------:|:---------------------------:|
+| `vault drift` | — | — | — | — |
+| `vault versions` | — | — | — | — |
+| `vault accuracy` | ✓ | ✓ | ✓ | ✓ |
+| `vault calibration` | ✓ preferred | ✓ fallback | ✓ preferred | ✓ fallback |
 
 ---
 
@@ -207,6 +207,7 @@ FEEDBACK — what to submit and when
 ───────────────────────────────────────────────────────────────────────────
   At the escalation gate (before remediation)
     → "Was the diagnosis correct?"           triage / at_gate      [best signal]
+    → "Is the remediation approach right?"   remediation / at_gate [best signal]
 
   After recovery (interactive faulttest, or via API)
     → "Was the diagnosis correct?"           triage / post_incident
@@ -214,15 +215,15 @@ FEEDBACK — what to submit and when
 
 COMMANDS — what question each answers
 ───────────────────────────────────────────────────────────────────────────
-  vault drift          Which faults are regressing?      (local history, no gateway)
-  vault versions       Did the playbook version improve? (auditd, no feedback needed)
-  vault accuracy       Is the diagnosis correct?         (triage feedback only)
-  vault calibration    Can I trust the scores?           (eval + triage + remediation feedback)
+  vault drift          Which faults are regressing?       (local default; --gateway for fleet-wide)
+  vault versions       Did the playbook version improve?  (auditd, no feedback needed)
+  vault accuracy       Are diagnosis/remediation correct? (triage + remediation feedback)
+  vault calibration    Can I trust the scores?            (eval + triage + remediation feedback)
 
 DEPENDENCY CHAIN
 ───────────────────────────────────────────────────────────────────────────
   drift  →  identifies which fault to look at
   versions  →  correlates regression to a playbook version
-  accuracy  →  checks whether diagnosis quality actually dropped
+  accuracy  →  checks whether diagnosis and remediation quality actually dropped
   calibration  →  validates whether the scores you're reading are reliable
 ```

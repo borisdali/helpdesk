@@ -422,6 +422,21 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 		}
 		g.proxyToAuditd(w, r, path)
 	}))
+	mux.HandleFunc("GET /api/v1/fleet/fault-run-history", auth("GET /api/v1/fleet/fault-run-history", func(w http.ResponseWriter, r *http.Request) {
+		path := "/v1/fleet/fault-run-history"
+		q := r.URL.Query()
+		var parts []string
+		if v := q.Get("since_days"); v != "" {
+			parts = append(parts, "since_days="+v)
+		}
+		if v := q.Get("fault_id"); v != "" {
+			parts = append(parts, "fault_id="+v)
+		}
+		if len(parts) > 0 {
+			path += "?" + strings.Join(parts, "&")
+		}
+		g.proxyToAuditd(w, r, path)
+	}))
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))

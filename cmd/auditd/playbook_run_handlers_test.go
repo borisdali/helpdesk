@@ -986,3 +986,81 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 		t.Errorf("remediation 90-100%% Calibration = %q, want OVERCONFIDENT", report.RemediationBands[0].Calibration)
 	}
 }
+
+func TestPlaybookRunHandlers_FaultRunHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	evalStore, err := audit.NewRunEvaluationStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	srv := &playbookRunServer{evaluationStore: evalStore}
+
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		runID     string
+		failureID string
+		passed    bool
+		ago       time.Duration
+	}{
+		{"plr_fh1", "db-lock-contention", true, 5 * 24 * time.Hour},
+		{"plr_fh2", "db-lock-contention", false, 2 * 24 * time.Hour},
+		{"plr_fh3", "k8s-pod-crashloop", true, 3 * 24 * time.Hour},
+		// Outside 30-day window — must not appear.
+		{"plr_fh4", "db-lock-contention", true, 60 * 24 * time.Hour},
+		// Empty failure_id — must be excluded.
+		{"plr_fh5", "", true, 1 * 24 * time.Hour},
+	} {
+		if err := evalStore.Upsert(ctx, &audit.RunEvaluation{
+			RunID: tc.runID, FailureID: tc.failureID, Passed: tc.passed,
+			CreatedAt: now.Add(-tc.ago),
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", tc.runID, err)
+		}
+	}
+
+	// All faults, 30-day window.
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-run-history?since_days=30", nil)
+	rec := httptest.NewRecorder()
+	srv.handleFaultRunHistory(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Entries []struct {
+			RunID     string `json:"run_id"`
+			FailureID string `json:"failure_id"`
+			Passed    bool   `json:"passed"`
+		} `json:"entries"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Entries) != 3 {
+		t.Errorf("entries = %d, want 3 (plr_fh1/fh2/fh3)", len(result.Entries))
+	}
+
+	// Filter by fault_id.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-run-history?since_days=30&fault_id=db-lock-contention", nil)
+	rec2 := httptest.NewRecorder()
+	srv.handleFaultRunHistory(rec2, req2.WithContext(ctx))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("filtered status = %d", rec2.Code)
+	}
+	var result2 struct {
+		Entries []struct{ FailureID string `json:"failure_id"` } `json:"entries"`
+	}
+	if err := json.NewDecoder(rec2.Body).Decode(&result2); err != nil {
+		t.Fatalf("decode filtered: %v", err)
+	}
+	if len(result2.Entries) != 2 {
+		t.Errorf("filtered entries = %d, want 2", len(result2.Entries))
+	}
+}

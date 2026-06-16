@@ -223,6 +223,13 @@ func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) 
 			stats.PostIncidentCount = fbStats.PostIncidentCount
 			stats.PostIncidentCorrect = fbStats.PostIncidentCorrect
 			stats.PostIncidentAccuracyRate = fbStats.PostIncidentAccuracyRate
+			stats.RemediationFeedbackCount = fbStats.RemediationFeedbackCount
+			stats.RemediationCorrectCount = fbStats.RemediationCorrectCount
+			stats.RemediationAccuracyRate = fbStats.RemediationAccuracyRate
+			stats.RemediationAtGateCount = fbStats.RemediationAtGateCount
+			stats.RemediationAtGateCorrect = fbStats.RemediationAtGateCorrect
+			stats.RemediationPostIncidentCount = fbStats.RemediationPostIncidentCount
+			stats.RemediationPostIncidentCorrect = fbStats.RemediationPostIncidentCorrect
 		}
 	}
 
@@ -396,6 +403,37 @@ func (s *playbookRunServer) handleCalibration(w http.ResponseWriter, r *http.Req
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(report) //nolint:errcheck
+}
+
+// handleFaultRunHistory handles GET /v1/fleet/fault-run-history.
+// Returns lightweight pass/fail history per fault, used by `vault drift --gateway`.
+// Query params:
+//
+//	since_days int    (default 90) — how far back to look
+//	fault_id   string (optional)   — filter to a single fault
+func (s *playbookRunServer) handleFaultRunHistory(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	sinceDays := 90
+	if v := r.URL.Query().Get("since_days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			sinceDays = n
+		}
+	}
+	faultID := r.URL.Query().Get("fault_id")
+	entries, err := s.evaluationStore.ListHistory(r.Context(), sinceDays, faultID)
+	if err != nil {
+		slog.Error("failed to list fault run history", "err", err)
+		http.Error(w, "failed to list fault run history", http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []*audit.FaultRunEntry{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"entries": entries}) //nolint:errcheck
 }
 
 func (s *playbookRunServer) handleListPendingFeedback(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -189,6 +190,15 @@ type playbookGatewayInfo struct {
 	postIncidentCount        int
 	postIncidentCorrect      int
 	postIncidentAccuracyRate float64
+
+	// Remediation feedback fields.
+	remediationFeedbackCount       int
+	remediationCorrectCount        int
+	remediationAccuracyRate        float64
+	remediationAtGateCount         int
+	remediationAtGateCorrect       int
+	remediationPostIncidentCount   int
+	remediationPostIncidentCorrect int
 }
 
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
@@ -237,6 +247,14 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 				PostIncidentCount        int     `json:"post_incident_count"`
 				PostIncidentCorrect      int     `json:"post_incident_correct"`
 				PostIncidentAccuracyRate float64 `json:"post_incident_accuracy_rate"`
+
+				RemediationFeedbackCount       int     `json:"remediation_feedback_count"`
+				RemediationCorrectCount        int     `json:"remediation_correct_count"`
+				RemediationAccuracyRate        float64 `json:"remediation_accuracy_rate"`
+				RemediationAtGateCount         int     `json:"remediation_at_gate_count"`
+				RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
+				RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
+				RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
 			} `json:"stats"`
 		} `json:"playbooks"`
 	}
@@ -258,6 +276,13 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 		info.postIncidentCount = s.PostIncidentCount
 		info.postIncidentCorrect = s.PostIncidentCorrect
 		info.postIncidentAccuracyRate = s.PostIncidentAccuracyRate
+		info.remediationFeedbackCount = s.RemediationFeedbackCount
+		info.remediationCorrectCount = s.RemediationCorrectCount
+		info.remediationAccuracyRate = s.RemediationAccuracyRate
+		info.remediationAtGateCount = s.RemediationAtGateCount
+		info.remediationAtGateCorrect = s.RemediationAtGateCorrect
+		info.remediationPostIncidentCount = s.RemediationPostIncidentCount
+		info.remediationPostIncidentCorrect = s.RemediationPostIncidentCorrect
 	}
 	return info
 }
@@ -549,6 +574,67 @@ func vaultStatus(args []string) {
 
 // ── vault drift ───────────────────────────────────────────────────────────
 
+// fetchFaultRunHistory calls the gateway fault-run-history endpoint and returns
+// a faultStats map keyed by failure_id, split into first/second halves by mid.
+func fetchFaultRunHistory(gatewayURL, apiKey string, sinceDays int, faultID string, cutoff, mid time.Time) (map[string]*struct{ firstHalf, secondHalf []bool }, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-run-history" +
+		"?since_days=" + strconv.Itoa(sinceDays)
+	if faultID != "" {
+		u += "&fault_id=" + faultID
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fault-run-history: HTTP %d", resp.StatusCode)
+	}
+	var result struct {
+		Entries []struct {
+			RunID     string `json:"run_id"`
+			FailureID string `json:"failure_id"`
+			Timestamp string `json:"timestamp"`
+			Passed    bool   `json:"passed"`
+		} `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	type faultHalves struct{ firstHalf, secondHalf []bool }
+	out := make(map[string]*faultHalves)
+	for _, e := range result.Entries {
+		ts, err := time.Parse(time.RFC3339Nano, e.Timestamp)
+		if err != nil {
+			ts, err = time.Parse(time.RFC3339, e.Timestamp)
+			if err != nil || ts.Before(cutoff) {
+				continue
+			}
+		}
+		if _, ok := out[e.FailureID]; !ok {
+			out[e.FailureID] = &faultHalves{}
+		}
+		if ts.Before(mid) {
+			out[e.FailureID].firstHalf = append(out[e.FailureID].firstHalf, e.Passed)
+		} else {
+			out[e.FailureID].secondHalf = append(out[e.FailureID].secondHalf, e.Passed)
+		}
+	}
+	// Re-key as map[string]*struct{firstHalf, secondHalf []bool}
+	result2 := make(map[string]*struct{ firstHalf, secondHalf []bool }, len(out))
+	for k, v := range out {
+		result2[k] = &struct{ firstHalf, secondHalf []bool }{v.firstHalf, v.secondHalf}
+	}
+	return result2, nil
+}
+
 func vaultDrift(args []string) {
 	fs := flag.NewFlagSet("vault drift", flag.ExitOnError)
 	var sinceDays int
@@ -556,16 +642,6 @@ func vaultDrift(args []string) {
 	fs.IntVar(&sinceDays, "since-days", 90, "Days of history to analyze")
 	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
 	cfg := loadConfig(fs, args)
-
-	runs, err := loadHistory()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if len(runs) == 0 {
-		fmt.Println("No history found.")
-		return
-	}
 
 	cutoff := time.Now().AddDate(0, 0, -sinceDays)
 	mid := cutoff.Add(time.Duration(sinceDays) * 24 * time.Hour / 2)
@@ -576,22 +652,48 @@ func vaultDrift(args []string) {
 	}
 	stats := make(map[string]*faultStats)
 
-	for _, run := range runs {
-		if target != "" && run.Target != target {
-			continue
+	if cfg.GatewayURL != "" {
+		// Gateway path: read from auditd fleet-wide history instead of local file.
+		gwStats, err := fetchFaultRunHistory(cfg.GatewayURL, cfg.GatewayAPIKey, sinceDays, "", cutoff, mid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching fault run history from gateway: %v\n", err)
+			os.Exit(1)
 		}
-		t, err := time.Parse(time.RFC3339, run.Timestamp)
-		if err != nil || t.Before(cutoff) {
-			continue
+		for id, s := range gwStats {
+			stats[id] = &faultStats{firstHalf: s.firstHalf, secondHalf: s.secondHalf}
 		}
-		for _, r := range run.Results {
-			if _, ok := stats[r.FailureID]; !ok {
-				stats[r.FailureID] = &faultStats{}
+		if len(stats) == 0 {
+			fmt.Println("No history found in gateway (runs need --gateway set when they were posted).")
+			return
+		}
+	} else {
+		// Local path: read from ~/.faulttest/history.json.
+		runs, err := loadHistory()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(runs) == 0 {
+			fmt.Println("No history found.")
+			return
+		}
+		for _, run := range runs {
+			if target != "" && run.Target != target {
+				continue
 			}
-			if t.Before(mid) {
-				stats[r.FailureID].firstHalf = append(stats[r.FailureID].firstHalf, r.Passed)
-			} else {
-				stats[r.FailureID].secondHalf = append(stats[r.FailureID].secondHalf, r.Passed)
+			t, err := time.Parse(time.RFC3339, run.Timestamp)
+			if err != nil || t.Before(cutoff) {
+				continue
+			}
+			for _, r := range run.Results {
+				if _, ok := stats[r.FailureID]; !ok {
+					stats[r.FailureID] = &faultStats{}
+				}
+				if t.Before(mid) {
+					stats[r.FailureID].firstHalf = append(stats[r.FailureID].firstHalf, r.Passed)
+				} else {
+					stats[r.FailureID].secondHalf = append(stats[r.FailureID].secondHalf, r.Passed)
+				}
 			}
 		}
 	}
@@ -804,6 +906,29 @@ func vaultAccuracy(args []string) {
 				info.postIncidentCorrect, info.postIncidentCount, info.postIncidentAccuracyRate*100)
 		}
 	}
+
+	// Remediation approach accuracy when feedback exists.
+	if info.remediationFeedbackCount > 0 {
+		fmt.Println()
+		fmt.Printf("  Remediation approach accuracy\n")
+		fmt.Printf("  Feedback submitted : %d runs\n", info.remediationFeedbackCount)
+		fmt.Printf("  Appropriate        : %d\n", info.remediationCorrectCount)
+		fmt.Printf("  Accuracy rate      : %.0f%%\n", info.remediationAccuracyRate*100)
+		if info.remediationAtGateCount > 0 || info.remediationPostIncidentCount > 0 {
+			fmt.Println()
+			fmt.Println("  Breakdown by feedback time:")
+			if info.remediationAtGateCount > 0 {
+				fmt.Printf("    At-gate (before remediation) : %d of %d appropriate (%.0f%%)\n",
+					info.remediationAtGateCorrect, info.remediationAtGateCount,
+					float64(info.remediationAtGateCorrect)/float64(info.remediationAtGateCount)*100)
+			}
+			if info.remediationPostIncidentCount > 0 {
+				fmt.Printf("    Post-incident (after recovery): %d of %d appropriate (%.0f%%)\n",
+					info.remediationPostIncidentCorrect, info.remediationPostIncidentCount,
+					float64(info.remediationPostIncidentCorrect)/float64(info.remediationPostIncidentCount)*100)
+			}
+		}
+	}
 }
 
 // vaultAccuracyAll is the no-arg mode: scans every catalog fault that has a
@@ -817,13 +942,16 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 	}
 
 	type entry struct {
-		faultID              string
-		seriesID             string
-		atGateCount          int
-		atGateCorrect        int
-		postIncidentCount    int
-		postIncidentCorrect  int
-		rate                 float64
+		faultID                        string
+		seriesID                       string
+		atGateCount                    int
+		atGateCorrect                  int
+		postIncidentCount              int
+		postIncidentCorrect            int
+		rate                           float64
+		remediationFeedbackCount       int
+		remediationCorrectCount        int
+		remediationAccuracyRate        float64
 	}
 
 	seen := make(map[string]bool)
@@ -842,6 +970,9 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 			e.postIncidentCount = info.postIncidentCount
 			e.postIncidentCorrect = info.postIncidentCorrect
 			e.rate = info.accuracyRate
+			e.remediationFeedbackCount = info.remediationFeedbackCount
+			e.remediationCorrectCount = info.remediationCorrectCount
+			e.remediationAccuracyRate = info.remediationAccuracyRate
 		}
 		if e.atGateCount+e.postIncidentCount > 0 {
 			withFeedback = append(withFeedback, e)
@@ -862,17 +993,25 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 		return fmt.Sprintf("%d/%d", correct, total)
 	}
 
+	fmtAccuracy := func(rate float64, count int) string {
+		if count == 0 {
+			return "–"
+		}
+		return fmt.Sprintf("%.0f%%", rate*100)
+	}
+
 	if len(withFeedback) > 0 {
 		colFault := 36
 		colSeries := 36
-		fmt.Printf("  %-*s %-*s %9s %9s %s\n", colFault, "FAULT", colSeries, "SERIES", "AT-GATE", "POST-INC", "ACCURACY")
-		fmt.Printf("  %-*s %-*s %9s %9s %s\n", colFault, strings.Repeat("─", colFault), colSeries, strings.Repeat("─", colSeries), "─────────", "────────", "────────")
+		fmt.Printf("  %-*s %-*s %9s %9s %9s %9s\n", colFault, "FAULT", colSeries, "SERIES", "AT-GATE", "POST-INC", "DIAG ACC", "REMED ACC")
+		fmt.Printf("  %-*s %-*s %9s %9s %9s %9s\n", colFault, strings.Repeat("─", colFault), colSeries, strings.Repeat("─", colSeries), "─────────", "────────", "────────", "─────────")
 		for _, e := range withFeedback {
-			fmt.Printf("  %-*s %-*s %9s %9s   %.0f%%\n",
+			fmt.Printf("  %-*s %-*s %9s %9s %9s %9s\n",
 				colFault, e.faultID, colSeries, e.seriesID,
 				fmtBreakdown(e.atGateCorrect, e.atGateCount),
 				fmtBreakdown(e.postIncidentCorrect, e.postIncidentCount),
-				e.rate*100)
+				fmtAccuracy(e.rate, e.atGateCount+e.postIncidentCount),
+				fmtAccuracy(e.remediationAccuracyRate, e.remediationFeedbackCount))
 		}
 		fmt.Println()
 		fmt.Println("  Run `faulttest vault accuracy <series_id or fault_id>` for the full breakdown.")

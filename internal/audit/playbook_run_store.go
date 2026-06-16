@@ -65,6 +65,15 @@ type PlaybookRunStats struct {
 	PostIncidentCount        int     `json:"post_incident_count"`
 	PostIncidentCorrect      int     `json:"post_incident_correct"`
 	PostIncidentAccuracyRate float64 `json:"post_incident_accuracy_rate,omitempty"`
+
+	// Remediation feedback fields — populated when remediation feedback exists.
+	RemediationFeedbackCount       int     `json:"remediation_feedback_count"`
+	RemediationCorrectCount        int     `json:"remediation_correct_count"`
+	RemediationAccuracyRate        float64 `json:"remediation_accuracy_rate,omitempty"`
+	RemediationAtGateCount         int     `json:"remediation_at_gate_count"`
+	RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
+	RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
+	RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
 }
 
 // PlaybookVersionStats summarises run history broken down by playbook version.
