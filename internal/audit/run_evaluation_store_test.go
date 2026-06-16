@@ -245,7 +245,8 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 		t.Errorf("TotalRuns after adding eval-only run = %d, want 6 (no feedback → excluded)", reportAfter.TotalRuns)
 	}
 
-	// at_gate feedback must NOT count — calibration uses post_incident only.
+	// at_gate feedback counts — calibration now includes both at_gate and post_incident,
+	// preferring at_gate. plr_c_gate has score 0.93 (90-100% band) and correct=true.
 	atGateRun := &RunEvaluation{
 		RunID: "plr_c_gate", FailureID: "db-lock", DiagnosisScore: 0.93, OverallScore: 0.93,
 	}
@@ -263,8 +264,33 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CalibrationBands after at_gate: %v", err)
 	}
-	if reportGate.TotalRuns != 6 {
-		t.Errorf("TotalRuns after at_gate feedback = %d, want 6 (at_gate excluded)", reportGate.TotalRuns)
+	// at_gate runs now count, so TotalRuns grows to 7.
+	if reportGate.TotalRuns != 7 {
+		t.Errorf("TotalRuns after at_gate feedback = %d, want 7 (at_gate counted)", reportGate.TotalRuns)
+	}
+	// 90-100% band: previously 3 runs / 2 correct; now 4 runs / 3 correct (plr_c_gate added).
+	b90Gate := reportGate.Bands[0]
+	if b90Gate.Runs != 4 || b90Gate.Correct != 3 {
+		t.Errorf("90-100%% after at_gate: Runs=%d Correct=%d, want Runs=4 Correct=3", b90Gate.Runs, b90Gate.Correct)
+	}
+
+	// Verify at_gate is preferred when a run has BOTH at_gate and post_incident feedback.
+	// plr_c_gate already has at_gate=true; add post_incident=false — at_gate must win.
+	fa2 := false
+	if err := fbStore.Submit(ctx, &RunFeedback{
+		RunID: "plr_c_gate", SeriesID: seriesID, FeedbackType: "triage", FeedbackTime: "post_incident",
+		VerdictCorrect: &fa2,
+	}); err != nil {
+		t.Fatalf("Submit post_incident feedback for plr_c_gate: %v", err)
+	}
+	reportBoth, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands with both feedbacks: %v", err)
+	}
+	// at_gate wins → correct count unchanged (still 3, not 2).
+	b90Both := reportBoth.Bands[0]
+	if b90Both.Runs != 4 || b90Both.Correct != 3 {
+		t.Errorf("90-100%% (both feedbacks): Runs=%d Correct=%d, want Runs=4 Correct=3 (at_gate preferred)", b90Both.Runs, b90Both.Correct)
 	}
 
 	// Pending feedback (verdict_correct = NULL) must NOT count.
@@ -284,8 +310,8 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CalibrationBands after pending: %v", err)
 	}
-	if reportPend.TotalRuns != 6 {
-		t.Errorf("TotalRuns after pending feedback = %d, want 6 (NULL verdict excluded)", reportPend.TotalRuns)
+	if reportPend.TotalRuns != 7 {
+		t.Errorf("TotalRuns after pending feedback = %d, want 7 (NULL verdict excluded)", reportPend.TotalRuns)
 	}
 }
 

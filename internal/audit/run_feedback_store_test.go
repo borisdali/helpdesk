@@ -222,7 +222,8 @@ func TestRunFeedbackStore_StatsBySeries(t *testing.T) {
 		}
 	}
 
-	// at_gate rows for same runs should NOT be counted in StatsBySeries.
+	// at_gate rows ARE now counted in StatsBySeries (both feedback_time values are included).
+	// plr_a gets an at_gate=true entry; combined total becomes 4 runs / 3 correct.
 	if err := store.Submit(ctx, &RunFeedback{
 		RunID: "plr_a", FeedbackType: "triage", FeedbackTime: "at_gate",
 		SeriesID: seriesID, VerdictCorrect: boolPtr(true), Operator: "test",
@@ -234,15 +235,30 @@ func TestRunFeedbackStore_StatsBySeries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StatsBySeries: %v", err)
 	}
-	if stats.FeedbackCount != 3 {
-		t.Errorf("FeedbackCount: got %d, want 3", stats.FeedbackCount)
+	// Combined totals: 3 post_incident + 1 at_gate = 4 runs, 3 correct.
+	if stats.FeedbackCount != 4 {
+		t.Errorf("FeedbackCount: got %d, want 4", stats.FeedbackCount)
 	}
-	if stats.CorrectCount != 2 {
-		t.Errorf("CorrectCount: got %d, want 2", stats.CorrectCount)
+	if stats.CorrectCount != 3 {
+		t.Errorf("CorrectCount: got %d, want 3", stats.CorrectCount)
 	}
-	want := 2.0 / 3.0
+	want := 3.0 / 4.0
 	if diff := stats.AccuracyRate - want; diff < -0.001 || diff > 0.001 {
 		t.Errorf("AccuracyRate: got %.4f, want %.4f", stats.AccuracyRate, want)
+	}
+	// Per-time breakdown.
+	if stats.AtGateCount != 1 || stats.AtGateCorrect != 1 {
+		t.Errorf("AtGate: got %d/%d, want 1/1", stats.AtGateCorrect, stats.AtGateCount)
+	}
+	if stats.AtGateAccuracyRate != 1.0 {
+		t.Errorf("AtGateAccuracyRate: got %.4f, want 1.0", stats.AtGateAccuracyRate)
+	}
+	if stats.PostIncidentCount != 3 || stats.PostIncidentCorrect != 2 {
+		t.Errorf("PostIncident: got %d/%d, want 2/3", stats.PostIncidentCorrect, stats.PostIncidentCount)
+	}
+	wantPost := 2.0 / 3.0
+	if diff := stats.PostIncidentAccuracyRate - wantPost; diff < -0.001 || diff > 0.001 {
+		t.Errorf("PostIncidentAccuracyRate: got %.4f, want %.4f", stats.PostIncidentAccuracyRate, wantPost)
 	}
 }
 

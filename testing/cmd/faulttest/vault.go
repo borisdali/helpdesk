@@ -182,6 +182,13 @@ type playbookGatewayInfo struct {
 	feedbackCount  int
 	correctCount   int
 	accuracyRate   float64 // 0.0–1.0; valid only when feedbackCount > 0
+
+	atGateCount              int
+	atGateCorrect            int
+	atGateAccuracyRate       float64
+	postIncidentCount        int
+	postIncidentCorrect      int
+	postIncidentAccuracyRate float64
 }
 
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
@@ -223,6 +230,13 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 				FeedbackCount  int     `json:"feedback_count"`
 				CorrectCount   int     `json:"correct_count"`
 				AccuracyRate   float64 `json:"accuracy_rate"`
+
+				AtGateCount              int     `json:"at_gate_count"`
+				AtGateCorrect            int     `json:"at_gate_correct"`
+				AtGateAccuracyRate       float64 `json:"at_gate_accuracy_rate"`
+				PostIncidentCount        int     `json:"post_incident_count"`
+				PostIncidentCorrect      int     `json:"post_incident_correct"`
+				PostIncidentAccuracyRate float64 `json:"post_incident_accuracy_rate"`
 			} `json:"stats"`
 		} `json:"playbooks"`
 	}
@@ -238,6 +252,12 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 		info.feedbackCount = s.FeedbackCount
 		info.correctCount = s.CorrectCount
 		info.accuracyRate = s.AccuracyRate
+		info.atGateCount = s.AtGateCount
+		info.atGateCorrect = s.AtGateCorrect
+		info.atGateAccuracyRate = s.AtGateAccuracyRate
+		info.postIncidentCount = s.PostIncidentCount
+		info.postIncidentCorrect = s.PostIncidentCorrect
+		info.postIncidentAccuracyRate = s.PostIncidentAccuracyRate
 	}
 	return info
 }
@@ -770,6 +790,20 @@ func vaultAccuracy(args []string) {
 	fmt.Printf("  Feedback submitted : %d runs\n", info.feedbackCount)
 	fmt.Printf("  Correct diagnoses  : %d\n", info.correctCount)
 	fmt.Printf("  Accuracy rate      : %.0f%%\n", info.accuracyRate*100)
+
+	// Breakdown by feedback time when at least one type has data.
+	if info.atGateCount > 0 || info.postIncidentCount > 0 {
+		fmt.Println()
+		fmt.Println("  Breakdown by feedback time:")
+		if info.atGateCount > 0 {
+			fmt.Printf("    At-gate (before remediation) : %d of %d correct (%.0f%%)\n",
+				info.atGateCorrect, info.atGateCount, info.atGateAccuracyRate*100)
+		}
+		if info.postIncidentCount > 0 {
+			fmt.Printf("    Post-incident (after recovery): %d of %d correct (%.0f%%)\n",
+				info.postIncidentCorrect, info.postIncidentCount, info.postIncidentAccuracyRate*100)
+		}
+	}
 }
 
 // vaultAccuracyAll is the no-arg mode: scans every catalog fault that has a
@@ -783,11 +817,13 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 	}
 
 	type entry struct {
-		faultID  string
-		seriesID string
-		count    int
-		correct  int
-		rate     float64
+		faultID              string
+		seriesID             string
+		atGateCount          int
+		atGateCorrect        int
+		postIncidentCount    int
+		postIncidentCorrect  int
+		rate                 float64
 	}
 
 	seen := make(map[string]bool)
@@ -801,11 +837,13 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 		info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
 		e := entry{faultID: f.ID, seriesID: sid}
 		if info.check == playbookFound {
-			e.count = info.feedbackCount
-			e.correct = info.correctCount
+			e.atGateCount = info.atGateCount
+			e.atGateCorrect = info.atGateCorrect
+			e.postIncidentCount = info.postIncidentCount
+			e.postIncidentCorrect = info.postIncidentCorrect
 			e.rate = info.accuracyRate
 		}
-		if e.count > 0 {
+		if e.atGateCount+e.postIncidentCount > 0 {
 			withFeedback = append(withFeedback, e)
 		} else {
 			withoutFeedback = append(withoutFeedback, e)
@@ -817,13 +855,24 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 		return
 	}
 
+	fmtBreakdown := func(correct, total int) string {
+		if total == 0 {
+			return "–"
+		}
+		return fmt.Sprintf("%d/%d", correct, total)
+	}
+
 	if len(withFeedback) > 0 {
 		colFault := 36
 		colSeries := 36
-		fmt.Printf("  %-*s %-*s %8s %8s %s\n", colFault, "FAULT", colSeries, "SERIES", "FEEDBACK", "CORRECT", "ACCURACY")
-		fmt.Printf("  %-*s %-*s %8s %8s %s\n", colFault, strings.Repeat("─", colFault), colSeries, strings.Repeat("─", colSeries), "────────", "───────", "────────")
+		fmt.Printf("  %-*s %-*s %9s %9s %s\n", colFault, "FAULT", colSeries, "SERIES", "AT-GATE", "POST-INC", "ACCURACY")
+		fmt.Printf("  %-*s %-*s %9s %9s %s\n", colFault, strings.Repeat("─", colFault), colSeries, strings.Repeat("─", colSeries), "─────────", "────────", "────────")
 		for _, e := range withFeedback {
-			fmt.Printf("  %-*s %-*s %8d %8d   %.0f%%\n", colFault, e.faultID, colSeries, e.seriesID, e.count, e.correct, e.rate*100)
+			fmt.Printf("  %-*s %-*s %9s %9s   %.0f%%\n",
+				colFault, e.faultID, colSeries, e.seriesID,
+				fmtBreakdown(e.atGateCorrect, e.atGateCount),
+				fmtBreakdown(e.postIncidentCorrect, e.postIncidentCount),
+				e.rate*100)
 		}
 		fmt.Println()
 		fmt.Println("  Run `faulttest vault accuracy <series_id or fault_id>` for the full breakdown.")

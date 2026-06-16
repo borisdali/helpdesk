@@ -22,11 +22,21 @@ type RunFeedback struct {
 }
 
 // FeedbackStats aggregates feedback quality metrics for a playbook series.
+// Both at-gate and post-incident triage feedback are counted. AccuracyRate
+// combines both; AtGate* and PostIncident* give the per-time breakdown.
 type FeedbackStats struct {
 	SeriesID      string  `json:"series_id"`
-	FeedbackCount int     `json:"feedback_count"`
+	FeedbackCount int     `json:"feedback_count"` // total across both feedback times
 	CorrectCount  int     `json:"correct_count"`
-	AccuracyRate  float64 `json:"accuracy_rate"` // correct_count / feedback_count; 0 when no feedback
+	AccuracyRate  float64 `json:"accuracy_rate"`
+
+	AtGateCount          int     `json:"at_gate_count"`
+	AtGateCorrect        int     `json:"at_gate_correct"`
+	AtGateAccuracyRate   float64 `json:"at_gate_accuracy_rate,omitempty"`
+
+	PostIncidentCount          int     `json:"post_incident_count"`
+	PostIncidentCorrect        int     `json:"post_incident_correct"`
+	PostIncidentAccuracyRate   float64 `json:"post_incident_accuracy_rate,omitempty"`
 }
 
 // RunFeedbackStore persists operator feedback on playbook run quality.
@@ -227,33 +237,56 @@ ORDER BY submitted_at DESC`))
 	return out, rows.Err()
 }
 
-// StatsBySeries returns accuracy aggregates for post-incident triage feedback
-// for a playbook series. Only counts records where verdict_correct is set;
-// placeholder records (verdict_correct IS NULL) are excluded.
+// StatsBySeries returns accuracy aggregates for triage feedback for a playbook
+// series, broken down by feedback_time (at_gate / post_incident). Only counts
+// records where verdict_correct is set; placeholder records are excluded.
 func (s *RunFeedbackStore) StatsBySeries(ctx context.Context, seriesID string) (*FeedbackStats, error) {
-	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
 SELECT
-    COUNT(*) AS feedback_count,
-    COALESCE(SUM(CASE WHEN verdict_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_count
+    feedback_time,
+    COUNT(*) AS total,
+    COALESCE(SUM(CASE WHEN verdict_correct = 1 THEN 1 ELSE 0 END), 0) AS correct
 FROM run_feedback
 WHERE series_id = ?
   AND feedback_type = 'triage'
-  AND feedback_time = 'post_incident'
-  AND verdict_correct IS NOT NULL`), seriesID)
-	var total, correct int
-	if err := row.Scan(&total, &correct); err != nil {
+  AND verdict_correct IS NOT NULL
+GROUP BY feedback_time`), seriesID)
+	if err != nil {
 		return nil, fmt.Errorf("stats by series: %w", err)
 	}
-	rate := 0.0
-	if total > 0 {
-		rate = float64(correct) / float64(total)
+	defer rows.Close()
+
+	stats := &FeedbackStats{SeriesID: seriesID}
+	for rows.Next() {
+		var fbTime string
+		var total, correct int
+		if err := rows.Scan(&fbTime, &total, &correct); err != nil {
+			return nil, fmt.Errorf("scan stats row: %w", err)
+		}
+		stats.FeedbackCount += total
+		stats.CorrectCount += correct
+		switch fbTime {
+		case "at_gate":
+			stats.AtGateCount = total
+			stats.AtGateCorrect = correct
+			if total > 0 {
+				stats.AtGateAccuracyRate = float64(correct) / float64(total)
+			}
+		case "post_incident":
+			stats.PostIncidentCount = total
+			stats.PostIncidentCorrect = correct
+			if total > 0 {
+				stats.PostIncidentAccuracyRate = float64(correct) / float64(total)
+			}
+		}
 	}
-	return &FeedbackStats{
-		SeriesID:      seriesID,
-		FeedbackCount: total,
-		CorrectCount:  correct,
-		AccuracyRate:  rate,
-	}, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if stats.FeedbackCount > 0 {
+		stats.AccuracyRate = float64(stats.CorrectCount) / float64(stats.FeedbackCount)
+	}
+	return stats, nil
 }
 
 type feedbackScanner interface {

@@ -54,9 +54,17 @@ type PlaybookRunStats struct {
 	ResolutionRate float64 `json:"resolution_rate"` // resolved / total_runs
 	LastRunAt      string  `json:"last_run_at,omitempty"`
 	// Accuracy fields — populated when feedback is available (FeedbackCount > 0).
+	// FeedbackCount is the total across at_gate and post_incident.
 	FeedbackCount int     `json:"feedback_count"`
 	CorrectCount  int     `json:"correct_count"`
 	AccuracyRate  float64 `json:"accuracy_rate"` // correct_count / feedback_count; 0 when no feedback
+
+	AtGateCount              int     `json:"at_gate_count"`
+	AtGateCorrect            int     `json:"at_gate_correct"`
+	AtGateAccuracyRate       float64 `json:"at_gate_accuracy_rate,omitempty"`
+	PostIncidentCount        int     `json:"post_incident_count"`
+	PostIncidentCorrect      int     `json:"post_incident_correct"`
+	PostIncidentAccuracyRate float64 `json:"post_incident_accuracy_rate,omitempty"`
 }
 
 // PlaybookVersionStats summarises run history broken down by playbook version.

@@ -217,6 +217,12 @@ func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) 
 			stats.FeedbackCount = fbStats.FeedbackCount
 			stats.CorrectCount = fbStats.CorrectCount
 			stats.AccuracyRate = fbStats.AccuracyRate
+			stats.AtGateCount = fbStats.AtGateCount
+			stats.AtGateCorrect = fbStats.AtGateCorrect
+			stats.AtGateAccuracyRate = fbStats.AtGateAccuracyRate
+			stats.PostIncidentCount = fbStats.PostIncidentCount
+			stats.PostIncidentCorrect = fbStats.PostIncidentCorrect
+			stats.PostIncidentAccuracyRate = fbStats.PostIncidentAccuracyRate
 		}
 	}
 

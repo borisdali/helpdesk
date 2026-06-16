@@ -750,15 +750,17 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		if ep, _ := pb["entry_point"].(bool); ep {
 			t.Error("entry_point = true, want false (config recovery is not an entry point)")
 		}
-		escalates, _ := pb["escalates_to"].([]any)
-		if len(escalates) == 0 {
-			t.Error("escalates_to is empty, want at least one series ID")
+		// config recovery uses transitions_to (same-domain follow-on to pitr_recovery),
+		// not escalates_to (cross-domain handoff). Directive split added in v0.16.
+		transitions, _ := pb["transitions_to"].([]any)
+		if len(transitions) == 0 {
+			t.Error("transitions_to is empty, want at least one series ID")
 		}
 		evidence, _ := pb["requires_evidence"].([]any)
 		if len(evidence) == 0 {
 			t.Error("requires_evidence is empty, want at least one pattern")
 		}
-		t.Logf("config_recovery: escalates_to=%v requires_evidence=%v", escalates, evidence)
+		t.Logf("config_recovery: transitions_to=%v requires_evidence=%v", transitions, evidence)
 	})
 
 	t.Run("pitr_recovery_is_agent_with_evidence", func(t *testing.T) {

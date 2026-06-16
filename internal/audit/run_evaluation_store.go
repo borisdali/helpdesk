@@ -139,21 +139,34 @@ func calibrationLabel(actual, expected float64, runs int) string {
 	return "WELL_CALIBRATED"
 }
 
-// CalibrationBands joins run_evaluation diagnosis scores with post-incident operator feedback
-// to compute per-band accuracy. Pass seriesID="" for fleet-wide calibration.
+// CalibrationBands joins run_evaluation diagnosis scores with operator triage
+// feedback to compute per-band accuracy. At-gate feedback (captured before
+// remediation) is preferred over post-incident feedback; a run with both
+// contributes only once using the at-gate verdict.
+// Pass seriesID="" for fleet-wide calibration.
 func (s *RunEvaluationStore) CalibrationBands(ctx context.Context, seriesID string) (*CalibrationReport, error) {
-	q := `
-SELECT ev.diagnosis_score, fb.verdict_correct
-FROM run_evaluation ev
-JOIN run_feedback fb ON fb.run_id = ev.run_id
-  AND fb.feedback_type = 'triage'
-  AND fb.feedback_time = 'post_incident'
-  AND fb.verdict_correct IS NOT NULL`
+	gateFilter := ""
+	postFilter := ""
 	args := []any{}
 	if seriesID != "" {
-		q += " WHERE fb.series_id = ?"
-		args = append(args, seriesID)
+		gateFilter = " AND fb_gate.series_id = ?"
+		postFilter = " AND fb_post.series_id = ?"
+		args = append(args, seriesID, seriesID)
 	}
+
+	q := fmt.Sprintf(`
+SELECT ev.diagnosis_score,
+       COALESCE(fb_gate.verdict_correct, fb_post.verdict_correct) AS verdict_correct
+FROM run_evaluation ev
+LEFT JOIN run_feedback fb_gate ON fb_gate.run_id = ev.run_id
+  AND fb_gate.feedback_type = 'triage'
+  AND fb_gate.feedback_time = 'at_gate'
+  AND fb_gate.verdict_correct IS NOT NULL%s
+LEFT JOIN run_feedback fb_post ON fb_post.run_id = ev.run_id
+  AND fb_post.feedback_type = 'triage'
+  AND fb_post.feedback_time = 'post_incident'
+  AND fb_post.verdict_correct IS NOT NULL%s
+WHERE fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL`, gateFilter, postFilter)
 
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, q), args...)
 	if err != nil {
