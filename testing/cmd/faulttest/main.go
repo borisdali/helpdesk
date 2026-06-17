@@ -391,6 +391,27 @@ func cmdRun(args []string) {
 			evalResult.CrystalBall = resp.CrystalBall
 			evalResult.RunID = resp.RunID
 
+			// Detect protocol violations from gateway warnings.
+			// When the fallback gate fires (agent omitted TRANSITION_TO/ESCALATE_TO),
+			// the gateway appends a warning. Cap the score to signal the breach.
+			if len(resp.Warnings) > 0 {
+				evalResult.GatewayWarnings = resp.Warnings
+				for _, w := range resp.Warnings {
+					if strings.Contains(w, "omitted required TRANSITION_TO") ||
+						strings.Contains(w, "ESCALATE_TO signal") {
+						evalResult.ProtocolViolation = true
+						break
+					}
+				}
+			}
+			if evalResult.ProtocolViolation {
+				const protocolViolationCap = 0.75
+				if evalResult.Score > protocolViolationCap {
+					evalResult.Score = protocolViolationCap
+					evalResult.Passed = evalResult.Score >= 0.6 && evalResult.KeywordPass
+				}
+			}
+
 			// Push judge reasoning to the audit store so it appears alongside
 			// live agent_reasoning events in the governance trail.
 			if !evalResult.JudgeSkipped && evalResult.JudgeReasoning != "" {

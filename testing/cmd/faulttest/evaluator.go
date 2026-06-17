@@ -44,6 +44,14 @@ type EvalResult struct {
 	// Set only on --via-gateway runs; false on direct A2A calls.
 	CrystalBall bool `json:"crystal_ball,omitempty"`
 
+	// ProtocolViolation is true when the triage agent omitted the required
+	// TRANSITION_TO/ESCALATE_TO handoff signal. Set from resp.Warnings when the
+	// gateway reports the omission via the fallback gate. A protocol violation
+	// caps the diagnosis score at 0.75 regardless of other eval components.
+	ProtocolViolation bool `json:"protocol_violation,omitempty"`
+	// GatewayWarnings holds warnings returned by the gateway for this run.
+	GatewayWarnings []string `json:"gateway_warnings,omitempty"`
+
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
 	RemediationPassed    bool    `json:"remediation_passed,omitempty"`

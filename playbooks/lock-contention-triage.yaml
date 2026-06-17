@@ -48,8 +48,9 @@ guidance: |
   Document the chain depth (number of blocked sessions) and the lock type
   (ACCESS EXCLUSIVE, ROW EXCLUSIVE, etc.) from the blocking query details.
 
-  Final step: after your analysis, output exactly these lines in this
-  format (no markdown, no extra text on each line):
+  Required output — write these exact lines at the end of your response,
+  no markdown, no extra text on any line. The handoff signal (TRANSITION_TO
+  or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate:
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1

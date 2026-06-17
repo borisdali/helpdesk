@@ -98,12 +98,16 @@ func (r Report) PrintSummary() {
 	textFallbackCount := 0
 	judgeCount := 0
 	crystalBallCount := 0
+	protocolViolationCount := 0
 	for _, res := range r.Results {
 		if !res.JudgeSkipped && res.JudgeModel != "" {
 			judgeCount++
 		}
 		if res.CrystalBall {
 			crystalBallCount++
+		}
+		if res.ProtocolViolation {
+			protocolViolationCount++
 		}
 	}
 
@@ -169,6 +173,10 @@ func (r Report) PrintSummary() {
 			}
 		}
 
+		if res.ProtocolViolation {
+			fmt.Printf("       [WARN] protocol violation: triage agent omitted TRANSITION_TO/ESCALATE_TO — diagnosis score capped at 75%%\n")
+		}
+
 		if res.Error != "" {
 			fmt.Printf("       Error: %s\n", res.Error)
 		}
@@ -201,6 +209,11 @@ func (r Report) PrintSummary() {
 	if crystalBallCount > 0 {
 		fmt.Printf("\nNote: %d fault(s) ran in crystal-ball mode — playbook scaffolding was bypassed.\n", crystalBallCount)
 		fmt.Printf("Results measure unguided LLM capability only and are not comparable to guided runs.\n")
+	}
+	if protocolViolationCount > 0 {
+		fmt.Printf("\nNote: %d fault(s) had a protocol violation — triage agent omitted the required\n", protocolViolationCount)
+		fmt.Printf("TRANSITION_TO/ESCALATE_TO handoff signal. Diagnosis score was capped at 75%%.\n")
+		fmt.Printf("Tighten playbook guidance to enforce the signal; the fallback gate caught this run.\n")
 	}
 	if judgeCount > 0 {
 		fmt.Printf("\nLLM judge scored diagnosis for %d fault(s). Weights: tool*0.40 + judge*0.40 + keyword*0.20.\n", judgeCount)

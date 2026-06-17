@@ -47,10 +47,9 @@ guidance: |
   finding — dead tuples will accumulate indefinitely without manual VACUUM
   runs. Report this clearly as a configuration risk.
 
-  Final step: after your analysis, output exactly these lines below. If
-  recommended=archive_live_data or recommended=monitor, use ESCALATE_TO: none
-  instead of TRANSITION_TO. Otherwise use TRANSITION_TO: pbs_vacuum_remediate.
-  Format (no markdown, no extra text on each line):
+  Required output — write these exact lines at the end of your response,
+  no markdown, no extra text on any line. The handoff signal (TRANSITION_TO
+  or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate:
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1
