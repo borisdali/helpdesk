@@ -366,6 +366,84 @@ func TestHandleGetDecision_Feedback_Resolved(t *testing.T) {
 	}
 }
 
+// TestHandleResolveDecision_Gate_VerdictCorrectPassthrough verifies that
+// verdict_correct and verdict_notes in a gate: resolution body are forwarded
+// to postAtGateFeedback, which stores them as (triage, at_gate).
+func TestHandleResolveDecision_Gate_VerdictCorrectPassthrough(t *testing.T) {
+	feedbackCh := make(chan map[string]any, 1)
+
+	run := &audit.PlaybookRun{
+		RunID:       "plr_gvc01",
+		SeriesID:    "pbs_lock_chain_triage",
+		Outcome:     audit.OutcomeGatePending,
+		EscalatedTo: "pbs_lock_chain_remediate",
+	}
+	runData, _ := json.Marshal(run)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/") && !strings.HasSuffix(r.URL.Path, "/feedback"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/feedback"):
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			select {
+			case feedbackCh <- body:
+			default:
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"run_id": "plr_gvc01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			remedPB := &audit.Playbook{
+				PlaybookID:    "pb_gvc_rem01",
+				SeriesID:      "pbs_lock_chain_remediate",
+				Name:          "Lock Chain — Remediation",
+				ExecutionMode: "agent",
+				IsActive:      true,
+			}
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gvc_rem01"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	gw := makePlaybookRunGateway(srv.URL, nil)
+
+	resolveDecision(t, gw, "gate:plr_gvc01", map[string]any{
+		"resolution":      "approved",
+		"resolved_by":     "ops-alice",
+		"approval_mode":   "review",
+		"verdict_correct": true,
+		"verdict_notes":   "PID 7883 confirmed root blocker",
+	})
+
+	// postAtGateFeedback runs in a goroutine; wait for it with a short timeout.
+	select {
+	case fb := <-feedbackCh:
+		if fb["feedback_type"] != "triage" {
+			t.Errorf("feedback_type = %v, want triage", fb["feedback_type"])
+		}
+		if fb["feedback_time"] != "at_gate" {
+			t.Errorf("feedback_time = %v, want at_gate", fb["feedback_time"])
+		}
+		if fb["verdict_correct"] != true {
+			t.Errorf("verdict_correct = %v, want true", fb["verdict_correct"])
+		}
+		if fb["verdict_notes"] != "PID 7883 confirmed root blocker" {
+			t.Errorf("verdict_notes = %v", fb["verdict_notes"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for postAtGateFeedback to post triage/at_gate feedback")
+	}
+}
+
 func TestHandleResolveDecision_Feedback_Approved(t *testing.T) {
 	auditSrv := mockFeedbackAuditd(t, "plr_fb03", nil)
 	gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://gw"}

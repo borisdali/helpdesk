@@ -120,6 +120,8 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 		Reason          string `json:"reason,omitempty"`
 		ApprovalMode    string `json:"approval_mode,omitempty"`
 		ApprovalSession string `json:"approval_session,omitempty"`
+		VerdictCorrect  *bool  `json:"verdict_correct,omitempty"`
+		VerdictNotes    string `json:"verdict_notes,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -133,7 +135,7 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 	switch {
 	case strings.HasPrefix(id, "gate:"):
 		runID := strings.TrimPrefix(id, "gate:")
-		g.resolveGate(w, r, runID, req.Resolution, req.ResolvedBy, req.ApprovalMode, req.ApprovalSession)
+		g.resolveGate(w, r, runID, req.Resolution, req.ResolvedBy, req.ApprovalMode, req.ApprovalSession, req.VerdictCorrect, req.VerdictNotes)
 
 	case strings.HasPrefix(id, "fleet:"), strings.HasPrefix(id, "step:"):
 		approvalID := id[strings.Index(id, ":")+1:]
@@ -150,13 +152,20 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 
 // resolveGate delegates gate resolution to handleProceedEscalation by
 // rewriting the request URL and body to match that handler's expected form.
-func (g *Gateway) resolveGate(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, approvalMode, approvalSession string) {
-	body, err := json.Marshal(map[string]any{
+func (g *Gateway) resolveGate(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, approvalMode, approvalSession string, verdictCorrect *bool, verdictNotes string) {
+	payload := map[string]any{
 		"resolution":       resolution,
 		"resolved_by":      resolvedBy,
 		"approval_mode":    approvalMode,
 		"approval_session": approvalSession,
-	})
+	}
+	if verdictCorrect != nil {
+		payload["verdict_correct"] = *verdictCorrect
+	}
+	if verdictNotes != "" {
+		payload["verdict_notes"] = verdictNotes
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to build proceed-escalation request")
 		return
