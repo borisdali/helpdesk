@@ -910,7 +910,7 @@ func vaultAccuracy(args []string) {
 	// Remediation approach accuracy when feedback exists.
 	if info.remediationFeedbackCount > 0 {
 		fmt.Println()
-		fmt.Printf("  Remediation approach accuracy\n")
+		fmt.Printf("Remediation accuracy\n")
 		fmt.Printf("  Feedback submitted : %d runs\n", info.remediationFeedbackCount)
 		fmt.Printf("  Appropriate        : %d\n", info.remediationCorrectCount)
 		fmt.Printf("  Accuracy rate      : %.0f%%\n", info.remediationAccuracyRate*100)
