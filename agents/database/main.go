@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -252,10 +254,43 @@ func main() {
 		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
 	}
 
+	cardOpts.ExtraHandlers = map[string]http.Handler{
+		"POST /admin/register-db": http.HandlerFunc(handleRegisterDB),
+	}
+
 	if err := agentutil.ServeWithTracingAndDirectTools(ctx, dbAgent, cfg, traceStore, auditStore, NewDatabaseDirectRegistry(), cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// handleRegisterDB handles POST /admin/register-db.
+// It merges a single DB entry into the ephemeral registry so the agent can
+// reach databases that weren't listed in HELPDESK_INFRA_CONFIG at startup
+// (e.g. a temporary container created by faulttest --auto-db).
+func handleRegisterDB(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ServerID         string   `json:"server_id"`
+		Name             string   `json:"name"`
+		ConnectionString string   `json:"connection_string"`
+		Tags             []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ServerID == "" || req.ConnectionString == "" {
+		http.Error(w, "server_id and connection_string are required", http.StatusBadRequest)
+		return
+	}
+	patchEphemeralDB(req.ServerID, infra.DBServer{
+		Name:             req.Name,
+		ConnectionString: req.ConnectionString,
+		Tags:             req.Tags,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"server_id": req.ServerID, "status": "registered"}) //nolint:errcheck
 }
 
 func createTools() ([]tool.Tool, error) {

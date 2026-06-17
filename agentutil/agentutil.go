@@ -1263,6 +1263,10 @@ type CardOptions struct {
 	// ToolSchemas maps a tool name (without agent prefix) to its JSON Schema properties.
 	// Computed by ComputeInputSchemas; served at GET /schemas for gateway discovery.
 	ToolSchemas map[string]map[string]any
+
+	// ExtraHandlers registers additional HTTP endpoints on the agent's mux.
+	// Pattern → handler (e.g. "POST /admin/register-db" → http.HandlerFunc(...)).
+	ExtraHandlers map[string]http.Handler
 }
 
 // applyCardOptions merges optional metadata onto an AgentCard.
@@ -1655,6 +1659,12 @@ func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Conf
 		authzr := authz.NewAuthorizer(authz.DefaultAgentPermissions, enforcing)
 		registerDirectToolRoutes(mux, registry, traceStore, idProvider, authzr)
 		slog.Info("direct tool dispatch enabled", "agent", a.Name(), "tools", len(registry.tools))
+	}
+
+	if len(opts) > 0 {
+		for pattern, handler := range opts[0].ExtraHandlers {
+			mux.Handle(pattern, handler)
+		}
 	}
 
 	slog.Info("starting A2A server with tracing",

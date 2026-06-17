@@ -2094,3 +2094,67 @@ func TestCheckApprovalMode_Session_ExpiredSessionBlocks(t *testing.T) {
 		t.Error("expired session should block")
 	}
 }
+
+func TestHandleRegisterEphemeralDB_Valid(t *testing.T) {
+	// DB agent mock that records the forwarded registration request.
+	var agentBody []byte
+	agentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer agentSrv.Close()
+
+	gw := &Gateway{
+		auditor: audit.NewGatewayAuditor(&testAuditor{}),
+		agents: map[string]*discovery.Agent{
+			agentNameDB: {Name: agentNameDB, InvokeURL: agentSrv.URL + "/invoke"},
+		},
+	}
+
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	body := `{"server_id":"faulttest-auto-61195","name":"Auto-DB","connection_string":"host=127.0.0.1 port=61195 dbname=faulttest user=postgres","tags":["chaos","test"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infra/register-db", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	// Gateway's in-memory infra config should contain the new entry.
+	if gw.infra == nil {
+		t.Fatal("gw.infra is nil after registration")
+	}
+	db, ok := gw.infra.DBServers["faulttest-auto-61195"]
+	if !ok {
+		t.Fatal("faulttest-auto-61195 not in gw.infra.DBServers")
+	}
+	if db.ConnectionString != "host=127.0.0.1 port=61195 dbname=faulttest user=postgres" {
+		t.Errorf("ConnectionString = %q", db.ConnectionString)
+	}
+	// DB agent should have received the forwarded request.
+	if len(agentBody) == 0 {
+		t.Error("DB agent did not receive forwarded registration request")
+	}
+}
+
+func TestHandleRegisterEphemeralDB_MissingFields(t *testing.T) {
+	gw := &Gateway{auditor: audit.NewGatewayAuditor(&testAuditor{})}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	for _, body := range []string{
+		`{"name":"no server_id","connection_string":"host=localhost"}`,
+		`{"server_id":"no-conn"}`,
+		`not json`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infra/register-db", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code == http.StatusOK {
+			t.Errorf("body %q: want non-200, got 200", body)
+		}
+	}
+}

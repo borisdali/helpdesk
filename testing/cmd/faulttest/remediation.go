@@ -235,13 +235,15 @@ func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) stri
 		return ""
 	}
 	defer resp.Body.Close()
-	var runs []struct {
-		RunID string `json:"run_id"`
+	var result struct {
+		Runs []struct {
+			RunID string `json:"run_id"`
+		} `json:"runs"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&runs); err != nil || len(runs) == 0 {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Runs) == 0 {
 		return ""
 	}
-	return runs[0].RunID
+	return result.Runs[0].RunID
 }
 
 // printGatePreviewAndReport prints the remediation plan preview and structured
@@ -332,6 +334,17 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	// Checked before TTY so this path works on a developer laptop too.
 	if r.cfg.EmitAndWait {
 		return r.waitForGateEmitAndWait(ctx, gate)
+	}
+
+	// --approval-mode force: skip the gate entirely, auto-approve and proceed.
+	if r.cfg.ApprovalMode == "force" {
+		slog.Info("force-approving gate", "run_id", gate.RunID)
+		_, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+			Resolution:   "approved",
+			ResolvedBy:   r.cfg.OperatorID,
+			ApprovalMode: "auto",
+		})
+		return err
 	}
 
 	tty, err := os.Open("/dev/tty")
@@ -493,8 +506,14 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 
 	current := initial
 	const maxSteps = 100
+	// Resolve approval mode:
+	// 1. Gateway "force" (policy override via approval_override_roles) always wins.
+	// 2. CLI --approval-mode flag wins over the playbook's gateway default.
+	// 3. Fall back to the gateway's effective mode when no CLI flag was given.
 	mode := r.cfg.ApprovalMode
-	if initial.EffectiveApprovalMode != "" {
+	if initial.EffectiveApprovalMode == "force" {
+		mode = "force"
+	} else if mode == "" {
 		mode = initial.EffectiveApprovalMode
 	}
 

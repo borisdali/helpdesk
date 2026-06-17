@@ -221,6 +221,33 @@ func (s *RunFeedbackStore) GetByRunID(ctx context.Context, runID string) (*RunFe
 	return s.GetByRunIDAndType(ctx, runID, "triage", "post_incident")
 }
 
+// ListByRunID returns all feedback records for a run across all type/time
+// combinations, ordered by submitted_at. Returns an empty slice (not an error)
+// when no records exist.
+func (s *RunFeedbackStore) ListByRunID(ctx context.Context, runID string) ([]*RunFeedback, error) {
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at
+FROM run_feedback
+WHERE run_id = ?
+ORDER BY submitted_at`), runID)
+	if err != nil {
+		return nil, fmt.Errorf("list feedback by run_id: %w", err)
+	}
+	defer rows.Close()
+	var out []*RunFeedback
+	for rows.Next() {
+		fb, err := scanRunFeedbackRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fb)
+	}
+	if out == nil {
+		out = []*RunFeedback{}
+	}
+	return out, rows.Err()
+}
+
 // ListPending returns RunFeedback records for post-incident triage feedback
 // where verdict_correct has not been set yet (placeholder records created by
 // request-feedback calls, awaiting operator resolution via the Decision Hub).

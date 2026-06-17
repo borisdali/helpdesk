@@ -298,8 +298,10 @@ func (s *playbookRunServer) handleSubmitFeedback(w http.ResponseWriter, r *http.
 }
 
 // handleGetFeedback handles GET /v1/fleet/playbook-runs/{runID}/feedback.
-// Optional query params ?feedback_type=<type>&feedback_time=<time> select a
-// specific row; defaults to feedback_type=triage, feedback_time=post_incident.
+// Without query params: returns all feedback records for the run as
+// {"feedback":[...]}.
+// With ?feedback_type=<type>&feedback_time=<time>: returns the single matching
+// record as a JSON object (404 when absent).
 func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.feedbackStore == nil {
 		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
@@ -311,10 +313,26 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 		return
 	}
 	feedbackType := r.URL.Query().Get("feedback_type")
+	feedbackTime := r.URL.Query().Get("feedback_time")
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// Unfiltered: return all records for this run.
+	if feedbackType == "" && feedbackTime == "" {
+		records, err := s.feedbackStore.ListByRunID(r.Context(), runID)
+		if err != nil {
+			slog.Error("failed to list run feedback", "run_id", runID, "err", err)
+			http.Error(w, "failed to list feedback", http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"feedback": records}) //nolint:errcheck
+		return
+	}
+
+	// Filtered: return the specific type+time record.
 	if feedbackType == "" {
 		feedbackType = "triage"
 	}
-	feedbackTime := r.URL.Query().Get("feedback_time")
 	if feedbackTime == "" {
 		feedbackTime = "post_incident"
 	}
@@ -328,7 +346,6 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 		http.Error(w, "failed to get feedback", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(fb) //nolint:errcheck
 }
 

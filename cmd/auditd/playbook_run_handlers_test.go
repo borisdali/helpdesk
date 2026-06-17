@@ -306,7 +306,7 @@ func TestPlaybookRunHandlers_Feedback_SubmitAndGet(t *testing.T) {
 		t.Errorf("submit status = %d, want 201", rec.Code)
 	}
 
-	// Retrieve feedback.
+	// Retrieve all feedback (unfiltered) → {"feedback":[...]}.
 	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_fb01/feedback", nil)
 	req2.SetPathValue("runID", "plr_fb01")
 	rec2 := httptest.NewRecorder()
@@ -315,10 +315,16 @@ func TestPlaybookRunHandlers_Feedback_SubmitAndGet(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Errorf("get status = %d, want 200", rec2.Code)
 	}
-	var got audit.RunFeedback
-	if err := json.NewDecoder(rec2.Body).Decode(&got); err != nil {
-		t.Fatalf("decode: %v", err)
+	var listResp struct {
+		Feedback []audit.RunFeedback `json:"feedback"`
 	}
+	if err := json.NewDecoder(rec2.Body).Decode(&listResp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listResp.Feedback) != 1 {
+		t.Fatalf("len(feedback) = %d, want 1", len(listResp.Feedback))
+	}
+	got := listResp.Feedback[0]
 	if got.RunID != "plr_fb01" {
 		t.Errorf("RunID = %q, want plr_fb01", got.RunID)
 	}
@@ -328,18 +334,52 @@ func TestPlaybookRunHandlers_Feedback_SubmitAndGet(t *testing.T) {
 	if got.VerdictNotes != "PID 42 held ShareLock" {
 		t.Errorf("VerdictNotes = %q", got.VerdictNotes)
 	}
+
+	// Retrieve via filtered path → single record (original behaviour).
+	req3 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_fb01/feedback?feedback_type=triage&feedback_time=post_incident", nil)
+	req3.SetPathValue("runID", "plr_fb01")
+	req3.URL.RawQuery = "feedback_type=triage&feedback_time=post_incident"
+	rec3 := httptest.NewRecorder()
+	srv.handleGetFeedback(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Errorf("filtered get status = %d, want 200", rec3.Code)
+	}
+	var got2 audit.RunFeedback
+	if err := json.NewDecoder(rec3.Body).Decode(&got2); err != nil {
+		t.Fatalf("decode filtered: %v", err)
+	}
+	if got2.RunID != "plr_fb01" {
+		t.Errorf("filtered RunID = %q, want plr_fb01", got2.RunID)
+	}
 }
 
 func TestPlaybookRunHandlers_Feedback_NotFound(t *testing.T) {
 	srv := newPlaybookRunServerWithFeedback(t)
 
+	// Unfiltered GET on a run with no records → 200 with empty list.
 	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_ghost/feedback", nil)
 	req.SetPathValue("runID", "plr_ghost")
 	rec := httptest.NewRecorder()
 	srv.handleGetFeedback(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("unfiltered status = %d, want 200", rec.Code)
+	}
+	var listResp struct {
+		Feedback []audit.RunFeedback `json:"feedback"`
+	}
+	json.NewDecoder(rec.Body).Decode(&listResp) //nolint:errcheck
+	if len(listResp.Feedback) != 0 {
+		t.Errorf("unfiltered: len(feedback) = %d, want 0", len(listResp.Feedback))
+	}
 
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", rec.Code)
+	// Filtered GET on a run with no matching record → 404.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_ghost/feedback?feedback_type=triage&feedback_time=post_incident", nil)
+	req2.SetPathValue("runID", "plr_ghost")
+	req2.URL.RawQuery = "feedback_type=triage&feedback_time=post_incident"
+	rec2 := httptest.NewRecorder()
+	srv.handleGetFeedback(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Errorf("filtered status = %d, want 404", rec2.Code)
 	}
 }
 
@@ -567,16 +607,24 @@ func TestPlaybookRunHandlers_Feedback_QueryParams(t *testing.T) {
 	submitFeedback(t, "plr_qp01", "triage", "at_gate", true, "looked correct at gate")
 	submitFeedback(t, "plr_qp01", "triage", "post_incident", false, "wrong after investigation")
 
-	// Default (no params) → post_incident.
-	fb, code := getFeedback(t, "plr_qp01", "", "")
-	if code != http.StatusOK {
-		t.Fatalf("default GET: status %d", code)
-	}
-	if fb.FeedbackTime != "post_incident" {
-		t.Errorf("default GET: feedback_time = %q, want post_incident", fb.FeedbackTime)
-	}
-	if fb.VerdictCorrect == nil || *fb.VerdictCorrect != false {
-		t.Errorf("default GET: verdict_correct = %v, want false", fb.VerdictCorrect)
+	// Default (no params) → all records as {"feedback":[...]}.
+	{
+		req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/plr_qp01/feedback", nil)
+		req.SetPathValue("runID", "plr_qp01")
+		rec := httptest.NewRecorder()
+		srv.handleGetFeedback(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("default GET: status %d", rec.Code)
+		}
+		var listResp struct {
+			Feedback []audit.RunFeedback `json:"feedback"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+			t.Fatalf("default GET: decode list: %v", err)
+		}
+		if len(listResp.Feedback) != 2 {
+			t.Errorf("default GET: len(feedback) = %d, want 2", len(listResp.Feedback))
+		}
 	}
 
 	// Explicit at_gate → returns at_gate row.

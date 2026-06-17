@@ -334,6 +334,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/research", auth("POST /api/v1/research", g.handleResearch))
 	mux.HandleFunc("GET /api/v1/infrastructure", auth("GET /api/v1/infrastructure", g.handleListInfrastructure))
 	mux.HandleFunc("GET /api/v1/databases", auth("GET /api/v1/databases", g.handleListDatabases))
+	mux.HandleFunc("POST /api/v1/admin/infra/register-db", auth("POST /api/v1/admin/infra/register-db", g.handleRegisterEphemeralDB))
 	mux.HandleFunc("GET /api/v1/governance", auth("GET /api/v1/governance", g.handleGovernance))
 	mux.HandleFunc("GET /api/v1/governance/policies", auth("GET /api/v1/governance/policies", g.handleGovernancePolicies))
 	mux.HandleFunc("GET /api/v1/governance/explain", auth("GET /api/v1/governance/explain", g.handleGovernanceExplain))
@@ -871,6 +872,59 @@ func (g *Gateway) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 		"databases": g.infra.ListDatabases(),
 		"count":     len(g.infra.DBServers),
 	})
+}
+
+// handleRegisterEphemeralDB registers a temporary database entry so it can be
+// reached by the DB agent without being listed in HELPDESK_INFRA_CONFIG at startup.
+// Used by faulttest --auto-db --via-gateway to inject the auto-created container.
+func (g *Gateway) handleRegisterEphemeralDB(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ServerID         string   `json:"server_id"`
+		Name             string   `json:"name"`
+		ConnectionString string   `json:"connection_string"`
+		Tags             []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if req.ServerID == "" || req.ConnectionString == "" {
+		writeError(w, http.StatusBadRequest, "server_id and connection_string are required")
+		return
+	}
+
+	// Merge into gateway's in-memory infra config (fleet planner, /api/v1/databases).
+	if g.infra == nil {
+		g.infra = &infra.Config{
+			DBServers:   make(map[string]infra.DBServer),
+			K8sClusters: make(map[string]infra.K8sCluster),
+		}
+	}
+	if g.infra.DBServers == nil {
+		g.infra.DBServers = make(map[string]infra.DBServer)
+	}
+	g.infra.DBServers[req.ServerID] = infra.DBServer{
+		Name:             req.Name,
+		ConnectionString: req.ConnectionString,
+		Tags:             req.Tags,
+	}
+	slog.Info("ephemeral DB registered in gateway infra", "server_id", req.ServerID)
+
+	// Forward to the DB agent's /admin/register-db so it can resolve the connection string.
+	if dbAgent, ok := g.agents[agentNameDB]; ok {
+		agentBase := strings.TrimSuffix(dbAgent.InvokeURL, "/invoke")
+		agentURL := agentBase + "/admin/register-db"
+		body, _ := json.Marshal(req)
+		resp, err := http.Post(agentURL, "application/json", bytes.NewReader(body)) //nolint:noctx
+		if err != nil {
+			slog.Warn("failed to forward register-db to DB agent", "url", agentURL, "err", err)
+		} else {
+			resp.Body.Close()
+			slog.Info("forwarded register-db to DB agent", "url", agentURL, "status", resp.StatusCode)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"server_id": req.ServerID, "status": "registered"})
 }
 
 func (g *Gateway) handleGovernance(w http.ResponseWriter, r *http.Request) {

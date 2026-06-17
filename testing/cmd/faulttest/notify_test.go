@@ -188,3 +188,98 @@ func TestRequestVaultDraft_URLPath(t *testing.T) {
 		t.Errorf("path = %q, want /api/v1/fleet/playbooks/from-trace", gotPath)
 	}
 }
+
+// ── registerAutoDBWithGateway ─────────────────────────────────────────────
+
+func TestRegisterAutoDBWithGateway_PostsCorrectPayload(t *testing.T) {
+	var gotPath, gotMethod, gotAPIKey string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAPIKey = r.Header.Get("X-API-Key")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	connStr := "host=127.0.0.1 port=61195 dbname=faulttest user=postgres password=faulttest sslmode=disable"
+	if err := registerAutoDBWithGateway(srv.URL, "test-key", connStr); err != nil {
+		t.Fatalf("registerAutoDBWithGateway: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/v1/admin/infra/register-db" {
+		t.Errorf("path = %q, want /api/v1/admin/infra/register-db", gotPath)
+	}
+	if gotAPIKey != "test-key" {
+		t.Errorf("X-API-Key = %q, want test-key", gotAPIKey)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if payload["server_id"] != "faulttest-auto-61195" {
+		t.Errorf("server_id = %v, want faulttest-auto-61195", payload["server_id"])
+	}
+	if payload["connection_string"] != connStr {
+		t.Errorf("connection_string = %v", payload["connection_string"])
+	}
+	tags, _ := payload["tags"].([]any)
+	if len(tags) != 2 {
+		t.Errorf("tags = %v, want [chaos test]", tags)
+	}
+}
+
+func TestRegisterAutoDBWithGateway_ServerIDFromPort(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Port extracted regardless of field order.
+	registerAutoDBWithGateway(srv.URL, "", "dbname=faulttest port=55000 host=127.0.0.1 user=postgres") //nolint:errcheck
+	var payload map[string]any
+	json.Unmarshal(gotBody, &payload) //nolint:errcheck
+	if payload["server_id"] != "faulttest-auto-55000" {
+		t.Errorf("server_id = %v, want faulttest-auto-55000", payload["server_id"])
+	}
+}
+
+func TestRegisterAutoDBWithGateway_NoPort_FallbackID(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	registerAutoDBWithGateway(srv.URL, "", "host=localhost dbname=faulttest user=postgres") //nolint:errcheck
+	var payload map[string]any
+	json.Unmarshal(gotBody, &payload) //nolint:errcheck
+	if payload["server_id"] != "faulttest-auto" {
+		t.Errorf("server_id = %v, want faulttest-auto (no port in conn string)", payload["server_id"])
+	}
+}
+
+func TestRegisterAutoDBWithGateway_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	err := registerAutoDBWithGateway(srv.URL, "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres")
+	if err == nil {
+		t.Error("want error for 500 response")
+	}
+}
+
+func TestRegisterAutoDBWithGateway_NetworkError(t *testing.T) {
+	err := registerAutoDBWithGateway("http://127.0.0.1:19994", "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres")
+	if err == nil {
+		t.Error("want error for unreachable server")
+	}
+}

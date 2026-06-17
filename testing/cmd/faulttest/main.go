@@ -277,6 +277,11 @@ func cmdRun(args []string) {
 		defer teardown()
 		cfg.ConnStr = connStr
 		fmt.Printf("Auto-DB ready: %s\n\n", connStr)
+		if cfg.GatewayURL != "" {
+			if err := registerAutoDBWithGateway(cfg.GatewayURL, cfg.GatewayAPIKey, connStr); err != nil {
+				slog.Warn("could not register auto-DB with gateway — DB agent may reject connection", "err", err)
+			}
+		}
 	}
 
 	failures := FilterFailures(cat, cfg)
@@ -574,6 +579,47 @@ func cmdRun(args []string) {
 
 // postNotify POSTs the full JSON report to the given webhook URL. Failures are
 // logged at Warn level and never cause the faulttest run to fail.
+// registerAutoDBWithGateway calls POST /api/v1/admin/infra/register-db on the gateway
+// so that both the gateway and the DB agent can resolve the auto-created connection string.
+// The entry gets "chaos" and "test" tags so governance policy allows it.
+func registerAutoDBWithGateway(gatewayURL, apiKey, connStr string) error {
+	// Derive a stable server_id from the port in the connection string.
+	serverID := "faulttest-auto"
+	for _, part := range strings.Fields(connStr) {
+		if strings.HasPrefix(part, "port=") {
+			serverID = "faulttest-auto-" + strings.TrimPrefix(part, "port=")
+			break
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"server_id":         serverID,
+		"name":              "Auto-DB faulttest instance",
+		"connection_string": connStr,
+		"tags":              []string{"chaos", "test"},
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, gatewayURL+"/api/v1/admin/infra/register-db", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	slog.Info("auto-DB registered with gateway", "server_id", serverID)
+	return nil
+}
+
 func postNotify(notifyURL string, report Report) {
 	body, err := json.Marshal(report)
 	if err != nil {

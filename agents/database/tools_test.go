@@ -2331,6 +2331,118 @@ func TestResolveDatabaseInfo_PasswordEnv_Missing(t *testing.T) {
 	}
 }
 
+func withEphemeralDBs(entries map[string]infra.DBServer) func() {
+	ephemeralDBsMu.Lock()
+	old := ephemeralDBs
+	ephemeralDBs = entries
+	ephemeralDBsMu.Unlock()
+	return func() {
+		ephemeralDBsMu.Lock()
+		ephemeralDBs = old
+		ephemeralDBsMu.Unlock()
+	}
+}
+
+func TestResolveDatabaseInfo_EphemeralFallback_ConnString(t *testing.T) {
+	// infraConfig is set but the connection string isn't there; it IS in ephemeralDBs.
+	defer withInfraConfig(makeTestInfraConfig())()
+	defer withEphemeralDBs(map[string]infra.DBServer{
+		"faulttest-auto-61195": {
+			Name:             "Auto-DB faulttest instance",
+			ConnectionString: "host=127.0.0.1 port=61195 dbname=faulttest user=postgres password=faulttest sslmode=disable",
+			Tags:             []string{"chaos", "test"},
+		},
+	})()
+
+	info, err := resolveDatabaseInfo("host=127.0.0.1 port=61195 dbname=faulttest user=postgres password=faulttest sslmode=disable")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil for ephemeral DB", err)
+	}
+	if info.Name != "faulttest-auto-61195" {
+		t.Errorf("Name = %q, want faulttest-auto-61195", info.Name)
+	}
+	if len(info.Tags) == 0 || info.Tags[0] != "chaos" {
+		t.Errorf("Tags = %v, want [chaos test]", info.Tags)
+	}
+	if !info.IsFromInfraConfig {
+		t.Error("IsFromInfraConfig = false, want true for ephemeral entry")
+	}
+}
+
+func TestResolveDatabaseInfo_EphemeralFallback_Name(t *testing.T) {
+	// infraConfig is set but the name isn't there; it IS in ephemeralDBs.
+	defer withInfraConfig(makeTestInfraConfig())()
+	defer withEphemeralDBs(map[string]infra.DBServer{
+		"faulttest-auto-61195": {
+			Name:             "Auto-DB faulttest instance",
+			ConnectionString: "host=127.0.0.1 port=61195 dbname=faulttest user=postgres",
+			Tags:             []string{"chaos", "test"},
+		},
+	})()
+
+	info, err := resolveDatabaseInfo("faulttest-auto-61195")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil for ephemeral DB by name", err)
+	}
+	if info.ConnectionStr != "host=127.0.0.1 port=61195 dbname=faulttest user=postgres" {
+		t.Errorf("ConnectionStr = %q", info.ConnectionStr)
+	}
+}
+
+func TestResolveDatabaseInfo_EphemeralFallback_NotInEphemeral(t *testing.T) {
+	// infraConfig is set, ephemeralDBs is populated but doesn't have this entry → still reject.
+	defer withInfraConfig(makeTestInfraConfig())()
+	defer withEphemeralDBs(map[string]infra.DBServer{
+		"faulttest-auto-61195": {ConnectionString: "host=127.0.0.1 port=61195 dbname=faulttest user=postgres"},
+	})()
+
+	_, err := resolveDatabaseInfo("host=unknown.example.com dbname=other user=postgres")
+	if err == nil {
+		t.Fatal("want error for DB not in infra config or ephemeral registry")
+	}
+	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
+		t.Errorf("error = %q, want 'not registered in infrastructure config'", err.Error())
+	}
+}
+
+func TestHandleRegisterDB_Valid(t *testing.T) {
+	defer withEphemeralDBs(map[string]infra.DBServer{})()
+
+	body := `{"server_id":"faulttest-auto-61195","name":"Auto-DB","connection_string":"host=127.0.0.1 port=61195 dbname=faulttest user=postgres","tags":["chaos","test"]}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/register-db", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handleRegisterDB(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	ephemeralDBsMu.RLock()
+	db, ok := ephemeralDBs["faulttest-auto-61195"]
+	ephemeralDBsMu.RUnlock()
+	if !ok {
+		t.Fatal("faulttest-auto-61195 not in ephemeralDBs after registration")
+	}
+	if db.ConnectionString != "host=127.0.0.1 port=61195 dbname=faulttest user=postgres" {
+		t.Errorf("ConnectionString = %q", db.ConnectionString)
+	}
+}
+
+func TestHandleRegisterDB_MissingFields(t *testing.T) {
+	for _, body := range []string{
+		`{"name":"no server_id","connection_string":"host=localhost"}`,
+		`{"server_id":"no-conn"}`,
+		`not json`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/admin/register-db", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handleRegisterDB(rec, req)
+		if rec.Code == http.StatusOK {
+			t.Errorf("body %q: want non-200, got 200", body)
+		}
+	}
+}
+
 func TestCheckConnectionTool_InfraEnforced_Rejected(t *testing.T) {
 	// infraConfig is set but connection string is not registered → tool returns ERROR.
 	defer withInfraConfig(makeTestInfraConfig())()
