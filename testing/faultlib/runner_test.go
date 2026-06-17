@@ -421,3 +421,96 @@ func TestRunViaPlaybook_SendsXTraceID(t *testing.T) {
 		t.Errorf("X-Trace-ID = %q, want %q", gotTraceID, "trace-abc123")
 	}
 }
+
+// TestRunViaPlaybook_GateEscalation_SendsRemediationSeriesID verifies that when
+// GateEscalation is true and Remediation.PlaybookID is set, the runner includes
+// remediation_series_id in the request body. This field powers the server-side
+// fallback gate: without it, an LLM that omits TRANSITION_TO silently bypasses
+// operator review.
+func TestRunViaPlaybook_GateEscalation_SendsRemediationSeriesID(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_triage01"}},
+			})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok", "run_id": "plr_x"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := NewRunner(&HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "key",
+		ViaGateway:    true,
+		GateEscalation: true,
+	})
+	f := Failure{
+		ID:                        "db-tx-lock-chain-blocker",
+		Category:                  "database",
+		Prompt:                    "Investigate the lock chain.",
+		Timeout:                   "30s",
+		DiagnosisPlaybookSeriesID: "pbs_lock_chain_triage",
+		Remediation: RemediationSpec{
+			PlaybookID: "pbs_lock_chain_remediate",
+		},
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	if gotBody["gate_escalation"] != true {
+		t.Errorf("gate_escalation = %v, want true", gotBody["gate_escalation"])
+	}
+	if gotBody["remediation_series_id"] != "pbs_lock_chain_remediate" {
+		t.Errorf("remediation_series_id = %q, want %q", gotBody["remediation_series_id"], "pbs_lock_chain_remediate")
+	}
+}
+
+// TestRunViaPlaybook_GateEscalation_NoRemediationSeriesID_WhenPlaybookIDEmpty
+// verifies that remediation_series_id is NOT sent when Remediation.PlaybookID
+// is empty, so faults without a remediation playbook aren't affected.
+func TestRunViaPlaybook_GateEscalation_NoRemediationSeriesID_WhenPlaybookIDEmpty(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_diag01"}},
+			})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := NewRunner(&HarnessConfig{
+		GatewayURL:     srv.URL,
+		GatewayAPIKey:  "key",
+		ViaGateway:     true,
+		GateEscalation: true,
+	})
+	f := Failure{
+		ID: "db-some-fault", Category: "database",
+		Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_some_triage",
+		// Remediation.PlaybookID intentionally empty
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if _, ok := gotBody["remediation_series_id"]; ok {
+		t.Errorf("remediation_series_id should not be sent when Remediation.PlaybookID is empty, got %q", gotBody["remediation_series_id"])
+	}
+	if gotBody["gate_escalation"] != true {
+		t.Errorf("gate_escalation = %v, want true", gotBody["gate_escalation"])
+	}
+}

@@ -77,6 +77,10 @@ func toLFConfig(cfg *HarnessConfig) *faultlib.HarnessConfig {
 
 // toLFFailure converts a local Failure to faultlib.Failure.
 // Only the fields consumed by faultlib.Runner.Run are populated.
+// Remediation.PlaybookID is required for the fallback gate: when gate_escalation
+// is enabled and the triage agent omits TRANSITION_TO/ESCALATE_TO, the server
+// falls back to remediation_series_id (derived from this field) to create the
+// gate rather than silently bypassing the operator review step.
 func toLFFailure(f Failure) faultlib.Failure {
 	return faultlib.Failure{
 		ID:                        f.ID,
@@ -84,5 +88,12 @@ func toLFFailure(f Failure) faultlib.Failure {
 		Prompt:                    f.Prompt,
 		Timeout:                   f.Timeout,
 		DiagnosisPlaybookSeriesID: f.DiagnosisPlaybookSeriesID,
+		Remediation: faultlib.RemediationSpec{
+			PlaybookID:    f.Remediation.PlaybookID,
+			AgentName:     f.Remediation.AgentName,
+			AgentPrompt:   f.Remediation.AgentPrompt,
+			VerifySQL:     f.Remediation.VerifySQL,
+			VerifyTimeout: f.Remediation.VerifyTimeout,
+		},
 	}
 }
