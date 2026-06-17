@@ -374,15 +374,17 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		fmt.Printf("  Invalid mode %q — enter manual, review, or auto (or press Enter for %s).\n", modeInput, suggested)
 	}
 
-	fmt.Print("  Reason (optional, press Enter to skip): ")
+	fmt.Print("  Approval note (optional): ")
 	reasonInput, _ := reader.ReadString('\n')
 	reasonInput = strings.TrimSpace(reasonInput)
 
 	// At-gate feedback — captured before remediation runs so the signal is
 	// independent of whether the fix worked.
+	fmt.Println()
+	fmt.Println("  Feedback (optional, but recommended — recorded before remediation runs):")
 	var verdictCorrect *bool
 	var verdictNotes string
-	fmt.Print("  Was the diagnosis correct? [y/n/skip]: ")
+	fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
 	diagAnswer, _ := reader.ReadString('\n')
 	diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
 	if diagAnswer == "y" || diagAnswer == "yes" {
@@ -394,7 +396,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	}
 	if verdictCorrect != nil {
 		defaultCause := primaryHypothesisText(gate.DiagnosticReport)
-		prompt := "  Actual root cause"
+		prompt := "    Root cause"
 		if defaultCause != "" {
 			prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultCause)
 		}
@@ -411,7 +413,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	// runs, so the signal is free of outcome bias (same reason as triage/at_gate).
 	var remVerdictCorrect *bool
 	var remVerdictNotes string
-	fmt.Print("  Is the remediation approach appropriate? [y/n/skip]: ")
+	fmt.Print("    Was the proposed remediation appropriate? [y/n/skip]: ")
 	remAnswer, _ := reader.ReadString('\n')
 	remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
 	if remAnswer == "y" || remAnswer == "yes" {
@@ -420,7 +422,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	} else if remAnswer == "n" || remAnswer == "no" {
 		v := false
 		remVerdictCorrect = &v
-		fmt.Print("  Notes (optional): ")
+		fmt.Print("    Notes on remediation plan (optional): ")
 		remNotes, _ := reader.ReadString('\n')
 		remVerdictNotes = strings.TrimSpace(remNotes)
 	}
@@ -763,7 +765,8 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 	reader := bufio.NewReader(tty)
 
 	fmt.Println()
-	fmt.Print("  Was the diagnosis correct? [y/n/skip]: ")
+	fmt.Println("  Post-incident feedback (optional, but recommended):")
+	fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer == "" || answer == "skip" || answer == "s" {
@@ -783,7 +786,7 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 	// Suggest the primary hypothesis text as the default root cause.
 	defaultRootCause := primaryHypothesisText(diagReport)
 
-	prompt := "  Actual root cause"
+	prompt := "    Root cause"
 	if defaultRootCause != "" {
 		prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultRootCause)
 	}
@@ -798,7 +801,7 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 
 	// Remediation approach feedback — only when remediation ran.
 	if remRunID != "" {
-		fmt.Print("  Was the remediation approach appropriate? [y/n/skip]: ")
+		fmt.Print("    Was the remediation approach appropriate? [y/n/skip]: ")
 		remAnswer, _ := reader.ReadString('\n')
 		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
 		if remAnswer == "y" || remAnswer == "yes" {
@@ -806,7 +809,7 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, "")
 		} else if remAnswer == "n" || remAnswer == "no" {
 			v := false
-			fmt.Print("  Notes (optional): ")
+			fmt.Print("    Notes on remediation approach (optional): ")
 			notes, _ := reader.ReadString('\n')
 			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes))
 		}
