@@ -17,8 +17,9 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"POST /api/v1/incidents":     {AdminBypass: true},
 	"GET /api/v1/incidents":      {AdminBypass: true},
 	"POST /api/v1/research":      {AdminBypass: true},
-	"GET /api/v1/infrastructure": {AdminBypass: true},
-	"GET /api/v1/databases":      {AdminBypass: true},
+	"GET /api/v1/infrastructure":           {AdminBypass: true},
+	"GET /api/v1/databases":                {AdminBypass: true},
+	"POST /api/v1/admin/infra/register-db": {AdminBypass: true},
 
 	// Governance reads
 	"GET /api/v1/governance":                   {AdminBypass: true},

@@ -438,6 +438,7 @@ var gatewayRoutes = []string{
 	"POST /api/v1/research",
 	"GET /api/v1/infrastructure",
 	"GET /api/v1/databases",
+	"POST /api/v1/admin/infra/register-db",
 	"GET /api/v1/governance",
 	"GET /api/v1/governance/policies",
 	"GET /api/v1/governance/explain",

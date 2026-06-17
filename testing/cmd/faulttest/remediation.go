@@ -825,7 +825,9 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
 		if remAnswer == "y" || remAnswer == "yes" {
 			v := true
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, "")
+			fmt.Print("    Remediation approach notes (optional): ")
+			remNotes, _ := reader.ReadString('\n')
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes))
 		} else if remAnswer == "n" || remAnswer == "no" {
 			v := false
 			fmt.Print("    Notes on remediation approach (optional): ")

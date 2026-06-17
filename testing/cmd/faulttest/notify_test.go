@@ -192,12 +192,12 @@ func TestRequestVaultDraft_URLPath(t *testing.T) {
 // ── registerAutoDBWithGateway ─────────────────────────────────────────────
 
 func TestRegisterAutoDBWithGateway_PostsCorrectPayload(t *testing.T) {
-	var gotPath, gotMethod, gotAPIKey string
+	var gotPath, gotMethod, gotAuth string
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotMethod = r.Method
-		gotAPIKey = r.Header.Get("X-API-Key")
+		gotAuth = r.Header.Get("Authorization")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -213,8 +213,8 @@ func TestRegisterAutoDBWithGateway_PostsCorrectPayload(t *testing.T) {
 	if gotPath != "/api/v1/admin/infra/register-db" {
 		t.Errorf("path = %q, want /api/v1/admin/infra/register-db", gotPath)
 	}
-	if gotAPIKey != "test-key" {
-		t.Errorf("X-API-Key = %q, want test-key", gotAPIKey)
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(gotBody, &payload); err != nil {
