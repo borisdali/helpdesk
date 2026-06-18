@@ -1,4 +1,4 @@
-# Benchmarking sample#6 (Docker/Podman): Informed Consent
+# Informed Consent sample#6 (on Docker/Podman): Part 1
 
 For the concept definition see [INFORMED_CONSENT.md](INFORMED_CONSENT.md). For the background on Fault Injection Testing in aiHelpDesk see [FAULTTEST.md](FAULTTEST.md).
 
