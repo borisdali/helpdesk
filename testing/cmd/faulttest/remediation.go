@@ -27,6 +27,9 @@ type RemediationResult struct {
 	Err              error
 	Score            float64
 	Method           string
+	// RunID is the remediation playbook run_id (plr_*). Empty when unavailable
+	// (e.g. agent_prompt remediation, or auditd not configured).
+	RunID string
 }
 
 // Remediator wraps faultlib.Remediator, adding interactive approval prompts
@@ -70,6 +73,9 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
 	}
 
+	// Find the remediation run that was started by proceed-escalation.
+	remRunID := r.findChildRunID(ctx, gate.RunID)
+
 	spec := f.Remediation
 	verifySQL := spec.VerifySQL
 	if verifySQL == "" {
@@ -107,13 +113,14 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 			r.waitForFeedback(ctx, gate.RunID)
 		}
 	} else {
-		r.submitFeedback(ctx, gate.RunID, gate.DiagnosticReport)
+		r.submitFeedback(ctx, gate.RunID, remRunID, gate.DiagnosticReport)
 	}
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
 		Score:            score,
 		Method:           "playbook",
+		RunID:            remRunID,
 	}
 }
 
@@ -126,10 +133,11 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		"prior_run_id", priorRunID)
 
 	var method string
+	var remRunID string
 	var triggerErr error
 	if spec.PlaybookID != "" {
 		method = "playbook"
-		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
+		remRunID, triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
 	} else if spec.AgentPrompt != "" {
 		method = "agent_prompt"
 		agentName := spec.AgentName
@@ -170,12 +178,14 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		RecoveryTimeSecs: recoverySecs,
 		Score:            score,
 		Method:           method,
+		RunID:            remRunID,
 	}
 }
 
 // triggerPlaybook calls RunPlaybook via faultlib and drives an interactive
-// approval loop when the run returns pending_approval.
-func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) error {
+// approval loop when the run returns pending_approval. Returns the remediation
+// run_id so the caller can fetch steps for the remediation judge.
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) (string, error) {
 	// Bridge the local trace-ID slot into faultlib's slot so that RunPlaybook
 	// and ProceedStep set X-Trace-ID on gateway requests.
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
@@ -183,7 +193,7 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	}
 	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	for _, w := range runResp.Warnings {
@@ -191,15 +201,49 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	}
 
 	if runResp.Status == "pending_approval" {
-		return r.runApprovalLoop(ctx, *runResp)
+		return runResp.RunID, r.runApprovalLoop(ctx, *runResp)
 	}
 
 	if runResp.Status == "pending_gate" {
-		return r.runGateLoop(ctx, *runResp)
+		return runResp.RunID, r.runGateLoop(ctx, *runResp)
 	}
 
 	slog.Info("playbook triggered", "series_id", seriesID, "status", runResp.Status)
-	return nil
+	return runResp.RunID, nil
+}
+
+// findChildRunID queries auditd for the remediation run that was started by a
+// proceed-escalation call on the given triage run. Returns "" when the run
+// cannot be found (e.g. auditd not configured, or run not yet committed).
+func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) string {
+	if r.cfg.AuditURL == "" || priorRunID == "" {
+		return ""
+	}
+	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + priorRunID + "&limit=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ""
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Runs []struct {
+			RunID string `json:"run_id"`
+		} `json:"runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Runs) == 0 {
+		return ""
+	}
+	return result.Runs[0].RunID
 }
 
 // printGatePreviewAndReport prints the remediation plan preview and structured
@@ -292,6 +336,17 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		return r.waitForGateEmitAndWait(ctx, gate)
 	}
 
+	// --approval-mode force: skip the gate entirely, auto-approve and proceed.
+	if r.cfg.ApprovalMode == "force" {
+		slog.Info("force-approving gate", "run_id", gate.RunID)
+		_, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+			Resolution:   "approved",
+			ResolvedBy:   r.cfg.OperatorID,
+			ApprovalMode: "auto",
+		})
+		return err
+	}
+
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
 		// Non-interactive without emit-and-wait: auto-approve with the configured mode.
@@ -332,9 +387,58 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		fmt.Printf("  Invalid mode %q — enter manual, review, or auto (or press Enter for %s).\n", modeInput, suggested)
 	}
 
-	fmt.Print("  Reason (optional, press Enter to skip): ")
+	fmt.Print("  Approval note (optional): ")
 	reasonInput, _ := reader.ReadString('\n')
 	reasonInput = strings.TrimSpace(reasonInput)
+
+	// At-gate feedback — captured before remediation runs so the signal is
+	// independent of whether the fix worked.
+	fmt.Println()
+	fmt.Println("  Feedback (optional, but recommended — recorded before remediation runs):")
+	var verdictCorrect *bool
+	var verdictNotes string
+	fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
+	diagAnswer, _ := reader.ReadString('\n')
+	diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
+	if diagAnswer == "y" || diagAnswer == "yes" {
+		v := true
+		verdictCorrect = &v
+	} else if diagAnswer == "n" || diagAnswer == "no" {
+		v := false
+		verdictCorrect = &v
+	}
+	if verdictCorrect != nil {
+		defaultCause := primaryHypothesisText(gate.DiagnosticReport)
+		prompt := "    Root cause"
+		if defaultCause != "" {
+			prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultCause)
+		}
+		fmt.Print(prompt + ": ")
+		causeInput, _ := reader.ReadString('\n')
+		causeInput = strings.TrimSpace(causeInput)
+		if causeInput == "" {
+			causeInput = defaultCause
+		}
+		verdictNotes = causeInput
+	}
+
+	// Remediation approach verdict — asked at the same gate, before remediation
+	// runs, so the signal is free of outcome bias (same reason as triage/at_gate).
+	var remVerdictCorrect *bool
+	var remVerdictNotes string
+	fmt.Print("    Was the proposed remediation appropriate? [y/n/skip]: ")
+	remAnswer, _ := reader.ReadString('\n')
+	remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
+	if remAnswer == "y" || remAnswer == "yes" {
+		v := true
+		remVerdictCorrect = &v
+	} else if remAnswer == "n" || remAnswer == "no" {
+		v := false
+		remVerdictCorrect = &v
+		fmt.Print("    Notes on remediation plan (optional): ")
+		remNotes, _ := reader.ReadString('\n')
+		remVerdictNotes = strings.TrimSpace(remNotes)
+	}
 
 	connStr := r.cfg.ConnStr
 	if r.cfg.AgentConnStr != "" {
@@ -346,9 +450,14 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		ApprovalMode:     modeInput,
 		ConnectionString: connStr,
 		Reason:           reasonInput,
+		VerdictCorrect:   verdictCorrect,
+		VerdictNotes:     verdictNotes,
 	})
 	if err != nil {
 		return fmt.Errorf("proceed-escalation: %w", err)
+	}
+	if remVerdictCorrect != nil {
+		r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", remVerdictCorrect, remVerdictNotes)
 	}
 	if resp.Status == "pending_approval" {
 		return r.runApprovalLoop(ctx, *resp)
@@ -364,10 +473,16 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
 	fmt.Printf("  Resolve at        : POST %s\n", resolveURL)
 	fmt.Printf("  Body fields:\n")
-	fmt.Printf("    resolution    : \"approved\" | \"denied\"\n")
-	fmt.Printf("    resolved_by   : your email or user ID\n")
-	fmt.Printf("    approval_mode : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
-	fmt.Printf("    reason        : optional — your assessment of the diagnosis\n\n")
+	fmt.Printf("    resolution        : \"approved\" | \"denied\"\n")
+	fmt.Printf("    resolved_by       : your email or user ID\n")
+	fmt.Printf("    approval_mode     : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
+	fmt.Printf("    reason            : optional — free-text operator comment\n")
+	fmt.Printf("    verdict_correct : true | false  (triage/at_gate feedback, before remediation runs)\n")
+	fmt.Printf("    verdict_notes   : string        (required when verdict_correct=false)\n")
+	feedbackURL := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + gate.RunID + "/feedback"
+	fmt.Printf("\n  Remediation feedback (separate call, same gate window):\n")
+	fmt.Printf("    POST %s\n", feedbackURL)
+	fmt.Printf("    {\"feedback_type\":\"remediation\",\"feedback_time\":\"at_gate\",\"verdict_correct\":true,\"verdict_notes\":\"...\"}\n\n")
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
 	if err != nil {
@@ -391,8 +506,14 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 
 	current := initial
 	const maxSteps = 100
+	// Resolve approval mode:
+	// 1. Gateway "force" (policy override via approval_override_roles) always wins.
+	// 2. CLI --approval-mode flag wins over the playbook's gateway default.
+	// 3. Fall back to the gateway's effective mode when no CLI flag was given.
 	mode := r.cfg.ApprovalMode
-	if initial.EffectiveApprovalMode != "" {
+	if initial.EffectiveApprovalMode == "force" {
+		mode = "force"
+	} else if mode == "" {
 		mode = initial.EffectiveApprovalMode
 	}
 
@@ -646,10 +767,13 @@ func (r *Remediator) waitForFeedback(ctx context.Context, runID string) {
 	}
 }
 
-// submitFeedback prompts the operator for diagnosis quality feedback and POSTs
-// it to the gateway. Silent no-op when non-interactive or gateway not configured.
-func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagReport map[string]any) {
-	if r.cfg.GatewayURL == "" || runID == "" {
+// submitFeedback prompts the operator for diagnosis and (optionally) remediation
+// quality feedback and POSTs to the gateway. Silent no-op when non-interactive
+// or gateway not configured. triageRunID anchors both feedback records so they
+// are joinable with run_evaluation without a cross-table join. remRunID is only
+// used for logging; pass "" when remediation did not run.
+func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID string, diagReport map[string]any) {
+	if r.cfg.GatewayURL == "" || triageRunID == "" {
 		return
 	}
 	tty, err := os.Open("/dev/tty")
@@ -660,7 +784,8 @@ func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagRepor
 	reader := bufio.NewReader(tty)
 
 	fmt.Println()
-	fmt.Print("  Was the diagnosis correct? [y/n/skip]: ")
+	fmt.Println("  Post-incident feedback (optional, but recommended):")
+	fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer == "" || answer == "skip" || answer == "s" {
@@ -680,7 +805,7 @@ func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagRepor
 	// Suggest the primary hypothesis text as the default root cause.
 	defaultRootCause := primaryHypothesisText(diagReport)
 
-	prompt := "  Actual root cause"
+	prompt := "    Root cause"
 	if defaultRootCause != "" {
 		prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultRootCause)
 	}
@@ -691,12 +816,37 @@ func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagRepor
 		causeInput = defaultRootCause
 	}
 
-	fb := map[string]any{
-		"run_id":            runID,
-		"diagnosis_correct": diagCorrect,
+	r.postFeedback(ctx, triageRunID, "triage", "post_incident", diagCorrect, causeInput)
+
+	// Remediation approach feedback — only when remediation ran.
+	if remRunID != "" {
+		fmt.Print("    Was the remediation approach appropriate? [y/n/skip]: ")
+		remAnswer, _ := reader.ReadString('\n')
+		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
+		if remAnswer == "y" || remAnswer == "yes" {
+			v := true
+			fmt.Print("    Remediation approach notes (optional): ")
+			remNotes, _ := reader.ReadString('\n')
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes))
+		} else if remAnswer == "n" || remAnswer == "no" {
+			v := false
+			fmt.Print("    Notes on remediation approach (optional): ")
+			notes, _ := reader.ReadString('\n')
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes))
+		}
 	}
-	if causeInput != "" {
-		fb["actual_root_cause"] = causeInput
+}
+
+// postFeedback POSTs a single feedback record to the gateway.
+func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feedbackTime string, verdictCorrect *bool, notes string) {
+	fb := map[string]any{
+		"run_id":          runID,
+		"verdict_correct": verdictCorrect,
+		"feedback_type":   feedbackType,
+		"feedback_time":   feedbackTime,
+	}
+	if notes != "" {
+		fb["verdict_notes"] = notes
 	}
 	if r.cfg.OperatorID != "" {
 		fb["operator"] = r.cfg.OperatorID
@@ -713,12 +863,12 @@ func (r *Remediator) submitFeedback(ctx context.Context, runID string, diagRepor
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Warn("faulttest: failed to submit feedback", "run_id", runID, "err", err)
+		slog.Warn("faulttest: failed to submit feedback", "run_id", runID, "feedback_type", feedbackType, "err", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		fmt.Printf("  Feedback submitted (run_id=%s)\n", runID)
+		fmt.Printf("  Feedback submitted (%s/%s run_id=%s)\n", feedbackType, feedbackTime, runID)
 	}
 }
 

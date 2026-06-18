@@ -61,7 +61,10 @@ type ProceedEscalationRequest struct {
 	ApprovalMode     string `json:"approval_mode,omitempty"`   // "manual"|"review"|"auto"|"session"|"force"
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"`
-	Reason           string `json:"reason,omitempty"`          // optional operator rationale
+	Reason           string `json:"reason,omitempty"`           // optional operator rationale
+	// At-gate feedback — captured before remediation runs.
+	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
+	VerdictNotes   string `json:"verdict_notes,omitempty"`
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.

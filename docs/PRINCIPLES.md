@@ -118,7 +118,7 @@ The Orchestrator owns the infrastructure inventory. Sub-agents own their tool
 implementations. The audit daemon owns the persistent record. Responsibility
 is clearly partitioned.
 
-## 8. Human in the loop is not optional
+## 8. Informed Consent: human in the loop is not optional
 
 aiHelpDesk is a shift-left support tool, not a replacement for human
 judgment or accountability. The system is designed to dramatically reduce the time it takes to
@@ -130,6 +130,13 @@ The approval workflow, the review-and-confirm step, the fleet-runner plan
 review, and the dry-run mode are all expressions of this principle. The goal
 is not to remove humans from the loop; it is to give humans much better
 information when they are in the loop.
+
+This principle has a name: **[Informed Consent](INFORMED_CONSENT.md)**. Borrowed from medical
+ethics, it requires three things before any remediation executes: the operator must be
+*informed* of the diagnosis and proposed steps, must *consent* to the action, and must
+retain the *right to refuse* with the denial permanently recorded. The feedback flywheel
+(`vault accuracy`, `vault calibration`) is what makes the "informed" part verifiable rather
+than just claimed — it measures whether the diagnoses operators are shown are actually correct.
 
 ## 9. Extensibility without forking
 

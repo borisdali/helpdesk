@@ -696,43 +696,50 @@ After an incident resolves, operators can record whether the agent's diagnosis w
 
 ```
 POST /api/v1/fleet/playbook-runs/{runID}/feedback
-GET  /api/v1/fleet/playbook-runs/{runID}/feedback
+GET  /api/v1/fleet/playbook-runs/{runID}/feedback[?feedback_type=triage&feedback_time=post_incident]
 ```
 
 ```bash
-# Submit feedback after a resolved incident
+# Submit post-incident feedback after a resolved incident
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/feedback \
   -H "Content-Type: application/json" \
   -d '{
-    "diagnosis_correct": true,
-    "actual_root_cause":  "PID 867 held ShareLock on transaction 9823 — idle in transaction for 47 seconds",
-    "operator":           "alice@example.com"
+    "feedback_type":  "triage",
+    "feedback_time":  "post_incident",
+    "verdict_correct": true,
+    "verdict_notes":   "PID 867 held ShareLock on transaction 9823 — idle in transaction for 47 seconds",
+    "operator":        "alice@example.com"
   }'
 
-# Retrieve feedback later
+# Retrieve post-incident feedback (default when no query params are supplied)
 curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/feedback | jq .
+
+# Retrieve at-gate feedback submitted when the gate was approved or denied
+curl -s "http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/feedback?feedback_type=triage&feedback_time=at_gate" | jq .
 ```
 
-Submitting feedback twice for the same `run_id` **overwrites** the previous entry (upsert semantics). `GET` returns `404` when no feedback has been submitted for the run.
+Each `(run_id, feedback_type, feedback_time)` triple is stored as a separate row — submitting at-gate and post-incident feedback for the same run does not overwrite either entry. Resubmitting the *same* triple updates that row (upsert semantics). `GET` returns `404` when no matching row exists.
 
 **`RunFeedback` object:**
 
 | Field | Type | Description |
 |---|---|---|
 | `run_id` | string | The run the feedback refers to |
+| `feedback_type` | string | `"triage"` (default) or `"remediation"` — what phase is being evaluated |
+| `feedback_time` | string | `"post_incident"` (default) or `"at_gate"` — when feedback was collected |
 | `series_id` | string | Playbook series (auto-populated from the run record if omitted from the body) |
-| `diagnosis_correct` | bool \| null | `true` = the agent identified the correct root cause; `false` = wrong hypothesis; `null` (omitted) = not assessed |
-| `actual_root_cause` | string | What the root cause actually was, in the operator's own words |
+| `verdict_correct` | bool \| null | `true` = the agent's assessment was correct; `false` = wrong hypothesis; `null` (omitted) = not assessed |
+| `verdict_notes` | string | What was actually correct, in the operator's own words |
 | `operator` | string | Who submitted the feedback (falls back to `X-User` header) |
 | `submitted_at` | RFC3339 | When the feedback was submitted |
 
-Accuracy aggregates (across all runs in a series with `diagnosis_correct` set) are included in `GET /api/v1/fleet/playbooks/{id}/stats` — see `PlaybookRunStats` below.
+Accuracy aggregates (across all runs in a series with `verdict_correct` set for `feedback_type=triage, feedback_time=post_incident`) are included in `GET /api/v1/fleet/playbooks/{id}/stats` — see `PlaybookRunStats` below.
 
 ### Diagnosis accuracy and what counts toward it
 
 **What accuracy measures**
 
-`accuracy_rate` in `PlaybookRunStats` answers one question: when the agent named a root cause, was it right? It is computed from runs that have an explicit `diagnosis_correct` value — either `true` or `false`. Runs with no feedback entry, or entries where `diagnosis_correct` is omitted, do not affect the rate.
+`accuracy_rate` in `PlaybookRunStats` answers one question: when the agent named a root cause, was it right? It is computed from `(triage, post_incident)` feedback rows that have an explicit `verdict_correct` value — either `true` or `false`. Runs with no feedback, or entries where `verdict_correct` is omitted, do not affect the rate.
 
 This is entirely separate from `resolution_rate`, which measures whether the database recovered after remediation. The two signals are independent:
 
@@ -745,14 +752,14 @@ A system with high resolution rate and low accuracy is fixing things by brute fo
 
 **What counts toward accuracy**
 
-Two sources contribute `diagnosis_correct=false` entries:
+Two sources contribute `verdict_correct=false` entries for `(triage, post_incident)`:
 
-1. **Explicit post-incident feedback** — submitted by an operator via `POST .../feedback` after reviewing the incident outcome. This is the primary signal and supports both `true` and `false` values with an optional free-text `actual_root_cause`.
+1. **Explicit post-incident feedback** — submitted by an operator via `POST .../feedback` after reviewing the incident outcome. This is the primary signal and supports both `true` and `false` values with an optional free-text `verdict_notes`.
 
-2. **Gate denial auto-submission** — when an operator denies the gate via `POST .../proceed-escalation` with `resolution: "denied"`, the gateway automatically submits a `RunFeedback` entry with `diagnosis_correct: false` for the triage run. The denial `reason`, if provided, is stored as `actual_root_cause`. This captures the implicit signal — an operator reviewing triage findings and deciding not to proceed is a reliable indicator that the diagnosis was unconvincing or wrong.
+2. **Gate denial auto-submission** — when an operator denies the gate via `POST .../proceed-escalation` with `resolution: "denied"`, the gateway automatically submits a `RunFeedback` entry with `feedback_type=triage`, `feedback_time=at_gate`, and `verdict_correct=false`. The denial `reason`, if provided, is stored as `verdict_notes`. This captures the implicit signal — an operator reviewing triage findings and deciding not to proceed is a reliable indicator that the diagnosis was unconvincing or wrong.
 
    ```bash
-   # This denial automatically records diagnosis_correct=false for plr_a3f7c1b2
+   # This denial automatically records verdict_correct=false (triage/at_gate) for plr_a3f7c1b2
    curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/proceed-escalation \
      -H "Content-Type: application/json" \
      -d '{
@@ -762,11 +769,11 @@ Two sources contribute `diagnosis_correct=false` entries:
      }'
    ```
 
-   The auto-submitted entry uses upsert semantics: if the operator later submits explicit feedback via `POST .../feedback`, it overwrites the auto-entry.
+   Gate-denial entries are stored as `(triage, at_gate)` — they do not overwrite or collide with a later `(triage, post_incident)` entry the operator submits after the incident is fully resolved.
 
 **What does not count toward accuracy**
 
-Gate **approvals** are deliberately not auto-submitted as `diagnosis_correct=true`. An approval means the operator found the diagnosis plausible enough to attempt remediation — not that they confirmed it was correct. Definitive confirmation typically only exists after remediation completes and the operator can compare the agent's hypothesis against what actually fixed the problem. Submit explicit post-incident feedback for that confirmation.
+Gate **approvals** are deliberately not auto-submitted as `verdict_correct=true`. An approval means the operator found the diagnosis plausible enough to attempt remediation — not that they confirmed it was correct. Definitive confirmation typically only exists after remediation completes and the operator can compare the agent's hypothesis against what actually fixed the problem. Submit explicit post-incident feedback for that confirmation.
 
 **Reading the accuracy signal**
 
@@ -824,15 +831,17 @@ Returns `404` if no run with that ID exists.
   },
 
   "feedback": {
-    "diagnosis_correct": true,
-    "actual_root_cause": "PID 867 held ShareLock on tx 9823 for 47s",
-    "operator":          "alice@example.com",
-    "submitted_at":      "2026-06-01T10:05:00Z"
+    "feedback_type":  "triage",
+    "feedback_time":  "post_incident",
+    "verdict_correct": true,
+    "verdict_notes":   "PID 867 held ShareLock on tx 9823 for 47s",
+    "operator":        "alice@example.com",
+    "submitted_at":    "2026-06-01T10:05:00Z"
   }
 }
 ```
 
-`gate` and `remediation` are `null` when the triage run completed without triggering a gate. `feedback` is `null` when no feedback has been submitted. `resolved_at` and `duration_sec` are populated when the remediation run has a `completed_at` timestamp.
+`gate` and `remediation` are `null` when the triage run completed without triggering a gate. `feedback` is `null` when no post-incident feedback has been submitted. `resolved_at` and `duration_sec` are populated when the remediation run has a `completed_at` timestamp.
 
 ### `PlaybookRun` object
 
@@ -1862,9 +1871,11 @@ After recovery, the operator records whether the agent's hypothesis was actually
 curl -s -X POST "$GW/api/v1/fleet/playbook-runs/$RUN_ID/feedback" \
   -H "Content-Type: application/json" \
   -d '{
-    "diagnosis_correct": true,
-    "actual_root_cause": "PID 867 idle-in-transaction — abandoned migration draft held ShareLock on accounts for 47s",
-    "operator":          "alice@example.com"
+    "feedback_type":   "triage",
+    "feedback_time":   "post_incident",
+    "verdict_correct": true,
+    "verdict_notes":   "PID 867 idle-in-transaction — abandoned migration draft held ShareLock on accounts for 47s",
+    "operator":        "alice@example.com"
   }'
 ```
 
@@ -1908,10 +1919,12 @@ curl -s "$GW/api/v1/incidents/$RUN_ID" | jq .
   },
 
   "feedback": {
-    "diagnosis_correct": true,
-    "actual_root_cause": "PID 867 idle-in-transaction — abandoned migration draft",
-    "operator":          "alice@example.com",
-    "submitted_at":      "2026-06-01T10:05:00Z"
+    "feedback_type":   "triage",
+    "feedback_time":   "post_incident",
+    "verdict_correct": true,
+    "verdict_notes":   "PID 867 idle-in-transaction — abandoned migration draft",
+    "operator":        "alice@example.com",
+    "submitted_at":    "2026-06-01T10:05:00Z"
   }
 }
 ```
@@ -2069,8 +2082,8 @@ Returned inline in `GET /fleet/playbooks` and by `GET /fleet/playbooks/{playbook
 | `resolution_rate` | float | `resolved / total_runs` (0–1) |
 | `escalation_rate` | float | `escalated / total_runs` (0–1) |
 | `last_run_at` | string | Timestamp of the most recent run |
-| `feedback_count` | int | Number of feedback submissions for this series (runs where an operator answered the "was the diagnosis correct?" question) |
-| `correct_count` | int | Number of submissions with `diagnosis_correct=true` |
+| `feedback_count` | int | Number of `(triage, post_incident)` feedback submissions for this series where `verdict_correct` was explicitly set |
+| `correct_count` | int | Number of submissions with `verdict_correct=true` |
 | `accuracy_rate` | float | `correct_count / feedback_count` (0–1); `0` when no feedback has been submitted |
 
 **How outcomes are set:**

@@ -43,8 +43,9 @@ guidance: |
   Common misdiagnoses: blaming a slow query that is actually waiting for a lock
   held by a separate long-running transaction — always check blocking chains first.
 
-  Final step: after your analysis, output exactly these lines in this format
-  (no markdown, no extra text on each line):
+  Required output — write these exact lines at the end of your response,
+  no markdown, no extra text on any line. The handoff signal (TRANSITION_TO
+  or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate:
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1

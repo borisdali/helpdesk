@@ -315,8 +315,25 @@ func (c *GatewayClient) SubmitFeedback(ctx context.Context, runID string, body m
 }
 
 // GetFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
+// Defaults to feedback_type=triage, feedback_time=post_incident.
 func (c *GatewayClient) GetFeedback(ctx context.Context, runID string) (map[string]any, error) {
 	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode feedback: %w", err)
+	}
+	return result, nil
+}
+
+// GetFeedbackByType calls GET /api/v1/fleet/playbook-runs/{runID}/feedback
+// with ?feedback_type=<feedbackType>&feedback_time=<feedbackTime>.
+func (c *GatewayClient) GetFeedbackByType(ctx context.Context, runID, feedbackType, feedbackTime string) (map[string]any, error) {
+	path := fmt.Sprintf("/api/v1/fleet/playbook-runs/%s/feedback?feedback_type=%s&feedback_time=%s",
+		runID, feedbackType, feedbackTime)
+	raw, err := c.get(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -331,6 +348,40 @@ func (c *GatewayClient) GetFeedback(ctx context.Context, runID string) (map[stri
 // Returns the response body map which includes "resolve_url".
 func (c *GatewayClient) RequestFeedback(ctx context.Context, runID string) (map[string]any, error) {
 	return c.postJSON(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/request-feedback", map[string]any{})
+}
+
+// SubmitEvaluation calls POST /api/v1/fleet/playbook-runs/{runID}/evaluation.
+// Returns the HTTP status code (204 on success).
+func (c *GatewayClient) SubmitEvaluation(ctx context.Context, runID string, body map[string]any) (int, error) {
+	path := "/api/v1/fleet/playbook-runs/" + runID + "/evaluation"
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("POST %s: %w", path, err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// GetEvaluation calls GET /api/v1/fleet/playbook-runs/{runID}/evaluation.
+func (c *GatewayClient) GetEvaluation(ctx context.Context, runID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/evaluation")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode evaluation: %w", err)
+	}
+	return result, nil
 }
 
 // GetDecisions calls GET /api/v1/decisions with optional query params.

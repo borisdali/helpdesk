@@ -14,11 +14,13 @@ var DefaultGatewayPermissions = map[string]Permission{
 
 	// ── Authenticated: any verified (non-anonymous) user ──────────────────────
 	"POST /api/v1/query":         {AdminBypass: true},
-	"POST /api/v1/incidents":     {AdminBypass: true},
-	"GET /api/v1/incidents":      {AdminBypass: true},
+	"POST /api/v1/incidents":       {AdminBypass: true},
+	"GET /api/v1/incidents":        {AdminBypass: true},
+	"GET /api/v1/incidents/{runID}": {AdminBypass: true},
 	"POST /api/v1/research":      {AdminBypass: true},
-	"GET /api/v1/infrastructure": {AdminBypass: true},
-	"GET /api/v1/databases":      {AdminBypass: true},
+	"GET /api/v1/infrastructure":           {AdminBypass: true},
+	"GET /api/v1/databases":                {AdminBypass: true},
+	"POST /api/v1/admin/infra/register-db": {AdminBypass: true},
 
 	// Governance reads
 	"GET /api/v1/governance":                   {AdminBypass: true},
@@ -82,12 +84,22 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"POST /api/v1/fleet/playbooks/{playbookID}/run":        {AdminBypass: true},
 	"GET /api/v1/fleet/playbooks/{playbookID}/runs":        {AdminBypass: true},
 	"GET /api/v1/fleet/playbooks/{playbookID}/stats":       {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs":                               {AdminBypass: true},
 	"PATCH /api/v1/fleet/playbook-runs/{runID}":                    {AdminBypass: true},
 	"GET /api/v1/fleet/playbook-runs/{runID}":                      {AdminBypass: true},
 	"GET /api/v1/fleet/playbook-runs/{runID}/steps":                {AdminBypass: true},
 	"GET /api/v1/fleet/playbook-runs/{runID}/pending-step":         {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}/events":               {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}/feedback":             {AdminBypass: true},
+	"POST /api/v1/fleet/playbook-runs/{runID}/feedback":            {AdminBypass: true},
+	"POST /api/v1/fleet/playbook-runs/{runID}/request-feedback":    {AdminBypass: true},
+	"GET /api/v1/fleet/playbook-runs/{runID}/evaluation":           {AdminBypass: true},
+	"POST /api/v1/fleet/playbook-runs/{runID}/evaluation":          {AdminBypass: true},
 	"POST /api/v1/fleet/playbook-runs/{runID}/proceed":             {AdminBypass: true},
 	"POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation":  {AdminBypass: true},
+	"GET /api/v1/fleet/series/{seriesID}/version-stats":            {AdminBypass: true},
+	"GET /api/v1/fleet/calibration":                                {AdminBypass: true},
+	"GET /api/v1/fleet/fault-run-history":                          {AdminBypass: true},
 
 	// ── Role-required ─────────────────────────────────────────────────────────
 

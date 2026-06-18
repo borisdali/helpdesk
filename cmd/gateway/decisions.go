@@ -120,6 +120,8 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 		Reason          string `json:"reason,omitempty"`
 		ApprovalMode    string `json:"approval_mode,omitempty"`
 		ApprovalSession string `json:"approval_session,omitempty"`
+		VerdictCorrect  *bool  `json:"verdict_correct,omitempty"`
+		VerdictNotes    string `json:"verdict_notes,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -133,7 +135,7 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 	switch {
 	case strings.HasPrefix(id, "gate:"):
 		runID := strings.TrimPrefix(id, "gate:")
-		g.resolveGate(w, r, runID, req.Resolution, req.ResolvedBy, req.ApprovalMode, req.ApprovalSession)
+		g.resolveGate(w, r, runID, req.Resolution, req.ResolvedBy, req.ApprovalMode, req.ApprovalSession, req.VerdictCorrect, req.VerdictNotes)
 
 	case strings.HasPrefix(id, "fleet:"), strings.HasPrefix(id, "step:"):
 		approvalID := id[strings.Index(id, ":")+1:]
@@ -150,13 +152,20 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 
 // resolveGate delegates gate resolution to handleProceedEscalation by
 // rewriting the request URL and body to match that handler's expected form.
-func (g *Gateway) resolveGate(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, approvalMode, approvalSession string) {
-	body, err := json.Marshal(map[string]any{
+func (g *Gateway) resolveGate(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, approvalMode, approvalSession string, verdictCorrect *bool, verdictNotes string) {
+	payload := map[string]any{
 		"resolution":       resolution,
 		"resolved_by":      resolvedBy,
 		"approval_mode":    approvalMode,
 		"approval_session": approvalSession,
-	})
+	}
+	if verdictCorrect != nil {
+		payload["verdict_correct"] = *verdictCorrect
+	}
+	if verdictNotes != "" {
+		payload["verdict_notes"] = verdictNotes
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to build proceed-escalation request")
 		return
@@ -445,18 +454,18 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var fb struct {
-			RunID            string  `json:"run_id"`
-			SeriesID         string  `json:"series_id"`
-			DiagnosisCorrect *bool   `json:"diagnosis_correct,omitempty"`
-			ActualRootCause  string  `json:"actual_root_cause,omitempty"`
-			Operator         string  `json:"operator"`
+			RunID          string  `json:"run_id"`
+			SeriesID       string  `json:"series_id"`
+			VerdictCorrect *bool   `json:"verdict_correct,omitempty"`
+			VerdictNotes   string  `json:"verdict_notes,omitempty"`
+			Operator       string  `json:"operator"`
 		}
 		if err := json.NewDecoder(resp2.Body).Decode(&fb); err != nil {
 			writeError(w, http.StatusInternalServerError, "decoding feedback: "+err.Error())
 			return
 		}
 		status := "pending"
-		if fb.DiagnosisCorrect != nil {
+		if fb.VerdictCorrect != nil {
 			status = "resolved"
 		}
 		d := decisions.Decision{
@@ -472,11 +481,11 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 				"series_id": fb.SeriesID,
 			},
 		}
-		if fb.DiagnosisCorrect != nil {
-			d.Extra["diagnosis_correct"] = *fb.DiagnosisCorrect
+		if fb.VerdictCorrect != nil {
+			d.Extra["verdict_correct"] = *fb.VerdictCorrect
 		}
-		if fb.ActualRootCause != "" {
-			d.Extra["actual_root_cause"] = fb.ActualRootCause
+		if fb.VerdictNotes != "" {
+			d.Extra["verdict_notes"] = fb.VerdictNotes
 		}
 		writeJSON(w, http.StatusOK, d)
 
@@ -637,18 +646,20 @@ func (g *Gateway) fetchPendingFeedback(ctx context.Context, limit int) ([]decisi
 }
 
 // resolveFeedback handles feedback decision resolution.
-// resolution="approved" → diagnosis_correct=true; "denied" → diagnosis_correct=false.
-// reason becomes actual_root_cause.
+// resolution="approved" → verdict_correct=true; "denied" → verdict_correct=false.
+// reason becomes verdict_notes. Stored as (feedback_type="triage", feedback_time="post_incident").
 func (g *Gateway) resolveFeedback(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, reason string) {
-	diagCorrect := resolution == "approved"
+	verdictCorrect := resolution == "approved"
 	payload := map[string]any{
-		"diagnosis_correct": diagCorrect,
+		"verdict_correct": verdictCorrect,
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
 	}
 	if resolvedBy != "" {
 		payload["operator"] = resolvedBy
 	}
 	if reason != "" {
-		payload["actual_root_cause"] = reason
+		payload["verdict_notes"] = reason
 	}
 	body, _ := json.Marshal(payload)
 
@@ -682,7 +693,7 @@ func (g *Gateway) resolveFeedback(w http.ResponseWriter, r *http.Request, runID,
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":            "resolved",
-		"diagnosis_correct": diagCorrect,
+		"status":          "resolved",
+		"verdict_correct": verdictCorrect,
 	})
 }

@@ -145,7 +145,7 @@ GET /api/v1/fleet/playbooks?series_id=pbs_db_restart_triage
 
 ## Vault Commands
 
-`faulttest vault` provides the operational window into the Vault from the command line. Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`.
+`faulttest vault` provides the operational window into the Vault from the command line. Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores (`keyword_score`, `tool_score`, `diagnosis_score`, `overall_score`) are also written to the auditd `run_evaluation` table via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation`, keyed by the gateway's `plr_*` playbook run ID. The local JSON file acts as a cache; auditd is the durable store.
 
 ### vault list
 
@@ -183,7 +183,7 @@ Use `--target` to filter history to a specific database server (the `--agent-con
 faulttest vault accuracy <series_id> [--gateway http://gateway:8080] [--api-key sk-...]
 ```
 
-Shows the per-series diagnosis accuracy breakdown — how often the agent's root-cause hypothesis was confirmed correct by operators who submitted post-incident feedback.
+Shows the per-series diagnosis accuracy breakdown — how often the agent's root-cause hypothesis was confirmed correct by operators. Counts both at-gate feedback (captured before remediation at the triage→remediation decision gate) and post-incident feedback (submitted after recovery).
 
 ```bash
 faulttest vault accuracy pbs_lock_chain_triage \
@@ -192,20 +192,64 @@ faulttest vault accuracy pbs_lock_chain_triage \
 ```
 
 ```
-=== Diagnosis Accuracy: pbs_lock_chain_triage ===
+Diagnosis accuracy for series: pbs_lock_chain_triage
 
-Feedback submissions:  12
-Correct diagnoses:     11
-Accuracy rate:         91.7%
+  Feedback submitted : 12 runs
+  Correct diagnoses  : 11
+  Accuracy rate      : 92%
 
-Submit feedback after an incident:
-  POST /api/v1/fleet/playbook-runs/{runID}/feedback
-  {"diagnosis_correct": true, "actual_root_cause": "PID 867 idle-in-tx 47s"}
+  Breakdown by feedback time:
+    At-gate (before remediation) : 8 of 9 correct (89%)
+    Post-incident (after recovery): 3 of 3 correct (100%)
 ```
 
-Accuracy rate is `correct / total` across all runs in the series where `diagnosis_correct` was explicitly set (nil feedback is excluded). Use this alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
+The overall accuracy rate is `correct / total` across both feedback times; nil verdicts are excluded. The breakdown section appears whenever at least one feedback type has data, letting you compare the signal quality: at-gate feedback is uncontaminated by knowledge of whether the fix worked, while post-incident feedback can be influenced by hindsight.
+
+With no argument, lists all catalog faults that have a diagnosis playbook series and shows a table with per-type counts:
+
+```
+  FAULT                                SERIES                               AT-GATE   POST-INC  ACCURACY
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  db-lock-contention                   pbs_lock_chain_triage                  8/9       3/3       92%
+  db-slow-query                        pbs_slow_query_triage                  4/5       –         80%
+```
+
+`AT-GATE` and `POST-INC` show `correct/total`; `–` means no feedback of that type has been submitted for the series yet.
+
+Use `vault accuracy` alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
 
 Feedback is submitted interactively by `faulttest` after a successful recovery when running with `--remediate` and `--gateway` (see below), or manually via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`.
+
+### vault incidents
+
+```bash
+faulttest vault incidents <fault-id or series-id> \
+  [--limit N] \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Lists the most recent triage runs for a fault or playbook series. Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a series ID (e.g. `pbs_lock_chain_triage`). Requires `--gateway`.
+
+```
+Incidents for db-lock-contention (pbs_lock_chain_triage) — 3 runs
+
+RUN ID          STARTED            DIAG        REMEDIATION       FEEDBACK      SCORE  FINDINGS
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+plr_a3f7c1b2   2026-06-01 14:32   resolved    resolved          ✓ correct     91%    lock_type=relation, rel...
+plr_e8c2d5a1   2026-05-28 09:11   resolved    –                 submitted     85%    blocking_pid=3421, wait...
+plr_f1b9e3c4   2026-05-14 22:45   unresolved  –                 ✗ wrong       40%    –
+```
+
+| Column | Source |
+|--------|--------|
+| `DIAG` | Triage run outcome from gateway |
+| `REMEDIATION` | Outcome of the linked remediation run (if any) |
+| `FEEDBACK` | Operator post-incident verdict via Decision Hub |
+| `SCORE` | `overall_score` from `run_evaluation` in auditd (requires `--gateway`) |
+| `FINDINGS` | Truncated `findings_summary` from the playbook run |
+
+The `SCORE` column is populated only when faulttest evaluation data has been posted to auditd (i.e., the run was triggered by `faulttest run --gateway`). Real-incident runs triggered from the product UI show `–` unless scores are manually submitted via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation`.
 
 ### vault status
 
@@ -252,6 +296,91 @@ db-replication-lag               75%          33%          -42%
 ```
 
 When drift is detected, run `faulttest inject` + `faulttest teardown` to reproduce the fault interactively and investigate what changed in the agent or environment.
+
+### vault versions
+
+```bash
+faulttest vault versions <fault-id or series-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Shows per-version run stats for a playbook series: resolution rate, average step count, average recovery time, and separate diagnosis / remediation scores. Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a series ID (e.g. `pbs_lock_chain_triage`). Requires `--gateway`.
+
+```
+Version stats for pbs_cache_miss_remediate — 2 version(s)
+
+VERSION     RUNS    RESOLVED    AVG STEPS   AVG TIME    AVG DIAG   AVG REMED
+─────────────────────────────────────────────────────────────────────────────
+1.0          5      60%         6.2         42s         72%        –
+1.1  *       3      100%        4.0         8s          91%        85%
+
+* = currently active version
+```
+
+Data sources:
+
+| Column | Source |
+|--------|--------|
+| `RUNS` / `RESOLVED` | `playbook_runs` table in auditd, grouped by `playbook_id` |
+| `AVG STEPS` | Average number of steps recorded in `playbook_run_steps` per run |
+| `AVG TIME` | Average wall-clock time between `started_at` and `completed_at` for completed runs |
+| `AVG DIAG` | Average `diagnosis_score` from `run_evaluation`; `–` when no runs have eval data |
+| `AVG REMED` | Average `remediation_score` for runs where remediation was executed (score > 0); `–` when no remediation runs |
+
+The gateway endpoint backing this command: `GET /api/v1/fleet/series/{seriesID}/version-stats`.
+
+### vault calibration
+
+```bash
+# Fleet-wide calibration
+faulttest vault calibration \
+  --gateway https://gateway.internal \
+  --api-key $HELPDESK_API_KEY
+
+# Scoped to one series (or fault ID)
+faulttest vault calibration db-lock-contention \
+  --gateway https://gateway.internal \
+  --api-key $HELPDESK_API_KEY
+```
+
+Shows how well `diagnosis_score` and `remediation_score` predict whether operators confirm the outcome was correct. Requires runs that have both an evaluation score (`--gateway` flag during `faulttest run`) and operator feedback (at-gate or post-incident).
+
+At-gate feedback is preferred over post-incident when both exist for the same run — it is captured before the operator knows whether remediation succeeded, making it a cleaner signal. A run with only post-incident feedback still contributes.
+
+```
+Diagnosis calibration — fleet-wide (17 runs with eval + operator feedback)
+
+CONF BAND     RUNS    CORRECT    ACCURACY    CALIBRATION
+─────────────────────────────────────────────────────────────────
+90-100%          12         10        83%    OVERCONFIDENT
+70-89%            4          3        75%    WELL_CALIBRATED
+<70%              1          1       100%    INSUFFICIENT_DATA
+
+Remediation calibration — fleet-wide (8 runs with remediation score + operator feedback)
+
+SCORE BAND    RUNS    CORRECT    ACCURACY    CALIBRATION
+─────────────────────────────────────────────────────────────────
+90-100%           5          4        80%    WELL_CALIBRATED
+70-89%            3          3       100%    UNDERCONFIDENT
+<70%              0          0          –    INSUFFICIENT_DATA
+```
+
+The remediation section only appears when there are runs with both a non-zero `remediation_score` and operator remediation feedback (`feedback_type: "remediation"`).
+
+Calibration is determined by comparing `ACCURACY` against the midpoint of each band:
+
+| Band | Expected accuracy | WELL_CALIBRATED range |
+|------|------------------|-----------------------|
+| `90-100%` | 95% | 85–100% |
+| `70-89%` | 80% | 70–90% |
+| `<70%` | 50% | 40–60% |
+
+**OVERCONFIDENT** — model scores high but operators disagree more than expected.  
+**UNDERCONFIDENT** — model scores low but operators agree more than expected.  
+**INSUFFICIENT_DATA** — fewer than 3 runs in this band; no reliable conclusion.
+
+The gateway endpoint backing this command: `GET /api/v1/fleet/calibration?series_id=<optional>`.
 
 ### vault suggest
 
@@ -438,6 +567,7 @@ faulttest run \
   --external --conn "host=staging-db ..." \
   --db-agent http://helpdesk-gateway:8080 \
   --judge --judge-vendor anthropic --judge-model claude-haiku-4-5-20251001 \
+  --remediation-judge \
   --remediate --gateway http://helpdesk-gateway:8080 --api-key $HELPDESK_API_KEY \
   --notify-url https://hooks.slack.com/services/xxx/yyy/zzz
 

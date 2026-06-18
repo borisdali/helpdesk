@@ -16,7 +16,7 @@ func newPlaybookRunStore(t *testing.T) *PlaybookRunStore {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	s, err := NewPlaybookRunStore(store.DB())
+	s, err := NewPlaybookRunStore(store.DB(), false)
 	if err != nil {
 		t.Fatalf("NewPlaybookRunStore: %v", err)
 	}
@@ -435,5 +435,195 @@ func TestPlaybookRunStore_ListByPriorRunID(t *testing.T) {
 	}
 	if len(none) != 0 {
 		t.Errorf("want 0 runs for unknown prior_run_id, got %d", len(none))
+	}
+}
+
+func TestPlaybookRunStore_StatsByVersion(t *testing.T) {
+	ctx := context.Background()
+	raw, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { raw.Close() })
+
+	runStore, err := NewPlaybookRunStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	pbStore, err := NewPlaybookStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookStore: %v", err)
+	}
+	stepStore, err := NewPlaybookRunStepStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStepStore: %v", err)
+	}
+	evalStore, err := NewRunEvaluationStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+
+	const seriesID = "pbs_test_versioned"
+
+	// Insert two playbook versions — v1.0 (inactive) and v1.1 (active).
+	// Both use the same SeriesID so they belong to the same series.
+	pb10 := &Playbook{
+		Name:          "Test Playbook v1.0",
+		SeriesID:      seriesID,
+		Version:       "1.0",
+		IsActive:      false,
+		ExecutionMode: "agent",
+		ProblemClass:  "test",
+		Guidance:      "v1.0 guidance",
+	}
+	if err := pbStore.Create(ctx, pb10); err != nil {
+		t.Fatalf("Create v1.0: %v", err)
+	}
+	pb11 := &Playbook{
+		Name:          "Test Playbook v1.1",
+		SeriesID:      seriesID,
+		Version:       "1.1",
+		IsActive:      true,
+		ExecutionMode: "agent",
+		ProblemClass:  "test",
+		Guidance:      "v1.1 guidance",
+	}
+	if err := pbStore.Create(ctx, pb11); err != nil {
+		t.Fatalf("Create v1.1: %v", err)
+	}
+
+	id10 := pb10.PlaybookID
+	id11 := pb11.PlaybookID
+	if id10 == "" || id11 == "" {
+		t.Fatalf("playbook IDs not populated after Create: id10=%q id11=%q", id10, id11)
+	}
+
+	now := time.Now().UTC()
+
+	// v1.0: 2 resolved runs, 1 abandoned.
+	for i, outcome := range []string{"resolved", "resolved", "abandoned"} {
+		r := &PlaybookRun{
+			RunID:       "plr_v10_" + string(rune('a'+i)),
+			PlaybookID:  id10,
+			SeriesID:    seriesID,
+			Outcome:     outcome,
+			StartedAt:   now.Add(time.Duration(-i*60) * time.Second),
+			CompletedAt: now.Add(time.Duration(-i*60+30) * time.Second),
+		}
+		if err := runStore.Record(ctx, r); err != nil {
+			t.Fatalf("Record v1.0 run: %v", err)
+		}
+		// Add 2 steps to resolved runs.
+		if outcome == "resolved" {
+			for step := 1; step <= 2; step++ {
+				if err := stepStore.CreateStep(ctx, &PlaybookRunStep{
+					RunID: r.RunID, StepIndex: step, Agent: "db", Tool: "check_connection", Status: "succeeded",
+				}); err != nil {
+					t.Fatalf("CreateStep: %v", err)
+				}
+			}
+		}
+	}
+
+	// v1.1: 2 resolved runs, avg steps = 4.
+	for i, outcome := range []string{"resolved", "resolved"} {
+		r := &PlaybookRun{
+			RunID:       "plr_v11_" + string(rune('a'+i)),
+			PlaybookID:  id11,
+			SeriesID:    seriesID,
+			Outcome:     outcome,
+			StartedAt:   now.Add(time.Duration(-i*60) * time.Second),
+			CompletedAt: now.Add(time.Duration(-i*60+10) * time.Second),
+		}
+		if err := runStore.Record(ctx, r); err != nil {
+			t.Fatalf("Record v1.1 run: %v", err)
+		}
+		for step := 1; step <= 4; step++ {
+			if err := stepStore.CreateStep(ctx, &PlaybookRunStep{
+				RunID: r.RunID, StepIndex: step, Agent: "db", Tool: "check_connection", Status: "succeeded",
+			}); err != nil {
+				t.Fatalf("CreateStep: %v", err)
+			}
+		}
+		// Add eval score only to v1.1 runs.
+		if err := evalStore.Upsert(ctx, &RunEvaluation{
+			RunID:          r.RunID,
+			FailureID:      "db-lock-contention",
+			DiagnosisScore: 0.9,
+			OverallScore:   0.9,
+			Passed:         true,
+		}); err != nil {
+			t.Fatalf("Upsert eval: %v", err)
+		}
+	}
+
+	versions, err := runStore.StatsByVersion(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("StatsByVersion: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("want 2 versions, got %d", len(versions))
+	}
+
+	v10 := versions[0]
+	if v10.Version != "1.0" {
+		t.Errorf("versions[0].Version = %q, want 1.0", v10.Version)
+	}
+	if v10.IsActive {
+		t.Error("v1.0 should not be active")
+	}
+	if v10.TotalRuns != 3 {
+		t.Errorf("v1.0 TotalRuns = %d, want 3", v10.TotalRuns)
+	}
+	if v10.Resolved != 2 {
+		t.Errorf("v1.0 Resolved = %d, want 2", v10.Resolved)
+	}
+	if v10.DiagEvalCount != 0 {
+		t.Errorf("v1.0 DiagEvalCount = %d, want 0", v10.DiagEvalCount)
+	}
+	// avg steps: (2+2+0)/3 = 1.33...
+	wantSteps10 := (2.0 + 2.0 + 0.0) / 3.0
+	if v10.AvgStepCount < wantSteps10-0.01 || v10.AvgStepCount > wantSteps10+0.01 {
+		t.Errorf("v1.0 AvgStepCount = %.2f, want %.2f", v10.AvgStepCount, wantSteps10)
+	}
+
+	v11 := versions[1]
+	if v11.Version != "1.1" {
+		t.Errorf("versions[1].Version = %q, want 1.1", v11.Version)
+	}
+	if !v11.IsActive {
+		t.Error("v1.1 should be active")
+	}
+	if v11.TotalRuns != 2 {
+		t.Errorf("v1.1 TotalRuns = %d, want 2", v11.TotalRuns)
+	}
+	if v11.Resolved != 2 {
+		t.Errorf("v1.1 Resolved = %d, want 2", v11.Resolved)
+	}
+	if v11.DiagEvalCount != 2 {
+		t.Errorf("v1.1 DiagEvalCount = %d, want 2", v11.DiagEvalCount)
+	}
+	if v11.AvgDiagnosisScore < 0.89 || v11.AvgDiagnosisScore > 0.91 {
+		t.Errorf("v1.1 AvgDiagnosisScore = %.2f, want 0.90", v11.AvgDiagnosisScore)
+	}
+	if v11.RemedEvalCount != 0 {
+		t.Errorf("v1.1 RemedEvalCount = %d, want 0 (no remediation runs)", v11.RemedEvalCount)
+	}
+	// avg steps: 4.0
+	if v11.AvgStepCount < 3.99 || v11.AvgStepCount > 4.01 {
+		t.Errorf("v1.1 AvgStepCount = %.2f, want 4.0", v11.AvgStepCount)
+	}
+	// recovery time: ~10s per run
+	if v11.AvgRecoverySecs < 9 || v11.AvgRecoverySecs > 11 {
+		t.Errorf("v1.1 AvgRecoverySecs = %.1f, want ~10", v11.AvgRecoverySecs)
+	}
+
+	// Empty series returns empty slice.
+	empty, err := runStore.StatsByVersion(ctx, "pbs_nonexistent")
+	if err != nil {
+		t.Fatalf("StatsByVersion (empty): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("want 0 versions for unknown series, got %d", len(empty))
 	}
 }

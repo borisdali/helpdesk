@@ -41,8 +41,8 @@ Gates have two sub-types, reflected in `extra.gate_type`:
 |---|---|---|
 | `run_id` | Yes | The triage run ID this feedback request is anchored to |
 | `series_id` | Yes | The triage playbook series ID (e.g. `pbs_lock_chain_triage`) |
-| `diagnosis_correct` | Only when resolved | `true` if the operator confirmed the diagnosis; `false` if denied |
-| `actual_root_cause` | When provided at resolve time | Free-text description of what the root cause actually was |
+| `verdict_correct` | Only when resolved | `true` if the operator confirmed the diagnosis; `false` if denied |
+| `verdict_notes` | When provided at resolve time | Free-text description of what the root cause actually was |
 
 ---
 
@@ -152,7 +152,7 @@ A `feedback` decision looks like this:
 }
 ```
 
-Once resolved, `extra` gains `diagnosis_correct` and, if provided, `actual_root_cause`.
+Once resolved, `extra` gains `verdict_correct` and, if provided, `verdict_notes`.
 
 ---
 
@@ -169,7 +169,7 @@ The `{id}` prefix determines routing:
 | `gate:{runID}` | Playbook `proceed-escalation` endpoint | Triggers the remediation playbook on approval |
 | `fleet:{approvalID}` | Fleet approval in the audit store | |
 | `step:{approvalID}` | Step approval in the audit store | |
-| `feedback:{runID}` | Playbook feedback endpoint | `approved` → `diagnosis_correct=true`; `denied` → `diagnosis_correct=false` |
+| `feedback:{runID}` | Playbook feedback endpoint | `approved` → `verdict_correct=true`; `denied` → `verdict_correct=false` |
 
 **Request body:**
 
@@ -189,7 +189,7 @@ The `{id}` prefix determines routing:
 |---|---|
 | `resolution` | `"approved"` or `"denied"` |
 | `resolved_by` | Operator identity; defaults to `X-User` header if omitted |
-| `reason` | Optional free-text; for gates it is stored in the audit trail; for feedback it becomes `actual_root_cause` |
+| `reason` | Optional free-text; for gates it is stored in the audit trail; for feedback it becomes `verdict_notes` |
 | `approval_mode` | Gate only: approval mode for the triggered remediation playbook |
 | `approval_session` | Gate only: session token when `approval_mode=session` |
 
@@ -284,7 +284,7 @@ The Decision Hub is an additional surface, not a replacement. The existing endpo
 | Step approval | `PATCH {auditdURL}/v1/approvals/{id}` | `POST /api/v1/decisions/step:{id}/resolve` |
 | Feedback | `POST /api/v1/fleet/playbook-runs/{id}/feedback` | `POST /api/v1/decisions/feedback:{id}/resolve` |
 
-The hub routes to the same backend as the type-specific endpoint — they are interchangeable. The one exception is `feedback`: the direct endpoint accepts arbitrary `diagnosis_correct` values (`true`, `false`, or omitted for a placeholder), while the hub resolve endpoint maps `approved`→`true` and `denied`→`false` to fit the standard resolution model.
+The hub routes to the same backend as the type-specific endpoint — they are interchangeable. The one exception is `feedback`: the direct endpoint accepts arbitrary `verdict_correct` values (`true`, `false`, or omitted for a placeholder), while the hub resolve endpoint maps `approved`→`true` and `denied`→`false` to fit the standard resolution model.
 
 ---
 
@@ -360,7 +360,7 @@ With `--emit-and-wait`:
   POST http://helpdesk:8080/api/v1/decisions/feedback:plr_a3f7c1b2/resolve
   Body: {"resolution":"approved"|"denied","resolved_by":"...","reason":"..."}
   ```
-  Faulttest then exits with a pass result. The card persists in the hub until an operator answers it — there is no TTY prompt and no blocking wait. Resolving it records `diagnosis_correct` and contributes to the playbook's accuracy rate in the Vault.
+  Faulttest then exits with a pass result. The card persists in the hub until an operator answers it — there is no TTY prompt and no blocking wait. Resolving it records `verdict_correct` and contributes to the playbook's accuracy rate in the Vault.
 
 This makes faulttest safe to run inside a Kubernetes Job or a Docker container where `/dev/tty` is not available.
 
@@ -375,18 +375,18 @@ flowchart TD
     A([Fault injected]) --> B["Triage playbook runs\nagent diagnoses root cause\nchain-of-thought → auditd"]
     B --> C{"Gate\noutcome: gate_pending"}
 
-    C -- "resolution: denied" --> D["Gateway auto-submits\ndiagnosis_correct = false\nreason → actual_root_cause"]
+    C -- "resolution: denied" --> D["Gateway auto-submits\nverdict_correct = false (triage/at_gate)\nreason → verdict_notes"]
     D --> ACC[(Accuracy updated\nin RunFeedback store)]
 
     C -- "resolution: approved" --> E["Remediation playbook runs\nagent_approve step-by-step\nstep cards → hub"]
     E --> F{"pollRecovery\nverify SQL every 5s"}
     F -- "timeout / error" --> G([Run: failed\nno feedback card created])
-    F -- "success" --> H["POST .../request-feedback\nplaceholder written to auditd\ndiagnosis_correct = nil"]
+    F -- "success" --> H["POST .../request-feedback\nplaceholder written to auditd\nverdict_correct = nil (triage/post_incident)"]
     H --> I["feedback card in hub\ntype: feedback  status: pending"]
     H --> J([faulttest exits\npass result])
     I --> K{"Operator resolves\nfeedback card"}
-    K -- "approved" --> L["diagnosis_correct = true\nactual_root_cause stored"]
-    K -- "denied" --> M["diagnosis_correct = false\nactual_root_cause stored"]
+    K -- "approved" --> L["verdict_correct = true\nverdict_notes stored"]
+    K -- "denied" --> M["verdict_correct = false\nverdict_notes stored"]
     L --> ACC
     M --> ACC
     ACC --> V["vault list — accuracy column\nvault accuracy &lt;series_id&gt;"]
@@ -399,20 +399,20 @@ flowchart TD
 2. **Triage** — the LLM agent runs diagnostic tools; every reasoning step and tool call is written to auditd under the run's `trace_id`. The agent emits `TRANSITION_TO:` or `ESCALATE_TO:` with a `DiagnosticReport`. The gateway sets `outcome=gate_pending`.
 
 3. **Gate** — a `type=gate` card appears in the hub. The operator reviews the triage findings and diagnostic report, then resolves:
-   - **Denied**: the gateway immediately auto-submits `diagnosis_correct=false` for the triage run, using the denial reason as `actual_root_cause`. No feedback card is created — accuracy is updated at denial time and the flow ends here.
+   - **Denied**: the gateway immediately auto-submits `verdict_correct=false` (`feedback_type=triage`, `feedback_time=at_gate`) for the triage run, using the denial reason as `verdict_notes`. No feedback card is created — accuracy is updated at denial time and the flow ends here.
    - **Approved**: the gateway fires the remediation playbook and the flow continues.
 
 4. **Remediation** — the `agent_approve` playbook runs step-by-step. Each write/destructive tool call appears as a `type=step_approval` card in the hub until the operator approves or the mode auto-approves it.
 
 5. **Recovery verification** — faulttest polls the verify SQL every 5 seconds until the fault clears or the timeout elapses. On failure, the run is marked failed and no feedback card is created.
 
-6. **Feedback request** — on successful recovery, faulttest calls `POST .../request-feedback`. The gateway writes a `RunFeedback` placeholder (`diagnosis_correct=nil`) to auditd. A `type=feedback, status=pending` card appears in the hub. Faulttest prints the resolve URL and exits immediately — there is no blocking wait.
+6. **Feedback request** — on successful recovery, faulttest calls `POST .../request-feedback`. The gateway writes a `RunFeedback` placeholder (`verdict_correct=nil`, `feedback_type=triage`, `feedback_time=post_incident`) to auditd. A `type=feedback, status=pending` card appears in the hub. Faulttest prints the resolve URL and exits immediately — there is no blocking wait.
 
 7. **Operator resolves the feedback card** — at any point after the faulttest job exits, the operator opens the hub card and resolves it:
-   - `resolution=approved` → the diagnosis was correct
-   - `resolution=denied` → wrong hypothesis; an optional `reason` becomes `actual_root_cause`
+   - `resolution=approved` → the diagnosis was correct (`verdict_correct=true`)
+   - `resolution=denied` → wrong hypothesis; an optional `reason` becomes `verdict_notes`
 
-8. **Accuracy propagates** — `diagnosis_correct` and `actual_root_cause` are persisted. `PlaybookRunStats.accuracy_rate` updates. `faulttest vault list` shows the accuracy column; `faulttest vault accuracy <series_id>` shows the per-hypothesis breakdown across all runs with feedback.
+8. **Accuracy propagates** — `verdict_correct` and `verdict_notes` are persisted. `PlaybookRunStats.accuracy_rate` updates. `faulttest vault list` shows the accuracy column; `faulttest vault accuracy <series_id>` shows the per-hypothesis breakdown across all runs with feedback.
 
 ---
 

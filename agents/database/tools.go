@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/tool"
@@ -20,8 +21,24 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
+
+// ephemeralDBs holds DB entries registered at runtime (e.g. by --auto-db faulttest runs).
+// These supplement infraConfig and are consulted when infraConfig doesn't contain a match.
+var (
+	ephemeralDBsMu sync.RWMutex
+	ephemeralDBs   = map[string]infra.DBServer{}
+)
+
+// patchEphemeralDB adds or replaces a DB entry in the ephemeral registry.
+func patchEphemeralDB(serverID string, server infra.DBServer) {
+	ephemeralDBsMu.Lock()
+	defer ephemeralDBsMu.Unlock()
+	ephemeralDBs[serverID] = server
+	slog.Info("ephemeral DB registered", "server_id", serverID, "connection_string", server.ConnectionString)
+}
 
 // toolAuditor is set during initialization if auditing is enabled.
 var toolAuditor *audit.ToolAuditor
@@ -94,7 +111,22 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 					}, nil
 				}
 			}
-			// infraConfig is set but connection string not registered — hard reject.
+			// infraConfig is set but connection string not registered — check ephemeral registry.
+			ephemeralDBsMu.RLock()
+			for id, db := range ephemeralDBs {
+				if db.ConnectionString == connStrOrName {
+					ephemeralDBsMu.RUnlock()
+					slog.Info("resolved connection string from ephemeral registry", "id", id)
+					return databaseInfo{
+						Name:              id,
+						ConnectionStr:     db.ResolvedConnectionString(),
+						Tags:              db.Tags,
+						IsFromInfraConfig: true,
+					}, nil
+				}
+			}
+			ephemeralDBsMu.RUnlock()
+			// Hard reject: not in infra config or ephemeral registry.
 			known := make([]string, 0, len(infraConfig.DBServers))
 			for id := range infraConfig.DBServers {
 				known = append(known, id)
@@ -129,7 +161,20 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 				IsFromInfraConfig: true,
 			}, nil
 		}
-		// infraConfig is set but database name not registered — hard reject.
+		// infraConfig is set but name not registered — check ephemeral registry.
+		ephemeralDBsMu.RLock()
+		if db, ok := ephemeralDBs[connStrOrName]; ok {
+			ephemeralDBsMu.RUnlock()
+			slog.Info("resolved database name from ephemeral registry", "name", connStrOrName)
+			return databaseInfo{
+				Name:              connStrOrName,
+				ConnectionStr:     db.ResolvedConnectionString(),
+				Tags:              db.Tags,
+				IsFromInfraConfig: true,
+			}, nil
+		}
+		ephemeralDBsMu.RUnlock()
+		// Hard reject: not in infra config or ephemeral registry.
 		known := make([]string, 0, len(infraConfig.DBServers))
 		for id := range infraConfig.DBServers {
 			known = append(known, id)

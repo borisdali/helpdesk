@@ -81,6 +81,7 @@ faulttest run --external --conn "host=staging-db port=5432 ..."
 
   JSON report written to faulttest-<run-id>.json
   Run history appended to ~/.faulttest/history.json
+  Evaluation scores posted to auditd (when --gateway is set)
 ```
 
 Each fault is scored on three weighted dimensions. The weights depend on whether
@@ -275,6 +276,26 @@ overall_score = diagnosis_score × 0.6 + remediation_score × 0.4
 
 When no remediation is attempted, `overall_score` equals `score` (the diagnosis-only score). This means a fault that was correctly diagnosed but not remediated is not penalised — remediation is strictly additive.
 
+**Remediation judge (`--remediation-judge`):**
+
+The time-based `remediation_score` answers *did it recover?* — not *was the approach good?* Adding `--remediation-judge` evaluates the qualitative approach: blast radius, tool choice, and step sequencing. After each remediation, faulttest fetches the executed steps from the gateway and sends them to the LLM judge, which scores on a 0–3 scale:
+
+| Judge score | Normalised | Meaning |
+|:-----------:|:----------:|---------|
+| 3 | 1.00 | Targeted tool choice, correct sequence, no redundant steps |
+| 2 | 0.67 | Correct approach, one unnecessary step or mild sequencing issue |
+| 1 | 0.33 | Eventually recovered but excessive blast radius or redundant calls |
+| 0 | 0.00 | Wrong tool choice or no meaningful steps recorded |
+
+The result is printed inline and stored in `run_evaluation.remediation_judge_score` for `vault calibration`:
+
+```
+Remediation: RECOVERED in 12.3s (score: 100%)
+Remediation Judge:   score=67% — correct approach, one extra read step before acting
+```
+
+Requires `--gateway` (to fetch steps) and a judge LLM configured via `--judge-vendor`/`--judge-model`. Uses the same LLM credentials as `--judge`; both flags can be combined.
+
 **Fault-specific verification SQL:**
 
 Each fault in the catalog can define a `verify_sql` query that confirms the specific condition has been resolved, rather than relying on a generic connectivity check:
@@ -311,15 +332,19 @@ The reason is sent as `"reason"` in the `proceed-escalation` request and is stor
 
 **Post-recovery feedback prompt:**
 
-After a successful recovery (verification SQL returns true), `faulttest` optionally prompts for diagnosis feedback when an interactive terminal is available and `--gateway` is set:
+After a successful recovery (verification SQL returns true), `faulttest` optionally prompts for two feedback questions when an interactive terminal is available and `--gateway` is set:
 
 ```
   Diagnosis feedback (optional)
   Was the diagnosis correct? [y/n/skip]:  y
   Actual root cause (Enter to confirm: "Root blocker PID 867 idle-in-transaction"):
+
+  Remediation feedback (optional)
+  Was the remediation approach appropriate? [y/n/skip]:  y
+  Notes (optional, press Enter to skip): kill_idle_connections was the right call
 ```
 
-Answering stores a `RunFeedback` record via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`. This feeds the `accuracy_rate` shown in `faulttest vault accuracy` and `faulttest vault list`. Skipping or running non-interactively leaves no feedback — the run still scores normally.
+The diagnosis answer stores a `RunFeedback` record (`feedback_type: "triage"`, `feedback_time: "post_incident"`). The remediation answer stores a second record (`feedback_type: "remediation"`, `feedback_time: "post_incident"`), anchored to the same triage run ID so it can be joined with `run_evaluation` for calibration. Both feed `vault calibration`; at-gate feedback (captured earlier at the triage→remediation gate) is treated as the higher-quality signal and preferred when both exist. Skipping or running non-interactively leaves no feedback — the run still scores normally.
 
 **Post-run incident summary:**
 
@@ -457,6 +482,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
+| `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the gateway after remediation and scores blast-radius, step efficiency, and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
 | `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
 | `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |
@@ -532,10 +558,10 @@ faulttest example --category kubernetes > k8s-faults.yaml
 ### 5.6 vault
 
 ```
-faulttest vault <list|status|drift|suggest|suggest-update>
+faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|suggest|suggest-update>
 ```
 
-The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
+The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores are also posted to auditd (`run_evaluation` table) keyed by the `plr_*` playbook run ID — the local JSON file is a cache. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
 
 #### vault list
 
@@ -620,6 +646,43 @@ FAULT                            FIRST HALF   SECOND HALF  DRIFT
 db-lock-contention               100%         50%          -50%
 db-replication-lag               75%          33%          -42%
 ```
+
+#### vault incidents
+
+```bash
+faulttest vault incidents <fault-id or series-id> \
+  [--limit N] \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Lists the most recent triage runs for a fault or playbook series, with DIAG outcome, REMEDIATION outcome, operator FEEDBACK verdict, and the faulttest SCORE (from `run_evaluation` in auditd). See [VAULT.md — vault incidents](VAULT.md#vault-incidents) for full column reference and output example.
+
+#### vault versions
+
+```bash
+faulttest vault versions <fault-id or series-id> \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Shows per-version run stats for a playbook series: resolution rate, average step count, average wall-clock recovery time, and separate average diagnosis / remediation scores (`AVG DIAG` / `AVG REMED`). Useful after a `vault suggest-update` to confirm whether the new version improved outcomes. See [VAULT.md — vault versions](VAULT.md#vault-versions) for output example and column reference.
+
+#### vault calibration
+
+```bash
+# Fleet-wide
+faulttest vault calibration \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+
+# Scoped to one fault or series
+faulttest vault calibration db-lock-contention \
+  --gateway http://gateway:8080 \
+  --api-key sk-...
+```
+
+Shows confidence-band calibration: how well `diagnosis_score` (and `remediation_score` when available) predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%`, and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT`, or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and operator feedback (at-gate or post-incident; at-gate is preferred when both exist). A remediation calibration section appears automatically when runs with non-zero `remediation_score` and remediation feedback exist. See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
 
 #### vault suggest
 
@@ -812,17 +875,20 @@ Sample output:
 ```
 --- Testing: Max connections exhausted (db-max-connections) ---
 Remediation: RECOVERED in 12.3s (score: 100%)
-Result: [PASS] score=87% | Diagnosis: 92% | Remediation: 100% | Overall: 95%
+Remediation Judge:   score=67% — correct approach, one extra read step before acting
+Diagnostic Result:   [PASS] score=87% (keywords=100% tools=80% judge=92%)
+Remediation Result:  [PASS] score=100% (12.3s, playbook)
+Overall Result:      [PASS] score=95%
 
 --- Testing: Long-running query blocking (db-long-running-query) ---
-Result: [PASS] score=74%
+Diagnostic Result:   [PASS] score=74%
 
 === SUMMARY ===
 Passed: 9/10  Failed: 1  Skipped: 0
 Report: faulttest-a3f2b1c4.json
 ```
 
-The `overall_score` in the report combines `diagnosis_score × 0.6 + remediation_score × 0.4`. Faults without a remediation spec show only the diagnosis score.
+The `overall_score` in the report combines `diagnosis_score × 0.6 + remediation_score × 0.4`. Faults without a remediation spec show only the diagnosis score. The `Remediation Judge:` line only appears when `--remediation-judge` is enabled and the judge LLM returns a result.
 
 ### 7.4 Interactive single-fault injection
 
@@ -1118,6 +1184,9 @@ The JSON report contains one entry per fault:
 | `remediation_score` | 0.0–1.0: `1.0` if recovered within half the verify timeout, `0.75` within the full timeout, `0.0` if timed out. Only present when `--remediate` was set. |
 | `remediation_method` | `playbook` or `agent_prompt` (only when `--remediate` was set) |
 | `overall_score` | `diagnosis_score × 0.6 + remediation_score × 0.4` when remediation was attempted; equals `score` otherwise |
+| `remediation_judge_score` | 0.0–1.0 mapped from the judge's 0–3 score. Only present when `--remediation-judge` was set and the judge call succeeded. |
+| `remediation_judge_reasoning` | One-sentence explanation from the remediation judge LLM (omitted when skipped). |
+| `remediation_judge_skipped` | `true` when `--remediation-judge` was not set, no steps were recorded, or the judge call failed. |
 
 **Tool evidence: three-tier fallback**
 

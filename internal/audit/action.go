@@ -53,6 +53,7 @@ var ToolClassification = map[string]ActionClass{
 	"get_pg_settings":             ActionRead,
 	"get_extensions":              ActionRead,
 	"get_baseline":                ActionRead,
+	"get_saved_snapshots":         ActionRead,
 	"get_slow_queries":            ActionRead,
 	"get_vacuum_status":           ActionRead,
 	"get_disk_usage":              ActionRead,

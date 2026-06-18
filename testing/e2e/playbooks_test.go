@@ -645,8 +645,12 @@ func TestPlaybooks_GetRunByID(t *testing.T) {
 		t.Skip("no playbook_id available")
 	}
 
-	// Trigger a run (ignore execution errors — recording is best-effort synchronous).
-	client.PlaybookRun(ctx, pbID, map[string]any{"connection_string": cfg.ConnStr}) //nolint:errcheck
+	// Trigger a run using a short independent context. POST /run invokes the LLM
+	// agent which can take 30+ seconds; the run start is recorded in auditd before
+	// the agent call, so we cancel early without consuming the main test budget.
+	triggerCtx, triggerCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer triggerCancel()
+	client.PlaybookRun(triggerCtx, pbID, map[string]any{"connection_string": cfg.ConnStr}) //nolint:errcheck
 
 	// List runs to get the latest run_id.
 	runsResp, err := client.PlaybookRuns(ctx, pbID)
@@ -746,15 +750,17 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		if ep, _ := pb["entry_point"].(bool); ep {
 			t.Error("entry_point = true, want false (config recovery is not an entry point)")
 		}
-		escalates, _ := pb["escalates_to"].([]any)
-		if len(escalates) == 0 {
-			t.Error("escalates_to is empty, want at least one series ID")
+		// config recovery uses transitions_to (same-domain follow-on to pitr_recovery),
+		// not escalates_to (cross-domain handoff). Directive split added in v0.16.
+		transitions, _ := pb["transitions_to"].([]any)
+		if len(transitions) == 0 {
+			t.Error("transitions_to is empty, want at least one series ID")
 		}
 		evidence, _ := pb["requires_evidence"].([]any)
 		if len(evidence) == 0 {
 			t.Error("requires_evidence is empty, want at least one pattern")
 		}
-		t.Logf("config_recovery: escalates_to=%v requires_evidence=%v", escalates, evidence)
+		t.Logf("config_recovery: transitions_to=%v requires_evidence=%v", transitions, evidence)
 	})
 
 	t.Run("pitr_recovery_is_agent_with_evidence", func(t *testing.T) {
@@ -1077,12 +1083,14 @@ func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
 
 	runID := fmt.Sprintf("plr_e2e_fb_%d", time.Now().UnixNano())
 
-	// Submit initial feedback (diagnosis_correct=true).
+	// Submit initial feedback (verdict_correct=true).
 	fb, err := client.SubmitFeedback(ctx, runID, map[string]any{
-		"series_id":         "pbs_lock_chain_triage",
-		"diagnosis_correct": true,
-		"actual_root_cause": "PID 867 held ShareLock on tx 9823",
-		"operator":          "e2e-test",
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": true,
+		"verdict_notes":   "PID 867 held ShareLock on tx 9823",
+		"operator":        "e2e-test",
 	})
 	if err != nil {
 		t.Fatalf("SubmitFeedback: %v", err)
@@ -1105,19 +1113,21 @@ func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
 	if got["series_id"] != "pbs_lock_chain_triage" {
 		t.Errorf("feedback series_id = %q", got["series_id"])
 	}
-	if dc, _ := got["diagnosis_correct"].(bool); !dc {
-		t.Errorf("feedback diagnosis_correct = %v, want true", got["diagnosis_correct"])
+	if dc, _ := got["verdict_correct"].(bool); !dc {
+		t.Errorf("feedback verdict_correct = %v, want true", got["verdict_correct"])
 	}
-	if got["actual_root_cause"] != "PID 867 held ShareLock on tx 9823" {
-		t.Errorf("feedback actual_root_cause = %q", got["actual_root_cause"])
+	if got["verdict_notes"] != "PID 867 held ShareLock on tx 9823" {
+		t.Errorf("feedback verdict_notes = %q", got["verdict_notes"])
 	}
 
-	// Upsert: re-submit the same run_id with corrected values.
+	// Upsert: re-submit the same (run_id, feedback_type, feedback_time) with corrected values.
 	_, err = client.SubmitFeedback(ctx, runID, map[string]any{
-		"series_id":         "pbs_lock_chain_triage",
-		"diagnosis_correct": false,
-		"actual_root_cause": "wrong hypothesis — actual blocker was autovacuum",
-		"operator":          "e2e-test",
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": false,
+		"verdict_notes":   "wrong hypothesis — actual blocker was autovacuum",
+		"operator":        "e2e-test",
 	})
 	if err != nil {
 		t.Fatalf("SubmitFeedback (upsert): %v", err)
@@ -1127,14 +1137,105 @@ func TestPlaybooks_FeedbackRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFeedback after upsert: %v", err)
 	}
-	if dc, _ := got2["diagnosis_correct"].(bool); dc {
-		t.Errorf("after upsert diagnosis_correct = true, want false")
+	if dc, _ := got2["verdict_correct"].(bool); dc {
+		t.Errorf("after upsert verdict_correct = true, want false")
 	}
-	if got2["actual_root_cause"] != "wrong hypothesis — actual blocker was autovacuum" {
-		t.Errorf("after upsert actual_root_cause = %q", got2["actual_root_cause"])
+	if got2["verdict_notes"] != "wrong hypothesis — actual blocker was autovacuum" {
+		t.Errorf("after upsert verdict_notes = %q", got2["verdict_notes"])
 	}
 
 	t.Logf("feedback roundtrip OK: run_id=%s", runID)
+}
+
+// TestPlaybooks_FeedbackByType verifies that GET /feedback?feedback_type=&feedback_time=
+// returns the correct row for each combination, and that at_gate and post_incident
+// feedback for the same run_id are stored independently (no collision).
+func TestPlaybooks_FeedbackByType(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	runID := fmt.Sprintf("plr_e2e_fbtype_%d", time.Now().UnixNano())
+
+	// Submit (triage, at_gate) — mirroring what the gateway does at proceed-escalation time.
+	_, err := client.SubmitFeedback(ctx, runID, map[string]any{
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "at_gate",
+		"verdict_correct": true,
+		"verdict_notes":   "diagnosis looked right at gate",
+		"operator":        "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("SubmitFeedback (at_gate): %v", err)
+	}
+
+	// Submit (triage, post_incident) for the same run.
+	_, err = client.SubmitFeedback(ctx, runID, map[string]any{
+		"series_id":       "pbs_lock_chain_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": false,
+		"verdict_notes":   "autovacuum was the real cause",
+		"operator":        "e2e-test",
+	})
+	if err != nil {
+		t.Fatalf("SubmitFeedback (post_incident): %v", err)
+	}
+
+	// Default GET (no params) → returns post_incident row.
+	defaultFB, err := client.GetFeedback(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetFeedback (default): %v", err)
+	}
+	if defaultFB["feedback_time"] != "post_incident" {
+		t.Errorf("default GET: feedback_time = %q, want post_incident", defaultFB["feedback_time"])
+	}
+	if dc, _ := defaultFB["verdict_correct"].(bool); dc {
+		t.Errorf("default GET: verdict_correct = true, want false")
+	}
+	if defaultFB["verdict_notes"] != "autovacuum was the real cause" {
+		t.Errorf("default GET: verdict_notes = %q", defaultFB["verdict_notes"])
+	}
+
+	// Explicit at_gate GET → returns at_gate row.
+	atGateFB, err := client.GetFeedbackByType(ctx, runID, "triage", "at_gate")
+	if err != nil {
+		t.Fatalf("GetFeedbackByType (at_gate): %v", err)
+	}
+	if atGateFB["feedback_time"] != "at_gate" {
+		t.Errorf("at_gate GET: feedback_time = %q, want at_gate", atGateFB["feedback_time"])
+	}
+	if dc, _ := atGateFB["verdict_correct"].(bool); !dc {
+		t.Errorf("at_gate GET: verdict_correct = false, want true")
+	}
+	if atGateFB["verdict_notes"] != "diagnosis looked right at gate" {
+		t.Errorf("at_gate GET: verdict_notes = %q", atGateFB["verdict_notes"])
+	}
+
+	// Explicit post_incident GET → same as default.
+	postFB, err := client.GetFeedbackByType(ctx, runID, "triage", "post_incident")
+	if err != nil {
+		t.Fatalf("GetFeedbackByType (post_incident): %v", err)
+	}
+	if postFB["feedback_time"] != "post_incident" {
+		t.Errorf("explicit post_incident GET: feedback_time = %q", postFB["feedback_time"])
+	}
+
+	// Non-existent combination → 404.
+	_, err = client.GetFeedbackByType(ctx, runID, "remediation", "post_incident")
+	if err == nil {
+		t.Error("expected 404 for remediation/post_incident, got nil error")
+	} else if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected 404, got: %v", err)
+	}
+
+	t.Logf("feedback by-type OK: run_id=%s", runID)
 }
 
 // TestPlaybooks_FeedbackNotFound verifies that GET feedback for a run with no
@@ -1161,7 +1262,7 @@ func TestPlaybooks_FeedbackNotFound(t *testing.T) {
 // TestPlaybooks_RequestFeedback_DecisionHubFlow verifies the full emit-and-wait
 // feedback path end-to-end: request-feedback creates a placeholder that appears
 // as a pending "feedback" decision in the hub, and resolving it via
-// POST /decisions/feedback:{runID}/resolve persists diagnosis_correct.
+// POST /decisions/feedback:{runID}/resolve persists verdict_correct.
 // No LLM is needed — request-feedback works against any run_id.
 func TestPlaybooks_RequestFeedback_DecisionHubFlow(t *testing.T) {
 	cfg := LoadConfig()
@@ -1220,7 +1321,7 @@ func TestPlaybooks_RequestFeedback_DecisionHubFlow(t *testing.T) {
 		t.Errorf("decision status = %q, want pending", d["status"])
 	}
 
-	// Step 4: resolve via the hub — approved maps to diagnosis_correct=true.
+	// Step 4: resolve via the hub — approved maps to verdict_correct=true.
 	resolved, err := client.ResolveDecision(ctx, "feedback:"+runID, map[string]any{
 		"resolution":  "approved",
 		"resolved_by": "e2e-test",
@@ -1232,20 +1333,20 @@ func TestPlaybooks_RequestFeedback_DecisionHubFlow(t *testing.T) {
 	if resolved["status"] != "resolved" {
 		t.Errorf("resolve response status = %q, want resolved", resolved["status"])
 	}
-	if resolved["diagnosis_correct"] != true {
-		t.Errorf("resolve response diagnosis_correct = %v, want true", resolved["diagnosis_correct"])
+	if resolved["verdict_correct"] != true {
+		t.Errorf("resolve response verdict_correct = %v, want true", resolved["verdict_correct"])
 	}
 
-	// Step 5: feedback is persisted — GET .../feedback returns diagnosis_correct=true.
+	// Step 5: feedback is persisted — GET .../feedback returns verdict_correct=true.
 	fb, err := client.GetFeedback(ctx, runID)
 	if err != nil {
 		t.Fatalf("GetFeedback after resolve: %v", err)
 	}
-	if dc, _ := fb["diagnosis_correct"].(bool); !dc {
-		t.Errorf("feedback diagnosis_correct = %v, want true", fb["diagnosis_correct"])
+	if dc, _ := fb["verdict_correct"].(bool); !dc {
+		t.Errorf("feedback verdict_correct = %v, want true", fb["verdict_correct"])
 	}
-	if fb["actual_root_cause"] != "PID 236 confirmed idle-in-transaction — diagnosis correct" {
-		t.Errorf("actual_root_cause = %q", fb["actual_root_cause"])
+	if fb["verdict_notes"] != "PID 236 confirmed idle-in-transaction — diagnosis correct" {
+		t.Errorf("verdict_notes = %q", fb["verdict_notes"])
 	}
 
 	t.Logf("feedback hub flow OK: run_id=%s resolve_url=%s", runID, resolveURL)
@@ -1335,9 +1436,11 @@ func TestPlaybooks_StatsIncludeAccuracy(t *testing.T) {
 	}
 	for _, f := range feedbacks {
 		_, err := client.SubmitFeedback(ctx, f.runID, map[string]any{
-			"series_id":         seriesID,
-			"diagnosis_correct": f.correct,
-			"operator":          "e2e-test",
+			"series_id":       seriesID,
+			"feedback_type":   "triage",
+			"feedback_time":   "post_incident",
+			"verdict_correct": f.correct,
+			"operator":        "e2e-test",
 		})
 		if err != nil {
 			t.Fatalf("SubmitFeedback %s: %v", f.runID, err)
@@ -1525,10 +1628,12 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 
 	// Submit feedback on the triage run.
 	_, err = client.SubmitFeedback(ctx, triageRunID, map[string]any{
-		"series_id":         "pbs_db_restart_triage",
-		"diagnosis_correct": true,
-		"actual_root_cause": "e2e test confirmed",
-		"operator":          "e2e-test",
+		"series_id":       "pbs_db_restart_triage",
+		"feedback_type":   "triage",
+		"feedback_time":   "post_incident",
+		"verdict_correct": true,
+		"verdict_notes":   "e2e test confirmed",
+		"operator":        "e2e-test",
 	})
 	if err != nil {
 		t.Fatalf("SubmitFeedback: %v", err)
@@ -1595,10 +1700,91 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	if feedback == nil {
 		t.Fatal("incident narrative missing feedback chapter")
 	}
-	if dc, _ := feedback["diagnosis_correct"].(bool); !dc {
-		t.Errorf("feedback.diagnosis_correct = %v, want true", feedback["diagnosis_correct"])
+	if dc, _ := feedback["verdict_correct"].(bool); !dc {
+		t.Errorf("feedback.verdict_correct = %v, want true", feedback["verdict_correct"])
 	}
 
 	t.Logf("incident narrative full e2e OK: incident_id=%s triage=%s gate_reason=%q",
 		narrative["incident_id"], triageRunID, gate["reason"])
+}
+
+// TestPlaybooks_EvaluationRoundtrip verifies that POST .../evaluation stores scores
+// and GET .../evaluation retrieves them with all fields intact.
+func TestPlaybooks_EvaluationRoundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	runID := fmt.Sprintf("plr_e2e_ev_%d", time.Now().UnixNano())
+
+	status, err := client.SubmitEvaluation(ctx, runID, map[string]any{
+		"failure_id":       "db-tx-lock-chain-blocker",
+		"failure_name":     "Transaction lock chain blocker",
+		"keyword_score":    1.0,
+		"tool_score":       0.8,
+		"diagnosis_score":  0.9,
+		"remediation_score": 0.0,
+		"overall_score":    0.85,
+		"judge_used":       true,
+		"passed":           true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitEvaluation: %v", err)
+	}
+	if status != 204 {
+		t.Fatalf("SubmitEvaluation status = %d, want 204", status)
+	}
+
+	got, err := client.GetEvaluation(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetEvaluation: %v", err)
+	}
+	if got["run_id"] != runID {
+		t.Errorf("run_id = %q, want %q", got["run_id"], runID)
+	}
+	if got["failure_id"] != "db-tx-lock-chain-blocker" {
+		t.Errorf("failure_id = %q", got["failure_id"])
+	}
+	if ks, _ := got["keyword_score"].(float64); ks != 1.0 {
+		t.Errorf("keyword_score = %v, want 1.0", got["keyword_score"])
+	}
+	if os, _ := got["overall_score"].(float64); os != 0.85 {
+		t.Errorf("overall_score = %v, want 0.85", got["overall_score"])
+	}
+	if ju, _ := got["judge_used"].(bool); !ju {
+		t.Errorf("judge_used = %v, want true", got["judge_used"])
+	}
+	if p, _ := got["passed"].(bool); !p {
+		t.Errorf("passed = %v, want true", got["passed"])
+	}
+
+	// Upsert: re-submit should overwrite.
+	status2, err := client.SubmitEvaluation(ctx, runID, map[string]any{
+		"failure_id":    "db-tx-lock-chain-blocker",
+		"overall_score": 0.95,
+		"passed":        true,
+	})
+	if err != nil || status2 != 204 {
+		t.Fatalf("SubmitEvaluation (upsert) status=%d err=%v", status2, err)
+	}
+	got2, err := client.GetEvaluation(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetEvaluation after upsert: %v", err)
+	}
+	if os2, _ := got2["overall_score"].(float64); os2 != 0.95 {
+		t.Errorf("after upsert overall_score = %v, want 0.95", got2["overall_score"])
+	}
+
+	// Not-found: separate run_id should return 404.
+	_, err = client.GetEvaluation(ctx, "plr_nonexistent_ev")
+	if err == nil {
+		t.Error("GetEvaluation for nonexistent run should return error (404)")
+	}
+
+	t.Logf("evaluation roundtrip OK: run_id=%s", runID)
 }

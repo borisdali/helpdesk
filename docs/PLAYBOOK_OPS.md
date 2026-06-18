@@ -310,15 +310,81 @@ curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
 ### 2.4 Step 4: Provide an Informed Consent (aka Review/Approve the Gate)
 Once the diagnosis is reached (by either running a single triage playbook or by auto-chaining the original playbook to others), a [gate](PLAYBOOKS.md#informed-gate) opens to allow a human operator to review the diagnosis and the proposed remediation plan.
 
-**Best Practice:** Provide feedback (we call it gate-level feedback) as to whether the diagnosis makes sense and whether you'd arrive to the same conclusion if you were to run the triage yourself. This feedback is optional, but it's critical for improving the triage playbooks over time. We highly encourage you to not skip this step.
+**Best Practice:** Provide gate-level feedback on two questions: (1) whether the diagnosis makes sense, and (2) whether the proposed remediation approach is appropriate. Both questions are answered at the same gate, before remediation runs — making this the highest-quality feedback you can provide, since it's free of outcome bias. This feedback is optional, but it's critical for improving both triage and remediation playbooks over time. We highly encourage you to not skip this step. See [Vault Feedback & Commands](VAULT_FEEDBACK_FLOW.md) for a full explanation of the feedback model and how each piece feeds the `vault` commands.
 
-Assuming that both, the diagnosis and the remediation plan make sense, approve and let the remediation playbook kick in.
+```bash
+# Check what is waiting at the gate for this run
+curl -s "http://localhost:8080/api/v1/decisions?run_id=$RUN_ID&status=pending" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
+
+# Inspect the gate payload: diagnosis summary and proposed remediation steps
+curl -s "http://localhost:8080/api/v1/decisions/gate:$RUN_ID" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '{diagnosis_summary, proposed_steps, escalation_target}'
+
+# Approve — include verdict_correct to capture triage/at_gate feedback
+curl -sX POST "http://localhost:8080/api/v1/decisions/gate:$RUN_ID/resolve" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resolution":     "approved",
+    "resolved_by":    "ops@example.com",
+    "verdict_correct": true,
+    "verdict_notes":  "PID 4521 is the idle-in-transaction blocker — diagnosis correct, proposed kill order looks safe"
+  }'
+
+# Deny — if the diagnosis is wrong or the proposed plan is unacceptable
+curl -sX POST "http://localhost:8080/api/v1/decisions/gate:$RUN_ID/resolve" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resolution":     "denied",
+    "resolved_by":    "ops@example.com",
+    "verdict_correct": false,
+    "verdict_notes":  "Agent blamed replication lag; actual cause is a missing index on orders table"
+  }'
+```
+
+`verdict_correct` records whether the diagnosis was correct at the time of gate review (`triage/at_gate` feedback). `verdict_notes` is optional but helps calibration and playbook improvement — include enough detail to explain the disagreement. When denying, the run is closed and no remediation runs.
 
 ### 2.5 Step 5: Decide on remediation approval mode
 There are a few `--approval-mode`s to choose from as defined at the playbook level: `manual` (often the default because it's safe), `review` (often the most practical), `auto` and `session`. See [here](PLAYBOOKS.md#proceeding-through-the-gate) for details on each.
 
+```bash
+# Check the approval_mode of the playbook that was triggered for this run
+curl -s "http://localhost:8080/api/v1/fleet/playbook-runs/$RUN_ID" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '{playbook_id, approval_mode}'
+```
+
 ### 2.6 Step 6: Finish the remediation / Provide incident feedback
-Once the remediation is done, provide [incident-level feedback](PLAYBOOKS.md#operator-feedback) on how aiHelpDesk triage/remediation process worked out. This feedback is different from the at-the-gate feedback, that is specific to triage step and it's served to improve the overall support process. This incident-level feedback is also optional, but we strongly encourage the operational teams include it in their SoP.
+Once the remediation is done, provide [incident-level feedback](PLAYBOOKS.md#operator-feedback) on how the triage and remediation process worked out. This feedback is captured in two separate calls — one for the diagnosis, one for the remediation approach — and is different from the at-gate feedback (which covered only the diagnosis and was recorded before the outcome was known). Both are optional but strongly encouraged as part of your SoP.
+
+```bash
+# Was the diagnosis correct? (post-incident, after seeing the outcome)
+curl -sX POST "http://localhost:8080/api/v1/fleet/playbook-runs/$RUN_ID/feedback" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "feedback_type":   "triage",
+    "feedback_time":   "post_incident",
+    "verdict_correct": true,
+    "verdict_notes":   "Connection pool exhaustion confirmed — pg_stat_activity matched the agent diagnosis"
+  }'
+
+# Was the remediation approach appropriate? (post-incident)
+curl -sX POST "http://localhost:8080/api/v1/fleet/playbook-runs/$RUN_ID/feedback" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "feedback_type":   "remediation",
+    "feedback_time":   "post_incident",
+    "verdict_correct": true,
+    "verdict_notes":   "Killed idle connections in correct order; no client errors during recovery"
+  }'
+```
+
+Both records are keyed on the triage `RUN_ID` (not the remediation run ID), so they join cleanly with `run_evaluation` in `vault calibration`. If you only have time for one, submit the triage feedback — it feeds both `vault accuracy` and `vault calibration`.
 
 ### 2.7 Step 7: Record the outcome and trigger draft synthesis
 
@@ -430,5 +496,6 @@ See [here](PLAYBOOKS.md#record-an-outcome) for the patching instructions.
 | [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel, how drafts enter the Vault, vault commands (`vault list`, `vault status`, `vault drift`, `vault suggest`) |
 | [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, CRUD API, import formats, system playbooks |
 | [FAULTTEST.md](FAULTTEST.md) | Fault injection CLI, fault catalog, remediation mode, LLM-as-judge scoring |
+| [VAULT_FEEDBACK_FLOW.md](VAULT_FEEDBACK_FLOW.md) | Feedback model deep-dive: the 4 feedback combinations, when each is captured, which `vault` commands consume them, and the recommended weekly review workflow |
 | [FLEET.md](FLEET.md) | Fleet runner, job definitions, scheduled baseline capture |
 | [API.md](API.md) | Full REST API reference including `/fleet/playbooks/from-trace` |

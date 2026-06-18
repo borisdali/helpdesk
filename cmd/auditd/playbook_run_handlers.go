@@ -12,9 +12,10 @@ import (
 )
 
 type playbookRunServer struct {
-	store         *audit.PlaybookRunStore
-	playbookStore *audit.PlaybookStore
-	feedbackStore *audit.RunFeedbackStore
+	store           *audit.PlaybookRunStore
+	playbookStore   *audit.PlaybookStore
+	feedbackStore   *audit.RunFeedbackStore
+	evaluationStore *audit.RunEvaluationStore
 }
 
 // handleRecord handles POST /v1/fleet/playbooks/{playbookID}/runs.
@@ -216,11 +217,48 @@ func (s *playbookRunServer) handleStats(w http.ResponseWriter, r *http.Request) 
 			stats.FeedbackCount = fbStats.FeedbackCount
 			stats.CorrectCount = fbStats.CorrectCount
 			stats.AccuracyRate = fbStats.AccuracyRate
+			stats.AtGateCount = fbStats.AtGateCount
+			stats.AtGateCorrect = fbStats.AtGateCorrect
+			stats.AtGateAccuracyRate = fbStats.AtGateAccuracyRate
+			stats.PostIncidentCount = fbStats.PostIncidentCount
+			stats.PostIncidentCorrect = fbStats.PostIncidentCorrect
+			stats.PostIncidentAccuracyRate = fbStats.PostIncidentAccuracyRate
+			stats.RemediationFeedbackCount = fbStats.RemediationFeedbackCount
+			stats.RemediationCorrectCount = fbStats.RemediationCorrectCount
+			stats.RemediationAccuracyRate = fbStats.RemediationAccuracyRate
+			stats.RemediationAtGateCount = fbStats.RemediationAtGateCount
+			stats.RemediationAtGateCorrect = fbStats.RemediationAtGateCorrect
+			stats.RemediationPostIncidentCount = fbStats.RemediationPostIncidentCount
+			stats.RemediationPostIncidentCorrect = fbStats.RemediationPostIncidentCorrect
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats) //nolint:errcheck
+}
+
+// handleVersionStats handles GET /v1/fleet/series/{seriesID}/version-stats.
+// Returns per-version run counts, resolution rates, step counts, recovery times,
+// and average evaluation scores for a playbook series.
+func (s *playbookRunServer) handleVersionStats(w http.ResponseWriter, r *http.Request) {
+	seriesID := r.PathValue("seriesID")
+	if seriesID == "" {
+		http.Error(w, "seriesID path parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	versions, err := s.store.StatsByVersion(r.Context(), seriesID)
+	if err != nil {
+		slog.Error("failed to get version stats", "series_id", seriesID, "err", err)
+		http.Error(w, "failed to get version stats", http.StatusInternalServerError)
+		return
+	}
+
+	if versions == nil {
+		versions = []*audit.PlaybookVersionStats{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"series_id": seriesID, "versions": versions}) //nolint:errcheck
 }
 
 // handleSubmitFeedback handles POST /v1/fleet/playbook-runs/{runID}/feedback.
@@ -260,6 +298,10 @@ func (s *playbookRunServer) handleSubmitFeedback(w http.ResponseWriter, r *http.
 }
 
 // handleGetFeedback handles GET /v1/fleet/playbook-runs/{runID}/feedback.
+// Without query params: returns all feedback records for the run as
+// {"feedback":[...]}.
+// With ?feedback_type=<type>&feedback_time=<time>: returns the single matching
+// record as a JSON object (404 when absent).
 func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.feedbackStore == nil {
 		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)
@@ -270,7 +312,31 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 		http.Error(w, "runID is required", http.StatusBadRequest)
 		return
 	}
-	fb, err := s.feedbackStore.GetByRunID(r.Context(), runID)
+	feedbackType := r.URL.Query().Get("feedback_type")
+	feedbackTime := r.URL.Query().Get("feedback_time")
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// Unfiltered: return all records for this run.
+	if feedbackType == "" && feedbackTime == "" {
+		records, err := s.feedbackStore.ListByRunID(r.Context(), runID)
+		if err != nil {
+			slog.Error("failed to list run feedback", "run_id", runID, "err", err)
+			http.Error(w, "failed to list feedback", http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"feedback": records}) //nolint:errcheck
+		return
+	}
+
+	// Filtered: return the specific type+time record.
+	if feedbackType == "" {
+		feedbackType = "triage"
+	}
+	if feedbackTime == "" {
+		feedbackTime = "post_incident"
+	}
+	fb, err := s.feedbackStore.GetByRunIDAndType(r.Context(), runID, feedbackType, feedbackTime)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "no feedback for run", http.StatusNotFound)
@@ -280,13 +346,113 @@ func (s *playbookRunServer) handleGetFeedback(w http.ResponseWriter, r *http.Req
 		http.Error(w, "failed to get feedback", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(fb) //nolint:errcheck
 }
 
+// handleSubmitEvaluation handles POST /v1/fleet/playbook-runs/{runID}/evaluation.
+// Faulttest calls this after each fault to record automated scoring metrics against
+// the triage playbook run_id, making them available for calibration alongside feedback.
+func (s *playbookRunServer) handleSubmitEvaluation(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	var eval audit.RunEvaluation
+	if err := json.NewDecoder(r.Body).Decode(&eval); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	eval.RunID = runID
+	if err := s.evaluationStore.Upsert(r.Context(), &eval); err != nil {
+		slog.Error("failed to submit evaluation", "run_id", runID, "err", err)
+		http.Error(w, "failed to submit evaluation", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetEvaluation handles GET /v1/fleet/playbook-runs/{runID}/evaluation.
+func (s *playbookRunServer) handleGetEvaluation(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	runID := r.PathValue("runID")
+	if runID == "" {
+		http.Error(w, "runID is required", http.StatusBadRequest)
+		return
+	}
+	eval, err := s.evaluationStore.GetByRunID(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "no evaluation for run", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to get evaluation", "run_id", runID, "err", err)
+		http.Error(w, "failed to get evaluation", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(eval) //nolint:errcheck
+}
+
 // handleListPendingFeedback handles GET /v1/fleet/playbook-runs/feedback-pending.
-// Returns RunFeedback placeholder records where diagnosis_correct has not been
-// submitted yet — these are feedback requests awaiting operator resolution.
+// Returns post-incident triage RunFeedback placeholder records where verdict_correct
+// has not been submitted yet — these are feedback requests awaiting operator resolution.
+// handleCalibration handles GET /v1/fleet/calibration.
+// Optional query param series_id scopes to a single playbook series; omit for fleet-wide.
+func (s *playbookRunServer) handleCalibration(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	seriesID := r.URL.Query().Get("series_id")
+	report, err := s.evaluationStore.CalibrationBands(r.Context(), seriesID)
+	if err != nil {
+		slog.Error("failed to compute calibration", "series_id", seriesID, "err", err)
+		http.Error(w, "failed to compute calibration", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(report) //nolint:errcheck
+}
+
+// handleFaultRunHistory handles GET /v1/fleet/fault-run-history.
+// Returns lightweight pass/fail history per fault, used by `vault drift --gateway`.
+// Query params:
+//
+//	since_days int    (default 90) — how far back to look
+//	fault_id   string (optional)   — filter to a single fault
+func (s *playbookRunServer) handleFaultRunHistory(w http.ResponseWriter, r *http.Request) {
+	if s.evaluationStore == nil {
+		http.Error(w, "evaluation store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	sinceDays := 90
+	if v := r.URL.Query().Get("since_days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			sinceDays = n
+		}
+	}
+	faultID := r.URL.Query().Get("fault_id")
+	entries, err := s.evaluationStore.ListHistory(r.Context(), sinceDays, faultID)
+	if err != nil {
+		slog.Error("failed to list fault run history", "err", err)
+		http.Error(w, "failed to list fault run history", http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []*audit.FaultRunEntry{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"entries": entries}) //nolint:errcheck
+}
+
 func (s *playbookRunServer) handleListPendingFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.feedbackStore == nil {
 		http.Error(w, "feedback store not configured", http.StatusServiceUnavailable)

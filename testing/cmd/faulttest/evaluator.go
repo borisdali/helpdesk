@@ -16,6 +16,9 @@ type EvalResult struct {
 	Category     string  `json:"category"`
 	Score        float64 `json:"score"`
 	Passed       bool    `json:"passed"`
+	// RunID is the gateway playbook run_id (plr_*) for this fault's triage run.
+	// Set from resp.RunID after the agent call; empty for injection failures.
+	RunID        string  `json:"run_id,omitempty"`
 	KeywordPass  bool    `json:"keyword_pass"`
 	DiagnosisPass bool   `json:"diagnosis_pass"`
 	ToolEvidence bool    `json:"tool_evidence"`
@@ -41,6 +44,14 @@ type EvalResult struct {
 	// Set only on --via-gateway runs; false on direct A2A calls.
 	CrystalBall bool `json:"crystal_ball,omitempty"`
 
+	// ProtocolViolation is true when the triage agent omitted the required
+	// TRANSITION_TO/ESCALATE_TO handoff signal. Set from resp.Warnings when the
+	// gateway reports the omission via the fallback gate. A protocol violation
+	// caps the diagnosis score at 0.75 regardless of other eval components.
+	ProtocolViolation bool `json:"protocol_violation,omitempty"`
+	// GatewayWarnings holds warnings returned by the gateway for this run.
+	GatewayWarnings []string `json:"gateway_warnings,omitempty"`
+
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
 	RemediationPassed    bool    `json:"remediation_passed,omitempty"`
@@ -56,6 +67,11 @@ type EvalResult struct {
 	// OverallScore combines composite score and remediation: Score*0.6 + RemediationScore*0.4
 	// when remediation was attempted; equals Score when not attempted.
 	OverallScore float64 `json:"overall_score,omitempty"`
+
+	// Remediation judge fields — populated when --remediation-judge is set.
+	RemediationJudgeScore     float64 `json:"remediation_judge_score,omitempty"`
+	RemediationJudgeReasoning string  `json:"remediation_judge_reasoning,omitempty"`
+	RemediationJudgeSkipped   bool    `json:"remediation_judge_skipped,omitempty"`
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.

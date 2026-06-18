@@ -75,8 +75,9 @@ guidance: |
   - If archiving was the cause, verify archive_status/ready count is
     declining (archiver is making progress)
 
-  Final step: after your analysis, output exactly these lines in this
-  format (no markdown, no extra text on each line):
+  Required output — write these exact lines at the end of your response,
+  no markdown, no extra text on any line. The handoff signal (TRANSITION_TO
+  or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate:
   HYPOTHESIS_1: <primary root cause of WAL disk full> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from logs>"
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1
