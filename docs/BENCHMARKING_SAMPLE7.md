@@ -10,7 +10,7 @@ In contrast to the previous samples, this one shows aiHelpDesk running directly 
 
 The initial [blog post](https://medium.com/@borisdali/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) provides more color on aiHelpDesk [Informed Consent](INFORMED_CONSENT.md) and poses this question: did the AI operate with your consent? This blog post sets the stage for the commands listed below and may be a better starting point if you are less familiar with aiHelpDesk.
 
-This follow up [blog post](...) provides goes a step further and adds an additional question: when you consented, were you right to?
+This follow up [blog post](https://medium.com/@borisdali/you-got-informed-consent-can-you-prove-the-ai-was-right-f62bda72d602) provides goes a step further and adds an additional question: when you consented, were you right to?
 
 Commands and their output below is used as the supporting documentation for the conclusion presented in the second blog post.
 
@@ -71,7 +71,7 @@ Would you like me to investigate why the Kubernetes cluster is down, or do you n
 aiHelpDesk allows BYO faults and playbooks, but here's the list of fault injection tests that we ship and which are available out of the box:
 
 ```
-[boris@cassiopeia /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ ./faulttest list
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ ./faulttest list
 ID                             CATEGORY     SEVERITY   EXTERNAL DB      SOURCE   NAME
 -----------------------------------------------------------------------------------------------------------
 db-max-connections             database     high       yes      auto    builtin  Max connections exhausted
@@ -220,3 +220,166 @@ Overall Result:      [PASS] score=100%
 Total: 1 | Passed: 1 | Failed: 0 | Rate: 100%
   database: 1/1 (100%)
 ```
+
+## Retrieve the feedback
+
+Here's all the feedback for a particular fault injection test run:
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ RUN_ID="plr_16f55166"
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ curl -s "$GATEWAY/api/v1/fleet/playbook-runs/$RUN_ID/feedback" -H "Authorization: Bearer $API_KEY" | jq '.feedback[]'
+{
+  "run_id": "plr_16f55166",
+  "feedback_type": "triage",
+  "feedback_time": "at_gate",
+  "series_id": "pbs_lock_chain_triage",
+  "verdict_correct": true,
+  "verdict_notes": "PID 63 is an active root blocker executing a long-running sleep operation (pg_sleep(3600)) within an open transaction holding exclusive locks on _faulttest_lock_chain, causing a 4-level downstream lock chain that prevents all queued queries from executing",
+  "operator": "alice@example.com",
+  "submitted_at": "2026-06-18T01:01:31.513046Z"
+}
+{
+  "run_id": "plr_16f55166",
+  "feedback_type": "remediation",
+  "feedback_time": "at_gate",
+  "series_id": "pbs_lock_chain_triage",
+  "verdict_correct": true,
+  "operator": "alice@example.com",
+  "submitted_at": "2026-06-18T01:01:34.712166Z"
+}
+{
+  "run_id": "plr_16f55166",
+  "feedback_type": "triage",
+  "feedback_time": "post_incident",
+  "series_id": "pbs_lock_chain_triage",
+  "verdict_correct": true,
+  "verdict_notes": "PID 63 is an active root blocker executing a long-running sleep operation (pg_sleep(3600)) within an open transaction holding exclusive locks on _faulttest_lock_chain, causing a 4-level downstream lock chain that prevents all queued queries from executing",
+  "operator": "alice@example.com",
+  "submitted_at": "2026-06-18T01:02:22.738937Z"
+}
+{
+  "run_id": "plr_16f55166",
+  "feedback_type": "remediation",
+  "feedback_time": "post_incident",
+  "series_id": "pbs_lock_chain_triage",
+  "verdict_correct": true,
+  "verdict_notes": "seems like it resolved the problem",
+  "operator": "alice@example.com",
+  "submitted_at": "2026-06-18T01:02:39.014887Z"
+}
+```
+
+Here's the feedback for the same test run, but limited to only to triage and only post-incident:
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ curl -s "$GATEWAY/api/v1/fleet/playbook-runs/$RUN_ID/feedback?feedback_type=triage&feedback_time=post_incident" -H "Authorization: Bearer $API_KEY"|jq .
+{
+  "run_id": "plr_16f55166",
+  "feedback_type": "triage",
+  "feedback_time": "post_incident",
+  "series_id": "pbs_lock_chain_triage",
+  "verdict_correct": true,
+  "verdict_notes": "PID 63 is an active root blocker executing a long-running sleep operation (pg_sleep(3600)) within an open transaction holding exclusive locks on _faulttest_lock_chain, causing a 4-level downstream lock chain that prevents all queued queries from executing",
+  "operator": "alice@example.com",
+  "submitted_at": "2026-06-18T01:02:22.738937Z"
+}
+```
+
+## vault drift
+
+Let's start with the *drift*:
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ ./faulttest vault drift --since-days 90
+=== Vault Drift Analysis — all targets (last 90 days) ===
+
+FAULT                            FIRST HALF   SECOND HALF  DRIFT
+------------------------------------------------------------------------
+db-long-running-query            75%          50%          -25%
+```
+
+What does the -25% drift mean?
+
+So in this environment, the first half was on Apr 21–22 with 4 runs, 3 passes, which works out to be 75%. The second half falls on Jun 9–10 with 4 runs and 2 pass, i.e. 50%
+
+So the -25% is real data because it reflects the actual variation between those two sessions.
+
+Whether -25% from 4-vs-4 runs is meaningful is a different question. Calibration suppresses small samples at < 3 runs per band. Drift today has no floor, so that a single FAIL in a 2-run second half can produce a 50% swing. TBD.
+
+## vault versions
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ ./faulttest vault versions --gateway $GATEWAY --api-key gateway-api-key $FAULT
+Version stats for pbs_lock_chain_triage — 1 version(s)
+
+VERSION     RUNS    TRANSITIONED AVG STEPS   AVG TIME    AVG DIAG   AVG REMED
+────────────────────────────────────────────────────────────────────────────
+1.3 *       17      5%             –           7m41s       100%       100%
+
+* = currently active version
+```
+
+This test history is revealing: 17 runs triggered against this series, most ended without a resolution signal (the DB registration was broken for most of them), so only ~1 resolved. The 100% diag/remed accuracy is from the feedback records.
+
+
+## vault accuracy
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ ./faulttest vault accuracy --gateway $GATEWAY --api-key $API_KEY
+  FAULT                                SERIES                                 AT-GATE  POST-INC  DIAG ACC REMED ACC
+  ──────────────────────────────────── ──────────────────────────────────── ─────────  ────────  ──────── ─────────
+  db-tx-lock-chain-blocker             pbs_lock_chain_triage                    10/10       5/5      100%       93%
+
+  Run `faulttest vault accuracy <series_id or fault_id>` for the full breakdown.
+
+  18 series awaiting first feedback: pbs_connection_triage, pbs_slow_query_triage, pbs_lock_contention_triage, pbs_vacuum_triage, pbs_cache_miss_triage, pbs_db_restart_triage, pbs_auth_failure_triage, pbs_replication_lag,                     pbs_k8s_pod_crash_triage, pbs_k8s_pending_triage, pbs_k8s_image_pull_triage, pbs_k8s_no_endpoints_triage, pbs_k8s_pvc_triage, pbs_k8s_scale_to_zero_triage, pbs_disk_pressure_triage, pbs_pg_hba_triage, pbs_wal_stale_slot,                      pbs_checkpoint_bgwriter_triage
+```
+
+And accuracy metrics for a specific failure scenario (aka series):
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ ./faulttest vault accuracy --gateway $GATEWAY --api-key $API_KEY $SERIES
+Diagnosis accuracy for series: pbs_lock_chain_triage
+
+  Feedback submitted : 15 runs
+  Correct diagnoses  : 15
+  Accuracy rate      : 100%
+
+  Breakdown by feedback time:
+    At-gate (before remediation) : 10 of 10 correct (100%)
+    Post-incident (after recovery): 5 of 5 correct (100%)
+
+Remediation accuracy
+  Feedback submitted : 15 runs
+  Appropriate        : 14
+  Accuracy rate      : 93%
+
+  Breakdown by feedback time:
+    At-gate (before remediation) : 11 of 11 appropriate (100%)
+    Post-incident (after recovery): 3 of 4 appropriate (75%)
+```
+
+
+## vault calibration
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.17.0-darwin-arm64]$ ./faulttest vault calibration --gateway $GATEWAY --api-key $API_KEY
+Diagnosis calibration — fleet-wide (13 runs with eval + operator feedback)
+
+CONF BAND     RUNS    CORRECT    ACCURACY    CALIBRATION
+─────────────────────────────────────────────────────────────────
+90-100%       12      11         91%         WELL_CALIBRATED
+70-89%        1       1          100%        INSUFFICIENT_DATA
+<70%          0       0          –           INSUFFICIENT_DATA
+
+Remediation calibration — fleet-wide (5 runs with remediation score + operator feedback)
+
+SCORE BAND    RUNS    CORRECT    ACCURACY    CALIBRATION
+─────────────────────────────────────────────────────────────────
+90-100%       5       5          100%        WELL_CALIBRATED
+70-89%        0       0          –           INSUFFICIENT_DATA
+<70%          0       0          –           INSUFFICIENT_DATA
+```
+
+There's a clear signal here. The calibration data says the agent's confidence is honest. When it reports 90–100% confidence, it's correct 91% of the time, which is exactly where you'd want it. The 70–89% band only has 1 run so no judgment yet. One thing worth noting: 13 runs with eval+feedback for diagnosis but only 5 for remediation. That gap is expected to close as more faulttest runs complete with --remediate. Something to watch out for.
+
