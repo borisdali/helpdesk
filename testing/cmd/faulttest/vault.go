@@ -1605,6 +1605,8 @@ type versionStats struct {
 	TotalRuns       int     `json:"total_runs"`
 	Resolved        int     `json:"resolved"`
 	ResolutionRate  float64 `json:"resolution_rate"`
+	Transitioned    int     `json:"transitioned"`
+	TransitionRate  float64 `json:"transition_rate"`
 	AvgStepCount    float64 `json:"avg_step_count"`
 	AvgRecoverySecs float64 `json:"avg_recovery_secs"`
 	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`
@@ -1724,7 +1726,7 @@ func vaultVersions(args []string) {
 		colRemed = 9
 	)
 	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colVer, "VERSION", colRuns, "RUNS", colRes, "RESOLVED",
+		colVer, "VERSION", colRuns, "RUNS", colRes, "TRANSITIONED",
 		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG", "AVG REMED")
 	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+colDiag+2+colRemed))
 
@@ -1736,7 +1738,7 @@ func vaultVersions(args []string) {
 
 		resolvedStr := "–"
 		if v.TotalRuns > 0 {
-			resolvedStr = fmt.Sprintf("%d%%", int(v.ResolutionRate*100))
+			resolvedStr = fmt.Sprintf("%d%%", int(v.TransitionRate*100))
 		}
 
 		stepsStr := "–"

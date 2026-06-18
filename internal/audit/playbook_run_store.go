@@ -82,9 +82,11 @@ type PlaybookVersionStats struct {
 	SeriesID        string  `json:"series_id"`
 	Version         string  `json:"version"`
 	IsActive        bool    `json:"is_active"`         // currently active version for this series
-	TotalRuns       int     `json:"total_runs"`
-	Resolved        int     `json:"resolved"`
-	ResolutionRate  float64 `json:"resolution_rate"`   // resolved / total_runs; 0 when no runs
+	TotalRuns        int     `json:"total_runs"`
+	Resolved         int     `json:"resolved"`
+	ResolutionRate   float64 `json:"resolution_rate"`    // resolved / total_runs; 0 when no runs
+	Transitioned     int     `json:"transitioned"`
+	TransitionRate   float64 `json:"transition_rate"`    // transitioned / total_runs; meaningful for triage series
 	AvgStepCount    float64 `json:"avg_step_count"`    // average steps per run; 0 when no step data
 	AvgRecoverySecs float64 `json:"avg_recovery_secs"` // average wall-clock seconds for completed runs; 0 when no data
 	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`   // average diagnosis_score; 0 when no eval data
@@ -515,6 +517,7 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		isActive        bool
 		totalRuns       int
 		resolved        int
+		transitioned    int
 		stepSum         float64
 		recoverySumSecs float64
 		recoveryCount   int
@@ -548,6 +551,9 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		if outcome == OutcomeResolved {
 			a.resolved++
 		}
+		if outcome == OutcomeTransitioned {
+			a.transitioned++
+		}
 		a.stepSum += float64(stepCount)
 
 		if completedStr != "" && startedStr != "" {
@@ -576,17 +582,19 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	for _, v := range orderedVersions {
 		a := acc[v]
 		st := &PlaybookVersionStats{
-			SeriesID:  seriesID,
-			Version:   v,
-			IsActive:  a.isActive,
-			TotalRuns: a.totalRuns,
-			Resolved:  a.resolved,
+			SeriesID:     seriesID,
+			Version:      v,
+			IsActive:     a.isActive,
+			TotalRuns:    a.totalRuns,
+			Resolved:     a.resolved,
+			Transitioned: a.transitioned,
 			DiagEvalCount:  a.diagEvalCount,
 			RemedEvalCount: a.remedEvalCount,
 		}
 		if a.totalRuns > 0 {
-			st.ResolutionRate = float64(a.resolved) / float64(a.totalRuns)
-			st.AvgStepCount = a.stepSum / float64(a.totalRuns)
+			st.ResolutionRate  = float64(a.resolved)     / float64(a.totalRuns)
+			st.TransitionRate  = float64(a.transitioned) / float64(a.totalRuns)
+			st.AvgStepCount   = a.stepSum / float64(a.totalRuns)
 		}
 		if a.recoveryCount > 0 {
 			st.AvgRecoverySecs = a.recoverySumSecs / float64(a.recoveryCount)
