@@ -2,7 +2,7 @@
 
 This document is the operational detail layer beneath the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel). The flywheel shows the high-level loop. This document explains exactly where operator feedback enters that loop, what form it takes and which `vault` commands consume it to close the cycle.
 
-The feedback model is the same whether the event is a real production incident or a `faulttest` injection: the gate schema, the endpoint, and the `run_feedback` table are shared. This document describes the **faulttest** path. For the equivalent steps in a live incident, see [PLAYBOOK_OPS.md §2.4](PLAYBOOK_OPS.md#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate) (at-gate feedback) and [§2.6](PLAYBOOK_OPS.md#26-step-6-finish-the-remediation--provide-incident-feedback) (post-incident feedback).
+The feedback model is the same whether the event is a real production incident or a simulated one, manufactred via aiHelpDesk [fault injection test](FAULTTEST.md) system: the gate schema, the endpoint, and the `run_feedback` table are shared. This document describes the **faulttest** path. For the equivalent steps in a live incident, see [PLAYBOOK_OPS.md §2.4](PLAYBOOK_OPS.md#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate) (at-gate feedback) and [§2.6](PLAYBOOK_OPS.md#26-step-6-finish-the-remediation--provide-incident-feedback) (post-incident feedback).
 
 The feedback loop described here is also the measurement layer of [Informed Consent](INFORMED_CONSENT.md): `vault accuracy` and `vault calibration` are what make the "Informed" part of that framework verifiable rather than just claimed.
 

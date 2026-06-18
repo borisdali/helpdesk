@@ -90,6 +90,8 @@ Skipping to autonomy without steps 1–3 is trading accountability for speed. Th
 
 ---
 
+See also the [Operational Guide](VAULT_FEEDBACK_FLOW.md) on how we turn Informed Consent from a methodology to a shipping product.
+
 ## Related docs
 
 - [Blog post: You let AI operate on a production database without your consent](https://medium.com/google-cloud/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) — the external reference that motivated this framework
