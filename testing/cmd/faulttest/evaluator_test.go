@@ -627,6 +627,51 @@ reduce transaction volume.`
 	}
 }
 
+// TestEvaluate_PrimaryConfidenceExtracted verifies that Evaluate populates
+// PrimaryConfidence from HYPOTHESIS_1: ... | CONFIDENCE: X in the response text.
+func TestEvaluate_PrimaryConfidenceExtracted(t *testing.T) {
+	f := Failure{
+		ID:       "db-lock",
+		Name:     "Lock contention",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"lock"}},
+		},
+	}
+
+	// Response that contains a structured HYPOTHESIS_1 line with CONFIDENCE.
+	response := "The database has a lock issue.\n" +
+		"HYPOTHESIS_1: Lock chain from long-running transaction | CONFIDENCE: 0.87 | EVIDENCE: pg_locks waiting\n" +
+		"HYPOTHESIS_2: High connection count | CONFIDENCE: 0.20 | EVIDENCE: pg_stat_activity"
+
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+
+	if result.PrimaryConfidence < 0.87-0.001 || result.PrimaryConfidence > 0.87+0.001 {
+		t.Errorf("PrimaryConfidence = %v, want 0.87 (from HYPOTHESIS_1 CONFIDENCE field)", result.PrimaryConfidence)
+	}
+}
+
+// TestEvaluate_PrimaryConfidenceZeroWhenAbsent verifies that PrimaryConfidence
+// is 0.0 when no HYPOTHESIS_1 structured line is present.
+func TestEvaluate_PrimaryConfidenceZeroWhenAbsent(t *testing.T) {
+	f := Failure{
+		ID:       "db-lock",
+		Name:     "Lock contention",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"lock"}},
+		},
+	}
+
+	response := "The database has a lock issue. No structured hypotheses here."
+
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+
+	if result.PrimaryConfidence != 0.0 {
+		t.Errorf("PrimaryConfidence = %v, want 0.0 (no HYPOTHESIS_1 line)", result.PrimaryConfidence)
+	}
+}
+
 func TestSplitCategory_DotIsNotSeparator(t *testing.T) {
 	// Dots are not split characters — use underscore for compound categories.
 	// "wal_accumulation.stale_slot" would produce "accumulation.stale" as a

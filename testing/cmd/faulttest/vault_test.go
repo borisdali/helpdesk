@@ -1294,6 +1294,72 @@ func TestFetchIncidentNarrative_SendsAuth(t *testing.T) {
 
 // ── postEvaluations primary_confidence ───────────────────────────────────
 
+// ── wordWrap ──────────────────────────────────────────────────────────────
+
+func TestWordWrap(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		maxWidth int
+		indent   string
+		want     string
+	}{
+		{
+			"short text fits on one line",
+			"hello world",
+			20,
+			"  ",
+			"hello world",
+		},
+		{
+			"exact fit",
+			"hello world",
+			11,
+			"  ",
+			"hello world",
+		},
+		{
+			"wraps at word boundary",
+			"one two three four five",
+			13,
+			"   ",
+			"one two three\n   four five",
+		},
+		{
+			"continuation indent applied",
+			"alpha beta gamma delta epsilon",
+			15,
+			">>",
+			"alpha beta\n>>gamma delta\n>>epsilon",
+		},
+		{
+			"empty text",
+			"",
+			10,
+			"  ",
+			"",
+		},
+		{
+			"single long word is not split",
+			"superlongwordthatexceedswidth",
+			10,
+			"  ",
+			"superlongwordthatexceedswidth",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wordWrap(tt.text, tt.maxWidth, tt.indent)
+			if got != tt.want {
+				t.Errorf("wordWrap(%q, %d, %q) =\n  %q\nwant\n  %q",
+					tt.text, tt.maxWidth, tt.indent, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── postEvaluations primary_confidence ───────────────────────────────────
+
 func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

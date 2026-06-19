@@ -251,6 +251,49 @@ plr_f1b9e3c4   2026-05-14 22:45   unresolved  –                 ✗ wrong     
 
 The `SCORE` column is populated only when faulttest evaluation data has been posted to auditd (i.e., the run was triggered by `faulttest run --gateway`). Real-incident runs triggered from the product UI show `–` unless scores are manually submitted via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation`.
 
+**Deep-dive mode:** pass a `plr_*` run ID instead of a fault or series ID to print the full incident journey for that specific run:
+
+```bash
+faulttest vault incidents plr_a3f7c1b2 \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+```
+════════════════════════════════════════════════════════════
+INCIDENT plr_a3f7c1b2
+Started: 2026-06-01 14:32 UTC   Duration: 47s
+Operator: alice
+
+── TRIAGE ──────────────────────────────────────────────────
+Playbook:  pbs_lock_chain_triage
+Findings:  Transaction lock chain detected on pg_locks...
+
+Hypotheses:
+  [PRIMARY  92%] Lock contention from long-running txn (pid 1234)
+                 Evidence: "waiting on ShareLock"
+  [REJECTED 41%] High connection count near pg_max_connections
+                 Rejected: pg_stat_activity shows only 23/100 used
+
+── GATE ────────────────────────────────────────────────────
+Approved by: alice  at 14:33 UTC  (approved)
+Feedback:
+  Triage at gate:      ✓ correct
+
+── REMEDIATION ─────────────────────────────────────────────
+Playbook:  pbs_lock_chain_remediate   Outcome: resolved (8.1s)
+Steps:     ✓ get_blocking_queries  ✓ terminate_connection
+
+── EVALUATION ──────────────────────────────────────────────
+Diagnosis:         0.91 (LLM judge)   Agent confidence: 0.92
+Remediation:       0.88 (LLM judge)
+
+── POST-INCIDENT FEEDBACK ──────────────────────────────────
+  Triage:      ✓ correct
+  Remediation: ✓ worked as expected
+```
+
+The deep-dive assembles data from `GET /api/v1/incidents/{runID}` on the gateway, which joins triage, gate, remediation, eval scores, and all four feedback slots into a single timeline view.
+
 ### vault status
 
 ```bash
@@ -293,7 +336,11 @@ FAULT                            FIRST HALF   SECOND HALF  DRIFT
 ------------------------------------------------------------------------
 db-lock-contention               100%         50%          -50%
 db-replication-lag               75%          33%          -42%
+
+(2 fault(s) suppressed — fewer than 3 runs per window half)
 ```
+
+Faults with fewer than 3 runs in either the first or second half are suppressed from the table and counted in the footer. The floor matches `vault calibration`'s `INSUFFICIENT_DATA` threshold — below 3 samples, drift numbers are noise, not signal.
 
 When drift is detected, run `faulttest inject` + `faulttest teardown` to reproduce the fault interactively and investigate what changed in the agent or environment.
 
@@ -344,29 +391,32 @@ faulttest vault calibration db-lock-contention \
   --api-key $HELPDESK_API_KEY
 ```
 
-Shows how well `diagnosis_score` and `remediation_score` predict whether operators confirm the outcome was correct. Requires runs that have both an evaluation score (`--gateway` flag during `faulttest run`) and operator feedback (at-gate or post-incident).
+Shows how well the agent's self-reported confidence and LLM judge scores predict whether operators confirm the outcome was correct. Requires runs that have both evaluation data (`--gateway` flag during `faulttest run`) and operator feedback (at-gate or post-incident).
 
-At-gate feedback is preferred over post-incident when both exist for the same run — it is captured before the operator knows whether remediation succeeded, making it a cleaner signal. A run with only post-incident feedback still contributes.
+**Triage calibration** bands on `primary_confidence` — the agent's `CONFIDENCE:` value from its primary hypothesis line (`HYPOTHESIS_1: ... | CONFIDENCE: 0.92`). Runs where the agent did not emit a structured hypothesis are excluded from the confidence bands and counted separately as heuristic-only runs. At-gate feedback is preferred over post-incident for triage — it is captured before the operator knows whether remediation succeeded, eliminating outcome bias.
+
+**Remediation calibration** bands on `remediation_judge_score` — the LLM-as-judge quality grade for the remediation plan and execution. Post-incident feedback is preferred over at-gate for remediation, because post-incident reflects the actual outcome rather than a pre-execution plan review.
 
 ```
-Diagnosis calibration — fleet-wide (17 runs with eval + operator feedback)
+Diagnosis calibration — fleet-wide (17 runs with agent confidence + operator feedback)
+(2 run(s) excluded — agent did not emit a CONFIDENCE: value on primary hypothesis)
 
-CONF BAND     RUNS    CORRECT    ACCURACY    CALIBRATION
+CONFIDENCE    RUNS    CORRECT    ACCURACY    CALIBRATION
 ─────────────────────────────────────────────────────────────────
 90-100%          12         10        83%    OVERCONFIDENT
 70-89%            4          3        75%    WELL_CALIBRATED
 <70%              1          1       100%    INSUFFICIENT_DATA
 
-Remediation calibration — fleet-wide (8 runs with remediation score + operator feedback)
+Remediation calibration — fleet-wide (8 runs with remediation judge score + operator feedback)
 
-SCORE BAND    RUNS    CORRECT    ACCURACY    CALIBRATION
+CONFIDENCE    RUNS    CORRECT    ACCURACY    CALIBRATION
 ─────────────────────────────────────────────────────────────────
 90-100%           5          4        80%    WELL_CALIBRATED
 70-89%            3          3       100%    UNDERCONFIDENT
 <70%              0          0          –    INSUFFICIENT_DATA
 ```
 
-The remediation section only appears when there are runs with both a non-zero `remediation_score` and operator remediation feedback (`feedback_type: "remediation"`).
+The remediation section only appears when there are runs with both a non-zero `remediation_judge_score` and operator remediation feedback (`feedback_type: "remediation"`).
 
 Calibration is determined by comparing `ACCURACY` against the midpoint of each band:
 
