@@ -1,6 +1,6 @@
 series_id: pbs_stale_slot_remediate
 name: Stale Replication Slot — Drop to Allow WAL Recycling
-version: "1.2"
+version: "1.3"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -49,12 +49,12 @@ guidance: |
   Step 4: Verify the slot is gone and WAL is being recycled.
   Call get_replication_status again. Confirm the slot no longer appears.
   Note: pg_wal segments are recycled at the next checkpoint — the directory
-  size may not decrease immediately. Call check_disk if available to confirm
-  the data volume has headroom.
+  size may not decrease immediately, but the slot is gone and WAL recycling
+  is now unblocked.
 escalation:
   - "slot active=true — the replica is still connected; do NOT drop"
   - "multiple inactive slots found — drop one at a time; each requires separate operator approval"
-  - "lag_bytes > 50 GB — the disk may fill before the next checkpoint if not enough free space exists; check disk headroom first"
+  - "lag_bytes > 50 GB — the disk may fill before the next checkpoint; consider whether free space is sufficient before dropping"
   - "slot belongs to a logical replication subscriber — dropping it may break a downstream consumer; confirm the subscriber is permanently gone"
   - "archive_mode=on and archive_status/ready count is growing — archiving backlog may be the cause, not a stale slot"
 target_hints: []

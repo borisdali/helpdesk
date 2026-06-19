@@ -453,20 +453,33 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("auditd returned %d", resp2.StatusCode))
 			return
 		}
-		var fb struct {
-			RunID          string  `json:"run_id"`
-			SeriesID       string  `json:"series_id"`
-			VerdictCorrect *bool   `json:"verdict_correct,omitempty"`
-			VerdictNotes   string  `json:"verdict_notes,omitempty"`
-			Operator       string  `json:"operator"`
+		type fbRec struct {
+			RunID          string `json:"run_id"`
+			SeriesID       string `json:"series_id"`
+			VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
+			VerdictNotes   string `json:"verdict_notes,omitempty"`
+			Operator       string `json:"operator"`
 		}
-		if err := json.NewDecoder(resp2.Body).Decode(&fb); err != nil {
+		var envelope struct {
+			Feedback []fbRec `json:"feedback"`
+		}
+		if err := json.NewDecoder(resp2.Body).Decode(&envelope); err != nil {
 			writeError(w, http.StatusInternalServerError, "decoding feedback: "+err.Error())
 			return
 		}
+		if len(envelope.Feedback) == 0 {
+			writeError(w, http.StatusNotFound, "no feedback request for run")
+			return
+		}
+		// Use first record for metadata; prefer any resolved record for status.
+		fb := envelope.Feedback[0]
 		status := "pending"
-		if fb.VerdictCorrect != nil {
-			status = "resolved"
+		for _, rec := range envelope.Feedback {
+			if rec.VerdictCorrect != nil {
+				fb = rec
+				status = "resolved"
+				break
+			}
 		}
 		d := decisions.Decision{
 			ID:          id,

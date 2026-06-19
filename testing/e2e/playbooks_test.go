@@ -1696,12 +1696,29 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	}
 
 	// ── feedback chapter ──────────────────────────────────────────────────
-	feedback, _ := narrative["feedback"].(map[string]any)
-	if feedback == nil {
-		t.Fatal("incident narrative missing feedback chapter")
+	// Feedback is a []RunFeedback slice since v0.18.
+	feedbackSlice, _ := narrative["feedback"].([]any)
+	if len(feedbackSlice) == 0 {
+		t.Fatal("incident narrative missing feedback chapter (empty slice)")
 	}
-	if dc, _ := feedback["verdict_correct"].(bool); !dc {
-		t.Errorf("feedback.verdict_correct = %v, want true", feedback["verdict_correct"])
+	// Find the triage/post_incident record we submitted.
+	var feedbackCorrect *bool
+	for _, item := range feedbackSlice {
+		fb, _ := item.(map[string]any)
+		if fb == nil {
+			continue
+		}
+		if fb["feedback_type"] == "triage" && fb["feedback_time"] == "post_incident" {
+			if dc, ok := fb["verdict_correct"].(bool); ok {
+				feedbackCorrect = &dc
+			}
+			break
+		}
+	}
+	if feedbackCorrect == nil {
+		t.Error("triage/post_incident feedback record not found in narrative")
+	} else if !*feedbackCorrect {
+		t.Errorf("feedback.verdict_correct = false, want true")
 	}
 
 	t.Logf("incident narrative full e2e OK: incident_id=%s triage=%s gate_reason=%q",

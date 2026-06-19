@@ -314,10 +314,11 @@ func (c *GatewayClient) SubmitFeedback(ctx context.Context, runID string, body m
 	return c.postJSON(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback", body)
 }
 
-// GetFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
-// Defaults to feedback_type=triage, feedback_time=post_incident.
+// GetFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback with
+// feedback_type=triage&feedback_time=post_incident. Returns a single record or
+// an error containing "404" when no such record exists.
 func (c *GatewayClient) GetFeedback(ctx context.Context, runID string) (map[string]any, error) {
-	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback")
+	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback?feedback_type=triage&feedback_time=post_incident")
 	if err != nil {
 		return nil, err
 	}
