@@ -710,9 +710,15 @@ func vaultDrift(args []string) {
 		secondRate float64
 		drop       float64
 	}
+	const minDriftSamples = 3
 	var drifted []driftEntry
+	suppressed := 0
 	for id, s := range stats {
 		if len(s.firstHalf) == 0 || len(s.secondHalf) == 0 {
+			continue
+		}
+		if len(s.firstHalf) < minDriftSamples || len(s.secondHalf) < minDriftSamples {
+			suppressed++
 			continue
 		}
 		first := passRateOf(s.firstHalf)
@@ -724,6 +730,9 @@ func vaultDrift(args []string) {
 
 	if len(drifted) == 0 {
 		fmt.Println("No significant drift detected (>20% pass rate decline).")
+		if suppressed > 0 {
+			fmt.Printf("(%d fault(s) suppressed — fewer than %d runs per window half)\n", suppressed, minDriftSamples)
+		}
 		return
 	}
 
@@ -783,6 +792,9 @@ func vaultDrift(args []string) {
 				driftStr,
 			)
 		}
+	}
+	if suppressed > 0 {
+		fmt.Printf("\n(%d fault(s) suppressed — fewer than %d runs per window half)\n", suppressed, minDriftSamples)
 	}
 }
 
@@ -1080,7 +1092,8 @@ func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incide
 }
 
 // fetchFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
-// Returns nil (not an error) when no feedback has been submitted.
+// Returns the triage/at_gate record when present, falling back to triage/post_incident.
+// Returns nil when no triage feedback has been submitted.
 func fetchFeedback(gatewayURL, apiKey, runID string) *incidentFeedback {
 	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID + "/feedback"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -1095,14 +1108,39 @@ func fetchFeedback(gatewayURL, apiKey, runID string) *incidentFeedback {
 		return nil
 	}
 	defer resp.Body.Close()
-	var fb incidentFeedback
-	if err := json.NewDecoder(resp.Body).Decode(&fb); err != nil {
+	var envelope struct {
+		Feedback []struct {
+			RunID          string `json:"run_id"`
+			FeedbackType   string `json:"feedback_type"`
+			FeedbackTime   string `json:"feedback_time"`
+			VerdictCorrect *bool  `json:"verdict_correct"`
+			VerdictNotes   string `json:"verdict_notes"`
+			Operator       string `json:"operator"`
+		} `json:"feedback"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil
 	}
-	if fb.RunID == "" {
-		return nil
+	// Prefer triage/at_gate, fall back to triage/post_incident.
+	var fallback *incidentFeedback
+	for _, fb := range envelope.Feedback {
+		if fb.FeedbackType != "triage" {
+			continue
+		}
+		f := &incidentFeedback{
+			RunID:          fb.RunID,
+			VerdictCorrect: fb.VerdictCorrect,
+			VerdictNotes:   fb.VerdictNotes,
+			Operator:       fb.Operator,
+		}
+		if fb.FeedbackTime == "at_gate" {
+			return f
+		}
+		if fallback == nil {
+			fallback = f
+		}
 	}
-	return &fb
+	return fallback
 }
 
 // fetchRemediationRun fetches the remediation run linked to a triage run via
@@ -1169,11 +1207,22 @@ func vaultIncidents(args []string) {
 		os.Exit(1)
 	}
 	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault incidents <fault-id or series-id> [--limit N]")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault incidents <fault-id or series-id or run-id> [--limit N]")
 		os.Exit(1)
 	}
 
 	arg := fs.Args()[0]
+
+	// Deep-dive mode: when arg is a run ID (plr_*), print the full incident journey.
+	if strings.HasPrefix(arg, "plr_") {
+		if cfg.GatewayURL == "" {
+			fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents <run-id>")
+			os.Exit(1)
+		}
+		printIncidentJourney(cfg.GatewayURL, cfg.GatewayAPIKey, arg)
+		return
+	}
+
 	seriesID := arg
 
 	// Resolve fault ID → diagnosis series ID via catalog.
@@ -1567,6 +1616,7 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 			"passed":                        r.Passed,
 			"remediation_judge_score":       r.RemediationJudgeScore,
 			"remediation_judge_reasoning":   r.RemediationJudgeReasoning,
+			"primary_confidence":            r.PrimaryConfidence,
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -1790,6 +1840,7 @@ type calibrationReport struct {
 	TotalRuns        int               `json:"total_runs"`
 	RemediationBands []calibrationBand `json:"remediation_bands,omitempty"`
 	RemediationRuns  int               `json:"remediation_runs"`
+	HeuristicCount   int               `json:"heuristic_count,omitempty"`
 }
 
 // fetchCalibration calls GET /api/v1/fleet/calibration[?series_id=...].
@@ -1818,6 +1869,285 @@ func fetchCalibration(gatewayURL, apiKey, seriesID string) (*calibrationReport, 
 		return nil, err
 	}
 	return &report, nil
+}
+
+// ── Incident journey (deep-dive) ─────────────────────────────────────────────
+
+// narrativeFeedback is one feedback record within the incident narrative response.
+type narrativeFeedback struct {
+	RunID          string `json:"run_id"`
+	FeedbackType   string `json:"feedback_type"`
+	FeedbackTime   string `json:"feedback_time"`
+	VerdictCorrect *bool  `json:"verdict_correct"`
+	VerdictNotes   string `json:"verdict_notes"`
+	Operator       string `json:"operator"`
+}
+
+// narrativeEval mirrors RunEvaluation fields used by the deep-dive display.
+type narrativeEval struct {
+	DiagnosisScore            float64 `json:"diagnosis_score"`
+	RemediationJudgeScore     float64 `json:"remediation_judge_score"`
+	RemediationJudgeReasoning string  `json:"remediation_judge_reasoning"`
+	PrimaryConfidence         float64 `json:"primary_confidence"`
+	JudgeUsed                 bool    `json:"judge_used"`
+}
+
+// narrativeHypothesis mirrors audit.DiagnosticHypothesis.
+type narrativeHypothesis struct {
+	Rank           int     `json:"rank"`
+	Text           string  `json:"text"`
+	Confidence     float64 `json:"confidence"`
+	Evidence       string  `json:"evidence,omitempty"`
+	RejectedReason string  `json:"rejected_reason,omitempty"`
+	IsPrimary      bool    `json:"is_primary"`
+}
+
+// narrativeDiagReport mirrors audit.DiagnosticReport.
+type narrativeDiagReport struct {
+	Hypotheses []narrativeHypothesis `json:"hypotheses"`
+}
+
+// narrativeStep mirrors audit.PlaybookRunStep.
+type narrativeStep struct {
+	StepName string `json:"step_name"`
+	Status   string `json:"status"`
+}
+
+// incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
+type incidentNarrative struct {
+	IncidentID  string    `json:"incident_id"`
+	StartedAt   time.Time `json:"started_at"`
+	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
+	DurationSec float64   `json:"duration_sec,omitempty"`
+	Operator    string    `json:"operator"`
+	Triage      struct {
+		RunID            string               `json:"run_id"`
+		Playbook         string               `json:"playbook"`
+		Findings         string               `json:"findings,omitempty"`
+		DiagnosticReport *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+	} `json:"triage"`
+	Gate *struct {
+		ApprovedBy     string    `json:"approved_by,omitempty"`
+		AcknowledgedAt time.Time `json:"acknowledged_at,omitempty"`
+		Resolution     string    `json:"resolution"`
+		Reason         string    `json:"reason,omitempty"`
+	} `json:"gate,omitempty"`
+	Remediation *struct {
+		RunID      string          `json:"run_id"`
+		Playbook   string          `json:"playbook"`
+		Outcome    string          `json:"outcome"`
+		Findings   string          `json:"findings,omitempty"`
+		Transcript string          `json:"transcript,omitempty"`
+		Steps      []narrativeStep `json:"steps,omitempty"`
+	} `json:"remediation,omitempty"`
+	Feedback   []narrativeFeedback `json:"feedback,omitempty"`
+	Evaluation *narrativeEval      `json:"evaluation,omitempty"`
+}
+
+func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrative, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/incidents/" + runID
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("incident %s not found", runID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var n incidentNarrative
+	if err := json.NewDecoder(resp.Body).Decode(&n); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &n, nil
+}
+
+func printIncidentJourney(gatewayURL, apiKey, runID string) {
+	n, err := fetchIncidentNarrative(gatewayURL, apiKey, runID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	divider := strings.Repeat("═", 60)
+	section := func(title string) {
+		fmt.Printf("\n── %-54s\n", title)
+	}
+
+	fmt.Printf("\n%s\n", divider)
+	started := n.StartedAt.UTC().Format("2006-01-02 15:04 UTC")
+	if n.DurationSec > 0 {
+		fmt.Printf("INCIDENT %s\nStarted: %s   Duration: %.0fs\n", n.IncidentID, started, n.DurationSec)
+	} else {
+		fmt.Printf("INCIDENT %s\nStarted: %s\n", n.IncidentID, started)
+	}
+	if n.Operator != "" {
+		fmt.Printf("Operator: %s\n", n.Operator)
+	}
+	fmt.Printf("%s\n", divider)
+
+	// ── TRIAGE ───────────────────────────────────────────────
+	section("TRIAGE")
+	fmt.Printf("Playbook:  %s\n", n.Triage.Playbook)
+	if n.Triage.Findings != "" {
+		fmt.Printf("Findings:  %s\n", wordWrap(n.Triage.Findings, 70, "           "))
+	}
+	if n.Triage.DiagnosticReport != nil && len(n.Triage.DiagnosticReport.Hypotheses) > 0 {
+		fmt.Println("\nHypotheses:")
+		for _, h := range n.Triage.DiagnosticReport.Hypotheses {
+			tag := fmt.Sprintf("[REJECTED %2.0f%%]", h.Confidence*100)
+			if h.IsPrimary {
+				tag = fmt.Sprintf("[PRIMARY  %2.0f%%]", h.Confidence*100)
+			}
+			fmt.Printf("  %s %s\n", tag, h.Text)
+			if h.Evidence != "" {
+				fmt.Printf("  %s Evidence: %q\n", strings.Repeat(" ", len(tag)), h.Evidence)
+			}
+			if h.RejectedReason != "" {
+				fmt.Printf("  %s Rejected: %s\n", strings.Repeat(" ", len(tag)), h.RejectedReason)
+			}
+		}
+	}
+
+	// ── GATE ─────────────────────────────────────────────────
+	if n.Gate != nil {
+		section("GATE")
+		gateLine := n.Gate.Resolution
+		if n.Gate.ApprovedBy != "" {
+			gateLine = fmt.Sprintf("%s by %s", n.Gate.Resolution, n.Gate.ApprovedBy)
+		}
+		if !n.Gate.AcknowledgedAt.IsZero() {
+			gateLine += "  at " + n.Gate.AcknowledgedAt.UTC().Format("15:04 UTC")
+		}
+		fmt.Printf("Decision:  %s\n", gateLine)
+		// At-gate feedback
+		var gateFeedback []string
+		for _, fb := range n.Feedback {
+			if fb.FeedbackTime != "at_gate" {
+				continue
+			}
+			verdict := "–"
+			if fb.VerdictCorrect != nil {
+				if *fb.VerdictCorrect {
+					verdict = "✓ correct"
+				} else {
+					verdict = "✗ wrong"
+				}
+			}
+			label := fb.FeedbackType + " at gate"
+			if fb.VerdictNotes != "" {
+				verdict += fmt.Sprintf(" (%s)", fb.VerdictNotes)
+			}
+			gateFeedback = append(gateFeedback, fmt.Sprintf("  %-28s %s", label+":", verdict))
+		}
+		if len(gateFeedback) > 0 {
+			fmt.Println("Feedback:")
+			for _, f := range gateFeedback {
+				fmt.Println(f)
+			}
+		}
+	}
+
+	// ── REMEDIATION ──────────────────────────────────────────
+	if n.Remediation != nil {
+		section("REMEDIATION")
+		fmt.Printf("Playbook:  %s   Outcome: %s\n", n.Remediation.Playbook, n.Remediation.Outcome)
+		if n.Remediation.Findings != "" {
+			fmt.Printf("Plan:      %s\n", wordWrap(n.Remediation.Findings, 70, "           "))
+		}
+		if len(n.Remediation.Steps) > 0 {
+			stepNames := make([]string, 0, len(n.Remediation.Steps))
+			for _, s := range n.Remediation.Steps {
+				prefix := "✓"
+				if s.Status == "failed" || s.Status == "error" {
+					prefix = "✗"
+				}
+				stepNames = append(stepNames, prefix+" "+s.StepName)
+			}
+			fmt.Printf("Steps:     %s\n", strings.Join(stepNames, "  "))
+		}
+	}
+
+	// ── EVALUATION ───────────────────────────────────────────
+	if n.Evaluation != nil {
+		section("EVALUATION")
+		ev := n.Evaluation
+		diagLabel := "heuristic"
+		if ev.JudgeUsed {
+			diagLabel = "LLM judge"
+		}
+		fmt.Printf("Diagnosis:     %.2f (%s)", ev.DiagnosisScore, diagLabel)
+		if ev.PrimaryConfidence > 0 {
+			fmt.Printf("   Agent confidence: %.0f%%", ev.PrimaryConfidence*100)
+		}
+		fmt.Println()
+		if ev.RemediationJudgeScore > 0 {
+			fmt.Printf("Remediation:   %.2f (LLM judge)\n", ev.RemediationJudgeScore)
+		}
+		if ev.RemediationJudgeReasoning != "" {
+			fmt.Printf("Reasoning:     %s\n", wordWrap(ev.RemediationJudgeReasoning, 70, "               "))
+		}
+	}
+
+	// ── POST-INCIDENT FEEDBACK ────────────────────────────────
+	var postFeedback []narrativeFeedback
+	for _, fb := range n.Feedback {
+		if fb.FeedbackTime == "post_incident" {
+			postFeedback = append(postFeedback, fb)
+		}
+	}
+	if len(postFeedback) > 0 {
+		section("POST-INCIDENT FEEDBACK")
+		for _, fb := range postFeedback {
+			verdict := "–"
+			if fb.VerdictCorrect != nil {
+				if *fb.VerdictCorrect {
+					verdict = "✓ correct"
+				} else {
+					verdict = "✗ wrong"
+				}
+			}
+			if fb.VerdictNotes != "" {
+				verdict += fmt.Sprintf(" (%s)", fb.VerdictNotes)
+			}
+			fmt.Printf("  %-28s %s\n", fb.FeedbackType+":", verdict)
+		}
+	}
+	fmt.Println()
+}
+
+// wordWrap wraps text at maxWidth characters, indenting continuation lines with indent.
+func wordWrap(text string, maxWidth int, indent string) string {
+	if len(text) <= maxWidth {
+		return text
+	}
+	words := strings.Fields(text)
+	var lines []string
+	current := ""
+	for _, w := range words {
+		if current == "" {
+			current = w
+		} else if len(current)+1+len(w) <= maxWidth {
+			current += " " + w
+		} else {
+			lines = append(lines, current)
+			current = w
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return strings.Join(lines, "\n"+indent)
 }
 
 // vaultCalibration shows confidence-band calibration: how well diagnosis_score
@@ -1872,7 +2202,11 @@ func vaultCalibration(args []string) {
 	if report.SeriesID != "" {
 		scope = report.SeriesID
 	}
-	fmt.Printf("Diagnosis calibration — %s (%d runs with eval + operator feedback)\n\n", scope, report.TotalRuns)
+	fmt.Printf("Diagnosis calibration — %s (%d runs with agent confidence + operator feedback)\n", scope, report.TotalRuns)
+	if report.HeuristicCount > 0 {
+		fmt.Printf("(%d run(s) excluded — agent did not emit a CONFIDENCE: value on primary hypothesis)\n", report.HeuristicCount)
+	}
+	fmt.Println()
 
 	const (
 		colBand  = 12
@@ -1882,7 +2216,7 @@ func vaultCalibration(args []string) {
 		colCalib = 20
 	)
 	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
-		colBand, "CONF BAND", colRuns, "RUNS", colCorr, "CORRECT", colAccu, "ACCURACY", "CALIBRATION")
+		colBand, "CONFIDENCE", colRuns, "RUNS", colCorr, "CORRECT", colAccu, "ACCURACY", "CALIBRATION")
 	fmt.Println(strings.Repeat("─", colBand+2+colRuns+2+colCorr+2+colAccu+2+colCalib))
 
 	printCalibBands := func(bands []calibrationBand) {

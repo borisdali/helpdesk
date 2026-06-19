@@ -13,17 +13,21 @@ import (
 )
 
 // IncidentNarrative is the unified timeline view for a single triage incident:
-// triage → operator gate → remediation, with optional diagnosis feedback.
+// triage → operator gate → remediation, with evaluation scores and all feedback slots.
 type IncidentNarrative struct {
-	IncidentID  string              `json:"incident_id"`            // triage run_id
-	StartedAt   time.Time           `json:"started_at"`
-	ResolvedAt  *time.Time          `json:"resolved_at,omitempty"`
-	DurationSec float64             `json:"duration_sec,omitempty"`
-	Operator    string              `json:"operator"`
-	Triage      TriageChapter       `json:"triage"`
-	Gate        *GateChapter        `json:"gate,omitempty"`
-	Remediation *RemediationChapter `json:"remediation,omitempty"`
-	Feedback    *audit.RunFeedback  `json:"feedback,omitempty"`
+	IncidentID  string                `json:"incident_id"`            // triage run_id
+	StartedAt   time.Time             `json:"started_at"`
+	ResolvedAt  *time.Time            `json:"resolved_at,omitempty"`
+	DurationSec float64               `json:"duration_sec,omitempty"`
+	Operator    string                `json:"operator"`
+	Triage      TriageChapter         `json:"triage"`
+	Gate        *GateChapter          `json:"gate,omitempty"`
+	Remediation *RemediationChapter   `json:"remediation,omitempty"`
+	// Feedback holds all operator feedback records for this incident (up to four:
+	// triage/at_gate, triage/post_incident, remediation/at_gate, remediation/post_incident).
+	Feedback    []audit.RunFeedback   `json:"feedback,omitempty"`
+	// Evaluation holds automated faulttest eval scores for the triage run.
+	Evaluation  *audit.RunEvaluation  `json:"evaluation,omitempty"`
 }
 
 // TriageChapter holds the investigative phase of the incident.
@@ -46,10 +50,12 @@ type GateChapter struct {
 
 // RemediationChapter holds the remediation playbook run.
 type RemediationChapter struct {
-	RunID    string                    `json:"run_id"`
-	Playbook string                    `json:"playbook"` // series_id
-	Outcome  string                    `json:"outcome"`
-	Steps    []*audit.PlaybookRunStep  `json:"steps,omitempty"`
+	RunID      string                   `json:"run_id"`
+	Playbook   string                   `json:"playbook"` // series_id
+	Outcome    string                   `json:"outcome"`
+	Steps      []*audit.PlaybookRunStep `json:"steps,omitempty"`
+	Findings   string                   `json:"findings,omitempty"`
+	Transcript string                   `json:"transcript,omitempty"`
 }
 
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
@@ -124,10 +130,12 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	if remRun := g.fetchRemediationRun(r.Context(), runID); remRun != nil {
 		steps, _ := g.fetchRunSteps(r.Context(), remRun.RunID)
 		narrative.Remediation = &RemediationChapter{
-			RunID:    remRun.RunID,
-			Playbook: remRun.SeriesID,
-			Outcome:  remRun.Outcome,
-			Steps:    steps,
+			RunID:      remRun.RunID,
+			Playbook:   remRun.SeriesID,
+			Outcome:    remRun.Outcome,
+			Steps:      steps,
+			Findings:   remRun.FindingsSummary,
+			Transcript: remRun.AgentTranscript,
 		}
 		if !remRun.CompletedAt.IsZero() {
 			t := remRun.CompletedAt
@@ -140,8 +148,11 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
 	}
 
-	// 4. Feedback — optional diagnosis quality confirmation.
-	narrative.Feedback = g.fetchRunFeedback(r.Context(), runID)
+	// 4. Feedback — all operator feedback slots for this incident.
+	narrative.Feedback = g.fetchAllRunFeedback(r.Context(), runID)
+
+	// 5. Evaluation — automated faulttest eval scores.
+	narrative.Evaluation = g.fetchRunEvaluation(r.Context(), runID)
 
 	writeJSON(w, http.StatusOK, narrative)
 }
@@ -202,8 +213,9 @@ func (g *Gateway) fetchRemediationRun(ctx context.Context, triageRunID string) *
 	return result.Runs[0]
 }
 
-// fetchRunFeedback fetches operator feedback for a run, returning nil if none.
-func (g *Gateway) fetchRunFeedback(ctx context.Context, runID string) *audit.RunFeedback {
+// fetchAllRunFeedback fetches all operator feedback records for a run (up to four:
+// triage/at_gate, triage/post_incident, remediation/at_gate, remediation/post_incident).
+func (g *Gateway) fetchAllRunFeedback(ctx context.Context, runID string) []audit.RunFeedback {
 	if g.auditURL == "" {
 		return nil
 	}
@@ -216,20 +228,41 @@ func (g *Gateway) fetchRunFeedback(ctx context.Context, runID string) *audit.Run
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		return nil
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	var envelope struct {
+		Feedback []audit.RunFeedback `json:"feedback"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil
 	}
-	if resp.StatusCode != http.StatusOK {
+	return envelope.Feedback
+}
+
+// fetchRunEvaluation fetches automated eval scores for a run. Returns nil when none recorded.
+func (g *Gateway) fetchRunEvaluation(ctx context.Context, runID string) *audit.RunEvaluation {
+	if g.auditURL == "" {
 		return nil
 	}
-	var fb audit.RunFeedback
-	if err := json.NewDecoder(resp.Body).Decode(&fb); err != nil {
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/evaluation"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
 		return nil
 	}
-	return &fb
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	defer resp.Body.Close()
+	var ev audit.RunEvaluation
+	if err := json.NewDecoder(resp.Body).Decode(&ev); err != nil || ev.RunID == "" {
+		return nil
+	}
+	return &ev
 }
 

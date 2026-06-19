@@ -1018,7 +1018,7 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 		_ = i
 		if err := evalStore.Upsert(ctx, &audit.RunEvaluation{
 			RunID: runID, FailureID: "db-lock", DiagnosisScore: 0.95, OverallScore: 0.95,
-			RemediationScore: 0.92,
+			PrimaryConfidence: 0.95, RemediationJudgeScore: 0.92,
 		}); err != nil {
 			t.Fatalf("Upsert %s: %v", runID, err)
 		}

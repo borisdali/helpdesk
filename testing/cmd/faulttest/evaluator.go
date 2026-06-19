@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"helpdesk/testing/faultlib"
@@ -72,6 +73,11 @@ type EvalResult struct {
 	RemediationJudgeScore     float64 `json:"remediation_judge_score,omitempty"`
 	RemediationJudgeReasoning string  `json:"remediation_judge_reasoning,omitempty"`
 	RemediationJudgeSkipped   bool    `json:"remediation_judge_skipped,omitempty"`
+
+	// PrimaryConfidence is the triage agent's self-reported confidence on its
+	// primary hypothesis, extracted from HYPOTHESIS_1: ... | CONFIDENCE: X.
+	// Zero when the agent did not emit structured hypotheses.
+	PrimaryConfidence float64 `json:"primary_confidence,omitempty"`
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.
@@ -243,6 +249,7 @@ func Evaluate(f Failure, resp testutil.AgentResponse, auditTools ...[]string) Ev
 	// Pass criteria: score >= 0.6 AND keyword check passes.
 	result.Passed = result.Score >= 0.6 && result.KeywordPass
 
+	result.PrimaryConfidence = extractPrimaryConfidence(responseText)
 	return result
 }
 
@@ -352,7 +359,31 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	judgeVeto := !judgeResult.Skipped && judgeResult.Score < 0.33
 	result.Passed = result.Score >= 0.6 && result.KeywordPass && !judgeVeto
 
+	result.PrimaryConfidence = extractPrimaryConfidence(responseText)
 	return result
+}
+
+// extractPrimaryConfidence scans the agent response text for a HYPOTHESIS_1: line
+// and returns the CONFIDENCE: value. Returns 0.0 if not found or unparseable.
+func extractPrimaryConfidence(text string) float64 {
+	for _, line := range strings.Split(text, "\n") {
+		// Strip optional markdown bold markers before matching.
+		clean := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "**"))
+		if !strings.HasPrefix(strings.ToUpper(clean), "HYPOTHESIS_1:") {
+			continue
+		}
+		for _, part := range strings.Split(clean, " | ") {
+			part = strings.TrimSpace(part)
+			upper := strings.ToUpper(part)
+			if strings.HasPrefix(upper, "CONFIDENCE:") {
+				val := strings.TrimSpace(part[len("CONFIDENCE:"):])
+				if v, err := strconv.ParseFloat(val, 64); err == nil {
+					return v
+				}
+			}
+		}
+	}
+	return 0.0
 }
 
 // toFaultlibFailure converts a local Failure to a faultlib.Failure for judge calls.

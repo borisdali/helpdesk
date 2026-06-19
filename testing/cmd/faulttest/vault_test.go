@@ -1062,3 +1062,254 @@ func TestFetchFaultRunHistory_NetworkError(t *testing.T) {
 		t.Error("expected error for unreachable server, got nil")
 	}
 }
+
+// ── extractPrimaryConfidence ───────────────────────────────────────────────
+
+func TestExtractPrimaryConfidence(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want float64
+	}{
+		{
+			"standard format",
+			"HYPOTHESIS_1: Lock contention | CONFIDENCE: 0.92 | EVIDENCE: pg_locks shows waiting",
+			0.92,
+		},
+		{
+			"markdown bold prefix only",
+			"**HYPOTHESIS_1: High connection count near pg_max_connections | CONFIDENCE: 0.75",
+			0.75,
+		},
+		{
+			"markdown bold around hypothesis text",
+			"**HYPOTHESIS_1: High connection count near pg_max_connections** | CONFIDENCE: 0.75 | EVIDENCE: pg_stat_activity shows 95/100",
+			0.75,
+		},
+		{
+			"multi-line response",
+			"Some preamble.\nHYPOTHESIS_1: WAL stale slot | CONFIDENCE: 0.85 | EVIDENCE: inactive slot\nHYPOTHESIS_2: Archive failure | CONFIDENCE: 0.20",
+			0.85,
+		},
+		{
+			"no HYPOTHESIS_1",
+			"The agent found a lock. CONFIDENCE: 0.80",
+			0.0,
+		},
+		{
+			"HYPOTHESIS_1 but no CONFIDENCE field",
+			"HYPOTHESIS_1: Lock contention | EVIDENCE: pg_locks shows waiting",
+			0.0,
+		},
+		{
+			"HYPOTHESIS_2 should not match",
+			"HYPOTHESIS_2: High connections | CONFIDENCE: 0.60",
+			0.0,
+		},
+		{
+			"empty text",
+			"",
+			0.0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPrimaryConfidence(tt.text)
+			if got < tt.want-0.001 || got > tt.want+0.001 {
+				t.Errorf("extractPrimaryConfidence() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// ── fetchFeedback (array decode) ──────────────────────────────────────────
+
+func TestFetchFeedback_DecodesArray_AtGatePreferred(t *testing.T) {
+	tr := true
+	fa := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"feedback": []map[string]any{
+				{"run_id": "plr_x", "feedback_type": "triage", "feedback_time": "post_incident", "verdict_correct": &fa},
+				{"run_id": "plr_x", "feedback_type": "triage", "feedback_time": "at_gate", "verdict_correct": &tr},
+				{"run_id": "plr_x", "feedback_type": "remediation", "feedback_time": "at_gate", "verdict_correct": &fa},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	fb := fetchFeedback(srv.URL, "", "plr_x")
+	if fb == nil {
+		t.Fatal("expected non-nil feedback")
+	}
+	if fb.VerdictCorrect == nil || !*fb.VerdictCorrect {
+		t.Errorf("VerdictCorrect = %v, want true (at_gate preferred over post_incident)", fb.VerdictCorrect)
+	}
+}
+
+func TestFetchFeedback_FallsBackToPostIncident(t *testing.T) {
+	tr := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"feedback": []map[string]any{
+				{"run_id": "plr_y", "feedback_type": "triage", "feedback_time": "post_incident", "verdict_correct": &tr},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	fb := fetchFeedback(srv.URL, "", "plr_y")
+	if fb == nil {
+		t.Fatal("expected non-nil feedback")
+	}
+	if fb.VerdictCorrect == nil || !*fb.VerdictCorrect {
+		t.Errorf("VerdictCorrect = %v, want true (post_incident fallback)", fb.VerdictCorrect)
+	}
+}
+
+func TestFetchFeedback_ReturnsNilWhenNoTriage(t *testing.T) {
+	fa := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"feedback": []map[string]any{
+				{"run_id": "plr_z", "feedback_type": "remediation", "feedback_time": "at_gate", "verdict_correct": &fa},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	fb := fetchFeedback(srv.URL, "", "plr_z")
+	if fb != nil {
+		t.Errorf("expected nil when no triage feedback, got %+v", fb)
+	}
+}
+
+func TestFetchFeedback_NetworkError(t *testing.T) {
+	fb := fetchFeedback("http://127.0.0.1:19994", "", "plr_x")
+	if fb != nil {
+		t.Errorf("expected nil on network error, got %+v", fb)
+	}
+}
+
+// ── fetchIncidentNarrative ────────────────────────────────────────────────
+
+func TestFetchIncidentNarrative_Success(t *testing.T) {
+	now := time.Now().UTC()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/incidents/plr_narr01" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_narr01",
+			"started_at":  now.Format(time.RFC3339),
+			"operator":    "alice",
+			"triage": map[string]any{
+				"run_id":   "plr_narr01",
+				"playbook": "pbs_db_lock",
+				"findings": "Lock chain detected",
+			},
+			"feedback": []map[string]any{
+				{"run_id": "plr_narr01", "feedback_type": "triage", "feedback_time": "at_gate", "verdict_correct": true},
+			},
+			"evaluation": map[string]any{
+				"diagnosis_score":    0.91,
+				"primary_confidence": 0.88,
+				"judge_used":         true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	n, err := fetchIncidentNarrative(srv.URL, "", "plr_narr01")
+	if err != nil {
+		t.Fatalf("fetchIncidentNarrative: %v", err)
+	}
+	if n.IncidentID != "plr_narr01" {
+		t.Errorf("IncidentID = %q, want plr_narr01", n.IncidentID)
+	}
+	if n.Operator != "alice" {
+		t.Errorf("Operator = %q, want alice", n.Operator)
+	}
+	if n.Triage.Findings != "Lock chain detected" {
+		t.Errorf("Triage.Findings = %q, want Lock chain detected", n.Triage.Findings)
+	}
+	if len(n.Feedback) != 1 {
+		t.Fatalf("Feedback len = %d, want 1", len(n.Feedback))
+	}
+	if n.Feedback[0].FeedbackType != "triage" {
+		t.Errorf("Feedback[0].FeedbackType = %q, want triage", n.Feedback[0].FeedbackType)
+	}
+	if n.Evaluation == nil {
+		t.Fatal("Evaluation is nil, want non-nil")
+	}
+	if n.Evaluation.DiagnosisScore != 0.91 {
+		t.Errorf("Evaluation.DiagnosisScore = %v, want 0.91", n.Evaluation.DiagnosisScore)
+	}
+	if n.Evaluation.PrimaryConfidence != 0.88 {
+		t.Errorf("Evaluation.PrimaryConfidence = %v, want 0.88", n.Evaluation.PrimaryConfidence)
+	}
+}
+
+func TestFetchIncidentNarrative_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := fetchIncidentNarrative(srv.URL, "", "plr_ghost")
+	if err == nil {
+		t.Error("expected error for 404, got nil")
+	}
+}
+
+func TestFetchIncidentNarrative_NetworkError(t *testing.T) {
+	_, err := fetchIncidentNarrative("http://127.0.0.1:19993", "", "plr_x")
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchIncidentNarrative_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_x",
+			"triage":      map[string]any{"run_id": "plr_x", "playbook": "test"},
+		})
+	}))
+	defer srv.Close()
+
+	fetchIncidentNarrative(srv.URL, "tok-xyz", "plr_x") //nolint:errcheck
+	if gotAuth != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotAuth)
+	}
+}
+
+// ── postEvaluations primary_confidence ───────────────────────────────────
+
+func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	results := []EvalResult{{
+		RunID:             "plr_pc01",
+		PrimaryConfidence: 0.88,
+		OverallScore:      0.85,
+	}}
+	postEvaluations(srv.URL, "", results)
+
+	if v, ok := gotBody["primary_confidence"]; !ok || v != 0.88 {
+		t.Errorf("primary_confidence = %v (ok=%v), want 0.88", gotBody["primary_confidence"], ok)
+	}
+}
