@@ -370,10 +370,58 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer != "y" && answer != "yes" {
 		fmt.Println("  Denied.")
+		fmt.Println()
+		fmt.Println("  Feedback (optional — recorded even though remediation was denied):")
+		var denyVerdictCorrect *bool
+		var denyVerdictNotes string
+		fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
+		diagAnswer, _ := reader.ReadString('\n')
+		diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
+		if diagAnswer == "y" || diagAnswer == "yes" {
+			v := true
+			denyVerdictCorrect = &v
+		} else if diagAnswer == "n" || diagAnswer == "no" {
+			v := false
+			denyVerdictCorrect = &v
+		}
+		if denyVerdictCorrect != nil {
+			defaultCause := primaryHypothesisText(gate.DiagnosticReport)
+			prompt := "    Root cause"
+			if defaultCause != "" {
+				prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultCause)
+			}
+			fmt.Print(prompt + ": ")
+			causeInput, _ := reader.ReadString('\n')
+			causeInput = strings.TrimSpace(causeInput)
+			if causeInput == "" {
+				causeInput = defaultCause
+			}
+			denyVerdictNotes = causeInput
+		}
+		var denyRemVerdictCorrect *bool
+		var denyRemVerdictNotes string
+		fmt.Print("    Was the proposed remediation appropriate? [y/n/skip]: ")
+		remAnswer, _ := reader.ReadString('\n')
+		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
+		if remAnswer == "y" || remAnswer == "yes" {
+			v := true
+			denyRemVerdictCorrect = &v
+		} else if remAnswer == "n" || remAnswer == "no" {
+			v := false
+			denyRemVerdictCorrect = &v
+			fmt.Print("    Notes on remediation plan (optional): ")
+			remNotes, _ := reader.ReadString('\n')
+			denyRemVerdictNotes = strings.TrimSpace(remNotes)
+		}
 		r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{ //nolint:errcheck
-			Resolution: "denied",
-			ResolvedBy: r.cfg.OperatorID,
+			Resolution:     "denied",
+			ResolvedBy:     r.cfg.OperatorID,
+			VerdictCorrect: denyVerdictCorrect,
+			VerdictNotes:   denyVerdictNotes,
 		})
+		if denyRemVerdictCorrect != nil {
+			r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", denyRemVerdictCorrect, denyRemVerdictNotes)
+		}
 		return errGateDenied
 	}
 
