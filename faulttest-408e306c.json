@@ -1,0 +1,38 @@
+{
+  "id": "408e306c",
+  "timestamp": "2026-06-21T18:26:27Z",
+  "results": [
+    {
+      "failure_id": "db-lock-contention",
+      "failure_name": "Lock contention / deadlock",
+      "category": "database",
+      "score": 0,
+      "passed": false,
+      "keyword_pass": false,
+      "diagnosis_pass": false,
+      "tool_evidence": false,
+      "response_text": "",
+      "duration": "426.767542ms",
+      "error": "resolving diagnosis playbook \"pbs_lock_contention_triage\": gateway returned 401 for series \"pbs_lock_contention_triage\"",
+      "keyword_score": 0,
+      "tool_score": 0,
+      "diagnosis_score": 0,
+      "remediation_attempted": true,
+      "remediation_error": "remediation trigger: resolving playbook \"pbs_slow_query_remediate\": gateway returned 401 for series \"pbs_slow_query_remediate\"",
+      "remediation_method": "playbook"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "pass_rate": 0,
+    "categories": {
+      "database": {
+        "total": 1,
+        "passed": 0,
+        "rate": 0
+      }
+    }
+  }
+}

@@ -374,7 +374,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	validModes := map[string]bool{"manual": true, "review": true, "auto": true}
 	var modeInput string
 	for {
-		fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
+		fmt.Printf("  Approval remediation mode [manual/review/auto] (default: %s): ", suggested)
 		modeInput, _ = reader.ReadString('\n')
 		modeInput = strings.TrimSpace(strings.ToLower(modeInput))
 		if modeInput == "" {
@@ -387,7 +387,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		fmt.Printf("  Invalid mode %q — enter manual, review, or auto (or press Enter for %s).\n", modeInput, suggested)
 	}
 
-	fmt.Print("  Approval note (optional): ")
+	fmt.Print("  Approval note — reason for approving remediation (optional): ")
 	reasonInput, _ := reader.ReadString('\n')
 	reasonInput = strings.TrimSpace(reasonInput)
 
