@@ -119,7 +119,8 @@ failures:
     external_inject:
       type: shell_exec
       script_inline: |
-        psql "$FAULTTEST_CONN" -c "
+        set -e
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "
           CREATE TABLE IF NOT EXISTS _faulttest_longquery (id int PRIMARY KEY);
           INSERT INTO _faulttest_longquery VALUES (1) ON CONFLICT DO NOTHING;
         "
@@ -205,7 +206,8 @@ failures:
       # blocker via get_blocking_queries and terminate it to unblock the waiter.
       # $FAULTTEST_CONN is injected by faulttest from the --conn flag.
       script_inline: |
-        psql "$FAULTTEST_CONN" -c "
+        set -e
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "
           CREATE TABLE IF NOT EXISTS _faulttest_lock (id int PRIMARY KEY);
           INSERT INTO _faulttest_lock VALUES (1) ON CONFLICT DO NOTHING;
         "
@@ -547,7 +549,8 @@ failures:
       # waits for the next command, producing state='idle in transaction'.
       # $FAULTTEST_CONN is injected by faulttest from the --conn flag.
       script_inline: |
-        psql "$FAULTTEST_CONN" -c "
+        set -e
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "
           CREATE TABLE IF NOT EXISTS _faulttest_idle (id int PRIMARY KEY, val text);
           INSERT INTO _faulttest_idle VALUES (1, 'held') ON CONFLICT DO NOTHING;
         "
@@ -739,7 +742,8 @@ failures:
       # Same injection as db-idle-in-transaction.
       # $FAULTTEST_CONN is injected by faulttest from the --conn flag.
       script_inline: |
-        psql "$FAULTTEST_CONN" -c "
+        set -e
+        psql "$FAULTTEST_CONN" -v ON_ERROR_STOP=1 -c "
           CREATE TABLE IF NOT EXISTS _faulttest_idle (id int PRIMARY KEY, val text);
           INSERT INTO _faulttest_idle VALUES (1, 'held') ON CONFLICT DO NOTHING;
         "

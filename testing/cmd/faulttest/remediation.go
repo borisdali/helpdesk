@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,11 @@ import (
 	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
+
+// errGateDenied is returned by runGateLoop when the operator explicitly denies
+// remediation at the gate. HandlePendingGate treats it as a clean skip — not
+// an error — and omits verify_sql polling.
+var errGateDenied = errors.New("operator denied remediation at gate")
 
 // RemediationResult holds the outcome of a remediation attempt.
 type RemediationResult struct {
@@ -70,6 +76,10 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		"escalation_target", gate.EscalationTarget,
 	)
 	if err := r.runGateLoop(ctx, gate); err != nil {
+		if errors.Is(err, errGateDenied) {
+			fmt.Println("  Remediation skipped (denied).")
+			return RemediationResult{Passed: false, Method: "playbook"}
+		}
 		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
 	}
 
@@ -360,11 +370,11 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer != "y" && answer != "yes" {
 		fmt.Println("  Denied.")
-		_, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+		r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{ //nolint:errcheck
 			Resolution: "denied",
 			ResolvedBy: r.cfg.OperatorID,
 		})
-		return err
+		return errGateDenied
 	}
 
 	suggested := gate.SuggestedApprovalMode
@@ -492,6 +502,9 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 		return r.runApprovalLoop(ctx, *resp)
 	}
 	slog.Info("gate resolved externally", "status", resp.Status)
+	if resp.Status == "denied" {
+		return errGateDenied
+	}
 	return nil
 }
 
