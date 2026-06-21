@@ -191,10 +191,11 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	testutil.DockerComposeDir = filepath.Join(cfg.TestingDir, "docker")
 
-	// Resolve named infra alias (e.g. "faulttest-db") to the actual DSN so
-	// downstream injection code always gets a real connection string.
+	// Resolve named infra aliases to actual DSNs so downstream code always gets
+	// a real connection string and agents don't receive an ambiguous alias.
 	cfg.ConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ConnStr)
 	cfg.ReplicaConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ReplicaConnStr)
+	cfg.AgentConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.AgentConnStr)
 
 	return cfg
 }
