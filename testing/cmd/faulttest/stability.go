@@ -101,7 +101,7 @@ func (r StabilityReport) Print() {
 
 	if r.hasConf {
 		rangePP := int(math.Round(r.confRange() * 100))
-		confStr := fmt.Sprintf("min=%d%% max=%d%% range=%dpp mean=%d%%  (passing runs only)",
+		confStr := fmt.Sprintf("min=%d%% max=%d%% range=%dpp mean=%d%%  (H1, passing runs only)",
 			int(math.Round(r.ConfMin*100)),
 			int(math.Round(r.ConfMax*100)),
 			rangePP,

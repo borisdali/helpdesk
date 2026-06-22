@@ -196,9 +196,17 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	// Resolve named infra aliases to actual DSNs so downstream code always gets
 	// a real connection string and agents don't receive an ambiguous alias.
+	// Log the alias→host mapping immediately so operators can verify the right
+	// targets were chosen before any test run begins.
+	origConn := cfg.ConnStr
+	origAgentConn := cfg.AgentConnStr
+	origReplicaConn := cfg.ReplicaConnStr
 	cfg.ConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ConnStr)
 	cfg.ReplicaConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ReplicaConnStr)
 	cfg.AgentConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.AgentConnStr)
+	logConnResolution("--conn", origConn, cfg.ConnStr)
+	logConnResolution("--replica-conn", origReplicaConn, cfg.ReplicaConnStr)
+	logConnResolution("--agent-conn", origAgentConn, cfg.AgentConnStr)
 
 	return cfg
 }
@@ -546,24 +554,27 @@ func cmdRun(args []string) {
 				status = "FAIL"
 			}
 			if repeatMode {
-				confStr := ""
-				if evalResult.PrimaryConfidence > 0 {
-					confStr = fmt.Sprintf(" conf=%d%%", int(evalResult.PrimaryConfidence*100))
-				}
 				violation := ""
 				if evalResult.ProtocolViolation {
 					violation = " protocol-violation"
 				}
-				fmt.Printf("  [%s] score=%d%%%s%s\n", status, int(evalResult.Score*100), confStr, violation)
-				if evalResult.PrimaryHypothesis != "" {
-					fmt.Printf("         H1: %s\n", evalResult.PrimaryHypothesis)
-				}
-				if evalResult.SecondaryHypothesis != "" {
-					h2conf := ""
-					if evalResult.SecondaryConfidence > 0 {
-						h2conf = fmt.Sprintf(" (conf=%d%%)", int(evalResult.SecondaryConfidence*100))
+				fmt.Printf("  [%s] score=%d%%%s\n", status, int(evalResult.Score*100), violation)
+				for _, h := range evalResult.Hypotheses {
+					pct := int(h.Confidence * 100)
+					var tag string
+					switch {
+					case h.IsPrimary:
+						tag = fmt.Sprintf("[PRIMARY %d%%]", pct)
+					case h.RejectedReason != "":
+						tag = fmt.Sprintf("[REJECTED %d%%]", pct)
+					default:
+						tag = fmt.Sprintf("[%d%%]", pct)
 					}
-					fmt.Printf("         H2: %s%s\n", evalResult.SecondaryHypothesis, h2conf)
+					if h.RejectedReason != "" {
+						fmt.Printf("         %s %s — %s\n", tag, h.Text, h.RejectedReason)
+					} else {
+						fmt.Printf("         %s %s\n", tag, h.Text)
+					}
 				}
 			} else {
 				diagLabel := "category"

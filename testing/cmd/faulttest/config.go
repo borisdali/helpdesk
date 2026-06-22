@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -484,4 +485,23 @@ func connStrHost(connStr string) string {
 		}
 	}
 	return ""
+}
+
+// logConnResolution logs a single INFO line showing what alias (if any) a conn
+// flag resolved to. Skipped when the flag was empty. When the value changed
+// (alias was expanded), logs alias→host. When unchanged (raw DSN passed
+// directly), logs just the host so the operator can still verify the target.
+func logConnResolution(flag, before, after string) {
+	if after == "" {
+		return
+	}
+	host := connStrHost(after)
+	if host == "" {
+		host = after // fallback: log the raw value if we can't parse a host
+	}
+	if before != after {
+		slog.Info(flag, "alias", before, "host", host)
+	} else {
+		slog.Info(flag, "host", host)
+	}
 }
