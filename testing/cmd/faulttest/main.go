@@ -599,7 +599,9 @@ func cmdRun(args []string) {
 		results = append(results, repResults...)
 
 		if repeatMode {
-			buildStabilityReport(f, repResults).Print()
+			sr := buildStabilityReport(f, repResults)
+			sr.Print()
+			postStabilityCert(ctx, cfg, f, sr)
 		}
 	}
 

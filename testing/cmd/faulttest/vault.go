@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -287,6 +290,62 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 	return info
 }
 
+// stabilityInfo is a lightweight view of one fault's stability cert for vault list.
+type stabilityInfo struct {
+	IsStable    bool
+	NRuns       int
+	TestedAt    time.Time
+	hasData     bool
+}
+
+// fetchStabilityCerts fetches all fault stability certs from the gateway and
+// returns a map of fault_id → stabilityInfo. Returns empty map on error.
+func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
+	out := make(map[string]stabilityInfo)
+	if gatewayURL == "" {
+		return out
+	}
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return out
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return out
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Certs []struct {
+			FaultID  string  `json:"fault_id"`
+			NRuns    int     `json:"n_runs"`
+			IsStable bool    `json:"is_stable"`
+			TestedAt string  `json:"tested_at"`
+		} `json:"certs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return out
+	}
+	for _, c := range result.Certs {
+		info := stabilityInfo{IsStable: c.IsStable, NRuns: c.NRuns, hasData: true}
+		if c.TestedAt != "" {
+			if t, err := time.Parse(time.RFC3339Nano, c.TestedAt); err == nil {
+				info.TestedAt = t
+			}
+		}
+		out[c.FaultID] = info
+	}
+	return out
+}
+
 func vaultList(args []string) {
 	fs := flag.NewFlagSet("vault list", flag.ExitOnError)
 	var target string
@@ -325,16 +384,20 @@ func vaultList(args []string) {
 		fmt.Printf("Target: %s\n\n", target)
 	}
 
+	// Fetch stability certs once for all faults.
+	stabilityCerts := fetchStabilityCerts(cfg.GatewayURL, cfg.GatewayAPIKey)
+
 	const (
 		colFault     = 32
 		colPlatform  = 10
 		colDiag      = 26
 		colRemed     = 26
 		colFaultTest = 22 // "2026-04-18  PASS" or "(never)" or "READY"
+		colStable    = 14 // "STABLE(5)" or "UNSTABLE(3)" or "—"
 		// incidents column is the remainder
 	)
-	fmt.Printf("%-*s %-*s %-*s %-*s %-*s %s\n", colFault, "FAULT", colPlatform, "PLATFORM", colDiag, "DIAG PLAYBOOK", colRemed, "REMED PLAYBOOK", colFaultTest, "FAULT TEST", "INCIDENTS")
-	fmt.Println(strings.Repeat("-", colFault+1+colPlatform+1+colDiag+1+colRemed+1+colFaultTest+1+50))
+	fmt.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n", colFault, "FAULT", colPlatform, "PLATFORM", colDiag, "DIAG PLAYBOOK", colRemed, "REMED PLAYBOOK", colFaultTest, "LAST TEST", colStable, "STABLE", "INCIDENTS")
+	fmt.Println(strings.Repeat("-", colFault+1+colPlatform+1+colDiag+1+colRemed+1+colFaultTest+1+colStable+1+50))
 
 	for _, f := range failures {
 		playbookID := f.Remediation.PlaybookID
@@ -429,7 +492,24 @@ func vaultList(args []string) {
 			}
 		}
 
-		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, incidentCol)
+		// ── stable column ─────────────────────────────────────────────────
+		stableCol := "—"
+		if si, ok := stabilityCerts[f.ID]; ok && si.hasData {
+			label := "UNSTABLE"
+			if si.IsStable {
+				label = "STABLE"
+			}
+			stableCol = fmt.Sprintf("%s(%d)", label, si.NRuns)
+			// Append age in days when older than 14 days.
+			if !si.TestedAt.IsZero() {
+				age := int(time.Since(si.TestedAt).Hours() / 24)
+				if age >= 14 {
+					stableCol += fmt.Sprintf(" %dd", age)
+				}
+			}
+		}
+
+		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, colStable, stableCol, incidentCol)
 	}
 }
 
@@ -1643,6 +1723,56 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 	if posted > 0 {
 		fmt.Printf("Evaluation scores posted to auditd: %d/%d runs\n", posted, len(results))
 	}
+}
+
+// postStabilityCert posts a fault triage consistency certification to auditd
+// via the gateway. Silently skipped when --gateway is not set. Errors are
+// logged but never cause the run to fail.
+func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport) {
+	if cfg.GatewayURL == "" {
+		return
+	}
+	payload := map[string]any{
+		"fault_id":           sr.FailureID,
+		"fault_name":         sr.FailureName,
+		"playbook_series_id": f.DiagnosisPlaybookSeriesID,
+		"model":              cfg.JudgeModel, // annotation only; empty when no judge
+		"n_runs":             sr.N,
+		"pass_rate":          sr.passRate(),
+		"conf_range_pp":      int(math.Round(sr.confRange() * 100)),
+		"is_stable":          sr.isStable(),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		slog.Warn("fault stability: failed to marshal cert", "fault_id", f.ID, "err", err)
+		return
+	}
+	url := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/fault-stability"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("fault stability: failed to build request", "fault_id", f.ID, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("fault stability: POST failed", "fault_id", f.ID, "err", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		slog.Warn("fault stability: unexpected status", "fault_id", f.ID, "status", resp.StatusCode)
+		return
+	}
+	verdict := "UNSTABLE"
+	if sr.isStable() {
+		verdict = "STABLE"
+	}
+	slog.Info("fault stability cert posted", "fault_id", f.ID, "verdict", verdict, "n_runs", sr.N)
 }
 
 // ── vault versions ────────────────────────────────────────────────────────────
