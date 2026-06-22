@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -78,6 +79,15 @@ type EvalResult struct {
 	// primary hypothesis, extracted from HYPOTHESIS_1: ... | CONFIDENCE: X.
 	// Zero when the agent did not emit structured hypotheses.
 	PrimaryConfidence float64 `json:"primary_confidence,omitempty"`
+
+	// PrimaryHypothesis is the label text from the agent's HYPOTHESIS_1: line,
+	// extracted for display in stability reports. Empty when not emitted.
+	PrimaryHypothesis string `json:"primary_hypothesis,omitempty"`
+
+	// SecondaryHypothesis and SecondaryConfidence are from HYPOTHESIS_2:,
+	// the runner-up candidate. Empty/zero when not present.
+	SecondaryHypothesis string  `json:"secondary_hypothesis,omitempty"`
+	SecondaryConfidence float64 `json:"secondary_confidence,omitempty"`
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.
@@ -250,6 +260,8 @@ func Evaluate(f Failure, resp testutil.AgentResponse, auditTools ...[]string) Ev
 	result.Passed = result.Score >= 0.6 && result.KeywordPass
 
 	result.PrimaryConfidence = extractPrimaryConfidence(responseText)
+	result.PrimaryHypothesis = extractPrimaryHypothesis(responseText)
+	result.SecondaryHypothesis, result.SecondaryConfidence = extractHypothesisN(responseText, 2)
 	return result
 }
 
@@ -360,31 +372,68 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	result.Passed = result.Score >= 0.6 && result.KeywordPass && !judgeVeto
 
 	result.PrimaryConfidence = extractPrimaryConfidence(responseText)
+	result.PrimaryHypothesis = extractPrimaryHypothesis(responseText)
+	result.SecondaryHypothesis, result.SecondaryConfidence = extractHypothesisN(responseText, 2)
 	return result
 }
 
-// extractPrimaryConfidence scans the agent response text for a HYPOTHESIS_1: line
-// and returns the CONFIDENCE: value. Returns 0.0 if not found or unparseable.
-func extractPrimaryConfidence(text string) float64 {
-	for _, line := range strings.Split(text, "\n") {
-		// Strip optional markdown bold markers before matching.
-		clean := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "**"))
-		if !strings.HasPrefix(strings.ToUpper(clean), "HYPOTHESIS_1:") {
+// extractHypothesisN scans the agent response text for the Nth HYPOTHESIS_N: line
+// and returns the label text and CONFIDENCE value.
+//
+// Two formats are accepted:
+//
+//	Inline:     HYPOTHESIS_N: <text> | CONFIDENCE: 0.95 | EVIDENCE: ...
+//	Multi-line: HYPOTHESIS_N: <text>\nCONFIDENCE: 0.95\nEVIDENCE: ...
+//
+// Bold markdown wrappers (**) are stripped. Returns ("", 0.0) when not found.
+func extractHypothesisN(text string, n int) (label string, conf float64) {
+	prefix := fmt.Sprintf("HYPOTHESIS_%d:", n)
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		clean := strings.TrimSpace(strings.Trim(line, "* \t"))
+		if !strings.HasPrefix(strings.ToUpper(clean), prefix) {
 			continue
 		}
-		for _, part := range strings.Split(clean, " | ") {
-			part = strings.TrimSpace(part)
-			upper := strings.ToUpper(part)
-			if strings.HasPrefix(upper, "CONFIDENCE:") {
+		body := strings.TrimSpace(clean[len(prefix):])
+		// Extract label: everything before the first " | ".
+		labelEnd := strings.Index(body, " | ")
+		if labelEnd >= 0 {
+			label = strings.TrimSpace(strings.Trim(body[:labelEnd], "* \t"))
+		} else {
+			label = strings.TrimSpace(strings.Trim(body, "* \t"))
+		}
+		// Extract confidence from pipe-separated inline parts first.
+		for _, part := range strings.Split(body, " | ") {
+			part = strings.TrimSpace(strings.Trim(part, "*"))
+			if strings.HasPrefix(strings.ToUpper(part), "CONFIDENCE:") {
 				val := strings.TrimSpace(part[len("CONFIDENCE:"):])
 				if v, err := strconv.ParseFloat(val, 64); err == nil {
-					return v
+					conf = v
 				}
+				return
 			}
 		}
+		// Fall back: scan up to 5 following lines for a standalone CONFIDENCE: line.
+		for j := i + 1; j < len(lines) && j <= i+5; j++ {
+			next := strings.TrimSpace(strings.Trim(lines[j], "* \t"))
+			if strings.HasPrefix(strings.ToUpper(next), "CONFIDENCE:") {
+				val := strings.TrimSpace(next[len("CONFIDENCE:"):])
+				if v, err := strconv.ParseFloat(val, 64); err == nil {
+					conf = v
+				}
+				return
+			}
+			if strings.HasPrefix(strings.ToUpper(next), "HYPOTHESIS_") {
+				break
+			}
+		}
+		return
 	}
-	return 0.0
+	return
 }
+
+func extractPrimaryConfidence(text string) float64  { _, c := extractHypothesisN(text, 1); return c }
+func extractPrimaryHypothesis(text string) string   { l, _ := extractHypothesisN(text, 1); return l }
 
 // toFaultlibFailure converts a local Failure to a faultlib.Failure for judge calls.
 func toFaultlibFailure(f Failure) faultlib.Failure {

@@ -141,6 +141,10 @@ type HarnessConfig struct {
 	// AutoDB instructs faulttest to spin up a temporary Docker PostgreSQL and use
 	// it as the injection target. Implies External=true. Only auto-db-compat faults run.
 	AutoDB bool
+	// Repeat is the number of inject→triage→teardown cycles to run per fault.
+	// Values > 1 enable stability testing: remediation is skipped and a
+	// StabilityReport is printed after all cycles complete. Default 1.
+	Repeat int
 	// RemediateEnabled runs the remediation phase after injection + diagnosis.
 	RemediateEnabled bool
 	// GatewayURL is the helpdesk gateway base URL for playbook/agent remediation.
