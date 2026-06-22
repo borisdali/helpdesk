@@ -504,6 +504,53 @@ func (c *GatewayClient) UploadGetContent(ctx context.Context, id string) ([]byte
 	return c.get(ctx, "/api/v1/fleet/uploads/"+id+"/content")
 }
 
+// FaultStabilityUpsert calls POST /api/v1/fleet/fault-stability and returns the HTTP status code.
+func (c *GatewayClient) FaultStabilityUpsert(ctx context.Context, body map[string]any) (int, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/fleet/fault-stability", bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("POST /api/v1/fleet/fault-stability: %w", err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// FaultStabilityGet calls GET /api/v1/fleet/fault-stability/{faultID}.
+func (c *GatewayClient) FaultStabilityGet(ctx context.Context, faultID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/fault-stability/"+faultID)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode fault stability cert: %w", err)
+	}
+	return result, nil
+}
+
+// FaultStabilityList calls GET /api/v1/fleet/fault-stability.
+func (c *GatewayClient) FaultStabilityList(ctx context.Context) ([]map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/fault-stability")
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Certs []map[string]any `json:"certs"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, fmt.Errorf("decode fault stability list: %w", err)
+	}
+	return wrapper.Certs, nil
+}
+
 // rawDo executes an HTTP request and returns the response status code.
 // body may be nil (sends no body). The response body is drained and discarded.
 func (c *GatewayClient) rawDo(ctx context.Context, method, path string, body map[string]any) (int, error) {

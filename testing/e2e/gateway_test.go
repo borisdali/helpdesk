@@ -362,6 +362,91 @@ func TestSREBotWorkflow(t *testing.T) {
 	})
 }
 
+// TestGatewayFaultStabilityRoundtrip exercises the full POST→GET→LIST path for
+// the fault-stability cert endpoint via the gateway proxy (no LLM call required).
+// This test is separate from the unit tests because it catches proxy misconfiguration
+// (wrong path forwarding, missing auth headers) that in-process handler tests cannot catch.
+func TestGatewayFaultStabilityRoundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("Gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const faultID = "e2e-test-fault-stability"
+	cert := map[string]any{
+		"fault_id":           faultID,
+		"fault_name":         "E2E test fault",
+		"playbook_series_id": "pbs_e2e_test",
+		"model":              "claude-haiku-4-5-20251001",
+		"n_runs":             5,
+		"pass_rate":          1.0,
+		"conf_range_pp":      3,
+		"is_stable":          true,
+	}
+
+	// POST — upsert.
+	code, err := client.FaultStabilityUpsert(ctx, cert)
+	if err != nil {
+		t.Fatalf("FaultStabilityUpsert: %v", err)
+	}
+	if code != http.StatusNoContent {
+		t.Fatalf("POST fault-stability: got HTTP %d, want 204", code)
+	}
+
+	// GET — verify round-trip through gateway→auditd.
+	got, err := client.FaultStabilityGet(ctx, faultID)
+	if err != nil {
+		t.Fatalf("FaultStabilityGet: %v", err)
+	}
+	if id, _ := got["fault_id"].(string); id != faultID {
+		t.Errorf("fault_id: got %q, want %q", id, faultID)
+	}
+	if stable, _ := got["is_stable"].(bool); !stable {
+		t.Error("is_stable: want true")
+	}
+	if runs, _ := got["n_runs"].(float64); int(runs) != 5 {
+		t.Errorf("n_runs: got %v, want 5", runs)
+	}
+
+	// LIST — cert must appear in the list.
+	certs, err := client.FaultStabilityList(ctx)
+	if err != nil {
+		t.Fatalf("FaultStabilityList: %v", err)
+	}
+	found := false
+	for _, c := range certs {
+		if id, _ := c["fault_id"].(string); id == faultID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("fault_id %q not found in list of %d certs", faultID, len(certs))
+	}
+
+	// Upsert again with updated values — verify overwrite.
+	updated := map[string]any{
+		"fault_id":  faultID,
+		"n_runs":    10,
+		"pass_rate": 0.9,
+		"is_stable": true,
+	}
+	if code, err = client.FaultStabilityUpsert(ctx, updated); err != nil || code != http.StatusNoContent {
+		t.Fatalf("second upsert: code=%d err=%v", code, err)
+	}
+	got2, err := client.FaultStabilityGet(ctx, faultID)
+	if err != nil {
+		t.Fatalf("FaultStabilityGet after update: %v", err)
+	}
+	if runs, _ := got2["n_runs"].(float64); int(runs) != 10 {
+		t.Errorf("n_runs after overwrite: got %v, want 10", runs)
+	}
+}
+
 // TestGatewayMetricsEndpoint verifies that GET /metrics on the gateway returns
 // Prometheus text format with the gateway_fabrication_mismatches_total counter
 // declared. The counter value may be zero if no mismatches have occurred.

@@ -298,6 +298,56 @@ type stabilityInfo struct {
 	hasData     bool
 }
 
+// fetchStabilityCert fetches the stability cert for a single fault from the gateway.
+// Returns nil when not found or on error.
+func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
+	FaultID          string    `json:"fault_id"`
+	FaultName        string    `json:"fault_name"`
+	PlaybookSeriesID string    `json:"playbook_series_id"`
+	Model            string    `json:"model"`
+	NRuns            int       `json:"n_runs"`
+	PassRate         float64   `json:"pass_rate"`
+	ConfRangePP      int       `json:"conf_range_pp"`
+	IsStable         bool      `json:"is_stable"`
+	TestedAt         string    `json:"tested_at"`
+} {
+	if gatewayURL == "" {
+		return nil
+	}
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability/" + faultID
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil
+	}
+	defer resp.Body.Close()
+	var cert struct {
+		FaultID          string  `json:"fault_id"`
+		FaultName        string  `json:"fault_name"`
+		PlaybookSeriesID string  `json:"playbook_series_id"`
+		Model            string  `json:"model"`
+		NRuns            int     `json:"n_runs"`
+		PassRate         float64 `json:"pass_rate"`
+		ConfRangePP      int     `json:"conf_range_pp"`
+		IsStable         bool    `json:"is_stable"`
+		TestedAt         string  `json:"tested_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
+		return nil
+	}
+	return &cert
+}
+
 // fetchStabilityCerts fetches all fault stability certs from the gateway and
 // returns a map of fault_id → stabilityInfo. Returns empty map on error.
 func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
@@ -921,6 +971,7 @@ func vaultAccuracy(args []string) {
 
 	arg := fs.Args()[0]
 	seriesID := arg
+	faultID := "" // set when arg is a fault ID rather than a series ID
 
 	// If the arg doesn't look like a series_id (pbs_ prefix), treat it as a
 	// fault ID and resolve to DiagnosisPlaybookSeriesID via the catalog.
@@ -938,6 +989,7 @@ func vaultAccuracy(args []string) {
 					os.Exit(1)
 				}
 				seriesID = f.DiagnosisPlaybookSeriesID
+				faultID = f.ID
 				found = true
 				break
 			}
@@ -1018,6 +1070,41 @@ func vaultAccuracy(args []string) {
 				fmt.Printf("    Post-incident (after recovery): %d of %d appropriate (%.0f%%)\n",
 					info.remediationPostIncidentCorrect, info.remediationPostIncidentCount,
 					float64(info.remediationPostIncidentCorrect)/float64(info.remediationPostIncidentCount)*100)
+			}
+		}
+	}
+
+	// Triage consistency certification — shown when a fault ID was given
+	// (not a bare series ID, where we don't know which fault to look up).
+	if faultID != "" {
+		fmt.Println()
+		fmt.Println("Triage consistency")
+		cert := fetchStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
+		if cert == nil {
+			fmt.Println("  Not yet certified — run `faulttest run --repeat N` to generate a stability report.")
+		} else {
+			verdict := "UNSTABLE"
+			if cert.IsStable {
+				verdict = "STABLE"
+			}
+			fmt.Printf("  Verdict       : %s\n", verdict)
+			fmt.Printf("  Runs          : %d\n", cert.NRuns)
+			fmt.Printf("  Pass rate     : %.0f%%\n", cert.PassRate*100)
+			fmt.Printf("  Conf range    : %dpp  (primary hypothesis, passing runs only)\n", cert.ConfRangePP)
+			if cert.PlaybookSeriesID != "" {
+				fmt.Printf("  Playbook      : %s\n", cert.PlaybookSeriesID)
+			}
+			if cert.Model != "" {
+				fmt.Printf("  Model         : %s\n", cert.Model)
+			}
+			if cert.TestedAt != "" {
+				if t, err := time.Parse(time.RFC3339Nano, cert.TestedAt); err == nil {
+					age := int(time.Since(t).Hours() / 24)
+					fmt.Printf("  Tested at     : %s  (%d days ago)\n", t.Format("2006-01-02 15:04 MST"), age)
+					if age >= 30 {
+						fmt.Println("  [WARN] cert is older than 30 days — consider re-running --repeat to refresh")
+					}
+				}
 			}
 		}
 	}
