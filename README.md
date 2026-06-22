@@ -90,6 +90,10 @@ See the primary [Architecture page](docs/ARCHITECTURE.md) for system design, con
 
 See the primary [Vault page](docs/VAULT.md) for how aiHelpDesk accumulates and improves operational knowledge over time: the flywheel concept, how playbook drafts are auto-generated from incident traces, the three paths into the Vault, the review-and-activate workflow and the three core customer workflows (onboarding, acceptance, regression monitoring).
 
+## Triage Consistency Certification
+
+Before a Playbook enters live rotation, it is certified STABLE by running the same fault N times and verifying that both the pass rate (≥80%) and the confidence spread on the agent's primary hypothesis (≤30pp) are within bounds. A STABLE cert is the pre-promotion gate that ensures the accuracy and calibration signals coming from the flywheel are clean. See [CONSISTENCY.md](docs/CONSISTENCY.md) for the full concept, certification criteria, and per-platform runbooks (Host/VM, Docker, Kubernetes CronJob).
+
 ## AI Governance
 
 aiHelpDesk's Governance system rests on eight subsystems including full [auditing](docs/AUDIT.md), [compliance reporting](docs/COMPLIANCE.md) and the [journeys](docs/JOURNEYS.md). See the primary [AI Governance page](docs/AIGOVERNANCE.md) for the complete reference.

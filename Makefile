@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest faulttest-gateway e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest faulttest-gateway recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -235,6 +235,58 @@ faulttest-gateway-nocache:
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
 	go test --count=1 -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+
+# ---------------------------------------------------------------------------
+# Stability certification — auto-certify all external-compatible faults
+# ---------------------------------------------------------------------------
+# Runs each fault N times via the gateway and posts a STABLE/UNSTABLE cert to
+# auditd. Certs are visible in 'vault list' (STABLE column) and 'vault accuracy'.
+#
+# Required:
+#   FAULTTEST_GATEWAY_URL     e.g. http://localhost:8080
+#
+# Optional:
+#   FAULTTEST_CONN_STR        injection DSN (default: local test DB started here)
+#   FAULTTEST_AGENT_CONN_STR  alias sent to the agent (default: faulttest-db)
+#   FAULTTEST_API_KEY         gateway API key; falls back to HELPDESK_CLIENT_API_KEY
+#   FAULTTEST_INFRA_CONFIG    path to infrastructure.json for safety-tag check
+#   RECERTIFY_REPEAT          runs per fault (default: 5)
+#   CATEGORIES                comma-separated categories to certify, e.g. database
+#   FAULT_IDS                 comma-separated fault IDs (overrides CATEGORIES)
+# ---------------------------------------------------------------------------
+RECERTIFY_LOG    = /tmp/helpdesk-recertify.log
+RECERTIFY_REPEAT ?= 5
+FAULTTEST_CONN_STR ?= host=localhost port=15432 dbname=testdb user=postgres password=testpass
+FAULTTEST_AGENT_CONN_STR ?= faulttest-db
+
+recertify:
+	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ]; then \
+		echo "Error: FAULTTEST_GATEWAY_URL is not set"; \
+		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
+		exit 1; \
+	fi
+	@echo "Starting test database..."
+	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	@echo "Certifying faults (repeat=$(RECERTIFY_REPEAT), gateway=$(FAULTTEST_GATEWAY_URL))..."
+	-FAULTTEST_CONN_STR="$(FAULTTEST_CONN_STR)" \
+	FAULTTEST_AGENT_CONN_STR="$(FAULTTEST_AGENT_CONN_STR)" \
+	go run ./testing/cmd/faulttest run \
+		--external \
+		--via-gateway \
+		--gateway "$(FAULTTEST_GATEWAY_URL)" \
+		--repeat $(RECERTIFY_REPEAT) \
+		--approval-mode force \
+		$(if $(CATEGORIES),--categories "$(CATEGORIES)",) \
+		$(if $(FAULT_IDS),--ids "$(FAULT_IDS)",) \
+		$(if $(FAULTTEST_INFRA_CONFIG),--infra-config "$(FAULTTEST_INFRA_CONFIG)",) \
+		2>&1 | tee $(RECERTIFY_LOG)
+	@echo ""
+	@echo "Certification results:"
+	@go run ./testing/cmd/faulttest vault list \
+		--gateway "$(FAULTTEST_GATEWAY_URL)" \
+		$(if $(CATEGORIES),--categories "$(CATEGORIES)",) \
+		$(if $(FAULT_IDS),--ids "$(FAULT_IDS)",) \
+		2>&1
 
 # ---------------------------------------------------------------------------
 # End-to-end tests (requires full stack + LLM API key)

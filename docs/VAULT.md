@@ -13,22 +13,40 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
 The Vault is the engine of a feedback loop that tightens with every incident:
 
 ```
-  ┌────────────────────────────────────────────────────────────────────────┐
-  │                                                                        │
-  │         Fault           Agent diagnoses             Playbook           │
-  │   (injected or real) ───► + chain of thought ──────► remediates        │
-  │          ▲                  captured                    │              │
-  │          │                                              │              │
-  │          │                           Operator confirms  ▼              │
-  │   Library improves  ◄── Human      ◄── diagnosis     Draft auto-saved  │
-  │   (accuracy rises)      approves       correct?      to Vault          │
-  │                         (Vault review)  ↓                              │
-  │                                    accuracy_rate                       │
-  │                                    feeds vault list                    │
-  └────────────────────────────────────────────────────────────────────────┘
+  ┌────────────────────────────────────────────────────────────────────────────────┐
+  │                                                                                │
+  │              ┌─── CONSISTENCY GATE (pre-promotion) ──────────────┐             │
+  │              │  faulttest run --repeat N                         │ STABLE      │
+  │  author  ──► │  inject → diagnose → score (×N) → stability cert  │ ──────────► │
+  │  Playbook    │                                 see CONSISTENCY.md│ UNSTABLE ─► │
+  │              └───────────────────────────────────────────────────┘    fix      │
+  │                                                                                │
+  │         Fault               Agent diagnoses           Playbook                 │
+  │   (injected or real) ───► + chain of thought ──────► remediates                │
+  │          ▲                  captured                    │                      │
+  │          │                                              │                      │
+  │          │                           Operator confirms  ▼                      │
+  │   Library improves  ◄── Human      ◄── diagnosis     Draft auto-saved          │
+  │   (accuracy rises)      approves       correct?      to Vault                  │
+  │                         (Vault review)  ↓                                      │
+  │                                    accuracy_rate                               │
+  │                                    feeds vault calibration                     │
+  └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The loop closes at two levels. First, there's a carefully tracked **Resolution rate** (does the Playbook fix the problem?). Next, there's also an **Accuracy rate** (does the agent identify the *right* root cause?). It is measured separately because a Playbook can achieve 100% resolution rate while the agent's diagnosis is wrong, if the remediation step happens to fix the problem anyway. Distinguishing these two signals is what makes the Vault's knowledge meaningful rather than just empirically successful.
+The loop closes at three levels: 
+
+First, there is a **Consistency gate**: before a Playbook
+enters live rotation, it is certified STABLE by running the same fault N times and verifying
+that both pass rate (≥80%) and confidence spread (≤30pp) are within bounds, see [here](CONSISTENCY.md) for the full treatment. 
+
+Second, there is a carefully tracked **Resolution rate** (does the Playbook fix the problem?). 
+
+Third, there is an **Accuracy rate** (does the agent identify the *right* root cause?). Accuracy is measured separately from
+resolution because a Playbook can achieve 100% resolution rate while the agent's diagnosis is
+wrong, if the remediation step happens to fix the problem anyway. 
+
+Distinguishing these three signals is what makes the Vault's knowledge meaningful rather than just empirically successful.
 
 See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a full walkthrough of how a single incident contributes to both signals.
 
@@ -154,36 +172,51 @@ faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
                      [--target staging-db]
 ```
 
-Shows the full fault catalog alongside the linked Playbook, date of last run, pass/fail status, and diagnosis accuracy. When `--gateway` is provided, also verifies that referenced Playbook series IDs exist on the Gateway and fetches live accuracy data from operator feedback.
+Shows the full fault catalog alongside the linked Playbook, date of last test run, pass/fail status, consistency certification verdict, and diagnosis accuracy. When `--gateway` is provided, also verifies that referenced Playbook series IDs exist on the Gateway and fetches live stability certs and accuracy data.
 
 ```
-FAULT                            PLAYBOOK                     LAST RUN     STATUS   ACCURACY
--------------------------------------------------------------------------------------------------------
-db-max-connections               pbs_db_conn_pooling          2026-04-16   PASS     100% accurate (4/4)
-db-connection-refused            pbs_db_restart_triage        2026-04-15   PASS     –
-db-pg-hba-corrupt                pbs_db_config_recovery       (never)      -        –
-db-lock-contention               (none)                       2026-04-14   FAIL     –
-db-idle-in-transaction           pbs_db_idle_txn              2026-04-10   NO PLAYBOOK  –
+FAULT                          PLAYBOOK                   LAST TEST    STATUS  SCORE  STABLE       ACCURACY
+-----------------------------------------------------------------------------------------------------------------
+db-max-connections             pbs_db_conn_pooling        2026-06-20   PASS    95%    STABLE(5)    100% (4/4)
+db-lock-contention             pbs_lock_chain_triage      2026-06-20   PASS    91%    STABLE(5)    –
+db-idle-in-transaction         pbs_db_idle_txn            2026-06-15   PASS    88%    UNSTABLE(5)  –
+db-high-cache-miss             pbs_cache_miss_triage      (never)      -       –      —            –
+db-table-bloat                 pbs_vacuum_triage          2026-06-01   PASS    90%    STABLE(5) 21d –
+db-connection-refused          pbs_db_restart_triage      2026-04-15   PASS    82%    —            –
+db-pg-hba-corrupt              pbs_db_config_recovery     (never)      -       –      —            –
 ```
 
-| Status | Meaning |
-|--------|---------|
+**STATUS column:**
+
+| Value | Meaning |
+|-------|---------|
 | `PASS` / `FAIL` | Last run result |
 | `-` | Fault has a Playbook linked but has never been run against this target |
 | `NO PLAYBOOK` | No `remediation.playbook_id` configured in the catalog |
 | `PLAYBOOK NOT FOUND` | Playbook series ID configured but not found on the Gateway |
 
-The `ACCURACY` column shows the diagnosis accuracy rate for the Playbook series from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
+**STABLE column** — consistency certification verdict from the most recent `faulttest run --repeat N` (requires `--gateway`):
 
-Use `--target` to filter history to a specific database server (the `--agent-conn` alias set during runs).
+| Value | Meaning |
+|-------|---------|
+| `STABLE(N)` | Certified STABLE in the last N runs: pass rate ≥ 80% and confidence spread ≤ 30pp |
+| `STABLE(N) Xd` | STABLE but cert is X days old — shown after 14 days as an age reminder |
+| `UNSTABLE(N)` | Certified UNSTABLE — pass rate or confidence spread outside bounds; playbook needs attention before promotion |
+| `—` | No certification run has been posted for this fault |
+
+The `ACCURACY` column shows the diagnosis accuracy rate from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
+
+Use `--target` to filter history to a specific database server (the `--agent-conn` alias set during runs). See [here](CONSISTENCY.md) for how to run certifications and what STABLE/UNSTABLE means for the flywheel.
 
 ### vault accuracy
 
 ```bash
-faulttest vault accuracy <series_id> [--gateway http://gateway:8080] [--api-key sk-...]
+faulttest vault accuracy <fault-id or series-id> [--gateway http://gateway:8080] [--api-key sk-...]
 ```
 
-Shows the per-series diagnosis accuracy breakdown — how often the agent's root-cause hypothesis was confirmed correct by operators. Counts both at-gate feedback (captured before remediation at the triage→remediation decision gate) and post-incident feedback (submitted after recovery).
+Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a playbook series ID (e.g. `pbs_lock_chain_triage`). Shows the per-series diagnosis accuracy breakdown — how often the agent's root-cause hypothesis was confirmed correct by operators — and, when called with a fault ID, also shows the full consistency certification cert for that fault.
+
+**Called with a playbook series ID** — accuracy only:
 
 ```bash
 faulttest vault accuracy pbs_lock_chain_triage \
@@ -203,6 +236,37 @@ Diagnosis accuracy for series: pbs_lock_chain_triage
     Post-incident (after recovery): 3 of 3 correct (100%)
 ```
 
+**Called with a fault ID** — accuracy plus full stability cert:
+
+```bash
+faulttest vault accuracy db-lock-contention \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+```
+Accuracy: db-lock-contention → pbs_lock_chain_triage
+  At-gate feedback:      8 runs   89% accurate (8/9)
+  Post-incident:         3 runs  100% accurate (3/3)
+  Combined:             12 runs   92% accurate
+
+Stability Cert: db-lock-contention
+  Fault:         Lock contention / deadlock
+  Playbook:      pbs_lock_chain_triage
+  Model:         claude-haiku-4-5-20251001
+  Runs:          5
+  Pass rate:     100.0%
+  Conf range:    5pp  (H1 on passing runs)
+  Verdict:       STABLE
+  Tested:        2026-06-20T03:14:22Z
+```
+
+If the cert is older than 30 days, a warning is shown beneath it:
+
+```
+  ⚠  WARN: cert is 47 days old — re-certify if the model or playbook has changed
+```
+
 The overall accuracy rate is `correct / total` across both feedback times; nil verdicts are excluded. The breakdown section appears whenever at least one feedback type has data, letting you compare the signal quality: at-gate feedback is uncontaminated by knowledge of whether the fix worked, while post-incident feedback can be influenced by hindsight.
 
 With no argument, lists all catalog faults that have a diagnosis playbook series and shows a table with per-type counts:
@@ -216,7 +280,7 @@ With no argument, lists all catalog faults that have a diagnosis playbook series
 
 `AT-GATE` and `POST-INC` show `correct/total`; `–` means no feedback of that type has been submitted for the series yet.
 
-Use `vault accuracy` alongside `resolution_rate` (from stats) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing."
+Use `vault accuracy` alongside `resolution_rate` (from `vault stats`) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing." Use the stability cert block to understand whether the accuracy signal is built on a stable or noisy foundation, see [here](CONSISTENCY.md) for details.
 
 Feedback is submitted interactively by `faulttest` after a successful recovery when running with `--remediate` and `--gateway` (see below), or manually via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`.
 

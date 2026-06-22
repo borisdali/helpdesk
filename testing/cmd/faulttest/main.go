@@ -97,9 +97,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	cfg := &HarnessConfig{}
 
 	fs.StringVar(&cfg.TestingDir, "testing-dir", defaultTestingDir(), "Path to the testing/ directory")
-	fs.StringVar(&cfg.ConnStr, "conn", "", "PostgreSQL connection string (used for injection)")
-	fs.StringVar(&cfg.ReplicaConnStr, "replica-conn", "", "Replica PostgreSQL connection string")
-	fs.StringVar(&cfg.AgentConnStr, "agent-conn", "", "Connection string or alias sent to the agent in prompts (defaults to --conn)")
+	fs.StringVar(&cfg.ConnStr, "conn", os.Getenv("FAULTTEST_CONN_STR"), "PostgreSQL connection string (used for injection)")
+	fs.StringVar(&cfg.ReplicaConnStr, "replica-conn", os.Getenv("FAULTTEST_REPLICA_CONN_STR"), "Replica PostgreSQL connection string")
+	fs.StringVar(&cfg.AgentConnStr, "agent-conn", os.Getenv("FAULTTEST_AGENT_CONN_STR"), "Connection string or alias sent to the agent in prompts (defaults to --conn)")
 	fs.StringVar(&cfg.DBAgentURL, "db-agent", "", "Database agent A2A URL")
 	fs.StringVar(&cfg.K8sAgentURL, "k8s-agent", "", "Kubernetes agent A2A URL")
 	fs.StringVar(&cfg.SysadminAgentURL, "sysadmin-agent", "", "Sysadmin agent A2A URL")

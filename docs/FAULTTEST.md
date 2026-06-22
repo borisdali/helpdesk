@@ -463,9 +463,9 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--conn` | — | — | PostgreSQL connection string used for fault injection and teardown |
-| `--agent-conn` | — | `--conn` | Connection identifier sent to the agent in prompts. Defaults to `--conn`. Use this when the agent should see a registered alias from `infrastructure.json` (e.g. `staging-db`) while `--conn` holds the full DSN with password for injection. |
-| `--replica-conn` | — | — | Replica connection string (replication-lag fault) |
+| `--conn` | `FAULTTEST_CONN_STR` | — | PostgreSQL connection string used for fault injection and teardown |
+| `--agent-conn` | `FAULTTEST_AGENT_CONN_STR` | `--conn` | Connection identifier sent to the agent in prompts. Defaults to `--conn`. Use this when the agent should see a registered alias from `infrastructure.json` (e.g. `staging-db`) while `--conn` holds the full DSN with password for injection. |
+| `--replica-conn` | `FAULTTEST_REPLICA_CONN_STR` | — | Replica connection string (replication-lag fault) |
 | `--db-agent` | — | — | Database agent A2A URL or gateway URL |
 | `--k8s-agent` | — | — | Kubernetes agent A2A URL |
 | `--sysadmin-agent` | — | — | SysAdmin agent A2A URL |
@@ -477,6 +477,8 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--external` | — | true¹ | Only external_compat faults; SQL injection only |
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
+| `--repeat` | — | `1` | Run each matching fault N times (inject→diagnose→teardown) and print a stability report. Remediation is skipped in repeat mode. N > 1 triggers [triage consistency certification](CONSISTENCY.md) and posts a `STABLE`/`UNSTABLE` cert to auditd via the gateway. Use `make recertify` (from source) or `faulttest run --repeat 5 --auto-db` (binary) for batch certification of all faults. |
+| `--approval-mode` | — | playbook default | Override the playbook's `approval_mode` for this run (`auto\|session\|manual\|force`). Use `force` in repeat mode and automated pipelines to bypass interactive gates. |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
 | `--gateway` | — | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. No default — must be set explicitly when `--remediate` or `vault list` needs live validation. |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
@@ -562,6 +564,8 @@ faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|sugge
 ```
 
 The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores are also posted to auditd (`run_evaluation` table) keyed by the `plr_*` playbook run ID — the local JSON file is a cache. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
+
+`vault list` includes a **STABLE** column showing the latest consistency certification result for each fault — `STABLE(N)`, `UNSTABLE(N)`, or `—` (never certified). Certification is triggered by `faulttest run --repeat N` and is documented in full in [CONSISTENCY.md](CONSISTENCY.md).
 
 #### vault list
 
