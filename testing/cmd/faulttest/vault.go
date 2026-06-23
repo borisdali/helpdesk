@@ -350,6 +350,32 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	return &cert
 }
 
+// probeGateway does a lightweight health-check against the gateway and returns
+// a non-nil error when the gateway is unreachable or returns an unexpected status.
+// Used by vault subcommands to emit an early warning rather than silently rendering
+// empty columns when a configured gateway cannot be contacted.
+func probeGateway(gatewayURL, apiKey string) error {
+	if gatewayURL == "" {
+		return nil
+	}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimSuffix(gatewayURL, "/")+"/api/v1/fleet/playbooks?limit=1", nil)
+	if err != nil {
+		return err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("gateway returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // fetchStabilityCerts fetches all fault stability certs from the gateway and
 // returns a map of fault_id → stabilityInfo. Returns empty map on error.
 func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
@@ -413,6 +439,15 @@ func vaultList(args []string) {
 	failures := FilterFailures(cat, cfg)
 
 	runs, _ := loadHistory()
+
+	// Warn early when a gateway URL is configured but unreachable so the operator
+	// understands why STABLE and INCIDENTS columns will be empty. The warning goes
+	// to stderr so it does not corrupt piped output from the table.
+	if cfg.GatewayURL != "" {
+		if err := probeGateway(cfg.GatewayURL, cfg.GatewayAPIKey); err != nil {
+			fmt.Fprintf(os.Stderr, "[WARN] gateway %s is unreachable — STABLE and INCIDENTS columns will be empty (%v)\n", cfg.GatewayURL, err)
+		}
+	}
 
 	// Build last-run lookup from faulttest history: fault_id → (timestamp, passed).
 	type lastResult struct {
@@ -2079,6 +2114,8 @@ type calibrationReport struct {
 	RemediationBands []calibrationBand `json:"remediation_bands,omitempty"`
 	RemediationRuns  int               `json:"remediation_runs"`
 	HeuristicCount   int               `json:"heuristic_count,omitempty"`
+	HumanRuns        int               `json:"human_runs,omitempty"`
+	AutoJudgeRuns    int               `json:"auto_judge_runs,omitempty"`
 }
 
 // fetchCalibration calls GET /api/v1/fleet/calibration[?series_id=...].
@@ -2484,6 +2521,14 @@ func vaultCalibration(args []string) {
 		fmt.Println()
 		fmt.Println("No runs with both eval scores and operator feedback yet.")
 		fmt.Println("Run faulttest with --gateway and submit feedback via `vault incidents` to populate.")
+	} else if report.AutoJudgeRuns > 0 {
+		fmt.Println()
+		if report.HumanRuns == 0 {
+			fmt.Printf("Note: all %d run(s) above use auto_judge feedback (LLM judge score ≥ 0.8, --approval-mode force).\n", report.AutoJudgeRuns)
+			fmt.Println("      Calibration measures self-consistency, not human judgment. Run interactively to collect real operator verdicts.")
+		} else {
+			fmt.Printf("Sources: %d human operator verdict(s), %d auto_judge (LLM judge score, --approval-mode force)\n", report.HumanRuns, report.AutoJudgeRuns)
+		}
 	}
 
 	if report.RemediationRuns > 0 {

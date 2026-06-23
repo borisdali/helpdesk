@@ -12,13 +12,17 @@ import (
 // FeedbackTime distinguishes when: "at_gate" (before remediation) or "post_incident" (after recovery).
 type RunFeedback struct {
 	RunID          string    `json:"run_id"`
-	FeedbackType   string    `json:"feedback_type"`          // "triage" | "remediation"
-	FeedbackTime   string    `json:"feedback_time"`          // "at_gate" | "post_incident"
+	FeedbackType   string    `json:"feedback_type"`             // "triage" | "remediation"
+	FeedbackTime   string    `json:"feedback_time"`             // "at_gate" | "post_incident"
 	SeriesID       string    `json:"series_id"`
 	VerdictCorrect *bool     `json:"verdict_correct,omitempty"` // nil = not yet submitted
 	VerdictNotes   string    `json:"verdict_notes,omitempty"`
 	Operator       string    `json:"operator"`
 	SubmittedAt    time.Time `json:"submitted_at"`
+	// FeedbackSource distinguishes human operator verdicts from automated signals.
+	// "human" (default) = operator typed y/n at gate or post-incident prompt.
+	// "auto_judge" = verdict inferred from LLM judge score in --approval-mode force.
+	FeedbackSource string `json:"feedback_source,omitempty"`
 }
 
 // FeedbackStats aggregates feedback quality metrics for a playbook series.
@@ -91,7 +95,18 @@ func (s *RunFeedbackStore) migrate() error {
 	var colCount int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM pragma_table_info('run_feedback') WHERE name='feedback_type'`,
-	).Scan(&colCount); err != nil || colCount > 0 {
+	).Scan(&colCount); err != nil || colCount == 0 {
+		// v1 schema detected — fall through to recreate.
+	} else {
+		// v2 (or later). Add feedback_source column if not present (v2 → v3).
+		var srcCount int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('run_feedback') WHERE name='feedback_source'`,
+		).Scan(&srcCount); err == nil && srcCount == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE run_feedback ADD COLUMN feedback_source TEXT NOT NULL DEFAULT 'human'`); err != nil {
+				return fmt.Errorf("add feedback_source column: %w", err)
+			}
+		}
 		return nil
 	}
 
@@ -115,6 +130,7 @@ func (s *RunFeedbackStore) migrate() error {
 		    verdict_notes   TEXT     NOT NULL DEFAULT '',
 		    operator        TEXT     NOT NULL DEFAULT '',
 		    submitted_at    TEXT     NOT NULL DEFAULT '',
+		    feedback_source TEXT     NOT NULL DEFAULT 'human',
 		    PRIMARY KEY (run_id, feedback_type, feedback_time)
 		)`,
 		`INSERT OR IGNORE INTO run_feedback_new
@@ -155,13 +171,20 @@ CREATE TABLE IF NOT EXISTS run_feedback (
     verdict_notes   TEXT     NOT NULL DEFAULT '',
     operator        TEXT     NOT NULL DEFAULT '',
     submitted_at    TEXT     NOT NULL DEFAULT '',
+    feedback_source TEXT     NOT NULL DEFAULT 'human',
     PRIMARY KEY (run_id, feedback_type, feedback_time)
 )`)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_run_feedback_series
-    ON run_feedback(series_id)`)
+	if _, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_run_feedback_series
+    ON run_feedback(series_id)`); err != nil {
+		return err
+	}
+	// Add feedback_source to existing tables on Postgres (SQLite uses migrate()).
+	if s.isPostgres {
+		_, err = s.db.Exec(`ALTER TABLE run_feedback ADD COLUMN IF NOT EXISTS feedback_source TEXT NOT NULL DEFAULT 'human'`)
+	}
 	return err
 }
 
@@ -186,17 +209,22 @@ func (s *RunFeedbackStore) Submit(ctx context.Context, fb *RunFeedback) error {
 		}
 		verdictInt = &v
 	}
+	src := fb.FeedbackSource
+	if src == "" {
+		src = "human"
+	}
 	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
-INSERT INTO run_feedback (run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO run_feedback (run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at, feedback_source)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(run_id, feedback_type, feedback_time) DO UPDATE SET
     series_id       = excluded.series_id,
     verdict_correct = excluded.verdict_correct,
     verdict_notes   = excluded.verdict_notes,
     operator        = excluded.operator,
-    submitted_at    = excluded.submitted_at`),
+    submitted_at    = excluded.submitted_at,
+    feedback_source = excluded.feedback_source`),
 		fb.RunID, fb.FeedbackType, fb.FeedbackTime, fb.SeriesID, verdictInt, fb.VerdictNotes, fb.Operator,
-		fb.SubmittedAt.UTC().Format(time.RFC3339Nano),
+		fb.SubmittedAt.UTC().Format(time.RFC3339Nano), src,
 	)
 	if err != nil {
 		return fmt.Errorf("submit run feedback: %w", err)
@@ -208,7 +236,7 @@ ON CONFLICT(run_id, feedback_type, feedback_time) DO UPDATE SET
 // Returns sql.ErrNoRows when no matching record exists.
 func (s *RunFeedbackStore) GetByRunIDAndType(ctx context.Context, runID, feedbackType, feedbackTime string) (*RunFeedback, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at
+SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at, feedback_source
 FROM run_feedback WHERE run_id = ? AND feedback_type = ? AND feedback_time = ?`),
 		runID, feedbackType, feedbackTime)
 	return scanRunFeedback(row)
@@ -226,7 +254,7 @@ func (s *RunFeedbackStore) GetByRunID(ctx context.Context, runID string) (*RunFe
 // when no records exist.
 func (s *RunFeedbackStore) ListByRunID(ctx context.Context, runID string) ([]*RunFeedback, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at
+SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at, feedback_source
 FROM run_feedback
 WHERE run_id = ?
 ORDER BY submitted_at`), runID)
@@ -253,7 +281,7 @@ ORDER BY submitted_at`), runID)
 // request-feedback calls, awaiting operator resolution via the Decision Hub).
 func (s *RunFeedbackStore) ListPending(ctx context.Context) ([]*RunFeedback, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at
+SELECT run_id, feedback_type, feedback_time, series_id, verdict_correct, verdict_notes, operator, submitted_at, feedback_source
 FROM run_feedback
 WHERE verdict_correct IS NULL
   AND feedback_type = 'triage'
@@ -380,7 +408,7 @@ func scanRunFeedbackRow(s feedbackScanner) (*RunFeedback, error) {
 		verdictInt   *int
 		submittedStr string
 	)
-	if err := s.Scan(&fb.RunID, &fb.FeedbackType, &fb.FeedbackTime, &fb.SeriesID, &verdictInt, &fb.VerdictNotes, &fb.Operator, &submittedStr); err != nil {
+	if err := s.Scan(&fb.RunID, &fb.FeedbackType, &fb.FeedbackTime, &fb.SeriesID, &verdictInt, &fb.VerdictNotes, &fb.Operator, &submittedStr, &fb.FeedbackSource); err != nil {
 		return nil, err
 	}
 	if verdictInt != nil {

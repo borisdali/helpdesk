@@ -161,6 +161,11 @@ type CalibrationReport struct {
 	// HeuristicCount is runs excluded from triage calibration because the agent
 	// did not emit a CONFIDENCE: value on its primary hypothesis.
 	HeuristicCount int `json:"heuristic_count,omitempty"`
+	// HumanRuns and AutoJudgeRuns break down TotalRuns by feedback source so
+	// callers can signal when calibration is backed by synthetic rather than
+	// human verdicts.
+	HumanRuns     int `json:"human_runs,omitempty"`
+	AutoJudgeRuns int `json:"auto_judge_runs,omitempty"`
 }
 
 type bandDef struct {
@@ -208,11 +213,12 @@ func (s *RunEvaluationStore) CalibrationBands(ctx context.Context, seriesID stri
 
 	// Triage calibration: band on primary_confidence (agent self-reported).
 	// At-gate preferred over post-incident to avoid outcome bias.
-	// judge_used is selected so we can annotate bands that contain keyword-heuristic runs.
+	// judge_used and feedback_source are selected for band annotations and source breakdown.
 	q := fmt.Sprintf(`
 SELECT ev.primary_confidence,
        ev.judge_used,
-       COALESCE(fb_gate.verdict_correct, fb_post.verdict_correct) AS verdict_correct
+       COALESCE(fb_gate.verdict_correct, fb_post.verdict_correct) AS verdict_correct,
+       COALESCE(fb_gate.feedback_source, fb_post.feedback_source, 'human') AS feedback_source
 FROM run_evaluation ev
 LEFT JOIN run_feedback fb_gate ON fb_gate.run_id = ev.run_id
   AND fb_gate.feedback_type = 'triage'
@@ -233,13 +239,20 @@ WHERE (fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL)
 
 	type accum struct{ runs, correct, heuristic int }
 	counts := make([]accum, len(diagBands))
+	var humanRuns, autoJudgeRuns int
 
 	for rows.Next() {
 		var confScore float64
 		var judgeUsedInt int
 		var verdictInt int
-		if err := rows.Scan(&confScore, &judgeUsedInt, &verdictInt); err != nil {
+		var fbSource string
+		if err := rows.Scan(&confScore, &judgeUsedInt, &verdictInt, &fbSource); err != nil {
 			return nil, err
+		}
+		if fbSource == "auto_judge" {
+			autoJudgeRuns++
+		} else {
+			humanRuns++
 		}
 		for i, b := range diagBands {
 			if confScore >= b.min && confScore < b.max {
@@ -258,7 +271,7 @@ WHERE (fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL)
 		return nil, err
 	}
 
-	report := &CalibrationReport{SeriesID: seriesID}
+	report := &CalibrationReport{SeriesID: seriesID, HumanRuns: humanRuns, AutoJudgeRuns: autoJudgeRuns}
 	for i, b := range diagBands {
 		c := counts[i]
 		band := &CalibrationBand{Band: b.label, Runs: c.runs, Correct: c.correct, HeuristicRuns: c.heuristic}

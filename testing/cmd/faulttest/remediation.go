@@ -420,7 +420,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 			VerdictNotes:   denyVerdictNotes,
 		})
 		if denyRemVerdictCorrect != nil {
-			r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", denyRemVerdictCorrect, denyRemVerdictNotes)
+			r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", denyRemVerdictCorrect, denyRemVerdictNotes, "")
 		}
 		return errGateDenied
 	}
@@ -515,7 +515,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		return fmt.Errorf("proceed-escalation: %w", err)
 	}
 	if remVerdictCorrect != nil {
-		r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", remVerdictCorrect, remVerdictNotes)
+		r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", remVerdictCorrect, remVerdictNotes, "")
 	}
 	if resp.Status == "pending_approval" {
 		return r.runApprovalLoop(ctx, *resp)
@@ -877,7 +877,7 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 		causeInput = defaultRootCause
 	}
 
-	r.postFeedback(ctx, triageRunID, "triage", "post_incident", diagCorrect, causeInput)
+	r.postFeedback(ctx, triageRunID, "triage", "post_incident", diagCorrect, causeInput, "")
 
 	// Remediation approach feedback — only when remediation ran.
 	if remRunID != "" {
@@ -888,18 +888,20 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 			v := true
 			fmt.Print("    Remediation approach notes (optional): ")
 			remNotes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes))
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes), "")
 		} else if remAnswer == "n" || remAnswer == "no" {
 			v := false
 			fmt.Print("    Notes on remediation approach (optional): ")
 			notes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes))
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes), "")
 		}
 	}
 }
 
-// postFeedback POSTs a single feedback record to the gateway.
-func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feedbackTime string, verdictCorrect *bool, notes string) {
+// postFeedback POSTs a single feedback record to the gateway. source is
+// "auto_judge" for machine-inferred verdicts (force mode) or "" / "human" for
+// operator-provided verdicts; the gateway stores it in feedback_source.
+func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feedbackTime string, verdictCorrect *bool, notes, source string) {
 	fb := map[string]any{
 		"run_id":          runID,
 		"verdict_correct": verdictCorrect,
@@ -908,6 +910,9 @@ func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feed
 	}
 	if notes != "" {
 		fb["verdict_notes"] = notes
+	}
+	if source != "" {
+		fb["feedback_source"] = source
 	}
 	if r.cfg.OperatorID != "" {
 		fb["operator"] = r.cfg.OperatorID

@@ -157,7 +157,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.NotifyURL, "notify-url", "", "Webhook URL for POST notification on run completion (e.g. Slack incoming webhook)")
 
 	// Gateway-routed diagnosis (A/B comparison mode).
-	fs.BoolVar(&cfg.ViaGateway, "via-gateway", false, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
+	fs.BoolVar(&cfg.ViaGateway, "via-gateway", true, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
 
 	// Async gate and step approvals (K8s/Docker/headless safe).
 	fs.BoolVar(&cfg.GateEscalation, "gate-escalation", false, "Send gate_escalation=true on playbook run requests so the gateway intercepts ESCALATE_TO at the phase boundary")
@@ -542,6 +542,15 @@ func cmdRun(args []string) {
 				}
 			} else {
 				evalResult.OverallScore = evalResult.Score
+			}
+
+			// In force mode with judge enabled, auto-submit triage feedback derived
+			// from the judge score so vault calibration accumulates data without
+			// operator input. Feedback is tagged "auto_judge" so calibration can
+			// distinguish it from human verdicts and display the appropriate note.
+			if cfg.ApprovalMode == "force" && !evalResult.JudgeSkipped && resp.RunID != "" && cfg.GatewayURL != "" {
+				correct := evalResult.Score >= 0.8
+				remediator.postFeedback(faultCtx, resp.RunID, "triage", "post_incident", &correct, evalResult.JudgeReasoning, "auto_judge")
 			}
 
 			repResults = append(repResults, evalResult)
