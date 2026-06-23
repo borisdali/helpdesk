@@ -2068,6 +2068,7 @@ type calibrationBand struct {
 	Correct        int     `json:"correct"`
 	ActualAccuracy float64 `json:"actual_accuracy"`
 	Calibration    string  `json:"calibration"`
+	HeuristicRuns  int     `json:"heuristic_runs,omitempty"`
 }
 
 // calibrationReport mirrors audit.CalibrationReport.
@@ -2462,12 +2463,17 @@ func vaultCalibration(args []string) {
 			if b.Runs > 0 {
 				accuStr = fmt.Sprintf("%d%%", int(b.ActualAccuracy*100))
 			}
-			fmt.Printf("%-*s  %-*d  %-*d  %-*s  %s\n",
+			note := ""
+			if b.HeuristicRuns > 0 {
+				note = fmt.Sprintf("  ⚠ %d/%d keyword (no judge)", b.HeuristicRuns, b.Runs)
+			}
+			fmt.Printf("%-*s  %-*d  %-*d  %-*s  %s%s\n",
 				colBand, b.Band,
 				colRuns, b.Runs,
 				colCorr, b.Correct,
 				colAccu, accuStr,
 				b.Calibration,
+				note,
 			)
 		}
 	}

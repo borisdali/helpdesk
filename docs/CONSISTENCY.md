@@ -28,7 +28,7 @@ it on each deployment platform.
    - [From source (make recertify)](#51-from-source-make-recertify)
    - [Host / VM (binary)](#52-host--vm-binary)
    - [Docker Compose (binary + auto-db)](#53-docker-compose-binary--auto-db)
-   - [Kubernetes (Job / CronJob)](#54-kubernetes-job--cronjob)
+   - [Kubernetes (Helm / CronJob)](#54-kubernetes-helm)
 6. [Reading the per-run output](#6-reading-the-per-run-output)
 7. [Viewing certification results](#7-viewing-certification-results)
    - [vault list — STABLE column](#71-vault-list--stable-column)
@@ -132,7 +132,8 @@ previous cert for the same `fault_id` — one cert per fault, always the latest 
 | `fault_id` | string | Fault catalog ID (e.g. `db-lock-contention`) |
 | `fault_name` | string | Human-readable fault name |
 | `playbook_series_id` | string | Triage playbook series used (e.g. `pbs_lock_chain_triage`) |
-| `model` | string | LLM model used for diagnosis (e.g. `claude-haiku-4-5-20251001`) |
+| `diagnosis_model` | string | Agent model that generated the diagnoses (e.g. `claude-sonnet-4-6`); the subject of the cert |
+| `judge_model` | string | Eval judge model, if `--judge` was used; empty otherwise |
 | `n_runs` | int | Number of inject→diagnose→teardown cycles run |
 | `pass_rate` | float | Fraction of runs that passed (0.0–1.0) |
 | `conf_range_pp` | int | Confidence spread in percentage points (max−min, passing runs only) |

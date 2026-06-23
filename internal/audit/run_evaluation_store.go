@@ -145,6 +145,10 @@ type CalibrationBand struct {
 	Correct        int     `json:"correct"`         // operator confirmed diagnosis was correct
 	ActualAccuracy float64 `json:"actual_accuracy"` // Correct/Runs; 0 when Runs==0
 	Calibration    string  `json:"calibration"`     // "OVERCONFIDENT"|"WELL_CALIBRATED"|"UNDERCONFIDENT"|"INSUFFICIENT_DATA"
+	// HeuristicRuns is the count of runs in this band where judge_used=false.
+	// These runs were scored by keyword heuristic, not an LLM judge. Operators
+	// should treat bands with non-zero HeuristicRuns as lower-quality signal.
+	HeuristicRuns int `json:"heuristic_runs,omitempty"`
 }
 
 // CalibrationReport aggregates confidence-band calibration across a series (or fleet-wide).
@@ -204,8 +208,10 @@ func (s *RunEvaluationStore) CalibrationBands(ctx context.Context, seriesID stri
 
 	// Triage calibration: band on primary_confidence (agent self-reported).
 	// At-gate preferred over post-incident to avoid outcome bias.
+	// judge_used is selected so we can annotate bands that contain keyword-heuristic runs.
 	q := fmt.Sprintf(`
 SELECT ev.primary_confidence,
+       ev.judge_used,
        COALESCE(fb_gate.verdict_correct, fb_post.verdict_correct) AS verdict_correct
 FROM run_evaluation ev
 LEFT JOIN run_feedback fb_gate ON fb_gate.run_id = ev.run_id
@@ -225,13 +231,14 @@ WHERE (fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL)
 	}
 	defer rows.Close()
 
-	type accum struct{ runs, correct int }
+	type accum struct{ runs, correct, heuristic int }
 	counts := make([]accum, len(diagBands))
 
 	for rows.Next() {
 		var confScore float64
+		var judgeUsedInt int
 		var verdictInt int
-		if err := rows.Scan(&confScore, &verdictInt); err != nil {
+		if err := rows.Scan(&confScore, &judgeUsedInt, &verdictInt); err != nil {
 			return nil, err
 		}
 		for i, b := range diagBands {
@@ -239,6 +246,9 @@ WHERE (fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL)
 				counts[i].runs++
 				if verdictInt == 1 {
 					counts[i].correct++
+				}
+				if judgeUsedInt == 0 {
+					counts[i].heuristic++
 				}
 				break
 			}
@@ -251,7 +261,7 @@ WHERE (fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL)
 	report := &CalibrationReport{SeriesID: seriesID}
 	for i, b := range diagBands {
 		c := counts[i]
-		band := &CalibrationBand{Band: b.label, Runs: c.runs, Correct: c.correct}
+		band := &CalibrationBand{Band: b.label, Runs: c.runs, Correct: c.correct, HeuristicRuns: c.heuristic}
 		if c.runs > 0 {
 			band.ActualAccuracy = float64(c.correct) / float64(c.runs)
 		}
