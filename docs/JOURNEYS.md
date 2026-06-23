@@ -7,6 +7,47 @@ For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
 
 ---
 
+## Table of Contents
+
+1. [What is an aiHelpDesk Journey?](#1-what-is-an-aihelpdesk-journey)
+   - [1.1 Agent reasoning events](#11-agent-reasoning-events)
+2. [The Three Audit IDs](#2-the-three-audit-ids)
+   - [2.1 Trace ID prefixes](#21-trace-id-prefixes)
+3. [Architecture](#3-architecture)
+4. [Accessing the API by Deployment Type](#4-accessing-the-api-by-deployment-type)
+   - [4.1 Docker Compose / local binary](#41-docker-compose--local-binary)
+   - [4.2 Kubernetes](#42-kubernetes)
+5. [Endpoint](#5-endpoint)
+   - [5.1 `GET /v1/journeys` (auditd)](#51-get-v1journeys-auditd)
+   - [5.2 `GET /api/v1/governance/journeys` (Gateway proxy)](#52-get-apiv1governancejourneys-gateway-proxy)
+   - [5.3 Query parameters](#53-query-parameters)
+   - [5.4 Response](#54-response)
+   - [5.5 Field reference](#55-field-reference)
+   - [5.6 Journey outcomes](#56-journey-outcomes)
+6. [Examples](#6-examples)
+   - [6.1 My recent journeys](#61-my-recent-journeys)
+   - [6.2 Journeys in a time window](#62-journeys-in-a-time-window)
+   - [6.3 Journeys that ended in error](#63-journeys-that-ended-in-error)
+   - [6.4 Unverified claims — possible LLM fabrication](#64-unverified-claims--possible-llm-fabrication)
+   - [6.5 Journeys needing human escalation](#65-journeys-needing-human-escalation)
+   - [6.6 Recent database journeys with retries](#66-recent-database-journeys-with-retries)
+   - [6.7 Journey count by user](#67-journey-count-by-user)
+   - [6.8 Filter by dispatch path](#68-filter-by-dispatch-path)
+   - [6.9 Drilling Into a Journey](#69-drilling-into-a-journey)
+7. [Journey Coverage](#7-journey-coverage)
+   - [7.1 Origin values in journeys](#71-origin-values-in-journeys)
+   - [7.2 Playbook incident trails](#72-playbook-incident-trails)
+8. [Unverified Claims and LLM Fabrication Detection](#8-unverified-claims-and-llm-fabrication-detection)
+9. [Environment Variables](#9-environment-variables)
+10. [Troubleshooting](#10-troubleshooting)
+    - [10.1 `curl: (7) Failed to connect` on Kubernetes](#101-curl-7-failed-to-connect-to-localhost-port-1199-on-kubernetes)
+    - [10.2 Empty result despite active agents](#102-empty-result-despite-active-agents)
+    - [10.3 Events visible in `/v1/events` but not in `/v1/journeys`](#103-events-visible-in-v1events-but-not-in-v1journeys)
+    - [10.4 `started_at` / `ended_at` in unexpected order](#104-started_at--ended_at-in-unexpected-order)
+    - [10.5 Journey shows `unverified_claim` but action succeeded](#105-journey-shows-unverified_claim-but-the-action-did-succeed)
+
+---
+
 ## 1. What is an aiHelpDesk Journey?
 
 A **Journey** is everything that happened as a result of one user request —

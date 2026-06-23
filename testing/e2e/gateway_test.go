@@ -381,7 +381,8 @@ func TestGatewayFaultStabilityRoundtrip(t *testing.T) {
 		"fault_id":           faultID,
 		"fault_name":         "E2E test fault",
 		"playbook_series_id": "pbs_e2e_test",
-		"model":              "claude-haiku-4-5-20251001",
+		"diagnosis_model":    "claude-sonnet-4-6",
+		"judge_model":        "claude-haiku-4-5-20251001",
 		"n_runs":             5,
 		"pass_rate":          1.0,
 		"conf_range_pp":      3,
@@ -410,6 +411,12 @@ func TestGatewayFaultStabilityRoundtrip(t *testing.T) {
 	}
 	if runs, _ := got["n_runs"].(float64); int(runs) != 5 {
 		t.Errorf("n_runs: got %v, want 5", runs)
+	}
+	if dm, _ := got["diagnosis_model"].(string); dm != "claude-sonnet-4-6" {
+		t.Errorf("diagnosis_model: got %q, want claude-sonnet-4-6", dm)
+	}
+	if jm, _ := got["judge_model"].(string); jm != "claude-haiku-4-5-20251001" {
+		t.Errorf("judge_model: got %q, want claude-haiku-4-5-20251001", jm)
 	}
 
 	// LIST — cert must appear in the list.

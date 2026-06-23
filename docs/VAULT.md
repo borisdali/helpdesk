@@ -1,10 +1,38 @@
 # aiHelpDesk Vault
 
-The Vault is aiHelpDesk's institutional memory for operational knowledge. It is where every Playbook lives, where every incident trace lands, and where the library of known fault→remedy pairings grows. Automatically and with human approval at the gate.
+The Vault is aiHelpDesk's institutional memory for operational knowledge. It is where every [Playbook](PLAYBOOKS.md) lives, where every [Incident](INCIDENTS.md) trace lands, and where the library of known fault→remedy pairings grows. Automatically and with human approval at the gate.
 
 A traditional runbook is a static procedure — a fixed sequence of steps written once and followed literally. An aiHelpDesk [Playbook](PLAYBOOKS.md) is fundamentally different: it encodes strategic **intent** and expert **knowledge** that the fleet planner uses to generate an execution plan dynamically, against the current state of your infrastructure and tool catalog. The same Playbook produces different steps when your database configuration differs, when new tools are available, or when the environment has changed. This is what "never a stale script" means in practice.
 
 The Vault is the library where these Playbooks live. Tracked, versioned, and continuously improved as your infrastructure, applications that make use of it and agents evolve.
+
+---
+
+## Table of Contents
+
+1. [The Operational SRE/DBA Flywheel](#the-operational-sredba-flywheel)
+2. [How Artifacts Enter the Vault](#how-artifacts-enter-the-vault)
+   - [1. System Playbooks (shipped)](#1-system-playbooks-shipped)
+   - [2. The incident agent (auto-suggest on resolution)](#2-the-incident-agent-auto-suggest-on-resolution)
+   - [3. faulttest auto-suggest (on remediation pass)](#3-faulttest-auto-suggest-on-remediation-pass)
+3. [The Artifact Lifecycle](#the-artifact-lifecycle)
+4. [Vault Commands](#vault-commands)
+   - [vault list](#vault-list)
+   - [vault accuracy](#vault-accuracy)
+   - [vault incidents](#vault-incidents)
+   - [vault status](#vault-status)
+   - [vault drift](#vault-drift)
+   - [vault versions](#vault-versions)
+   - [vault calibration](#vault-calibration)
+   - [vault suggest](#vault-suggest)
+   - [vault suggest-update](#vault-suggest-update)
+5. [The `from-trace` Endpoint](#the-from-trace-endpoint)
+6. [Reviewing and Activating Drafts](#reviewing-and-activating-drafts)
+7. [Three Customer Workflows](#three-customer-workflows)
+   - [1. Onboarding — linking your first Playbooks](#1-onboarding--linking-your-first-playbooks)
+   - [2. Playbook acceptance — review and approve auto-generated drafts](#2-playbook-acceptance--review-and-approve-auto-generated-drafts)
+   - [3. Regression monitoring — catching drift before it becomes an incident](#3-regression-monitoring--catching-drift-before-it-becomes-an-incident)
+8. [Connection to Other Docs](#connection-to-other-docs)
 
 ---
 
@@ -250,21 +278,22 @@ Accuracy: db-lock-contention → pbs_lock_chain_triage
   Post-incident:         3 runs  100% accurate (3/3)
   Combined:             12 runs   92% accurate
 
-Stability Cert: db-lock-contention
-  Fault:         Lock contention / deadlock
-  Playbook:      pbs_lock_chain_triage
-  Model:         claude-haiku-4-5-20251001
-  Runs:          5
-  Pass rate:     100.0%
-  Conf range:    5pp  (H1 on passing runs)
-  Verdict:       STABLE
-  Tested:        2026-06-20T03:14:22Z
+Triage consistency
+  Fault         : db-lock-contention  (Lock contention / deadlock)
+  Verdict       : STABLE
+  Runs          : 5
+  Pass rate     : 100%
+  Conf range    : 5pp  (primary hypothesis, passing runs only)
+  Playbook      : pbs_lock_chain_triage
+  Diagnosis model: claude-sonnet-4-6
+  Judge model   : claude-haiku-4-5-20251001
+  Tested at     : 2026-06-20 03:14 UTC  (1 days ago)
 ```
 
 If the cert is older than 30 days, a warning is shown beneath it:
 
 ```
-  ⚠  WARN: cert is 47 days old — re-certify if the model or playbook has changed
+  [WARN] cert is older than 30 days — consider re-running --repeat to refresh
 ```
 
 The overall accuracy rate is `correct / total` across both feedback times; nil verdicts are excluded. The breakdown section appears whenever at least one feedback type has data, letting you compare the signal quality: at-gate feedback is uncontaminated by knowledge of whether the fix worked, while post-incident feedback can be influenced by hindsight.
@@ -467,7 +496,7 @@ Diagnosis calibration — fleet-wide (17 runs with agent confidence + operator f
 
 CONFIDENCE    RUNS    CORRECT    ACCURACY    CALIBRATION
 ─────────────────────────────────────────────────────────────────
-90-100%          12         10        83%    OVERCONFIDENT
+90-100%          12         10        83%    OVERCONFIDENT  ⚠ 7/12 keyword (no judge)
 70-89%            4          3        75%    WELL_CALIBRATED
 <70%              1          1       100%    INSUFFICIENT_DATA
 
@@ -479,6 +508,16 @@ CONFIDENCE    RUNS    CORRECT    ACCURACY    CALIBRATION
 70-89%            3          3       100%    UNDERCONFIDENT
 <70%              0          0          –    INSUFFICIENT_DATA
 ```
+
+The `⚠ N/M keyword (no judge)` annotation appears on a band when some of its runs were scored
+using the keyword heuristic (`--judge` was not used or not available). These runs are still
+included in the band — they have a confidence value — but their `verdict_correct` determination
+came from keyword matching rather than a semantic LLM judge. The annotation is a data-quality
+signal: if a band is `OVERCONFIDENT` but most of its verdicts are heuristic-derived, tighten
+the signal by running `--judge` before drawing conclusions.
+
+This is distinct from the *excluded* runs reported in the header line (`agent did not emit a
+CONFIDENCE: value`) — those runs have no confidence score at all and do not appear in any band.
 
 The remediation section only appears when there are runs with both a non-zero `remediation_judge_score` and operator remediation feedback (`feedback_type: "remediation"`).
 

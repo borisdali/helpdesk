@@ -8,6 +8,53 @@ For end-to-end request journeys see [JOURNEYS.md](JOURNEYS.md).
 
 ---
 
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [The Three Audit IDs](#2-the-three-audit-ids)
+   - [2.1 event_id prefix → event type](#21-event_id-prefix--event-type)
+   - [2.2 trace_id prefix → request origin](#22-trace_id-prefix--request-origin)
+3. [Hash Chain Integrity](#3-hash-chain-integrity)
+4. [Event Schema](#4-event-schema)
+   - [4.1 tool_execution fields](#41-tool_execution-fields)
+   - [4.2 policy_decision fields](#42-policy_decision-fields)
+   - [4.3 delegation_decision fields](#43-delegation_decision-fields)
+   - [4.4 delegation_verification fields](#44-delegation_verification-fields-orchestrator)
+   - [4.5 origin values](#45-origin-values)
+5. [Action Classification](#5-action-classification)
+6. [auditd API Reference](#6-auditd-api-reference)
+   - [6.1 Audit events](#61-audit-events)
+   - [6.2 Journey summaries](#62-journey-summaries)
+   - [6.3 Approvals](#63-approvals)
+   - [6.4 Governance](#64-governance)
+   - [6.5 Fleet jobs](#65-fleet-jobs)
+   - [6.6 Rollbacks](#66-rollbacks)
+   - [6.7 Health](#67-health)
+   - [6.8 Approval Sessions](#68-approval-sessions)
+7. [Event Query Filters](#7-event-query-filters)
+8. [Starting auditd](#8-starting-auditd)
+   - [8.1 auditd environment variables](#81-auditd-environment-variables)
+   - [8.2 Agent environment variables](#82-agent-environment-variables)
+9. [auditor CLI](#9-auditor-cli)
+   - [9.1 auditor flags](#91-auditor-flags)
+   - [9.2 Security detection patterns](#92-security-detection-patterns)
+10. [Chain Verification](#10-chain-verification)
+    - [10.1 Via API](#101-via-api)
+    - [10.2 Via auditor (one-shot)](#102-via-auditor-one-shot)
+    - [10.3 Via SQL](#103-via-sql)
+11. [Tool Result Store](#11-tool-result-store)
+    - [11.1 What gets recorded](#111-what-gets-recorded)
+    - [11.2 Schema](#112-schema)
+    - [11.3 Querying via the gateway](#113-querying-via-the-gateway)
+    - [11.4 auditd direct endpoints](#114-auditd-direct-endpoints)
+12. [Troubleshooting](#12-troubleshooting)
+    - [12.1 Events not appearing in auditd](#121-events-not-appearing-in-auditd)
+    - [12.2 auditor not receiving events](#122-auditor-not-receiving-events)
+    - [12.3 Chain integrity failure](#123-chain-integrity-failure)
+    - [12.4 Events with empty trace_id](#124-events-with-empty-trace_id)
+
+---
+
 ## 1. Overview
 
 The audit system is a tamper-evident, hash-chained log of every significant

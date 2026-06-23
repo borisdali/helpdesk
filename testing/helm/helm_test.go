@@ -507,6 +507,134 @@ func TestGatewayService(t *testing.T) {
 
 // TestFleetRunnerDisabledByDefault verifies that no CronJob is rendered when
 // fleetRunner.scheduledJobs is empty (the default).
+// TestRecertifyDisabledByDefault verifies that the recertify CronJob is NOT
+// rendered when recertify.enabled=false (the default).
+func TestRecertifyDisabledByDefault(t *testing.T) {
+	objects := render(t)
+	for key := range objects {
+		if strings.HasPrefix(key, "CronJob/") && strings.Contains(key, "recertify") {
+			t.Errorf("unexpected recertify CronJob %q with default values (recertify.enabled=false)", key)
+		}
+	}
+}
+
+// TestRecertifyEnabled verifies that the recertify CronJob renders correctly
+// when recertify.enabled=true, with the correct schedule and concurrencyPolicy.
+func TestRecertifyEnabled(t *testing.T) {
+	objects := render(t,
+		"recertify.enabled=true",
+		"recertify.schedule=0 2 * * 0",
+		"recertify.repeat=5",
+	)
+
+	cj, ok := objects["CronJob/test-recertify"]
+	if !ok {
+		t.Fatal("CronJob/test-recertify not found")
+	}
+
+	spec, _ := cj["spec"].(map[string]any)
+	if schedule, _ := spec["schedule"].(string); schedule != "0 2 * * 0" {
+		t.Errorf("schedule = %q, want \"0 2 * * 0\"", schedule)
+	}
+	if policy, _ := spec["concurrencyPolicy"].(string); policy != "Forbid" {
+		t.Errorf("concurrencyPolicy = %q, want \"Forbid\"", policy)
+	}
+
+	jobTemplate, _ := spec["jobTemplate"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	podTemplate, _ := jobSpec["template"].(map[string]any)
+	podSpec, _ := podTemplate["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("no containers in recertify CronJob pod spec")
+	}
+	container, _ := containers[0].(map[string]any)
+	args := containerArgs(container)
+	if !hasArg(args, "--repeat=5") {
+		t.Errorf("args %v missing --repeat=5", args)
+	}
+	if !hasArg(args, "--external") {
+		t.Errorf("args %v missing --external", args)
+	}
+	if !hasArg(args, "--via-gateway") {
+		t.Errorf("args %v missing --via-gateway", args)
+	}
+	if !hasArg(args, "--approval-mode=force") {
+		t.Errorf("args %v missing --approval-mode=force", args)
+	}
+	if !hasArg(args, "--emit-and-wait") {
+		t.Errorf("args %v missing --emit-and-wait", args)
+	}
+	if !hasArg(args, "--report-per-fault") {
+		t.Errorf("args %v missing --report-per-fault", args)
+	}
+}
+
+// TestFaulttestRepeatArg verifies that --repeat is included in the faulttest
+// Job args when faulttest.repeat > 1, and omitted when repeat=1 (default).
+func TestFaulttestRepeatArg(t *testing.T) {
+	withRepeat := render(t,
+		"faulttest.enabled=true",
+		"faulttest.ids=db-wal-disk-full-k8s",
+		"faulttest.repeat=5",
+	)
+	job, ok := withRepeat["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found with repeat=5")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("no containers in faulttest Job")
+	}
+	args := containerArgs(containers[0].(map[string]any))
+	if !hasArg(args, "--repeat=5") {
+		t.Errorf("args %v should contain --repeat=5 when faulttest.repeat=5", args)
+	}
+
+	// Default repeat=1 → flag must be absent.
+	withDefault := render(t,
+		"faulttest.enabled=true",
+		"faulttest.ids=db-wal-disk-full-k8s",
+	)
+	jobDef, ok := withDefault["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found with default repeat")
+	}
+	specDef, _ := jobDef["spec"].(map[string]any)
+	tmplDef, _ := specDef["template"].(map[string]any)
+	podSpecDef, _ := tmplDef["spec"].(map[string]any)
+	containersDef, _ := podSpecDef["containers"].([]any)
+	argsDef := containerArgs(containersDef[0].(map[string]any))
+	if hasArg(argsDef, "--repeat") {
+		t.Errorf("args %v should NOT contain --repeat when faulttest.repeat=1 (default)", argsDef)
+	}
+}
+
+// TestFaulttestAgentModelArg verifies --agent-model is included when
+// faulttest.agentModel is set, and absent by default.
+func TestFaulttestAgentModelArg(t *testing.T) {
+	objects := render(t,
+		"faulttest.enabled=true",
+		"faulttest.ids=db-wal-disk-full-k8s",
+		"faulttest.agentModel=claude-sonnet-4-6",
+	)
+	job, ok := objects["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	if !hasArg(args, "--agent-model=claude-sonnet-4-6") {
+		t.Errorf("args %v missing --agent-model=claude-sonnet-4-6", args)
+	}
+}
+
 func TestFleetRunnerDisabledByDefault(t *testing.T) {
 	objects := render(t)
 	for key := range objects {

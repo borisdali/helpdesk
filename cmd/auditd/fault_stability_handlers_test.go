@@ -74,6 +74,12 @@ func TestFaultStabilityHandlers_UpsertAndGet(t *testing.T) {
 	if !got.IsStable {
 		t.Error("IsStable: want true")
 	}
+	if got.DiagnosisModel != "claude-sonnet-4-6" {
+		t.Errorf("DiagnosisModel: got %q, want claude-sonnet-4-6", got.DiagnosisModel)
+	}
+	if got.JudgeModel != "claude-haiku-4-5-20251001" {
+		t.Errorf("JudgeModel: got %q, want claude-haiku-4-5-20251001", got.JudgeModel)
+	}
 }
 
 func TestFaultStabilityHandlers_Upsert_MissingFaultID(t *testing.T) {

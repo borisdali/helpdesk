@@ -485,6 +485,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
 | `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the gateway after remediation and scores blast-radius, step efficiency, and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
+| `--agent-model` | `HELPDESK_MODEL_NAME` | — | Name of the triage agent model. Stored as `diagnosis_model` in the stability cert when `--repeat N` is used. Defaults to `HELPDESK_MODEL_NAME`. Set this explicitly when certifying against a specific model so certs can be distinguished across model upgrades in `vault accuracy`. |
 | `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
 | `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |

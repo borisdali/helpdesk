@@ -8,6 +8,22 @@ The feedback loop described here is also the measurement layer of [Informed Cons
 
 ---
 
+## Table of Contents
+
+1. [The lifecycle in one picture](#the-lifecycle-in-one-picture)
+2. [Feedback reference](#feedback-reference)
+3. [Vault command reference](#vault-command-reference)
+   - [Which feedback each command consumes](#which-feedback-each-command-consumes)
+4. [When to use which command](#when-to-use-which-command)
+   - [Situation 1: Routine CI / scheduled regression check](#situation-1-routine-ci--scheduled-regression-check)
+   - [Situation 2: A playbook was updated — did it improve things?](#situation-2-a-playbook-was-updated--did-it-improve-things)
+   - [Situation 3: How accurate is the agent's diagnosis, really?](#situation-3-how-accurate-is-the-agents-diagnosis-really)
+   - [Situation 4: Are the automated scores trustworthy?](#situation-4-are-the-automated-scores-trustworthy)
+5. [Recommended weekly workflow](#recommended-weekly-workflow)
+6. [Quick-reference cheat-sheet](#quick-reference-cheat-sheet)
+
+---
+
 ## The lifecycle in one picture
 
 ```

@@ -1051,10 +1051,11 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 	}
 
 	type band struct {
-		Band        string `json:"band"`
-		Runs        int    `json:"runs"`
-		Correct     int    `json:"correct"`
-		Calibration string `json:"calibration"`
+		Band          string `json:"band"`
+		Runs          int    `json:"runs"`
+		Correct       int    `json:"correct"`
+		Calibration   string `json:"calibration"`
+		HeuristicRuns int    `json:"heuristic_runs"`
 	}
 	var report struct {
 		Bands            []band `json:"bands"`
@@ -1082,6 +1083,10 @@ func TestPlaybookRunHandlers_Calibration(t *testing.T) {
 	// |1.0 - 0.95| = 0.05 ≤ 0.10 → WELL_CALIBRATED
 	if report.Bands[0].Calibration != "WELL_CALIBRATED" {
 		t.Errorf("90-100%% Calibration = %q, want WELL_CALIBRATED", report.Bands[0].Calibration)
+	}
+	// All 3 seeded runs have judge_used=false → HeuristicRuns=3 in this band.
+	if report.Bands[0].HeuristicRuns != 3 {
+		t.Errorf("90-100%% HeuristicRuns = %d, want 3 (no runs used the judge)", report.Bands[0].HeuristicRuns)
 	}
 
 	// Remediation bands: all 3 runs have feedback (1 correct, 2 wrong).

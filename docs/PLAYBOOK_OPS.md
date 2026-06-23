@@ -6,6 +6,28 @@ Operational best practices for taking advantage of aiHelpDesk [Playbooks](PLAYBO
 
 ---
 
+## Table of Contents
+
+1. [Pre-incident preparation](#1-pre-incident-preparation)
+   - [1.1 Schedule regular baselines](#11-schedule-regular-baselines-required-for-db-down-diagnosis)
+   - [1.2 Understand the DB-down escalation chain](#12-understand-the-db-down-escalation-chain)
+   - [1.2a Auto-chaining vs. manual escalation](#12a-auto-chaining-vs-manual-escalation)
+   - [1.3 Know your `requires_evidence` patterns](#13-know-your-requires_evidence-patterns)
+2. [Running a DB-down investigation](#2-running-a-db-down-investigation)
+   - [2.1 Step 1: Collect the immediate evidence](#21-step-1-collect-the-immediate-evidence)
+   - [2.2 Step 2: Trigger the entry-point triage playbook](#22-step-2-trigger-the-entry-point-triage-playbook)
+   - [2.3 Step 3: Follow the escalation (if needed)](#23-step-3-follow-the-escalation-if-needed)
+   - [2.4 Step 4: Provide an Informed Consent (Review/Approve the Gate)](#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate)
+   - [2.5 Step 5: Decide on remediation approval mode](#25-step-5-decide-on-remediation-approval-mode)
+   - [2.6 Step 6: Finish the remediation / Provide incident feedback](#26-step-6-finish-the-remediation--provide-incident-feedback)
+   - [2.7 Step 7: Record the outcome and trigger draft synthesis](#27-step-7-record-the-outcome-and-trigger-draft-synthesis)
+   - [2.8 Step 8: Review the Vault draft](#28-step-8-review-the-vault-draft)
+3. [Outcome hygiene](#3-outcome-hygiene)
+4. [Quick-reference checklist](#4-quick-reference-checklist)
+5. [See also](#5-see-also)
+
+---
+
 ## 1. Pre-incident preparation
 
 ### 1.1 Schedule regular baselines (required for DB-down diagnosis)

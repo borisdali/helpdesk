@@ -577,6 +577,85 @@ func TestRunEvaluationStore_PrimaryConfidence_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestRunEvaluationStore_CalibrationBands_HeuristicRuns verifies that the
+// per-band HeuristicRuns counter counts runs where judge_used=false, distinct
+// from the report-level HeuristicCount (runs excluded for primary_confidence=0).
+func TestRunEvaluationStore_CalibrationBands_HeuristicRuns(t *testing.T) {
+	ctx := context.Background()
+
+	mainStore, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { mainStore.Close() })
+
+	evalStore, err := NewRunEvaluationStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	fbStore, err := NewRunFeedbackStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+
+	tr := true
+	submit := func(runID string, conf float64, judgeUsed bool) {
+		t.Helper()
+		if err := evalStore.Upsert(ctx, &RunEvaluation{
+			RunID: runID, FailureID: "db-lock", PrimaryConfidence: conf, JudgeUsed: judgeUsed,
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", runID, err)
+		}
+		if err := fbStore.Submit(ctx, &RunFeedback{
+			RunID: runID, FeedbackType: "triage", FeedbackTime: "at_gate", VerdictCorrect: &tr,
+		}); err != nil {
+			t.Fatalf("Submit %s: %v", runID, err)
+		}
+	}
+
+	// 90-100% band: 2 with judge, 3 without → HeuristicRuns=3
+	submit("plr_hr01", 0.92, true)
+	submit("plr_hr02", 0.95, true)
+	submit("plr_hr03", 0.91, false)
+	submit("plr_hr04", 0.93, false)
+	submit("plr_hr05", 0.97, false)
+	// 70-89% band: 1 with judge, 0 without → HeuristicRuns=0
+	submit("plr_hr06", 0.80, true)
+
+	report, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands: %v", err)
+	}
+
+	var highBand, midBand *CalibrationBand
+	for _, b := range report.Bands {
+		switch b.Band {
+		case "90-100%":
+			highBand = b
+		case "70-89%":
+			midBand = b
+		}
+	}
+	if highBand == nil {
+		t.Fatal("90-100% band not found")
+	}
+	if highBand.Runs != 5 {
+		t.Errorf("90-100%% band Runs = %d, want 5", highBand.Runs)
+	}
+	if highBand.HeuristicRuns != 3 {
+		t.Errorf("90-100%% band HeuristicRuns = %d, want 3 (judge_used=false runs)", highBand.HeuristicRuns)
+	}
+	if midBand == nil {
+		t.Fatal("70-89% band not found")
+	}
+	if midBand.Runs != 1 {
+		t.Errorf("70-89%% band Runs = %d, want 1", midBand.Runs)
+	}
+	if midBand.HeuristicRuns != 0 {
+		t.Errorf("70-89%% band HeuristicRuns = %d, want 0 (all runs used judge)", midBand.HeuristicRuns)
+	}
+}
+
 func TestRunEvaluationStore_CalibrationBands_HeuristicCount(t *testing.T) {
 	ctx := context.Background()
 

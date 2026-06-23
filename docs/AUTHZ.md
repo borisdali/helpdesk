@@ -6,6 +6,30 @@ This document covers HTTP-level authorization — who can call which endpoint an
 
 ---
 
+## Table of Contents
+
+1. [Terminology](#1-terminology)
+2. [Authorization vs Governance](#2-authorization-vs-governance)
+3. [How Enforcement Works](#3-how-enforcement-works)
+   - [3.1 Activation](#31-activation)
+   - [3.2 Per-Request Flow](#32-per-request-flow)
+   - [3.3 Response Codes](#33-response-codes)
+   - [3.4 Fail-Closed Behaviour](#34-fail-closed-behaviour)
+4. [Roles Reference](#4-roles-reference)
+   - [4.1 Role Summary](#41-role-summary)
+   - [4.2 Gateway Routes by Access Level](#42-gateway-routes-by-access-level)
+   - [4.3 auditd Routes by Access Level](#43-auditd-routes-by-access-level)
+5. [Finding Your Role](#5-finding-your-role)
+6. [Admin Role](#6-admin-role)
+7. [Role Aliases](#7-role-aliases)
+   - [7.1 Static provider](#71-static-provider-helpdesk_identity_providerstatic)
+   - [7.2 JWT provider](#72-jwt-provider-helpdesk_identity_providerjwt)
+8. [Operating Mode and Authorization](#8-operating-mode-and-authorization)
+9. [Service Accounts and the `ServiceOnly` Constraint](#9-service-accounts-and-the-serviceonly-constraint)
+10. [Implementation Reference](#10-implementation-reference)
+
+---
+
 ## 1. Terminology
 
 These terms appear throughout this document and the codebase. They are sometimes used interchangeably in the industry, so the distinctions below reflect specifically how they are used in aiHelpDesk's context.

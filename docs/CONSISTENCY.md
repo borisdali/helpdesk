@@ -140,8 +140,8 @@ previous cert for the same `fault_id` — one cert per fault, always the latest 
 | `is_stable` | bool | `true` if STABLE criteria are met |
 | `tested_at` | timestamp | When the cert was issued |
 
-The `model` field is intentional: a cert issued against `claude-haiku-4-5-20251001` does not
-automatically transfer to `claude-haiku-4-5-20260101`. See [When to re-certify](#8-when-to-re-certify).
+The `diagnosis_model` field is intentional: a cert issued against `claude-sonnet-4-6` does not
+automatically transfer to a newer model release. See [When to re-certify](#8-when-to-re-certify).
 
 ---
 
@@ -229,8 +229,13 @@ faulttest run \
   --gateway http://localhost:8080 \
   --api-key $HELPDESK_CLIENT_API_KEY \
   --repeat 5 \
-  --approval-mode force
+  --approval-mode force \
+  --agent-model $HELPDESK_MODEL_NAME
 ```
+
+`--agent-model` annotates the cert with the name of the model being certified. It defaults to the
+`HELPDESK_MODEL_NAME` environment variable. Omitting it leaves `diagnosis_model` blank in the cert,
+which makes it harder to distinguish certs across model upgrades.
 
 Filter to specific categories or faults:
 
@@ -289,7 +294,8 @@ faulttest run \
   --gateway http://localhost:8080 \
   --agent-conn faulttest-db \
   --repeat 5 \
-  --approval-mode force
+  --approval-mode force \
+  --agent-model $HELPDESK_MODEL_NAME
 ```
 
 ### 5.4 Kubernetes (Helm)
@@ -454,21 +460,27 @@ Accuracy: db-lock-contention → pbs_lock_chain_triage
   Post-incident:         2 runs  100% accurate (2/2)
   Combined:              6 runs   83% accurate
 
-Stability Cert: db-lock-contention
-  Fault:         Lock contention / deadlock
-  Playbook:      pbs_lock_chain_triage
-  Model:         claude-haiku-4-5-20251001
-  Runs:          5
-  Pass rate:     80.0%
-  Conf range:    5pp  (H1 on passing runs)
-  Verdict:       STABLE
-  Tested:        2026-06-20T03:14:22Z
+Triage consistency
+  Fault         : db-lock-contention  (Lock contention / deadlock)
+  Verdict       : STABLE
+  Runs          : 5
+  Pass rate     : 80%
+  Conf range    : 5pp  (primary hypothesis, passing runs only)
+  Playbook      : pbs_lock_chain_triage
+  Diagnosis model: claude-sonnet-4-6
+  Judge model   : claude-haiku-4-5-20251001
+  Tested at     : 2026-06-20 03:14 UTC  (1 days ago)
 ```
+
+`Diagnosis model` is the agent model whose output was certified (set via `--agent-model` or
+`HELPDESK_MODEL_NAME`). `Judge model` appears only when `--judge` was used during certification.
+If no feedback has been submitted yet for the fault, `vault accuracy` still shows the cert block
+rather than returning early — the consistency signal is available independently of accuracy data.
 
 If the cert is older than 30 days, a warning is shown:
 
 ```
-  ⚠  WARN: cert is 47 days old — re-certify if the model or playbook has changed
+  [WARN] cert is older than 30 days — consider re-running --repeat to refresh
 ```
 
 ---
@@ -480,7 +492,7 @@ following changes should trigger a re-certification run:
 
 | Trigger | Why |
 |---------|-----|
-| **Model upgrade** | Different model weights produce different output distributions. A playbook STABLE under `claude-haiku-4-5-20251001` may be UNSTABLE under a newer release — or may become more stable. The cert includes the model field so `vault accuracy` can flag stale certs. |
+| **Model upgrade** | Different model weights produce different output distributions. A playbook STABLE under `claude-sonnet-4-6` may be UNSTABLE under a newer release — or may become more stable. The cert records the `diagnosis_model` field so `vault accuracy` can surface that a cert was issued against a different model than the one currently in use. |
 | **Significant playbook edit** | Adding or removing hypothesis format fields, changing escalation conditions, or rewording diagnostic guidance can shift confidence and pass rates materially. Minor wording edits typically don't require re-certification. |
 | **Significant infrastructure change** | If the agent's tool catalog changes (new tools added, existing tools removed) or the database configuration drifts significantly from the state at certification time, prior certs may no longer reflect real-world behaviour. |
 | **Cert age > 30 days** | Shown as a warning in `vault accuracy`. Not a hard expiry — a STABLE cert doesn't automatically become invalid — but a prompt to re-verify on a realistic schedule. |
