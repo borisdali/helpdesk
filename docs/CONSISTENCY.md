@@ -291,103 +291,70 @@ faulttest run \
   --approval-mode force
 ```
 
-### 5.4 Kubernetes (Job / CronJob)
+### 5.4 Kubernetes (Helm)
 
-On Kubernetes, `--auto-db` is not available (no Docker socket in the pod). Faulttest runs
-as a Job and connects to a dedicated test database in the cluster. `--emit-and-wait` is
-required for headless approval polling.
+On Kubernetes, `--auto-db` is not available (no Docker socket in the pod). The Helm chart
+ships a dedicated `recertify` CronJob
+(`deploy/helm/helpdesk/templates/recertify-cronjob.yaml`) that connects to a test database
+already running in the cluster. `--emit-and-wait` and `--approval-mode force` are baked in —
+no TTY required.
 
-**One-shot Job** — run after a model or playbook update:
-
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: helpdesk-recertify
-  namespace: helpdesk
-spec:
-  ttlSecondsAfterFinished: 86400
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-      - name: faulttest
-        image: ghcr.io/your-org/helpdesk:latest
-        args:
-        - faulttest
-        - run
-        - --external
-        - --via-gateway
-        - --gateway
-        - http://helpdesk-gateway:8080
-        - --conn
-        - $(FAULTTEST_CONN_STR)
-        - --agent-conn
-        - $(FAULTTEST_AGENT_CONN_STR)
-        - --repeat
-        - "5"
-        - --approval-mode
-        - force
-        - --emit-and-wait
-        env:
-        - name: HELPDESK_CLIENT_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: helpdesk-secrets
-              key: api-key
-        - name: FAULTTEST_CONN_STR
-          value: "host=test-postgres.helpdesk.svc port=5432 dbname=testdb user=postgres password=testpass"
-        - name: FAULTTEST_AGENT_CONN_STR
-          value: faulttest-db
-```
-
-**Weekly CronJob** — keeps certs fresh automatically:
+**Enable the weekly CronJob** (runs every Sunday 03:00 UTC by default):
 
 ```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: helpdesk-recertify-weekly
-  namespace: helpdesk
-spec:
-  schedule: "0 3 * * 0"   # 03:00 UTC every Sunday
-  concurrencyPolicy: Forbid
-  jobTemplate:
-    spec:
-      ttlSecondsAfterFinished: 172800
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-          - name: faulttest
-            image: ghcr.io/your-org/helpdesk:latest
-            args:
-            - faulttest
-            - run
-            - --external
-            - --via-gateway
-            - --gateway
-            - http://helpdesk-gateway:8080
-            - --conn
-            - $(FAULTTEST_CONN_STR)
-            - --agent-conn
-            - $(FAULTTEST_AGENT_CONN_STR)
-            - --repeat
-            - "5"
-            - --approval-mode
-            - force
-            - --emit-and-wait
-            env:
-            - name: HELPDESK_CLIENT_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: helpdesk-secrets
-                  key: api-key
-            - name: FAULTTEST_CONN_STR
-              value: "host=test-postgres.helpdesk.svc port=5432 dbname=testdb user=postgres password=testpass"
-            - name: FAULTTEST_AGENT_CONN_STR
-              value: faulttest-db
+# values.yaml or --set overrides
+recertify:
+  enabled: true
+  conn: "host=test-postgres.helpdesk.svc port=5432 dbname=testdb user=postgres"
+  dbPasswordSecret:
+    name: pg-cluster-app    # K8s Secret holding the DB password
+  gatewayAPIKeySecret: helpdesk-secrets
 ```
+
+```bash
+helm upgrade helpdesk deploy/helm/helpdesk \
+  --reuse-values \
+  -f recertify-values.yaml
+```
+
+**Run immediately** (one-shot, without waiting for the schedule):
+
+```bash
+kubectl create job --from=cronjob/helpdesk-recertify helpdesk-recertify-now \
+  -n helpdesk
+kubectl logs -n helpdesk -l job-name=helpdesk-recertify-now --follow
+```
+
+**Certify a specific fault only** (after a targeted playbook edit):
+
+```yaml
+recertify:
+  enabled: true
+  ids: "db-lock-contention"
+  conn: "host=test-postgres.helpdesk.svc port=5432 dbname=testdb user=postgres"
+  dbPasswordSecret:
+    name: pg-cluster-app
+  gatewayAPIKeySecret: helpdesk-secrets
+```
+
+**Key values** (`recertify.*`):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Deploy the CronJob |
+| `schedule` | `"0 3 * * 0"` | Cron schedule (weekly Sunday 03:00 UTC) |
+| `repeat` | `5` | Cycles per fault (drives STABLE/UNSTABLE verdict) |
+| `ids` | `""` | Comma-separated fault IDs; empty = all external-compatible |
+| `categories` | `""` | Comma-separated categories; empty = all |
+| `conn` | `""` | Test database connection string (required) |
+| `agentConn` | `"faulttest-db"` | Connection alias sent to the agent in prompts |
+| `judge` | `false` | Enable LLM-as-judge scoring |
+| `gatewayAPIKeySecret` | `""` | K8s Secret name for `HELPDESK_CLIENT_API_KEY` |
+| `dbPasswordSecret.name` | `""` | K8s Secret name for DB password (`PGPASSWORD`) |
+| `ttlSecondsAfterFinished` | `172800` | Job retention (48 h) |
+
+The CronJob reuses the `faulttest` ServiceAccount (created when `faulttest.rbac.create=true`),
+so no additional RBAC is needed.
 
 > **Note on the test database.** The `faulttest-db` PostgreSQL instance used for certification
 > should be a dedicated, non-production database. All faults in the external-compatible catalog

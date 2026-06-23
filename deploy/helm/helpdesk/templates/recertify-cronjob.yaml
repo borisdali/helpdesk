@@ -1,0 +1,110 @@
+{{- if .Values.recertify.enabled }}
+{{- $fullname := include "helpdesk.fullname" . }}
+{{- $gatewayURL := printf "http://%s-gateway:%d" $fullname (.Values.gateway.port | int) }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-recertify
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: recertify
+spec:
+  schedule: {{ .Values.recertify.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      {{- if .Values.recertify.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ .Values.recertify.ttlSecondsAfterFinished }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: recertify
+        spec:
+          restartPolicy: Never
+          {{- if .Values.faulttest.rbac.create }}
+          serviceAccountName: {{ $fullname }}-faulttest
+          {{- end }}
+          initContainers:
+            - name: wait-for-gateway
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - sh
+                - -c
+                - |
+                  url="{{ $gatewayURL }}/health"
+                  echo "Waiting for gateway at $url..."
+                  until curl -sf "$url" >/dev/null 2>&1; do sleep 2; done
+                  echo "Gateway ready."
+          containers:
+            - name: faulttest
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["/usr/local/bin/faulttest"]
+              args:
+                - run
+                - --external
+                - --via-gateway
+                - --gateway={{ $gatewayURL }}
+                - --repeat={{ .Values.recertify.repeat }}
+                - --approval-mode=force
+                - --emit-and-wait
+                - --report-per-fault
+                {{- if .Values.recertify.conn }}
+                - --conn={{ .Values.recertify.conn }}
+                {{- end }}
+                {{- if .Values.recertify.agentConn }}
+                - --agent-conn={{ .Values.recertify.agentConn }}
+                {{- end }}
+                {{- if .Values.recertify.ids }}
+                - --ids={{ .Values.recertify.ids }}
+                {{- end }}
+                {{- if .Values.recertify.categories }}
+                - --categories={{ .Values.recertify.categories }}
+                {{- end }}
+                {{- if .Values.recertify.judge }}
+                - --judge
+                {{- end }}
+                {{- if .Values.infrastructure }}
+                - --infra-config=/etc/helpdesk/infrastructure.json
+                {{- end }}
+                - --report-dir=/reports
+              env:
+                {{- include "helpdesk.modelEnv" . | nindent 16 }}
+                {{- include "helpdesk.logLevelEnv" . | nindent 16 }}
+                {{- if .Values.recertify.gatewayAPIKeySecret }}
+                - name: HELPDESK_CLIENT_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.recertify.gatewayAPIKeySecret }}
+                      key: {{ .Values.recertify.gatewayAPIKeyKey | default "api-key" }}
+                {{- end }}
+                {{- if .Values.recertify.dbPasswordSecret.name }}
+                - name: {{ .Values.recertify.dbPasswordSecret.envVar | default "PGPASSWORD" }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.recertify.dbPasswordSecret.name }}
+                      key: {{ .Values.recertify.dbPasswordSecret.key | default "password" }}
+                {{- end }}
+              volumeMounts:
+                {{- if .Values.infrastructure }}
+                - name: infra-config
+                  mountPath: /etc/helpdesk/infrastructure.json
+                  subPath: infrastructure.json
+                  readOnly: true
+                {{- end }}
+                - name: reports
+                  mountPath: /reports
+          volumes:
+            {{- if .Values.infrastructure }}
+            - name: infra-config
+              configMap:
+                name: {{ $fullname }}-config
+            {{- end }}
+            - name: reports
+              emptyDir: {}
+{{- end }}

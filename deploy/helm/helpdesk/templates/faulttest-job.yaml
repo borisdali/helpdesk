@@ -139,6 +139,15 @@ spec:
             {{- if .Values.governance.auditd.enabled }}
             - --audit-url=http://{{ $fullname }}-auditd:{{ .Values.governance.auditd.port }}
             {{- end }}
+            {{- if gt (int .Values.faulttest.repeat) 1 }}
+            - --repeat={{ .Values.faulttest.repeat }}
+            {{- end }}
+            {{- if .Values.faulttest.reportPerFault }}
+            - --report-per-fault
+            {{- end }}
+            {{- if .Values.faulttest.agentModel }}
+            - --agent-model={{ .Values.faulttest.agentModel }}
+            {{- end }}
             {{- if .Values.faulttest.judge }}
             - --judge
             {{- end }}

@@ -432,6 +432,19 @@ faulttest:
   # are skipped automatically when this is true.
   external: false
 
+  # Number of times to run each fault. Values > 1 trigger triage consistency
+  # certification: a STABLE/UNSTABLE cert is posted to auditd after the run.
+  # Leave at 1 for normal (non-certifying) runs.
+  repeat: 1
+
+  # Write a separate JSON report per fault in addition to the combined report.
+  # Useful when repeat > 1 produces large combined reports.
+  reportPerFault: false
+
+  # Diagnosis model annotation recorded in stability certs. Defaults to the
+  # chart-wide HELPDESK_MODEL_NAME when left empty.
+  agentModel: ""
+
   # Enable semantic judge evaluation of agent responses (uses the chart model config).
   judge: false
 
@@ -511,3 +524,49 @@ faulttest:
   # How long (seconds) to retain the completed Job before auto-deletion.
   # Set to 0 to disable TTL (manual cleanup required).
   ttlSecondsAfterFinished: 3600
+
+# ── Triage consistency recertification ───────────────────────────────────────
+# Runs `faulttest run --external --via-gateway --repeat N` on a cron schedule
+# and posts STABLE/UNSTABLE certs to auditd. Equivalent to `make recertify`
+# for Kubernetes deployments. See docs/CONSISTENCY.md.
+recertify:
+  # Set to true to deploy the recertify CronJob.
+  enabled: false
+
+  # Cron schedule. Default: 03:00 UTC every Sunday — keeps certs within the
+  # 30-day staleness window with minimal cluster load.
+  schedule: "0 3 * * 0"
+
+  # Number of inject→triage→teardown cycles per fault (drives STABLE/UNSTABLE verdict).
+  # 5 gives a 95% CI width of ≤44pp at 100% pass rate; use 10 for tighter bounds.
+  repeat: 5
+
+  # Fault IDs to certify, comma-separated. Empty = all external-compatible faults.
+  ids: ""
+
+  # Categories to certify, comma-separated. Empty = all external-compatible categories.
+  categories: ""
+
+  # Connection string for the test database. Required.
+  # Example: "host=test-postgres.helpdesk.svc port=5432 dbname=testdb user=postgres"
+  conn: ""
+
+  # Connection string alias sent to the agent in prompts (the name agents see, not
+  # the raw DSN). Should match an entry in infrastructure.json with tag=test.
+  agentConn: "faulttest-db"
+
+  # Enable LLM-as-judge scoring alongside certification (uses chart model config).
+  judge: false
+
+  # How long (seconds) to retain completed recertify Jobs before auto-deletion.
+  ttlSecondsAfterFinished: 172800  # 48 hours — long enough to inspect reports
+
+  # DB password Secret — same format as faulttest.dbPasswordSecret.
+  dbPasswordSecret:
+    name: ""        # Leave empty to skip
+    key: "password"
+    envVar: "PGPASSWORD"
+
+  # Gateway API key Secret — same format as faulttest.gatewayAPIKeySecret.
+  gatewayAPIKeySecret: ""
+  gatewayAPIKeyKey: "api-key"
