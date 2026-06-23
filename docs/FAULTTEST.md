@@ -480,7 +480,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--repeat` | — | `1` | Run each matching fault N times (inject→diagnose→teardown) and print a stability report. Remediation is skipped in repeat mode. N > 1 triggers [triage consistency certification](CONSISTENCY.md) and posts a `STABLE`/`UNSTABLE` cert to auditd via the gateway. Use `make recertify` (from source) or `faulttest run --repeat 5 --auto-db` (binary) for batch certification of all faults. |
 | `--approval-mode` | — | playbook default | Override the playbook's `approval_mode` for this run (`auto\|session\|manual\|force`). Use `force` in repeat mode and automated pipelines to bypass interactive gates. |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
-| `--gateway` | — | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. No default — must be set explicitly when `--remediate` or `vault list` needs live validation. |
+| `--gateway` | `FAULTTEST_GATEWAY_URL` | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. When the env var is set, all subcommands — including `vault list`, `vault accuracy`, and `run --repeat` — pick it up automatically. |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |

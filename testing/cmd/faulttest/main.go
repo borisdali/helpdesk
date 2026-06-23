@@ -124,7 +124,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	// Remediation phase.
 	fs.BoolVar(&cfg.RemediateEnabled, "remediate", false, "Run remediation phase after injection+diagnosis")
-	fs.StringVar(&cfg.GatewayURL, "gateway", "", "Gateway URL for playbook/agent remediation and vault playbook checks")
+	fs.StringVar(&cfg.GatewayURL, "gateway", os.Getenv("FAULTTEST_GATEWAY_URL"), "Gateway URL for playbook/agent remediation and vault playbook checks")
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 	fs.StringVar(&cfg.ApprovalMode, "approval-mode", "", "Override playbook approval_mode for this run (auto|session|manual|force). Empty = playbook default. Use 'force' to bypass manual gates in automated runs.")
@@ -138,6 +138,10 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.Var(&extraCatalogs, "catalog", "Additional customer catalog file (repeatable)")
 	fs.StringVar(&cfg.SourceFilter, "source", "", "Filter faults by source: builtin or custom")
 	fs.StringVar(&cfg.ReportDir, "report-dir", ".", "Directory to write the JSON report (default: current directory)")
+	fs.BoolVar(&cfg.ReportPerFault, "report-per-fault", false, "Write a separate JSON report per fault (faulttest-{runID}-{faultID}.json) in addition to the combined report")
+
+	// Diagnosis model annotation — recorded in stability certs, not used to call any LLM.
+	fs.StringVar(&cfg.DiagnosisModel, "agent-model", os.Getenv("HELPDESK_MODEL_NAME"), "Model used by the triage agent (annotation in stability cert; default: HELPDESK_MODEL_NAME)")
 
 	// LLM judge options.
 	fs.BoolVar(&cfg.JudgeEnabled, "judge", false, "Enable LLM-as-judge for semantic diagnosis scoring")
@@ -602,6 +606,16 @@ func cmdRun(args []string) {
 			sr := buildStabilityReport(f, repResults)
 			sr.Print()
 			postStabilityCert(ctx, cfg, f, sr)
+		}
+
+		if cfg.ReportPerFault {
+			faultReport := BuildReport(runID+"-"+f.ID, repResults)
+			faultReportFile := fmt.Sprintf("%s/faulttest-%s-%s.json", cfg.ReportDir, runID, f.ID)
+			if err := faultReport.WriteJSON(faultReportFile); err != nil {
+				slog.Error("failed to write per-fault report", "fault", f.ID, "err", err)
+			} else {
+				fmt.Printf("Fault report: %s\n", faultReportFile)
+			}
 		}
 	}
 

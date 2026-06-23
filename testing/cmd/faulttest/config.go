@@ -180,6 +180,14 @@ type HarnessConfig struct {
 	SourceFilter string
 	// ReportDir is the directory where the JSON report is written (default: ".").
 	ReportDir string
+	// ReportPerFault writes an individual JSON report per fault in addition to the
+	// combined report. Files are named faulttest-{runID}-{faultID}.json.
+	ReportPerFault bool
+
+	// DiagnosisModel is the model used by the triage agent to generate diagnoses.
+	// Recorded as an annotation in the stability cert so the cert is self-describing.
+	// Defaults to HELPDESK_MODEL_NAME (the env var that configures the agent server).
+	DiagnosisModel string
 
 	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
 	JudgeEnabled bool

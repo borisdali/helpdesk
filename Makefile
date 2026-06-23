@@ -205,6 +205,13 @@ faulttest-gateway:
 		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
 		exit 1; \
 	fi
+	@if ! curl -sf "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
+		echo "Error: Gateway not reachable at $(FAULTTEST_GATEWAY_URL)"; \
+		echo "  Start the full stack first:"; \
+		echo "    HELPDESK_IDENTITY_PROVIDER=none \\"; \
+		echo "    docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait"; \
+		exit 1; \
+	fi
 	@echo "Starting test database..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running fault tests via gateway ($(FAULTTEST_GATEWAY_URL))..."
@@ -224,6 +231,13 @@ faulttest-gateway-nocache:
 		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
 		exit 1; \
 	fi
+	@if ! curl -sf "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
+		echo "Error: Gateway not reachable at $(FAULTTEST_GATEWAY_URL)"; \
+		echo "  Start the full stack first:"; \
+		echo "    HELPDESK_IDENTITY_PROVIDER=none \\"; \
+		echo "    docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait"; \
+		exit 1; \
+	fi
 	@echo "Starting test database..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running fault tests via gateway ($(FAULTTEST_GATEWAY_URL))..."
@@ -241,6 +255,8 @@ faulttest-gateway-nocache:
 # ---------------------------------------------------------------------------
 # Runs each fault N times via the gateway and posts a STABLE/UNSTABLE cert to
 # auditd. Certs are visible in 'vault list' (STABLE column) and 'vault accuracy'.
+# Writes one JSON report per fault (faulttest-{runID}-{faultID}.json) so results
+# can be inspected individually without grepping a combined blob.
 #
 # Required:
 #   FAULTTEST_GATEWAY_URL     e.g. http://localhost:8080
@@ -248,11 +264,16 @@ faulttest-gateway-nocache:
 # Optional:
 #   FAULTTEST_CONN_STR        injection DSN (default: local test DB started here)
 #   FAULTTEST_AGENT_CONN_STR  alias sent to the agent (default: faulttest-db)
-#   FAULTTEST_API_KEY         gateway API key; falls back to HELPDESK_CLIENT_API_KEY
 #   FAULTTEST_INFRA_CONFIG    path to infrastructure.json for safety-tag check
 #   RECERTIFY_REPEAT          runs per fault (default: 5)
 #   CATEGORIES                comma-separated categories to certify, e.g. database
 #   FAULT_IDS                 comma-separated fault IDs (overrides CATEGORIES)
+#
+# Judge (optional — adds semantic scoring on top of keyword/tool scores):
+#   RECERTIFY_JUDGE=1         enable LLM-as-judge
+#   HELPDESK_MODEL_NAME       judge model (e.g. claude-haiku-4-5-20251001)
+#   HELPDESK_MODEL_VENDOR     judge vendor: anthropic or google
+#   HELPDESK_API_KEY          judge API key (defaults to agent key)
 # ---------------------------------------------------------------------------
 RECERTIFY_LOG    = /tmp/helpdesk-recertify.log
 RECERTIFY_REPEAT ?= 5
@@ -263,6 +284,13 @@ recertify:
 	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ]; then \
 		echo "Error: FAULTTEST_GATEWAY_URL is not set"; \
 		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
+		exit 1; \
+	fi
+	@if ! curl -sf "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
+		echo "Error: Gateway not reachable at $(FAULTTEST_GATEWAY_URL)"; \
+		echo "  Start the full stack first:"; \
+		echo "    HELPDESK_IDENTITY_PROVIDER=none \\"; \
+		echo "    docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait"; \
 		exit 1; \
 	fi
 	@echo "Starting test database..."
@@ -276,9 +304,11 @@ recertify:
 		--gateway "$(FAULTTEST_GATEWAY_URL)" \
 		--repeat $(RECERTIFY_REPEAT) \
 		--approval-mode force \
+		--report-per-fault \
 		$(if $(CATEGORIES),--categories "$(CATEGORIES)",) \
 		$(if $(FAULT_IDS),--ids "$(FAULT_IDS)",) \
 		$(if $(FAULTTEST_INFRA_CONFIG),--infra-config "$(FAULTTEST_INFRA_CONFIG)",) \
+		$(if $(RECERTIFY_JUDGE),--judge,) \
 		2>&1 | tee $(RECERTIFY_LOG)
 	@echo ""
 	@echo "Certification results:"

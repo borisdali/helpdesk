@@ -301,15 +301,16 @@ type stabilityInfo struct {
 // fetchStabilityCert fetches the stability cert for a single fault from the gateway.
 // Returns nil when not found or on error.
 func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
-	FaultID          string    `json:"fault_id"`
-	FaultName        string    `json:"fault_name"`
-	PlaybookSeriesID string    `json:"playbook_series_id"`
-	Model            string    `json:"model"`
-	NRuns            int       `json:"n_runs"`
-	PassRate         float64   `json:"pass_rate"`
-	ConfRangePP      int       `json:"conf_range_pp"`
-	IsStable         bool      `json:"is_stable"`
-	TestedAt         string    `json:"tested_at"`
+	FaultID          string  `json:"fault_id"`
+	FaultName        string  `json:"fault_name"`
+	PlaybookSeriesID string  `json:"playbook_series_id"`
+	DiagnosisModel   string  `json:"diagnosis_model"`
+	JudgeModel       string  `json:"judge_model"`
+	NRuns            int     `json:"n_runs"`
+	PassRate         float64 `json:"pass_rate"`
+	ConfRangePP      int     `json:"conf_range_pp"`
+	IsStable         bool    `json:"is_stable"`
+	TestedAt         string  `json:"tested_at"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -335,7 +336,8 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		FaultID          string  `json:"fault_id"`
 		FaultName        string  `json:"fault_name"`
 		PlaybookSeriesID string  `json:"playbook_series_id"`
-		Model            string  `json:"model"`
+		DiagnosisModel   string  `json:"diagnosis_model"`
+		JudgeModel       string  `json:"judge_model"`
 		NRuns            int     `json:"n_runs"`
 		PassRate         float64 `json:"pass_rate"`
 		ConfRangePP      int     `json:"conf_range_pp"`
@@ -1031,6 +1033,9 @@ func vaultAccuracy(args []string) {
 			fmt.Println()
 			fmt.Println("  Tip: run `faulttest vault accuracy` (no args) to list all series with feedback.")
 		}
+		if faultID != "" {
+			printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
+		}
 		return
 	}
 	fmt.Printf("  Feedback submitted : %d runs\n", info.feedbackCount)
@@ -1077,34 +1082,48 @@ func vaultAccuracy(args []string) {
 	// Triage consistency certification — shown when a fault ID was given
 	// (not a bare series ID, where we don't know which fault to look up).
 	if faultID != "" {
-		fmt.Println()
-		fmt.Println("Triage consistency")
-		cert := fetchStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
-		if cert == nil {
-			fmt.Println("  Not yet certified — run `faulttest run --repeat N` to generate a stability report.")
-		} else {
-			verdict := "UNSTABLE"
-			if cert.IsStable {
-				verdict = "STABLE"
-			}
-			fmt.Printf("  Verdict       : %s\n", verdict)
-			fmt.Printf("  Runs          : %d\n", cert.NRuns)
-			fmt.Printf("  Pass rate     : %.0f%%\n", cert.PassRate*100)
-			fmt.Printf("  Conf range    : %dpp  (primary hypothesis, passing runs only)\n", cert.ConfRangePP)
-			if cert.PlaybookSeriesID != "" {
-				fmt.Printf("  Playbook      : %s\n", cert.PlaybookSeriesID)
-			}
-			if cert.Model != "" {
-				fmt.Printf("  Model         : %s\n", cert.Model)
-			}
-			if cert.TestedAt != "" {
-				if t, err := time.Parse(time.RFC3339Nano, cert.TestedAt); err == nil {
-					age := int(time.Since(t).Hours() / 24)
-					fmt.Printf("  Tested at     : %s  (%d days ago)\n", t.Format("2006-01-02 15:04 MST"), age)
-					if age >= 30 {
-						fmt.Println("  [WARN] cert is older than 30 days — consider re-running --repeat to refresh")
-					}
-				}
+		printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
+	}
+}
+
+// printFaultStabilityCert fetches and prints the stability cert for faultID.
+// Called from both the zero-feedback and post-accuracy paths of vaultAccuracy.
+func printFaultStabilityCert(gatewayURL, apiKey, faultID string) {
+	fmt.Println()
+	fmt.Println("Triage consistency")
+	cert := fetchStabilityCert(gatewayURL, apiKey, faultID)
+	if cert == nil {
+		fmt.Println("  Not yet certified — run `faulttest run --repeat N` to generate a stability report.")
+		return
+	}
+	verdict := "UNSTABLE"
+	if cert.IsStable {
+		verdict = "STABLE"
+	}
+	if cert.FaultName != "" {
+		fmt.Printf("  Fault         : %s  (%s)\n", cert.FaultID, cert.FaultName)
+	} else {
+		fmt.Printf("  Fault         : %s\n", cert.FaultID)
+	}
+	fmt.Printf("  Verdict       : %s\n", verdict)
+	fmt.Printf("  Runs          : %d\n", cert.NRuns)
+	fmt.Printf("  Pass rate     : %.0f%%\n", cert.PassRate*100)
+	fmt.Printf("  Conf range    : %dpp  (primary hypothesis, passing runs only)\n", cert.ConfRangePP)
+	if cert.PlaybookSeriesID != "" {
+		fmt.Printf("  Playbook      : %s\n", cert.PlaybookSeriesID)
+	}
+	if cert.DiagnosisModel != "" {
+		fmt.Printf("  Diagnosis model: %s\n", cert.DiagnosisModel)
+	}
+	if cert.JudgeModel != "" {
+		fmt.Printf("  Judge model   : %s\n", cert.JudgeModel)
+	}
+	if cert.TestedAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, cert.TestedAt); err == nil {
+			age := int(time.Since(t).Hours() / 24)
+			fmt.Printf("  Tested at     : %s  (%d days ago)\n", t.Format("2006-01-02 15:04 MST"), age)
+			if age >= 30 {
+				fmt.Println("  [WARN] cert is older than 30 days — consider re-running --repeat to refresh")
 			}
 		}
 	}
@@ -1823,7 +1842,8 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		"fault_id":           sr.FailureID,
 		"fault_name":         sr.FailureName,
 		"playbook_series_id": f.DiagnosisPlaybookSeriesID,
-		"model":              cfg.JudgeModel, // annotation only; empty when no judge
+		"diagnosis_model":    cfg.DiagnosisModel, // agent model being certified; from --agent-model / HELPDESK_MODEL_NAME
+		"judge_model":        cfg.JudgeModel,     // empty when no judge was used
 		"n_runs":             sr.N,
 		"pass_rate":          sr.passRate(),
 		"conf_range_pp":      int(math.Round(sr.confRange() * 100)),

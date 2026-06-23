@@ -31,7 +31,8 @@ func TestFaultStabilityStore_UpsertAndGet(t *testing.T) {
 		FaultID:          "db-lock-contention",
 		FaultName:        "Lock contention / deadlock",
 		PlaybookSeriesID: "pbs_lock_contention_triage",
-		Model:            "claude-haiku-4-5-20251001",
+		DiagnosisModel:   "claude-sonnet-4-6",
+		JudgeModel:       "claude-haiku-4-5-20251001",
 		NRuns:            5,
 		PassRate:         1.0,
 		ConfRangePP:      4,
@@ -55,8 +56,11 @@ func TestFaultStabilityStore_UpsertAndGet(t *testing.T) {
 	if got.PlaybookSeriesID != cert.PlaybookSeriesID {
 		t.Errorf("PlaybookSeriesID: got %q, want %q", got.PlaybookSeriesID, cert.PlaybookSeriesID)
 	}
-	if got.Model != cert.Model {
-		t.Errorf("Model: got %q, want %q", got.Model, cert.Model)
+	if got.DiagnosisModel != cert.DiagnosisModel {
+		t.Errorf("DiagnosisModel: got %q, want %q", got.DiagnosisModel, cert.DiagnosisModel)
+	}
+	if got.JudgeModel != cert.JudgeModel {
+		t.Errorf("JudgeModel: got %q, want %q", got.JudgeModel, cert.JudgeModel)
 	}
 	if got.NRuns != cert.NRuns {
 		t.Errorf("NRuns: got %d, want %d", got.NRuns, cert.NRuns)
@@ -184,6 +188,67 @@ func TestFaultStabilityStore_ListAll_Empty(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Errorf("ListAll on empty store: got %d entries, want 0", len(list))
+	}
+}
+
+// TestFaultStabilityStore_Migrate verifies that an existing table created without
+// the diagnosis_model column gets the column added by migrate().
+func TestFaultStabilityStore_Migrate(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// Create the old schema (no diagnosis_model column).
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert (
+    fault_id           TEXT    NOT NULL PRIMARY KEY,
+    fault_name         TEXT    NOT NULL DEFAULT '',
+    playbook_series_id TEXT    NOT NULL DEFAULT '',
+    model              TEXT    NOT NULL DEFAULT '',
+    n_runs             INTEGER NOT NULL DEFAULT 0,
+    pass_rate          REAL    NOT NULL DEFAULT 0,
+    conf_range_pp      INTEGER NOT NULL DEFAULT 0,
+    is_stable          INTEGER NOT NULL DEFAULT 0,
+    tested_at          TEXT    NOT NULL DEFAULT ''
+)`); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	// Seed a row without diagnosis_model.
+	if _, err := store.DB().Exec(
+		`INSERT INTO fault_stability_cert (fault_id, n_runs, is_stable) VALUES ('db-old-fault', 3, 1)`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	// Opening via NewFaultStabilityStore must trigger migrate() and add the column.
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// After migration, existing rows should have an empty diagnosis_model and
+	// new rows should round-trip DiagnosisModel correctly.
+	cert := &FaultStabilityCert{
+		FaultID:        "db-new-fault",
+		DiagnosisModel: "claude-sonnet-4-6",
+		JudgeModel:     "claude-haiku-4-5-20251001",
+		NRuns:          5,
+		IsStable:       true,
+	}
+	if err := fs.Upsert(context.Background(), cert); err != nil {
+		t.Fatalf("Upsert after migrate: %v", err)
+	}
+	got, err := fs.GetByFaultID(context.Background(), "db-new-fault")
+	if err != nil {
+		t.Fatalf("GetByFaultID: %v", err)
+	}
+	if got.DiagnosisModel != "claude-sonnet-4-6" {
+		t.Errorf("DiagnosisModel: got %q, want claude-sonnet-4-6", got.DiagnosisModel)
+	}
+	if got.JudgeModel != "claude-haiku-4-5-20251001" {
+		t.Errorf("JudgeModel: got %q, want claude-haiku-4-5-20251001", got.JudgeModel)
 	}
 }
 
