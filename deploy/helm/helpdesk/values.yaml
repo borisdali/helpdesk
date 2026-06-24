@@ -42,6 +42,15 @@ agents:
     # Required when auditd enforces inbound auth (HELPDESK_IDENTITY_PROVIDER=static).
     auditAPIKeySecret: ""
     auditAPIKeyKey: "api-key"
+    # Extra env vars injected into the database-agent pod. Use this to expose
+    # password_env variables referenced in infrastructure.json entries, e.g.:
+    #   extraEnv:
+    #     - name: CNPG_APP_PASSWORD
+    #       valueFrom:
+    #         secretKeyRef:
+    #           name: cnpg-app-password
+    #           key: password
+    extraEnv: []
 
   k8s:
     replicas: 1

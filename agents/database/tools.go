@@ -111,6 +111,28 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 					}, nil
 				}
 			}
+			// Exact match failed — try host field as an infra ID. Handles the case
+			// where the LLM builds a DSN using the alias as the hostname
+			// (e.g. host=pg-cluster-minkube) instead of the stored FQDN.
+			inputHost := ""
+			for _, part := range strings.Split(connStrOrName, " ") {
+				if strings.HasPrefix(part, "host=") {
+					inputHost = strings.TrimPrefix(part, "host=")
+					break
+				}
+			}
+			if inputHost != "" {
+				if db, ok := infraConfig.DBServers[inputHost]; ok {
+					slog.Debug("resolved connection string via host-as-infra-id", "id", inputHost)
+					return databaseInfo{
+						Name:              inputHost,
+						ConnectionStr:     db.ResolvedConnectionString(),
+						Tags:              db.Tags,
+						Sensitivity:       db.Sensitivity,
+						IsFromInfraConfig: true,
+					}, nil
+				}
+			}
 			// infraConfig is set but connection string not registered — check ephemeral registry.
 			ephemeralDBsMu.RLock()
 			for id, db := range ephemeralDBs {
