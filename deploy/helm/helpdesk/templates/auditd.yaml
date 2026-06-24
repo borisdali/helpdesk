@@ -65,6 +65,13 @@ spec:
             - name: HELPDESK_POLICY_FILE
               value: /etc/helpdesk/policies.yaml
             {{- end }}
+            {{- if .Values.governance.policy.enabled }}
+            # Explicitly enable the policy engine on auditd so agents in remote
+            # check mode (HELPDESK_AUDIT_URL set + HELPDESK_POLICY_ENABLED=true)
+            # receive a healthy probe response from GET /v1/governance/info.
+            - name: HELPDESK_POLICY_ENABLED
+              value: "true"
+            {{- end }}
             {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- if and .Values.governance.email.enabled .Values.governance.email.smtpSecret }}
             - name: SMTP_USER
