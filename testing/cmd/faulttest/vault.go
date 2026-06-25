@@ -2161,6 +2161,8 @@ type narrativeFeedback struct {
 // narrativeEval mirrors RunEvaluation fields used by the deep-dive display.
 type narrativeEval struct {
 	DiagnosisScore            float64 `json:"diagnosis_score"`
+	RemediationScore          float64 `json:"remediation_score,omitempty"`
+	OverallScore              float64 `json:"overall_score"`
 	RemediationJudgeScore     float64 `json:"remediation_judge_score"`
 	RemediationJudgeReasoning string  `json:"remediation_judge_reasoning"`
 	PrimaryConfidence         float64 `json:"primary_confidence"`
@@ -2360,6 +2362,14 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		diagLabel := "heuristic"
 		if ev.JudgeUsed {
 			diagLabel = "LLM judge"
+		}
+		// Overall score matches the SCORE column in vault incidents <fault-id>.
+		if ev.OverallScore > 0 {
+			breakdown := fmt.Sprintf("diagnosis %d%%", int(ev.DiagnosisScore*100))
+			if ev.RemediationScore > 0 {
+				breakdown += fmt.Sprintf(" · remediation %d%%", int(ev.RemediationScore*100))
+			}
+			fmt.Printf("Score:         %d%%   (%s)\n", int(ev.OverallScore*100), breakdown)
 		}
 		fmt.Printf("Diagnosis:     %.2f (%s)", ev.DiagnosisScore, diagLabel)
 		if ev.PrimaryConfidence > 0 {
