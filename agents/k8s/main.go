@@ -63,7 +63,7 @@ func main() {
 	traceStore := &audit.CurrentTraceStore{}
 
 	if auditStore != nil {
-		defer auditStore.Close()
+		defer func() { _ = auditStore.Close() }()
 		// Create tool auditor with trace store for dynamic trace_id
 		sessionID := "k8sagent_" + uuid.New().String()[:8]
 		toolAuditor = audit.NewToolAuditorWithTraceStore(auditStore, "k8s_agent", sessionID, traceStore)

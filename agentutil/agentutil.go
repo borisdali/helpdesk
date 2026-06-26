@@ -1120,7 +1120,7 @@ func (e *PolicyEnforcer) callRemotePolicyCheck(ctx context.Context, req policyCh
 		slog.Warn("remote policy check: service unreachable; failing closed", "url", checkURL, "err", err)
 		return policyCheckResp{}, fmt.Errorf("policy check failed: policy service unreachable")
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	// 403 is the expected status for a deny decision (body still carries the effect).
 	// Any other non-2xx (e.g. 503 "policy engine not configured") is an infrastructure

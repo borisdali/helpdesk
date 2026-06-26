@@ -556,7 +556,7 @@ func readPgLogFileViaCopy(ctx context.Context, host resolvedHost, logDir string,
 	if err != nil {
 		return PgLogFileResult{}, fmt.Errorf("read_pg_log_file: cannot create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// docker cp containerName:logDir/. tmpDir copies the directory contents.
 	src := host.ContainerName + ":" + logDir + "/."

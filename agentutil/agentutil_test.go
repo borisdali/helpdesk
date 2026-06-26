@@ -50,7 +50,7 @@ func writeTempPolicyFile(t *testing.T, content string) string {
 	if _, err := f.WriteString(content); err != nil {
 		t.Fatalf("write temp policy file: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 	return f.Name()
 }
 
@@ -481,7 +481,7 @@ func TestCheckTool_ReadonlyGoverned_AuditsDenial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ta := audit.NewToolAuditor(store, "test-agent", "sess-rg", "trace-rg")
 	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{ToolAuditor: ta})
@@ -537,7 +537,7 @@ func TestCheckTool_EmitsToolInvokedWhenPolicyDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ta := audit.NewToolAuditor(store, "test-agent", "sess-1", "trace-cov")
 	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{

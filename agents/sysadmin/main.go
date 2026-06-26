@@ -61,7 +61,7 @@ func main() {
 	traceStore := &audit.CurrentTraceStore{}
 
 	if auditStore != nil {
-		defer auditStore.Close()
+		defer func() { _ = auditStore.Close() }()
 		sessionID := "sysadmin_" + uuid.New().String()[:8]
 		toolAuditor = audit.NewToolAuditorWithTraceStore(auditStore, "sysadmin_agent", sessionID, traceStore)
 		slog.Info("tool auditing enabled", "session_id", sessionID)

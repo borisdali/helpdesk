@@ -691,7 +691,7 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 	if err != nil {
 		return KubectlResult{}, fmt.Errorf("error getting pod logs: %v", diagnoseClientError(err))
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	data, err := io.ReadAll(stream)
 	duration := time.Since(start)
