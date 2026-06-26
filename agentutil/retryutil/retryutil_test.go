@@ -113,13 +113,15 @@ func TestWaitUntilResolved_AfterAttemptCallback(t *testing.T) {
 
 	cfg := Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
 	calls := 0
-	WaitUntilResolved(context.Background(), cfg,
+	if _, _, err := WaitUntilResolved(context.Background(), cfg,
 		func() (bool, error) { calls++; return calls == 3, nil },
 		func(attempt int, resolved bool) {
 			gotAttempts = append(gotAttempts, attempt)
 			gotResolved = append(gotResolved, resolved)
 		},
-	)
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	wantAttempts := []int{1, 2, 3}
 	wantResolved := []bool{false, false, true}

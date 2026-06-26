@@ -220,7 +220,7 @@ func runList(client *http.Client, baseURL, since, session, trace, tracePrefix, e
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 3
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -286,10 +286,10 @@ func runList(client *http.Client, baseURL, since, session, trace, tracePrefix, e
 
 		var eventID, ts string
 		if v, ok := e.raw["event_id"]; ok {
-			json.Unmarshal(v, &eventID)
+			_ = json.Unmarshal(v, &eventID)
 		}
 		if v, ok := e.raw["timestamp"]; ok {
-			json.Unmarshal(v, &ts)
+			_ = json.Unmarshal(v, &ts)
 			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 				ts = t.Local().Format("2006-01-02 15:04:05")
 			}
@@ -316,17 +316,17 @@ func runList(client *http.Client, baseURL, since, session, trace, tracePrefix, e
 // Columns: EVENT  TIME  EFFECT  ACTION  RESOURCE  POLICY  TRACE
 func printTable(events []parsedEvent) int {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "EVENT\tTIME\tEFFECT\tACTION\tRESOURCE\tPOLICY\tTRACE")
+	_, _ = fmt.Fprintln(w, "EVENT\tTIME\tEFFECT\tACTION\tRESOURCE\tPOLICY\tTRACE")
 
 	for _, e := range events {
 		var eventID, ts, traceID string
 		var resourceType, resourceName, action, policyName string
 
 		if v, ok := e.raw["event_id"]; ok {
-			json.Unmarshal(v, &eventID)
+			_ = json.Unmarshal(v, &eventID)
 		}
 		if v, ok := e.raw["timestamp"]; ok {
-			json.Unmarshal(v, &ts)
+			_ = json.Unmarshal(v, &ts)
 			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 				ts = t.Local().Format("01-02 15:04:05")
 			}
@@ -353,11 +353,11 @@ func printTable(events []parsedEvent) int {
 		}
 
 		resource := resourceType + ":" + resourceName
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			eventID, ts, strings.ToUpper(e.effStr), action, resource, policyName, traceID)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 	return 0
 }
 
@@ -468,7 +468,7 @@ func doExplainRequest(client *http.Client, endpoint string, asJSON bool) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 3
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

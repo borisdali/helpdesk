@@ -125,7 +125,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(jwksBody)
+		_, _ = w.Write(jwksBody)
 	})
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)

@@ -163,7 +163,7 @@ func main() {
 	// Start callback server before the POST so it's ready to receive.
 	callbackCh := make(chan callbackPayload, 1)
 	srv := startCallbackServer(*listen, callbackCh)
-	defer srv.Shutdown(context.Background())
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	logf("POST /api/v1/incidents")
 	logf("  infra_key:    %s", *infraKey)
@@ -288,7 +288,7 @@ func startCallbackServer(addr string, ch chan<- callbackPayload) *http.Server {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"received"}`))
+		_, _ = w.Write([]byte(`{"status":"received"}`))
 
 		select {
 		case ch <- p:
