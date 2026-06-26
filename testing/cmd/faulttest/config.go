@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -141,6 +142,10 @@ type HarnessConfig struct {
 	// AutoDB instructs faulttest to spin up a temporary Docker PostgreSQL and use
 	// it as the injection target. Implies External=true. Only auto-db-compat faults run.
 	AutoDB bool
+	// Repeat is the number of inject→triage→teardown cycles to run per fault.
+	// Values > 1 enable stability testing: remediation is skipped and a
+	// StabilityReport is printed after all cycles complete. Default 1.
+	Repeat int
 	// RemediateEnabled runs the remediation phase after injection + diagnosis.
 	RemediateEnabled bool
 	// GatewayURL is the helpdesk gateway base URL for playbook/agent remediation.
@@ -175,6 +180,14 @@ type HarnessConfig struct {
 	SourceFilter string
 	// ReportDir is the directory where the JSON report is written (default: ".").
 	ReportDir string
+	// ReportPerFault writes an individual JSON report per fault in addition to the
+	// combined report. Files are named faulttest-{runID}-{faultID}.json.
+	ReportPerFault bool
+
+	// DiagnosisModel is the model used by the triage agent to generate diagnoses.
+	// Recorded as an annotation in the stability cert so the cert is self-describing.
+	// Defaults to HELPDESK_MODEL_NAME (the env var that configures the agent server).
+	DiagnosisModel string
 
 	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
 	JudgeEnabled bool
@@ -480,4 +493,23 @@ func connStrHost(connStr string) string {
 		}
 	}
 	return ""
+}
+
+// logConnResolution logs a single INFO line showing what alias (if any) a conn
+// flag resolved to. Skipped when the flag was empty. When the value changed
+// (alias was expanded), logs alias→host. When unchanged (raw DSN passed
+// directly), logs just the host so the operator can still verify the target.
+func logConnResolution(flag, before, after string) {
+	if after == "" {
+		return
+	}
+	host := connStrHost(after)
+	if host == "" {
+		host = after // fallback: log the raw value if we can't parse a host
+	}
+	if before != after {
+		slog.Info(flag, "alias", before, "host", host)
+	} else {
+		slog.Info(flag, "host", host)
+	}
 }

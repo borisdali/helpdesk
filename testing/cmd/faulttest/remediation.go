@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,11 @@ import (
 	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
+
+// errGateDenied is returned by runGateLoop when the operator explicitly denies
+// remediation at the gate. HandlePendingGate treats it as a clean skip — not
+// an error — and omits verify_sql polling.
+var errGateDenied = errors.New("operator denied remediation at gate")
 
 // RemediationResult holds the outcome of a remediation attempt.
 type RemediationResult struct {
@@ -70,6 +76,10 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		"escalation_target", gate.EscalationTarget,
 	)
 	if err := r.runGateLoop(ctx, gate); err != nil {
+		if errors.Is(err, errGateDenied) {
+			fmt.Println("  Remediation skipped (denied).")
+			return RemediationResult{Passed: false, Method: "playbook"}
+		}
 		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
 	}
 
@@ -360,11 +370,59 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer != "y" && answer != "yes" {
 		fmt.Println("  Denied.")
-		_, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
-			Resolution: "denied",
-			ResolvedBy: r.cfg.OperatorID,
+		fmt.Println()
+		fmt.Println("  Feedback (optional — recorded even though remediation was denied):")
+		var denyVerdictCorrect *bool
+		var denyVerdictNotes string
+		fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
+		diagAnswer, _ := reader.ReadString('\n')
+		diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
+		if diagAnswer == "y" || diagAnswer == "yes" {
+			v := true
+			denyVerdictCorrect = &v
+		} else if diagAnswer == "n" || diagAnswer == "no" {
+			v := false
+			denyVerdictCorrect = &v
+		}
+		if denyVerdictCorrect != nil {
+			defaultCause := primaryHypothesisText(gate.DiagnosticReport)
+			prompt := "    Root cause"
+			if defaultCause != "" {
+				prompt += fmt.Sprintf(" (Enter to confirm: %q)", defaultCause)
+			}
+			fmt.Print(prompt + ": ")
+			causeInput, _ := reader.ReadString('\n')
+			causeInput = strings.TrimSpace(causeInput)
+			if causeInput == "" {
+				causeInput = defaultCause
+			}
+			denyVerdictNotes = causeInput
+		}
+		var denyRemVerdictCorrect *bool
+		var denyRemVerdictNotes string
+		fmt.Print("    Was the proposed remediation appropriate? [y/n/skip]: ")
+		remAnswer, _ := reader.ReadString('\n')
+		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
+		if remAnswer == "y" || remAnswer == "yes" {
+			v := true
+			denyRemVerdictCorrect = &v
+		} else if remAnswer == "n" || remAnswer == "no" {
+			v := false
+			denyRemVerdictCorrect = &v
+			fmt.Print("    Notes on remediation plan (optional): ")
+			remNotes, _ := reader.ReadString('\n')
+			denyRemVerdictNotes = strings.TrimSpace(remNotes)
+		}
+		r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{ //nolint:errcheck
+			Resolution:     "denied",
+			ResolvedBy:     r.cfg.OperatorID,
+			VerdictCorrect: denyVerdictCorrect,
+			VerdictNotes:   denyVerdictNotes,
 		})
-		return err
+		if denyRemVerdictCorrect != nil {
+			r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", denyRemVerdictCorrect, denyRemVerdictNotes, "")
+		}
+		return errGateDenied
 	}
 
 	suggested := gate.SuggestedApprovalMode
@@ -374,7 +432,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	validModes := map[string]bool{"manual": true, "review": true, "auto": true}
 	var modeInput string
 	for {
-		fmt.Printf("  Approval mode [manual/review/auto] (default: %s): ", suggested)
+		fmt.Printf("  Approval remediation mode [manual/review/auto] (default: %s): ", suggested)
 		modeInput, _ = reader.ReadString('\n')
 		modeInput = strings.TrimSpace(strings.ToLower(modeInput))
 		if modeInput == "" {
@@ -387,7 +445,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		fmt.Printf("  Invalid mode %q — enter manual, review, or auto (or press Enter for %s).\n", modeInput, suggested)
 	}
 
-	fmt.Print("  Approval note (optional): ")
+	fmt.Print("  Approval note — reason for approving remediation (optional): ")
 	reasonInput, _ := reader.ReadString('\n')
 	reasonInput = strings.TrimSpace(reasonInput)
 
@@ -457,7 +515,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		return fmt.Errorf("proceed-escalation: %w", err)
 	}
 	if remVerdictCorrect != nil {
-		r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", remVerdictCorrect, remVerdictNotes)
+		r.postFeedback(ctx, gate.RunID, "remediation", "at_gate", remVerdictCorrect, remVerdictNotes, "")
 	}
 	if resp.Status == "pending_approval" {
 		return r.runApprovalLoop(ctx, *resp)
@@ -492,6 +550,9 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 		return r.runApprovalLoop(ctx, *resp)
 	}
 	slog.Info("gate resolved externally", "status", resp.Status)
+	if resp.Status == "denied" {
+		return errGateDenied
+	}
 	return nil
 }
 
@@ -816,7 +877,7 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 		causeInput = defaultRootCause
 	}
 
-	r.postFeedback(ctx, triageRunID, "triage", "post_incident", diagCorrect, causeInput)
+	r.postFeedback(ctx, triageRunID, "triage", "post_incident", diagCorrect, causeInput, "")
 
 	// Remediation approach feedback — only when remediation ran.
 	if remRunID != "" {
@@ -827,18 +888,20 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 			v := true
 			fmt.Print("    Remediation approach notes (optional): ")
 			remNotes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes))
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes), "")
 		} else if remAnswer == "n" || remAnswer == "no" {
 			v := false
 			fmt.Print("    Notes on remediation approach (optional): ")
 			notes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes))
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes), "")
 		}
 	}
 }
 
-// postFeedback POSTs a single feedback record to the gateway.
-func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feedbackTime string, verdictCorrect *bool, notes string) {
+// postFeedback POSTs a single feedback record to the gateway. source is
+// "auto_judge" for machine-inferred verdicts (force mode) or "" / "human" for
+// operator-provided verdicts; the gateway stores it in feedback_source.
+func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feedbackTime string, verdictCorrect *bool, notes, source string) {
 	fb := map[string]any{
 		"run_id":          runID,
 		"verdict_correct": verdictCorrect,
@@ -847,6 +910,9 @@ func (r *Remediator) postFeedback(ctx context.Context, runID, feedbackType, feed
 	}
 	if notes != "" {
 		fb["verdict_notes"] = notes
+	}
+	if source != "" {
+		fb["feedback_source"] = source
 	}
 	if r.cfg.OperatorID != "" {
 		fb["operator"] = r.cfg.OperatorID

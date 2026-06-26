@@ -147,6 +147,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create fault stability store (shares the same database connection)
+	faultStabilityStore, err := audit.NewFaultStabilityStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create fault stability store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create playbook run step store (shares the same database connection)
 	playbookRunStepStore, err := audit.NewPlaybookRunStepStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -258,6 +265,7 @@ func main() {
 	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore, feedbackStore: runFeedbackStore, evaluationStore: runEvaluationStore}
 	playbookRunStepSrv := &playbookRunStepServer{store: playbookRunStepStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
+	faultStabilitySrv := &faultStabilityServer{store: faultStabilityStore}
 
 	mux := http.NewServeMux()
 
@@ -325,6 +333,11 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/series/{seriesID}/version-stats", auth("GET /v1/fleet/series/{seriesID}/version-stats", playbookRunSrv.handleVersionStats))
 	mux.HandleFunc("GET /v1/fleet/calibration", auth("GET /v1/fleet/calibration", playbookRunSrv.handleCalibration))
 	mux.HandleFunc("GET /v1/fleet/fault-run-history", auth("GET /v1/fleet/fault-run-history", playbookRunSrv.handleFaultRunHistory))
+
+	// Fault triage consistency certification (--repeat N results).
+	mux.HandleFunc("POST /v1/fleet/fault-stability", auth("POST /v1/fleet/fault-stability", faultStabilitySrv.handleUpsert))
+	mux.HandleFunc("GET /v1/fleet/fault-stability", auth("GET /v1/fleet/fault-stability", faultStabilitySrv.handleList))
+	mux.HandleFunc("GET /v1/fleet/fault-stability/{faultID}", auth("GET /v1/fleet/fault-stability/{faultID}", faultStabilitySrv.handleGet))
 
 	// Playbook run step endpoints (agent_approve mode)
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/steps", auth("POST /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleCreateStep))

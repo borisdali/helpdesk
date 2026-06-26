@@ -162,6 +162,7 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	for _, s := range seeds {
 		if err := evalStore.Upsert(ctx, &RunEvaluation{
 			RunID: s.runID, FailureID: "db-lock", DiagnosisScore: s.score, OverallScore: s.score,
+			PrimaryConfidence: s.score,
 		}); err != nil {
 			t.Fatalf("Upsert %s: %v", s.runID, err)
 		}
@@ -234,6 +235,7 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	// Runs without feedback are excluded.
 	noFeedbackRun := &RunEvaluation{
 		RunID: "plr_c99", FailureID: "db-lock", DiagnosisScore: 0.93, OverallScore: 0.93,
+		PrimaryConfidence: 0.93,
 	}
 	if err := evalStore.Upsert(ctx, noFeedbackRun); err != nil {
 		t.Fatalf("Upsert no-feedback run: %v", err)
@@ -250,6 +252,7 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	// preferring at_gate. plr_c_gate has score 0.93 (90-100% band) and correct=true.
 	atGateRun := &RunEvaluation{
 		RunID: "plr_c_gate", FailureID: "db-lock", DiagnosisScore: 0.93, OverallScore: 0.93,
+		PrimaryConfidence: 0.93,
 	}
 	if err := evalStore.Upsert(ctx, atGateRun); err != nil {
 		t.Fatalf("Upsert at_gate run: %v", err)
@@ -297,6 +300,7 @@ func TestRunEvaluationStore_CalibrationBands(t *testing.T) {
 	// Pending feedback (verdict_correct = NULL) must NOT count.
 	pendingRun := &RunEvaluation{
 		RunID: "plr_c_pend", FailureID: "db-lock", DiagnosisScore: 0.94, OverallScore: 0.94,
+		PrimaryConfidence: 0.94,
 	}
 	if err := evalStore.Upsert(ctx, pendingRun); err != nil {
 		t.Fatalf("Upsert pending run: %v", err)
@@ -357,9 +361,10 @@ func TestRunEvaluationStore_RemediationCalibrationBands(t *testing.T) {
 	for _, s := range seeds {
 		if err := evalStore.Upsert(ctx, &RunEvaluation{
 			RunID: s.runID, FailureID: "db-lock",
-			DiagnosisScore:   s.diagSc,
-			RemediationScore: s.remedSc,
-			OverallScore:     s.diagSc,
+			DiagnosisScore:        s.diagSc,
+			PrimaryConfidence:     s.diagSc,
+			RemediationJudgeScore: s.remedSc,
+			OverallScore:          s.diagSc,
 		}); err != nil {
 			t.Fatalf("Upsert %s: %v", s.runID, err)
 		}
@@ -390,9 +395,9 @@ func TestRunEvaluationStore_RemediationCalibrationBands(t *testing.T) {
 		t.Errorf("TotalRuns = %d, want 5", report.TotalRuns)
 	}
 
-	// Remediation bands: only 3 runs (plr_r01–r03) qualify:
+	// Remediation bands: only 3 runs (plr_r01-r03) qualify:
 	//   plr_r04 has no remediation feedback → excluded
-	//   plr_r05 has remediation_score=0 → excluded by WHERE ev.remediation_score > 0
+	//   plr_r05 has remediation_judge_score=0 → excluded by WHERE ev.remediation_judge_score > 0
 	if report.RemediationRuns != 3 {
 		t.Errorf("RemediationRuns = %d, want 3", report.RemediationRuns)
 	}
@@ -427,8 +432,8 @@ func TestRunEvaluationStore_RemediationCalibrationBands(t *testing.T) {
 		t.Errorf("scoped RemediationRuns = %d, want 3", scoped.RemediationRuns)
 	}
 
-	// at_gate remediation feedback preferred over post_incident.
-	// plr_r02 has post_incident=wrong; add at_gate=correct → band should flip to 2/2.
+	// Post-incident feedback is preferred over at-gate for remediation (actual outcome > plan review).
+	// plr_r02 has post_incident=wrong; add at_gate=correct → post_incident still wins → Correct stays 1.
 	if err := fbStore.Submit(ctx, &RunFeedback{
 		RunID: "plr_r02", SeriesID: seriesID, FeedbackType: "remediation", FeedbackTime: "at_gate",
 		VerdictCorrect: &tr,
@@ -440,8 +445,8 @@ func TestRunEvaluationStore_RemediationCalibrationBands(t *testing.T) {
 		t.Fatalf("CalibrationBands after at_gate: %v", err)
 	}
 	b90Gate := reportGate.RemediationBands[0]
-	if b90Gate.Runs != 2 || b90Gate.Correct != 2 {
-		t.Errorf("90-100%% after at_gate remed: Runs=%d Correct=%d, want Runs=2 Correct=2 (at_gate preferred)", b90Gate.Runs, b90Gate.Correct)
+	if b90Gate.Runs != 2 || b90Gate.Correct != 1 {
+		t.Errorf("90-100%% after at_gate remed: Runs=%d Correct=%d, want Runs=2 Correct=1 (post_incident preferred)", b90Gate.Runs, b90Gate.Correct)
 	}
 }
 
@@ -529,5 +534,184 @@ func TestRunEvaluationStore_ListHistory(t *testing.T) {
 	}
 	if len(entries3) != 1 {
 		t.Errorf("ListHistory 2 days: got %d entries, want 1", len(entries3))
+	}
+}
+
+func TestRunEvaluationStore_PrimaryConfidence_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newRunEvaluationStore(t)
+
+	eval := &RunEvaluation{
+		RunID:             "plr_conf01",
+		FailureID:         "db-lock",
+		DiagnosisScore:    0.87,
+		PrimaryConfidence: 0.87,
+		OverallScore:      0.87,
+		Passed:            true,
+	}
+	if err := store.Upsert(ctx, eval); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	got, err := store.GetByRunID(ctx, eval.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID: %v", err)
+	}
+	if got.PrimaryConfidence != 0.87 {
+		t.Errorf("PrimaryConfidence: got %v, want 0.87", got.PrimaryConfidence)
+	}
+
+	// Zero is stored and returned correctly.
+	evalZero := &RunEvaluation{
+		RunID: "plr_conf02", FailureID: "db-lock", PrimaryConfidence: 0.0,
+	}
+	if err := store.Upsert(ctx, evalZero); err != nil {
+		t.Fatalf("Upsert zero: %v", err)
+	}
+	gotZero, err := store.GetByRunID(ctx, evalZero.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID zero: %v", err)
+	}
+	if gotZero.PrimaryConfidence != 0.0 {
+		t.Errorf("PrimaryConfidence (zero): got %v, want 0.0", gotZero.PrimaryConfidence)
+	}
+}
+
+// TestRunEvaluationStore_CalibrationBands_HeuristicRuns verifies that the
+// per-band HeuristicRuns counter counts runs where judge_used=false, distinct
+// from the report-level HeuristicCount (runs excluded for primary_confidence=0).
+func TestRunEvaluationStore_CalibrationBands_HeuristicRuns(t *testing.T) {
+	ctx := context.Background()
+
+	mainStore, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { mainStore.Close() })
+
+	evalStore, err := NewRunEvaluationStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	fbStore, err := NewRunFeedbackStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+
+	tr := true
+	submit := func(runID string, conf float64, judgeUsed bool) {
+		t.Helper()
+		if err := evalStore.Upsert(ctx, &RunEvaluation{
+			RunID: runID, FailureID: "db-lock", PrimaryConfidence: conf, JudgeUsed: judgeUsed,
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", runID, err)
+		}
+		if err := fbStore.Submit(ctx, &RunFeedback{
+			RunID: runID, FeedbackType: "triage", FeedbackTime: "at_gate", VerdictCorrect: &tr,
+		}); err != nil {
+			t.Fatalf("Submit %s: %v", runID, err)
+		}
+	}
+
+	// 90-100% band: 2 with judge, 3 without → HeuristicRuns=3
+	submit("plr_hr01", 0.92, true)
+	submit("plr_hr02", 0.95, true)
+	submit("plr_hr03", 0.91, false)
+	submit("plr_hr04", 0.93, false)
+	submit("plr_hr05", 0.97, false)
+	// 70-89% band: 1 with judge, 0 without → HeuristicRuns=0
+	submit("plr_hr06", 0.80, true)
+
+	report, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands: %v", err)
+	}
+
+	var highBand, midBand *CalibrationBand
+	for _, b := range report.Bands {
+		switch b.Band {
+		case "90-100%":
+			highBand = b
+		case "70-89%":
+			midBand = b
+		}
+	}
+	if highBand == nil {
+		t.Fatal("90-100% band not found")
+	}
+	if highBand.Runs != 5 {
+		t.Errorf("90-100%% band Runs = %d, want 5", highBand.Runs)
+	}
+	if highBand.HeuristicRuns != 3 {
+		t.Errorf("90-100%% band HeuristicRuns = %d, want 3 (judge_used=false runs)", highBand.HeuristicRuns)
+	}
+	if midBand == nil {
+		t.Fatal("70-89% band not found")
+	}
+	if midBand.Runs != 1 {
+		t.Errorf("70-89%% band Runs = %d, want 1", midBand.Runs)
+	}
+	if midBand.HeuristicRuns != 0 {
+		t.Errorf("70-89%% band HeuristicRuns = %d, want 0 (all runs used judge)", midBand.HeuristicRuns)
+	}
+}
+
+func TestRunEvaluationStore_CalibrationBands_HeuristicCount(t *testing.T) {
+	ctx := context.Background()
+
+	mainStore, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { mainStore.Close() })
+
+	evalStore, err := NewRunEvaluationStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	fbStore, err := NewRunFeedbackStore(mainStore.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+
+	tr := true
+	// Runs with primary_confidence > 0 — counted in TotalRuns.
+	for _, runID := range []string{"plr_hc01", "plr_hc02"} {
+		if err := evalStore.Upsert(ctx, &RunEvaluation{
+			RunID: runID, FailureID: "db-lock", PrimaryConfidence: 0.92,
+		}); err != nil {
+			t.Fatalf("Upsert %s: %v", runID, err)
+		}
+		if err := fbStore.Submit(ctx, &RunFeedback{
+			RunID: runID, FeedbackType: "triage", FeedbackTime: "post_incident",
+			VerdictCorrect: &tr,
+		}); err != nil {
+			t.Fatalf("Submit %s: %v", runID, err)
+		}
+	}
+	// Runs with primary_confidence == 0 — excluded from TotalRuns, counted in HeuristicCount.
+	for _, runID := range []string{"plr_hc03", "plr_hc04"} {
+		if err := evalStore.Upsert(ctx, &RunEvaluation{
+			RunID: runID, FailureID: "db-lock", PrimaryConfidence: 0.0, DiagnosisScore: 0.85,
+		}); err != nil {
+			t.Fatalf("Upsert heuristic %s: %v", runID, err)
+		}
+		if err := fbStore.Submit(ctx, &RunFeedback{
+			RunID: runID, FeedbackType: "triage", FeedbackTime: "post_incident",
+			VerdictCorrect: &tr,
+		}); err != nil {
+			t.Fatalf("Submit heuristic %s: %v", runID, err)
+		}
+	}
+
+	report, err := evalStore.CalibrationBands(ctx, "")
+	if err != nil {
+		t.Fatalf("CalibrationBands: %v", err)
+	}
+	if report.TotalRuns != 2 {
+		t.Errorf("TotalRuns = %d, want 2 (only primary_confidence > 0 runs)", report.TotalRuns)
+	}
+	if report.HeuristicCount != 2 {
+		t.Errorf("HeuristicCount = %d, want 2 (runs with feedback but no confidence signal)", report.HeuristicCount)
 	}
 }

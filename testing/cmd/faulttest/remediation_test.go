@@ -421,7 +421,7 @@ func TestPostFeedback_RemediationAtGate_Approved(t *testing.T) {
 
 	r := newTestRemediator(t, srv.URL)
 	v := true
-	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "")
+	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "", "")
 
 	wantPath := "/api/v1/fleet/playbook-runs/plr_abc123/feedback"
 	if gotPath != wantPath {
@@ -448,7 +448,7 @@ func TestPostFeedback_RemediationAtGate_Denied_WithNotes(t *testing.T) {
 
 	r := newTestRemediator(t, srv.URL)
 	v := false
-	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "plan would terminate active sessions")
+	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "plan would terminate active sessions", "")
 
 	if gotBody["verdict_correct"] != false {
 		t.Errorf("verdict_correct = %v, want false", gotBody["verdict_correct"])
@@ -465,5 +465,5 @@ func TestPostFeedback_RemediationAtGate_NoGateway(t *testing.T) {
 	// With no gateway configured, postFeedback must be a silent no-op (no panic).
 	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
 	v := true
-	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "")
+	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "", "")
 }

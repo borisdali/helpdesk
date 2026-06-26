@@ -34,7 +34,7 @@ func (inj *Injector) Inject(ctx context.Context, f Failure) error {
 		spec = f.ExternalInject
 		mode = "external"
 	}
-	slog.Info("injecting failure", "id", f.ID, "type", spec.Type, "mode", mode)
+	slog.Info("injecting failure", "id", f.ID, "type", spec.Type, "mode", mode, "conn", connStrHost(inj.cfg.ConnStr))
 	return inj.exec(ctx, spec, f)
 }
 
@@ -45,7 +45,7 @@ func (inj *Injector) Teardown(ctx context.Context, f Failure) error {
 	if (inj.cfg.External || inj.cfg.SSHHost != "") && f.ExternalTeardown.Type != "" {
 		spec = f.ExternalTeardown
 	}
-	slog.Info("tearing down failure", "id", f.ID, "type", spec.Type)
+	slog.Info("tearing down failure", "id", f.ID, "type", spec.Type, "conn", connStrHost(inj.cfg.ConnStr))
 	return inj.exec(ctx, spec, f)
 }
 

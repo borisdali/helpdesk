@@ -627,6 +627,203 @@ reduce transaction volume.`
 	}
 }
 
+// TestEvaluate_PrimaryConfidenceExtracted verifies that Evaluate populates
+// PrimaryConfidence from HYPOTHESIS_1: ... | CONFIDENCE: X in the response text.
+func TestEvaluate_PrimaryConfidenceExtracted(t *testing.T) {
+	f := Failure{
+		ID:       "db-lock",
+		Name:     "Lock contention",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"lock"}},
+		},
+	}
+
+	// Response that contains a structured HYPOTHESIS_1 line with CONFIDENCE.
+	response := "The database has a lock issue.\n" +
+		"HYPOTHESIS_1: Lock chain from long-running transaction | CONFIDENCE: 0.87 | EVIDENCE: pg_locks waiting\n" +
+		"HYPOTHESIS_2: High connection count | CONFIDENCE: 0.20 | EVIDENCE: pg_stat_activity"
+
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+
+	if result.PrimaryConfidence < 0.87-0.001 || result.PrimaryConfidence > 0.87+0.001 {
+		t.Errorf("PrimaryConfidence = %v, want 0.87 (from HYPOTHESIS_1 CONFIDENCE field)", result.PrimaryConfidence)
+	}
+}
+
+// TestEvaluate_PrimaryConfidenceZeroWhenAbsent verifies that PrimaryConfidence
+// is 0.0 when no HYPOTHESIS_1 structured line is present.
+func TestEvaluate_PrimaryConfidenceZeroWhenAbsent(t *testing.T) {
+	f := Failure{
+		ID:       "db-lock",
+		Name:     "Lock contention",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"lock"}},
+		},
+	}
+
+	response := "The database has a lock issue. No structured hypotheses here."
+
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+
+	if result.PrimaryConfidence != 0.0 {
+		t.Errorf("PrimaryConfidence = %v, want 0.0 (no HYPOTHESIS_1 line)", result.PrimaryConfidence)
+	}
+}
+
+// ── extractHypothesisN ────────────────────────────────────────────────────
+
+func TestExtractHypothesisN(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		n         int
+		wantLabel string
+		wantConf  float64
+	}{
+		{
+			name:      "inline H1",
+			text:      "HYPOTHESIS_1: lock contention | CONFIDENCE: 0.95 | CATEGORY: db",
+			n:         1,
+			wantLabel: "lock contention",
+			wantConf:  0.95,
+		},
+		{
+			name:      "multiline H1",
+			text:      "HYPOTHESIS_1: lock contention\nCONFIDENCE: 0.92\nEVIDENCE: pg_locks",
+			n:         1,
+			wantLabel: "lock contention",
+			wantConf:  0.92,
+		},
+		{
+			name:      "bold inline H1",
+			text:      "**HYPOTHESIS_1: lock contention** | **CONFIDENCE: 0.80**",
+			n:         1,
+			wantLabel: "lock contention",
+			wantConf:  0.80,
+		},
+		{
+			name:      "bold multiline H1",
+			text:      "**HYPOTHESIS_1: lock contention**\n**CONFIDENCE: 0.85**",
+			n:         1,
+			wantLabel: "lock contention",
+			wantConf:  0.85,
+		},
+		{
+			name:      "H2 inline",
+			text:      "HYPOTHESIS_1: lock | CONFIDENCE: 0.90\nHYPOTHESIS_2: network issue | CONFIDENCE: 0.10",
+			n:         2,
+			wantLabel: "network issue",
+			wantConf:  0.10,
+		},
+		{
+			name:      "no confidence field",
+			text:      "HYPOTHESIS_1: something without confidence",
+			n:         1,
+			wantLabel: "something without confidence",
+			wantConf:  0.0,
+		},
+		{
+			name:      "absent hypothesis",
+			text:      "HYPOTHESIS_1: lock | CONFIDENCE: 0.90",
+			n:         2,
+			wantLabel: "",
+			wantConf:  0.0,
+		},
+		{
+			name:      "stop at next hypothesis block",
+			text:      "HYPOTHESIS_1: lock\nHYPOTHESIS_2: network\nCONFIDENCE: 0.50",
+			n:         1,
+			wantLabel: "lock",
+			wantConf:  0.0, // CONFIDENCE belongs to H2, not H1
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			label, conf := extractHypothesisN(tt.text, tt.n)
+			if label != tt.wantLabel {
+				t.Errorf("label: got %q, want %q", label, tt.wantLabel)
+			}
+			if conf < tt.wantConf-0.001 || conf > tt.wantConf+0.001 {
+				t.Errorf("conf: got %v, want %v", conf, tt.wantConf)
+			}
+		})
+	}
+}
+
+func TestPopulateHypotheses_FromDiagnosticReport(t *testing.T) {
+	resp := testutil.AgentResponse{
+		DiagnosticReport: map[string]any{
+			"hypotheses": []any{
+				map[string]any{"text": "lock contention", "confidence": 0.95, "is_primary": true, "rejected_reason": ""},
+				map[string]any{"text": "network issue", "confidence": 0.05, "is_primary": false, "rejected_reason": "no network evidence"},
+			},
+		},
+	}
+	var result EvalResult
+	populateHypotheses(&result, resp, "")
+
+	if len(result.Hypotheses) != 2 {
+		t.Fatalf("Hypotheses len: got %d, want 2", len(result.Hypotheses))
+	}
+	if result.Hypotheses[0].Text != "lock contention" {
+		t.Errorf("H1 text: got %q", result.Hypotheses[0].Text)
+	}
+	if !result.Hypotheses[0].IsPrimary {
+		t.Error("H1 should be primary")
+	}
+	if result.Hypotheses[1].RejectedReason != "no network evidence" {
+		t.Errorf("H2 rejected_reason: got %q", result.Hypotheses[1].RejectedReason)
+	}
+	if result.PrimaryHypothesis != "lock contention" {
+		t.Errorf("PrimaryHypothesis: got %q", result.PrimaryHypothesis)
+	}
+	if result.PrimaryConfidence != 0.95 {
+		t.Errorf("PrimaryConfidence: got %v", result.PrimaryConfidence)
+	}
+	if result.SecondaryHypothesis != "network issue" {
+		t.Errorf("SecondaryHypothesis: got %q", result.SecondaryHypothesis)
+	}
+}
+
+func TestPopulateHypotheses_TextFallback(t *testing.T) {
+	resp := testutil.AgentResponse{} // no DiagnosticReport
+	text := "HYPOTHESIS_1: lock contention | CONFIDENCE: 0.90 | CATEGORY: db\n" +
+		"HYPOTHESIS_2: disk full | CONFIDENCE: 0.10"
+
+	var result EvalResult
+	populateHypotheses(&result, resp, text)
+
+	if len(result.Hypotheses) != 2 {
+		t.Fatalf("Hypotheses len: got %d, want 2", len(result.Hypotheses))
+	}
+	if !result.Hypotheses[0].IsPrimary {
+		t.Error("H1 should be primary in text fallback")
+	}
+	if result.Hypotheses[1].IsPrimary {
+		t.Error("H2 should not be primary")
+	}
+	if result.PrimaryConfidence != 0.90 {
+		t.Errorf("PrimaryConfidence: got %v, want 0.90", result.PrimaryConfidence)
+	}
+	if result.SecondaryHypothesis != "disk full" {
+		t.Errorf("SecondaryHypothesis: got %q", result.SecondaryHypothesis)
+	}
+}
+
+func TestPopulateHypotheses_EmptyResponse(t *testing.T) {
+	var result EvalResult
+	populateHypotheses(&result, testutil.AgentResponse{}, "No structured hypotheses here.")
+	if len(result.Hypotheses) != 0 {
+		t.Errorf("expected no hypotheses, got %d", len(result.Hypotheses))
+	}
+	if result.PrimaryConfidence != 0 {
+		t.Error("PrimaryConfidence should be 0 when no hypotheses")
+	}
+}
+
 func TestSplitCategory_DotIsNotSeparator(t *testing.T) {
 	// Dots are not split characters — use underscore for compound categories.
 	// "wal_accumulation.stale_slot" would produce "accumulation.stale" as a

@@ -20,6 +20,20 @@ The [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) run
 
 ---
 
+## Table of Contents
+
+1. [What an Incident Contains](#what-an-incident-contains)
+2. [Two Paths Into the System](#two-paths-into-the-system)
+   - [Real Incidents](#real-incidents)
+   - [Injected Incidents (faulttest)](#injected-incidents-faulttest)
+3. [Faults and Incidents](#faults-and-incidents)
+4. [The Audit Trail](#the-audit-trail)
+5. [From Incident to Vault: the Full Path](#from-incident-to-vault-the-full-path)
+6. [Listing and Retrieving Incidents](#listing-and-retrieving-incidents)
+7. [Connection to Other Docs](#connection-to-other-docs)
+
+---
+
 ## What an Incident Contains
 
 An Incident is created by the `create_incident_bundle` tool, called either by the Incident agent during a real investigation or by `faulttest` during a controlled injection run.

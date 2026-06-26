@@ -215,10 +215,26 @@ func InitPolicyEngine(cfg Config) (*policy.Engine, error) {
 
 	// Remote check mode: policy evaluation is delegated to auditd.
 	// The PolicyEnforcer will call POST /v1/governance/check instead of a local engine.
+	// Retry the probe a few times to tolerate auditd starting concurrently with this agent.
 	if cfg.PolicyCheckURL != "" {
-		if probeRemotePolicyEngine(cfg.PolicyCheckURL, cfg.AuditAPIKey) {
+		var enabled, authFailed bool
+		for attempt := range 3 {
+			enabled, authFailed = probeRemotePolicyEngine(cfg.PolicyCheckURL, cfg.AuditAPIKey)
+			if enabled || authFailed {
+				break
+			}
+			if attempt < 2 {
+				time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
+			}
+		}
+		switch {
+		case authFailed:
+			slog.Warn("policy enforcement enabled (remote check mode) but auditd rejected the probe request — set HELPDESK_AUDIT_API_KEY on this agent",
+				"url", cfg.PolicyCheckURL,
+				"hint", "set agents.<name>.auditAPIKeySecret in Helm values (or HELPDESK_AUDIT_API_KEY env var)")
+		case enabled:
 			slog.Info("policy enforcement enabled (remote check mode)", "url", cfg.PolicyCheckURL)
-		} else {
+		default:
 			slog.Warn("policy enforcement enabled (remote check mode) but remote has no policy engine",
 				"url", cfg.PolicyCheckURL,
 				"hint", "set HELPDESK_POLICY_FILE and HELPDESK_POLICY_ENABLED on the auditd server")
@@ -1043,33 +1059,38 @@ type policyCheckResp struct {
 }
 
 // probeRemotePolicyEngine calls GET /v1/governance/info on the auditd service and
-// returns true if the remote has a policy engine configured and enabled.
-// The call is best-effort: any network or parse error returns false.
-func probeRemotePolicyEngine(checkURL, apiKey string) bool {
+// returns (enabled, authFailed). enabled is true when the remote has a policy
+// engine configured. authFailed is true when auditd returned 401/403, which
+// means HELPDESK_AUDIT_API_KEY is missing or wrong on this agent — a distinct
+// problem from the engine not being configured.
+func probeRemotePolicyEngine(checkURL, apiKey string) (enabled, authFailed bool) {
 	infoURL := strings.TrimRight(checkURL, "/") + "/v1/governance/info"
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, infoURL, nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return false, true
+	}
 	var info struct {
 		Policy *struct {
 			Enabled bool `json:"enabled"`
 		} `json:"policy"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return false
+		return false, false
 	}
-	return info.Policy != nil && info.Policy.Enabled
+	return info.Policy != nil && info.Policy.Enabled, false
 }
 
 // callRemotePolicyCheck sends a policy check request to the auditd service.

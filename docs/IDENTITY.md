@@ -4,6 +4,45 @@ This document covers the Identity & Access sub-module of
 aiHelpDesk [AI Governance](AIGOVERNANCE.md). See that document for context
 on how Identity & Access fits into the broader governance architecture.
 
+---
+
+## Table of Contents
+
+1. [Why Role-Based Access (RBAC) Alone Is Insufficient](#1-why-role-based-access-rbac-alone-is-insufficient)
+2. [Identity Provider](#2-identity-provider)
+   - [2.1 Go Interface](#21-go-interface)
+   - [2.2 Static Identity Provider](#22-static-identity-provider)
+   - [2.3 JWT Identity Provider](#23-jwt-identity-provider)
+   - [2.4 Fleet-Runner Authentication](#24-fleet-runner-authentication)
+   - [2.5 Authentication Failures](#25-authentication-failures)
+   - [2.6 HTTP Authorization (Role Checks)](#26-http-authorization-role-checks)
+3. [Data Sensitivity Markings](#3-data-sensitivity-markings)
+   - [3.1 Sensitivity Classes](#31-sensitivity-classes)
+   - [3.2 Declaring Sensitivity in Infra Config](#32-declaring-sensitivity-in-infra-config)
+   - [3.3 Using Sensitivity in Policy](#33-using-sensitivity-in-policy)
+4. [Purpose-Based Access](#4-purpose-based-access)
+   - [4.1 Purpose Vocabulary](#41-purpose-vocabulary)
+   - [4.2 How Purpose Is Declared](#42-how-purpose-is-declared)
+   - [4.3 Purpose Conditions in Policy Rules](#43-purpose-conditions-in-policy-rules)
+   - [4.4 Emergency Purpose (Break-Glass)](#44-emergency-purpose-break-glass)
+   - [4.5 Requiring Explicit Purpose for Sensitive Resources](#45-requiring-explicit-purpose-for-sensitive-resources)
+5. [Principal Propagation](#5-principal-propagation)
+   - [5.1 A2A Metadata Keys](#51-a2a-metadata-keys)
+   - [5.2 Service Account vs. Human Caller Identity](#52-service-account-vs-human-caller-identity)
+6. [Policy Engine Extensions](#6-policy-engine-extensions)
+   - [6.1 Sensitivity Matching in Resource Rules](#61-sensitivity-matching-in-resource-rules)
+   - [6.2 Purpose Conditions](#62-purpose-conditions)
+   - [6.3 Request Extensions](#63-request-extensions)
+7. [Audit Trail Integration](#7-audit-trail-integration)
+   - [7.1 Querying by Identity and Outcome](#71-querying-by-identity-and-outcome)
+8. [Compliance Reporting](#8-compliance-reporting)
+9. [govexplain Integration](#9-govexplain-integration)
+10. [Configuration Reference](#10-configuration-reference)
+11. [Security Considerations](#11-security-considerations)
+12. [Implementation Map](#12-implementation-map)
+
+---
+
 ## 1. Why Role-Based Access (RBAC) Alone Is Insufficient
 
 At aiHelpDesk we stipulate that agentic systems require even tighter control

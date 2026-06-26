@@ -314,10 +314,11 @@ func (c *GatewayClient) SubmitFeedback(ctx context.Context, runID string, body m
 	return c.postJSON(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback", body)
 }
 
-// GetFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
-// Defaults to feedback_type=triage, feedback_time=post_incident.
+// GetFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback with
+// feedback_type=triage&feedback_time=post_incident. Returns a single record or
+// an error containing "404" when no such record exists.
 func (c *GatewayClient) GetFeedback(ctx context.Context, runID string) (map[string]any, error) {
-	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback")
+	raw, err := c.get(ctx, "/api/v1/fleet/playbook-runs/"+runID+"/feedback?feedback_type=triage&feedback_time=post_incident")
 	if err != nil {
 		return nil, err
 	}
@@ -501,6 +502,53 @@ func (c *GatewayClient) UploadGet(ctx context.Context, id string) (map[string]an
 // UploadGetContent calls GET /api/v1/fleet/uploads/{id}/content and returns the raw bytes.
 func (c *GatewayClient) UploadGetContent(ctx context.Context, id string) ([]byte, error) {
 	return c.get(ctx, "/api/v1/fleet/uploads/"+id+"/content")
+}
+
+// FaultStabilityUpsert calls POST /api/v1/fleet/fault-stability and returns the HTTP status code.
+func (c *GatewayClient) FaultStabilityUpsert(ctx context.Context, body map[string]any) (int, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/fleet/fault-stability", bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("POST /api/v1/fleet/fault-stability: %w", err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// FaultStabilityGet calls GET /api/v1/fleet/fault-stability/{faultID}.
+func (c *GatewayClient) FaultStabilityGet(ctx context.Context, faultID string) (map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/fault-stability/"+faultID)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode fault stability cert: %w", err)
+	}
+	return result, nil
+}
+
+// FaultStabilityList calls GET /api/v1/fleet/fault-stability.
+func (c *GatewayClient) FaultStabilityList(ctx context.Context) ([]map[string]any, error) {
+	raw, err := c.get(ctx, "/api/v1/fleet/fault-stability")
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Certs []map[string]any `json:"certs"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, fmt.Errorf("decode fault stability list: %w", err)
+	}
+	return wrapper.Certs, nil
 }
 
 // rawDo executes an HTTP request and returns the response status code.

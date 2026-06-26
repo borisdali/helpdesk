@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"helpdesk/testing/faultlib"
@@ -72,6 +74,33 @@ type EvalResult struct {
 	RemediationJudgeScore     float64 `json:"remediation_judge_score,omitempty"`
 	RemediationJudgeReasoning string  `json:"remediation_judge_reasoning,omitempty"`
 	RemediationJudgeSkipped   bool    `json:"remediation_judge_skipped,omitempty"`
+
+	// PrimaryConfidence is the triage agent's self-reported confidence on its
+	// primary hypothesis. Derived from Hypotheses[primary].Confidence.
+	// Zero when the agent did not emit structured hypotheses.
+	PrimaryConfidence float64 `json:"primary_confidence,omitempty"`
+
+	// PrimaryHypothesis is the label text of the primary hypothesis.
+	// Derived from Hypotheses[primary].Text. Empty when not emitted.
+	PrimaryHypothesis string `json:"primary_hypothesis,omitempty"`
+
+	// SecondaryHypothesis and SecondaryConfidence are from the first non-primary
+	// hypothesis (runner-up). Empty/zero when not present.
+	SecondaryHypothesis string  `json:"secondary_hypothesis,omitempty"`
+	SecondaryConfidence float64 `json:"secondary_confidence,omitempty"`
+
+	// Hypotheses holds all structured hypotheses from the triage response, in
+	// emission order. Populated from DiagnosticReport when the gateway returns
+	// structured data; falls back to text-parsed H1/H2 otherwise.
+	Hypotheses []HypothesisEntry `json:"hypotheses,omitempty"`
+}
+
+// HypothesisEntry represents one hypothesis from the agent's diagnostic report.
+type HypothesisEntry struct {
+	Text           string  `json:"text"`
+	Confidence     float64 `json:"confidence"`
+	IsPrimary      bool    `json:"is_primary"`
+	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.
@@ -243,6 +272,7 @@ func Evaluate(f Failure, resp testutil.AgentResponse, auditTools ...[]string) Ev
 	// Pass criteria: score >= 0.6 AND keyword check passes.
 	result.Passed = result.Score >= 0.6 && result.KeywordPass
 
+	populateHypotheses(&result, resp, responseText)
 	return result
 }
 
@@ -352,8 +382,114 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	judgeVeto := !judgeResult.Skipped && judgeResult.Score < 0.33
 	result.Passed = result.Score >= 0.6 && result.KeywordPass && !judgeVeto
 
+	populateHypotheses(&result, resp, responseText)
 	return result
 }
+
+// populateHypotheses fills result.Hypotheses from resp.DiagnosticReport when
+// structured data is available, falling back to text-parsing H1/H2 otherwise.
+// It also derives the convenience fields PrimaryHypothesis, PrimaryConfidence,
+// SecondaryHypothesis, and SecondaryConfidence from the populated slice.
+func populateHypotheses(result *EvalResult, resp testutil.AgentResponse, responseText string) {
+	if hyps, _ := resp.DiagnosticReport["hypotheses"].([]any); len(hyps) > 0 {
+		for _, h := range hyps {
+			hm, _ := h.(map[string]any)
+			text, _ := hm["text"].(string)
+			conf, _ := hm["confidence"].(float64)
+			isPrimary, _ := hm["is_primary"].(bool)
+			rejected, _ := hm["rejected_reason"].(string)
+			result.Hypotheses = append(result.Hypotheses, HypothesisEntry{
+				Text: text, Confidence: conf, IsPrimary: isPrimary, RejectedReason: rejected,
+			})
+		}
+	} else {
+		// Text-parse fallback: extract H1 and H2 from the response narrative.
+		if label, conf := extractHypothesisN(responseText, 1); label != "" {
+			result.Hypotheses = append(result.Hypotheses, HypothesisEntry{
+				Text: label, Confidence: conf, IsPrimary: true,
+			})
+		}
+		if label, conf := extractHypothesisN(responseText, 2); label != "" {
+			result.Hypotheses = append(result.Hypotheses, HypothesisEntry{
+				Text: label, Confidence: conf,
+			})
+		}
+	}
+
+	// Derive convenience fields from the populated slice.
+	for _, h := range result.Hypotheses {
+		if h.IsPrimary {
+			result.PrimaryHypothesis = h.Text
+			result.PrimaryConfidence = h.Confidence
+			break
+		}
+	}
+	for _, h := range result.Hypotheses {
+		if !h.IsPrimary && result.SecondaryHypothesis == "" {
+			result.SecondaryHypothesis = h.Text
+			result.SecondaryConfidence = h.Confidence
+			break
+		}
+	}
+}
+
+// extractHypothesisN scans the agent response text for the Nth HYPOTHESIS_N: line
+// and returns the label text and CONFIDENCE value.
+//
+// Two formats are accepted:
+//
+//	Inline:     HYPOTHESIS_N: <text> | CONFIDENCE: 0.95 | EVIDENCE: ...
+//	Multi-line: HYPOTHESIS_N: <text>\nCONFIDENCE: 0.95\nEVIDENCE: ...
+//
+// Bold markdown wrappers (**) are stripped. Returns ("", 0.0) when not found.
+func extractHypothesisN(text string, n int) (label string, conf float64) {
+	prefix := fmt.Sprintf("HYPOTHESIS_%d:", n)
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		clean := strings.TrimSpace(strings.Trim(line, "* \t"))
+		if !strings.HasPrefix(strings.ToUpper(clean), prefix) {
+			continue
+		}
+		body := strings.TrimSpace(clean[len(prefix):])
+		// Extract label: everything before the first " | ".
+		labelEnd := strings.Index(body, " | ")
+		if labelEnd >= 0 {
+			label = strings.TrimSpace(strings.Trim(body[:labelEnd], "* \t"))
+		} else {
+			label = strings.TrimSpace(strings.Trim(body, "* \t"))
+		}
+		// Extract confidence from pipe-separated inline parts first.
+		for _, part := range strings.Split(body, " | ") {
+			part = strings.TrimSpace(strings.Trim(part, "*"))
+			if strings.HasPrefix(strings.ToUpper(part), "CONFIDENCE:") {
+				val := strings.TrimSpace(part[len("CONFIDENCE:"):])
+				if v, err := strconv.ParseFloat(val, 64); err == nil {
+					conf = v
+				}
+				return
+			}
+		}
+		// Fall back: scan up to 5 following lines for a standalone CONFIDENCE: line.
+		for j := i + 1; j < len(lines) && j <= i+5; j++ {
+			next := strings.TrimSpace(strings.Trim(lines[j], "* \t"))
+			if strings.HasPrefix(strings.ToUpper(next), "CONFIDENCE:") {
+				val := strings.TrimSpace(next[len("CONFIDENCE:"):])
+				if v, err := strconv.ParseFloat(val, 64); err == nil {
+					conf = v
+				}
+				return
+			}
+			if strings.HasPrefix(strings.ToUpper(next), "HYPOTHESIS_") {
+				break
+			}
+		}
+		return
+	}
+	return
+}
+
+func extractPrimaryConfidence(text string) float64  { _, c := extractHypothesisN(text, 1); return c }
+func extractPrimaryHypothesis(text string) string   { l, _ := extractHypothesisN(text, 1); return l }
 
 // toFaultlibFailure converts a local Failure to a faultlib.Failure for judge calls.
 func toFaultlibFailure(f Failure) faultlib.Failure {

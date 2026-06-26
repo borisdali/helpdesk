@@ -27,8 +27,8 @@ import (
 // stringSliceFlag is a repeatable flag.Value for --catalog.
 type stringSliceFlag []string
 
-func (s *stringSliceFlag) String() string        { return strings.Join(*s, ",") }
-func (s *stringSliceFlag) Set(v string) error    { *s = append(*s, v); return nil }
+func (s *stringSliceFlag) String() string     { return strings.Join(*s, ",") }
+func (s *stringSliceFlag) Set(v string) error { *s = append(*s, v); return nil }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -97,9 +97,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	cfg := &HarnessConfig{}
 
 	fs.StringVar(&cfg.TestingDir, "testing-dir", defaultTestingDir(), "Path to the testing/ directory")
-	fs.StringVar(&cfg.ConnStr, "conn", "", "PostgreSQL connection string (used for injection)")
-	fs.StringVar(&cfg.ReplicaConnStr, "replica-conn", "", "Replica PostgreSQL connection string")
-	fs.StringVar(&cfg.AgentConnStr, "agent-conn", "", "Connection string or alias sent to the agent in prompts (defaults to --conn)")
+	fs.StringVar(&cfg.ConnStr, "conn", os.Getenv("FAULTTEST_CONN_STR"), "PostgreSQL connection string (used for injection)")
+	fs.StringVar(&cfg.ReplicaConnStr, "replica-conn", os.Getenv("FAULTTEST_REPLICA_CONN_STR"), "Replica PostgreSQL connection string")
+	fs.StringVar(&cfg.AgentConnStr, "agent-conn", os.Getenv("FAULTTEST_AGENT_CONN_STR"), "Connection string or alias sent to the agent in prompts (defaults to --conn)")
 	fs.StringVar(&cfg.DBAgentURL, "db-agent", "", "Database agent A2A URL")
 	fs.StringVar(&cfg.K8sAgentURL, "k8s-agent", "", "Kubernetes agent A2A URL")
 	fs.StringVar(&cfg.SysadminAgentURL, "sysadmin-agent", "", "Sysadmin agent A2A URL")
@@ -119,9 +119,12 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.SSHUser, "ssh-user", os.Getenv("USER"), "SSH username for ssh_exec faults (prepended to host when no @ in --ssh-host)")
 	fs.StringVar(&cfg.SSHKeyPath, "ssh-key", "", "SSH private key path for ssh_exec faults")
 
+	// Stability / repeat mode.
+	fs.IntVar(&cfg.Repeat, "repeat", 1, "Run each fault N times (inject→triage→teardown) and print a stability report; remediation is skipped when N > 1")
+
 	// Remediation phase.
 	fs.BoolVar(&cfg.RemediateEnabled, "remediate", false, "Run remediation phase after injection+diagnosis")
-	fs.StringVar(&cfg.GatewayURL, "gateway", "", "Gateway URL for playbook/agent remediation and vault playbook checks")
+	fs.StringVar(&cfg.GatewayURL, "gateway", os.Getenv("FAULTTEST_GATEWAY_URL"), "Gateway URL for playbook/agent remediation and vault playbook checks")
 	fs.StringVar(&cfg.GatewayAPIKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key for remediation (or HELPDESK_CLIENT_API_KEY)")
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 	fs.StringVar(&cfg.ApprovalMode, "approval-mode", "", "Override playbook approval_mode for this run (auto|session|manual|force). Empty = playbook default. Use 'force' to bypass manual gates in automated runs.")
@@ -135,6 +138,10 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.Var(&extraCatalogs, "catalog", "Additional customer catalog file (repeatable)")
 	fs.StringVar(&cfg.SourceFilter, "source", "", "Filter faults by source: builtin or custom")
 	fs.StringVar(&cfg.ReportDir, "report-dir", ".", "Directory to write the JSON report (default: current directory)")
+	fs.BoolVar(&cfg.ReportPerFault, "report-per-fault", false, "Write a separate JSON report per fault (faulttest-{runID}-{faultID}.json) in addition to the combined report")
+
+	// Diagnosis model annotation — recorded in stability certs, not used to call any LLM.
+	fs.StringVar(&cfg.DiagnosisModel, "agent-model", os.Getenv("HELPDESK_MODEL_NAME"), "Model used by the triage agent (annotation in stability cert; default: HELPDESK_MODEL_NAME)")
 
 	// LLM judge options.
 	fs.BoolVar(&cfg.JudgeEnabled, "judge", false, "Enable LLM-as-judge for semantic diagnosis scoring")
@@ -150,7 +157,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.NotifyURL, "notify-url", "", "Webhook URL for POST notification on run completion (e.g. Slack incoming webhook)")
 
 	// Gateway-routed diagnosis (A/B comparison mode).
-	fs.BoolVar(&cfg.ViaGateway, "via-gateway", false, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
+	fs.BoolVar(&cfg.ViaGateway, "via-gateway", true, "Route diagnosis through the gateway instead of calling the agent directly (requires --gateway and diagnosis_playbook_series_id in the catalog)")
 
 	// Async gate and step approvals (K8s/Docker/headless safe).
 	fs.BoolVar(&cfg.GateEscalation, "gate-escalation", false, "Send gate_escalation=true on playbook run requests so the gateway intercepts ESCALATE_TO at the phase boundary")
@@ -191,10 +198,19 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 
 	testutil.DockerComposeDir = filepath.Join(cfg.TestingDir, "docker")
 
-	// Resolve named infra alias (e.g. "faulttest-db") to the actual DSN so
-	// downstream injection code always gets a real connection string.
+	// Resolve named infra aliases to actual DSNs so downstream code always gets
+	// a real connection string and agents don't receive an ambiguous alias.
+	// Log the alias→host mapping immediately so operators can verify the right
+	// targets were chosen before any test run begins.
+	origConn := cfg.ConnStr
+	origAgentConn := cfg.AgentConnStr
+	origReplicaConn := cfg.ReplicaConnStr
 	cfg.ConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ConnStr)
 	cfg.ReplicaConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.ReplicaConnStr)
+	cfg.AgentConnStr = resolveConnAlias(cfg.InfraConfigPath, cfg.AgentConnStr)
+	logConnResolution("--conn", origConn, cfg.ConnStr)
+	logConnResolution("--replica-conn", origReplicaConn, cfg.ReplicaConnStr)
+	logConnResolution("--agent-conn", origAgentConn, cfg.AgentConnStr)
 
 	return cfg
 }
@@ -327,7 +343,17 @@ func cmdRun(args []string) {
 	var results []EvalResult
 
 	for _, f := range failures {
-		fmt.Printf("\n--- Testing: %s (%s) ---\n", f.Name, f.ID)
+		nReps := cfg.Repeat
+		if nReps < 1 {
+			nReps = 1
+		}
+		repeatMode := nReps > 1
+
+		if repeatMode {
+			fmt.Printf("\n--- Testing: %s (%s) — %d runs ---\n", f.Name, f.ID, nReps)
+		} else {
+			fmt.Printf("\n--- Testing: %s (%s) ---\n", f.Name, f.ID)
+		}
 
 		// Skip faults that require a replica when none is configured.
 		if faultNeedsReplica(f) && cfg.ReplicaConnStr == "" {
@@ -336,205 +362,269 @@ func cmdRun(args []string) {
 			continue
 		}
 
-		// Save original conn string for config-override failures.
-		origConn := cfg.ConnStr
+		if repeatMode && cfg.RemediateEnabled {
+			slog.Warn("--remediate is disabled in --repeat mode", "repeat", nReps)
+		}
 
-		// Per-fault trace ID propagated as X-Trace-ID on all gateway requests so that
-		// tool execution events land under a stable ID vault synthesis can query later.
-		faultTraceID := "faulttest-" + runID + "-" + f.ID
-		faultCtx := context.WithValue(ctx, ctxKeyFaultTraceID{}, faultTraceID)
+		var repResults []EvalResult
 
-		// 1. Inject.
-		if err := injector.Inject(ctx, f); err != nil {
-			slog.Error("injection failed", "id", f.ID, "err", err)
-			results = append(results, EvalResult{
-				FailureID:   f.ID,
-				FailureName: f.Name,
-				Category:    f.Category,
-				Error:       fmt.Sprintf("injection failed: %v", err),
-			})
+		for rep := range nReps {
+			// Save original conn string for config-override failures; restore after each rep.
+			origConn := cfg.ConnStr
+
+			if repeatMode {
+				fmt.Printf("\n  Run %d/%d\n", rep+1, nReps)
+			}
+
+			// Per-rep trace ID. Single-run format stays unchanged; repeat runs append -rN
+			// so each rep gets its own audit window.
+			faultTraceID := "faulttest-" + runID + "-" + f.ID
+			if repeatMode {
+				faultTraceID = fmt.Sprintf("faulttest-%s-%s-r%d", runID, f.ID, rep+1)
+			}
+			faultCtx := context.WithValue(ctx, ctxKeyFaultTraceID{}, faultTraceID)
+
+			// 1. Inject.
+			if err := injector.Inject(ctx, f); err != nil {
+				slog.Error("injection failed", "id", f.ID, "rep", rep+1, "err", err)
+				repResults = append(repResults, EvalResult{
+					FailureID:   f.ID,
+					FailureName: f.Name,
+					Category:    f.Category,
+					Error:       fmt.Sprintf("injection failed: %v", err),
+				})
+				cfg.ConnStr = origConn
+				break // abort remaining reps for this fault
+			}
+
+			// 2. Run agent (record call start for audit window).
+			callStart := time.Now()
+			resp := runner.Run(faultCtx, f)
+
+			if resp.CrystalBall {
+				slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
+			}
+
+			// Query audit trail for tool evidence if --audit-url is set.
+			var auditTools []string
+			if cfg.AuditURL != "" {
+				auditTools = auditQueryTools(ctx, cfg.AuditURL, cfg.GatewayAPIKey, callStart)
+				if len(auditTools) > 0 {
+					slog.Info("audit evidence", "failure", f.ID, "tools", auditTools)
+				}
+			}
+
+			// 3. Evaluate.
+			var evalResult EvalResult
+			if resp.Error != nil {
+				fmt.Printf("Agent error: %v\n", resp.Error)
+				evalResult = EvalResult{
+					FailureID:   f.ID,
+					FailureName: f.Name,
+					Category:    f.Category,
+					Error:       resp.Error.Error(),
+					Duration:    resp.Duration.String(),
+				}
+			} else {
+				if judgeCompleter != nil {
+					evalResult = EvaluateWithJudge(ctx, f, resp, judgeCompleter, judgeModel, auditTools)
+				} else {
+					evalResult = Evaluate(f, resp, auditTools)
+				}
+				evalResult.ResponseText = resp.Text
+				evalResult.Duration = resp.Duration.String()
+				evalResult.CrystalBall = resp.CrystalBall
+				evalResult.RunID = resp.RunID
+
+				// Detect protocol violations from gateway warnings.
+				// When the fallback gate fires (agent omitted TRANSITION_TO/ESCALATE_TO),
+				// the gateway appends a warning. Cap the score to signal the breach.
+				if len(resp.Warnings) > 0 {
+					evalResult.GatewayWarnings = resp.Warnings
+					for _, w := range resp.Warnings {
+						if strings.Contains(w, "omitted required TRANSITION_TO") ||
+							strings.Contains(w, "ESCALATE_TO signal") {
+							evalResult.ProtocolViolation = true
+							break
+						}
+					}
+				}
+				if evalResult.ProtocolViolation {
+					const protocolViolationCap = 0.75
+					if evalResult.Score > protocolViolationCap {
+						evalResult.Score = protocolViolationCap
+						evalResult.Passed = evalResult.Score >= 0.6 && evalResult.KeywordPass
+					}
+				}
+
+				// Push judge reasoning to the audit store so it appears alongside
+				// live agent_reasoning events in the governance trail.
+				if !evalResult.JudgeSkipped && evalResult.JudgeReasoning != "" {
+					faultTraceID := "ft_" + runID + "_" + f.ID
+					pushJudgeReasoning(ctx, cfg.AuditURL, cfg.GatewayAPIKey, faultTraceID,
+						agentNameFromCategory(f.Category), evalResult.JudgeReasoning, auditTools)
+				}
+			}
+
+			// 4. Remediation phase (skipped in repeat mode).
+			// When gate_escalation=true, the triage playbook may return pending_gate at
+			// the triage→remediation boundary. In that case, the gate handler drives
+			// operator approval and recovery instead of the normal Remediate path.
+			runRemediationJudge := func(remResult RemediationResult) {
+				if !cfg.RemediationJudgeEnabled || judgeCompleter == nil || remResult.RunID == "" {
+					return
+				}
+				steps := fetchRemediationSteps(faultCtx, cfg.GatewayURL, cfg.GatewayAPIKey, remResult.RunID)
+				jr := faultlib.JudgeRemediation(faultCtx, faultlib.RemediationJudgeInput{
+					FaultName:        f.Name,
+					FaultDescription: f.Description,
+					PlaybookGuidance: f.Remediation.AgentPrompt,
+					Steps:            steps,
+					RecoveryTimeSecs: remResult.RecoveryTimeSecs,
+					Passed:           remResult.Passed,
+				}, judgeCompleter, judgeModel)
+				evalResult.RemediationJudgeScore = jr.Score
+				evalResult.RemediationJudgeReasoning = jr.Reasoning
+				evalResult.RemediationJudgeSkipped = jr.Skipped
+				if !jr.Skipped {
+					fmt.Printf("Remediation Judge:   score=%d%% — %s\n", int(jr.Score*100), jr.Reasoning)
+				}
+			}
+
+			if !repeatMode && cfg.RemediateEnabled && resp.Status == "pending_gate" {
+				remResult := remediator.HandlePendingGate(faultCtx, f, resp)
+				evalResult.RemediationAttempted = true
+				evalResult.RemediationPassed = remResult.Passed
+				evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
+				evalResult.RemediationScore = remResult.Score
+				evalResult.RemediationMethod = remResult.Method
+				if remResult.Err != nil {
+					evalResult.RemediationError = remResult.Err.Error()
+				}
+				evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
+				runRemediationJudge(remResult)
+				if remResult.Passed {
+					fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+					printIncidentSummary(resp, remResult.RecoveryTimeSecs, cfg.GatewayURL)
+					if cfg.GatewayURL != "" {
+						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
+							slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
+						} else if pbID != "" {
+							fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
+						}
+					}
+				} else {
+					fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
+				}
+			} else if !repeatMode && cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
+				remResult := remediator.Remediate(faultCtx, f, resp.RunID)
+				evalResult.RemediationAttempted = true
+				evalResult.RemediationPassed = remResult.Passed
+				evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
+				evalResult.RemediationScore = remResult.Score
+				evalResult.RemediationMethod = remResult.Method
+				if remResult.Err != nil {
+					evalResult.RemediationError = remResult.Err.Error()
+				}
+				evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
+				runRemediationJudge(remResult)
+				if remResult.Passed {
+					fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+					if cfg.GatewayURL != "" {
+						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
+							slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
+						} else if pbID != "" {
+							fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
+						}
+					}
+				} else {
+					fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
+				}
+			} else {
+				evalResult.OverallScore = evalResult.Score
+			}
+
+			// In force mode with judge enabled, auto-submit triage feedback derived
+			// from the judge score so vault calibration accumulates data without
+			// operator input. Feedback is tagged "auto_judge" so calibration can
+			// distinguish it from human verdicts and display the appropriate note.
+			if cfg.ApprovalMode == "force" && !evalResult.JudgeSkipped && resp.RunID != "" && cfg.GatewayURL != "" {
+				correct := evalResult.Score >= 0.8
+				remediator.postFeedback(faultCtx, resp.RunID, "triage", "post_incident", &correct, evalResult.JudgeReasoning, "auto_judge")
+			}
+
+			repResults = append(repResults, evalResult)
+
+			// 5. Teardown.
 			cfg.ConnStr = origConn
-			continue
-		}
-
-		// 2. Run agent (record call start for audit window).
-		callStart := time.Now()
-		resp := runner.Run(faultCtx, f)
-
-		if resp.CrystalBall {
-			slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
-		}
-
-		// Query audit trail for tool evidence if --audit-url is set.
-		var auditTools []string
-		if cfg.AuditURL != "" {
-			auditTools = auditQueryTools(ctx, cfg.AuditURL, cfg.GatewayAPIKey, callStart)
-			if len(auditTools) > 0 {
-				slog.Info("audit evidence", "failure", f.ID, "tools", auditTools)
+			if err := injector.Teardown(ctx, f); err != nil {
+				slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", err)
 			}
-		}
 
-		// 3. Evaluate.
-		var evalResult EvalResult
-		if resp.Error != nil {
-			fmt.Printf("Agent error: %v\n", resp.Error)
-			evalResult = EvalResult{
-				FailureID:   f.ID,
-				FailureName: f.Name,
-				Category:    f.Category,
-				Error:       resp.Error.Error(),
-				Duration:    resp.Duration.String(),
+			// Print result: compact one-liner in repeat mode, full detail otherwise.
+			status := "PASS"
+			if !evalResult.Passed {
+				status = "FAIL"
 			}
-		} else {
-			if judgeCompleter != nil {
-				evalResult = EvaluateWithJudge(ctx, f, resp, judgeCompleter, judgeModel, auditTools)
-			} else {
-				evalResult = Evaluate(f, resp, auditTools)
-			}
-			evalResult.ResponseText = resp.Text
-			evalResult.Duration = resp.Duration.String()
-			evalResult.CrystalBall = resp.CrystalBall
-			evalResult.RunID = resp.RunID
-
-			// Detect protocol violations from gateway warnings.
-			// When the fallback gate fires (agent omitted TRANSITION_TO/ESCALATE_TO),
-			// the gateway appends a warning. Cap the score to signal the breach.
-			if len(resp.Warnings) > 0 {
-				evalResult.GatewayWarnings = resp.Warnings
-				for _, w := range resp.Warnings {
-					if strings.Contains(w, "omitted required TRANSITION_TO") ||
-						strings.Contains(w, "ESCALATE_TO signal") {
-						evalResult.ProtocolViolation = true
-						break
+			if repeatMode {
+				violation := ""
+				if evalResult.ProtocolViolation {
+					violation = " protocol-violation"
+				}
+				fmt.Printf("  [%s] score=%d%%%s\n", status, int(evalResult.Score*100), violation)
+				for _, h := range evalResult.Hypotheses {
+					pct := int(h.Confidence * 100)
+					var tag string
+					switch {
+					case h.IsPrimary:
+						tag = fmt.Sprintf("[PRIMARY %d%%]", pct)
+					case h.RejectedReason != "":
+						tag = fmt.Sprintf("[REJECTED %d%%]", pct)
+					default:
+						tag = fmt.Sprintf("[%d%%]", pct)
 					}
-				}
-			}
-			if evalResult.ProtocolViolation {
-				const protocolViolationCap = 0.75
-				if evalResult.Score > protocolViolationCap {
-					evalResult.Score = protocolViolationCap
-					evalResult.Passed = evalResult.Score >= 0.6 && evalResult.KeywordPass
-				}
-			}
-
-			// Push judge reasoning to the audit store so it appears alongside
-			// live agent_reasoning events in the governance trail.
-			if !evalResult.JudgeSkipped && evalResult.JudgeReasoning != "" {
-				faultTraceID := "ft_" + runID + "_" + f.ID
-				pushJudgeReasoning(ctx, cfg.AuditURL, cfg.GatewayAPIKey, faultTraceID,
-					agentNameFromCategory(f.Category), evalResult.JudgeReasoning, auditTools)
-			}
-		}
-
-		// 4. Remediation phase (optional).
-		// When gate_escalation=true, the triage playbook may return pending_gate at
-		// the triage→remediation boundary. In that case, the gate handler drives
-		// operator approval and recovery instead of the normal Remediate path.
-		runRemediationJudge := func(remResult RemediationResult) {
-			if !cfg.RemediationJudgeEnabled || judgeCompleter == nil || remResult.RunID == "" {
-				return
-			}
-			steps := fetchRemediationSteps(faultCtx, cfg.GatewayURL, cfg.GatewayAPIKey, remResult.RunID)
-			jr := faultlib.JudgeRemediation(faultCtx, faultlib.RemediationJudgeInput{
-				FaultName:        f.Name,
-				FaultDescription: f.Description,
-				PlaybookGuidance: f.Remediation.AgentPrompt,
-				Steps:            steps,
-				RecoveryTimeSecs: remResult.RecoveryTimeSecs,
-				Passed:           remResult.Passed,
-			}, judgeCompleter, judgeModel)
-			evalResult.RemediationJudgeScore = jr.Score
-			evalResult.RemediationJudgeReasoning = jr.Reasoning
-			evalResult.RemediationJudgeSkipped = jr.Skipped
-			if !jr.Skipped {
-				fmt.Printf("Remediation Judge:   score=%d%% — %s\n", int(jr.Score*100), jr.Reasoning)
-			}
-		}
-
-		if cfg.RemediateEnabled && resp.Status == "pending_gate" {
-			remResult := remediator.HandlePendingGate(faultCtx, f, resp)
-			evalResult.RemediationAttempted = true
-			evalResult.RemediationPassed = remResult.Passed
-			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
-			evalResult.RemediationScore = remResult.Score
-			evalResult.RemediationMethod = remResult.Method
-			if remResult.Err != nil {
-				evalResult.RemediationError = remResult.Err.Error()
-			}
-			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
-			runRemediationJudge(remResult)
-			if remResult.Passed {
-				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
-				printIncidentSummary(resp, remResult.RecoveryTimeSecs, cfg.GatewayURL)
-				if cfg.GatewayURL != "" {
-					if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
-						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
-					} else if pbID != "" {
-						fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
+					if h.RejectedReason != "" {
+						fmt.Printf("         %s %s — %s\n", tag, h.Text, h.RejectedReason)
+					} else {
+						fmt.Printf("         %s %s\n", tag, h.Text)
 					}
 				}
 			} else {
-				fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
-			}
-		} else if cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
-			remResult := remediator.Remediate(faultCtx, f, resp.RunID)
-			evalResult.RemediationAttempted = true
-			evalResult.RemediationPassed = remResult.Passed
-			evalResult.RecoveryTimeSecs = remResult.RecoveryTimeSecs
-			evalResult.RemediationScore = remResult.Score
-			evalResult.RemediationMethod = remResult.Method
-			if remResult.Err != nil {
-				evalResult.RemediationError = remResult.Err.Error()
-			}
-			// OverallScore: 60% composite score + 40% remediation when remediation attempted.
-			evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
-			runRemediationJudge(remResult)
-			if remResult.Passed {
-				fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
-				// Auto-suggest: when remediation succeeds and a gateway is configured,
-				// synthesize a playbook draft from the fault trace and save it to the vault.
-				if cfg.GatewayURL != "" {
-					if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
-						slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
-					} else if pbID != "" {
-						fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
-					}
+				diagLabel := "category"
+				if !evalResult.JudgeSkipped {
+					diagLabel = "judge"
 				}
+				fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% %s=%d%%)\n",
+					status, int(evalResult.Score*100),
+					int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), diagLabel, int(evalResult.DiagnosisScore*100))
+				if evalResult.RemediationAttempted {
+					remStatus := "PASS"
+					if !evalResult.RemediationPassed {
+						remStatus = "FAIL"
+					}
+					fmt.Printf("Remediation Result:  [%s] score=%d%% (%.1fs, %s)\n",
+						remStatus, int(evalResult.RemediationScore*100), evalResult.RecoveryTimeSecs, evalResult.RemediationMethod)
+					fmt.Printf("Overall Result:      [%s] score=%d%%\n", status, int(evalResult.OverallScore*100))
+				}
+			}
+		} // end rep loop
+
+		results = append(results, repResults...)
+
+		if repeatMode {
+			sr := buildStabilityReport(f, repResults)
+			sr.Print()
+			postStabilityCert(ctx, cfg, f, sr)
+		}
+
+		if cfg.ReportPerFault {
+			faultReport := BuildReport(runID+"-"+f.ID, repResults)
+			faultReportFile := fmt.Sprintf("%s/faulttest-%s-%s.json", cfg.ReportDir, runID, f.ID)
+			if err := faultReport.WriteJSON(faultReportFile); err != nil {
+				slog.Error("failed to write per-fault report", "fault", f.ID, "err", err)
 			} else {
-				fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
+				fmt.Printf("Fault report: %s\n", faultReportFile)
 			}
-		} else {
-			// No remediation attempted: overall score equals diagnosis score.
-			evalResult.OverallScore = evalResult.Score
-		}
-
-		results = append(results, evalResult)
-
-		// 5. Teardown.
-		cfg.ConnStr = origConn
-		if err := injector.Teardown(ctx, f); err != nil {
-			slog.Error("teardown failed", "id", f.ID, "err", err)
-		}
-
-		status := "PASS"
-		if !evalResult.Passed {
-			status = "FAIL"
-		}
-		diagLabel := "category"
-		if !evalResult.JudgeSkipped {
-			diagLabel = "judge"
-		}
-		fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% %s=%d%%)\n",
-			status, int(evalResult.Score*100),
-			int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), diagLabel, int(evalResult.DiagnosisScore*100))
-		if evalResult.RemediationAttempted {
-			remStatus := "PASS"
-			if !evalResult.RemediationPassed {
-				remStatus = "FAIL"
-			}
-			fmt.Printf("Remediation Result:  [%s] score=%d%% (%.1fs, %s)\n",
-				remStatus, int(evalResult.RemediationScore*100), evalResult.RecoveryTimeSecs, evalResult.RemediationMethod)
-			fmt.Printf("Overall Result:      [%s] score=%d%%\n", status, int(evalResult.OverallScore*100))
 		}
 	}
 

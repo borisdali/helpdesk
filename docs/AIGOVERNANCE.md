@@ -4,6 +4,61 @@ Please see [here](ARCHITECTURE.md) for the general overview of
 aiHelpDesk Architecture. This page presents a part of this architecture
 dedicated to aiHelpDesk's critical subsystem that we refer to as AI Governance.
 
+---
+
+## Table of Contents
+
+1. [Overview](#1-overview)
+   - [1.1 LLM Fabrication Detection](#11-llm-fabrication-detection)
+2. [Components](#2-components)
+3. [Policy Engine](#3-policy-engine)
+   - [3.1 Policy Structure](#31-policy-structure)
+   - [3.2 Policy Evaluation Flow](#32-policy-evaluation-flow)
+   - [3.3 Environment Variables](#33-environment-variables)
+   - [3.4 Implementation](#34-implementation)
+   - [3.5 Agent Integration](#35-agent-integration)
+4. [Approval Workflows](#4-approval-workflows)
+   - [4.1 Flow](#41-flow)
+   - [4.2 Implementation](#42-implementation)
+   - [4.3 Approvals CLI](#43-approvals-cli)
+   - [4.4 Approval API Endpoints](#44-approval-api-endpoints)
+   - [4.5 Configuration](#45-configuration)
+   - [4.6 Approval States](#46-approval-states)
+5. [Guardrails](#5-guardrails)
+   - [5.1 DB Blast Radius (`max_rows_affected`)](#51-db-blast-radius-max_rows_affected)
+   - [5.2 K8s Blast Radius (`max_pods_affected`)](#52-k8s-blast-radius-max_pods_affected)
+   - [5.3 Transaction Age (`max_xact_age_secs`)](#53-transaction-age-max_xact_age_secs)
+   - [5.4 Schedule](#54-schedule)
+   - [5.5 Planned Guardrails](#55-planned-guardrails)
+6. [Operating Mode](#6-operating-mode)
+   - [6.1 Why a Default of `readonly`](#61-why-a-default-of-readonly)
+   - [6.2 Startup Validation (fix mode)](#62-startup-validation-fix-mode)
+   - [6.3 Runtime Enforcement](#63-runtime-enforcement)
+   - [6.4 Governance Misconfiguration Incidents](#64-governance-misconfiguration-incidents)
+   - [6.5 Violation Types](#65-violation-types)
+   - [6.6 Implementation](#66-implementation)
+7. [Audit System](#7-audit-system)
+   - [7.1 secbot — Security Responder](#71-secbot--security-responder)
+8. [Compliance Reporting](#8-compliance-reporting-cmdgovbot)
+   - [8.1 Compliance Phases](#81-compliance-phases)
+   - [8.2 Exit Codes](#82-exit-codes)
+   - [8.3 Detection Logic](#83-detection-logic)
+   - [8.4 Running govbot](#84-running-govbot)
+   - [8.5 Scheduling in Kubernetes](#85-scheduling-in-kubernetes)
+9. [Explainability](#9-explainability)
+   - [9.1 Decision Trace](#91-decision-trace)
+   - [9.2 Human-Readable Explanation](#92-human-readable-explanation)
+   - [9.3 Surfacing the Explanation](#93-surfacing-the-explanation)
+   - [9.4 Audit Enrichment](#94-audit-enrichment)
+   - [9.5 Gateway API Endpoints](#95-gateway-api-endpoints)
+   - [9.6 govexplain CLI](#96-govexplain-cli)
+   - [9.7 Implementation Plan](#97-implementation-plan)
+10. [Identity & Access](#10-identity--access)
+11. [Troubleshooting](#11-troubleshooting)
+12. [Outstanding](#12-outstanding)
+
+---
+
 ## 1. Overview
 
 As aiHelpDesk evolves from read-only diagnostics to actively *fixing* infrastructure

@@ -28,6 +28,11 @@ type RunEvaluation struct {
 	// Remediation judge fields — set when faulttest runs with --remediation-judge.
 	RemediationJudgeScore     float64 `json:"remediation_judge_score,omitempty"`
 	RemediationJudgeReasoning string  `json:"remediation_judge_reasoning,omitempty"`
+
+	// PrimaryConfidence is the triage agent's self-reported confidence on its
+	// primary hypothesis (from HYPOTHESIS_1: ... | CONFIDENCE: X in the response).
+	// Zero when the agent did not emit structured hypotheses.
+	PrimaryConfidence float64 `json:"primary_confidence,omitempty"`
 }
 
 // RunEvaluationStore persists automated faulttest evaluation scores.
@@ -73,6 +78,7 @@ CREATE TABLE IF NOT EXISTS run_evaluation (
 	}{
 		{"remediation_judge_score", "ALTER TABLE run_evaluation ADD COLUMN remediation_judge_score REAL NOT NULL DEFAULT 0"},
 		{"remediation_judge_reasoning", "ALTER TABLE run_evaluation ADD COLUMN remediation_judge_reasoning TEXT NOT NULL DEFAULT ''"},
+		{"primary_confidence", "ALTER TABLE run_evaluation ADD COLUMN primary_confidence REAL NOT NULL DEFAULT 0"},
 	} {
 		if !s.isPostgres {
 			var cnt int
@@ -105,8 +111,8 @@ func (s *RunEvaluationStore) Upsert(ctx context.Context, eval *RunEvaluation) er
 INSERT INTO run_evaluation
     (run_id, failure_id, failure_name, keyword_score, tool_score, diagnosis_score,
      remediation_score, overall_score, judge_used, passed, created_at,
-     remediation_judge_score, remediation_judge_reasoning)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     remediation_judge_score, remediation_judge_reasoning, primary_confidence)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(run_id) DO UPDATE SET
     failure_id                  = excluded.failure_id,
     failure_name                = excluded.failure_name,
@@ -119,13 +125,15 @@ ON CONFLICT(run_id) DO UPDATE SET
     passed                      = excluded.passed,
     created_at                  = excluded.created_at,
     remediation_judge_score     = excluded.remediation_judge_score,
-    remediation_judge_reasoning = excluded.remediation_judge_reasoning`),
+    remediation_judge_reasoning = excluded.remediation_judge_reasoning,
+    primary_confidence          = excluded.primary_confidence`),
 		eval.RunID, eval.FailureID, eval.FailureName,
 		eval.KeywordScore, eval.ToolScore, eval.DiagnosisScore,
 		eval.RemediationScore, eval.OverallScore,
 		judgeInt, passedInt,
 		eval.CreatedAt.UTC().Format(time.RFC3339Nano),
 		eval.RemediationJudgeScore, eval.RemediationJudgeReasoning,
+		eval.PrimaryConfidence,
 	)
 	return err
 }
@@ -137,15 +145,27 @@ type CalibrationBand struct {
 	Correct        int     `json:"correct"`         // operator confirmed diagnosis was correct
 	ActualAccuracy float64 `json:"actual_accuracy"` // Correct/Runs; 0 when Runs==0
 	Calibration    string  `json:"calibration"`     // "OVERCONFIDENT"|"WELL_CALIBRATED"|"UNDERCONFIDENT"|"INSUFFICIENT_DATA"
+	// HeuristicRuns is the count of runs in this band where judge_used=false.
+	// These runs were scored by keyword heuristic, not an LLM judge. Operators
+	// should treat bands with non-zero HeuristicRuns as lower-quality signal.
+	HeuristicRuns int `json:"heuristic_runs,omitempty"`
 }
 
 // CalibrationReport aggregates confidence-band calibration across a series (or fleet-wide).
 type CalibrationReport struct {
 	SeriesID         string             `json:"series_id,omitempty"`
 	Bands            []*CalibrationBand `json:"bands"`
-	TotalRuns        int                `json:"total_runs"` // total runs counted across all bands
+	TotalRuns        int                `json:"total_runs"` // runs included in triage bands (primary_confidence > 0)
 	RemediationBands []*CalibrationBand `json:"remediation_bands,omitempty"`
 	RemediationRuns  int                `json:"remediation_runs"`
+	// HeuristicCount is runs excluded from triage calibration because the agent
+	// did not emit a CONFIDENCE: value on its primary hypothesis.
+	HeuristicCount int `json:"heuristic_count,omitempty"`
+	// HumanRuns and AutoJudgeRuns break down TotalRuns by feedback source so
+	// callers can signal when calibration is backed by synthetic rather than
+	// human verdicts.
+	HumanRuns     int `json:"human_runs,omitempty"`
+	AutoJudgeRuns int `json:"auto_judge_runs,omitempty"`
 }
 
 type bandDef struct {
@@ -174,10 +194,12 @@ func calibrationLabel(actual, expected float64, runs int) string {
 	return "WELL_CALIBRATED"
 }
 
-// CalibrationBands joins run_evaluation diagnosis scores with operator triage
-// feedback to compute per-band accuracy. At-gate feedback (captured before
-// remediation) is preferred over post-incident feedback; a run with both
-// contributes only once using the at-gate verdict.
+// CalibrationBands joins run_evaluation primary_confidence with operator triage
+// feedback to compute per-band accuracy. Triage calibration bands on the agent's
+// self-reported primary hypothesis confidence (primary_confidence > 0); runs
+// without a confidence signal are excluded and counted in HeuristicCount.
+// For triage, at-gate feedback is preferred over post-incident (no outcome bias).
+// For remediation, post-incident feedback is preferred (actual outcome > plan review).
 // Pass seriesID="" for fleet-wide calibration.
 func (s *RunEvaluationStore) CalibrationBands(ctx context.Context, seriesID string) (*CalibrationReport, error) {
 	gateFilter := ""
@@ -189,9 +211,14 @@ func (s *RunEvaluationStore) CalibrationBands(ctx context.Context, seriesID stri
 		args = append(args, seriesID, seriesID)
 	}
 
+	// Triage calibration: band on primary_confidence (agent self-reported).
+	// At-gate preferred over post-incident to avoid outcome bias.
+	// judge_used and feedback_source are selected for band annotations and source breakdown.
 	q := fmt.Sprintf(`
-SELECT ev.diagnosis_score,
-       COALESCE(fb_gate.verdict_correct, fb_post.verdict_correct) AS verdict_correct
+SELECT ev.primary_confidence,
+       ev.judge_used,
+       COALESCE(fb_gate.verdict_correct, fb_post.verdict_correct) AS verdict_correct,
+       COALESCE(fb_gate.feedback_source, fb_post.feedback_source, 'human') AS feedback_source
 FROM run_evaluation ev
 LEFT JOIN run_feedback fb_gate ON fb_gate.run_id = ev.run_id
   AND fb_gate.feedback_type = 'triage'
@@ -201,7 +228,8 @@ LEFT JOIN run_feedback fb_post ON fb_post.run_id = ev.run_id
   AND fb_post.feedback_type = 'triage'
   AND fb_post.feedback_time = 'post_incident'
   AND fb_post.verdict_correct IS NOT NULL%s
-WHERE fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL`, gateFilter, postFilter)
+WHERE (fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL)
+  AND ev.primary_confidence > 0`, gateFilter, postFilter)
 
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, q), args...)
 	if err != nil {
@@ -209,20 +237,31 @@ WHERE fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL`, gateFilter, pos
 	}
 	defer rows.Close()
 
-	type accum struct{ runs, correct int }
+	type accum struct{ runs, correct, heuristic int }
 	counts := make([]accum, len(diagBands))
+	var humanRuns, autoJudgeRuns int
 
 	for rows.Next() {
-		var diagScore float64
+		var confScore float64
+		var judgeUsedInt int
 		var verdictInt int
-		if err := rows.Scan(&diagScore, &verdictInt); err != nil {
+		var fbSource string
+		if err := rows.Scan(&confScore, &judgeUsedInt, &verdictInt, &fbSource); err != nil {
 			return nil, err
 		}
+		if fbSource == "auto_judge" {
+			autoJudgeRuns++
+		} else {
+			humanRuns++
+		}
 		for i, b := range diagBands {
-			if diagScore >= b.min && diagScore < b.max {
+			if confScore >= b.min && confScore < b.max {
 				counts[i].runs++
 				if verdictInt == 1 {
 					counts[i].correct++
+				}
+				if judgeUsedInt == 0 {
+					counts[i].heuristic++
 				}
 				break
 			}
@@ -232,10 +271,10 @@ WHERE fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL`, gateFilter, pos
 		return nil, err
 	}
 
-	report := &CalibrationReport{SeriesID: seriesID}
+	report := &CalibrationReport{SeriesID: seriesID, HumanRuns: humanRuns, AutoJudgeRuns: autoJudgeRuns}
 	for i, b := range diagBands {
 		c := counts[i]
-		band := &CalibrationBand{Band: b.label, Runs: c.runs, Correct: c.correct}
+		band := &CalibrationBand{Band: b.label, Runs: c.runs, Correct: c.correct, HeuristicRuns: c.heuristic}
 		if c.runs > 0 {
 			band.ActualAccuracy = float64(c.correct) / float64(c.runs)
 		}
@@ -244,7 +283,22 @@ WHERE fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL`, gateFilter, pos
 		report.TotalRuns += c.runs
 	}
 
-	// Second query: remediation_score vs remediation operator feedback.
+	// Count runs excluded because primary_confidence was not emitted.
+	heuristicQ := fmt.Sprintf(`
+SELECT COUNT(*) FROM run_evaluation ev
+LEFT JOIN run_feedback fb_gate ON fb_gate.run_id = ev.run_id
+  AND fb_gate.feedback_type = 'triage' AND fb_gate.feedback_time = 'at_gate'
+  AND fb_gate.verdict_correct IS NOT NULL%s
+LEFT JOIN run_feedback fb_post ON fb_post.run_id = ev.run_id
+  AND fb_post.feedback_type = 'triage' AND fb_post.feedback_time = 'post_incident'
+  AND fb_post.verdict_correct IS NOT NULL%s
+WHERE (fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL)
+  AND ev.primary_confidence = 0`, gateFilter, postFilter)
+	hArgs := append([]any{}, args...)
+	s.db.QueryRowContext(ctx, rebind(s.isPostgres, heuristicQ), hArgs...).Scan(&report.HeuristicCount) //nolint:errcheck
+
+	// Second query: remediation_judge_score vs remediation operator feedback.
+	// Post-incident feedback is preferred over at-gate (actual outcome > plan review).
 	remGateFilter := ""
 	remPostFilter := ""
 	remArgs := []any{}
@@ -254,8 +308,8 @@ WHERE fb_gate.run_id IS NOT NULL OR fb_post.run_id IS NOT NULL`, gateFilter, pos
 		remArgs = append(remArgs, seriesID, seriesID)
 	}
 	remQ := fmt.Sprintf(`
-SELECT ev.remediation_score,
-       COALESCE(rfb_gate.verdict_correct, rfb_post.verdict_correct) AS verdict_correct
+SELECT ev.remediation_judge_score,
+       COALESCE(rfb_post.verdict_correct, rfb_gate.verdict_correct) AS verdict_correct
 FROM run_evaluation ev
 LEFT JOIN run_feedback rfb_gate ON rfb_gate.run_id = ev.run_id
   AND rfb_gate.feedback_type = 'remediation'
@@ -265,7 +319,7 @@ LEFT JOIN run_feedback rfb_post ON rfb_post.run_id = ev.run_id
   AND rfb_post.feedback_type = 'remediation'
   AND rfb_post.feedback_time = 'post_incident'
   AND rfb_post.verdict_correct IS NOT NULL%s
-WHERE ev.remediation_score > 0
+WHERE ev.remediation_judge_score > 0
   AND (rfb_gate.run_id IS NOT NULL OR rfb_post.run_id IS NOT NULL)`, remGateFilter, remPostFilter)
 
 	remRows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, remQ), remArgs...)
@@ -377,7 +431,7 @@ func (s *RunEvaluationStore) GetByRunID(ctx context.Context, runID string) (*Run
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 SELECT run_id, failure_id, failure_name, keyword_score, tool_score, diagnosis_score,
        remediation_score, overall_score, judge_used, passed, created_at,
-       remediation_judge_score, remediation_judge_reasoning
+       remediation_judge_score, remediation_judge_reasoning, primary_confidence
 FROM run_evaluation WHERE run_id = ?`), runID)
 
 	var (
@@ -392,6 +446,7 @@ FROM run_evaluation WHERE run_id = ?`), runID)
 		&eval.RemediationScore, &eval.OverallScore,
 		&judgeInt, &passedInt, &createdStr,
 		&eval.RemediationJudgeScore, &eval.RemediationJudgeReasoning,
+		&eval.PrimaryConfidence,
 	); err != nil {
 		return nil, err
 	}

@@ -8,6 +8,22 @@ The feedback loop described here is also the measurement layer of [Informed Cons
 
 ---
 
+## Table of Contents
+
+1. [The lifecycle in one picture](#the-lifecycle-in-one-picture)
+2. [Feedback reference](#feedback-reference)
+3. [Vault command reference](#vault-command-reference)
+   - [Which feedback each command consumes](#which-feedback-each-command-consumes)
+4. [When to use which command](#when-to-use-which-command)
+   - [Situation 1: Routine CI / scheduled regression check](#situation-1-routine-ci--scheduled-regression-check)
+   - [Situation 2: A playbook was updated — did it improve things?](#situation-2-a-playbook-was-updated--did-it-improve-things)
+   - [Situation 3: How accurate is the agent's diagnosis, really?](#situation-3-how-accurate-is-the-agents-diagnosis-really)
+   - [Situation 4: Are the automated scores trustworthy?](#situation-4-are-the-automated-scores-trustworthy)
+5. [Recommended weekly workflow](#recommended-weekly-workflow)
+6. [Quick-reference cheat-sheet](#quick-reference-cheat-sheet)
+
+---
+
 ## The lifecycle in one picture
 
 ```
@@ -62,8 +78,11 @@ All four combinations are implemented and captured by faulttest.
 | 3 | `remediation` | `post_incident` | Was the remediation approach appropriate? | After recovery completes |
 | 4 | `remediation` | `at_gate` | Is the remediation approach appropriate? | At the same gate as #1 — asked immediately after Q1, before remediation runs |
 
-**Why `triage/at_gate` is the highest-quality signal:**  
-It is captured before the operator knows whether remediation succeeded. Post-incident feedback is contaminated by outcome bias — an operator who just saw a 12-second recovery is more likely to confirm the diagnosis regardless of whether it was actually correct. At-gate feedback has no such bias, so `vault calibration` prefers it over post-incident when both exist for the same run.
+**Why `triage/at_gate` is the highest-quality signal for diagnosis:**  
+It is captured before the operator knows whether remediation succeeded. Post-incident feedback is contaminated by outcome bias — an operator who just saw a 12-second recovery is more likely to confirm the diagnosis regardless of whether it was actually correct. At-gate feedback has no such bias, so `vault calibration` prefers it over post-incident when both exist for the same triage run.
+
+**Why `remediation/post_incident` is the preferred signal for remediation calibration:**  
+At-gate remediation feedback is a review of a plan. Post-incident remediation feedback reflects whether the plan actually worked. For calibrating `remediation_judge_score` against ground truth, the actual outcome is more informative than a pre-execution opinion, so `vault calibration` prefers post-incident when both exist for the same run.
 
 **Why both types of post-incident feedback share `post_incident`:**  
 They are captured in the same interactive session after recovery, but stored as separate records keyed by `(run_id, feedback_type, feedback_time)`. Both are anchored to the triage `run_id` — not the remediation `run_id` — so they can be joined with `run_evaluation` (which is also keyed on the triage run_id) without a cross-table join.
@@ -104,7 +123,7 @@ curl -sX POST "$GATEWAY/api/v1/fleet/playbook-runs/$RUN_ID/feedback" \
 | `vault drift` | — | — | — | — |
 | `vault versions` | — | — | — | — |
 | `vault accuracy` | ✓ | ✓ | ✓ | ✓ |
-| `vault calibration` | ✓ preferred | ✓ fallback | ✓ preferred | ✓ fallback |
+| `vault calibration` | ✓ preferred (triage) | ✓ fallback (triage) | ✓ fallback (remediation) | ✓ preferred (remediation) |
 
 ---
 
@@ -161,20 +180,22 @@ The at-gate count is the more trustworthy signal. If post-incident accuracy is s
 
 **Run:** `vault calibration [fault-id or series-id]`  
 **Needs:** Gateway + both eval scores (faulttest run with `--gateway`) and operator feedback.  
-**Tells you:** Whether the model's confidence (diagnosis_score and remediation_score bands) predicts actual operator-confirmed correctness. Two sections — diagnosis calibration and, when remediation feedback exists, remediation calibration.
+**Tells you:** Whether the agent's self-reported confidence (`primary_confidence`, from the `CONFIDENCE:` field on its primary hypothesis) and the LLM judge's remediation score predict actual operator-confirmed correctness. Two sections — diagnosis calibration and, when remediation feedback exists, remediation calibration.
 
 ```bash
 faulttest vault calibration --gateway $GATEWAY --api-key $KEY          # fleet-wide
 faulttest vault calibration db-lock-contention --gateway $GATEWAY ...  # one fault
 ```
 
+Runs where the agent did not emit a structured `HYPOTHESIS_1: ... | CONFIDENCE:` line are excluded from the diagnosis confidence bands and shown in a separate footnote as heuristic-only runs. These runs still contribute to `vault accuracy` (they have feedback), but cannot be placed in a confidence band.
+
 Interpret the output:
 
 | Label | Meaning | Action |
 |-------|---------|--------|
-| `WELL_CALIBRATED` | Score band predicts accuracy within ±10 percentage points | No change needed |
-| `OVERCONFIDENT` | Agent scores high but operators disagree more than expected | Lower pass threshold or retrain guidance |
-| `UNDERCONFIDENT` | Agent scores low but operators agree more than expected | Raise pass threshold or improve narrative coverage |
+| `WELL_CALIBRATED` | Confidence band predicts accuracy within ±10 percentage points | No change needed |
+| `OVERCONFIDENT` | Agent reports high confidence but operators disagree more than expected | Lower pass threshold or strengthen hypothesis guidance |
+| `UNDERCONFIDENT` | Agent reports low confidence but operators agree more than expected | Raise pass threshold; agent is being too conservative |
 | `INSUFFICIENT_DATA` | Fewer than 3 runs in this band | Collect more feedback before acting |
 
 ---

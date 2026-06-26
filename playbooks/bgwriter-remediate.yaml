@@ -1,6 +1,6 @@
 series_id: pbs_bgwriter_remediate
 name: Checkpoint Warning — Reset bgwriter_lru_maxpages
-version: "1.3"
+version: "1.4"
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
@@ -18,14 +18,19 @@ symptoms:
   - "buffers_backend elevated (backends writing dirty pages)"
   - "bgwriter_lru_maxpages significantly below 100 (default)"
 guidance: |
-  Step 1: Confirm the misconfiguration.
-  Call get_pg_settings with category="background writer". Verify:
-  - bgwriter_lru_maxpages: should be 100 (default). If it is < 10, the bgwriter
-    is severely throttled and will hit its limit on nearly every wakeup cycle.
-  - bgwriter_lru_multiplier: default 2.0. Unusually low values compound the effect.
-  Also check checkpoint_warning: if very short (< 60s), frequent checkpoint
-  warnings may be cosmetic (triggered by the low threshold) even if bgwriter
-  is not truly overwhelmed. Note both values before making any change.
+  Step 1: Confirm the misconfiguration. Make exactly TWO get_pg_settings calls
+  — these settings live in different PostgreSQL categories and cannot be fetched
+  together. After both calls you have everything needed; proceed immediately to
+  Step 2 without calling get_pg_settings again.
+
+  Call A: get_pg_settings with category="background writer"
+    Returns bgwriter_lru_maxpages (default 100) and bgwriter_lru_multiplier
+    (default 2.0). If bgwriter_lru_maxpages < 10 the bgwriter is severely
+    throttled and is the primary cause.
+
+  Call B: get_pg_settings with category="checkpoints"
+    Returns checkpoint_warning (default 300s). A very short value (< 60s)
+    causes cosmetic warnings even when the bgwriter is not overwhelmed.
 
   Step 2: Reset misconfigured settings to default.
   Use reset_pg_setting — this is the ONLY tool available for this step. Do NOT

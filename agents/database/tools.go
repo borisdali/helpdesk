@@ -78,6 +78,43 @@ type databaseInfo struct {
 	IsFromInfraConfig bool
 }
 
+// connStrCoreFields parses a libpq key=value connection string and returns only
+// the non-sensitive, non-mode fields used for identity matching (host, port, dbname, user).
+func connStrCoreFields(s string) map[string]string {
+	skip := map[string]bool{
+		"password": true, "sslpassword": true,
+		"sslmode": true, "sslcert": true, "sslkey": true, "sslrootcert": true,
+		"connect_timeout": true, "application_name": true,
+	}
+	fields := make(map[string]string)
+	for _, part := range strings.Fields(s) {
+		eq := strings.IndexByte(part, '=')
+		if eq < 0 {
+			continue
+		}
+		k := part[:eq]
+		if !skip[k] {
+			fields[k] = part[eq+1:]
+		}
+	}
+	return fields
+}
+
+// connStrCoreFieldsMatch returns true when the infra connection string's core
+// fields are a subset of (or equal to) the input's core fields.
+func connStrCoreFieldsMatch(infraConn string, inputCore map[string]string) bool {
+	infraCore := connStrCoreFields(infraConn)
+	if len(infraCore) == 0 {
+		return false
+	}
+	for k, v := range infraCore {
+		if inputCore[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveDatabaseInfo resolves a connection string or database name to full info.
 // Returns the resolved info and metadata for policy checks.
 // When infraConfig is set and the database is not registered, returns an error
@@ -96,14 +133,39 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 			}
 		}
 
-		// Reverse lookup: find which infraConfig entry has this connection string
+		// Reverse lookup: find which infraConfig entry has this connection string.
+		// Compare core fields only (host/port/dbname/user) so that extra fields in
+		// the input (password=, sslmode=) or in the infra entry do not break the match.
 		if infraConfig != nil {
+			inputCore := connStrCoreFields(connStrOrName)
 			for id, db := range infraConfig.DBServers {
 				slog.Debug("reverse lookup comparing", "id", id, "db_conn", db.ConnectionString, "input_conn", connStrOrName, "tags", db.Tags)
-				if db.ConnectionString == connStrOrName {
+				if connStrCoreFieldsMatch(db.ConnectionString, inputCore) {
 					slog.Debug("reverse resolved connection string to database", "id", id, "tags", db.Tags)
 					return databaseInfo{
 						Name:              id,
+						ConnectionStr:     db.ResolvedConnectionString(),
+						Tags:              db.Tags,
+						Sensitivity:       db.Sensitivity,
+						IsFromInfraConfig: true,
+					}, nil
+				}
+			}
+			// Exact match failed — try host field as an infra ID. Handles the case
+			// where the LLM builds a DSN using the alias as the hostname
+			// (e.g. host=pg-cluster-minkube) instead of the stored FQDN.
+			inputHost := ""
+			for _, part := range strings.Split(connStrOrName, " ") {
+				if strings.HasPrefix(part, "host=") {
+					inputHost = strings.TrimPrefix(part, "host=")
+					break
+				}
+			}
+			if inputHost != "" {
+				if db, ok := infraConfig.DBServers[inputHost]; ok {
+					slog.Debug("resolved connection string via host-as-infra-id", "id", inputHost)
+					return databaseInfo{
+						Name:              inputHost,
 						ConnectionStr:     db.ResolvedConnectionString(),
 						Tags:              db.Tags,
 						Sensitivity:       db.Sensitivity,

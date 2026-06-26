@@ -346,6 +346,17 @@ After a successful recovery (verification SQL returns true), `faulttest` optiona
 
 The diagnosis answer stores a `RunFeedback` record (`feedback_type: "triage"`, `feedback_time: "post_incident"`). The remediation answer stores a second record (`feedback_type: "remediation"`, `feedback_time: "post_incident"`), anchored to the same triage run ID so it can be joined with `run_evaluation` for calibration. Both feed `vault calibration`; at-gate feedback (captured earlier at the triage→remediation gate) is treated as the higher-quality signal and preferred when both exist. Skipping or running non-interactively leaves no feedback — the run still scores normally.
 
+**Automatic post-incident feedback (`--approval-mode=force` + `--judge`):**
+
+When both `--approval-mode=force` and `--judge` are set, faulttest skips the interactive prompt and auto-submits the post-incident triage feedback on your behalf, using the LLM judge's verdict:
+
+- Judge score ≥ 0.8 → `verdict_correct: true`
+- Judge score < 0.8 → `verdict_correct: false`
+
+The submitted record carries `feedback_source: "auto_judge"` to distinguish it from operator-submitted feedback (`feedback_source: "human"`). This field is visible in `vault incidents <run-id>` under `── POST-INCIDENT FEEDBACK` and is stored in `run_feedback.feedback_source` in auditd.
+
+Auto-judge feedback counts toward `vault accuracy` and `vault calibration` the same as human feedback. Use `vault calibration` to track whether the judge's automated verdicts are well-calibrated against at-gate human feedback over time — if the two diverge systematically, the judge prompt or score threshold may need tuning.
+
 **Post-run incident summary:**
 
 After gate resolution and recovery complete, `faulttest` prints a one-line incident summary:
@@ -463,9 +474,9 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--conn` | — | — | PostgreSQL connection string used for fault injection and teardown |
-| `--agent-conn` | — | `--conn` | Connection identifier sent to the agent in prompts. Defaults to `--conn`. Use this when the agent should see a registered alias from `infrastructure.json` (e.g. `staging-db`) while `--conn` holds the full DSN with password for injection. |
-| `--replica-conn` | — | — | Replica connection string (replication-lag fault) |
+| `--conn` | `FAULTTEST_CONN_STR` | — | PostgreSQL connection string used for fault injection and teardown |
+| `--agent-conn` | `FAULTTEST_AGENT_CONN_STR` | `--conn` | Connection identifier sent to the agent in prompts. Defaults to `--conn`. Use this when the agent should see a registered alias from `infrastructure.json` (e.g. `staging-db`) while `--conn` holds the full DSN with password for injection. |
+| `--replica-conn` | `FAULTTEST_REPLICA_CONN_STR` | — | Replica connection string (replication-lag fault) |
 | `--db-agent` | — | — | Database agent A2A URL or gateway URL |
 | `--k8s-agent` | — | — | Kubernetes agent A2A URL |
 | `--sysadmin-agent` | — | — | SysAdmin agent A2A URL |
@@ -477,12 +488,15 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--external` | — | true¹ | Only external_compat faults; SQL injection only |
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
+| `--repeat` | — | `1` | Run each matching fault N times (inject→diagnose→teardown) and print a stability report. Remediation is skipped in repeat mode. N > 1 triggers [triage consistency certification](CONSISTENCY.md) and posts a `STABLE`/`UNSTABLE` cert to auditd via the gateway. Use `make recertify` (from source) or `faulttest run --repeat 5 --auto-db` (binary) for batch certification of all faults. |
+| `--approval-mode` | — | playbook default | Override the playbook's `approval_mode` for this run (`auto\|session\|manual\|force`). Use `force` in repeat mode and automated pipelines to bypass interactive gates. When combined with `--judge`, post-incident triage feedback is auto-submitted from the judge's verdict (tagged `feedback_source: "auto_judge"`); see [Automatic post-incident feedback](#post-recovery-feedback-prompt). |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
-| `--gateway` | — | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. No default — must be set explicitly when `--remediate` or `vault list` needs live validation. |
+| `--gateway` | `FAULTTEST_GATEWAY_URL` | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. When the env var is set, all subcommands — including `vault list`, `vault accuracy`, and `run --repeat` — pick it up automatically. |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
 | `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the gateway after remediation and scores blast-radius, step efficiency, and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
+| `--agent-model` | `HELPDESK_MODEL_NAME` | — | Name of the triage agent model. Stored as `diagnosis_model` in the stability cert when `--repeat N` is used. Defaults to `HELPDESK_MODEL_NAME`. Set this explicitly when certifying against a specific model so certs can be distinguished across model upgrades in `vault accuracy`. |
 | `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
 | `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |
@@ -562,6 +576,8 @@ faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|sugge
 ```
 
 The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores are also posted to auditd (`run_evaluation` table) keyed by the `plr_*` playbook run ID — the local JSON file is a cache. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
+
+`vault list` includes a **STABLE** column showing the latest consistency certification result for each fault — `STABLE(N)`, `UNSTABLE(N)`, or `—` (never certified). Certification is triggered by `faulttest run --repeat N` and is documented in full in [CONSISTENCY.md](CONSISTENCY.md).
 
 #### vault list
 

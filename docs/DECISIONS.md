@@ -4,6 +4,28 @@ The Decision Hub is a unified surface that aggregates every pending human decisi
 
 ---
 
+## Table of Contents
+
+1. [Decision types](#decision-types)
+   - [Gate `extra` fields](#gate-extra-fields)
+   - [Feedback `extra` fields](#feedback-extra-fields)
+2. [Listing pending decisions](#listing-pending-decisions)
+3. [Resolving a decision](#resolving-a-decision)
+4. [Notifications](#notifications)
+   - [Webhook payload](#webhook-payload)
+   - [Slack detection](#slack-detection)
+   - [HMAC signing](#hmac-signing)
+5. [Relationship to type-specific endpoints](#relationship-to-type-specific-endpoints)
+6. [Git webhook adapter (opt-in)](#git-webhook-adapter-opt-in)
+   - [How it works](#how-it-works)
+   - [Branch naming convention](#branch-naming-convention)
+   - [Configuration](#configuration)
+7. [K8s and Docker — emit-and-wait](#k8s-and-docker--emit-and-wait)
+8. [Life of a post-incident feedback](#life-of-a-post-incident-feedback)
+9. [Operational SRE/DBA Flywheel — fleet scenarios](#operational-sredba-flywheel--fleet-scenarios)
+
+---
+
 ## Decision types
 
 | Type | Prefix | Raised by | Raised when |

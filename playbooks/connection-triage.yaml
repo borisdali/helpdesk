@@ -34,6 +34,15 @@ guidance: |
   Use get_lock_info to see the full lock table. Filter for AccessExclusiveLock —
   these block even reads and are the most disruptive.
 
+  When idle connections are the primary cause (no blocking transactions, no locked
+  queries, no uncommitted writes), your immediate remediation recommendation MUST
+  be terminate_idle_connections — encoded as kill_idle in the FINDINGS line.
+  Application-level changes (pool size reduction, idle timeout configuration) are
+  the correct long-term fix but must NOT be listed as the primary recommended
+  action when idle connections can be terminated directly right now. Reserve
+  "escalate" only for sessions with has_writes=true that are too old to terminate
+  safely without risking data loss.
+
   Common misdiagnosis: blaming connection count when the real issue is a single
   long-running transaction preventing autovacuum from reclaiming connection slots
   (wraparound risk). Check transaction age alongside connection count.

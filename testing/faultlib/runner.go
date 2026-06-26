@@ -67,11 +67,16 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 		return testutil.AgentResponse{Error: fmt.Errorf("no agent URL configured for category %q", f.Category)}
 	}
 
+	agentConn := r.cfg.AgentConnStr
+	if agentConn == "" {
+		agentConn = r.cfg.ConnStr
+	}
 	slog.Info("sending prompt to agent",
 		"failure", f.ID,
 		"category", f.Category,
 		"agent", agentURL,
 		"prompt_len", len(prompt),
+		"agent-conn", agentConn,
 	)
 
 	timeout := f.TimeoutDuration()
@@ -96,8 +101,12 @@ func (r *Runner) runViaGatewayQuery(ctx context.Context, f Failure) testutil.Age
 	agentName := categoryToGatewayAgent(f.Category)
 	prompt := ResolvePrompt(f.Prompt, r.cfg)
 
+	agentConn := r.cfg.AgentConnStr
+	if agentConn == "" {
+		agentConn = r.cfg.ConnStr
+	}
 	slog.Info("sending prompt via gateway query",
-		"failure", f.ID, "category", f.Category, "agent", agentName, "gateway", r.cfg.GatewayURL)
+		"failure", f.ID, "category", f.Category, "agent", agentName, "gateway", r.cfg.GatewayURL, "agent-conn", agentConn)
 
 	timeout := f.TimeoutDuration()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -119,17 +128,18 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		}
 	}
 
+	connStr := r.cfg.ConnStr
+	if r.cfg.AgentConnStr != "" {
+		connStr = r.cfg.AgentConnStr
+	}
+
 	slog.Info("sending prompt to agent via playbook",
 		"failure", f.ID,
 		"series_id", f.DiagnosisPlaybookSeriesID,
 		"playbook_id", playbookID,
 		"gateway", r.cfg.GatewayURL,
+		"agent-conn", connStr,
 	)
-
-	connStr := r.cfg.ConnStr
-	if r.cfg.AgentConnStr != "" {
-		connStr = r.cfg.AgentConnStr
-	}
 	reqBody := map[string]any{
 		"context": ResolvePrompt(f.Prompt, r.cfg),
 	}

@@ -283,7 +283,7 @@ func mockFeedbackAuditd(t *testing.T, runID string, diagCorrect *bool) *httptest
 		pendingPath := "/v1/fleet/playbook-runs/feedback-pending"
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == path:
-			json.NewEncoder(w).Encode(submitted) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"feedback": []any{submitted}}) //nolint:errcheck
 		case r.Method == http.MethodPost && r.URL.Path == path:
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
