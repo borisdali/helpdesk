@@ -156,7 +156,7 @@ func cmdList(ctx context.Context, client *audit.ApprovalClient, args []string, o
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tSTATUS\tACTION\tTOOL\tAGENT\tREQUESTED\tEXPIRES")
+	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tACTION\tTOOL\tAGENT\tREQUESTED\tEXPIRES")
 	for _, a := range approvals {
 		expiresIn := ""
 		if !a.ExpiresAt.IsZero() {
@@ -168,7 +168,7 @@ func cmdList(ctx context.Context, client *audit.ApprovalClient, args []string, o
 			}
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			a.ApprovalID,
 			statusIcon(a.Status)+" "+a.Status,
 			a.ActionClass,
@@ -178,7 +178,7 @@ func cmdList(ctx context.Context, client *audit.ApprovalClient, args []string, o
 			expiresIn,
 		)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	return nil
 }

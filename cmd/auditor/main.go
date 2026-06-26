@@ -114,7 +114,7 @@ func main() {
 	args := logging.InitLogging(os.Args[1:])
 
 	// Parse remaining flags
-	flag.CommandLine.Parse(args)
+	_ = flag.CommandLine.Parse(args)
 
 	// Allow SMTP password from environment
 	if cfg.SMTPPassword == "" {
@@ -246,7 +246,7 @@ func main() {
 		slog.Info("hint: or use -audit-service=<url> to poll events via HTTP when the socket is unavailable")
 		os.Exit(1)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	slog.Info("connected to audit socket, monitoring events...")
 
@@ -296,7 +296,7 @@ func runVerifyMode(cfg Config) {
 		fmt.Printf("ERROR: Failed to open database: %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Verify the chain
 	ctx := context.Background()
@@ -597,28 +597,28 @@ func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 
-	fmt.Fprintf(w, "# HELP auditor_events_total Total number of audit events processed\n")
-	fmt.Fprintf(w, "# TYPE auditor_events_total counter\n")
-	fmt.Fprintf(w, "auditor_events_total %d\n\n", m.eventsTotal)
+	_, _ = fmt.Fprintf(w, "# HELP auditor_events_total Total number of audit events processed\n")
+	_, _ = fmt.Fprintf(w, "# TYPE auditor_events_total counter\n")
+	_, _ = fmt.Fprintf(w, "auditor_events_total %d\n\n", m.eventsTotal)
 
-	fmt.Fprintf(w, "# HELP auditor_alerts_total Total number of alerts by level\n")
-	fmt.Fprintf(w, "# TYPE auditor_alerts_total counter\n")
+	_, _ = fmt.Fprintf(w, "# HELP auditor_alerts_total Total number of alerts by level\n")
+	_, _ = fmt.Fprintf(w, "# TYPE auditor_alerts_total counter\n")
 	for level, count := range m.alertsTotal {
-		fmt.Fprintf(w, "auditor_alerts_total{level=%q} %d\n", level, count)
+		_, _ = fmt.Fprintf(w, "auditor_alerts_total{level=%q} %d\n", level, count)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
-	fmt.Fprintf(w, "# HELP auditor_delegations_total Total delegations by agent\n")
-	fmt.Fprintf(w, "# TYPE auditor_delegations_total counter\n")
+	_, _ = fmt.Fprintf(w, "# HELP auditor_delegations_total Total delegations by agent\n")
+	_, _ = fmt.Fprintf(w, "# TYPE auditor_delegations_total counter\n")
 	for agent, count := range m.delegationsByAgent {
-		fmt.Fprintf(w, "auditor_delegations_total{agent=%q} %d\n", agent, count)
+		_, _ = fmt.Fprintf(w, "auditor_delegations_total{agent=%q} %d\n", agent, count)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
-	fmt.Fprintf(w, "# HELP auditor_errors_total Total errors by agent\n")
-	fmt.Fprintf(w, "# TYPE auditor_errors_total counter\n")
+	_, _ = fmt.Fprintf(w, "# HELP auditor_errors_total Total errors by agent\n")
+	_, _ = fmt.Fprintf(w, "# TYPE auditor_errors_total counter\n")
 	for agent, count := range m.errorsByAgent {
-		fmt.Fprintf(w, "auditor_errors_total{agent=%q} %d\n", agent, count)
+		_, _ = fmt.Fprintf(w, "auditor_errors_total{agent=%q} %d\n", agent, count)
 	}
 }
 

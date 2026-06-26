@@ -348,7 +348,7 @@ func startCallbackServer(addr string, ch chan<- callbackPayload) *http.Server {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"received"}`))
+		_, _ = w.Write([]byte(`{"status":"received"}`))
 
 		select {
 		case ch <- p:

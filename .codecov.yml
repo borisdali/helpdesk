@@ -1,0 +1,15 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 2%
+
+ignore:
+  # Binary entrypoints — glue code, not library logic
+  - "cmd/**"
+  # Test infrastructure and helpers — not self-tested by design
+  - "testing/**"
+  # Embedded assets with no executable statements
+  - "playbooks/**"
+  - "prompts/**"
