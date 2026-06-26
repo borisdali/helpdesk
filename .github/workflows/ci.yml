@@ -28,7 +28,8 @@ jobs:
       - name: Unit tests
         # agents/incident has pre-existing test failures unrelated to this codebase.
         run: |
-          go test -v $(go list ./... | grep -v helpdesk/agents/incident) \
+          go test -v -coverprofile=unit.out -covermode=atomic \
+            $(go list ./... | grep -v helpdesk/agents/incident) \
             2>&1 | tee /tmp/unit.log
           grep -E "^(ok |FAIL)" /tmp/unit.log
 
@@ -36,10 +37,21 @@ jobs:
         run: make test-helm
 
       - name: Governance integration tests
-        run: make integration-governance
+        run: make integration-governance GOTEST_EXTRA="-coverprofile=gov.out -covermode=atomic"
 
       - name: Integration tests
-        run: make integration
+        run: make integration GOTEST_EXTRA="-coverprofile=integration.out -covermode=atomic"
+
+      - name: Merge coverage profiles
+        run: |
+          echo "mode: atomic" > coverage.out
+          grep -h -v "^mode:" unit.out gov.out integration.out >> coverage.out
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
 
       - name: Upload logs on failure
         if: failure()

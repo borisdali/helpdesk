@@ -105,8 +105,10 @@ cover-governance:
 # ---------------------------------------------------------------------------
 # AI Governance integration tests (no Docker required; builds auditd internally)
 # ---------------------------------------------------------------------------
+GOTEST_EXTRA ?=
+
 integration-governance:
-	go test -tags integration -timeout 120s -v ./testing/integration/governance/...
+	go test -tags integration -timeout 120s -v $(GOTEST_EXTRA) ./testing/integration/governance/...
 
 # ---------------------------------------------------------------------------
 # Integration tests (requires Docker)
@@ -124,7 +126,7 @@ integration:
 	@echo "Starting test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running integration tests..."
-	-go test -tags integration -timeout 120s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+	-go test -tags integration -timeout 120s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml down -v
