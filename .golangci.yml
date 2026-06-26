@@ -1,18 +1,21 @@
-linters-settings:
-  errcheck:
-    exclude-functions:
-      # Close() in a defer can't be acted on — idiomatic Go to ignore.
-      - (io.Closer).Close
-      # Diagnostic writes: stderr, tabwriter, http.ResponseWriter.
-      # If the connection drops or the terminal is gone, there's nothing to do.
-      - fmt.Fprint
-      - fmt.Fprintf
-      - fmt.Fprintln
-      - fmt.Print
-      - fmt.Println
-      - (*text/tabwriter.Writer).Flush
-      # Temp-dir cleanup in defer: best-effort, not actionable on error.
-      - os.RemoveAll
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # Close() in a defer can't be acted on — idiomatic Go to ignore.
+        - (io.Closer).Close
+        # Diagnostic writes: stderr, tabwriter, http.ResponseWriter.
+        # If the connection drops or the terminal is gone, there's nothing to do.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Print
+        - fmt.Println
+        - (*text/tabwriter.Writer).Flush
+        # Temp-dir cleanup in defer: best-effort, not actionable on error.
+        - os.RemoveAll
 
 issues:
   exclude-rules:
