@@ -346,6 +346,17 @@ After a successful recovery (verification SQL returns true), `faulttest` optiona
 
 The diagnosis answer stores a `RunFeedback` record (`feedback_type: "triage"`, `feedback_time: "post_incident"`). The remediation answer stores a second record (`feedback_type: "remediation"`, `feedback_time: "post_incident"`), anchored to the same triage run ID so it can be joined with `run_evaluation` for calibration. Both feed `vault calibration`; at-gate feedback (captured earlier at the triage→remediation gate) is treated as the higher-quality signal and preferred when both exist. Skipping or running non-interactively leaves no feedback — the run still scores normally.
 
+**Automatic post-incident feedback (`--approval-mode=force` + `--judge`):**
+
+When both `--approval-mode=force` and `--judge` are set, faulttest skips the interactive prompt and auto-submits the post-incident triage feedback on your behalf, using the LLM judge's verdict:
+
+- Judge score ≥ 0.8 → `verdict_correct: true`
+- Judge score < 0.8 → `verdict_correct: false`
+
+The submitted record carries `feedback_source: "auto_judge"` to distinguish it from operator-submitted feedback (`feedback_source: "human"`). This field is visible in `vault incidents <run-id>` under `── POST-INCIDENT FEEDBACK` and is stored in `run_feedback.feedback_source` in auditd.
+
+Auto-judge feedback counts toward `vault accuracy` and `vault calibration` the same as human feedback. Use `vault calibration` to track whether the judge's automated verdicts are well-calibrated against at-gate human feedback over time — if the two diverge systematically, the judge prompt or score threshold may need tuning.
+
 **Post-run incident summary:**
 
 After gate resolution and recovery complete, `faulttest` prints a one-line incident summary:
@@ -478,7 +489,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
 | `--repeat` | — | `1` | Run each matching fault N times (inject→diagnose→teardown) and print a stability report. Remediation is skipped in repeat mode. N > 1 triggers [triage consistency certification](CONSISTENCY.md) and posts a `STABLE`/`UNSTABLE` cert to auditd via the gateway. Use `make recertify` (from source) or `faulttest run --repeat 5 --auto-db` (binary) for batch certification of all faults. |
-| `--approval-mode` | — | playbook default | Override the playbook's `approval_mode` for this run (`auto\|session\|manual\|force`). Use `force` in repeat mode and automated pipelines to bypass interactive gates. |
+| `--approval-mode` | — | playbook default | Override the playbook's `approval_mode` for this run (`auto\|session\|manual\|force`). Use `force` in repeat mode and automated pipelines to bypass interactive gates. When combined with `--judge`, post-incident triage feedback is auto-submitted from the judge's verdict (tagged `feedback_source: "auto_judge"`); see [Automatic post-incident feedback](#post-recovery-feedback-prompt). |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
 | `--gateway` | `FAULTTEST_GATEWAY_URL` | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. When the env var is set, all subcommands — including `vault list`, `vault accuracy`, and `run --repeat` — pick it up automatically. |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |

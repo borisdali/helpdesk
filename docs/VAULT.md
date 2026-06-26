@@ -311,7 +311,13 @@ With no argument, lists all catalog faults that have a diagnosis playbook series
 
 Use `vault accuracy` alongside `resolution_rate` (from `vault stats`) to distinguish between "the agent diagnosed correctly but remediation didn't work" and "the agent misdiagnosed and remediation fixed the wrong thing." Use the stability cert block to understand whether the accuracy signal is built on a stable or noisy foundation, see [here](CONSISTENCY.md) for details.
 
-Feedback is submitted interactively by `faulttest` after a successful recovery when running with `--remediate` and `--gateway` (see below), or manually via `POST /api/v1/fleet/playbook-runs/{runID}/feedback`.
+Feedback is submitted in one of three ways:
+
+- **Interactive prompt** — `faulttest run --remediate --gateway` prompts after a successful recovery when a terminal is available. Stored with `feedback_source: "human"`.
+- **Auto-judge** — when `--approval-mode=force` and `--judge` are both set, faulttest skips the prompt and auto-submits the post-incident triage verdict from the LLM judge's score (≥ 0.8 → correct). Stored with `feedback_source: "auto_judge"`. See [FAULTTEST.md — Automatic post-incident feedback](FAULTTEST.md#post-recovery-feedback-prompt).
+- **Manual API call** — `POST /api/v1/fleet/playbook-runs/{runID}/feedback` with `feedback_source: "human"` (or omitted; defaults to `"human"`).
+
+The `feedback_source` field is visible in `vault incidents <run-id>` under `── POST-INCIDENT FEEDBACK` and in `vault accuracy` breakdowns. Auto-judge feedback and human feedback count equally toward accuracy and calibration metrics; use `vault calibration` to verify that the judge's automated verdicts track human judgement over time.
 
 ### vault incidents
 
@@ -377,13 +383,18 @@ Playbook:  pbs_lock_chain_remediate   Outcome: resolved (8.1s)
 Steps:     ✓ get_blocking_queries  ✓ terminate_connection
 
 ── EVALUATION ──────────────────────────────────────────────
-Diagnosis:         0.91 (LLM judge)   Agent confidence: 0.92
-Remediation:       0.88 (LLM judge)
+Score:         91%   (diagnosis 91% · remediation 88%)
+Diagnosis:     0.91 (LLM judge)   Agent confidence: 92%
+Remediation:   0.88 (LLM judge)
 
 ── POST-INCIDENT FEEDBACK ──────────────────────────────────
-  Triage:      ✓ correct
-  Remediation: ✓ worked as expected
+  triage:      ✓ correct   [auto_judge]
+  remediation: ✓ worked as expected
 ```
+
+The `Score` line matches the `SCORE` column in `vault incidents <series-id>` — it is the `overall_score` from `run_evaluation` (`diagnosis_score × 0.6 + remediation_score × 0.4`). The `Diagnosis` line shows the raw component scores before weighting.
+
+The `[auto_judge]` tag on a feedback line means the verdict was submitted automatically by the LLM judge (`feedback_source: "auto_judge"`), not by a human operator. Human-submitted feedback carries no tag. Both sources are counted equally in `vault accuracy` and `vault calibration`.
 
 The deep-dive assembles data from `GET /api/v1/incidents/{runID}` on the gateway, which joins triage, gate, remediation, eval scores, and all four feedback slots into a single timeline view.
 
