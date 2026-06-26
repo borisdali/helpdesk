@@ -398,6 +398,8 @@ The `[auto_judge]` tag on a feedback line means the verdict was submitted automa
 
 The deep-dive assembles data from `GET /api/v1/incidents/{runID}` on the gateway, which joins triage, gate, remediation, eval scores, and all four feedback slots into a single timeline view.
 
+See also the [Incidents page](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full description of this feature.
+
 ### vault status
 
 ```bash

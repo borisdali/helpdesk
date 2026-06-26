@@ -30,7 +30,8 @@ The [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) run
 4. [The Audit Trail](#the-audit-trail)
 5. [From Incident to Vault: the Full Path](#from-incident-to-vault-the-full-path)
 6. [Listing and Retrieving Incidents](#listing-and-retrieving-incidents)
-7. [Connection to Other Docs](#connection-to-other-docs)
+7. [The Incident Receipt: full timeline view](#the-incident-receipt-full-timeline-view)
+8. [Connection to Other Docs](#connection-to-other-docs)
 
 ---
 
@@ -225,11 +226,85 @@ Bundles are stored in `HELPDESK_INCIDENT_DIR` (default: current directory for ho
 
 ---
 
+## The Incident Receipt: full timeline view
+
+Every playbook-driven incident — real or injected — is assigned a `plr_*` run ID by the gateway at the moment the triage playbook is triggered. This ID is the stable handle for everything that follows: gate approval, remediation, operator feedback, and evaluation scores.
+
+Pass a `plr_*` run ID to `faulttest vault incidents` to retrieve the complete incident timeline in one view:
+
+```bash
+faulttest vault incidents plr_264f28fc \
+  --gateway http://gateway:8080 --api-key $HELPDESK_CLIENT_API_KEY
+```
+
+Or fetch the raw JSON directly:
+
+```bash
+curl -s http://gateway:8080/api/v1/incidents/plr_264f28fc \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
+```
+
+The response assembles triage, gate, remediation, evaluation scores, and all operator feedback into a single chronological view:
+
+```
+════════════════════════════════════════════════════════════
+INCIDENT plr_264f28fc
+Started: 2026-06-26 00:20 UTC   Duration: 187s
+
+── TRIAGE
+Playbook:  pbs_connection_triage
+Findings:  Connection pool saturation at 108/100 (108%) with 96 idle connections
+
+Hypotheses:
+  [PRIMARY  95%] Application connection pool saturation
+                 Evidence: "total_connections=108 exceeds max_connections=100;
+                            idle=96 waiting on ClientRead"
+  [REJECTED  5%] Long-running transaction preventing connection cleanup
+                 Rejected: get_blocking_queries returned no blocking queries
+
+── GATE
+Decision:  approved by boris@borisdali.com  at 00:22 UTC
+Feedback:
+  remediation at gate:  ✓ correct (plan looks appropriate)
+  triage at gate:       ✓ correct
+
+── REMEDIATION
+Playbook:  pbs_connection_remediate   Outcome: resolved
+Plan:      Terminated 96 idle connections; active connections dropped from
+           108 to 12, well below max_connections=100.
+Steps:     ✓   ✓   ✓   ✓   ✓
+
+── EVALUATION
+Score:         100%   (diagnosis 100% · remediation 100%)
+Diagnosis:     1.00 (LLM judge)   Agent confidence: 95%
+
+── POST-INCIDENT FEEDBACK
+  triage:      ✓ correct   [auto_judge]
+```
+
+**What each section contains:**
+
+| Section | What it shows |
+|---------|---------------|
+| `TRIAGE` | The agent's primary and rejected hypotheses, confidence, evidence quoted verbatim from tool output, and the triage playbook's `findings_summary` |
+| `GATE` | Who approved, when, and the at-gate feedback verdicts for both triage diagnosis and remediation plan |
+| `REMEDIATION` | Which remediation playbook ran, each step's outcome, and the plan summary the agent produced |
+| `EVALUATION` | `Score` = `overall_score` from `run_evaluation` (matches the `SCORE` column in `vault incidents <series-id>`). `Diagnosis` = the raw component score with source (`LLM judge` or `heuristic`) and the agent's self-reported confidence |
+| `POST-INCIDENT FEEDBACK` | Operator or auto-judge verdicts submitted after the incident resolved. `[auto_judge]` means the verdict was submitted automatically by the LLM judge (`feedback_source: "auto_judge"`); no tag means a human submitted it |
+
+**The `Score` line** is the composite `overall_score`: `diagnosis_score × 0.6 + remediation_score × 0.4` when remediation was attempted, or `diagnosis_score` alone otherwise. It matches the `SCORE` column in the `vault incidents <fault-id>` list view — both read from the same `run_evaluation` record in auditd.
+
+**The `[auto_judge]` tag** on a post-incident feedback line means the verdict was derived automatically from the LLM judge's score (≥ 0.8 → correct) when `faulttest` was run with `--approval-mode=force --judge`. Human-submitted feedback carries no tag. Both sources count equally in `vault accuracy` and `vault calibration`. See [FAULTTEST.md — Automatic post-incident feedback](FAULTTEST.md#post-recovery-feedback-prompt) for details.
+
+This view is the accountability layer for every AI-driven incident. Every decision is traceable: which model ran, what it observed, what it concluded, who authorised it, and whether the outcome was confirmed correct after the fact.
+
+---
+
 ## Connection to Other Docs
 
 | Document | What it covers |
 |----------|----------------|
-| [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel; how drafts enter and are activated; vault CLI commands |
+| [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel; how drafts enter and are activated; vault CLI commands including `vault incidents <series-id>` list view |
 | [FAULTTEST.md](FAULTTEST.md) | Fault catalog, injection mechanics, scoring, remediation mode, vault integration |
 | [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, CRUD API, import formats, system Playbooks |
 | [PLAYBOOK_OPS.md](PLAYBOOK_OPS.md) | Step-by-step investigation workflow; outcome hygiene; Vault draft review |
