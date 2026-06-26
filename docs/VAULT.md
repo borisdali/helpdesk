@@ -314,7 +314,7 @@ Use `vault accuracy` alongside `resolution_rate` (from `vault stats`) to disting
 Feedback is submitted in one of three ways:
 
 - **Interactive prompt** — `faulttest run --remediate --gateway` prompts after a successful recovery when a terminal is available. Stored with `feedback_source: "human"`.
-- **Auto-judge** — when `--approval-mode=force` and `--judge` are both set, faulttest skips the prompt and auto-submits the post-incident triage verdict from the LLM judge's score (≥ 0.8 → correct). Stored with `feedback_source: "auto_judge"`. See [FAULTTEST.md — Automatic post-incident feedback](FAULTTEST.md#post-recovery-feedback-prompt).
+- **Auto-judge** — when `--approval-mode=force` and `--judge` are both set, faulttest skips the prompt and auto-submits the post-incident triage verdict from the LLM judge's score (≥ 0.8 → correct). Stored with `feedback_source: "auto_judge"`. See [auto-judge](FAULTTEST.md#34-remediation-mode) under the Remediation Mode section.
 - **Manual API call** — `POST /api/v1/fleet/playbook-runs/{runID}/feedback` with `feedback_source: "human"` (or omitted; defaults to `"human"`).
 
 The `feedback_source` field is visible in `vault incidents <run-id>` under `── POST-INCIDENT FEEDBACK` and in `vault accuracy` breakdowns. Auto-judge feedback and human feedback count equally toward accuracy and calibration metrics; use `vault calibration` to verify that the judge's automated verdicts track human judgement over time.
