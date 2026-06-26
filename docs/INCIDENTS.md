@@ -294,7 +294,7 @@ Diagnosis:     1.00 (LLM judge)   Agent confidence: 95%
 
 **The `Score` line** is the composite `overall_score`: `diagnosis_score × 0.6 + remediation_score × 0.4` when remediation was attempted, or `diagnosis_score` alone otherwise. It matches the `SCORE` column in the `vault incidents <fault-id>` list view — both read from the same `run_evaluation` record in auditd.
 
-**The `[auto_judge]` tag** on a post-incident feedback line means the verdict was derived automatically from the LLM judge's score (≥ 0.8 → correct) when `faulttest` was run with `--approval-mode=force --judge`. Human-submitted feedback carries no tag. Both sources count equally in `vault accuracy` and `vault calibration`. See [FAULTTEST.md — Automatic post-incident feedback](FAULTTEST.md#post-recovery-feedback-prompt) for details.
+**The `[auto_judge]` tag** on a post-incident feedback line means the verdict was derived automatically from the LLM judge's score (≥ 0.8 → correct) when `faulttest` was run with `--approval-mode=force --judge`. Human-submitted feedback carries no tag. Both sources count equally in `vault accuracy` and `vault calibration`. See [auto-judge](FAULTTEST.md#34-remediation-mode) under the Remediation Mode section for details.
 
 This view is the accountability layer for every AI-driven incident. Every decision is traceable: which model ran, what it observed, what it concluded, who authorised it, and whether the outcome was confirmed correct after the fact.
 
