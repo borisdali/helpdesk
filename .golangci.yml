@@ -16,9 +16,3 @@ linters:
         - (*text/tabwriter.Writer).Flush
         # Temp-dir cleanup in defer: best-effort, not actionable on error.
         - os.RemoveAll
-
-issues:
-  exclude-rules:
-    # flag.CommandLine uses ExitOnError by default — error return is always nil.
-    - text: "Error return value of `flag.CommandLine.Parse` is not checked"
-      linters: [errcheck]
