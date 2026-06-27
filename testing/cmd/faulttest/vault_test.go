@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -1503,6 +1504,113 @@ func TestFetchJourneys_WithDelegations(t *testing.T) {
 }
 
 // ── postEvaluations primary_confidence ───────────────────────────────────
+
+// ── fetchRunsByOutcome ────────────────────────────────────────────────────────
+
+func TestFetchRunsByOutcome_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/playbook-runs" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("outcome") != "resolved" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"runs": []incidentRun{
+				{RunID: "plr_aaa111", SeriesID: "pbs_db_triage", Outcome: "resolved"},
+				{RunID: "plr_bbb222", SeriesID: "pbs_k8s_triage", Outcome: "resolved"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].RunID != "plr_aaa111" {
+		t.Errorf("RunID = %q, want plr_aaa111", got[0].RunID)
+	}
+	if got[1].SeriesID != "pbs_k8s_triage" {
+		t.Errorf("SeriesID = %q, want pbs_k8s_triage", got[1].SeriesID)
+	}
+}
+
+func TestFetchRunsByOutcome_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunsByOutcome(srv.URL, "", "failed", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchRunsByOutcome_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
+	if err == nil {
+		t.Error("expected error for 500 response, got nil")
+	}
+}
+
+func TestFetchRunsByOutcome_NetworkError(t *testing.T) {
+	_, err := fetchRunsByOutcome("http://127.0.0.1:19997", "", "resolved", 10)
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchRunsByOutcome_SendsAuth(t *testing.T) {
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunsByOutcome(srv.URL, "tok-xyz", "resolved", 10) //nolint:errcheck
+	if gotHeader != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotHeader)
+	}
+}
+
+func TestFetchRunsByOutcome_PassesOutcomeAndLimit(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunsByOutcome(srv.URL, "", "abandoned", 7) //nolint:errcheck
+	if gotQuery.Get("outcome") != "abandoned" {
+		t.Errorf("outcome = %q, want abandoned", gotQuery.Get("outcome"))
+	}
+	if gotQuery.Get("limit") != "7" {
+		t.Errorf("limit = %q, want 7", gotQuery.Get("limit"))
+	}
+}
+
+// ── TestPostEvaluations_IncludesPrimaryConfidence ─────────────────────────────
 
 func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 	var gotBody map[string]any
