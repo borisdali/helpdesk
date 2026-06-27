@@ -9,6 +9,8 @@ linters:
         - (*database/sql.DB).Close
         - (*database/sql.Stmt).Close
         - (*database/sql.Tx).Rollback
+        # internal audit store — used in every test file; close errors unactionable in defer/cleanup
+        - (*helpdesk/internal/audit.Store).Close
         # file, network, and stream close — errors in defer are unactionable
         - (*os.File).Close
         - (io.ReadCloser).Close

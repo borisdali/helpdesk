@@ -140,7 +140,7 @@ func main() {
 			}
 			slog.Info("audit logging enabled (local)", "db", auditCfg.DBPath, "socket", auditCfg.SocketPath)
 		}
-		defer auditor.Close()
+		defer func() { _ = auditor.Close() }()
 	}
 
 	// Create agent registry for delegate tool

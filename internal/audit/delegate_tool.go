@@ -182,7 +182,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, regist
 				Duration:     time.Since(start),
 			}
 			if auditor != nil {
-				auditor.RecordOutcome(context.Background(), event.EventID, outcome)
+				_ = auditor.RecordOutcome(context.Background(), event.EventID, outcome)
 			}
 			return DelegateResult{
 				Agent:    args.Agent,
@@ -233,7 +233,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, regist
 			outcome.Status = "success"
 		}
 		if auditor != nil {
-			auditor.RecordOutcome(context.Background(), event.EventID, outcome)
+			_ = auditor.RecordOutcome(context.Background(), event.EventID, outcome)
 		}
 
 		if err != nil {

@@ -539,7 +539,7 @@ func extractEffect(m map[string]json.RawMessage) string {
 		if json.Unmarshal(decisionRaw, &d) == nil {
 			if effRaw, ok := d["effect"]; ok {
 				var s string
-				json.Unmarshal(effRaw, &s)
+				_ = json.Unmarshal(effRaw, &s)
 				return s
 			}
 		}
@@ -550,7 +550,7 @@ func extractEffect(m map[string]json.RawMessage) string {
 		if json.Unmarshal(pdRaw, &pd) == nil {
 			if effRaw, ok := pd["effect"]; ok {
 				var s string
-				json.Unmarshal(effRaw, &s)
+				_ = json.Unmarshal(effRaw, &s)
 				return s
 			}
 		}
