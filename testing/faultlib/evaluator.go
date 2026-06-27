@@ -258,22 +258,6 @@ func firstOrderingPatternIndex(toolName, lower string) int {
 	return earliest
 }
 
-// firstPatternIndex returns the index of the earliest pattern match for toolName
-// in lower (already lower-cased), or -1 if no pattern matches.
-func firstPatternIndex(toolName, lower string) int {
-	patterns, ok := ToolPatterns[toolName]
-	if !ok {
-		return -1
-	}
-	earliest := -1
-	for _, p := range patterns {
-		idx := strings.Index(lower, strings.ToLower(p))
-		if idx >= 0 && (earliest < 0 || idx < earliest) {
-			earliest = idx
-		}
-	}
-	return earliest
-}
 
 // SplitCategory breaks "connection_exhaustion" into ["connection", "exhaustion"].
 func SplitCategory(category string) []string {

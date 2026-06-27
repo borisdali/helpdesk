@@ -488,8 +488,7 @@ func extractHypothesisN(text string, n int) (label string, conf float64) {
 	return
 }
 
-func extractPrimaryConfidence(text string) float64  { _, c := extractHypothesisN(text, 1); return c }
-func extractPrimaryHypothesis(text string) string   { l, _ := extractHypothesisN(text, 1); return l }
+func extractPrimaryConfidence(text string) float64 { _, c := extractHypothesisN(text, 1); return c }
 
 // toFaultlibFailure converts a local Failure to a faultlib.Failure for judge calls.
 func toFaultlibFailure(f Failure) faultlib.Failure {

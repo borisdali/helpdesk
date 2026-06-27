@@ -320,17 +320,3 @@ func outcomeStatus(errMsg string) string {
 	return "success"
 }
 
-func categorizeToolAgent(agentName string) RequestCategory {
-	switch agentName {
-	case "postgres_database_agent":
-		return CategoryDatabase
-	case "k8s_agent":
-		return CategoryKubernetes
-	case "incident_agent":
-		return CategoryIncident
-	case "research_agent":
-		return CategoryResearch
-	default:
-		return CategoryUnknown
-	}
-}

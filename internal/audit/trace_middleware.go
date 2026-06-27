@@ -210,7 +210,3 @@ func parseA2ARequest(body []byte) a2aRequestData {
 	return out
 }
 
-// extractTraceID is kept for backward compatibility. Use parseA2ARequest for new code.
-func extractTraceID(body []byte) string {
-	return parseA2ARequest(body).traceID
-}
