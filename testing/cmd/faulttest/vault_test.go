@@ -1358,6 +1358,150 @@ func TestWordWrap(t *testing.T) {
 	}
 }
 
+// ── fetchJourneys ─────────────────────────────────────────────────────────
+
+func TestFetchJourneys_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/governance/journeys" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]journeySummary{ //nolint:errcheck
+			{TraceID: "tr_abc123", Outcome: "resolved", IncidentRunID: "plr_001"},
+			{TraceID: "tr_def456", Outcome: "abandoned"},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchJourneys(srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].TraceID != "tr_abc123" {
+		t.Errorf("TraceID = %q, want tr_abc123", got[0].TraceID)
+	}
+	if got[0].IncidentRunID != "plr_001" {
+		t.Errorf("IncidentRunID = %q, want plr_001", got[0].IncidentRunID)
+	}
+	if got[1].Outcome != "abandoned" {
+		t.Errorf("Outcome = %q, want abandoned", got[1].Outcome)
+	}
+}
+
+func TestFetchJourneys_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchJourneys(srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchJourneys_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchJourneys(srv.URL, "", nil)
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
+	}
+}
+
+func TestFetchJourneys_NetworkError(t *testing.T) {
+	_, err := fetchJourneys("http://127.0.0.1:19998", "", nil)
+	if err == nil {
+		t.Fatal("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchJourneys_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchJourneys(srv.URL, "tok-xyz", nil) //nolint:errcheck
+	if gotAuth != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotAuth)
+	}
+}
+
+func TestFetchJourneys_PassesQueryParams(t *testing.T) {
+	var gotQuery map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = map[string]string{
+			"limit":    r.URL.Query().Get("limit"),
+			"since":    r.URL.Query().Get("since"),
+			"category": r.URL.Query().Get("category"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	params := map[string]string{
+		"limit":    "5",
+		"since":    "48h",
+		"category": "database",
+	}
+	fetchJourneys(srv.URL, "", params) //nolint:errcheck
+	for k, want := range params {
+		if gotQuery[k] != want {
+			t.Errorf("query param %s = %q, want %q", k, gotQuery[k], want)
+		}
+	}
+}
+
+func TestFetchJourneys_WithDelegations(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]journeySummary{ //nolint:errcheck
+			{
+				TraceID: "tr_deleg01",
+				Delegations: []delegationSummary{
+					{Intent: "diagnose slow query", Tools: []string{"get_db_info", "cancel_query"}},
+				},
+				ToolsUsed:   []string{"get_db_info", "cancel_query"},
+				HasMismatch: true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchJourneys(srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if !got[0].HasMismatch {
+		t.Error("HasMismatch = false, want true")
+	}
+	if len(got[0].Delegations) != 1 {
+		t.Fatalf("Delegations len = %d, want 1", len(got[0].Delegations))
+	}
+	if got[0].Delegations[0].Intent != "diagnose slow query" {
+		t.Errorf("Intent = %q, want diagnose slow query", got[0].Delegations[0].Intent)
+	}
+}
+
 // ── postEvaluations primary_confidence ───────────────────────────────────
 
 func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {

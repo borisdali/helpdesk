@@ -20,6 +20,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
    - [vault list](#vault-list)
    - [vault accuracy](#vault-accuracy)
    - [vault incidents](#vault-incidents)
+   - [vault journey](#vault-journey)
    - [vault status](#vault-status)
    - [vault drift](#vault-drift)
    - [vault versions](#vault-versions)
@@ -398,7 +399,118 @@ The `[auto_judge]` tag on a feedback line means the verdict was submitted automa
 
 The deep-dive assembles data from `GET /api/v1/incidents/{runID}` on the gateway, which joins triage, gate, remediation, eval scores, and all four feedback slots into a single timeline view.
 
+When the incident has an associated audit trail, the deep-dive shows a JOURNEYS section at the bottom listing the `trace_id`(s) for the triage and/or remediation phases:
+
+```
+── JOURNEYS ────────────────────────────────────────────────
+  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)
+
+  triage:                tr_9a4f2b1e
+                         reasoning chain, hypothesis building
+  remediation:           tr_c8d3e7f2
+                         tool calls, approvals, blast-radius decisions
+
+  → vault journey tr_9a4f2b1e
+```
+
+Use the displayed `trace_id` with `vault journey` to see the full tool-by-tool audit trail. See [vault journey](#vault-journey) below.
+
 See also the [Incidents page](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full description of this feature.
+
+### vault journey
+
+```bash
+# List recent journeys (default: last 24h, up to 20)
+faulttest vault journey \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Filter to incident-linked journeys only
+faulttest vault journey --incident \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Filter by category or outcome
+faulttest vault journey --category database --outcome resolved \
+  --since 7d --limit 50 \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Drill into a specific trace
+faulttest vault journey tr_9a4f2b1e \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+`vault journey` is the audit-trail complement to `vault incidents`. Where `vault incidents` shows WHY the agent reached a conclusion (the incident narrative — hypotheses, confidence, evidence), `vault journey` shows WHAT the agent actually did (tool calls, delegations, policy decisions, blast-radius approvals).
+
+**List mode** (no positional argument) shows a table of recent journeys:
+
+```
+Recent journeys — 8 entries (last 24h)
+
+TRACE ID              STARTED           DUR     AGENT         OUTCOME       INCIDENT        TOOLS
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+tr_9a4f2b1e           2026-06-27 14:30   4.2s   database      resolved      plr_a3f7c1b2    get_session_info, kill_idle...
+tr_c8d3e7f2           2026-06-27 14:33  12.1s   database      resolved      plr_a3f7c1b2    get_blocking_queries, termi...
+tr_e1f4a8c3           2026-06-26 09:15   3.8s   kubernetes    resolved      –               describe_pod, get_pod_logs
+tr_b7d2f9e1           2026-06-25 22:44   2.1s   database      denied        –               get_session_info
+```
+
+| Column | Description |
+|--------|-------------|
+| `TRACE ID` | Journey trace ID; pass to `vault journey <trace_id>` for detail |
+| `DUR` | Wall-clock duration from first to last event |
+| `AGENT` | Agent category (`database`, `kubernetes`, `host`) |
+| `OUTCOME` | Highest-priority outcome across all events in the trace |
+| `INCIDENT` | `plr_*` run ID when this journey is linked to an incident run; `–` for ad-hoc sessions |
+| `TOOLS` | Tool names called, truncated to fit; see detail mode for the full list |
+
+A `!` suffix on a TOOLS entry (or anywhere on the row) means `has_mismatch=true` — the agent reported success but no matching tool execution appears in the audit trail. See [§8 in JOURNEYS.md](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection).
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit N` | 20 | Maximum number of journeys to show |
+| `--since duration` | `24h` | Show journeys from the last duration; supports `7d` notation |
+| `--category` | (all) | Filter by `database`, `kubernetes`, or `host` |
+| `--outcome` | (all) | Filter by outcome: `resolved`, `abandoned`, `denied`, `error`, etc. |
+| `--incident` | false | Show only journeys that are linked to an incident run (`incident_run_id` non-empty) |
+
+**Detail mode** (positional `<trace_id>` argument) shows the full journey:
+
+```
+JOURNEY  tr_9a4f2b1e
+──────────────────────────────────────────────────────────────────────────
+  Started:           2026-06-27 14:30:12 UTC
+  Ended:             2026-06-27 14:30:16 UTC
+  Duration:          4.2s
+  Agent:             postgres_database_agent
+  Category:          database
+  Origin:            agent
+  Outcome:           resolved
+  Events:            7
+
+QUERY
+──────────────────────────────────────────────────────────────────────────
+  Connection pool saturation — 108/100 connections, 96 idle
+
+DELEGATIONS
+──────────────────────────────────────────────────────────────────────────
+  1. Diagnose connection pool saturation
+     tools: get_session_info, get_db_info
+
+TOOLS USED
+──────────────────────────────────────────────────────────────────────────
+  • get_db_info
+  • get_session_info
+  • kill_idle_connections
+
+INCIDENT LINK
+──────────────────────────────────────────────────────────────────────────
+  Run ID:            plr_a3f7c1b2
+
+  → vault incidents plr_a3f7c1b2
+```
+
+The INCIDENT LINK section appears when the journey's `trace_id` is associated with a playbook run. Use the navigation hint (`→ vault incidents <plr_>`) to jump to the incident narrative for the WHY behind these tool calls.
 
 ### vault status
 

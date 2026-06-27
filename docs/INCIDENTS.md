@@ -31,6 +31,7 @@ The [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) run
 5. [From Incident to Vault: the Full Path](#from-incident-to-vault-the-full-path)
 6. [Listing and Retrieving Incidents](#listing-and-retrieving-incidents)
 7. [The Incident Receipt: full timeline view](#the-incident-receipt-full-timeline-view)
+   - [JOURNEYS: navigating to the audit trail](#journeys-navigating-to-the-audit-trail)
 8. [Connection to Other Docs](#connection-to-other-docs)
 
 ---
@@ -298,13 +299,68 @@ Diagnosis:     1.00 (LLM judge)   Agent confidence: 95%
 
 This view is the accountability layer for every AI-driven incident. Every decision is traceable: which model ran, what it observed, what it concluded, who authorised it, and whether the outcome was confirmed correct after the fact.
 
+### JOURNEYS: navigating to the audit trail
+
+The incident narrative answers WHY: what the agent concluded and how confident it was. For WHAT — the step-by-step tool calls, blast-radius approvals, and policy decisions that produced those conclusions — navigate to the linked Journey audit trail.
+
+When an incident has an associated trace, `vault incidents <plr_>` shows a JOURNEYS section after the evaluation:
+
+```
+── JOURNEYS ────────────────────────────────────────────────
+  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)
+
+  triage:                tr_9a4f2b1e
+                         reasoning chain, hypothesis building
+  remediation:           tr_c8d3e7f2
+                         tool calls, approvals, blast-radius decisions
+
+  → vault journey tr_9a4f2b1e
+```
+
+Each `trace_id` links to a Journey — the complete ordered record of every tool the agent called, every policy decision that was applied, and every step approval that was granted or denied.
+
+**Phase labels:**
+
+| Phase | What the Journey contains |
+|-------|--------------------------|
+| `triage` | Diagnostic tool calls and reasoning — the investigation that produced the hypotheses |
+| `remediation` | Mutation tool calls, step approvals, blast-radius checks — the actions taken to fix the issue |
+| `triage+remediation` | A single trace covering both phases (the agent ran triage and remediation in the same session) |
+
+**Navigating from the incident to the Journey:**
+
+```bash
+# From the CLI (follows the navigation hint in the JOURNEYS section)
+faulttest vault journey tr_9a4f2b1e \
+  --gateway http://gateway:8080 --api-key $HELPDESK_CLIENT_API_KEY
+
+# From the API — get the journey trace_ids directly
+curl -s http://gateway:8080/api/v1/incidents/plr_264f28fc \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '.journeys'
+# [{"phase":"triage","trace_id":"tr_9a4f2b1e"}, {"phase":"remediation","trace_id":"tr_c8d3e7f2"}]
+```
+
+**Navigating from a Journey back to the incident:**
+
+Any Journey that originated from a playbook run carries an `incident_run_id` in the API response. This is the reverse cross-link:
+
+```bash
+curl -s "http://localhost:1199/v1/journeys?trace_id=tr_9a4f2b1e" \
+  | jq '.[0].incident_run_id'
+# "plr_264f28fc"
+```
+
+See [JOURNEYS.md §7.2](JOURNEYS.md#72-incident--journey-cross-links) for the full bidirectional model and [VAULT.md — vault journey](VAULT.md#vault-journey) for the CLI reference.
+
 ---
 
 ## Connection to Other Docs
 
 | Document | What it covers |
 |----------|----------------|
-| [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel; how drafts enter and are activated; vault CLI commands including `vault incidents <series-id>` list view |
+| [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel; how drafts enter and are activated; vault CLI commands including `vault incidents`, `vault journey` |
+| [JOURNEYS.md](JOURNEYS.md) | Journey audit trail API; `incident_run_id` cross-link; bidirectional Incident ↔ Journey navigation model |
 | [FAULTTEST.md](FAULTTEST.md) | Fault catalog, injection mechanics, scoring, remediation mode, vault integration |
 | [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, CRUD API, import formats, system Playbooks |
 | [PLAYBOOK_OPS.md](PLAYBOOK_OPS.md) | Step-by-step investigation workflow; outcome hygiene; Vault draft review |
