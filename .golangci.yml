@@ -38,6 +38,16 @@ linters:
         - fmt.Sscanf
         - fmt.Sscan
         - (*text/tabwriter.Writer).Flush
+        # net.Conn deadline setting — unactionable if it fails
+        - (net.Conn).SetReadDeadline
+        - (net.Conn).SetWriteDeadline
+        - (net.Conn).SetDeadline
+        # http.ResponseWriter.Write in test handlers — connection drops unactionable
+        - (net/http.ResponseWriter).Write
+        # json.Unmarshal best-effort extraction (fallback paths, test handlers)
+        - encoding/json.Unmarshal
+        # env cleanup in tests — Unsetenv errors unactionable
+        - os.Unsetenv
         # Filesystem cleanup in defer: best-effort, not actionable on error
         - os.Remove
         - os.RemoveAll
