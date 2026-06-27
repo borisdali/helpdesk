@@ -582,6 +582,12 @@ type DelegationSummary struct {
 	Tools  []string `json:"tools"`
 }
 
+// IncidentJourneyRef links a PlaybookRun (plr_*) to an audit Journey by phase.
+type IncidentJourneyRef struct {
+	Phase   string `json:"phase"`    // "triage" | "remediation" | "triage+remediation"
+	TraceID string `json:"trace_id"` // argument to: vault journeys <trace_id>
+}
+
 // JourneySummary summarises a single end-to-end user request (one trace_id).
 type JourneySummary struct {
 	TraceID     string              `json:"trace_id"`
@@ -610,6 +616,9 @@ type JourneySummary struct {
 	// has Mismatch=true — meaning an agent returned success but no matching tool
 	// executions appeared in the audit trail (possible LLM fabrication).
 	HasMismatch bool `json:"has_mismatch,omitempty"`
+	// IncidentRunID is the plr_* playbook run ID for journeys associated with an
+	// incident run. Empty for ad-hoc or non-incident journeys.
+	IncidentRunID string `json:"incident_run_id,omitempty"`
 }
 
 // QueryJourneys returns journey summaries for traces anchored by a
@@ -917,6 +926,32 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			Origin:      d.origin,
 			HasMismatch: d.hasMismatch,
 		})
+	}
+
+	// Enrich summaries with incident run IDs: one query, keyed by trace_id.
+	if len(summaries) > 0 {
+		placeholders := make([]string, len(summaries))
+		args := make([]any, len(summaries))
+		for i, js := range summaries {
+			placeholders[i] = "?"
+			args[i] = js.TraceID
+		}
+		q := "SELECT trace_id, run_id FROM playbook_runs WHERE trace_id IN (" +
+			strings.Join(placeholders, ",") + ")"
+		runRows, err := s.db.QueryContext(ctx, q, args...)
+		if err == nil {
+			traceToRunID := make(map[string]string)
+			for runRows.Next() {
+				var tid, rid string
+				if runRows.Scan(&tid, &rid) == nil {
+					traceToRunID[tid] = rid
+				}
+			}
+			_ = runRows.Close()
+			for i := range summaries {
+				summaries[i].IncidentRunID = traceToRunID[summaries[i].TraceID]
+			}
+		}
 	}
 
 	// Post-aggregation filters (applied in Go after SQL aggregation).

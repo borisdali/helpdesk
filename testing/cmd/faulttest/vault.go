@@ -2190,6 +2190,12 @@ type narrativeStep struct {
 	Status   string `json:"status"`
 }
 
+// narrativeJourneyRef mirrors audit.IncidentJourneyRef for JSON decoding.
+type narrativeJourneyRef struct {
+	Phase   string `json:"phase"`
+	TraceID string `json:"trace_id"`
+}
+
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
 type incidentNarrative struct {
 	IncidentID  string    `json:"incident_id"`
@@ -2217,8 +2223,9 @@ type incidentNarrative struct {
 		Transcript string          `json:"transcript,omitempty"`
 		Steps      []narrativeStep `json:"steps,omitempty"`
 	} `json:"remediation,omitempty"`
-	Feedback   []narrativeFeedback `json:"feedback,omitempty"`
-	Evaluation *narrativeEval      `json:"evaluation,omitempty"`
+	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
+	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
+	Journeys   []narrativeJourneyRef `json:"journeys,omitempty"`
 }
 
 func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrative, error) {
@@ -2407,6 +2414,31 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			}
 			fmt.Printf("  %-28s %s\n", fb.FeedbackType+":", verdict)
 		}
+	}
+
+	// ── JOURNEYS ─────────────────────────────────────────────
+	if len(n.Journeys) > 0 {
+		section("JOURNEYS")
+		fmt.Println("  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)")
+		fmt.Println()
+		for _, j := range n.Journeys {
+			label := j.Phase
+			desc := ""
+			switch j.Phase {
+			case "triage":
+				desc = "reasoning chain, hypothesis building"
+			case "remediation":
+				desc = "tool calls, approvals, blast-radius decisions"
+			case "triage+remediation":
+				desc = "full session: diagnosis through fix"
+			}
+			fmt.Printf("  %-22s %s\n", label+":", j.TraceID)
+			if desc != "" {
+				fmt.Printf("  %-22s %s\n", "", desc)
+			}
+		}
+		fmt.Println()
+		fmt.Printf("  → vault journeys %s\n", n.Journeys[0].TraceID)
 	}
 	fmt.Println()
 }
