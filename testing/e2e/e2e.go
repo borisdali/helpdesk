@@ -48,6 +48,12 @@ type Config struct {
 	ConnStr          string
 	KubeContext      string
 	Categories       []string
+	// GatewayUser is the X-User header value sent on every gateway request.
+	// When HELPDESK_IDENTITY_PROVIDER=static, this must match a user defined in
+	// users.yaml. Set via E2E_USER (default: alice@example.com, which exists in
+	// users.example.yaml with dba+sre+operator roles covering all e2e endpoints).
+	// When HELPDESK_IDENTITY_PROVIDER=none, the header is still sent but ignored.
+	GatewayUser string
 }
 
 // LoadConfig reads configuration from environment variables.
@@ -62,6 +68,7 @@ func LoadConfig() *Config {
 		AuditdURL:        getEnvDefault("E2E_AUDITD_URL", "http://localhost:1199"),
 		ConnStr:          getEnvDefault("E2E_CONN_STR", "host=localhost port=15432 dbname=testdb user=postgres password=testpass"),
 		KubeContext:      os.Getenv("E2E_KUBE_CONTEXT"),
+		GatewayUser:      getEnvDefault("E2E_USER", "alice@example.com"),
 	}
 
 	if cats := os.Getenv("E2E_CATEGORIES"); cats != "" {
@@ -119,12 +126,18 @@ type A2AResponse struct {
 type GatewayClient struct {
 	BaseURL string
 	Client  *http.Client
+	// userID is sent as X-User on every request so that tests work when
+	// HELPDESK_IDENTITY_PROVIDER=static. Set via NewGatewayClient (uses
+	// E2E_USER → alice@example.com by default).
+	userID string
 }
 
-// NewGatewayClient creates a client for the gateway.
+// NewGatewayClient creates a client for the gateway using E2E_USER as the
+// authenticated identity (default: alice@example.com).
 func NewGatewayClient(baseURL string) *GatewayClient {
 	return &GatewayClient{
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
+		userID:  getEnvDefault("E2E_USER", "alice@example.com"),
 		Client: &http.Client{
 			Timeout: 120 * time.Second, // LLM calls can be slow
 		},
@@ -364,6 +377,9 @@ func (c *GatewayClient) SubmitEvaluation(ctx context.Context, runID string, body
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("POST %s: %w", path, err)
@@ -469,6 +485,9 @@ func (c *GatewayClient) UploadCreate(ctx context.Context, filename, content stri
 		return nil, err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -515,6 +534,9 @@ func (c *GatewayClient) FaultStabilityUpsert(ctx context.Context, body map[strin
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("POST /api/v1/fleet/fault-stability: %w", err)
@@ -571,6 +593,9 @@ func (c *GatewayClient) rawDo(ctx context.Context, method, path string, body map
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("%s %s: %w", method, path, err)
@@ -595,6 +620,9 @@ func (c *GatewayClient) postJSON(ctx context.Context, path string, payload map[s
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", path, err)
@@ -615,6 +643,9 @@ func (c *GatewayClient) get(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {
 		return nil, err
+	}
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
 	}
 
 	resp, err := c.Client.Do(req)
@@ -641,6 +672,9 @@ func (c *GatewayClient) post(ctx context.Context, path string, payload map[strin
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
 
 	resp, err := c.Client.Do(req)
 	if err != nil {

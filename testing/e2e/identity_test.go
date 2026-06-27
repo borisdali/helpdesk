@@ -340,7 +340,7 @@ func TestIdentityE2E_Explain_WithPurposeAndSensitivity(t *testing.T) {
 
 	// Also check via gateway proxy if available.
 	if IsGatewayReachable(cfg.GatewayURL) {
-		gatewayResult := auditdGet(t, cfg.GatewayURL,
+		gatewayResult := gatewayGet(t, cfg,
 			"/api/v1/governance/explain?resource_type=database&resource_name=prod-db&action=read&purpose=diagnostic&sensitivity=pii")
 		if _, ok := gatewayResult["decision"]; !ok {
 			t.Error("gateway explain response missing decision field")

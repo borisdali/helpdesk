@@ -1817,6 +1817,35 @@ When importing via LLM (`format=markdown`, `text`, `rundeck`, `ansible`), the im
 
 This section walks through a complete incident end-to-end — from the first triage run to the operator feedback that feeds back into the Vault. Each step is a real API call. The story is the `pbs_lock_chain_triage` / `pbs_lock_chain_remediate` pair against a live database.
 
+```mermaid
+flowchart TD
+    A([Triage playbook triggered\nplr_* run created]) --> B[Agent investigates\ntool calls + reasoning recorded]
+    B --> C{Gate fires?}
+
+    C -- pending_gate --> D[Operator reviews\nfindings + chain of thought]
+    D --> E{Decision}
+    E -- approved --> F[Remediation playbook starts\nstep-by-step approval loop]
+    E -- denied --> G([Incident abandoned\naudit trail preserved])
+    F --> H{Outcome}
+    H -- resolved --> I[Run marked resolved\nduration recorded]
+    H -- escalated --> J([Handed off\nto next playbook])
+
+    C -- no gate --> I
+
+    I --> K[Operator feedback\nvault accuracy improves]
+    I --> L[Incident narrative\nGET /api/v1/incidents/plr_*]
+
+    L --> M[WHY: triage hypotheses\ngate reason, eval scores]
+    L --> N[WHAT: journey audit trail\ntool calls, approvals\nvault journey tr_*]
+
+    K --> O([Vault\naccuracy · calibration · drift])
+    N --> O
+
+    style G fill:#f5f5f5,stroke:#999
+    style J fill:#f5f5f5,stroke:#999
+    style O fill:#e8f5e9,stroke:#4caf50
+```
+
 ### Step 1 — Triage: the agent investigates
 
 ```bash

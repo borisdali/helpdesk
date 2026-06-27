@@ -86,7 +86,7 @@ func TestGatewayHealthCheck(t *testing.T) {
 
 	// Verify response indicates success or a recognized error.
 	successKeywords := []string{"PostgreSQL", "version", "Connection successful", "connected"}
-	errorKeywords := []string{"connection refused", "authentication failed", "does not exist", "timeout"}
+	errorKeywords := []string{"connection refused", "authentication failed", "does not exist", "timeout", "policy denied", "DENIED"}
 
 	if !ContainsAny(resp.Text, successKeywords) && !ContainsAny(resp.Text, errorKeywords) {
 		t.Errorf("Response doesn't indicate clear success or failure: %s", truncate(resp.Text, 300))

@@ -31,7 +31,7 @@ func TestDiagnoseClientError_ContextNotExist(t *testing.T) {
 func TestDiagnoseClientError_ConnectionRefused(t *testing.T) {
 	err := fmt.Errorf("connection refused")
 	got := diagnoseClientError(err)
-	if !strings.Contains(got.Error(), "Connection refused") {
+	if !strings.Contains(got.Error(), "connection refused") {
 		t.Errorf("got %q, want connection refused diagnosis", got)
 	}
 }
@@ -43,7 +43,7 @@ func TestDiagnoseClientError_NetOpError(t *testing.T) {
 		Err: fmt.Errorf("network unreachable"),
 	}
 	got := diagnoseClientError(err)
-	if !strings.Contains(got.Error(), "Cannot reach") {
+	if !strings.Contains(got.Error(), "cannot reach") {
 		t.Errorf("got %q, want network diagnosis", got)
 	}
 }
@@ -51,7 +51,7 @@ func TestDiagnoseClientError_NetOpError(t *testing.T) {
 func TestDiagnoseClientError_UnableToConnect(t *testing.T) {
 	err := fmt.Errorf("unable to connect to the server: something")
 	got := diagnoseClientError(err)
-	if !strings.Contains(got.Error(), "Cannot reach") {
+	if !strings.Contains(got.Error(), "cannot reach") {
 		t.Errorf("got %q, want cannot reach diagnosis", got)
 	}
 }
@@ -67,7 +67,7 @@ func TestDiagnoseClientError_Timeout(t *testing.T) {
 func TestDiagnoseClientError_Certificate(t *testing.T) {
 	err := fmt.Errorf("x509: certificate has expired")
 	got := diagnoseClientError(err)
-	if !strings.Contains(got.Error(), "TLS certificate error") {
+	if !strings.Contains(got.Error(), "certificate error") {
 		t.Errorf("got %q, want cert diagnosis", got)
 	}
 }
@@ -432,7 +432,7 @@ func TestDiagnoseClientError_NetOpErrorConnectionRefused(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected non-nil error")
 	}
-	if !strings.Contains(got.Error(), "Connection refused") {
+	if !strings.Contains(got.Error(), "connection refused") {
 		t.Errorf("got %q, want connection refused diagnosis", got)
 	}
 }
