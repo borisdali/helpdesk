@@ -113,17 +113,6 @@ func resolveNamespaceInfo(namespaceOrDBName, contextOrDBName string) (namespaceI
 	return namespaceInfo{Namespace: namespaceOrDBName}, nil
 }
 
-// resolveNamespace checks if the input looks like a database name from the
-// infrastructure config and returns the associated K8s namespace. If not found
-// or not a database name, returns the input unchanged.
-func resolveNamespace(namespaceOrDBName string) (string, error) {
-	info, err := resolveNamespaceInfo(namespaceOrDBName, "")
-	if err != nil {
-		return "", err
-	}
-	return info.Namespace, nil
-}
-
 // resolveContext checks if the input looks like a database name from the
 // infrastructure config and returns the associated K8s context. If not found
 // or not a database name, returns the input unchanged.

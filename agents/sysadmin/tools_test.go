@@ -25,11 +25,6 @@ func withMockRunner(output string, err error) func() {
 	return func() { cmdRunner = old }
 }
 
-// mockToolContext implements tool.Context (embeds context.Context) for testing.
-type mockToolContext struct {
-	context.Context
-}
-
 // withDockerInfra sets up a fake infraConfig with a Docker-hosted DB and cleans up
 // after the test.
 func withDockerInfra(t *testing.T) {

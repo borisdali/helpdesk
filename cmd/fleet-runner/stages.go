@@ -10,14 +10,6 @@ import (
 	"helpdesk/internal/fleet"
 )
 
-// stageResult holds the outcome of executing a change against one server.
-// Kept for backward compat; internally we now use serverResult from runner.go.
-type stageResult struct {
-	server string
-	output string
-	err    error
-}
-
 // runStages executes the full staged rollout: canary → waves.
 // It returns an error if the canary fails or if the circuit breaker trips.
 func runStages(ctx context.Context, rcfg runnerConfig, def *fleet.JobDef, servers []string) error {

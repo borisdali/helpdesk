@@ -1046,9 +1046,6 @@ func main() {
 	if len(events) == 0 {
 		logf("No events available for purpose coverage analysis")
 	} else {
-		type purposeKey struct {
-			purpose string
-		}
 		purposeCounts := make(map[string]int)
 		sensitiveWithoutPurpose := 0
 		sensitiveTotal := 0

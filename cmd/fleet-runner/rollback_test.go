@@ -11,10 +11,6 @@ func makeStep(agent, tool string) fleet.Step {
 	return fleet.Step{Agent: agent, Tool: tool}
 }
 
-func makeStepWithArgs(agent, tool string, args map[string]any) fleet.Step {
-	return fleet.Step{Agent: agent, Tool: tool, Args: args}
-}
-
 // TestBuildRollbackJobDef_StepsReversed verifies that the steps in the rollback
 // job are the inverse operations in reverse order.
 func TestBuildRollbackJobDef_StepsReversed(t *testing.T) {

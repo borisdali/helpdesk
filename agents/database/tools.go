@@ -255,17 +255,6 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 	}, nil
 }
 
-// resolveConnectionString checks if the input looks like a database name (no "=" sign)
-// and attempts to resolve it using the infrastructure config. Returns an error if the
-// database is not registered when infraConfig is set.
-func resolveConnectionString(connStrOrName string) (string, error) {
-	info, err := resolveDatabaseInfo(connStrOrName)
-	if err != nil {
-		return "", err
-	}
-	return info.ConnectionStr, nil
-}
-
 // CommandRunner abstracts command execution for testing.
 type CommandRunner interface {
 	Run(ctx context.Context, name string, args []string, env []string) (string, error)

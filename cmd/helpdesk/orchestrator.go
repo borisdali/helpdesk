@@ -22,13 +22,6 @@ type AgentConfig struct {
 	UseCases    []string `json:"use_cases,omitempty"`
 }
 
-// inputParams holds the orchestrator configuration.
-type inputParams struct {
-	modelName string
-	apiKey    string
-	agents    []AgentConfig
-}
-
 // loadAgentsConfig loads agent configurations from a JSON file.
 func loadAgentsConfig(configPath string) ([]AgentConfig, error) {
 	data, err := os.ReadFile(configPath)

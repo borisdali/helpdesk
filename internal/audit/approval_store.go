@@ -15,7 +15,6 @@ import (
 type ApprovalStore struct {
 	db         *sql.DB
 	isPostgres bool
-	mu         sync.RWMutex
 	waiters    map[string][]chan *StoredApproval // keyed by approval_id
 	waiterMu   sync.Mutex
 }

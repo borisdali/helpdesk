@@ -2527,27 +2527,6 @@ func mockApprovalServerForTools(t *testing.T) (string, <-chan audit.ApprovalCrea
 	return srv.URL, ch
 }
 
-// mockApprovalServerForToolsPreApproved simulates the cross-turn retry scenario:
-// a prior turn already created an approval that has since been granted. The list
-// endpoint returns it as approved so the tool can proceed without a new request.
-func mockApprovalServerForToolsPreApproved(t *testing.T, toolName string) string {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/approvals" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode([]audit.StoredApproval{{
-				ApprovalID: "tool-approval-pre",
-				Status:     "approved",
-				ToolName:   toolName,
-				ResolvedBy: "auto-approver",
-			}})
-			return
-		}
-		http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	return srv.URL
-}
 
 const requireApprovalPolicy = `
 version: "1"

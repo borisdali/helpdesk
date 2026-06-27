@@ -635,7 +635,6 @@ type Auditor struct {
 	sessionQueries  map[string][]string
 	lastEventHash   string // For chain integrity verification
 	lastEventTime   time.Time
-	lastEventID     int64 // Sequence tracking
 
 	// Security monitoring
 	eventsThisMinute int
