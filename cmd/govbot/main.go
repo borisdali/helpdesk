@@ -768,8 +768,8 @@ func main() {
 			hdrBuf.WriteString("  ")
 			valBuf.WriteString("  ")
 			for h := 0; h < 24; h++ {
-				hdrBuf.WriteString(fmt.Sprintf("%3d", h))
-				valBuf.WriteString(fmt.Sprintf("%3d", hourlyCounts[h]))
+				fmt.Fprintf(&hdrBuf, "%3d", h)
+				fmt.Fprintf(&valBuf, "%3d", hourlyCounts[h])
 			}
 			logf("%s", hdrBuf.String())
 			logf("%s", valBuf.String())
@@ -1323,9 +1323,9 @@ func postWebhook(webhookURL, overall string, alerts, warnings []string, info *go
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s *AI Governance Report* — %s\n", icon, overall))
-	sb.WriteString(fmt.Sprintf("Window: last %s  |  Total events: %d  |  Pending approvals: %d  |  Chain: ",
-		window, info.Audit.EventsTotal, info.Approvals.PendingCount))
+	fmt.Fprintf(&sb, "%s *AI Governance Report* — %s\n", icon, overall)
+	fmt.Fprintf(&sb, "Window: last %s  |  Total events: %d  |  Pending approvals: %d  |  Chain: ",
+		window, info.Audit.EventsTotal, info.Approvals.PendingCount)
 	if info.Audit.ChainValid {
 		sb.WriteString("✓ valid\n")
 	} else {
@@ -1335,13 +1335,13 @@ func postWebhook(webhookURL, overall string, alerts, warnings []string, info *go
 	if len(alerts) > 0 {
 		sb.WriteString("\n*Alerts:*\n")
 		for _, a := range alerts {
-			sb.WriteString(fmt.Sprintf("• :red_circle: %s\n", a))
+			fmt.Fprintf(&sb, "• :red_circle: %s\n", a)
 		}
 	}
 	if len(warnings) > 0 {
 		sb.WriteString("\n*Warnings:*\n")
 		for _, w := range warnings {
-			sb.WriteString(fmt.Sprintf("• :large_yellow_circle: %s\n", w))
+			fmt.Fprintf(&sb, "• :large_yellow_circle: %s\n", w)
 		}
 	}
 

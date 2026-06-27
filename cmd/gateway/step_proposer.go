@@ -156,8 +156,8 @@ func buildHistorySection(history []*audit.PlaybookRunStep) string {
 	var sb strings.Builder
 	for _, s := range history {
 		argsJSON, _ := json.Marshal(s.Args)
-		sb.WriteString(fmt.Sprintf("Tool call #%d: %s(%s)\nResult: %s\n\n",
-			s.StepIndex, s.Tool, string(argsJSON), s.Result))
+		fmt.Fprintf(&sb, "Tool call #%d: %s(%s)\nResult: %s\n\n",
+			s.StepIndex, s.Tool, string(argsJSON), s.Result)
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }

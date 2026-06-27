@@ -2006,7 +2006,7 @@ func isToolError(text string) bool {
 // buildToolPrompt constructs a clear instruction for the agent to call a specific tool.
 func buildToolPrompt(toolName string, args map[string]any) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Call the %s tool", toolName))
+	fmt.Fprintf(&sb, "Call the %s tool", toolName)
 
 	if len(args) > 0 {
 		sb.WriteString(" with the following parameters: ")

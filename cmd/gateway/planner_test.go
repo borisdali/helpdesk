@@ -164,7 +164,7 @@ func TestAssemblePlannerPrompt_IntentSection(t *testing.T) {
 	if toolsIdx < 0 || intentIdx < 0 || schemaIdx < 0 {
 		t.Fatal("prompt missing expected sections")
 	}
-	if !(toolsIdx < intentIdx && intentIdx < schemaIdx) {
+	if toolsIdx >= intentIdx || intentIdx >= schemaIdx {
 		t.Errorf("section order wrong: tools=%d intent=%d schema=%d", toolsIdx, intentIdx, schemaIdx)
 	}
 	if !strings.Contains(prompt, "health_check") {
@@ -195,10 +195,10 @@ func TestAssemblePlannerPrompt_GuidanceInjection(t *testing.T) {
 		if intentIdx < 0 || guidanceIdx < 0 || schemaIdx < 0 {
 			t.Fatal("prompt missing one or more expected sections")
 		}
-		if !(intentIdx < guidanceIdx) {
+		if intentIdx >= guidanceIdx {
 			t.Errorf("'## Playbook Guidance' should appear AFTER '## Intent-to-Tool Mapping': intent=%d guidance=%d", intentIdx, guidanceIdx)
 		}
-		if !(guidanceIdx < schemaIdx) {
+		if guidanceIdx >= schemaIdx {
 			t.Errorf("'## Playbook Guidance' should appear BEFORE '## JobDef Schema': guidance=%d schema=%d", guidanceIdx, schemaIdx)
 		}
 	})

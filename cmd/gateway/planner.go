@@ -341,11 +341,11 @@ func buildPlannerInfraContext(cfg *infra.Config) (summary string, restricted []s
 		if len(server.Sensitivity) > 0 {
 			sensitivity = strings.Join(server.Sensitivity, ", ")
 			restricted = append(restricted, key)
-			sb.WriteString(fmt.Sprintf("  %s  tags=[%s]  sensitivity=[%s]  [RESTRICTED]\n",
-				key, tags, sensitivity))
+			fmt.Fprintf(&sb, "  %s  tags=[%s]  sensitivity=[%s]  [RESTRICTED]\n",
+				key, tags, sensitivity)
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s  tags=[%s]  sensitivity=[%s]\n",
-				key, tags, sensitivity))
+			fmt.Fprintf(&sb, "  %s  tags=[%s]  sensitivity=[%s]\n",
+				key, tags, sensitivity)
 		}
 	}
 	return sb.String(), restricted
@@ -359,10 +359,10 @@ func buildPlannerToolCatalog(r *toolregistry.Registry) string {
 	var sb strings.Builder
 	for _, entry := range r.ListFleetEligible() {
 		caps := strings.Join(entry.Capabilities, ", ")
-		sb.WriteString(fmt.Sprintf("  %s  agent=%s  class=%s  caps=[%s]  — %s\n",
-			entry.Name, entry.Agent, entry.ActionClass, caps, entry.Description))
+		fmt.Fprintf(&sb, "  %s  agent=%s  class=%s  caps=[%s]  — %s\n",
+			entry.Name, entry.Agent, entry.ActionClass, caps, entry.Description)
 		if entry.InputSchema != nil {
-			sb.WriteString(fmt.Sprintf("    Parameters:\n"))
+			sb.WriteString("    Parameters:\n")
 			if props, ok := entry.InputSchema["properties"].(map[string]any); ok {
 				var required []string
 				if req, ok := entry.InputSchema["required"].([]any); ok {
@@ -392,9 +392,9 @@ func buildPlannerToolCatalog(r *toolregistry.Registry) string {
 						req = "required"
 					}
 					if descStr != "" {
-						sb.WriteString(fmt.Sprintf("      %s (%s, %s): %s\n", paramName, typeStr, req, descStr))
+						fmt.Fprintf(&sb, "      %s (%s, %s): %s\n", paramName, typeStr, req, descStr)
 					} else {
-						sb.WriteString(fmt.Sprintf("      %s (%s, %s)\n", paramName, typeStr, req))
+						fmt.Fprintf(&sb, "      %s (%s, %s)\n", paramName, typeStr, req)
 					}
 				}
 			}
@@ -414,7 +414,7 @@ func buildIntentSection() string {
 	var sb strings.Builder
 	for _, intent := range intents {
 		tools := toolregistry.IntentMap[intent]
-		sb.WriteString(fmt.Sprintf("  %s → %s\n", intent, strings.Join(tools, ", ")))
+		fmt.Fprintf(&sb, "  %s → %s\n", intent, strings.Join(tools, ", "))
 	}
 	return sb.String()
 }

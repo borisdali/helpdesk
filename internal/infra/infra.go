@@ -199,8 +199,8 @@ func (c *Config) Summary() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Infrastructure: %d database(s), %d K8s cluster(s), %d VM(s)\n",
-		len(c.DBServers), len(c.K8sClusters), len(c.VMs)))
+	fmt.Fprintf(&sb, "Infrastructure: %d database(s), %d K8s cluster(s), %d VM(s)\n",
+		len(c.DBServers), len(c.K8sClusters), len(c.VMs))
 
 	if len(c.DBServers) > 0 {
 		sb.WriteString("\nDatabases:\n")

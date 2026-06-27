@@ -109,10 +109,10 @@ func buildInfraPromptSection(config *InfraConfig) string {
 	sb.WriteString("## Managed Databases\n\n")
 
 	for id, db := range config.DBServers {
-		sb.WriteString(fmt.Sprintf("**%s** — %s\n", id, db.Name))
-		sb.WriteString(fmt.Sprintf("- connection_string: `%s`\n", db.ConnectionString))
+		fmt.Fprintf(&sb, "**%s** — %s\n", id, db.Name)
+		fmt.Fprintf(&sb, "- connection_string: `%s`\n", db.ConnectionString)
 		// Add a ready-to-use delegation example for this specific database
-		sb.WriteString(fmt.Sprintf("- To check this database, delegate: \"Check if the database is reachable using connection_string: %s\"\n", db.ConnectionString))
+		fmt.Fprintf(&sb, "- To check this database, delegate: \"Check if the database is reachable using connection_string: %s\"\n", db.ConnectionString)
 
 		if db.K8sCluster != "" {
 			// Expand the K8s cluster reference inline.
@@ -121,18 +121,18 @@ func buildInfraPromptSection(config *InfraConfig) string {
 				if ns == "" {
 					ns = "default"
 				}
-				sb.WriteString(fmt.Sprintf("- Hosted on Kubernetes: cluster=%s, context=`%s`, namespace=`%s`\n",
-					k8s.Name, k8s.Context, ns))
-				sb.WriteString(fmt.Sprintf("- To check K8s pods, delegate: \"Check pods in namespace '%s' using context '%s'\"\n", ns, k8s.Context))
+				fmt.Fprintf(&sb, "- Hosted on Kubernetes: cluster=%s, context=`%s`, namespace=`%s`\n",
+					k8s.Name, k8s.Context, ns)
+				fmt.Fprintf(&sb, "- To check K8s pods, delegate: \"Check pods in namespace '%s' using context '%s'\"\n", ns, k8s.Context)
 			} else {
-				sb.WriteString(fmt.Sprintf("- Hosted on Kubernetes: cluster=%s (details not configured)\n", db.K8sCluster))
+				fmt.Fprintf(&sb, "- Hosted on Kubernetes: cluster=%s (details not configured)\n", db.K8sCluster)
 			}
 		} else if db.VMName != "" {
 			// Expand the VM reference inline.
 			if vm, ok := config.VMs[db.VMName]; ok {
-				sb.WriteString(fmt.Sprintf("- Hosted on VM: %s (address: `%s`)\n", vm.Name, vm.Address))
+				fmt.Fprintf(&sb, "- Hosted on VM: %s (address: `%s`)\n", vm.Name, vm.Address)
 			} else {
-				sb.WriteString(fmt.Sprintf("- Hosted on VM: %s (details not configured)\n", db.VMName))
+				fmt.Fprintf(&sb, "- Hosted on VM: %s (details not configured)\n", db.VMName)
 			}
 		} else {
 			sb.WriteString("- Hosting: standalone (no K8s cluster or VM specified)\n")
@@ -164,14 +164,14 @@ func buildAgentPromptSection(agents []AgentConfig) string {
 	sb.WriteString("You have access to the following specialist agents that you can delegate to:\n\n")
 
 	for _, agent := range agents {
-		sb.WriteString(fmt.Sprintf("### %s\n", agent.Name))
+		fmt.Fprintf(&sb, "### %s\n", agent.Name)
 		if agent.Description != "" {
-			sb.WriteString(fmt.Sprintf("%s\n", agent.Description))
+			fmt.Fprintf(&sb, "%s\n", agent.Description)
 		}
 		if len(agent.UseCases) > 0 {
 			sb.WriteString("Use this agent for:\n")
 			for _, useCase := range agent.UseCases {
-				sb.WriteString(fmt.Sprintf("- %s\n", useCase))
+				fmt.Fprintf(&sb, "- %s\n", useCase)
 			}
 		}
 		sb.WriteString("\n")

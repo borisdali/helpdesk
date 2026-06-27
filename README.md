@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml) [![Release](https://github.com/borisdali/helpdesk/actions/workflows/release.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/release.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/borisdali/helpdesk)](https://github.com/borisdali/helpdesk/blob/main/go.mod) [![codecov](https://codecov.io/gh/borisdali/helpdesk/badge.svg)](https://codecov.io/gh/borisdali/helpdesk) [![Docs](https://img.shields.io/badge/docs-helpdesk-blue)](https://github.com/borisdali/helpdesk/tree/main/docs)
 
-aiHelpDesk is a Go-based Agentic AI multi-agent database support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) hosted on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment — your databases, your tool catalog, your operational history — and couples it with a strictly governed execution arm that actually fixes problems, not just explains them.
+aiHelpDesk is a Go-based Agentic AI multi-agent database support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) hosted on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment. Your databases, your tool catalog, your operational history. Most importantly to your institutional knowledge. But what's more is that aiHelpDesk couples all that with a strictly governed execution arm that actually fixes problems, not just explains them.
 
 Two things set aiHelpDesk apart from a general-purpose AI assistant:
 
@@ -94,7 +94,7 @@ See the primary [Vault page](docs/VAULT.md) for how aiHelpDesk accumulates and i
 
 ## Triage Consistency Certification
 
-Before a Playbook enters live rotation, it is certified STABLE by running the same fault N times and verifying that both the pass rate (≥80%) and the confidence spread on the agent's primary hypothesis (≤30pp) are within bounds. A STABLE cert is the pre-promotion gate that ensures the accuracy and calibration signals coming from the flywheel are clean. See [CONSISTENCY.md](docs/CONSISTENCY.md) for the full concept, certification criteria, and per-platform runbooks (Host/VM, Docker, Kubernetes CronJob).
+Before a Playbook enters live rotation, it is certified STABLE by running the same fault N times and verifying that both the pass rate (≥80%) and the confidence spread on the agent's primary hypothesis (≤30pp) are within bounds. A STABLE cert is the pre-promotion gate that ensures the accuracy and calibration signals coming from the flywheel are clean. See [here](docs/CONSISTENCY.md) for the full concept, certification criteria, and per-platform runbooks (Host/VM, Docker, Kubernetes CronJob).
 
 ## AI Governance
 

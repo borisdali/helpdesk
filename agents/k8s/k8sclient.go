@@ -164,39 +164,39 @@ func diagnoseClientError(err error) error {
 	if errors.As(err, &statusErr) {
 		switch {
 		case apierrors.IsUnauthorized(statusErr):
-			return fmt.Errorf("Authentication to the cluster failed. "+
+			return fmt.Errorf("authentication to the cluster failed. "+
 				"Credentials may have expired. Try re-authenticating "+
 				"(e.g., 'gcloud container clusters get-credentials' for GKE).\n\nRaw error: %v", err)
 		case apierrors.IsForbidden(statusErr):
-			return fmt.Errorf("Permission denied. The current user/service account does not have "+
+			return fmt.Errorf("permission denied. The current user/service account does not have "+
 				"the required RBAC permissions for this operation.\n\nRaw error: %v", err)
 		case apierrors.IsNotFound(statusErr):
 			if strings.Contains(lower, "namespace") {
-				return fmt.Errorf("The specified namespace does not exist in this cluster. "+
+				return fmt.Errorf("the specified namespace does not exist in this cluster. "+
 					"Run 'kubectl get namespaces' to list available namespaces.\n\nRaw error: %v", err)
 			}
-			return fmt.Errorf("The requested resource was not found in the cluster. "+
+			return fmt.Errorf("the requested resource was not found in the cluster. "+
 				"Verify the resource name, namespace, and that it has been created.\n\nRaw error: %v", err)
 		}
 	}
 
 	// Timeout / deadline.
 	if os.IsTimeout(err) || strings.Contains(lower, "deadline exceeded") || strings.Contains(lower, "i/o timeout") {
-		return fmt.Errorf("Request to the Kubernetes API server timed out. "+
+		return fmt.Errorf("request to the Kubernetes API server timed out. "+
 			"The cluster may be under heavy load, or there may be network issues.\n\nRaw error: %v", err)
 	}
 
 	// TLS / certificate.
 	if strings.Contains(lower, "certificate") && (strings.Contains(lower, "expired") ||
 		strings.Contains(lower, "invalid") || strings.Contains(lower, "unknown authority")) {
-		return fmt.Errorf("TLS certificate error communicating with the cluster. "+
+		return fmt.Errorf("certificate error communicating with the cluster (TLS). "+
 			"The cluster certificate may have expired or the CA is not trusted. "+
 			"Re-fetch cluster credentials or update the kubeconfig.\n\nRaw error: %v", err)
 	}
 
 	// Missing kubeconfig.
 	if strings.Contains(lower, "no configuration") || strings.Contains(lower, "invalid configuration") {
-		return fmt.Errorf("The kubeconfig file is invalid or missing. "+
+		return fmt.Errorf("the kubeconfig file is invalid or missing. "+
 			"Check that ~/.kube/config exists and is correctly formatted, "+
 			"or set KUBECONFIG to point to the right file.\n\nRaw error: %v", err)
 	}
