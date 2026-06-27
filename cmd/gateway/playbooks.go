@@ -1209,9 +1209,7 @@ func mergeDiagnosticReports(primary, secondary *audit.DiagnosticReport) *audit.D
 		h.IsPrimary = false
 		all = append(all, h)
 	}
-	for _, h := range secondary.Hypotheses {
-		all = append(all, h)
-	}
+	all = append(all, secondary.Hypotheses...)
 
 	// Sort by confidence descending.
 	sort.Slice(all, func(i, j int) bool {

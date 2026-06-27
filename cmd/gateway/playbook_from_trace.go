@@ -271,11 +271,11 @@ func parsePlaybookYAMLLenient(text string) (audit.Playbook, error) {
 	}
 
 	str := func(key string) string {
-		v, _ := raw[key]
+		v := raw[key]
 		return yamlToString(v)
 	}
 	strSlice := func(key string) []string {
-		v, _ := raw[key]
+		v := raw[key]
 		return yamlToStringSlice(v)
 	}
 

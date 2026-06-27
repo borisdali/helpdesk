@@ -189,7 +189,7 @@ func main() {
 		if info.Audit.LastEventAt != "" {
 			logf("Last event:       %s", info.Audit.LastEventAt)
 		}
-		if info.Audit.ChainValid == false {
+		if !info.Audit.ChainValid {
 			alerts = append(alerts, "Audit hash chain integrity failure — log tampering may have occurred")
 		}
 	} else {

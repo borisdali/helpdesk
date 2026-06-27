@@ -155,10 +155,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, regist
 				AlternativesConsidered: func() []Alternative {
 					alts := make([]Alternative, len(args.AlternativesConsidered))
 					for i, a := range args.AlternativesConsidered {
-						alts[i] = Alternative{
-							Agent:           a.Agent,
-							RejectedBecause: a.RejectedBecause,
-						}
+						alts[i] = Alternative(a)
 					}
 					return alts
 				}(),

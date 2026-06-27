@@ -911,10 +911,10 @@ func TestJWTProvider_NoKid_MultipleKeys(t *testing.T) {
 	key2, _ := rsa.GenerateKey(rand.Reader, 2048)
 
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n1 := base64.RawURLEncoding.EncodeToString(key1.PublicKey.N.Bytes())
-		e1 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key1.PublicKey.E)).Bytes())
-		n2 := base64.RawURLEncoding.EncodeToString(key2.PublicKey.N.Bytes())
-		e2 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key2.PublicKey.E)).Bytes())
+		n1 := base64.RawURLEncoding.EncodeToString(key1.N.Bytes())
+		e1 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key1.E)).Bytes())
+		n2 := base64.RawURLEncoding.EncodeToString(key2.N.Bytes())
+		e2 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key2.E)).Bytes())
 		body, _ := json.Marshal(map[string]any{"keys": []map[string]any{
 			{"kty": "RSA", "alg": "RS256", "kid": "key-a", "n": n1, "e": e1},
 			{"kty": "RSA", "alg": "RS256", "kid": "key-b", "n": n2, "e": e2},

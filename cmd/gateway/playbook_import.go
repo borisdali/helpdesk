@@ -235,10 +235,11 @@ func assembleImportPrompt(text, format string, hints PlaybookImportHints, toolCa
 	sb.WriteString("For 'description', write it as a clear intent statement that an LLM fleet planner can\n")
 	sb.WriteString("use to select appropriate tools from the Available Tools list above.\n\n")
 
-	if format == "rundeck" {
+	switch format {
+	case "rundeck":
 		sb.WriteString("Note: the source text is a Rundeck job definition. Translate shell commands and\n")
 		sb.WriteString("node steps into natural language descriptions referencing the available tools.\n\n")
-	} else if format == "ansible" {
+	case "ansible":
 		sb.WriteString("Note: the source text is an Ansible playbook. Translate tasks into natural language\n")
 		sb.WriteString("descriptions referencing the available tools where applicable.\n\n")
 	}

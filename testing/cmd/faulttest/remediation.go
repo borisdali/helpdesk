@@ -377,10 +377,11 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
 		diagAnswer, _ := reader.ReadString('\n')
 		diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
-		if diagAnswer == "y" || diagAnswer == "yes" {
+		switch diagAnswer {
+		case "y", "yes":
 			v := true
 			denyVerdictCorrect = &v
-		} else if diagAnswer == "n" || diagAnswer == "no" {
+		case "n", "no":
 			v := false
 			denyVerdictCorrect = &v
 		}
@@ -403,10 +404,11 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		fmt.Print("    Was the proposed remediation appropriate? [y/n/skip]: ")
 		remAnswer, _ := reader.ReadString('\n')
 		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
-		if remAnswer == "y" || remAnswer == "yes" {
+		switch remAnswer {
+		case "y", "yes":
 			v := true
 			denyRemVerdictCorrect = &v
-		} else if remAnswer == "n" || remAnswer == "no" {
+		case "n", "no":
 			v := false
 			denyRemVerdictCorrect = &v
 			fmt.Print("    Notes on remediation plan (optional): ")
@@ -458,10 +460,11 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	fmt.Print("    Was the triage diagnosis correct? [y/n/skip]: ")
 	diagAnswer, _ := reader.ReadString('\n')
 	diagAnswer = strings.TrimSpace(strings.ToLower(diagAnswer))
-	if diagAnswer == "y" || diagAnswer == "yes" {
+	switch diagAnswer {
+	case "y", "yes":
 		v := true
 		verdictCorrect = &v
-	} else if diagAnswer == "n" || diagAnswer == "no" {
+	case "n", "no":
 		v := false
 		verdictCorrect = &v
 	}
@@ -487,10 +490,11 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	fmt.Print("    Was the proposed remediation appropriate? [y/n/skip]: ")
 	remAnswer, _ := reader.ReadString('\n')
 	remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
-	if remAnswer == "y" || remAnswer == "yes" {
+	switch remAnswer {
+	case "y", "yes":
 		v := true
 		remVerdictCorrect = &v
-	} else if remAnswer == "n" || remAnswer == "no" {
+	case "n", "no":
 		v := false
 		remVerdictCorrect = &v
 		fmt.Print("    Notes on remediation plan (optional): ")
@@ -853,13 +857,14 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 		return
 	}
 	var diagCorrect *bool
-	if answer == "y" || answer == "yes" {
+	switch answer {
+	case "y", "yes":
 		v := true
 		diagCorrect = &v
-	} else if answer == "n" || answer == "no" {
+	case "n", "no":
 		v := false
 		diagCorrect = &v
-	} else {
+	default:
 		return
 	}
 
@@ -884,12 +889,13 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 		fmt.Print("    Was the remediation approach appropriate? [y/n/skip]: ")
 		remAnswer, _ := reader.ReadString('\n')
 		remAnswer = strings.TrimSpace(strings.ToLower(remAnswer))
-		if remAnswer == "y" || remAnswer == "yes" {
+		switch remAnswer {
+		case "y", "yes":
 			v := true
 			fmt.Print("    Remediation approach notes (optional): ")
 			remNotes, _ := reader.ReadString('\n')
 			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes), "")
-		} else if remAnswer == "n" || remAnswer == "no" {
+		case "n", "no":
 			v := false
 			fmt.Print("    Notes on remediation approach (optional): ")
 			notes, _ := reader.ReadString('\n')

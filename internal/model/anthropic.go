@@ -391,7 +391,8 @@ func (m *AnthropicModel) generateStreaming(ctx context.Context, req anthropic.Me
 
 		case "content_block_delta":
 			delta := event.AsContentBlockDelta()
-			if delta.Delta.Type == "text_delta" {
+			switch delta.Delta.Type {
+			case "text_delta":
 				accumulatedText += delta.Delta.Text
 				resp := &adkmodel.LLMResponse{
 					Content: &genai.Content{
@@ -403,7 +404,7 @@ func (m *AnthropicModel) generateStreaming(ctx context.Context, req anthropic.Me
 				if !yield(resp, nil) {
 					return
 				}
-			} else if delta.Delta.Type == "input_json_delta" {
+			case "input_json_delta":
 				// Accumulate tool input JSON
 				currentToolInput += delta.Delta.PartialJSON
 			}

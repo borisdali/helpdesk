@@ -70,9 +70,10 @@ func (s *playbookServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *playbookServer) handleList(w http.ResponseWriter, r *http.Request) {
 	q := audit.DefaultPlaybookListQuery()
-	if v := r.URL.Query().Get("active_only"); v == "false" {
+	switch r.URL.Query().Get("active_only") {
+	case "false":
 		q.ActiveOnly = false
-	} else if v == "true" {
+	case "true":
 		q.ActiveOnly = true
 	}
 	if r.URL.Query().Get("include_system") == "false" {
