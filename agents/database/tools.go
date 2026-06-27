@@ -1809,7 +1809,7 @@ func getBaselineImpl(ctx context.Context, args GetBaselineArgs) (PsqlResult, err
 		sb.WriteString("══════════════════════════════════════════\n")
 		result, err := s.fn()
 		if err != nil {
-			sb.WriteString(fmt.Sprintf("  WARNING: failed to collect %s: %v\n\n", s.name, err))
+			fmt.Fprintf(&sb, "  WARNING: failed to collect %s: %v\n\n", s.name, err)
 			continue
 		}
 		sb.WriteString(result.Output)

@@ -127,7 +127,7 @@ func diagnoseClientError(err error) error {
 
 	// Kubeconfig / context errors.
 	if strings.Contains(lower, "context") && strings.Contains(lower, "does not exist") {
-		return fmt.Errorf("The specified Kubernetes context does not exist in the local kubeconfig. "+
+		return fmt.Errorf("the specified Kubernetes context does not exist in the local kubeconfig. "+
 			"Run 'kubectl config get-contexts' to list available contexts, "+
 			"or check that the correct kubeconfig file is being used.\n\nRaw error: %v", err)
 	}
@@ -136,7 +136,7 @@ func diagnoseClientError(err error) error {
 	var netErr *net.OpError
 	if errors.As(err, &netErr) {
 		if strings.Contains(lower, "connection refused") {
-			return fmt.Errorf("Connection refused by the Kubernetes API server. "+
+			return fmt.Errorf("connection refused by the Kubernetes API server. "+
 				"The cluster may be down, the API server address may be wrong, "+
 				"or a VPN/tunnel may need to be active.\n\nRaw error: %v", err)
 		}
