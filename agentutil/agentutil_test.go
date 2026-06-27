@@ -1603,7 +1603,7 @@ func TestNewToolCallCallbacks_BeforeInjectsStore(t *testing.T) {
 // one FunctionCall with the given name. Such events are NOT final responses.
 func makeFunctionCallEvent(name string) *session.Event {
 	evt := &session.Event{}
-	evt.LLMResponse.Content = &genai.Content{
+	evt.Content = &genai.Content{
 		Parts: []*genai.Part{
 			{FunctionCall: &genai.FunctionCall{Name: name}},
 		},
@@ -1615,7 +1615,7 @@ func makeFunctionCallEvent(name string) *session.Event {
 // FunctionCalls, so IsFinalResponse() returns true.
 func makeFinalResponseEvent(text string) *session.Event {
 	evt := &session.Event{}
-	evt.LLMResponse.Content = &genai.Content{
+	evt.Content = &genai.Content{
 		Parts: []*genai.Part{{Text: text}},
 	}
 	return evt

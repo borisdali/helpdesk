@@ -263,10 +263,10 @@ func TestRunStages_WaveGate_RequestsApproval(t *testing.T) {
 func TestRunStages_WaveGate_DeniedAborts(t *testing.T) {
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			json.NewEncoder(w).Encode(map[string]string{"approval_id": "apr_denied", "status": "pending"}) //nolint:errcheck
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]string{"approval_id": "apr_denied", "status": "denied"}) //nolint:errcheck
 		}
 	}))

@@ -1198,7 +1198,7 @@ func TestGetPodResources_RequestsLimitsOnly(t *testing.T) {
 			},
 		},
 	}
-	cs := fake.NewSimpleClientset(pod)
+	cs := fake.NewClientset(pod)
 	defer injectFakeClientset("", cs)()
 	// kubectl top fails (metrics-server absent)
 	defer withMockKubectl("", fmt.Errorf("metrics not available"))()
@@ -1239,7 +1239,7 @@ func TestGetPodResources_WithLiveUsage(t *testing.T) {
 			Containers: []corev1.Container{{Name: "server"}},
 		},
 	}
-	cs := fake.NewSimpleClientset(pod)
+	cs := fake.NewClientset(pod)
 	defer injectFakeClientset("", cs)()
 	// kubectl top output: NAME  CPU(cores)  MEMORY(bytes)
 	defer withMockKubectl("api-xyz   120m   200Mi", nil)()
@@ -1264,7 +1264,7 @@ func TestGetPodResources_PolicyDenied(t *testing.T) {
 	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
 	// Policy only denies destructive — read should still pass.
 	// Use a fake client so the tool can actually execute.
-	cs := fake.NewSimpleClientset()
+	cs := fake.NewClientset()
 	defer injectFakeClientset("", cs)()
 	defer withMockKubectl("", fmt.Errorf("no metrics"))()
 
@@ -1303,7 +1303,7 @@ func TestGetNodeStatus_AllNodes(t *testing.T) {
 			NodeInfo: corev1.NodeSystemInfo{KubeletVersion: "v1.32.0"},
 		},
 	}
-	cs := fake.NewSimpleClientset(node)
+	cs := fake.NewClientset(node)
 	defer injectFakeClientset("", cs)()
 
 	ctx := newK8sTestContext()
@@ -1352,7 +1352,7 @@ func TestGetNodeStatus_SingleNode(t *testing.T) {
 			},
 		},
 	}
-	cs := fake.NewSimpleClientset(node)
+	cs := fake.NewClientset(node)
 	defer injectFakeClientset("", cs)()
 
 	ctx := newK8sTestContext()
@@ -1378,7 +1378,7 @@ func TestGetNodeStatus_MemoryPressure_IncludesMessage(t *testing.T) {
 			},
 		},
 	}
-	cs := fake.NewSimpleClientset(node)
+	cs := fake.NewClientset(node)
 	defer injectFakeClientset("", cs)()
 
 	ctx := newK8sTestContext()

@@ -83,7 +83,7 @@ func TestK8sDirectRegistry_ToolCallable(t *testing.T) {
 			},
 		},
 	}
-	cs := fake.NewSimpleClientset(svc)
+	cs := fake.NewClientset(svc)
 	defer injectFakeClientset("", cs)()
 
 	r := NewK8sDirectRegistry()

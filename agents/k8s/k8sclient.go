@@ -140,21 +140,21 @@ func diagnoseClientError(err error) error {
 				"The cluster may be down, the API server address may be wrong, "+
 				"or a VPN/tunnel may need to be active.\n\nRaw error: %v", err)
 		}
-		return fmt.Errorf("Cannot reach the Kubernetes API server. "+
+		return fmt.Errorf("cannot reach the Kubernetes API server. "+
 			"Check network connectivity, verify the cluster is running, "+
 			"and confirm the server address in kubeconfig is correct.\n\nRaw error: %v", err)
 	}
 
 	// Connection refused without *net.OpError wrapper.
 	if strings.Contains(lower, "connection refused") {
-		return fmt.Errorf("Connection refused by the Kubernetes API server. "+
+		return fmt.Errorf("connection refused by the Kubernetes API server. "+
 			"The cluster may be down, the API server address may be wrong, "+
 			"or a VPN/tunnel may need to be active.\n\nRaw error: %v", err)
 	}
 
 	// Unable to connect.
 	if strings.Contains(lower, "unable to connect to the server") {
-		return fmt.Errorf("Cannot reach the Kubernetes API server. "+
+		return fmt.Errorf("cannot reach the Kubernetes API server. "+
 			"Check network connectivity, verify the cluster is running, "+
 			"and confirm the server address in kubeconfig is correct.\n\nRaw error: %v", err)
 	}

@@ -997,9 +997,9 @@ func newToolCallCallbacks() (adka2a.BeforeExecuteCallback, adka2a.AfterEventCall
 
 	after := func(ctx adka2a.ExecutorContext, adkEvent *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
 		// Collect FunctionCall names from this ADK event.
-		if adkEvent.LLMResponse.Content != nil {
+		if adkEvent.Content != nil {
 			if store := toolCallStoreFromContext(ctx); store != nil {
-				for _, part := range adkEvent.LLMResponse.Content.Parts {
+				for _, part := range adkEvent.Content.Parts {
 					if part.FunctionCall != nil && part.FunctionCall.Name != "" {
 						store.add(part.FunctionCall.Name)
 					}
