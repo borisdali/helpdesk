@@ -646,4 +646,111 @@ func TestHandleGetIncident(t *testing.T) {
 	if narrative.DurationSec <= 0 {
 		t.Errorf("DurationSec should be positive, got %f", narrative.DurationSec)
 	}
+	// Journeys: triage run has no TraceID set, remediation run has no TraceID set →
+	// Journeys slice should be empty (both TraceIDs are "").
+	if len(narrative.Journeys) != 0 {
+		t.Errorf("Journeys = %v, want empty when both runs have no TraceID", narrative.Journeys)
+	}
+}
+
+// TestHandleGetIncident_JourneyRefs verifies that the Journeys field on
+// IncidentNarrative is populated correctly in three cases:
+//   - Two distinct trace IDs → [{triage, T1}, {remediation, T2}]
+//   - Same trace ID for both → [{triage+remediation, T1}]
+//   - Triage only (no remediation run) → [{triage, T1}]
+func TestHandleGetIncident_JourneyRefs(t *testing.T) {
+	makeRun := func(runID, seriesID, outcome, priorRunID, traceID string) *audit.PlaybookRun {
+		return &audit.PlaybookRun{
+			RunID:      runID,
+			SeriesID:   seriesID,
+			Outcome:    outcome,
+			PriorRunID: priorRunID,
+			TraceID:    traceID,
+			Operator:   "alice",
+			StartedAt:  time.Now().Add(-30 * time.Second).UTC(),
+			CompletedAt: time.Now().UTC(),
+		}
+	}
+
+	runGateway := func(t *testing.T, triageRun, remRun *audit.PlaybookRun) IncidentNarrative {
+		t.Helper()
+		triageData, _ := json.Marshal(triageRun)
+		var remListData []byte
+		if remRun != nil {
+			remListData, _ = json.Marshal(map[string]any{"runs": []*audit.PlaybookRun{remRun}, "count": 1})
+		} else {
+			remListData, _ = json.Marshal(map[string]any{"runs": []*audit.PlaybookRun{}, "count": 0})
+		}
+
+		auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case strings.Contains(r.URL.Path, "/playbook-runs/"+triageRun.RunID):
+				w.Write(triageData) //nolint:errcheck
+			case r.URL.Path == "/v1/fleet/playbook-runs" && r.URL.Query().Get("prior_run_id") == triageRun.RunID:
+				w.Write(remListData) //nolint:errcheck
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(auditSrv.Close)
+
+		gw := &Gateway{auditURL: auditSrv.URL, baseURL: "http://localhost"}
+		mux := http.NewServeMux()
+		gw.RegisterRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents/"+triageRun.RunID, nil)
+		req.SetPathValue("runID", triageRun.RunID)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		var n IncidentNarrative
+		if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return n
+	}
+
+	t.Run("two distinct traces → separate triage and remediation refs", func(t *testing.T) {
+		triage := makeRun("plr_t1", "pbs_lock_triage", audit.OutcomeTransitioned, "", "trace-triage-001")
+		rem := makeRun("plr_r1", "pbs_lock_remediate", audit.OutcomeResolved, "plr_t1", "trace-remed-001")
+		n := runGateway(t, triage, rem)
+
+		if len(n.Journeys) != 2 {
+			t.Fatalf("Journeys len = %d, want 2; got %v", len(n.Journeys), n.Journeys)
+		}
+		if n.Journeys[0].Phase != "triage" || n.Journeys[0].TraceID != "trace-triage-001" {
+			t.Errorf("Journeys[0] = %+v, want {triage, trace-triage-001}", n.Journeys[0])
+		}
+		if n.Journeys[1].Phase != "remediation" || n.Journeys[1].TraceID != "trace-remed-001" {
+			t.Errorf("Journeys[1] = %+v, want {remediation, trace-remed-001}", n.Journeys[1])
+		}
+	})
+
+	t.Run("shared trace ID → single triage+remediation ref", func(t *testing.T) {
+		triage := makeRun("plr_t2", "pbs_lock_triage", audit.OutcomeTransitioned, "", "trace-shared-001")
+		rem := makeRun("plr_r2", "pbs_lock_remediate", audit.OutcomeResolved, "plr_t2", "trace-shared-001")
+		n := runGateway(t, triage, rem)
+
+		if len(n.Journeys) != 1 {
+			t.Fatalf("Journeys len = %d, want 1; got %v", len(n.Journeys), n.Journeys)
+		}
+		if n.Journeys[0].Phase != "triage+remediation" || n.Journeys[0].TraceID != "trace-shared-001" {
+			t.Errorf("Journeys[0] = %+v, want {triage+remediation, trace-shared-001}", n.Journeys[0])
+		}
+	})
+
+	t.Run("triage only → single triage ref", func(t *testing.T) {
+		triage := makeRun("plr_t3", "pbs_lock_triage", audit.OutcomeAbandoned, "", "trace-triage-only")
+		n := runGateway(t, triage, nil)
+
+		if len(n.Journeys) != 1 {
+			t.Fatalf("Journeys len = %d, want 1; got %v", len(n.Journeys), n.Journeys)
+		}
+		if n.Journeys[0].Phase != "triage" || n.Journeys[0].TraceID != "trace-triage-only" {
+			t.Errorf("Journeys[0] = %+v, want {triage, trace-triage-only}", n.Journeys[0])
+		}
+	})
 }

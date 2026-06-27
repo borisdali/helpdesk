@@ -2305,3 +2305,80 @@ func TestStore_Query_EventTypes_MultiType(t *testing.T) {
 		t.Errorf("no filter: got %d, want 4", len(results))
 	}
 }
+
+// TestQueryJourneys_IncidentRunID verifies that QueryJourneys populates
+// IncidentRunID when a playbook_run row matches the journey's trace_id,
+// and leaves it empty for journeys with no associated run.
+func TestQueryJourneys_IncidentRunID(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Journey with an associated playbook run (tr_incident).
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_inc1",
+			Timestamp: base,
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_incident",
+			Session:   Session{ID: "sess_inc", UserID: "alice"},
+			Input:     Input{UserQuery: "fix connection pool"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+		{
+			EventID:   "tool_inc1",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeToolExecution,
+			TraceID:   "tr_incident",
+			Session:   Session{ID: "dbagent_inc"},
+			Tool:      &ToolExecution{Name: "get_active_connections"},
+			Outcome:   &Outcome{Status: "success"},
+		},
+	})
+
+	// Journey with no associated run (tr_adhoc).
+	recordAll(t, store, []*Event{
+		{
+			EventID:   "del_adhoc1",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegation,
+			TraceID:   "tr_adhoc",
+			Session:   Session{ID: "sess_adhoc", UserID: "bob"},
+			Input:     Input{UserQuery: "check locks"},
+			Decision:  &Decision{Agent: "postgres_database_agent"},
+		},
+	})
+
+	// Insert a playbook_run row that matches tr_incident.
+	prs, err := NewPlaybookRunStore(store.db, false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	if err := prs.Record(ctx, &PlaybookRun{
+		RunID:      "plr_inc01",
+		PlaybookID: "pb_lock_triage_v1",
+		SeriesID:   "pbs_lock_triage",
+		TraceID:    "tr_incident",
+		Operator:   "alice",
+		StartedAt:  base,
+	}); err != nil {
+		t.Fatalf("Insert playbook run: %v", err)
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+
+	byTrace := make(map[string]JourneySummary)
+	for _, j := range journeys {
+		byTrace[j.TraceID] = j
+	}
+
+	if got := byTrace["tr_incident"].IncidentRunID; got != "plr_inc01" {
+		t.Errorf("tr_incident IncidentRunID = %q, want plr_inc01", got)
+	}
+	if got := byTrace["tr_adhoc"].IncidentRunID; got != "" {
+		t.Errorf("tr_adhoc IncidentRunID = %q, want empty (no associated run)", got)
+	}
+}

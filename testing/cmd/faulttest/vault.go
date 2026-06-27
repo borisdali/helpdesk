@@ -135,13 +135,14 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|suggest|suggest-update>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
 		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
 		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
 		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
+		fmt.Fprintln(os.Stderr, "  journey         Show audit trail for a trace (tools, decisions, delegations)")
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
@@ -159,6 +160,8 @@ func cmdVault(args []string) {
 		vaultAccuracy(args[1:])
 	case "incidents":
 		vaultIncidents(args[1:])
+	case "journey":
+		vaultJourney(args[1:])
 	case "versions":
 		vaultVersions(args[1:])
 	case "calibration":
@@ -1555,6 +1558,326 @@ func vaultIncidents(args []string) {
 	fmt.Printf("    -H 'Authorization: Bearer $API_KEY' -H 'Content-Type: application/json' \\\n")
 	fmt.Printf("    -d '{\"resolution\": \"approved\", \"resolved_by\": \"you@example.com\", \"reason\": \"<root cause>\"}'\n")
 	fmt.Printf("  (resolution=approved → correct, resolution=denied → wrong diagnosis)\n")
+}
+
+// ── vault journey ─────────────────────────────────────────────────────────
+
+// journeySummary mirrors audit.JourneySummary for JSON decoding.
+type journeySummary struct {
+	TraceID       string               `json:"trace_id"`
+	StartedAt     string               `json:"started_at"`
+	EndedAt       string               `json:"ended_at"`
+	DurationMs    int64                `json:"duration_ms"`
+	UserID        string               `json:"user_id,omitempty"`
+	UserQuery     string               `json:"user_query,omitempty"`
+	Agent         string               `json:"agent,omitempty"`
+	Category      string               `json:"category,omitempty"`
+	Delegations   []delegationSummary  `json:"delegations,omitempty"`
+	ToolsUsed     []string             `json:"tools_used"`
+	Outcome       string               `json:"outcome,omitempty"`
+	EventCount    int                  `json:"event_count"`
+	RetryCount    int                  `json:"retry_count,omitempty"`
+	Origin        string               `json:"origin,omitempty"`
+	HasMismatch   bool                 `json:"has_mismatch,omitempty"`
+	IncidentRunID string               `json:"incident_run_id,omitempty"`
+}
+
+// delegationSummary mirrors audit.DelegationSummary.
+type delegationSummary struct {
+	Intent string   `json:"intent"`
+	Tools  []string `json:"tools"`
+}
+
+// fetchJourneys calls GET /api/v1/governance/journeys with the given query params.
+func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journeySummary, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/governance/journeys"
+	if len(params) > 0 {
+		parts := make([]string, 0, len(params))
+		for k, v := range params {
+			parts = append(parts, k+"="+v)
+		}
+		u += "?" + strings.Join(parts, "&")
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var summaries []journeySummary
+	if err := json.Unmarshal(body, &summaries); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return summaries, nil
+}
+
+// vaultJourney shows the audit trail for one or more journey traces.
+// Usage: faulttest vault journey [<trace_id>] [--limit N] [--since duration] [--category db|k8s] [--outcome X] [--incident]
+func vaultJourney(args []string) {
+	fs := flag.NewFlagSet("vault journey", flag.ExitOnError)
+	var limit int
+	var since string
+	var category string
+	var outcome string
+	var incidentOnly bool
+	fs.IntVar(&limit, "limit", 20, "Maximum number of journeys to show")
+	fs.StringVar(&since, "since", "24h", "Show journeys from the last duration (e.g. 1h, 24h, 7d)")
+	fs.StringVar(&category, "category", "", "Filter by category: database, kubernetes, host")
+	fs.StringVar(&outcome, "outcome", "", "Filter by outcome: resolved, abandoned, escalated, in_progress")
+	fs.BoolVar(&incidentOnly, "incident", false, "Show only journeys linked to an incident run")
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault journey")
+		os.Exit(1)
+	}
+
+	// Detail mode: vault journey <trace_id>
+	if len(fs.Args()) > 0 {
+		traceID := fs.Args()[0]
+		printJourneyDetail(cfg.GatewayURL, cfg.GatewayAPIKey, traceID)
+		return
+	}
+
+	// List mode: show recent journeys.
+	params := map[string]string{
+		"limit": strconv.Itoa(limit),
+	}
+	// Normalise "7d" → "168h" since the server expects Go duration format.
+	sinceDur := since
+	if strings.HasSuffix(since, "d") {
+		if days, err := strconv.Atoi(strings.TrimSuffix(since, "d")); err == nil {
+			sinceDur = fmt.Sprintf("%dh", days*24)
+		}
+	}
+	if sinceDur != "" {
+		params["since"] = sinceDur
+	}
+	if category != "" {
+		params["category"] = category
+	}
+	if outcome != "" {
+		params["outcome"] = outcome
+	}
+
+	journeys, err := fetchJourneys(cfg.GatewayURL, cfg.GatewayAPIKey, params)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching journeys: %v\n", err)
+		os.Exit(1)
+	}
+	if incidentOnly {
+		filtered := journeys[:0]
+		for _, j := range journeys {
+			if j.IncidentRunID != "" {
+				filtered = append(filtered, j)
+			}
+		}
+		journeys = filtered
+	}
+	if len(journeys) == 0 {
+		fmt.Println("No journeys found.")
+		return
+	}
+
+	title := fmt.Sprintf("Recent journeys — %d entries (last %s)", len(journeys), since)
+	if category != "" {
+		title += "  category=" + category
+	}
+	if outcome != "" {
+		title += "  outcome=" + outcome
+	}
+	fmt.Println(title)
+	fmt.Println()
+
+	const (
+		colTrace    = 20
+		colDate     = 16
+		colDur      = 7
+		colAgent    = 12
+		colOutcome  = 12
+		colIncident = 14
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colTrace, "TRACE ID",
+		colDate, "STARTED",
+		colDur, "DUR",
+		colAgent, "AGENT",
+		colOutcome, "OUTCOME",
+		colIncident, "INCIDENT",
+		"TOOLS",
+	)
+	fmt.Println(strings.Repeat("─", colTrace+2+colDate+2+colDur+2+colAgent+2+colOutcome+2+colIncident+2+40))
+
+	for _, j := range journeys {
+		date := j.StartedAt
+		if t, err := time.Parse(time.RFC3339, j.StartedAt); err == nil {
+			date = t.Format("2006-01-02 15:04")
+		} else if len(j.StartedAt) >= 16 {
+			date = j.StartedAt[:16]
+		}
+
+		durStr := "–"
+		if j.DurationMs > 0 {
+			d := time.Duration(j.DurationMs) * time.Millisecond
+			if d < time.Minute {
+				durStr = fmt.Sprintf("%.1fs", d.Seconds())
+			} else {
+				durStr = fmt.Sprintf("%.0fm", d.Minutes())
+			}
+		}
+
+		agent := j.Agent
+		if agent == "" {
+			agent = j.Category
+		}
+		if agent == "" {
+			agent = "–"
+		}
+
+		outcomeStr := j.Outcome
+		if outcomeStr == "" {
+			outcomeStr = "–"
+		}
+
+		incidentStr := "–"
+		if j.IncidentRunID != "" {
+			incidentStr = j.IncidentRunID
+		}
+		mismatchFlag := ""
+		if j.HasMismatch {
+			mismatchFlag = " !"
+		}
+
+		toolStr := strings.Join(j.ToolsUsed, ", ")
+		if len(toolStr) > 40 {
+			toolStr = toolStr[:37] + "..."
+		}
+		if toolStr == "" {
+			toolStr = "–"
+		}
+
+		traceDisplay := j.TraceID
+		if len(traceDisplay) > colTrace {
+			traceDisplay = traceDisplay[:colTrace]
+		}
+
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s%s\n",
+			colTrace, traceDisplay,
+			colDate, date,
+			colDur, durStr,
+			colAgent, agent,
+			colOutcome, outcomeStr,
+			colIncident, incidentStr,
+			toolStr, mismatchFlag,
+		)
+	}
+
+	fmt.Println()
+	fmt.Println("  ! = fabrication mismatch (agent reported success but no tool call recorded)")
+	fmt.Printf("\nTo drill into a trace:\n  faulttest vault journey <trace_id> --gateway %s\n", cfg.GatewayURL)
+}
+
+// printJourneyDetail shows a single journey in full detail.
+func printJourneyDetail(gatewayURL, apiKey, traceID string) {
+	journeys, err := fetchJourneys(gatewayURL, apiKey, map[string]string{
+		"trace_id": traceID,
+		"limit":    "1",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching journey: %v\n", err)
+		os.Exit(1)
+	}
+	if len(journeys) == 0 {
+		fmt.Fprintf(os.Stderr, "No journey found for trace_id %q\n", traceID)
+		os.Exit(1)
+	}
+	j := journeys[0]
+
+	sep := strings.Repeat("─", 70)
+	sectionJ := func(name string) {
+		fmt.Printf("\n%s\n%s\n", name, sep)
+	}
+
+	fmt.Printf("\nJOURNEY  %s\n%s\n", j.TraceID, sep)
+
+	started := j.StartedAt
+	if t, err := time.Parse(time.RFC3339, j.StartedAt); err == nil {
+		started = t.Format("2006-01-02 15:04:05 UTC")
+	}
+	ended := j.EndedAt
+	if t, err := time.Parse(time.RFC3339, j.EndedAt); err == nil {
+		ended = t.Format("2006-01-02 15:04:05 UTC")
+	}
+	durStr := "–"
+	if j.DurationMs > 0 {
+		d := time.Duration(j.DurationMs) * time.Millisecond
+		durStr = fmt.Sprintf("%.1fs", d.Seconds())
+	}
+
+	fmt.Printf("  %-18s %s\n", "Started:", started)
+	fmt.Printf("  %-18s %s\n", "Ended:", ended)
+	fmt.Printf("  %-18s %s\n", "Duration:", durStr)
+	if j.Agent != "" {
+		fmt.Printf("  %-18s %s\n", "Agent:", j.Agent)
+	}
+	if j.Category != "" {
+		fmt.Printf("  %-18s %s\n", "Category:", j.Category)
+	}
+	if j.Origin != "" {
+		fmt.Printf("  %-18s %s\n", "Origin:", j.Origin)
+	}
+	fmt.Printf("  %-18s %s\n", "Outcome:", j.Outcome)
+	fmt.Printf("  %-18s %d\n", "Events:", j.EventCount)
+	if j.RetryCount > 0 {
+		fmt.Printf("  %-18s %d\n", "Retries:", j.RetryCount)
+	}
+
+	if j.UserQuery != "" {
+		sectionJ("QUERY")
+		fmt.Printf("  %s\n", wordWrap(j.UserQuery, 66, "  "))
+	}
+
+	if len(j.Delegations) > 0 {
+		sectionJ("DELEGATIONS")
+		for i, d := range j.Delegations {
+			fmt.Printf("  %d. %s\n", i+1, d.Intent)
+			if len(d.Tools) > 0 {
+				fmt.Printf("     tools: %s\n", strings.Join(d.Tools, ", "))
+			}
+		}
+	}
+
+	if len(j.ToolsUsed) > 0 {
+		sectionJ("TOOLS USED")
+		for _, t := range j.ToolsUsed {
+			fmt.Printf("  • %s\n", t)
+		}
+	}
+
+	if j.HasMismatch {
+		sectionJ("FABRICATION WARNING")
+		fmt.Println("  ! One or more delegations reported success but no matching tool")
+		fmt.Println("    execution was recorded in the audit trail.")
+		fmt.Println("    This may indicate LLM fabrication. Review the agent transcript.")
+	}
+
+	if j.IncidentRunID != "" {
+		sectionJ("INCIDENT LINK")
+		fmt.Printf("  %-18s %s\n", "Run ID:", j.IncidentRunID)
+		fmt.Printf("\n  → vault incidents %s\n", j.IncidentRunID)
+	}
+
+	fmt.Println()
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────
