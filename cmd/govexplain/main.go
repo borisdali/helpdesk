@@ -332,22 +332,22 @@ func printTable(events []parsedEvent) int {
 			}
 		}
 		if v, ok := e.raw["trace_id"]; ok {
-			json.Unmarshal(v, &traceID)
+			_ = json.Unmarshal(v, &traceID)
 		}
 		if pdRaw, ok := e.raw["policy_decision"]; ok {
 			var pd map[string]json.RawMessage
 			if json.Unmarshal(pdRaw, &pd) == nil {
 				if v, ok := pd["resource_type"]; ok {
-					json.Unmarshal(v, &resourceType)
+					_ = json.Unmarshal(v, &resourceType)
 				}
 				if v, ok := pd["resource_name"]; ok {
-					json.Unmarshal(v, &resourceName)
+					_ = json.Unmarshal(v, &resourceName)
 				}
 				if v, ok := pd["action"]; ok {
-					json.Unmarshal(v, &action)
+					_ = json.Unmarshal(v, &action)
 				}
 				if v, ok := pd["policy_name"]; ok {
-					json.Unmarshal(v, &policyName)
+					_ = json.Unmarshal(v, &policyName)
 				}
 			}
 		}

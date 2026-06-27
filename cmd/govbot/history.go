@@ -280,7 +280,7 @@ func (h *localHistoryStore) printTable(window string, n int) error {
 
 func (h *localHistoryStore) close() {
 	if h.db != nil {
-		h.db.Close()
+		_ = h.db.Close()
 	}
 }
 

@@ -97,7 +97,7 @@ func main() {
 	// Start callback server
 	callbackCh := make(chan callbackPayload, 10)
 	srv := startCallbackServer(*listen, callbackCh)
-	defer srv.Shutdown(context.Background())
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	logPhase(2, "Connect to Audit Stream")
 	fmt.Println()

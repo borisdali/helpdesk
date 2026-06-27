@@ -276,7 +276,7 @@ func (s *ApprovalStore) ListRequests(ctx context.Context, opts ApprovalQueryOpti
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var requests []*StoredApproval
 	for rows.Next() {
@@ -417,12 +417,12 @@ func (s *ApprovalStore) ExpireRequests(ctx context.Context) (int, error) {
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, err
 		}
 		expiredIDs = append(expiredIDs, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if len(expiredIDs) == 0 {
 		return 0, nil

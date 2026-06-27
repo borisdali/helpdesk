@@ -16,7 +16,7 @@ func newApprovalSessionStore(t *testing.T) *ApprovalSessionStore {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	s, err := NewApprovalSessionStore(store.DB())
 	if err != nil {
 		t.Fatalf("NewApprovalSessionStore: %v", err)
