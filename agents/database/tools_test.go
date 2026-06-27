@@ -1917,7 +1917,7 @@ func writeTempDBPolicyFile(t *testing.T, content string) string {
 	if _, err := f.WriteString(content); err != nil {
 		t.Fatalf("write temp policy file: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 	return f.Name()
 }
 
@@ -2575,7 +2575,7 @@ func newToolTestEnforcer(t *testing.T, approvalURL string) *agentutil.PolicyEnfo
 	if _, err := f.WriteString(requireApprovalPolicy); err != nil {
 		t.Fatalf("write temp policy file: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
 		PolicyEnabled: true,

@@ -33,7 +33,7 @@ func main() {
 		os.Exit(1)
 	}
 	if auditStore != nil {
-		defer auditStore.Close()
+		defer func() { _ = auditStore.Close() }()
 	}
 	traceStore := &audit.CurrentTraceStore{}
 

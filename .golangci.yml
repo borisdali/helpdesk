@@ -9,21 +9,29 @@ linters:
         - (*database/sql.DB).Close
         - (*database/sql.Stmt).Close
         - (*database/sql.Tx).Rollback
-        # network connections — if dial succeeds, close errors are unactionable
+        # file and network close — errors in defer are unactionable
+        - (*os.File).Close
         - (net.Conn).Close
         - (*net.TCPConn).Close
         - (*net.UDPConn).Close
-        # HTTP server lifecycle — ListenAndServe blocks until shutdown; Shutdown after context cancel
+        # archive/compression writers — flushed in defer, errors can't be recovered
+        - (*compress/gzip.Writer).Close
+        - (*archive/tar.Writer).Close
+        # HTTP server lifecycle
         - (*net/http.Server).ListenAndServe
         - (*net/http.Server).ListenAndServeTLS
         - (*net/http.Server).Shutdown
-        # Diagnostic writes: stderr, tabwriter, http.ResponseWriter.
-        # If the connection drops or the terminal is gone, there's nothing to do.
+        # JSON encoding to http.ResponseWriter — connection drops are unactionable
+        - (*encoding/json.Encoder).Encode
+        # Diagnostic / formatting writes and scans
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
         - fmt.Print
         - fmt.Println
+        - fmt.Sscanf
+        - fmt.Sscan
         - (*text/tabwriter.Writer).Flush
-        # Temp-dir cleanup in defer: best-effort, not actionable on error.
+        # Filesystem cleanup in defer: best-effort, not actionable on error
+        - os.Remove
         - os.RemoveAll

@@ -2001,7 +2001,7 @@ func getBgwriterStatsImpl(ctx context.Context, args GetBgwriterStatsArgs) (PsqlR
 	verRow := parseExpandedRow(verOut)
 	versionNum := 0
 	if s, ok := verRow["v"]; ok {
-		fmt.Sscanf(s, "%d", &versionNum)
+		_, _ = fmt.Sscanf(s, "%d", &versionNum)
 	}
 
 	var query string

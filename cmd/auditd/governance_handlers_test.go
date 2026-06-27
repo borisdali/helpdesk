@@ -118,7 +118,7 @@ func TestGovernanceInfo_AuditFieldsWithNilStore(t *testing.T) {
 	gs.handleGetInfo(w, req)
 
 	var info GovernanceInfo
-	json.NewDecoder(w.Body).Decode(&info)
+	_ = json.NewDecoder(w.Body).Decode(&info)
 
 	// Audit section is always present; nil store means zero counts.
 	if !info.Audit.Enabled {
@@ -245,7 +245,7 @@ func TestHandleExplain_NoPolicyEngine(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if enabled, _ := resp["enabled"].(bool); enabled {
 		t.Error("expected enabled=false when no engine is loaded")
 	}
@@ -301,7 +301,7 @@ func TestHandleExplain_DeniedDecision(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var trace map[string]any
-	json.NewDecoder(w.Body).Decode(&trace)
+	_ = json.NewDecoder(w.Body).Decode(&trace)
 
 	decision, _ := trace["decision"].(map[string]any)
 	if decision["effect"] != "deny" {
@@ -339,7 +339,7 @@ policies:
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var trace map[string]any
-	json.NewDecoder(w.Body).Decode(&trace)
+	_ = json.NewDecoder(w.Body).Decode(&trace)
 
 	decision, _ := trace["decision"].(map[string]any)
 	if decision["effect"] != "require_approval" {
@@ -377,7 +377,7 @@ policies:
 	w := httptest.NewRecorder()
 	gs.handleExplain(w, req)
 	var trace map[string]any
-	json.NewDecoder(w.Body).Decode(&trace)
+	_ = json.NewDecoder(w.Body).Decode(&trace)
 	if d, _ := trace["decision"].(map[string]any); d["effect"] != "allow" {
 		t.Errorf("staging tag: Effect = %v, want allow", d["effect"])
 	}
@@ -491,7 +491,7 @@ policies:
 	gs.handleExplain(w, req)
 
 	var trace map[string]any
-	json.NewDecoder(w.Body).Decode(&trace)
+	_ = json.NewDecoder(w.Body).Decode(&trace)
 	d, _ := trace["decision"].(map[string]any)
 	if got := d["effect"]; got != "deny" {
 		t.Errorf("Effect = %v, want deny (explicit production tag should override infra-config)", got)
@@ -659,7 +659,7 @@ func TestHandleGetEvent_WithTraceAndExplanation(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var result map[string]any
-	json.NewDecoder(w.Body).Decode(&result)
+	_ = json.NewDecoder(w.Body).Decode(&result)
 
 	pd, _ := result["policy_decision"].(map[string]any)
 	if pd == nil {
@@ -908,7 +908,7 @@ policies:
 	}
 
 	var resp PolicyCheckResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp.Effect != "deny" {
 		t.Errorf("Effect = %q, want deny", resp.Effect)
 	}
@@ -951,7 +951,7 @@ func TestHandlePolicyCheck_SessionIDFallback(t *testing.T) {
 	}
 
 	var resp PolicyCheckResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 
 	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
 	if err != nil {
@@ -984,7 +984,7 @@ func TestHandlePolicyCheck_AgentWithoutTraceID_Returns400(t *testing.T) {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 	var errResp map[string]string
-	json.NewDecoder(w.Body).Decode(&errResp)
+	_ = json.NewDecoder(w.Body).Decode(&errResp)
 	if !strings.Contains(errResp["error"], "trace_id") {
 		t.Errorf("error message should mention trace_id, got: %q", errResp["error"])
 	}
@@ -1008,7 +1008,7 @@ func TestHandlePolicyCheck_DirectCallAutoGeneratesChkTraceID(t *testing.T) {
 	}
 
 	var resp PolicyCheckResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 
 	if !strings.HasPrefix(resp.TraceID, "chk_") {
 		t.Errorf("trace_id = %q, want chk_* prefix for direct call", resp.TraceID)
@@ -1136,7 +1136,7 @@ func TestHandlePolicyCheck_ServicePrincipal(t *testing.T) {
 	}
 
 	var resp PolicyCheckResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 
 	events, err := store.Query(context.Background(), audit.QueryOptions{EventID: resp.EventID, Limit: 1})
 	if err != nil {
@@ -1183,7 +1183,7 @@ func TestHandlePolicyCheck_SensitivityCallerSupplied(t *testing.T) {
 	}
 
 	var resp PolicyCheckResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp.Effect != "allow" {
 		t.Errorf("Effect = %q, want allow", resp.Effect)
 	}
@@ -1229,7 +1229,7 @@ func TestHandlePolicyCheck_SensitivityPurposeMissing_Deny(t *testing.T) {
 	}
 
 	var resp PolicyCheckResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp.Effect != "deny" {
 		t.Errorf("Effect = %q, want deny", resp.Effect)
 	}

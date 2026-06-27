@@ -66,7 +66,7 @@ func main() {
 	traceStore := &audit.CurrentTraceStore{}
 
 	if auditStore != nil {
-		defer auditStore.Close()
+		defer func() { _ = auditStore.Close() }()
 		// Create tool auditor with trace store for dynamic trace_id
 		sessionID := "dbagent_" + uuid.New().String()[:8]
 		toolAuditor = audit.NewToolAuditorWithTraceStore(auditStore, "postgres_database_agent", sessionID, traceStore)

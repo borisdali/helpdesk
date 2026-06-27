@@ -120,7 +120,7 @@ func (s *approvalServer) handleCreateApproval(w http.ResponseWriter, r *http.Req
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"approval_id": approval.ApprovalID,
 		"status":      approval.Status,
 		"expires_at":  approval.ExpiresAt.Format(time.RFC3339),

@@ -27,7 +27,7 @@ func (s *uploadServer) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing 'file' field in multipart form", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	content, err := io.ReadAll(io.LimitReader(file, audit.UploadMaxBytes+1))
 	if err != nil {

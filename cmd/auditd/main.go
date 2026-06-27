@@ -77,7 +77,7 @@ func main() {
 		slog.Error("failed to create audit store", "err", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Create approval store (shares the same database connection)
 	approvalStore, err := audit.NewApprovalStore(store.DB(), store.IsPostgres())
