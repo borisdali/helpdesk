@@ -1286,10 +1286,22 @@ type incidentFeedback struct {
 	Operator       string `json:"operator"`
 }
 
+// fetchRunsByOutcome calls GET /api/v1/fleet/playbook-runs?outcome=<o>&limit=<n>.
+func fetchRunsByOutcome(gatewayURL, apiKey, outcome string, limit int) ([]incidentRun, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") +
+		fmt.Sprintf("/api/v1/fleet/playbook-runs?outcome=%s&limit=%d", outcome, limit)
+	return doFetchRuns(url, apiKey)
+}
+
 // fetchRunsBySeries calls GET /api/v1/fleet/playbook-runs?series_id=<sid>&limit=<n>.
 func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incidentRun, error) {
 	url := strings.TrimSuffix(gatewayURL, "/") +
 		fmt.Sprintf("/api/v1/fleet/playbook-runs?series_id=%s&limit=%d", seriesID, limit)
+	return doFetchRuns(url, apiKey)
+}
+
+// doFetchRuns executes GET on a pre-built playbook-runs URL and decodes the result.
+func doFetchRuns(url, apiKey string) ([]incidentRun, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -1419,6 +1431,68 @@ func formatRemediationOutcome(r *incidentRun) string {
 
 // vaultIncidents lists incidents (triage run IDs) for a fault or playbook series,
 // including outcome, timestamp, truncated findings, and feedback status.
+// vaultIncidentsRecent shows the most recent playbook runs across all faults
+// by querying resolved and failed outcomes and merging the results.
+func vaultIncidentsRecent(cfg *HarnessConfig, limit int) {
+	outcomes := []string{"resolved", "failed", "abandoned", "escalated"}
+	seen := map[string]bool{}
+	var all []incidentRun
+	for _, o := range outcomes {
+		runs, err := fetchRunsByOutcome(cfg.GatewayURL, cfg.GatewayAPIKey, o, limit)
+		if err != nil {
+			continue
+		}
+		for _, r := range runs {
+			if !seen[r.RunID] {
+				seen[r.RunID] = true
+				all = append(all, r)
+			}
+		}
+	}
+
+	if len(all) == 0 {
+		fmt.Println("No recent incidents found.")
+		fmt.Println("Run `faulttest vault incidents <fault-id>` to filter by fault.")
+		return
+	}
+
+	// Sort by started_at descending.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].StartedAt > all[j].StartedAt
+	})
+	if len(all) > limit {
+		all = all[:limit]
+	}
+
+	fmt.Printf("Recent incidents (last %d) — pass a fault-id or plr_* run-id for details\n\n", len(all))
+	const (
+		colRunID  = 14
+		colSeries = 30
+		colDate   = 16
+		colOutcome = 12
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colSeries, "SERIES", colDate, "STARTED", "OUTCOME")
+	fmt.Println(strings.Repeat("─", colRunID+2+colSeries+2+colDate+2+colOutcome+10))
+	for _, run := range all {
+		date := run.StartedAt
+		if t, err := time.Parse(time.RFC3339, run.StartedAt); err == nil {
+			date = t.Format("2006-01-02 15:04")
+		} else if len(run.StartedAt) >= 16 {
+			date = run.StartedAt[:16]
+		}
+		series := run.SeriesID
+		if len(series) > colSeries {
+			series = series[:colSeries-3] + "..."
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+			colRunID, run.RunID, colSeries, series, colDate, date, run.Outcome)
+	}
+	fmt.Println()
+	fmt.Println("  → vault incidents <plr_*>        full incident narrative")
+	fmt.Println("  → vault incidents <fault-id>     all runs for a fault")
+}
+
 // Usage: faulttest vault incidents <fault-id or series-id> [--limit N]
 func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
@@ -1431,8 +1505,8 @@ func vaultIncidents(args []string) {
 		os.Exit(1)
 	}
 	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault incidents <fault-id or series-id or run-id> [--limit N]")
-		os.Exit(1)
+		vaultIncidentsRecent(cfg, limit)
+		return
 	}
 
 	arg := fs.Args()[0]
