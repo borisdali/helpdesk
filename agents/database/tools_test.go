@@ -2507,7 +2507,7 @@ func mockApprovalServerForTools(t *testing.T) (string, <-chan audit.ApprovalCrea
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/approvals":
 			var req audit.ApprovalCreateRequest
-			json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewDecoder(r.Body).Decode(&req)
 			ch <- req
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)

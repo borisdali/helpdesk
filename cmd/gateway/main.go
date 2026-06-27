@@ -168,7 +168,7 @@ func main() {
 				slog.Info("local governance server started", "url", govURL)
 			}
 		}
-		defer auditor.Close()
+		defer func() { _ = auditor.Close() }()
 
 		gw.SetAuditor(audit.NewGatewayAuditor(auditor))
 	}

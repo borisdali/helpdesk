@@ -387,7 +387,7 @@ policies:
 	w2 := httptest.NewRecorder()
 	gs.handleExplain(w2, req2)
 	var trace2 map[string]any
-	json.NewDecoder(w2.Body).Decode(&trace2)
+	_ = json.NewDecoder(w2.Body).Decode(&trace2)
 	if d, _ := trace2["decision"].(map[string]any); d["effect"] != "deny" {
 		t.Errorf("production tag: Effect = %v, want deny", d["effect"])
 	}

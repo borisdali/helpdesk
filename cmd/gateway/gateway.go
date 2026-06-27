@@ -1279,7 +1279,7 @@ func (g *Gateway) proxyGovernanceRequest(w http.ResponseWriter, r *http.Request,
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // --- A2A call ---

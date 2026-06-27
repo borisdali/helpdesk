@@ -9,14 +9,18 @@ linters:
         - (*database/sql.DB).Close
         - (*database/sql.Stmt).Close
         - (*database/sql.Tx).Rollback
-        # file and network close — errors in defer are unactionable
+        # file, network, and stream close — errors in defer are unactionable
         - (*os.File).Close
+        - (io.ReadCloser).Close
         - (net.Conn).Close
         - (*net.TCPConn).Close
         - (*net.UDPConn).Close
-        # archive/compression writers — flushed in defer, errors can't be recovered
+        # archive/compression writers and readers
         - (*compress/gzip.Writer).Close
+        - (*compress/gzip.Reader).Close
         - (*archive/tar.Writer).Close
+        # multipart writer — finalises boundary; error unactionable in test helpers
+        - (*mime/multipart.Writer).Close
         # HTTP server lifecycle
         - (*net/http.Server).ListenAndServe
         - (*net/http.Server).ListenAndServeTLS
