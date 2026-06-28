@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#8 (on a K8s): Triage Consistency Certification (aka the badge) + AI Ledger
+# aiHelpDesk Sample#8 (on a K8s): Triage Consistency Certification badge + AI Ledger
 
 The sample commands presented below augment the following two blog posts:
 

@@ -161,7 +161,7 @@ func cmdVault(args []string) {
 		vaultAccuracy(args[1:])
 	case "incidents":
 		vaultIncidents(args[1:])
-	case "journey":
+	case "journey", "journeys":
 		vaultJourney(args[1:])
 	case "versions":
 		vaultVersions(args[1:])

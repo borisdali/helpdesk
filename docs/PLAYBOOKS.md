@@ -1815,9 +1815,7 @@ When importing via LLM (`format=markdown`, `text`, `rundeck`, `ansible`), the im
 
 ## Life of an Incident
 
-This section walks through a complete incident end-to-end: from the first triage run to the operator feedback that feeds back into the [Vault](VAULT.md). Each step is a real API call. 
-
-The story is the [`pbs_lock_chain_triage`](../playbooks/lock-chain-triage.yaml) / [`pbs_lock_chain_remediate`](../playbooks/lock-chain-remediate.yaml) pair against a live database.
+This section walks through a complete incident end-to-end: from the first triage run to the operator feedback that feeds back into the [Vault](VAULT.md). Each step is a real API call. The sample story below is based on the pair of triage and remediation playbooks: [`pbs_lock_chain_triage`](../playbooks/lock-chain-triage.yaml) and [`pbs_lock_chain_remediate`](../playbooks/lock-chain-remediate.yaml):
 
 ```mermaid
 flowchart TD
