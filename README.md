@@ -100,7 +100,7 @@ Before a Playbook enters live rotation, it is certified STABLE by running the sa
 
 aiHelpDesk's Governance system rests on eight subsystems including full [auditing](docs/AUDIT.md), [compliance reporting](docs/COMPLIANCE.md) and the [journeys](docs/JOURNEYS.md). See the primary [AI Governance page](docs/AIGOVERNANCE.md) for the complete reference.
 
-HTTP-level authorization is presented [here](docs/AUTHZ.md). Identity provider configuration (static users, JWT/OIDC, service accounts) is describe [here](docs/IDENTITY.md).
+HTTP-level authorization is presented [here](docs/AUTHZ.md). Identity provider configuration (static users, JWT/OIDC, service accounts) is described [here](docs/IDENTITY.md).
 
 ## Fleet Operations
 

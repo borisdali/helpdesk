@@ -516,7 +516,7 @@ func cmdRun(args []string) {
 				} else {
 					fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
 				}
-			} else if !repeatMode && cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
+			} else if !repeatMode && cfg.RemediateEnabled && resp.ChainedRunID == "" && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
 				remResult := remediator.Remediate(faultCtx, f, resp.RunID)
 				evalResult.RemediationAttempted = true
 				evalResult.RemediationPassed = remResult.Passed

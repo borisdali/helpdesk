@@ -202,6 +202,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		RemediationPreview map[string]any `json:"remediation_preview,omitempty"`
 		DiagnosticReport   map[string]any `json:"diagnostic_report,omitempty"`
 		GateReason         string         `json:"gate_reason,omitempty"`
+		ChainedRunID       string         `json:"chained_run_id,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -227,6 +228,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		RemediationPreview: result.RemediationPreview,
 		DiagnosticReport:   result.DiagnosticReport,
 		GateReason:         result.GateReason,
+		ChainedRunID:       result.ChainedRunID,
 	}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)
