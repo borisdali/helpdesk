@@ -16,6 +16,7 @@ See Playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk rec
    - [Intent vs. knowledge](#intent-vs-knowledge)
    - [Versioning](#versioning)
    - [System Playbooks](#system-playbooks)
+   - [Updating a System Playbook](#updating-a-system-playbook)
 2. [Agent endpoint security](#agent-endpoint-security)
    - [How it works](#how-it-works)
    - [Production setup](#production-setup)
@@ -154,7 +155,7 @@ The "Database Down" Playbooks form an escalating triage graph for Docker-hosted 
 
 The **WAL Accumulation — Stale Replication Slot** Playbook (`pbs_wal_stale_slot`) handles the complementary scenario where the database is still up but `pg_wal` is growing without bound. It differs from `pbs_wal_disk_full` in that the database is reachable — the agent works through a four-hypothesis elimination tree (archive failure → inactive slot → long transaction → write volume) rather than reading crash logs. Dropping the slot requires `approval_mode: manual` since it permanently removes the replica's reconnection point.
 
-`pbs_db_restart_action`, `pbs_wal_disk_full`, `pbs_wal_stale_slot`, and `pbs_lock_chain_remediate` all have `approval_mode: manual` and can never be auto-chained — the operator always receives `suggested_next` and must invoke them explicitly.
+`pbs_db_restart_action`, `pbs_wal_disk_full`, `pbs_wal_stale_slot`, and `pbs_lock_chain_remediate` all have `approval_mode: manual`. In normal (`auto` or `session`) mode this means the operator always receives `suggested_next` and must invoke them explicitly. With `approval_mode: force` the gateway bypasses the playbook-level gate and chains through them automatically — use `force` only when you are deliberately authorising the full diagnosis-to-remediation path end-to-end.
 
 Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 
@@ -162,7 +163,104 @@ For databases running on bare-metal hosts (no Kubernetes and no Docker), `get_po
 
 System Playbooks are **read-only**: `PUT` and `DELETE` return `400 Bad Request`. To customise one, run it as-is, or import and save your own version in the same series (the activate endpoint then lets you promote your version).
 
-Seeding is idempotent — restarting auditd never duplicates system Playbooks. If a newer version of a system Playbook ships with an aiHelpDesk upgrade, it is inserted as an **inactive** version so customers can review and promote it when ready.
+Seeding is idempotent — restarting auditd never duplicates system Playbooks. When a newer version ships with an aiHelpDesk upgrade, it is inserted **and immediately activated** (the previous version is deactivated). See [Updating a System Playbook](#updating-a-system-playbook) below for the full procedure.
+
+### Updating a System Playbook
+
+System Playbooks are embedded in the auditd binary at build time (`//go:embed *.yaml` in `playbooks/embed.go`). The seeder runs at every auditd startup and is keyed on `(series_id, version)`: if the exact version already exists and is active, the file is skipped. **Changing the guidance without bumping the version has no effect** — the seeder will skip the file and the live system will keep running the old text.
+
+The full procedure for making a change to a system Playbook:
+
+**1. Edit the YAML file**
+
+Make your change in `playbooks/<playbook>.yaml`. Keep the change focused — one concern per version bump.
+
+**2. Bump the version string**
+
+Increment `version:` in the YAML. We use semantic-ish strings (`"1.0"`, `"1.1"`, `"1.2"` …) but any non-empty string that differs from the current live version will work. The seeder does a string equality check, not a numeric comparison:
+
+```yaml
+# before
+version: "1.2"
+
+# after
+version: "1.3"
+```
+
+**3. Rebuild**
+
+The YAML is embedded at compile time, so the binary must be rebuilt:
+
+```bash
+make build          # or: go build ./cmd/auditd
+```
+
+**4. Restart auditd**
+
+On the next startup, `SeedSystemPlaybooks` will find no existing `(series_id, "1.3")` row, insert the new version as active, and deactivate `"1.2"`:
+
+```bash
+# Docker Compose (local dev)
+docker compose restart auditd
+
+# Kubernetes
+kubectl rollout restart deployment/auditd
+```
+
+**5. Verify**
+
+Confirm the new version is live:
+
+```bash
+curl -s -H "X-User: alice@example.com" \
+  "http://localhost:8080/api/v1/fleet/playbooks?series_id=pbs_wal_stale_slot" \
+  | jq '.playbooks[] | {version, is_active}'
+# → {"version": "1.3", "is_active": true}
+```
+
+To inspect both versions (before the old one is garbage-collected):
+
+```bash
+curl -s -H "X-User: alice@example.com" \
+  "http://localhost:8080/api/v1/fleet/playbooks?series_id=pbs_wal_stale_slot&active_only=false" \
+  | jq '[.playbooks[] | {version, is_active}]'
+# → [{"version": "1.3", "is_active": true}, {"version": "1.2", "is_active": false}]
+```
+
+**What the seeder does and does not do**
+
+| Scenario | Seeder behaviour |
+|---|---|
+| Same `(series_id, version)` exists and is active | Skip — no change |
+| Same `(series_id, version)` exists but is inactive | Activate it — no new row |
+| New version, series already exists | Insert new row as active; deactivate the previous active version |
+| Brand-new series | Insert new row as active |
+| On-disk version is lower than the active DB version | Insert the lower version and activate it — this is a **downgrade**; avoid it |
+
+The last case is a footgun: if the binary is rolled back to an older build, the seeder will insert and activate the older YAML version, replacing whatever was live. Always roll forward.
+
+**Customising a System Playbook without modifying source**
+
+If you want to tweak a System Playbook's guidance without touching the codebase — for example, to add site-specific escalation notes — create a user-authored version in the same series via the API. Your version starts inactive; promote it with the activate endpoint. The `PUT` and `DELETE` restrictions apply only to `is_system=true` rows; your new version is `is_system=false` and fully editable:
+
+```bash
+# 1. Create a customised version in the same series
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "series_id":   "pbs_wal_stale_slot",
+    "name":        "WAL Accumulation — Stale Replication Slot",
+    "version":     "custom-1.0",
+    "guidance":    "... your modified guidance ...",
+    "author":      "alice@example.com"
+  }'
+# → 201 Created, is_active: false, is_system: false
+
+# 2. Promote it — the system version becomes inactive
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/<new-pb-id>/activate
+```
+
+On the next auditd restart the seeder will find the system version `"1.3"` already present (inactive) and skip it — your custom version stays active. If you want to revert to the system version, activate the system row explicitly.
 
 ---
 
