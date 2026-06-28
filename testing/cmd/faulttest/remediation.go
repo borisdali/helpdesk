@@ -196,10 +196,11 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 // approval loop when the run returns pending_approval. Returns the remediation
 // run_id so the caller can fetch steps for the remediation judge.
 func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) (string, error) {
-	// Bridge the local trace-ID slot into faultlib's slot so that RunPlaybook
-	// and ProceedStep set X-Trace-ID on gateway requests.
+	// Give the remediation run a distinct faulttest-* trace so it stays
+	// recognisable as injected (not a real tr_* incident) while remaining a
+	// separate journey from the triage trace (WHY vs WHAT).
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
-		ctx = faultlib.WithFaultTraceID(ctx, id)
+		ctx = faultlib.WithFaultTraceID(ctx, id+"-remed")
 	}
 	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID)
 	if err != nil {
