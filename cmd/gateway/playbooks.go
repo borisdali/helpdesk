@@ -1138,6 +1138,19 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		"approval_mode", remReq.ApprovalMode, "resolved_by", resolvedBy)
 
 	if nextPB.ExecutionMode == "agent_approve" {
+		// proxyToAgentWithTool normally writes the gateway_request anchor that
+		// QueryJourneys uses to discover a trace. agent_approve bypasses that
+		// path (it uses per-step tool calls), so we write the anchor here.
+		if remStartTraceID != "" {
+			g.recordAudit(r.Context(), &audit.GatewayRequest{
+				TraceID:   remStartTraceID,
+				Agent:     nextPB.SeriesID,
+				Method:    r.Method,
+				Endpoint:  r.URL.Path,
+				StartTime: time.Now(),
+				Status:    "success",
+			})
+		}
 		g.handlePlaybookRunApprove(w, r, nextPB, remReq, remRunID, warnings)
 		return
 	}

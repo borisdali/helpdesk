@@ -149,6 +149,9 @@ func localHandleJourneys(store *audit.Store) http.HandlerFunc {
 		q := r.URL.Query()
 		opts := audit.JourneyOptions{Limit: 50}
 
+		if v := q.Get("trace_id"); v != "" {
+			opts.TraceID = v
+		}
 		if v := q.Get("user"); v != "" {
 			opts.UserID = v
 		}

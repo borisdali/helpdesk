@@ -468,6 +468,9 @@ func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req Pr
 	if r.cfg.OperatorID != "" {
 		httpReq.Header.Set("X-User", r.cfg.OperatorID)
 	}
+	if id := FaultTraceID(ctx); id != "" {
+		httpReq.Header.Set("X-Trace-ID", id)
+	}
 
 	resp, err := r.client.Do(httpReq)
 	if err != nil {

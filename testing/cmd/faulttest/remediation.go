@@ -310,6 +310,13 @@ func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
 // and confidence warning, prompts the operator to approve or deny, and if approved
 // asks which approval mode to use for the remediation playbook.
 func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunResponse) error {
+	// Bridge the faulttest trace ID into faultlib's slot with a -remed suffix so
+	// the gateway-triggered remediation run gets a faulttest-*-remed trace rather
+	// than a gateway-generated tr_* one.
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		ctx = faultlib.WithFaultTraceID(ctx, id+"-remed")
+	}
+
 	const width = 64
 	sep := strings.Repeat("═", width)
 

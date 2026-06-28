@@ -540,6 +540,9 @@ func cmdRun(args []string) {
 				} else {
 					fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
 				}
+				if cfg.ApprovalMode != "force" {
+					remediator.submitFeedback(faultCtx, resp.RunID, remResult.RunID, resp.DiagnosticReport)
+				}
 			} else {
 				evalResult.OverallScore = evalResult.Score
 			}
