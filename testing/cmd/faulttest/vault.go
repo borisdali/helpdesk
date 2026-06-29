@@ -1983,7 +1983,11 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string) {
 
 	if j.UserQuery != "" {
 		sectionJ("QUERY")
-		fmt.Printf("  %s\n", wordWrap(j.UserQuery, 66, "  "))
+		q := j.UserQuery
+		if idx := strings.IndexByte(q, '\n'); idx >= 0 {
+			q = q[:idx] + " ..."
+		}
+		fmt.Printf("  %s\n", wordWrap(q, 66, "  "))
 	}
 
 	if len(j.Delegations) > 0 {
