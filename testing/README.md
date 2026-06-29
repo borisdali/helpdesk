@@ -5,38 +5,39 @@
 ```
 [boris@ ~/helpdesk]$ make test-nocache
 go test -v --count=1 ./... 2>&1 | tee /tmp/helpdesk-test.log | grep -E "^(ok |FAIL)"
-ok      helpdesk/agents/database        0.348s
-ok      helpdesk/agents/incident        0.610s
-ok      helpdesk/agents/k8s     1.132s
-ok      helpdesk/agents/sysadmin        0.302s
-ok      helpdesk/agentutil      1.771s
-ok      helpdesk/agentutil/retryutil    2.260s
-ok      helpdesk/cmd/auditd     1.188s
-ok      helpdesk/cmd/auditor    1.357s
-ok      helpdesk/cmd/fleet-runner       2.900s
-ok      helpdesk/cmd/gateway    2.185s
-ok      helpdesk/cmd/govbot     2.249s
-ok      helpdesk/cmd/helpdesk   1.998s
-ok      helpdesk/cmd/helpdesk-client    2.111s
-ok      helpdesk/cmd/srebot     1.806s
-ok      helpdesk/internal/audit 2.720s
-ok      helpdesk/internal/authz 1.963s
-ok      helpdesk/internal/client        2.158s
-ok      helpdesk/internal/discovery     1.518s
-ok      helpdesk/internal/identity      2.680s
-ok      helpdesk/internal/infra 1.513s
-ok      helpdesk/internal/policy        1.382s
-ok      helpdesk/internal/toolregistry  1.244s
-ok      helpdesk/playbooks      1.728s
-ok      helpdesk/prompts        1.386s
-ok      helpdesk/testing/cmd/faulttest  3.561s
-ok      helpdesk/testing/faultlib       1.524s
-ok      helpdesk/testing/helm   2.099s
-ok      helpdesk/testing/testutil       1.556s
+ok  	helpdesk/agents/database	0.287s
+ok  	helpdesk/agents/incident	0.517s
+ok  	helpdesk/agents/k8s	0.595s
+ok  	helpdesk/agents/sysadmin	0.777s
+ok  	helpdesk/agentutil	9.661s
+ok  	helpdesk/agentutil/retryutil	1.525s
+ok  	helpdesk/cmd/auditd	2.454s
+ok  	helpdesk/cmd/auditor	2.048s
+ok  	helpdesk/cmd/fleet-runner	2.252s
+ok  	helpdesk/cmd/gateway	1.856s
+ok  	helpdesk/cmd/govbot	2.046s
+ok  	helpdesk/cmd/helpdesk	2.074s
+ok  	helpdesk/cmd/helpdesk-client	1.764s
+ok  	helpdesk/cmd/srebot	2.085s
+ok  	helpdesk/internal/audit	2.523s
+ok  	helpdesk/internal/authz	1.406s
+ok  	helpdesk/internal/client	1.771s
+ok  	helpdesk/internal/decisions	1.848s
+ok  	helpdesk/internal/discovery	1.398s
+ok  	helpdesk/internal/identity	2.536s
+ok  	helpdesk/internal/infra	1.521s
+ok  	helpdesk/internal/policy	1.347s
+ok  	helpdesk/internal/toolregistry	1.279s
+ok  	helpdesk/playbooks	1.337s
+ok  	helpdesk/prompts	1.024s
+ok  	helpdesk/testing/cmd/faulttest	2.901s
+ok  	helpdesk/testing/faultlib	1.600s
+ok  	helpdesk/testing/helm	1.408s
+ok  	helpdesk/testing/testutil	0.940s
 
 === Test Summary ===
-  Total:  1475
-  Passed: 1475
+  Total:  2161
+  Passed: 2161
   Failed: 0
 ```
 
@@ -219,9 +220,9 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 ```
 
 
-  ### Layer 4: Fault Injection Tests (with the wired faulttest into go test)
+  ### Layer 4a: Fault Injection Tests — Internal (Docker-compose, no gateway)
 
-  Goal: Run failure scenarios from failures.yaml (currently 27: 16 database, 7 Kubernetes, 2 host, 2 compound) as Go tests, producing standard `go test` output alongside the existing JSON report.
+  Goal: Run failure scenarios from failures.yaml (currently 32: 19 database, 8 Kubernetes, 3 host, 2 compound) as Go tests, producing standard `go test` output alongside the existing JSON report.
 
   Approach: Create a Go test file that loads the catalog and runs each failure as a subtest:
 
@@ -260,6 +261,74 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
 ```
 
 See [Fault Injection](FAULT_INJECTION_TESTING.md) for the internal Docker-compose harness details. For the customer-facing external injection guide (SQL-only, SSH, remediation), see [docs/FAULTTEST.md](../docs/FAULTTEST.md).
+
+  ### Layer 4b: Faulttest Gateway Tests — External (live gateway + real infra)
+
+  Goal: Run the subset of faults marked `external_compat: true` against a live gateway and real target infrastructure (staging database, SSH-accessible host). This validates the full agent→gateway→playbook→remediation pipeline, including step approval, audit journeys, and per-version vault metrics. It is the only layer that exercises the complete Vault learning signal end-to-end.
+
+  Infrastructure needed:
+  - Running gateway (`HELPDESK_GATEWAY_URL`, `HELPDESK_API_KEY`)
+  - Staging target database (tagged `test` or `chaos` in `infrastructure.json`)
+  - SSH access for host-level injection (`--ssh-key`, `--ssh-user`, `--ssh-host`)
+
+  Command:
+
+```bash
+  faulttest run --external \
+    --gateway $HELPDESK_GATEWAY_URL \
+    --api-key  $HELPDESK_API_KEY \
+    --infra-config /absolute/path/to/infrastructure.json \
+    --remediate \
+    --approval-mode force    # or omit for interactive gate feedback
+```
+
+  What this layer validates that Layer 4a cannot:
+  - Gateway playbook resolution and version tracking (`playbook_runs`, `playbook_run_steps`)
+  - Step approval gate (Decision Hub polling, `--emit-and-wait`)
+  - Audit journeys: diagnostic and remediation traces linked correctly
+  - Vault metrics after remediation: step count, recovery time, eval scores
+  - `vault list` per-version trend and `vault versions` APPROACH OK column
+
+  Makefile target:
+
+```
+  faulttest-gateway:
+      faulttest run --external \
+        --gateway $(HELPDESK_GATEWAY_URL) --api-key $(HELPDESK_API_KEY) \
+        --infra-config $(HELPDESK_INFRA_CONFIG) \
+        --remediate --approval-mode force
+```
+
+  Trigger: manually before release; optionally nightly on staging.
+
+  ### Layer 4c: Stability Re-certification (`make recertify`)
+
+  Goal: After a playbook version update (via `vault suggest-update` + activation), re-run stability certification for affected series to confirm the new version meets the STABLE threshold (≥80% pass rate, ≤30pp confidence spread). This closes the Vault improvement loop: suggest-update → activate → recertify → STABLE cert.
+
+  Command:
+
+```bash
+  # Re-certify a single series after a version update:
+  faulttest run db-wal-stale-slot --repeat 5 \
+    --gateway $HELPDESK_GATEWAY_URL \
+    --api-key  $HELPDESK_API_KEY \
+    --infra-config /absolute/path/to/infrastructure.json
+
+  # Then check the result:
+  faulttest vault accuracy db-wal-stale-slot \
+    --gateway $HELPDESK_GATEWAY_URL --api-key $HELPDESK_API_KEY
+```
+
+  Makefile target (fleet-wide, run after any batch of version activations):
+
+```
+  recertify:
+      faulttest run --external --repeat 5 \
+        --gateway $(HELPDESK_GATEWAY_URL) --api-key $(HELPDESK_API_KEY) \
+        --infra-config $(HELPDESK_INFRA_CONFIG)
+```
+
+  Trigger: manually after `vault suggest-update` cycles; before release to confirm no regressions in promoted playbook versions.
 
 
   ### Layer 5: End-to-End Tests
@@ -330,59 +399,106 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for the internal Docker-compos
   Testing build tags and make targets:
 
 ```
-  test:                             # Unit tests (no infra needed)
+  test:                             # Layer 1+2: unit + component (no infra)
       go test ./...
 
-  integration:                      # Real DB, no LLM
+  test-nocache:                     # Same with cache busted — use before committing
+      go test -v --count=1 ./...
+
+  integration:                      # Layer 3: real DB, no LLM
       docker compose -f testing/docker/docker-compose.yaml up -d --wait
       go test -tags integration -timeout 120s ./testing/integration/... || true
       docker compose -f testing/docker/docker-compose.yaml down -v
 
-  faulttest:                        # Fault injection (real DB + agents + LLM)
+  faulttest:                        # Layer 4a: fault injection (Docker + agents + LLM)
       docker compose -f testing/docker/docker-compose.yaml up -d --wait
       go test -tags faulttest -timeout 600s -v ./testing/faulttest/... || true
       docker compose -f testing/docker/docker-compose.yaml down -v
 
-  e2e:                              # Full stack (requires HELPDESK_API_KEY)
+  faulttest-gateway:                # Layer 4b: external faults against live gateway
+      faulttest run --external \
+        --gateway $(HELPDESK_GATEWAY_URL) --api-key $(HELPDESK_API_KEY) \
+        --infra-config $(HELPDESK_INFRA_CONFIG) \
+        --remediate --approval-mode force
+
+  recertify:                        # Layer 4c: re-run stability certs post-activation
+      faulttest run --external --repeat 5 \
+        --gateway $(HELPDESK_GATEWAY_URL) --api-key $(HELPDESK_API_KEY) \
+        --infra-config $(HELPDESK_INFRA_CONFIG)
+
+  e2e:                              # Layer 5: full stack (requires HELPDESK_API_KEY)
       docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
       go test -tags e2e -timeout 300s -v ./testing/e2e/... || true
       docker compose -f deploy/docker-compose/docker-compose.yaml down -v
 
-  test-all: test integration faulttest
+  test-all: test integration faulttest     # Layers 1–4a; no live infra needed
 ```
 
-  ## Summary: aiHelpDesk Five-Layer Test Pyramid
+  ## Summary: aiHelpDesk Testing Pyramid
 
 ```
-                                  /\
-                                 /  \     E2E (Layer 5)
-                                / 5c \    LLM + full stack, non-deterministic
-                               /──────\   ~5 tests, run manually or nightly
-                              /  5a 5b \
-                             /──────────\
-                            /  Layer 4   \  Fault injection
-                           / 17 scenarios \  Real DB + agents + LLM
-                          /────────────────\  ~17 tests, run in CI weekly
-                         /     Layer 3      \  Integration
-                        /   DB + K8s + A2A   \  Real DB, no LLM
-                       /──────────────────────\  ~20 tests, run in CI per-PR
-                      /    Layer 2: Component  \  Mock commands
-                     /     psql/kubectl mocked  \  ~30 tests, fast, no infra
-                    /────────────────────────────\
-                   /      Layer 1: Unit Tests     \  Pure logic
-                  /  diagnosePsqlError, formatAge  \  ~80 tests, <2s
-                 /──────────────────────────────────\
-  ┌────────────────────┬─────────┬───────────────────────────┬─────────┬──────────────────┐
-  │       Layer        │ # Tests │           Infra           │ Runtime │     Trigger      │
-  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
-  │ 1. Unit            │ ~80     │ None                      │ <2s     │ Every commit     │
-  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
-  │ 2. Component       │ ~30     │ None                      │ <5s     │ Every commit     │
-  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
-  │ 3. Integration     │ ~20     │ Docker (PostgreSQL)       │ ~30s    │ Per PR           │
-  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
-  │ 4. Fault injection │ 17      │ Docker + agents + LLM API │ ~15min  │ Weekly / release │
-  ├────────────────────┼─────────┼───────────────────────────┼─────────┼──────────────────┤
-  │ 5. E2E             │ ~5      │ Full stack + LLM API      │ ~5min   │ Manual / nightly │
-  └────────────────────┴─────────┴───────────────────────────┴─────────┴──────────────────┘
+                                    /\
+                                   /  \     E2E (Layer 5)
+                                  / 5c \    LLM + full stack, non-deterministic
+                                 /──────\   ~5 tests, run manually or nightly
+                                /  5a 5b \
+                               /──────────\
+                              / Layer 4c   \  Stability re-certification (recertify)
+                             / --repeat N   \  Vault flywheel closer; run post-activation
+                            /────────────────\
+                           /   Layer 4b       \  Faulttest gateway (external)
+                          / live gateway+infra \  Full Vault pipeline; run pre-release
+                         /──────────────────────\
+                        /   Layer 4a             \  Fault injection (internal)
+                       / 32 scenarios             \  Docker + agents + LLM; weekly
+                      /────────────────────────────\
+                     /     Layer 3                  \  Integration
+                    /   DB + K8s + A2A               \  Real DB, no LLM; per PR
+                   /──────────────────────────────────\
+                  /    Layer 2: Component              \  Mock commands
+                 /     psql/kubectl mocked              \  ~30 tests, fast, no infra
+                /────────────────────────────────────────\
+               /      Layer 1: Unit Tests                 \  Pure logic
+              /  diagnosePsqlError, formatAge              \  ~1800 tests, <5s
+             /──────────────────────────────────────────────\
+  ┌─────────────────────┬─────────┬──────────────────────────────┬──────────┬──────────────────────┐
+  │        Layer        │ # Tests │             Infra            │ Runtime  │       Trigger        │
+  ├─────────────────────┼─────────┼──────────────────────────────┼──────────┼──────────────────────┤
+  │ 1. Unit             │ ~1800   │ None                         │ <5s      │ Every commit (CI)    │
+  ├─────────────────────┼─────────┼──────────────────────────────┼──────────┼──────────────────────┤
+  │ 2. Component        │ ~30     │ None                         │ <5s      │ Every commit (CI)    │
+  ├─────────────────────┼─────────┼──────────────────────────────┼──────────┼──────────────────────┤
+  │ 3. Integration      │ ~20     │ Docker (PostgreSQL)          │ ~30s     │ Per PR (CI)          │
+  ├─────────────────────┼─────────┼──────────────────────────────┼──────────┼──────────────────────┤
+  │ 4a. Fault injection │ 32      │ Docker + agents + LLM API    │ ~15min   │ Weekly / release     │
+  ├─────────────────────┼─────────┼──────────────────────────────┼──────────┼──────────────────────┤
+  │ 4b. Faulttest GW    │ 11      │ Live gateway + staging infra │ ~20min   │ Pre-release / nightly│
+  ├─────────────────────┼─────────┼──────────────────────────────┼──────────┼──────────────────────┤
+  │ 4c. Recertify       │ per-PB  │ Live gateway + staging infra │ varies   │ Post suggest-update  │
+  ├─────────────────────┼─────────┼──────────────────────────────┼──────────┼──────────────────────┤
+  │ 5. E2E              │ ~5      │ Full stack + LLM API         │ ~5min    │ Manual / nightly     │
+  └─────────────────────┴─────────┴──────────────────────────────┴──────────┴──────────────────────┘
 ```
+
+  **Why each layer exists and what it cannot delegate downward:**
+
+  | Layer | What it catches that lower layers miss |
+  |-------|----------------------------------------|
+  | 1–2 (unit/component) | Logic bugs, parser errors, mock-injectable command failures — zero infra cost, runs in CI on every commit |
+  | 3 (integration) | Real PostgreSQL behavior, A2A protocol conformance, agent startup wiring |
+  | 4a (fault injection) | LLM reasoning quality, full inject→diagnose→evaluate cycle, agent behavior under real faults |
+  | 4b (faulttest gateway) | Gateway playbook resolution, step approval gate, audit journeys, Vault metrics pipeline — the only layer that validates the full learning signal |
+  | 4c (recertify) | Playbook version regressions after suggest-update; confirms STABLE cert holds on promoted versions |
+  | 5 (E2E) | Multi-agent delegation, orchestrator routing, non-deterministic end-to-end user flows |
+
+  **What CI currently gates on every PR (Layers 1–3):**
+
+```yaml
+  # .github/workflows/ci.yml
+  - Unit tests:                go test ./... (all packages, ~1800 tests)
+  - Helm tests:                make test-helm
+  - Governance integration:    make integration-governance
+  - Integration tests:         make integration
+```
+
+  Layers 4a–5 require live infrastructure and LLM API keys that are not available in the GitHub Actions runner. They are run manually or on a schedule against staging. The pre-release checklist should include 4a + 4b + any 4c recertifications triggered by version activations in the release.
