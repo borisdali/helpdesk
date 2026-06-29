@@ -793,27 +793,37 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		d.count++
 
 		if eventType == string(EventTypeDelegation) {
-			// delegation_decision is authoritative — overwrite any previously set
-			// gateway_request values with the richer orchestrator-side metadata.
-			if userID.Valid && userID.String != "" {
+			// delegation_decision may arrive in two contexts:
+			//
+			//  1. Orchestrator delegation: the orchestrator is the first event seen;
+			//     its session_agent (orchestrator name) should always win for d.agent.
+			//
+			//  2. Playbook escalation: the gateway emits a delegation_decision when
+			//     triage escalates to remediation. The gateway_request anchor for the
+			//     triage trace already set d.userQuery/d.agent; don't overwrite them
+			//     with the internal escalation description.
+			//
+			// Rule: only set scalar journey fields if not already populated.
+			// session_agent (case 1) is always authoritative.
+			if userID.Valid && userID.String != "" && d.userID == "" {
 				d.userID = userID.String
 			}
-			if userQuery.Valid && userQuery.String != "" {
+			if userQuery.Valid && userQuery.String != "" && d.userQuery == "" {
 				d.userQuery = userQuery.String
 			}
-			if purposeCol.Valid && purposeCol.String != "" {
+			if purposeCol.Valid && purposeCol.String != "" && d.purpose == "" {
 				d.purpose = purposeCol.String
 			}
-			if purposeNoteCol.Valid && purposeNoteCol.String != "" {
+			if purposeNoteCol.Valid && purposeNoteCol.String != "" && d.purposeNote == "" {
 				d.purposeNote = purposeNoteCol.String
 			}
 			// Prefer the session's owning agent name (e.g. "helpdesk_orchestrator")
 			// over the sub-agent being delegated to. This makes orchestrator-mediated
 			// journeys show the orchestrator as the top-level agent.
 			if sessionAgent.Valid && sessionAgent.String != "" {
-				d.agent = sessionAgent.String
-			} else if agent.Valid && agent.String != "" {
-				d.agent = agent.String
+				d.agent = sessionAgent.String // session_agent is always authoritative
+			} else if agent.Valid && agent.String != "" && d.agent == "" {
+				d.agent = agent.String // only fall back when no prior agent is known
 			}
 			if d.category == "" && decisionCategory.Valid && decisionCategory.String != "" {
 				d.category = decisionCategory.String

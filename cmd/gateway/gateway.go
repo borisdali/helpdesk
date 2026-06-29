@@ -1529,7 +1529,15 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	// Skipped for direct tool calls (toolName != "") — those are already audited
 	// structurally. Skipped when auditURL is not configured.
 	if toolName == "" && g.auditURL != "" {
-		actionClass := audit.ClassifyDelegation(agentName, prompt)
+		// Classify only the first line of the prompt. Multi-paragraph playbook
+		// prompts include remediation guidance (e.g. "drop_replication_slot") as
+		// instructional context, not as actions the agent is asked to perform;
+		// full-prompt classification produces false-positive destructive hits.
+		classifyTarget := prompt
+		if idx := strings.IndexByte(prompt, '\n'); idx > 0 {
+			classifyTarget = prompt[:idx]
+		}
+		actionClass := audit.ClassifyDelegation(agentName, classifyTarget)
 		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName)
 		// When approval_mode=manual the agent is expected to propose destructive
 		// actions in text without executing them — no tool call will appear in the
