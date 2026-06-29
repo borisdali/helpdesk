@@ -1,6 +1,6 @@
 # aiHelpDesk Vault as a Learning Signal
 
-The most common question after deploying an AI SRE is: **does it make things any better?**
+The most common question after deploying an AI SRE system is this: **does it make things any better?**
 
 A resolution rate tells you whether the system is working. It does not tell you whether it is improving. 
 

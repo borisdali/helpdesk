@@ -324,8 +324,9 @@ func TestTriggerPlaybook_BridgesTraceID(t *testing.T) {
 	if _, err := r.triggerPlaybook(ctx, "pbs_test", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
-	if gotTraceID != "trace-rem-bridge" {
-		t.Errorf("X-Trace-ID = %q, want trace-rem-bridge", gotTraceID)
+	// triggerPlaybook appends -remed so the gateway run lands under the remediation trace.
+	if gotTraceID != "trace-rem-bridge-remed" {
+		t.Errorf("X-Trace-ID = %q, want trace-rem-bridge-remed", gotTraceID)
 	}
 }
 
