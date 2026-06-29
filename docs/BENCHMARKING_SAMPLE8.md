@@ -5,7 +5,7 @@ The sample commands presented below augment the following two blog posts:
 - **[The LLM Is the Dumbest Part of Your AI Operations Platform](https://medium.com/google-cloud/the-llm-is-the-dumbest-part-of-your-ai-operations-platform-1ac95039cacd)**
   Why model-neutrality isn’t a nice-to-have. It’s the only architecture that survives a production contract. We’ve been saying this for a while now: models are quickly becoming a (disposable) commodity. Here’s how:
 
-- **[AI Fixed Your Database. Here Are the Receipts](...)**
+- **[AI Fixed Your Database. Here Are the Receipts](https://medium.com/@borisdali/ai-fixed-your-database-here-are-the-receipts-543b145b135e)**
   The black box is now a ledger. Don't settle for anything less than an Informed Consent and 100% auditable track record of all the AI decisions that led to a problem diagnosis and remediation
 
 

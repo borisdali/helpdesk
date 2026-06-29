@@ -74,6 +74,10 @@ type PlaybookRunStats struct {
 	RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
 	RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
 	RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
+
+	// Efficiency metrics — populated by joining playbook_run_steps and completed_at.
+	AvgStepCount    float64 `json:"avg_step_count,omitempty"`    // mean steps per run; 0 when no step data
+	AvgRecoverySecs float64 `json:"avg_recovery_secs,omitempty"` // mean wall-clock seconds for completed runs
 }
 
 // PlaybookVersionStats summarises run history broken down by playbook version.
@@ -265,6 +269,7 @@ func (s *PlaybookRunStore) Stats(ctx context.Context, seriesID string) (*Playboo
 			st.LastRunAt = lastRunAt.String
 		}
 	}
+	_ = s.augmentEfficiencyStats(ctx, map[string]*PlaybookRunStats{seriesID: st})
 	return st, nil
 }
 
@@ -317,7 +322,11 @@ func (s *PlaybookRunStore) StatsBatch(ctx context.Context, seriesIDs []string) (
 		}
 		result[st.SeriesID] = &st
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = s.augmentEfficiencyStats(ctx, result)
+	return result, nil
 }
 
 // GetByRunID returns a single PlaybookRun by its run_id.
@@ -483,6 +492,84 @@ func formatNullableTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// augmentEfficiencyStats fills AvgStepCount and AvgRecoverySecs on a map of stats
+// by running a single row-scan query across all the given series IDs.
+// Errors are silently ignored — callers get zero values rather than a partial failure.
+func (s *PlaybookRunStore) augmentEfficiencyStats(ctx context.Context, stats map[string]*PlaybookRunStats) error {
+	if len(stats) == 0 {
+		return nil
+	}
+	seriesIDs := make([]string, 0, len(stats))
+	for id := range stats {
+		seriesIDs = append(seriesIDs, id)
+	}
+	placeholders := strings.Repeat("?,", len(seriesIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(seriesIDs))
+	for i, id := range seriesIDs {
+		args[i] = id
+	}
+
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, fmt.Sprintf(`
+		SELECT r.series_id, r.started_at, r.completed_at, COALESCE(sc.cnt, 0) AS step_count
+		FROM playbook_runs r
+		LEFT JOIN (
+		    SELECT run_id, COUNT(*) AS cnt FROM playbook_run_steps GROUP BY run_id
+		) sc ON sc.run_id = r.run_id
+		WHERE r.series_id IN (%s)
+	`, placeholders)), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type accum struct {
+		stepSum         float64
+		totalRuns       int
+		recoverySumSecs float64
+		recoveryCount   int
+	}
+	acc := make(map[string]*accum, len(stats))
+
+	for rows.Next() {
+		var seriesID, startedStr, completedStr string
+		var stepCount int
+		if err := rows.Scan(&seriesID, &startedStr, &completedStr, &stepCount); err != nil {
+			return err
+		}
+		a := acc[seriesID]
+		if a == nil {
+			a = &accum{}
+			acc[seriesID] = a
+		}
+		a.totalRuns++
+		a.stepSum += float64(stepCount)
+		if startedStr != "" && completedStr != "" {
+			started := parseFlexTime(startedStr)
+			completed := parseFlexTime(completedStr)
+			if !started.IsZero() && !completed.IsZero() && completed.After(started) {
+				a.recoverySumSecs += completed.Sub(started).Seconds()
+				a.recoveryCount++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for id, st := range stats {
+		a := acc[id]
+		if a == nil || a.totalRuns == 0 {
+			continue
+		}
+		st.AvgStepCount = a.stepSum / float64(a.totalRuns)
+		if a.recoveryCount > 0 {
+			st.AvgRecoverySecs = a.recoverySumSecs / float64(a.recoveryCount)
+		}
+	}
+	return nil
 }
 
 // StatsByVersion returns per-version run stats for a playbook series, ordered by version.

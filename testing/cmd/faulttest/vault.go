@@ -206,6 +206,10 @@ type playbookGatewayInfo struct {
 	remediationAtGateCorrect       int
 	remediationPostIncidentCount   int
 	remediationPostIncidentCorrect int
+
+	// Efficiency metrics.
+	avgStepCount    float64
+	avgRecoverySecs float64
 }
 
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
@@ -262,6 +266,8 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 				RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
 				RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
 				RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
+				AvgStepCount                  float64 `json:"avg_step_count"`
+				AvgRecoverySecs               float64 `json:"avg_recovery_secs"`
 			} `json:"stats"`
 		} `json:"playbooks"`
 	}
@@ -290,6 +296,8 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 		info.remediationAtGateCorrect = s.RemediationAtGateCorrect
 		info.remediationPostIncidentCount = s.RemediationPostIncidentCount
 		info.remediationPostIncidentCorrect = s.RemediationPostIncidentCorrect
+		info.avgStepCount = s.AvgStepCount
+		info.avgRecoverySecs = s.AvgRecoverySecs
 	}
 	return info
 }
@@ -577,8 +585,15 @@ func vaultList(args []string) {
 					if feedbackCount > 0 {
 						accuracyStr = fmt.Sprintf("%.0f%% accurate", accuracyRate*100)
 					}
-					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s  last: %s%s",
-						info.totalRuns, info.resolutionRate*100, accuracyStr, lastDate, sourceTag)
+					effStr := ""
+					if info.avgStepCount > 0 {
+						effStr = fmt.Sprintf("  %.1f steps", info.avgStepCount)
+					}
+					if info.avgRecoverySecs > 0 {
+						effStr += fmt.Sprintf("  %s recovery", formatDuration(info.avgRecoverySecs))
+					}
+					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s%s  last: %s%s",
+						info.totalRuns, info.resolutionRate*100, accuracyStr, effStr, lastDate, sourceTag)
 				}
 			}
 		}
