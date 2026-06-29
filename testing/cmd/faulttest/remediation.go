@@ -902,12 +902,20 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 			v := true
 			fmt.Print("    Remediation approach notes (optional): ")
 			remNotes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes), "")
+			notes := strings.TrimSpace(remNotes)
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, notes, "")
+			if remRunID != "" {
+				r.postFeedback(ctx, remRunID, "remediation", "post_incident", &v, notes, "")
+			}
 		case "n", "no":
 			v := false
 			fmt.Print("    Notes on remediation approach (optional): ")
-			notes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes), "")
+			notesInput, _ := reader.ReadString('\n')
+			notes := strings.TrimSpace(notesInput)
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, notes, "")
+			if remRunID != "" {
+				r.postFeedback(ctx, remRunID, "remediation", "post_incident", &v, notes, "")
+			}
 		}
 	}
 }

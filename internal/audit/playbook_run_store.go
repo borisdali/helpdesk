@@ -97,6 +97,10 @@ type PlaybookVersionStats struct {
 	DiagEvalCount       int     `json:"diag_eval_count"`       // number of runs with diagnosis scores
 	AvgRemediationScore float64 `json:"avg_remediation_score"` // average remediation_score; 0 when no remediation data
 	RemedEvalCount      int     `json:"remed_eval_count"`      // number of runs with non-zero remediation scores
+
+	// Human remediation feedback — approach appropriateness verdict from operators.
+	RemFeedbackCount int     `json:"rem_feedback_count"` // runs with remediation feedback
+	RemFeedbackRate  float64 `json:"rem_feedback_rate"`  // fraction rated appropriate; 0 when no feedback
 }
 
 // PlaybookRunStore persists playbook execution records.
@@ -666,6 +670,7 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	}
 
 	out := make([]*PlaybookVersionStats, 0, len(orderedVersions))
+	versionIndex := map[string]int{} // version → index in out
 	for _, v := range orderedVersions {
 		a := acc[v]
 		st := &PlaybookVersionStats{
@@ -692,7 +697,46 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		if a.remedEvalCount > 0 {
 			st.AvgRemediationScore = a.remedScoreSum / float64(a.remedEvalCount)
 		}
+		versionIndex[v] = len(out)
 		out = append(out, st)
 	}
+
+	// Secondary pass: per-version human remediation feedback (stored against the
+	// remediation run directly when the operator submitted post-incident feedback).
+	fbRows, fbErr := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+		SELECT p.version, f.verdict_correct
+		FROM run_feedback f
+		JOIN playbook_runs r ON r.run_id = f.run_id
+		JOIN playbooks p ON r.playbook_id = p.playbook_id
+		WHERE r.series_id = ? AND f.feedback_type = 'remediation'
+	`), seriesID)
+	if fbErr == nil {
+		defer fbRows.Close()
+		type fbAccum struct{ count, correct int }
+		fbAcc := map[string]*fbAccum{}
+		for fbRows.Next() {
+			var version string
+			var verdictNull sql.NullBool
+			if scanErr := fbRows.Scan(&version, &verdictNull); scanErr != nil {
+				break
+			}
+			a, ok := fbAcc[version]
+			if !ok {
+				a = &fbAccum{}
+				fbAcc[version] = a
+			}
+			a.count++
+			if verdictNull.Valid && verdictNull.Bool {
+				a.correct++
+			}
+		}
+		for ver, a := range fbAcc {
+			if idx, ok := versionIndex[ver]; ok && a.count > 0 {
+				out[idx].RemFeedbackCount = a.count
+				out[idx].RemFeedbackRate = float64(a.correct) / float64(a.count)
+			}
+		}
+	}
+
 	return out, nil
 }

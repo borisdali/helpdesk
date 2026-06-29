@@ -1,6 +1,6 @@
 # aiHelpDesk Sample#8 (on a K8s): Triage Consistency Certification badge + AI Ledger
 
-The sample commands presented below augment the following two blog posts:
+The sample commands presented below complement the following two blog posts:
 
 - **[The LLM Is the Dumbest Part of Your AI Operations Platform](https://medium.com/google-cloud/the-llm-is-the-dumbest-part-of-your-ai-operations-platform-1ac95039cacd)**
   Why model-neutrality isn’t a nice-to-have. It’s the only architecture that survives a production contract. We’ve been saying this for a while now: models are quickly becoming a (disposable) commodity. Here’s how:
@@ -42,7 +42,7 @@ aiHelpDesk Fault Injection Testing is [well documented](FAULTTEST.md), with mult
          --api-key $HELPDESK_CLIENT_API_KEY
 pod/faulttest-demo created
 
-[boris@cassiopeia ~]$ kubectl logs -f -n helpdesk-system faulttest-demo
+[boris@ ~]$ kubectl logs -f -n helpdesk-system faulttest-demo
 time=2026-06-26T00:20:07.646Z level=INFO msg=--conn host=pg-cluster-minkube-rw.db.svc.cluster.local
 
 --- Testing: Max connections exhausted (db-max-connections) ---
@@ -315,7 +315,7 @@ The command to run the consistency cert testing is almost identical to the norma
 pod/faulttest-demo created
 
 
-[boris@cassiopeia ~]$ kubectl logs -f -n helpdesk-system faulttest-demo
+[boris@ ~]$ kubectl logs -f -n helpdesk-system faulttest-demo
 time=2026-06-26T02:00:47.805Z level=INFO msg=--conn host=pg-cluster-minkube-rw.db.svc.cluster.local
 time=2026-06-26T02:00:47.806Z level=INFO msg="using model" vendor=anthropic model=claude-haiku-4-5-20251001
 time=2026-06-26T02:00:47.806Z level=INFO msg="LLM diagnosis judge enabled" vendor=anthropic model=claude-haiku-4-5-20251001

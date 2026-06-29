@@ -616,6 +616,44 @@ func vaultList(args []string) {
 		}
 
 		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, colStable, stableCol, incidentCol)
+
+		// Per-version learning signal: show last 2 versions when multiple exist.
+		if playbookID != "" && cfg.GatewayURL != "" {
+			if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID); err == nil && len(versions) >= 2 {
+				// API returns oldest-first; reverse so active (newest) is first.
+				for i, j := 0, len(versions)-1; i < j; i, j = i+1, j-1 {
+					versions[i], versions[j] = versions[j], versions[i]
+				}
+				// Show at most 2 (newest pair — the comparison that matters).
+				show := versions
+				if len(show) > 2 {
+					show = show[:2]
+				}
+				for _, vs := range show {
+					active := "  "
+					if vs.IsActive {
+						active = " *"
+					}
+					stepsStr := ""
+					if vs.AvgStepCount > 0 {
+						stepsStr = fmt.Sprintf("  %.1f steps", vs.AvgStepCount)
+					}
+					recovStr := ""
+					if vs.AvgRecoverySecs > 0 {
+						recovStr = fmt.Sprintf("  %s recovery", formatDuration(vs.AvgRecoverySecs))
+					}
+					fbStr := ""
+					if vs.RemFeedbackCount > 0 {
+						fbStr = fmt.Sprintf("  %.0f%% approach OK", vs.RemFeedbackRate*100)
+					}
+					fmt.Printf("    %-5s%s  %dr  %.0f%%%s%s%s\n",
+						vs.Version, active, vs.TotalRuns, vs.ResolutionRate*100, stepsStr, recovStr, fbStr)
+				}
+				if len(versions) > 2 {
+					fmt.Printf("    → vault versions %s\n", playbookID)
+				}
+			}
+		}
 	}
 }
 
@@ -2436,6 +2474,8 @@ type versionStats struct {
 	DiagEvalCount       int     `json:"diag_eval_count"`
 	AvgRemediationScore float64 `json:"avg_remediation_score"`
 	RemedEvalCount      int     `json:"remed_eval_count"`
+	RemFeedbackCount    int     `json:"rem_feedback_count"`
+	RemFeedbackRate     float64 `json:"rem_feedback_rate"`
 }
 
 // fetchVersionStats calls GET /api/v1/fleet/series/{seriesID}/version-stats.
@@ -2540,18 +2580,20 @@ func vaultVersions(args []string) {
 	fmt.Printf("Version stats for %s — %d version(s)\n\n", seriesID, len(versions))
 
 	const (
-		colVer   = 10
-		colRuns  = 6
-		colRes   = 10
-		colSteps = 10
-		colTime  = 10
-		colDiag  = 9
-		colRemed = 9
+		colVer      = 10
+		colRuns     = 6
+		colRes      = 12
+		colSteps    = 10
+		colTime     = 10
+		colDiag     = 9
+		colRemed    = 9
+		colApproach = 9
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colVer, "VERSION", colRuns, "RUNS", colRes, "TRANSITIONED",
-		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG", "AVG REMED")
-	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+colDiag+2+colRemed))
+		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG",
+		colRemed, "AVG REMED", "APPROACH OK")
+	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+colDiag+2+colRemed+2+colApproach))
 
 	for _, v := range versions {
 		ver := v.Version
@@ -2581,14 +2623,20 @@ func vaultVersions(args []string) {
 			remedStr = fmt.Sprintf("%d%%", int(v.AvgRemediationScore*100))
 		}
 
-		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %s\n",
+		approachStr := "–"
+		if v.RemFeedbackCount > 0 {
+			approachStr = fmt.Sprintf("%d%%", int(v.RemFeedbackRate*100))
+		}
+
+		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colVer, ver,
 			colRuns, v.TotalRuns,
 			colRes, resolvedStr,
 			colSteps, stepsStr,
 			colTime, timeStr,
 			colDiag, diagStr,
-			remedStr,
+			colRemed, remedStr,
+			approachStr,
 		)
 	}
 	fmt.Println()
