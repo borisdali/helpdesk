@@ -150,6 +150,13 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
 	}
+	// Print gateway identity banner before any subcommand output so operators
+	// always know which instance they're talking to (two stacks on the same
+	// port look identical without this).
+	gwURL := scanFlag(args[1:], "gateway", os.Getenv("FAULTTEST_GATEWAY_URL"))
+	gwKey := scanFlag(args[1:], "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"))
+	printGatewayBanner(gwURL, gwKey)
+
 	switch args[0] {
 	case "list":
 		vaultList(args[1:])
@@ -362,6 +369,72 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	return &cert
 }
 
+// scanFlag returns the value of --flag=val or --flag val from a []string,
+// falling back to defaultVal when not found. Used for quick pre-parse before
+// full flag.FlagSet parsing so cmdVault can print the gateway banner before
+// dispatching to a subcommand.
+func scanFlag(args []string, name, defaultVal string) string {
+	prefix := "--" + name + "="
+	for i, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return strings.TrimPrefix(a, prefix)
+		}
+		if (a == "--"+name || a == "-"+name) && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return defaultVal
+}
+
+// fetchGatewayIdentity calls /health and returns (version, hostname).
+// Returns empty strings on any error so callers can degrade gracefully.
+func fetchGatewayIdentity(gatewayURL, apiKey string) (version, hostname string) {
+	if gatewayURL == "" {
+		return "", ""
+	}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimSuffix(gatewayURL, "/")+"/health", nil)
+	if err != nil {
+		return "", ""
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Version  string `json:"version"`
+		Hostname string `json:"hostname"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", ""
+	}
+	return body.Version, body.Hostname
+}
+
+// printGatewayBanner prints a one-line "Connected to:" header to stdout so
+// operators always know which gateway instance their vault command is reading.
+func printGatewayBanner(gatewayURL, apiKey string) {
+	if gatewayURL == "" {
+		return
+	}
+	version, hostname := fetchGatewayIdentity(gatewayURL, apiKey)
+	if version == "" && hostname == "" {
+		fmt.Printf("Gateway: %s\n\n", gatewayURL)
+		return
+	}
+	parts := []string{gatewayURL}
+	if version != "" {
+		parts = append(parts, "version: "+version)
+	}
+	if hostname != "" {
+		parts = append(parts, "host: "+hostname)
+	}
+	fmt.Printf("Gateway: %s\n\n", strings.Join(parts, "  ·  "))
+}
+
 // probeGateway does a lightweight health-check against the gateway and returns
 // a non-nil error when the gateway is unreachable or returns an unexpected status.
 // Used by vault subcommands to emit an early warning rather than silently rendering
@@ -489,8 +562,8 @@ func vaultList(args []string) {
 	const (
 		colFault     = 32
 		colPlatform  = 10
-		colDiag      = 26
-		colRemed     = 26
+		colDiag      = 31 // pbs_checkpoint_bgwriter_triage = 30 chars
+		colRemed     = 32 // pbs_k8s_scale_to_zero_remediate = 31 chars
 		colFaultTest = 22 // "2026-04-18  PASS" or "(never)" or "READY"
 		colStable    = 14 // "STABLE(5)" or "UNSTABLE(3)" or "—"
 		// incidents column is the remainder
@@ -587,10 +660,10 @@ func vaultList(args []string) {
 					}
 					effStr := ""
 					if info.avgStepCount > 0 {
-						effStr = fmt.Sprintf("  %.1f steps", info.avgStepCount)
+						effStr = fmt.Sprintf("  avg %.1f steps", info.avgStepCount)
 					}
 					if info.avgRecoverySecs > 0 {
-						effStr += fmt.Sprintf("  %s recovery", formatDuration(info.avgRecoverySecs))
+						effStr += fmt.Sprintf("  avg %s recovery", formatDuration(info.avgRecoverySecs))
 					}
 					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s%s  last: %s%s",
 						info.totalRuns, info.resolutionRate*100, accuracyStr, effStr, lastDate, sourceTag)
@@ -636,11 +709,11 @@ func vaultList(args []string) {
 					}
 					stepsStr := ""
 					if vs.AvgStepCount > 0 {
-						stepsStr = fmt.Sprintf("  %.1f steps", vs.AvgStepCount)
+						stepsStr = fmt.Sprintf("  avg %.1f steps", vs.AvgStepCount)
 					}
 					recovStr := ""
 					if vs.AvgRecoverySecs > 0 {
-						recovStr = fmt.Sprintf("  %s recovery", formatDuration(vs.AvgRecoverySecs))
+						recovStr = fmt.Sprintf("  avg %s recovery", formatDuration(vs.AvgRecoverySecs))
 					}
 					fbStr := ""
 					if vs.RemFeedbackCount > 0 {

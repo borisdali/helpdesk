@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -311,7 +312,8 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /health", auth("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q}\n", buildinfo.Version) //nolint:errcheck
+		hostname, _ := os.Hostname()
+		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q,\"hostname\":%q}\n", buildinfo.Version, hostname) //nolint:errcheck
 	}))
 	// /metrics is unauthenticated (Prometheus scrapes do not carry auth tokens by default).
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
