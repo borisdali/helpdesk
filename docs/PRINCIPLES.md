@@ -7,8 +7,8 @@ When a feature or a proposed change conflicts with one of these, the principle w
 
 ## 0. Quality beats Velocity
 
-This is our Principle#0 - we move fast, but when we can't confidently quailfy a release
-we stop and don't ship until we do.
+This is our Principle#0: we move fast, but when we can't confidently quailfy a release
+we stop and don't ship until we do. 
 
 ## 1. aiHelpDesk is OSS
 
@@ -63,13 +63,16 @@ differently at every layer:
   explicitly marked as not yet production-ready. We will not relax that
   designation until we are satisfied with the Governance module that wraps them.
 
+Any changes that aiHelpDesk may attempt on your databases to fix a problem
+follow this principle and abide by the rules of [aiHelpDesk mutations](ARCHITECTURE.md#0-mutations).
+
 ## 4. Audit is non-negotiable
 
 Every action — read or write, successful or failed, approved or denied — is
 recorded in a tamper-proof, hash-chained audit log. The hash chain means
 that any deletion or modification of a past record is detectable.
 
-The audit trail is the foundation of everything else: policy enforcement,
+The [audit trail](AUDIT.md) at aiHelpDesk is the foundation of everything else: policy enforcement,
 compliance reports, approval workflows, journey reconstruction, and human
 oversight. An AI system that cannot account for its own actions cannot be
 trusted. aiHelpDesk starts from the assumption that the audit log must exist
@@ -177,4 +180,22 @@ The probabilism in the reasoning layer is not left unchecked:
 When exact step-by-step repeatability is non-negotiable, the fleet runner's explicit job definition format is available: exact tool, exact arguments, exact rollback steps — specified by a human and executed verbatim. The LLM selects *which* Playbook fits; the Playbook constrains what the planner may generate; the policy layer enforces hard limits. How much latitude the planner has is tunable, down to zero.
 
 This principle is the answer to "AI systems are probabilistic — can you trust this in production?" Traditional operations are already probabilistic; the difference is that aiHelpDesk's probabilism is visible, bounded, measured, and continuously improved.
+
+## 11. Model-neutral by design
+
+aiHelpDesk is explicitly designed to be agnostic to two things:
+- LLM model used by the agents and/or by [LLM-as-Judge](LLM_AS_JUDGE.md) 
+- Model's behavior across runs
+
+This is achievable because institutional knowledge lives in versioned, human-readable Playbooks, not in model weights, fine-tuned checkpoints or prompt preambles. The model's job is to follow structured instructions. Models are not expected to stay still. A vendor ships a new model version, model pricing shifts, a better option emerges, etc. aiHelpDesk is designed to rise above all of these changes. Playbooks, governance, the audit trail and tool implementations are unaffected.
+
+This addresses a failure mode called *model swings*: the same model, the same fault, different confidence scores across runs. A model that diagnoses a WAL stale slot with 97% confidence on one run and 62% on another is operationally unreliable even if its average accuracy is high. The system tolerates that variance not by eliminating it (impossible) but by measuring it and gating on it.
+
+The mechanism is [*Triage Consistency Certification*](CONSISTENCY.md): inject a known fault repeatedly, measure accuracy and confidence spread, and require both to meet a threshold before a model is promoted. Replacing a model version becomes a measured afternoon command, not weeks of shadow-running and debate.
+
+*"The knowledge is yours, not the model's."*
+
+*"The LLM is just infrastructure. Commodity infrastructure that you evaluate, certify and replace on your schedule."*
+
+→ [The LLM is the Dumbest Part of Your AI Operations Platform](https://medium.com/google-cloud/the-llm-is-the-dumbest-part-of-your-ai-operations-platform-1ac95039cacd)
 
