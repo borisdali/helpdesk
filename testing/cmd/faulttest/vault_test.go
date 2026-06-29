@@ -619,11 +619,13 @@ func TestFetchVersionStats_Found(t *testing.T) {
 				{"version": "1.0", "is_active": false, "total_runs": 3, "resolved": 2,
 					"resolution_rate": 0.67, "avg_step_count": 4.0, "avg_recovery_secs": 42.0,
 					"avg_diagnosis_score": 0.72, "diag_eval_count": 2,
-					"avg_remediation_score": 0.0, "remed_eval_count": 0},
+					"avg_remediation_score": 0.0, "remed_eval_count": 0,
+					"rem_feedback_count": 2, "rem_feedback_rate": 0.5},
 				{"version": "1.1", "is_active": true, "total_runs": 2, "resolved": 2,
 					"resolution_rate": 1.0, "avg_step_count": 3.0, "avg_recovery_secs": 8.0,
 					"avg_diagnosis_score": 0.91, "diag_eval_count": 2,
-					"avg_remediation_score": 0.85, "remed_eval_count": 1},
+					"avg_remediation_score": 0.85, "remed_eval_count": 1,
+					"rem_feedback_count": 2, "rem_feedback_rate": 1.0},
 			},
 		})
 	}))
@@ -651,6 +653,14 @@ func TestFetchVersionStats_Found(t *testing.T) {
 	}
 	if versions[0].RemedEvalCount != 0 {
 		t.Errorf("v1.0 RemedEvalCount = %d, want 0", versions[0].RemedEvalCount)
+	}
+	if versions[0].RemFeedbackCount != 2 || versions[0].RemFeedbackRate != 0.5 {
+		t.Errorf("v1.0 rem feedback: count=%d rate=%v, want count=2 rate=0.5",
+			versions[0].RemFeedbackCount, versions[0].RemFeedbackRate)
+	}
+	if versions[1].RemFeedbackCount != 2 || versions[1].RemFeedbackRate != 1.0 {
+		t.Errorf("v1.1 rem feedback: count=%d rate=%v, want count=2 rate=1.0",
+			versions[1].RemFeedbackCount, versions[1].RemFeedbackRate)
 	}
 }
 

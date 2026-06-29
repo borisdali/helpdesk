@@ -885,12 +885,16 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPlaybookStore: %v", err)
 	}
-	// StatsByVersion JOINs playbook_run_steps and run_evaluation — create both tables.
+	// StatsByVersion JOINs playbook_run_steps, run_evaluation, and run_feedback.
 	if _, err := audit.NewPlaybookRunStepStore(store.DB(), false); err != nil {
 		t.Fatalf("NewPlaybookRunStepStore: %v", err)
 	}
 	if _, err := audit.NewRunEvaluationStore(store.DB(), false); err != nil {
 		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+	fbStore, err := audit.NewRunFeedbackStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
 	}
 	srv := &playbookRunServer{store: prs, playbookStore: pbs}
 
@@ -937,6 +941,16 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 		t.Fatalf("Record v1.1 run: %v", err)
 	}
 
+	// Add remediation feedback against the v1.1 run — verifies the secondary
+	// query in StatsByVersion is exercised through the HTTP handler.
+	tr := true
+	if err := fbStore.Submit(ctx, &audit.RunFeedback{
+		RunID: "plr_vh11", FeedbackType: "remediation", FeedbackTime: "post_incident",
+		VerdictCorrect: &tr,
+	}); err != nil {
+		t.Fatalf("Submit feedback: %v", err)
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/series/"+seriesID+"/version-stats", nil)
 	req.SetPathValue("seriesID", seriesID)
 	rec := httptest.NewRecorder()
@@ -949,10 +963,12 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 	var resp struct {
 		SeriesID string `json:"series_id"`
 		Versions []struct {
-			Version    string  `json:"version"`
-			IsActive   bool    `json:"is_active"`
-			TotalRuns  int     `json:"total_runs"`
-			Resolved   int     `json:"resolved"`
+			Version          string  `json:"version"`
+			IsActive         bool    `json:"is_active"`
+			TotalRuns        int     `json:"total_runs"`
+			Resolved         int     `json:"resolved"`
+			RemFeedbackCount int     `json:"rem_feedback_count"`
+			RemFeedbackRate  float64 `json:"rem_feedback_rate"`
 		} `json:"versions"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
@@ -979,6 +995,16 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 	if resp.Versions[1].TotalRuns != 1 || resp.Versions[1].Resolved != 1 {
 		t.Errorf("v1.1: TotalRuns=%d Resolved=%d, want 1/1",
 			resp.Versions[1].TotalRuns, resp.Versions[1].Resolved)
+	}
+	// Remediation feedback path: v1.1 should have 1 feedback record, 100% rate.
+	if resp.Versions[1].RemFeedbackCount != 1 {
+		t.Errorf("v1.1 RemFeedbackCount = %d, want 1", resp.Versions[1].RemFeedbackCount)
+	}
+	if resp.Versions[1].RemFeedbackRate < 0.99 {
+		t.Errorf("v1.1 RemFeedbackRate = %v, want 1.0", resp.Versions[1].RemFeedbackRate)
+	}
+	if resp.Versions[0].RemFeedbackCount != 0 {
+		t.Errorf("v1.0 RemFeedbackCount = %d, want 0", resp.Versions[0].RemFeedbackCount)
 	}
 
 	// Empty series → 200 with empty versions array.

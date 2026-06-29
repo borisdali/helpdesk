@@ -35,6 +35,8 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
    - [3. Regression monitoring — catching drift before it becomes an incident](#3-regression-monitoring--catching-drift-before-it-becomes-an-incident)
 8. [Connection to Other Docs](#connection-to-other-docs)
 
+> **The vault as a learning signal** — how per-version metrics (step count, recovery time, approach appropriateness) prove that the system is improving, not just working: [VAULT_METRICS.md](VAULT_METRICS.md)
+
 ---
 
 ## The Operational SRE/DBA Flywheel
@@ -204,16 +206,21 @@ faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
 Shows the full fault catalog alongside the linked Playbook, date of last test run, pass/fail status, consistency certification verdict, and diagnosis accuracy. When `--gateway` is provided, also verifies that referenced Playbook series IDs exist on the Gateway and fetches live stability certs and accuracy data.
 
 ```
-FAULT                          PLAYBOOK                   LAST TEST    STATUS  SCORE  STABLE       ACCURACY
------------------------------------------------------------------------------------------------------------------
-db-max-connections             pbs_db_conn_pooling        2026-06-20   PASS    95%    STABLE(5)    100% (4/4)
-db-lock-contention             pbs_lock_chain_triage      2026-06-20   PASS    91%    STABLE(5)    –
-db-idle-in-transaction         pbs_db_idle_txn            2026-06-15   PASS    88%    UNSTABLE(5)  –
-db-high-cache-miss             pbs_cache_miss_triage      (never)      -       –      —            –
-db-table-bloat                 pbs_vacuum_triage          2026-06-01   PASS    90%    STABLE(5) 21d –
-db-connection-refused          pbs_db_restart_triage      2026-04-15   PASS    82%    —            –
-db-pg-hba-corrupt              pbs_db_config_recovery     (never)      -       –      —            –
+FAULT                            PLATFORM   DIAG PLAYBOOK              REMED PLAYBOOK             LAST TEST              STABLE         INCIDENTS
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+db-high-cache-miss               any        pbs_cache_miss_triage      pbs_cache_miss_remediate   2026-06-28  PASS       STABLE(5)      3 runs  100% resolved  4.0 steps  8s recovery  last: 2026-06-28
+    v1.1 *  3r  100%  4.0 steps  8s recovery  100% approach OK
+    v1.0    5r   60%  6.2 steps  42s recovery   60% approach OK
+db-lock-contention               any        pbs_lock_chain_triage      pbs_lock_remediate         2026-06-20  PASS       STABLE(5)      5 runs  80% resolved  –  last: 2026-06-20
+db-max-connections               any        pbs_max_conn_triage        pbs_max_conn_remediate     2026-06-20  PASS       STABLE(5)      4 runs  100% resolved  100% accurate  last: 2026-06-20
+db-idle-in-transaction           any        pbs_db_idle_txn            (none)                     2026-06-15  PASS       UNSTABLE(5)    -
+db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_remediate   2026-04-15  PASS       —              2 runs  50% resolved  last: 2026-04-15
+db-pg-hba-corrupt                any        pbs_db_config_recovery     pbs_db_config_remediate    (never)     -          —              MISSING
 ```
+
+When a remediation playbook has two or more versions with run data, the per-version trend appears as indented rows below the fault. The `*` marks the currently active version. When more than two versions exist, a `→ vault versions <series>` pointer appears for the full history.
+
+The per-version breakdown is the primary learning signal: it shows whether step count and recovery time are improving across playbook versions, and whether operators are rating the approach as appropriate. See [VAULT_METRICS.md](VAULT_METRICS.md) for a full explanation of these metrics and how to read the trend.
 
 **STATUS column:**
 
@@ -575,10 +582,10 @@ Shows per-version run stats for a playbook series: resolution rate, average step
 ```
 Version stats for pbs_cache_miss_remediate — 2 version(s)
 
-VERSION     RUNS    RESOLVED    AVG STEPS   AVG TIME    AVG DIAG   AVG REMED
-─────────────────────────────────────────────────────────────────────────────
-1.0          5      60%         6.2         42s         72%        –
-1.1  *       3      100%        4.0         8s          91%        85%
+VERSION     RUNS    TRANSITIONED  AVG STEPS   AVG TIME    AVG DIAG   AVG REMED  APPROACH OK
+─────────────────────────────────────────────────────────────────────────────────────────────
+1.0          5      60%           6.2         42s         72%        –          60%
+1.1  *       3      100%          4.0         8s          91%        85%        100%
 
 * = currently active version
 ```
@@ -587,13 +594,16 @@ Data sources:
 
 | Column | Source |
 |--------|--------|
-| `RUNS` / `RESOLVED` | `playbook_runs` table in auditd, grouped by `playbook_id` |
+| `RUNS` / `TRANSITIONED` | `playbook_runs` table in auditd, grouped by `playbook_id`; transition = successful handoff to the next phase |
 | `AVG STEPS` | Average number of steps recorded in `playbook_run_steps` per run |
 | `AVG TIME` | Average wall-clock time between `started_at` and `completed_at` for completed runs |
 | `AVG DIAG` | Average `diagnosis_score` from `run_evaluation`; `–` when no runs have eval data |
 | `AVG REMED` | Average `remediation_score` for runs where remediation was executed (score > 0); `–` when no remediation runs |
+| `APPROACH OK` | Fraction of runs where operators rated the remediation approach as appropriate; collected via post-incident feedback prompt; `–` when no feedback submitted |
 
 The gateway endpoint backing this command: `GET /api/v1/fleet/series/{seriesID}/version-stats`.
+
+For the full explanation of what these metrics mean and how to read the trend across versions, see [VAULT_METRICS.md](VAULT_METRICS.md).
 
 ### vault calibration
 

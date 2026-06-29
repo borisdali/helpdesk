@@ -626,4 +626,138 @@ func TestPlaybookRunStore_StatsByVersion(t *testing.T) {
 	if len(empty) != 0 {
 		t.Errorf("want 0 versions for unknown series, got %d", len(empty))
 	}
+
+	// Remediation feedback per version — dual-posted against the remediation run ID.
+	fbStore, err := NewRunFeedbackStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewRunFeedbackStore: %v", err)
+	}
+	tr := true
+	// Post one "approach appropriate" verdict against a v1.0 run and two against v1.1 runs.
+	for _, runID := range []string{"plr_v10_a", "plr_v11_a", "plr_v11_b"} {
+		if err := fbStore.Submit(ctx, &RunFeedback{
+			RunID:          runID,
+			FeedbackType:   "remediation",
+			FeedbackTime:   "post_incident",
+			VerdictCorrect: &tr,
+		}); err != nil {
+			t.Fatalf("Submit feedback for %s: %v", runID, err)
+		}
+	}
+	// One "not appropriate" verdict against another v1.0 run.
+	fa := false
+	if err := fbStore.Submit(ctx, &RunFeedback{
+		RunID:          "plr_v10_b",
+		FeedbackType:   "remediation",
+		FeedbackTime:   "post_incident",
+		VerdictCorrect: &fa,
+	}); err != nil {
+		t.Fatalf("Submit feedback: %v", err)
+	}
+
+	versions2, err := runStore.StatsByVersion(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("StatsByVersion (with feedback): %v", err)
+	}
+	if len(versions2) != 2 {
+		t.Fatalf("want 2 versions, got %d", len(versions2))
+	}
+	// v1.0: 2 feedback records (1 correct, 1 not) → 50% approach rate.
+	v10f := versions2[0]
+	if v10f.RemFeedbackCount != 2 {
+		t.Errorf("v1.0 RemFeedbackCount = %d, want 2", v10f.RemFeedbackCount)
+	}
+	if v10f.RemFeedbackRate < 0.49 || v10f.RemFeedbackRate > 0.51 {
+		t.Errorf("v1.0 RemFeedbackRate = %.2f, want 0.50", v10f.RemFeedbackRate)
+	}
+	// v1.1: 2 feedback records, both correct → 100% approach rate.
+	v11f := versions2[1]
+	if v11f.RemFeedbackCount != 2 {
+		t.Errorf("v1.1 RemFeedbackCount = %d, want 2", v11f.RemFeedbackCount)
+	}
+	if v11f.RemFeedbackRate < 0.99 {
+		t.Errorf("v1.1 RemFeedbackRate = %.2f, want 1.0", v11f.RemFeedbackRate)
+	}
+}
+
+// TestPlaybookRunStore_Stats_EfficiencyMetrics verifies that augmentEfficiencyStats
+// populates AvgStepCount and AvgRecoverySecs in Stats() and StatsBatch() when run
+// steps and completed_at timestamps are present.
+func TestPlaybookRunStore_Stats_EfficiencyMetrics(t *testing.T) {
+	ctx := context.Background()
+	raw, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { raw.Close() })
+
+	runStore, err := NewPlaybookRunStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	stepStore, err := NewPlaybookRunStepStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStepStore: %v", err)
+	}
+
+	const seriesID = "pbs_eff_test"
+	now := time.Now().UTC()
+
+	runs := []struct {
+		id          string
+		outcome     string
+		steps       int
+		durationSec int
+	}{
+		{"plr_eff_a", "resolved", 3, 30},
+		{"plr_eff_b", "resolved", 5, 50},
+	}
+	for _, r := range runs {
+		if err := runStore.Record(ctx, &PlaybookRun{
+			RunID:       r.id,
+			PlaybookID:  "pb_eff",
+			SeriesID:    seriesID,
+			Outcome:     r.outcome,
+			StartedAt:   now,
+			CompletedAt: now.Add(time.Duration(r.durationSec) * time.Second),
+		}); err != nil {
+			t.Fatalf("Record %s: %v", r.id, err)
+		}
+		for i := 1; i <= r.steps; i++ {
+			if err := stepStore.CreateStep(ctx, &PlaybookRunStep{
+				RunID: r.id, StepIndex: i, Agent: "db", Tool: "run_query", Status: "succeeded",
+			}); err != nil {
+				t.Fatalf("CreateStep %s/%d: %v", r.id, i, err)
+			}
+		}
+	}
+
+	st, err := runStore.Stats(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	// avg steps: (3+5)/2 = 4.0
+	if st.AvgStepCount < 3.99 || st.AvgStepCount > 4.01 {
+		t.Errorf("AvgStepCount = %.2f, want 4.0", st.AvgStepCount)
+	}
+	// avg recovery: (30+50)/2 = 40s
+	if st.AvgRecoverySecs < 39 || st.AvgRecoverySecs > 41 {
+		t.Errorf("AvgRecoverySecs = %.1f, want 40.0", st.AvgRecoverySecs)
+	}
+
+	// StatsBatch should populate the same fields.
+	batch, err := runStore.StatsBatch(ctx, []string{seriesID})
+	if err != nil {
+		t.Fatalf("StatsBatch: %v", err)
+	}
+	bst, ok := batch[seriesID]
+	if !ok {
+		t.Fatalf("seriesID missing from StatsBatch result")
+	}
+	if bst.AvgStepCount < 3.99 || bst.AvgStepCount > 4.01 {
+		t.Errorf("StatsBatch AvgStepCount = %.2f, want 4.0", bst.AvgStepCount)
+	}
+	if bst.AvgRecoverySecs < 39 || bst.AvgRecoverySecs > 41 {
+		t.Errorf("StatsBatch AvgRecoverySecs = %.1f, want 40.0", bst.AvgRecoverySecs)
+	}
 }
