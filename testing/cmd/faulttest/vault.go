@@ -1839,11 +1839,11 @@ func vaultJourney(args []string) {
 	fmt.Println()
 
 	const (
-		colTrace    = 20
+		colTrace    = 44
 		colDate     = 16
 		colDur      = 7
-		colAgent    = 12
-		colOutcome  = 12
+		colAgent    = 25
+		colOutcome  = 17
 		colIncident = 14
 	)
 	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
@@ -2018,6 +2018,26 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string) {
 		sectionJ("INCIDENT LINK")
 		fmt.Printf("  %-18s %s\n", "Run ID:", j.IncidentRunID)
 		fmt.Printf("\n  → vault incidents %s\n", j.IncidentRunID)
+	}
+
+	// If this is a diagnostic journey (not already a remediation trace), check
+	// whether a companion remediation journey exists under the -remed suffix.
+	if !strings.HasSuffix(j.TraceID, "-remed") {
+		remedTraceID := j.TraceID + "-remed"
+		if rems, err := fetchJourneys(gatewayURL, apiKey, map[string]string{
+			"trace_id": remedTraceID,
+			"limit":    "1",
+		}); err == nil && len(rems) > 0 {
+			sectionJ("REMEDIATION JOURNEY")
+			rem := rems[0]
+			fmt.Printf("  %-18s %s\n", "Trace:", rem.TraceID)
+			fmt.Printf("  %-18s %s\n", "Agent:", rem.Agent)
+			fmt.Printf("  %-18s %s\n", "Outcome:", rem.Outcome)
+			if len(rem.ToolsUsed) > 0 {
+				fmt.Printf("  %-18s %s\n", "Tools:", strings.Join(rem.ToolsUsed, ", "))
+			}
+			fmt.Printf("\n  → vault journeys %s\n", rem.TraceID)
+		}
 	}
 
 	fmt.Println()
