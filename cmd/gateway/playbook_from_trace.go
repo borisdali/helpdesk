@@ -27,8 +27,10 @@ func isEmptyJSONArray(s string) bool {
 
 // PlaybookFromTraceRequest is the body for POST /api/v1/fleet/playbooks/from-trace.
 type PlaybookFromTraceRequest struct {
-	TraceID string `json:"trace_id"` // audit trace ID to synthesize from
-	Outcome string `json:"outcome"`  // "resolved" | "escalated"
+	TraceID  string `json:"trace_id"`            // audit trace ID to synthesize from
+	Outcome  string `json:"outcome"`             // "resolved" | "escalated"
+	SeriesID string `json:"series_id,omitempty"` // pin draft to existing series (suggest-update)
+	Version  string `json:"version,omitempty"`   // explicit version for the draft (suggest-update)
 }
 
 // PlaybookFromTraceResponse is returned by handlePlaybookFromTrace.
@@ -128,6 +130,15 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 			pb.Source = "generated"
 			pb.IsActive = false
 			pb.CreatedBy = "from-trace"
+			// Caller-supplied series_id and version take precedence over whatever
+			// the LLM wrote — this is how suggest-update pins the draft to an
+			// existing series and assigns the correct next version number.
+			if req.SeriesID != "" {
+				pb.SeriesID = req.SeriesID
+			}
+			if req.Version != "" {
+				pb.Version = req.Version
+			}
 			if pb.SeriesID == "" {
 				pb.SeriesID = "pbs_generated_" + uuid.New().String()[:8]
 			}
@@ -210,7 +221,84 @@ func (g *Gateway) fetchTraceEvents(traceID string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("auditd returned %d: %s", resp.StatusCode, string(data))
 	}
+
+	// When audit_events has no entries for this trace ID but the ID looks like a
+	// playbook run (plr_ prefix), fall back to playbook_run_steps. This covers
+	// the common case where agents emit step events under approval-request trace
+	// IDs (ar_*) rather than the run ID, so audit_events is empty for the plr_*
+	// ID even though full step data exists in playbook_run_steps.
+	if isEmptyJSONArray(string(data)) && strings.HasPrefix(traceID, "plr_") {
+		return g.fetchStepsAsTraceEvents(traceID)
+	}
 	return string(data), nil
+}
+
+// fetchStepsAsTraceEvents fetches playbook_run_steps for a run and returns them
+// formatted as a JSON array of tool_execution events so from-trace can synthesize
+// a playbook from runs that don't have audit_events entries.
+func (g *Gateway) fetchStepsAsTraceEvents(runID string) (string, error) {
+	stepsURL := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/steps"
+	hreq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, stepsURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build steps request: %w", err)
+	}
+	if g.auditAPIKey != "" {
+		hreq.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(hreq)
+	if err != nil {
+		return "", fmt.Errorf("steps request: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading steps response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("steps endpoint returned %d", resp.StatusCode)
+	}
+
+	// Unmarshal the steps and reformat as trace events for the LLM prompt.
+	var body struct {
+		Steps []struct {
+			StepIndex int             `json:"step_index"`
+			Agent     string          `json:"agent"`
+			Tool      string          `json:"tool"`
+			Args      json.RawMessage `json:"args"`
+			Reason    string          `json:"reason"`
+			Status    string          `json:"status"`
+			Result    string          `json:"result"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return "", fmt.Errorf("parsing steps: %w", err)
+	}
+	type traceEvent struct {
+		EventType string          `json:"event_type"`
+		Agent     string          `json:"agent"`
+		Tool      string          `json:"tool"`
+		Args      json.RawMessage `json:"args"`
+		Reason    string          `json:"reason,omitempty"`
+		Result    string          `json:"result,omitempty"`
+		Status    string          `json:"status"`
+	}
+	events := make([]traceEvent, 0, len(body.Steps))
+	for _, s := range body.Steps {
+		events = append(events, traceEvent{
+			EventType: "tool_execution",
+			Agent:     s.Agent,
+			Tool:      s.Tool,
+			Args:      s.Args,
+			Reason:    s.Reason,
+			Result:    s.Result,
+			Status:    s.Status,
+		})
+	}
+	out, err := json.Marshal(events)
+	if err != nil {
+		return "", fmt.Errorf("marshaling trace events: %w", err)
+	}
+	return string(out), nil
 }
 
 // parsePlaybookYAMLLenient parses LLM-generated playbook YAML into an audit.Playbook

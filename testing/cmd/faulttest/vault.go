@@ -178,6 +178,8 @@ func cmdVault(args []string) {
 		vaultSuggest(args[1:])
 	case "suggest-update":
 		vaultSuggestUpdate(args[1:])
+	case "drafts":
+		vaultDrafts(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -638,12 +640,6 @@ func vaultList(args []string) {
 						faultTestCol = "READY"
 					}
 				} else {
-					lastDate := "-"
-					if info.lastRunAt != "" {
-						if t, err := time.Parse(time.RFC3339, info.lastRunAt); err == nil {
-							lastDate = t.Format("2006-01-02")
-						}
-					}
 					// Accuracy feedback is submitted against the triage/diagnosis series,
 					// not the remediation series — fetch it separately when available.
 					feedbackCount := info.feedbackCount
@@ -659,14 +655,15 @@ func vaultList(args []string) {
 						accuracyStr = fmt.Sprintf("%.0f%% accurate", accuracyRate*100)
 					}
 					effStr := ""
-					if info.avgStepCount > 0 {
-						effStr = fmt.Sprintf("  avg %.1f steps", info.avgStepCount)
+					if info.avgStepCount > 0 && info.avgRecoverySecs > 0 {
+						effStr = fmt.Sprintf("  avg: %.1f steps, %s recovery", info.avgStepCount, formatDuration(info.avgRecoverySecs))
+					} else if info.avgStepCount > 0 {
+						effStr = fmt.Sprintf("  avg: %.1f steps", info.avgStepCount)
+					} else if info.avgRecoverySecs > 0 {
+						effStr = fmt.Sprintf("  avg: %s recovery", formatDuration(info.avgRecoverySecs))
 					}
-					if info.avgRecoverySecs > 0 {
-						effStr += fmt.Sprintf("  avg %s recovery", formatDuration(info.avgRecoverySecs))
-					}
-					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s%s  last: %s%s",
-						info.totalRuns, info.resolutionRate*100, accuracyStr, effStr, lastDate, sourceTag)
+					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s%s%s",
+						info.totalRuns, info.resolutionRate*100, accuracyStr, effStr, sourceTag)
 				}
 			}
 		}
@@ -690,40 +687,48 @@ func vaultList(args []string) {
 
 		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, colStable, stableCol, incidentCol)
 
-		// Per-version learning signal: show last 2 versions when multiple exist.
+		// Per-version learning signal: show the two newest version sub-rows when
+		// the series has 2+ versions so the before/after comparison is visible.
+		// A single-version fault prints only a pointer — avoids duplicating data
+		// already on the main row while still signalling that vault data exists.
 		if playbookID != "" && cfg.GatewayURL != "" {
-			if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID); err == nil && len(versions) >= 2 {
+			if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID); err == nil && len(versions) >= 1 {
 				// API returns oldest-first; reverse so active (newest) is first.
 				for i, j := 0, len(versions)-1; i < j; i, j = i+1, j-1 {
 					versions[i], versions[j] = versions[j], versions[i]
 				}
-				// Show at most 2 (newest pair — the comparison that matters).
-				show := versions
-				if len(show) > 2 {
-					show = show[:2]
-				}
-				for _, vs := range show {
-					active := "  "
-					if vs.IsActive {
-						active = " *"
-					}
-					stepsStr := ""
-					if vs.AvgStepCount > 0 {
-						stepsStr = fmt.Sprintf("  avg %.1f steps", vs.AvgStepCount)
-					}
-					recovStr := ""
-					if vs.AvgRecoverySecs > 0 {
-						recovStr = fmt.Sprintf("  avg %s recovery", formatDuration(vs.AvgRecoverySecs))
-					}
-					fbStr := ""
-					if vs.RemFeedbackCount > 0 {
-						fbStr = fmt.Sprintf("  %.0f%% approach OK", vs.RemFeedbackRate*100)
-					}
-					fmt.Printf("    %-5s%s  %dr  %.0f%%%s%s%s\n",
-						vs.Version, active, vs.TotalRuns, vs.ResolutionRate*100, stepsStr, recovStr, fbStr)
-				}
-				if len(versions) > 2 {
+				if len(versions) == 1 {
+					// One version: just a pointer so the operator knows data exists.
 					fmt.Printf("    → vault versions %s\n", playbookID)
+				} else {
+					// Two or more: show at most 2 (the comparison that matters).
+					show := versions
+					if len(show) > 2 {
+						show = show[:2]
+					}
+					for _, vs := range show {
+						active := "  "
+						if vs.IsActive {
+							active = " *"
+						}
+						effStr := ""
+						if vs.AvgStepCount > 0 && vs.AvgRecoverySecs > 0 {
+							effStr = fmt.Sprintf("  avg: %.1f steps, %s recovery", vs.AvgStepCount, formatDuration(vs.AvgRecoverySecs))
+						} else if vs.AvgStepCount > 0 {
+							effStr = fmt.Sprintf("  avg: %.1f steps", vs.AvgStepCount)
+						} else if vs.AvgRecoverySecs > 0 {
+							effStr = fmt.Sprintf("  avg: %s recovery", formatDuration(vs.AvgRecoverySecs))
+						}
+						fbStr := ""
+						if vs.RemFeedbackCount > 0 {
+							fbStr = fmt.Sprintf("  %.0f%% approach OK", vs.RemFeedbackRate*100)
+						}
+						fmt.Printf("    %-5s%s  %dr  %.0f%%%s%s\n",
+							vs.Version, active, vs.TotalRuns, vs.ResolutionRate*100, effStr, fbStr)
+					}
+					if len(versions) > 2 {
+						fmt.Printf("    → vault versions %s\n", playbookID)
+					}
 				}
 			}
 		}
@@ -1454,6 +1459,21 @@ func doFetchRuns(url, apiKey string) ([]incidentRun, error) {
 	return result.Runs, nil
 }
 
+// pickBestRunForSuggest returns the run ID of the most recent resolved run for
+// the given series, for use as --trace-id when the caller omits it.
+func pickBestRunForSuggest(gatewayURL, apiKey, seriesID string) (string, error) {
+	runs, err := fetchRunsBySeries(gatewayURL, apiKey, seriesID, 20)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range runs {
+		if r.Outcome == "resolved" || r.Outcome == "transitioned" {
+			return r.RunID, nil
+		}
+	}
+	return "", fmt.Errorf("no resolved runs found for series %s (check vault incidents %s)", seriesID, seriesID)
+}
+
 // fetchFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
 // Returns the triage/at_gate record when present, falling back to triage/post_incident.
 // Returns nil when no triage feedback has been submitted.
@@ -1754,8 +1774,8 @@ func vaultIncidents(args []string) {
 	const (
 		colRunID    = 14
 		colDate     = 16
-		colDiag     = 10
-		colRemed    = 16
+		colDiag     = 18 // wide enough for "escalated+resolved"
+		colRemed    = 24 // wide enough for "escalated+resolved 30.0s"
 		colFeedback = 12
 		colScore    = 5
 	)
@@ -2171,12 +2191,29 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string) {
 
 // ── vault suggest ─────────────────────────────────────────────────────────
 
+// nextVersion increments the minor component of a dotted version string.
+// "1.3" → "1.4", "2" → "2.1", "" → "1.0", "1.3.0" → "1.3.1".
+func nextVersion(current string) string {
+	if current == "" {
+		return "1.0"
+	}
+	parts := strings.Split(current, ".")
+	last := parts[len(parts)-1]
+	n, err := strconv.Atoi(last)
+	if err != nil {
+		return current + ".1"
+	}
+	parts[len(parts)-1] = strconv.Itoa(n + 1)
+	return strings.Join(parts, ".")
+}
+
 // ── vault suggest-update ──────────────────────────────────────────────────
 
 // vaultPlaybook is a minimal representation of a gateway playbook for suggest-update.
 type vaultPlaybook struct {
 	PlaybookID  string `json:"playbook_id"`
 	Name        string `json:"name"`
+	Version     string `json:"version"`
 	Description string `json:"description"`
 	Guidance    string `json:"guidance"`
 }
@@ -2226,16 +2263,27 @@ func vaultSuggestUpdate(args []string) {
 		apiKey     string
 	)
 	fs.StringVar(&seriesID, "series-id", "", "Series ID of the playbook to update (required)")
-	fs.StringVar(&traceID, "trace-id", "", "Audit trace ID of the successful incident (required)")
+	fs.StringVar(&traceID, "trace-id", "", "Run ID or trace ID to synthesize from (auto-selected when omitted)")
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
-	if seriesID == "" || traceID == "" {
-		fmt.Fprintln(os.Stderr, "Error: --series-id and --trace-id are both required")
+	if seriesID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --series-id is required")
 		os.Exit(1)
+	}
+	// Auto-select the most recent resolved run when --trace-id is omitted.
+	if traceID == "" {
+		picked, pickErr := pickBestRunForSuggest(gatewayURL, apiKey, seriesID)
+		if pickErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: --trace-id not provided and could not auto-select a run: %v\n", pickErr)
+			fmt.Fprintf(os.Stderr, "Hint: run `faulttest vault incidents %s` to list available runs.\n", seriesID)
+			os.Exit(1)
+		}
+		traceID = picked
+		fmt.Printf("Auto-selected trace: %s\n\n", traceID)
 	}
 
 	// Step 1: Fetch current active playbook.
@@ -2247,8 +2295,10 @@ func vaultSuggestUpdate(args []string) {
 
 	// Step 2: Synthesize proposed update via from-trace.
 	reqBody, _ := json.Marshal(map[string]string{
-		"trace_id": traceID,
-		"outcome":  outcome,
+		"trace_id":  traceID,
+		"outcome":   outcome,
+		"series_id": seriesID,
+		"version":   nextVersion(current.Version),
 	})
 	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
 	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(reqBody))
@@ -3087,6 +3137,123 @@ func wordWrap(text string, maxWidth int, indent string) string {
 		lines = append(lines, current)
 	}
 	return strings.Join(lines, "\n"+indent)
+}
+
+// ── vault drafts ──────────────────────────────────────────────────────────
+
+// vaultDrafts lists inactive generated playbook drafts waiting for review and activation.
+func vaultDrafts(args []string) {
+	fs := flag.NewFlagSet("vault drafts", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	var purgeOrphans bool
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	fs.BoolVar(&purgeOrphans, "purge-orphans", false, "Delete all drafts whose series_id starts with pbs_generated_ (orphans from failed suggest-update runs)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&source=generated"
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+			SeriesID   string `json:"series_id"`
+			Version    string `json:"version"`
+			Name       string `json:"name"`
+			CreatedAt  string `json:"created_at"`
+		} `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	drafts := result.Playbooks
+
+	if purgeOrphans {
+		client := &http.Client{Timeout: 15 * time.Second}
+		deleted := 0
+		for _, d := range drafts {
+			if !strings.HasPrefix(d.SeriesID, "pbs_generated_") {
+				continue
+			}
+			delURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + d.PlaybookID
+			delReq, _ := http.NewRequest(http.MethodDelete, delURL, nil)
+			if apiKey != "" {
+				delReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			delResp, delErr := client.Do(delReq)
+			if delErr != nil || delResp.StatusCode >= 300 {
+				fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", d.PlaybookID, delErr)
+				continue
+			}
+			delResp.Body.Close()
+			fmt.Printf("Deleted orphan draft %s (%s)\n", d.PlaybookID, d.Name)
+			deleted++
+		}
+		fmt.Printf("\nPurged %d orphan draft(s).\n", deleted)
+		return
+	}
+
+	if len(drafts) == 0 {
+		fmt.Println("No pending drafts.")
+		return
+	}
+
+	fmt.Printf("Pending drafts — %d awaiting review\n\n", len(drafts))
+	const (
+		colID   = 12
+		colSer  = 30
+		colVer  = 7
+		colName = 42
+		colDate = 10
+	)
+	orphans := 0
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colID, "DRAFT ID", colSer, "SERIES", colVer, "VERSION", colName, "NAME", "CREATED")
+	fmt.Println(strings.Repeat("─", colID+2+colSer+2+colVer+2+colName+2+colDate))
+	for _, d := range drafts {
+		ts := d.CreatedAt
+		if len(ts) >= 10 {
+			ts = ts[:10]
+		}
+		name := d.Name
+		if len(name) > colName {
+			name = name[:colName-1] + "…"
+		}
+		ser := d.SeriesID
+		orphan := ""
+		if strings.HasPrefix(ser, "pbs_generated_") {
+			orphan = " !"
+			orphans++
+		}
+		if len(ser) > colSer {
+			ser = ser[:colSer-1] + "…"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n", colID, d.PlaybookID, colSer, ser, colVer, d.Version, colName, name, ts, orphan)
+	}
+	if orphans > 0 {
+		fmt.Printf("\n! = orphan draft (series not pinned); run with --purge-orphans to delete all %d\n", orphans)
+	}
+	fmt.Printf("\nTo activate a draft:\n")
+	fmt.Printf("  faulttest vault drafts --gateway <url> --api-key <key>  # list\n")
+	fmt.Printf("  curl -X POST %s/api/v1/fleet/playbooks/<DRAFT_ID>/activate \\\n", strings.TrimSuffix(gatewayURL, "/"))
+	fmt.Printf("       -H 'Authorization: Bearer <api-key>'\n")
 }
 
 // vaultCalibration shows confidence-band calibration: how well diagnosis_score
