@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -282,6 +283,138 @@ func TestPersistPlaybookDraft_InvalidJSON(t *testing.T) {
 	_, err := g.persistPlaybookDraft(context.Background(), &audit.Playbook{})
 	if err == nil {
 		t.Error("expected error for invalid JSON response, got nil")
+	}
+}
+
+// ── fetchStepsAsTraceEvents fallback ─────────────────────────────────────
+
+// fakeStepsResponse is a minimal /v1/fleet/playbook-runs/{id}/steps response.
+const fakeStepsResponse = `{"steps":[
+  {"step_index":0,"agent":"db-agent","tool":"get_active_connections","args":{},"reason":"check connections","status":"success","result":"42 connections"},
+  {"step_index":1,"agent":"db-agent","tool":"kill_idle_connections","args":{"min_idle_minutes":5},"reason":"terminate idle","status":"success","result":"terminated 8"}
+]}`
+
+func TestHandlePlaybookFromTrace_FallsBackToStepsWhenEventsEmpty(t *testing.T) {
+	// audit_events returns [] for a plr_* trace ID → gateway must call the steps
+	// endpoint and format results as tool_execution events for the LLM.
+	var llmPrompt string
+	stepsEndpointCalled := false
+
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events"):
+			// audit_events: return empty array (the plr_* case).
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]")) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/steps"):
+			stepsEndpointCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(fakeStepsResponse)) //nolint:errcheck
+		case r.Method == http.MethodPost:
+			// persist draft
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_steps_001"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, prompt string) (string, error) {
+		llmPrompt = prompt
+		return "name: Steps-derived Playbook\ndescription: from steps\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "plr_abc123", "outcome": "resolved"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if !stepsEndpointCalled {
+		t.Error("expected steps endpoint to be called when audit_events is empty for plr_* trace")
+	}
+	if !strings.Contains(llmPrompt, "kill_idle_connections") {
+		t.Errorf("LLM prompt should contain step tool names; got: %s", llmPrompt)
+	}
+	if !strings.Contains(llmPrompt, "tool_execution") {
+		t.Errorf("LLM prompt should contain formatted trace events; got: %s", llmPrompt)
+	}
+}
+
+func TestHandlePlaybookFromTrace_NoFallbackForNonPlrPrefix(t *testing.T) {
+	// audit_events returns [] for an ar_* or tr_* trace ID — must NOT fall back
+	// to steps (those IDs are not run IDs and the steps endpoint would 404).
+	stepsEndpointCalled := false
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/steps") {
+			stepsEndpointCalled = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]")) //nolint:errcheck
+	}))
+	defer auditd.Close()
+
+	// Must provide a non-nil LLM so the handler passes the nil-LLM guard and
+	// reaches the trace-fetch path where the no-fallback check lives.
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("should not be called")
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "ar_no_fallback"})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422 (empty trace, no fallback)", w.Code)
+	}
+	if stepsEndpointCalled {
+		t.Error("steps endpoint must not be called for non-plr_ trace IDs")
+	}
+}
+
+func TestFetchStepsAsTraceEvents_FormatsAsToolExecutionEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/steps") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(fakeStepsResponse)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	g := &Gateway{auditURL: srv.URL}
+	result, err := g.fetchStepsAsTraceEvents("plr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var events []map[string]any
+	if err := json.Unmarshal([]byte(result), &events); err != nil {
+		t.Fatalf("result is not valid JSON: %v\nraw: %s", err, result)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	for i, ev := range events {
+		if ev["event_type"] != "tool_execution" {
+			t.Errorf("event[%d].event_type = %q, want tool_execution", i, ev["event_type"])
+		}
+	}
+	if events[0]["tool"] != "get_active_connections" {
+		t.Errorf("event[0].tool = %q, want get_active_connections", events[0]["tool"])
+	}
+	if events[1]["tool"] != "kill_idle_connections" {
+		t.Errorf("event[1].tool = %q, want kill_idle_connections", events[1]["tool"])
+	}
+}
+
+func TestFetchStepsAsTraceEvents_ErrorOnServerFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	g := &Gateway{auditURL: srv.URL}
+	_, err := g.fetchStepsAsTraceEvents("plr_fail")
+	if err == nil {
+		t.Error("expected error when steps endpoint returns 500, got nil")
 	}
 }
 

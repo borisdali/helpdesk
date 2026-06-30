@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1639,6 +1640,103 @@ func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 
 	if v, ok := gotBody["primary_confidence"]; !ok || v != 0.88 {
 		t.Errorf("primary_confidence = %v (ok=%v), want 0.88", gotBody["primary_confidence"], ok)
+	}
+}
+
+// ── purgeOrphanDrafts ─────────────────────────────────────────────────────
+
+type testDraft = struct {
+	PlaybookID string `json:"playbook_id"`
+	SeriesID   string `json:"series_id"`
+	Version    string `json:"version"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+}
+
+func TestPurgeOrphanDrafts_DeletesOnlyOrphans(t *testing.T) {
+	var deleted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		// URL: /api/v1/fleet/playbooks/{id}
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		deleted = append(deleted, id)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_orphan1", SeriesID: "pbs_generated_abc123", Name: "Orphan 1"},
+		{PlaybookID: "pb_pinned1", SeriesID: "pbs_connection_remediate", Name: "Pinned"},
+		{PlaybookID: "pb_orphan2", SeriesID: "pbs_generated_def456", Name: "Orphan 2"},
+	}
+
+	n := purgeOrphanDrafts(srv.URL, "", drafts)
+	if n != 2 {
+		t.Errorf("purged %d, want 2", n)
+	}
+	if len(deleted) != 2 {
+		t.Errorf("DELETE called %d times, want 2; deleted: %v", len(deleted), deleted)
+	}
+	for _, id := range deleted {
+		if id == "pb_pinned1" {
+			t.Error("pb_pinned1 (non-orphan) must not be deleted")
+		}
+	}
+}
+
+func TestPurgeOrphanDrafts_NoneWhenAllPinned(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_pinned1", SeriesID: "pbs_connection_remediate"},
+		{PlaybookID: "pb_pinned2", SeriesID: "pbs_wal_stale_slot"},
+	}
+	n := purgeOrphanDrafts(srv.URL, "", drafts)
+	if n != 0 {
+		t.Errorf("purged %d, want 0", n)
+	}
+	if called {
+		t.Error("DELETE must not be called when no orphans exist")
+	}
+}
+
+func TestPurgeOrphanDrafts_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_orphan1", SeriesID: "pbs_generated_abc"},
+	}
+	purgeOrphanDrafts(srv.URL, "my-key", drafts)
+	if gotAuth != "Bearer my-key" {
+		t.Errorf("Authorization = %q, want Bearer my-key", gotAuth)
+	}
+}
+
+func TestPurgeOrphanDrafts_SkipsOnServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_orphan1", SeriesID: "pbs_generated_abc"},
+	}
+	n := purgeOrphanDrafts(srv.URL, "", drafts)
+	if n != 0 {
+		t.Errorf("purged %d, want 0 (server error should skip, not count)", n)
 	}
 }
 

@@ -3227,6 +3227,39 @@ func vaultActive(args []string) {
 
 // ── vault drafts ──────────────────────────────────────────────────────────
 
+// purgeOrphanDrafts deletes every draft whose series_id has the pbs_generated_
+// prefix (orphans created before series-pinning was in place). Returns the count
+// of successfully deleted drafts.
+func purgeOrphanDrafts(gatewayURL, apiKey string, drafts []struct {
+	PlaybookID string `json:"playbook_id"`
+	SeriesID   string `json:"series_id"`
+	Version    string `json:"version"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+}) int {
+	client := &http.Client{Timeout: 15 * time.Second}
+	deleted := 0
+	for _, d := range drafts {
+		if !strings.HasPrefix(d.SeriesID, "pbs_generated_") {
+			continue
+		}
+		delURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + d.PlaybookID
+		delReq, _ := http.NewRequest(http.MethodDelete, delURL, nil)
+		if apiKey != "" {
+			delReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		delResp, delErr := client.Do(delReq)
+		if delErr != nil || delResp.StatusCode >= 300 {
+			fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", d.PlaybookID, delErr)
+			continue
+		}
+		delResp.Body.Close()
+		fmt.Printf("Deleted orphan draft %s (%s)\n", d.PlaybookID, d.Name)
+		deleted++
+	}
+	return deleted
+}
+
 // vaultDrafts lists inactive generated playbook drafts waiting for review and activation.
 func vaultDrafts(args []string) {
 	fs := flag.NewFlagSet("vault drafts", flag.ExitOnError)
@@ -3273,26 +3306,7 @@ func vaultDrafts(args []string) {
 	drafts := result.Playbooks
 
 	if purgeOrphans {
-		client := &http.Client{Timeout: 15 * time.Second}
-		deleted := 0
-		for _, d := range drafts {
-			if !strings.HasPrefix(d.SeriesID, "pbs_generated_") {
-				continue
-			}
-			delURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + d.PlaybookID
-			delReq, _ := http.NewRequest(http.MethodDelete, delURL, nil)
-			if apiKey != "" {
-				delReq.Header.Set("Authorization", "Bearer "+apiKey)
-			}
-			delResp, delErr := client.Do(delReq)
-			if delErr != nil || delResp.StatusCode >= 300 {
-				fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", d.PlaybookID, delErr)
-				continue
-			}
-			delResp.Body.Close()
-			fmt.Printf("Deleted orphan draft %s (%s)\n", d.PlaybookID, d.Name)
-			deleted++
-		}
+		deleted := purgeOrphanDrafts(gatewayURL, apiKey, drafts)
 		fmt.Printf("\nPurged %d orphan draft(s).\n", deleted)
 		return
 	}
