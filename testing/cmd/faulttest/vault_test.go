@@ -1641,3 +1641,90 @@ func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 		t.Errorf("primary_confidence = %v (ok=%v), want 0.88", gotBody["primary_confidence"], ok)
 	}
 }
+
+// ── nextVersion ───────────────────────────────────────────────────────────
+
+func TestNextVersion(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", "1.0"},
+		{"1.3", "1.4"},
+		{"1.0", "1.1"},
+		{"2", "3"},
+		{"1.3.0", "1.3.1"},
+		{"2.10", "2.11"},
+		{"1.abc", "1.abc.1"}, // non-numeric last segment → append .1
+	}
+	for _, tc := range cases {
+		got := nextVersion(tc.input)
+		if got != tc.want {
+			t.Errorf("nextVersion(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// ── pickBestRunForSuggest ─────────────────────────────────────────────────
+
+func makeRunsServer(t *testing.T, runs []map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+	}))
+}
+
+func TestPickBestRunForSuggest_PrefersResolved(t *testing.T) {
+	srv := makeRunsServer(t, []map[string]any{
+		{"run_id": "plr_trans1", "outcome": "transitioned"},
+		{"run_id": "plr_trans2", "outcome": "transitioned"},
+		{"run_id": "plr_res1", "outcome": "resolved"},
+		{"run_id": "plr_trans3", "outcome": "transitioned"},
+	})
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_res1" {
+		t.Errorf("got %q, want plr_res1 (resolved should be preferred over transitioned)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_FallsBackToTransitioned(t *testing.T) {
+	srv := makeRunsServer(t, []map[string]any{
+		{"run_id": "plr_trans1", "outcome": "transitioned"},
+		{"run_id": "plr_trans2", "outcome": "transitioned"},
+	})
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_trans1" {
+		t.Errorf("got %q, want plr_trans1 (first transitioned when no resolved exists)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_ErrorWhenNoUsableRuns(t *testing.T) {
+	srv := makeRunsServer(t, []map[string]any{
+		{"run_id": "plr_esc1", "outcome": "escalated"},
+		{"run_id": "plr_fail1", "outcome": "failed"},
+	})
+	defer srv.Close()
+
+	_, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err == nil {
+		t.Error("expected error when no resolved or transitioned runs exist, got nil")
+	}
+}
+
+func TestPickBestRunForSuggest_NetworkError(t *testing.T) {
+	_, err := pickBestRunForSuggest("http://127.0.0.1:19999", "", "pbs_test")
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}

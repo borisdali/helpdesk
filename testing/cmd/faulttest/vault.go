@@ -180,6 +180,8 @@ func cmdVault(args []string) {
 		vaultSuggestUpdate(args[1:])
 	case "drafts":
 		vaultDrafts(args[1:])
+	case "active":
+		vaultActive(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -1459,19 +1461,27 @@ func doFetchRuns(url, apiKey string) ([]incidentRun, error) {
 	return result.Runs, nil
 }
 
-// pickBestRunForSuggest returns the run ID of the most recent resolved run for
-// the given series, for use as --trace-id when the caller omits it.
+// pickBestRunForSuggest returns the run ID of the best run for synthesis:
+// prefers "resolved" (which has full tool execution data) over "transitioned"
+// (which may have completed the handoff without tool calls to synthesize from).
 func pickBestRunForSuggest(gatewayURL, apiKey, seriesID string) (string, error) {
 	runs, err := fetchRunsBySeries(gatewayURL, apiKey, seriesID, 20)
 	if err != nil {
 		return "", err
 	}
+	// First pass: prefer resolved runs — they have complete step data.
 	for _, r := range runs {
-		if r.Outcome == "resolved" || r.Outcome == "transitioned" {
+		if r.Outcome == "resolved" {
 			return r.RunID, nil
 		}
 	}
-	return "", fmt.Errorf("no resolved runs found for series %s (check vault incidents %s)", seriesID, seriesID)
+	// Second pass: fall back to transitioned if no resolved run exists.
+	for _, r := range runs {
+		if r.Outcome == "transitioned" {
+			return r.RunID, nil
+		}
+	}
+	return "", fmt.Errorf("no resolved or transitioned runs found for series %s (check: faulttest vault incidents %s)", seriesID, seriesID)
 }
 
 // fetchFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
@@ -3137,6 +3147,82 @@ func wordWrap(text string, maxWidth int, indent string) string {
 		lines = append(lines, current)
 	}
 	return strings.Join(lines, "\n"+indent)
+}
+
+// ── vault active ──────────────────────────────────────────────────────────
+
+// vaultActive lists the currently active version of every playbook series.
+func vaultActive(args []string) {
+	fs := flag.NewFlagSet("vault active", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=true&include_system=false"
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+			SeriesID   string `json:"series_id"`
+			Version    string `json:"version"`
+			Name       string `json:"name"`
+			Source     string `json:"source"`
+			UpdatedAt  string `json:"updated_at"`
+		} `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	pbs := result.Playbooks
+	if len(pbs) == 0 {
+		fmt.Println("No active playbooks.")
+		return
+	}
+
+	const (
+		colSer  = 34
+		colVer  = 7
+		colSrc  = 9
+		colDate = 10
+		colName = 44
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colSer, "SERIES", colVer, "VERSION", colSrc, "SOURCE", colDate, "UPDATED", "NAME")
+	fmt.Println(strings.Repeat("─", colSer+2+colVer+2+colSrc+2+colDate+2+colName))
+	for _, pb := range pbs {
+		ts := pb.UpdatedAt
+		if len(ts) >= 10 {
+			ts = ts[:10]
+		}
+		name := pb.Name
+		if len(name) > colName {
+			name = name[:colName-1] + "…"
+		}
+		ser := pb.SeriesID
+		if len(ser) > colSer {
+			ser = ser[:colSer-1] + "…"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colSer, ser, colVer, pb.Version, colSrc, pb.Source, colDate, ts, name)
+	}
 }
 
 // ── vault drafts ──────────────────────────────────────────────────────────

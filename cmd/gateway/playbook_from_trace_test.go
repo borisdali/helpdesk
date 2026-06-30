@@ -285,6 +285,81 @@ func TestPersistPlaybookDraft_InvalidJSON(t *testing.T) {
 	}
 }
 
+// ── series_id / version pinning (suggest-update path) ────────────────────
+
+func TestHandlePlaybookFromTrace_PinsSeriesAndVersion(t *testing.T) {
+	// When the request includes series_id and version, those values must be
+	// written to the draft posted to auditd — not whatever the LLM wrote.
+	var gotDraft audit.Playbook
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+			return
+		}
+		// POST — capture what was persisted.
+		body, _ := readAll(r.Body)
+		json.Unmarshal(body, &gotDraft) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_pinned_001"}) //nolint:errcheck
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, _ string) (string, error) {
+		// LLM returns a draft with a different series_id and version — caller's
+		// values must win.
+		return "name: Test\ndescription: desc\nseries_id: pbs_llm_invented\nversion: 9.9\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{
+		"trace_id":  "tr_pin",
+		"outcome":   "resolved",
+		"series_id": "pbs_connection_remediate",
+		"version":   "1.4",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if gotDraft.SeriesID != "pbs_connection_remediate" {
+		t.Errorf("persisted series_id = %q, want pbs_connection_remediate", gotDraft.SeriesID)
+	}
+	if gotDraft.Version != "1.4" {
+		t.Errorf("persisted version = %q, want 1.4", gotDraft.Version)
+	}
+}
+
+func TestHandlePlaybookFromTrace_NoPinUsesGeneratedSeries(t *testing.T) {
+	// When series_id is omitted, a pbs_generated_* series must be assigned
+	// (existing behaviour for direct from-trace calls without suggest-update).
+	var gotDraft audit.Playbook
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+			return
+		}
+		body, _ := readAll(r.Body)
+		json.Unmarshal(body, &gotDraft) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_gen_001"}) //nolint:errcheck
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: Test\ndescription: desc\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_nopin", "outcome": "resolved"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.HasPrefix(gotDraft.SeriesID, "pbs_generated_") {
+		t.Errorf("persisted series_id = %q, want pbs_generated_* prefix", gotDraft.SeriesID)
+	}
+}
+
 // readAll is a helper for test to consume an io.Reader body.
 func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {
 	var buf bytes.Buffer
