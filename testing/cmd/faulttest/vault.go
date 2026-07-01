@@ -186,6 +186,8 @@ func cmdVault(args []string) {
 		vaultActivate(args[1:])
 	case "diff":
 		vaultDiff(args[1:])
+	case "history":
+		vaultHistory(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -3237,6 +3239,106 @@ func vaultActive(args []string) {
 		}
 		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colSer, ser, colVer, pb.Version, colSrc, pb.Source, colDate, ts, name)
 	}
+}
+
+// ── vault history ─────────────────────────────────────────────────────────
+
+// vaultHistory lists every stored version of a playbook series — active, inactive,
+// system, and generated — regardless of whether any runs have been recorded.
+// This is the complete provenance ledger for a series.
+func vaultHistory(args []string) {
+	fs := flag.NewFlagSet("vault history", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault history <series-id> [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Lists every version stored for a series, including inactive and system versions.")
+		fmt.Fprintln(os.Stderr, "  Use playbook IDs from the ID column with 'vault diff <id1> <id2>'.")
+		os.Exit(1)
+	}
+	seriesID := fs.Arg(0)
+	if strings.HasPrefix(seriesID, "pb_") {
+		fmt.Fprintf(os.Stderr, "Error: %q looks like a playbook ID, not a series ID.\n", seriesID)
+		fmt.Fprintf(os.Stderr, "  Use a series ID like pbs_connection_remediate.\n")
+		os.Exit(1)
+	}
+
+	url := strings.TrimSuffix(gatewayURL, "/") +
+		"/api/v1/fleet/playbooks?series_id=" + seriesID + "&active_only=false&include_system=true"
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID  string `json:"playbook_id"`
+			Version     string `json:"version"`
+			IsActive    bool   `json:"is_active"`
+			Source      string `json:"source"`
+			OriginTrace string `json:"origin_trace"`
+			CreatedAt   string `json:"created_at"`
+			Name        string `json:"name"`
+		} `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result.Playbooks) == 0 {
+		fmt.Printf("No versions found for series %q.\n", seriesID)
+		return
+	}
+
+	fmt.Printf("Version history for %s — %d version(s)\n\n", seriesID, len(result.Playbooks))
+
+	const (
+		colID   = 14
+		colVer  = 9
+		colSrc  = 9
+		colDate = 10
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colID, "ID", colVer, "VERSION", colSrc, "SOURCE", colDate, "CREATED", "STATUS / NAME")
+	fmt.Println(strings.Repeat("─", colID+2+colVer+2+colSrc+2+colDate+2+50))
+	for _, pb := range result.Playbooks {
+		ts := pb.CreatedAt
+		if len(ts) >= 10 {
+			ts = ts[:10]
+		}
+		status := ""
+		if pb.IsActive {
+			status = "* "
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n",
+			colID, pb.PlaybookID,
+			colVer, pb.Version,
+			colSrc, pb.Source,
+			colDate, ts,
+			status, pb.Name,
+		)
+		if pb.OriginTrace != "" {
+			fmt.Printf("  %*s  from=%s\n", colID, "", pb.OriginTrace)
+		}
+	}
+	fmt.Println()
+	fmt.Println("* = currently active version")
+	fmt.Println("Use: faulttest vault diff <id1> <id2> to compare any two versions.")
 }
 
 // ── vault drafts ──────────────────────────────────────────────────────────

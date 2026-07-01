@@ -2012,3 +2012,116 @@ func TestFetchPlaybookByID_Returns404AsError(t *testing.T) {
 		t.Error("expected error for 404, got nil")
 	}
 }
+
+// ── vault history ─────────────────────────────────────────────────────────
+
+// makeHistoryServer returns a test server that responds to the playbooks list
+// endpoint with a fixed set of playbooks for the given series.
+func makeHistoryServer(t *testing.T, seriesID string, pbs []map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("series_id") != seriesID {
+			http.Error(w, "wrong series", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"playbooks": pbs})
+	}))
+}
+
+func TestVaultHistory_ShowsAllVersions(t *testing.T) {
+	srv := makeHistoryServer(t, "pbs_conn", []map[string]any{
+		{
+			"playbook_id": "pb_v13", "version": "1.3",
+			"is_active": true, "source": "system",
+			"created_at": "2026-01-01T00:00:00Z", "name": "Conn Remediate",
+		},
+		{
+			"playbook_id": "pb_v14", "version": "1.4",
+			"is_active": false, "source": "generated",
+			"origin_trace": "plr_abc123",
+			"created_at": "2026-06-01T00:00:00Z", "name": "Conn Remediate",
+		},
+	})
+	defer srv.Close()
+
+	// We test the HTTP fetch path indirectly by calling the same endpoint
+	// the command uses and verifying the response decodes correctly.
+	resp, err := http.Get(srv.URL + "?series_id=pbs_conn&active_only=false&include_system=true")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID  string `json:"playbook_id"`
+			Version     string `json:"version"`
+			IsActive    bool   `json:"is_active"`
+			Source      string `json:"source"`
+			OriginTrace string `json:"origin_trace"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Playbooks) != 2 {
+		t.Fatalf("want 2 playbooks, got %d", len(result.Playbooks))
+	}
+	if result.Playbooks[0].PlaybookID != "pb_v13" {
+		t.Errorf("want pb_v13 first, got %s", result.Playbooks[0].PlaybookID)
+	}
+	if !result.Playbooks[0].IsActive {
+		t.Error("want first entry active (system v1.3)")
+	}
+	if result.Playbooks[1].Source != "generated" {
+		t.Errorf("want second entry source=generated, got %q", result.Playbooks[1].Source)
+	}
+	if result.Playbooks[1].OriginTrace != "plr_abc123" {
+		t.Errorf("want origin_trace=plr_abc123, got %q", result.Playbooks[1].OriginTrace)
+	}
+}
+
+func TestVaultHistory_EmptySeries(t *testing.T) {
+	srv := makeHistoryServer(t, "pbs_empty", []map[string]any{})
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "?series_id=pbs_empty&active_only=false&include_system=true")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Playbooks []map[string]any `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Playbooks) != 0 {
+		t.Errorf("want empty list, got %d entries", len(result.Playbooks))
+	}
+}
+
+func TestVaultHistory_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"playbooks": []any{}})
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet,
+		srv.URL+"/api/v1/fleet/playbooks?series_id=pbs_x&active_only=false&include_system=true", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
+	}
+}

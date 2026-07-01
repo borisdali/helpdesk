@@ -32,6 +32,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
    - [vault diff](#vault-diff)
    - [vault activate](#vault-activate)
    - [vault active](#vault-active)
+   - [vault history](#vault-history)
 6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
 7. [Reviewing and Activating Drafts](#reviewing-and-activating-drafts)
 8. [Three Customer Workflows](#three-customer-workflows)
@@ -943,6 +944,36 @@ The `SOURCE` column indicates how the active version entered the Vault:
 | `imported` | Imported from Markdown, YAML, or Ansible via the import endpoint |
 
 `vault active` only shows system Playbooks that the Gateway is actually serving (i.e. `include_system=true` is the default). To hide system Playbooks and see only operator-managed series, filter them via the API directly: `GET /api/v1/fleet/playbooks?active_only=true&include_system=false`.
+
+### vault history
+
+```bash
+faulttest vault history <series-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Lists **every stored version** of a playbook series — active, inactive, system, and generated — regardless of whether any runs have been recorded against them. This is the complete provenance ledger for a series, and the primary way to discover playbook IDs for `vault diff <id1> <id2>`.
+
+```
+Version history for pbs_connection_remediate — 2 version(s)
+
+ID              VERSION    SOURCE     CREATED     STATUS / NAME
+──────────────────────────────────────────────────────────────────────────────────
+pb_be8b5667     1.3        system     2026-05-01  * Connection Overload — Terminate Idle Sessions
+pb_31575294     1.4        generated  2026-06-30  Connection Overload — Terminate Idle Sessions
+  from=plr_0c58aa4f
+```
+
+`*` marks the currently active version. The `from=` line under a generated entry shows the playbook run ID that triggered `vault suggest-update` — the trace whose tool call sequence was synthesised into that version.
+
+Use the `ID` column to compare any two versions:
+
+```bash
+faulttest vault diff pb_be8b5667 pb_31575294 --gateway ... --api-key ...
+```
+
+Unlike `vault versions`, which only shows versions that have accumulated run data, `vault history` shows the complete list immediately after seeding or activation — even before a single run has completed under the new version.
 
 ---
 
