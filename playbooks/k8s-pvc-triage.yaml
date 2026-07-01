@@ -1,6 +1,7 @@
 series_id: pbs_k8s_pvc_triage
 name: "K8s PVC Pending — StorageClass Triage"
 version: "1.0"
+playbook_type: triage
 entry_point: true
 execution_mode: agent
 agent_name: k8s_agent

@@ -24,6 +24,11 @@ name: "REPLACE ME — Short Description Remediation"
 # REQUIRED. Increment on every breaking change to guidance.
 version: "1.0"
 
+# REQUIRED. Declares the structured-output protocol this playbook follows.
+# The gateway uses this to validate the draft before activation.
+# For remediation playbooks this must always be "remediation".
+playbook_type: remediation
+
 # false → only reachable via a gate approval from the paired triage playbook.
 #         Use false for all remediation playbooks that follow a triage gate.
 # true  → also selectable directly (use when remediation can be run standalone,

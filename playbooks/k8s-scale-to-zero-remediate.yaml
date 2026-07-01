@@ -1,6 +1,7 @@
 series_id: pbs_k8s_scale_to_zero_remediate
 name: "K8s StatefulSet Scaled to Zero — Scale Up"
 version: "1.0"
+playbook_type: remediation
 entry_point: false
 execution_mode: agent_approve
 agent_name: k8s_agent

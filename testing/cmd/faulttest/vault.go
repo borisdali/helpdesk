@@ -2362,9 +2362,10 @@ func vaultSuggestUpdate(args []string) {
 		os.Exit(1)
 	}
 	var traceResult struct {
-		Draft      string `json:"draft"`
-		Source     string `json:"source"`
-		PlaybookID string `json:"playbook_id"`
+		Draft      string   `json:"draft"`
+		Source     string   `json:"source"`
+		PlaybookID string   `json:"playbook_id"`
+		Warnings   []string `json:"warnings"`
 	}
 	if err := json.Unmarshal(respBody, &traceResult); err != nil {
 		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
@@ -2387,6 +2388,14 @@ func vaultSuggestUpdate(args []string) {
 	fmt.Println("--- PROPOSED DRAFT (from trace) ---")
 	fmt.Println(traceResult.Draft)
 	fmt.Println()
+
+	if len(traceResult.Warnings) > 0 {
+		fmt.Println("⚠  Protocol warnings — review before activating:")
+		for _, w := range traceResult.Warnings {
+			fmt.Printf("   • %s\n", w)
+		}
+		fmt.Println()
+	}
 
 	if traceResult.PlaybookID != "" {
 		fmt.Printf("Proposed draft saved as: %s (inactive, source=generated)\n\n", traceResult.PlaybookID)

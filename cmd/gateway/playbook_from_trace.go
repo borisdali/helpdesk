@@ -37,9 +37,10 @@ type PlaybookFromTraceRequest struct {
 // When auditd is configured, the draft is persisted as an inactive "generated"
 // playbook and its ID is returned in PlaybookID for later activation or review.
 type PlaybookFromTraceResponse struct {
-	Draft      string `json:"draft"`                 // synthesized playbook YAML text
-	Source     string `json:"source"`                // trace_id used as source
-	PlaybookID string `json:"playbook_id,omitempty"` // ID of the persisted draft (empty if auditd unavailable)
+	Draft      string   `json:"draft"`                  // synthesized playbook YAML text
+	Source     string   `json:"source"`                 // trace_id used as source
+	PlaybookID string   `json:"playbook_id,omitempty"`  // ID of the persisted draft (empty if auditd unavailable)
+	Warnings   []string `json:"warnings,omitempty"`     // protocol violations detected in the draft
 }
 
 const fromTracePromptTemplate = `You are a playbook authoring assistant for an AI database operations platform.
@@ -50,6 +51,7 @@ synthesize a playbook YAML that captures the diagnostic and remediation approach
 The playbook should cover:
 - name: a short descriptive name for this scenario
 - description: what this playbook does and why (used by the fleet planner to select it)
+- playbook_type: "triage" if the trace is a read-only investigation ending with a FINDINGS/signal line; "remediation" if it executes corrective actions
 - problem_class: one of: performance | availability | capacity | data_integrity | security
 - symptoms: observable indicators that would trigger this playbook
 - guidance: expert reasoning, the sequence of investigation steps, and any heuristics
@@ -122,6 +124,7 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 	// tab indentation, nested structures, or other formatting that the strict
 	// struct-based parser rejects.
 	var playbookID string
+	var warnings []string
 	if g.auditURL != "" {
 		pb, parseErr := parsePlaybookYAMLLenient(draft)
 		if parseErr != nil {
@@ -156,6 +159,7 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 					pb.RequiresEvidence = active.RequiresEvidence
 					pb.PermittedTools   = active.PermittedTools
 					pb.TargetHints      = active.TargetHints
+					pb.PlaybookType     = active.PlaybookType
 					// Preserve the structured output protocol embedded in guidance.
 					// The "Required output" trailer (HYPOTHESIS_N / FINDINGS /
 					// TRANSITION_TO lines) is an operational instruction, not
@@ -175,6 +179,10 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 			if pb.SeriesID == "" {
 				pb.SeriesID = "pbs_generated_" + uuid.New().String()[:8]
 			}
+			warnings = validatePlaybookProtocol(pb)
+			if len(warnings) > 0 {
+				slog.Warn("from-trace: draft has protocol violations", "playbook_type", pb.PlaybookType, "warnings", warnings)
+			}
 			id, persistErr := g.persistPlaybookDraft(r.Context(), &pb)
 			if persistErr != nil {
 				slog.Warn("from-trace: could not persist draft", "err", persistErr)
@@ -189,6 +197,7 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 		Draft:      draft,
 		Source:     req.TraceID,
 		PlaybookID: playbookID,
+		Warnings:   warnings,
 	})
 }
 
@@ -411,8 +420,9 @@ func parsePlaybookYAMLLenient(text string) (audit.Playbook, error) {
 		EscalatesTo:   strSlice("escalates_to"),
 		TransitionsTo: strSlice("transitions_to"),
 		SeriesID:      str("series_id"),
-		Author:       str("author"),
-		Version:      str("version"),
+		Author:        str("author"),
+		Version:       str("version"),
+		PlaybookType:  str("playbook_type"),
 	}, nil
 }
 
@@ -445,8 +455,64 @@ func extractPlaybookScalars(text string) audit.Playbook {
 			pb.Version = v
 		case "series_id":
 			pb.SeriesID = v
+		case "playbook_type":
+			pb.PlaybookType = v
 		}
 	}
 	return pb
 }
 
+// validatePlaybookProtocol checks that pb satisfies the structural invariants
+// required by its playbook_type. Returns a slice of human-readable warning
+// strings (empty when the playbook is valid or has no type set).
+// Violations are non-blocking — the draft is still persisted so the operator
+// can review and correct before activation.
+func validatePlaybookProtocol(pb audit.Playbook) []string {
+	var warns []string
+
+	require := func(value, field string) {
+		if strings.TrimSpace(value) == "" {
+			warns = append(warns, field+": required field is empty")
+		}
+	}
+	requireSlice := func(items []string, field string) {
+		if len(items) == 0 {
+			warns = append(warns, field+": at least one entry required")
+		}
+	}
+
+	switch pb.PlaybookType {
+	case "triage":
+		require(pb.Name, "name")
+		require(pb.SeriesID, "series_id")
+		require(pb.Description, "description")
+		require(pb.Guidance, "guidance")
+		requireSlice(pb.Symptoms, "symptoms")
+		requireSlice(pb.Escalation, "escalation")
+		if pb.ExecutionMode != "agent" {
+			warns = append(warns, fmt.Sprintf("execution_mode: triage playbooks must use \"agent\", got %q", pb.ExecutionMode))
+		}
+		if !strings.Contains(pb.Guidance, "FINDINGS:") {
+			warns = append(warns, "guidance: missing FINDINGS: line — triage playbooks must emit structured findings")
+		}
+		if !strings.Contains(pb.Guidance, "TRANSITION_TO:") && !strings.Contains(pb.Guidance, "ESCALATE_TO:") {
+			warns = append(warns, "guidance: missing signal line — must end with TRANSITION_TO: <series_id> or ESCALATE_TO: <target|none>")
+		}
+
+	case "remediation":
+		require(pb.Name, "name")
+		require(pb.SeriesID, "series_id")
+		require(pb.Description, "description")
+		require(pb.Guidance, "guidance")
+		requireSlice(pb.Symptoms, "symptoms")
+		requireSlice(pb.Escalation, "escalation")
+		if pb.ExecutionMode != "agent_approve" {
+			warns = append(warns, fmt.Sprintf("execution_mode: remediation playbooks must use \"agent_approve\", got %q", pb.ExecutionMode))
+		}
+		if strings.Contains(pb.Guidance, "TRANSITION_TO:") || strings.Contains(pb.Guidance, "ESCALATE_TO:") {
+			warns = append(warns, "guidance: remediation playbooks must not emit TRANSITION_TO or ESCALATE_TO — routing is handled by the triage gate")
+		}
+	}
+
+	return warns
+}

@@ -632,6 +632,228 @@ func TestHandlePlaybookFromTrace_OperationalFieldFetchFailureIsSilent(t *testing
 	}
 }
 
+// ── validatePlaybookProtocol ──────────────────────────────────────────────
+
+func TestValidatePlaybookProtocol_Triage_Valid(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "triage",
+		Name:          "Conn Triage",
+		SeriesID:      "pbs_conn_triage",
+		Description:   "Investigates connection overload.",
+		ExecutionMode: "agent",
+		Symptoms:      []string{"too many connections"},
+		Escalation:    []string{"pg_hba rejection"},
+		Guidance: "Step 1: check connections.\n\nFINDINGS: conn=<N>/<max>\nTRANSITION_TO: pbs_conn_remediate",
+	}
+	if warns := validatePlaybookProtocol(pb); len(warns) != 0 {
+		t.Errorf("expected no warnings for valid triage, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_Triage_MissingFields(t *testing.T) {
+	pb := audit.Playbook{PlaybookType: "triage"} // all required fields empty
+	warns := validatePlaybookProtocol(pb)
+	wantSubstrings := []string{"name:", "series_id:", "description:", "guidance:", "symptoms:", "escalation:"}
+	for _, sub := range wantSubstrings {
+		found := false
+		for _, w := range warns {
+			if strings.Contains(w, sub) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected warning containing %q, got: %v", sub, warns)
+		}
+	}
+}
+
+func TestValidatePlaybookProtocol_Triage_WrongExecutionMode(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "triage",
+		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		ExecutionMode: "agent_approve",
+		Symptoms:      []string{"s"}, Escalation: []string{"e"},
+		Guidance: "FINDINGS: x\nTRANSITION_TO: pbs_r",
+	}
+	warns := validatePlaybookProtocol(pb)
+	if !containsWarning(warns, "execution_mode") {
+		t.Errorf("expected execution_mode warning, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_Triage_MissingFINDINGS(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "triage",
+		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		ExecutionMode: "agent",
+		Symptoms:      []string{"s"}, Escalation: []string{"e"},
+		Guidance: "Step 1: do stuff.\nTRANSITION_TO: pbs_r",
+	}
+	warns := validatePlaybookProtocol(pb)
+	if !containsWarning(warns, "FINDINGS:") {
+		t.Errorf("expected FINDINGS warning, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_Triage_MissingSignalLine(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "triage",
+		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		ExecutionMode: "agent",
+		Symptoms:      []string{"s"}, Escalation: []string{"e"},
+		Guidance: "Step 1: do stuff.\nFINDINGS: x=1",
+	}
+	warns := validatePlaybookProtocol(pb)
+	if !containsWarning(warns, "signal line") {
+		t.Errorf("expected signal line warning, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_Triage_EscalateToAccepted(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "triage",
+		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		ExecutionMode: "agent",
+		Symptoms:      []string{"s"}, Escalation: []string{"e"},
+		Guidance: "FINDINGS: x\nESCALATE_TO: none",
+	}
+	if warns := validatePlaybookProtocol(pb); len(warns) != 0 {
+		t.Errorf("ESCALATE_TO should satisfy signal line requirement, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_Remediation_Valid(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "remediation",
+		Name:          "Conn Remediate",
+		SeriesID:      "pbs_conn_remediate",
+		Description:   "Terminates idle sessions.",
+		ExecutionMode: "agent_approve",
+		Symptoms:      []string{"connection overload"},
+		Escalation:    []string{"active tx with writes"},
+		Guidance:      "Step 1: confirm state.\nStep 2: terminate idle sessions.\nStep 3: verify.",
+	}
+	if warns := validatePlaybookProtocol(pb); len(warns) != 0 {
+		t.Errorf("expected no warnings for valid remediation, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_Remediation_WrongExecutionMode(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "remediation",
+		Name:          "R", SeriesID: "pbs_r", Description: "d",
+		ExecutionMode: "agent",
+		Symptoms:      []string{"s"}, Escalation: []string{"e"},
+		Guidance: "Step 1: do stuff.",
+	}
+	warns := validatePlaybookProtocol(pb)
+	if !containsWarning(warns, "execution_mode") {
+		t.Errorf("expected execution_mode warning, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_Remediation_HasTransitionTo(t *testing.T) {
+	pb := audit.Playbook{
+		PlaybookType:  "remediation",
+		Name:          "R", SeriesID: "pbs_r", Description: "d",
+		ExecutionMode: "agent_approve",
+		Symptoms:      []string{"s"}, Escalation: []string{"e"},
+		Guidance: "Step 1: fix.\nTRANSITION_TO: pbs_other",
+	}
+	warns := validatePlaybookProtocol(pb)
+	if !containsWarning(warns, "TRANSITION_TO") {
+		t.Errorf("expected TRANSITION_TO warning for remediation, got: %v", warns)
+	}
+}
+
+func TestValidatePlaybookProtocol_NoType_NoWarnings(t *testing.T) {
+	// Untyped playbooks (legacy or runbook-style) must not generate warnings.
+	pb := audit.Playbook{PlaybookType: "", Name: "Legacy", ExecutionMode: "agent"}
+	if warns := validatePlaybookProtocol(pb); len(warns) != 0 {
+		t.Errorf("untyped playbook should produce no warnings, got: %v", warns)
+	}
+}
+
+func TestHandlePlaybookFromTrace_WarningsInResponse(t *testing.T) {
+	// A triage draft that is missing FINDINGS and the signal line should have
+	// warnings surfaced in the response JSON.
+	var gotDraft audit.Playbook
+
+	activePlaybook := audit.Playbook{
+		PlaybookID:    "pb_warn_active",
+		SeriesID:      "pbs_warn_triage",
+		Version:       "1.0",
+		IsActive:      true,
+		ExecutionMode: "agent",
+		PlaybookType:  "triage",
+		// Guidance has no "Required output" section — so trailer preservation won't add FINDINGS.
+		Guidance: "Investigate carefully.",
+	}
+
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events"):
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			json.NewEncoder(w).Encode(struct { //nolint:errcheck
+				Playbooks []audit.Playbook `json:"playbooks"`
+			}{Playbooks: []audit.Playbook{activePlaybook}})
+		case r.Method == http.MethodPost:
+			body, _ := readAll(r.Body)
+			json.Unmarshal(body, &gotDraft) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_warn_draft"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer auditd.Close()
+
+	// LLM produces guidance with no FINDINGS or signal line.
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: Warn Test\ndescription: desc\nguidance: Just look at things.\nsymptoms:\n  - slow\nescalation:\n  - never\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{
+		"trace_id":  "tr_warn",
+		"series_id": "pbs_warn_triage",
+		"version":   "1.1",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp PlaybookFromTraceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Warnings) == 0 {
+		t.Error("expected warnings in response for triage draft missing FINDINGS and signal line")
+	}
+	if !containsWarning(resp.Warnings, "FINDINGS:") {
+		t.Errorf("expected FINDINGS warning, got: %v", resp.Warnings)
+	}
+	if !containsWarning(resp.Warnings, "signal line") {
+		t.Errorf("expected signal line warning, got: %v", resp.Warnings)
+	}
+	// PlaybookType must be preserved from active.
+	if gotDraft.PlaybookType != "triage" {
+		t.Errorf("PlaybookType = %q, want triage (from active)", gotDraft.PlaybookType)
+	}
+}
+
+// containsWarning returns true if any element of warns contains substr.
+func containsWarning(warns []string, substr string) bool {
+	for _, w := range warns {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 // ── "Required output" trailer preservation ────────────────────────────────
 
 func TestHandlePlaybookFromTrace_PreservesRequiredOutputTrailer(t *testing.T) {

@@ -1,6 +1,7 @@
 series_id: pbs_disk_pressure_triage
 name: Disk Pressure / Large Table Growth — Triage
 version: "1.0"
+playbook_type: triage
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent

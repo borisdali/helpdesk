@@ -30,6 +30,7 @@ type systemPlaybookYAML struct {
 	ExecutionMode    string   `yaml:"execution_mode"`
 	AgentName        string   `yaml:"agent_name"`
 	ApprovalMode     string   `yaml:"approval_mode"`
+	PlaybookType     string   `yaml:"playbook_type"`
 }
 
 // SeedSystemPlaybooks reads all embedded *.yaml files and inserts them into the
@@ -137,6 +138,7 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 				ExecutionMode:    y.ExecutionMode,
 				AgentName:        y.AgentName,
 				ApprovalMode:     y.ApprovalMode,
+				PlaybookType:     y.PlaybookType,
 				IsSystem:         true,
 				IsActive:         true,
 				Source:           "system",

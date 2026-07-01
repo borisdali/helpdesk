@@ -1,6 +1,7 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
 version: "1.5"
+playbook_type: triage
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent

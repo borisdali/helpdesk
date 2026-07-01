@@ -1,6 +1,7 @@
 series_id: pbs_vacuum_triage
 name: Vacuum & Bloat Triage
 version: "1.3"
+playbook_type: triage
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent

@@ -1,6 +1,7 @@
 series_id: pbs_vacuum_remediate
 name: Table Bloat / Dead Tuples — Run VACUUM
 version: "1.2"
+playbook_type: remediation
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent
