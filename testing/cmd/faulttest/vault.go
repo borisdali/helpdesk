@@ -182,6 +182,8 @@ func cmdVault(args []string) {
 		vaultDrafts(args[1:])
 	case "active":
 		vaultActive(args[1:])
+	case "activate":
+		vaultActivate(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -3227,6 +3229,62 @@ func vaultActive(args []string) {
 
 // ── vault drafts ──────────────────────────────────────────────────────────
 
+// ── vault activate ────────────────────────────────────────────────────────
+
+// vaultActivate promotes a draft playbook to active status in its series.
+func vaultActivate(args []string) {
+	fs := flag.NewFlagSet("vault activate", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault activate <draft-id> [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Run 'faulttest vault drafts' to list pending draft IDs.")
+		os.Exit(1)
+	}
+	draftID := fs.Arg(0)
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + draftID + "/activate"
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var pb struct {
+		PlaybookID string `json:"playbook_id"`
+		SeriesID   string `json:"series_id"`
+		Version    string `json:"version"`
+		Name       string `json:"name"`
+		IsActive   bool   `json:"is_active"`
+	}
+	if err := json.Unmarshal(body, &pb); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Activated: %s  v%s  %s\n", pb.PlaybookID, pb.Version, pb.Name)
+	fmt.Printf("Series:    %s\n", pb.SeriesID)
+	fmt.Printf("\nfaulttest vault active --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
 // purgeOrphanDrafts deletes every draft whose series_id has the pbs_generated_
 // prefix (orphans created before series-pinning was in place). Returns the count
 // of successfully deleted drafts.
@@ -3296,6 +3354,7 @@ func vaultDrafts(args []string) {
 			Version    string `json:"version"`
 			Name       string `json:"name"`
 			CreatedAt  string `json:"created_at"`
+			IsActive   bool   `json:"is_active"`
 		} `json:"playbooks"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -3303,7 +3362,26 @@ func vaultDrafts(args []string) {
 		os.Exit(1)
 	}
 
-	drafts := result.Playbooks
+	// Filter to inactive only — active generated playbooks have already been
+	// reviewed and promoted; they no longer belong in the pending review queue.
+	var drafts []struct {
+		PlaybookID string `json:"playbook_id"`
+		SeriesID   string `json:"series_id"`
+		Version    string `json:"version"`
+		Name       string `json:"name"`
+		CreatedAt  string `json:"created_at"`
+	}
+	for _, p := range result.Playbooks {
+		if !p.IsActive {
+			drafts = append(drafts, struct {
+				PlaybookID string `json:"playbook_id"`
+				SeriesID   string `json:"series_id"`
+				Version    string `json:"version"`
+				Name       string `json:"name"`
+				CreatedAt  string `json:"created_at"`
+			}{p.PlaybookID, p.SeriesID, p.Version, p.Name, p.CreatedAt})
+		}
+	}
 
 	if purgeOrphans {
 		deleted := purgeOrphanDrafts(gatewayURL, apiKey, drafts)
@@ -3351,9 +3429,7 @@ func vaultDrafts(args []string) {
 		fmt.Printf("\n! = orphan draft (series not pinned); run with --purge-orphans to delete all %d\n", orphans)
 	}
 	fmt.Printf("\nTo activate a draft:\n")
-	fmt.Printf("  faulttest vault drafts --gateway <url> --api-key <key>  # list\n")
-	fmt.Printf("  curl -X POST %s/api/v1/fleet/playbooks/<DRAFT_ID>/activate \\\n", strings.TrimSuffix(gatewayURL, "/"))
-	fmt.Printf("       -H 'Authorization: Bearer <api-key>'\n")
+	fmt.Printf("  faulttest vault activate <DRAFT_ID> --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
 }
 
 // vaultCalibration shows confidence-band calibration: how well diagnosis_score
