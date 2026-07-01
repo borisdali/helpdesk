@@ -12,6 +12,22 @@ We should do better. And so aiHelpDesk [Vault](VAULT.md) answers the "is it gett
 
 ---
 
+## Table of Contents
+
+1. [The Three Learning Metrics](#the-three-learning-metrics)
+   - [1. Step count: is the agent becoming more direct?](#1-step-count-is-the-agent-becoming-more-direct)
+   - [2. Recovery time: is the system responding faster?](#2-recovery-time-is-the-system-responding-faster)
+   - [3. Approach appropriateness: did the agent fix it elegantly?](#3-approach-appropriateness-did-the-agent-fix-it-elegantly)
+2. [Reading the Learning Signal in `vault list`](#reading-the-learning-signal-in-vault-list)
+3. [Reading the Per-Version Table in `vault versions`](#reading-the-per-version-table-in-vault-versions)
+4. [The Loop: How Metrics Drive the Next Version](#the-loop-how-metrics-drive-the-next-version)
+5. [A Concrete Example: Cache Miss Remediation](#a-concrete-example-cache-miss-remediation)
+6. [What "Getting Better" Actually Means](#what-getting-better-actually-means)
+7. [Connecting to Other Vault Signals](#connecting-to-other-vault-signals)
+8. [See Also](#see-also)
+
+---
+
 ## The Three Learning Metrics
 
 ### 1. Step count: is the agent becoming more direct?

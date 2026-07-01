@@ -16,7 +16,8 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
    - [2. The incident agent (auto-suggest on resolution)](#2-the-incident-agent-auto-suggest-on-resolution)
    - [3. faulttest auto-suggest (on remediation pass)](#3-faulttest-auto-suggest-on-remediation-pass)
 3. [The Artifact Lifecycle](#the-artifact-lifecycle)
-4. [Vault Commands](#vault-commands)
+4. [Draft Review Flow](#draft-review-flow)
+5. [Vault Commands](#vault-commands)
    - [vault list](#vault-list)
    - [vault accuracy](#vault-accuracy)
    - [vault incidents](#vault-incidents)
@@ -28,11 +29,12 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
    - [vault suggest](#vault-suggest)
    - [vault suggest-update](#vault-suggest-update)
    - [vault drafts](#vault-drafts)
+   - [vault diff](#vault-diff)
    - [vault activate](#vault-activate)
    - [vault active](#vault-active)
-5. [The `from-trace` Endpoint](#the-from-trace-endpoint)
-6. [Reviewing and Activating Drafts](#reviewing-and-activating-drafts)
-7. [Three Customer Workflows](#three-customer-workflows)
+6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
+7. [Reviewing and Activating Drafts](#reviewing-and-activating-drafts)
+8. [Three Customer Workflows](#three-customer-workflows)
    - [1. Onboarding — linking your first Playbooks](#1-onboarding--linking-your-first-playbooks)
    - [2. Playbook acceptance — review and approve auto-generated drafts](#2-playbook-acceptance--review-and-approve-auto-generated-drafts)
    - [3. Regression monitoring — catching drift before it becomes an incident](#3-regression-monitoring--catching-drift-before-it-becomes-an-incident)
@@ -211,7 +213,9 @@ flowchart TD
 
     DRAFTS["faulttest vault drafts\n(pending review queue)"]
 
-    R{Operator reviews\nYAML proposal}
+    DIFF["faulttest vault diff &lt;draft-id&gt;\n(field-by-field diff vs active version)"]
+
+    R{Operator reviews\nchanges}
 
     ACT["faulttest vault activate &lt;draft-id&gt;"]
     DEL["DELETE /api/v1/fleet/playbooks/&lt;id&gt;\n(discard)"]
@@ -227,7 +231,8 @@ flowchart TD
     A3 --> FT
     FT --> D
     D --> DRAFTS
-    DRAFTS --> R
+    DRAFTS --> DIFF
+    DIFF --> R
     R -->|"looks good"| ACT
     R -->|"not useful"| DEL
     ACT --> ACTIVE
@@ -821,6 +826,53 @@ A `!` suffix marks **orphan drafts** — drafts whose `series_id` starts with `p
 
 **`--purge-orphans`** sends `DELETE /api/v1/fleet/playbooks/{id}` for every draft whose `series_id` has the `pbs_generated_` prefix. Non-orphan drafts are never touched. The count of deleted drafts is printed at the end.
 
+### vault diff
+
+```bash
+faulttest vault diff <draft-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Compares a pending draft against the currently active version of its series, field by field. Unchanged fields are omitted. Use this before `vault activate` to confirm the proposal is an improvement and hasn't introduced regressions in escalation conditions or execution mode.
+
+```
+Diff: pbs_connection_remediate (series pbs_connection_remediate)
+  current  pb_f49b5eac  v1.3  Idle Connection Pool Exhaustion Recovery
+  proposed pb_40729257  v1.4  Idle Connection Pool Exhaustion Recovery
+
+── guidance ─────────────────────────────────────────────────────────────
+  current   Connection pool exhaustion typically stems from client-side
+            connection leaks or improper connection management.
+            The diagnostic approach is:
+            1. Enumerate idle connections...
+            2. Terminate conservatively...
+  proposed  Connection pool exhaustion typically stems from client-side
+            connection leaks or improper connection management.
+            The diagnostic approach is:
+            1. Enumerate idle connections...
+            2. Safe termination with dry-run: Before terminating any
+               connections, perform a dry-run to forecast impact.
+               Use a threshold (e.g., idle_minutes=5)...
+            3. Escalate if dry-run shows safety risk...
+
+── escalation ───────────────────────────────────────────────────────────
+  current   connection count remains near max_connections after termination
+  proposed  dry-run indicates no idle connections older than safe threshold
+            connection count remains at or near max_connections after termination
+            idle-in-transaction sessions persist after idle connection cleanup
+            application continues to report connection errors immediately after remediation
+
+3 field(s) changed.
+
+To activate:  faulttest vault activate pb_40729257 --gateway http://gateway:8080 --api-key <key>
+To discard:   curl -X DELETE http://gateway:8080/api/v1/fleet/playbooks/pb_40729257 -H 'Authorization: Bearer <key>'
+```
+
+Fields compared: `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`. The `guidance` field is the most important — it is the strategic intent the agent works from, so any wording change there has direct effect on agent behaviour. `escalation` changes are the second-most critical: added or removed conditions change when the agent hands off to a human.
+
+If a field is identical in current and proposed, it is not shown. "No differences" means the LLM reproduced the existing playbook exactly — the draft is safe to discard.
+
 ### vault activate
 
 ```bash
@@ -988,18 +1040,20 @@ faulttest vault suggest-update --series-id pbs_connection_remediate \
 # 3. Review what was proposed
 faulttest vault drafts --gateway $GW --api-key $KEY
 
-# 4. Activate
-curl -X POST $GW/api/v1/fleet/playbooks/pb_new_draft/activate \
-  -H "Authorization: Bearer $KEY"
+# 4. Diff against current active version (guidance, escalation, execution_mode)
+faulttest vault diff pb_new_draft --gateway $GW --api-key $KEY
 
-# 5. Confirm active state
+# 5. Activate
+faulttest vault activate pb_new_draft --gateway $GW --api-key $KEY
+
+# 6. Confirm active state
 faulttest vault active --gateway $GW --api-key $KEY
 
-# 6. Re-run the fault to generate v2 data
+# 7. Re-run the fault to generate v2 data
 faulttest run --external --ids db-max-connections --remediate \
   --gateway $GW --api-key $KEY ...
 
-# 7. See the before/after version comparison
+# 8. See the before/after version comparison
 faulttest vault list --gateway $GW --api-key $KEY
 faulttest vault versions pbs_connection_remediate --gateway $GW --api-key $KEY
 ```

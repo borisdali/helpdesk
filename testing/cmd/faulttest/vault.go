@@ -184,6 +184,8 @@ func cmdVault(args []string) {
 		vaultActive(args[1:])
 	case "activate":
 		vaultActivate(args[1:])
+	case "diff":
+		vaultDiff(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -3283,6 +3285,146 @@ func vaultActivate(args []string) {
 	fmt.Printf("Activated: %s  v%s  %s\n", pb.PlaybookID, pb.Version, pb.Name)
 	fmt.Printf("Series:    %s\n", pb.SeriesID)
 	fmt.Printf("\nfaulttest vault active --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
+// ── vault diff ────────────────────────────────────────────────────────────
+
+// diffPlaybook holds the fields compared by vault diff.
+type diffPlaybook struct {
+	PlaybookID    string   `json:"playbook_id"`
+	SeriesID      string   `json:"series_id"`
+	Version       string   `json:"version"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description"`
+	Guidance      string   `json:"guidance"`
+	Symptoms      []string `json:"symptoms"`
+	Escalation    []string `json:"escalation"`
+	ExecutionMode string   `json:"execution_mode"`
+	ApprovalMode  string   `json:"approval_mode"`
+	IsActive      bool     `json:"is_active"`
+}
+
+func fetchPlaybookByID(gatewayURL, apiKey, playbookID string) (*diffPlaybook, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + playbookID
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var pb diffPlaybook
+	if err := json.Unmarshal(body, &pb); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &pb, nil
+}
+
+// vaultDiff compares a draft playbook against the currently active version in
+// its series, field by field. Unchanged fields are omitted.
+func vaultDiff(args []string) {
+	fs := flag.NewFlagSet("vault diff", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault diff <draft-id> [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Run 'faulttest vault drafts' to list pending draft IDs.")
+		os.Exit(1)
+	}
+	draftID := fs.Arg(0)
+
+	draft, err := fetchPlaybookByID(gatewayURL, apiKey, draftID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching draft %s: %v\n", draftID, err)
+		os.Exit(1)
+	}
+	if draft.IsActive {
+		fmt.Fprintf(os.Stderr, "%s is already active — nothing to diff against.\n", draftID)
+		os.Exit(1)
+	}
+
+	current, err := fetchActivePlaybook(gatewayURL, apiKey, draft.SeriesID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching active playbook for series %s: %v\n", draft.SeriesID, err)
+		os.Exit(1)
+	}
+	active, err := fetchPlaybookByID(gatewayURL, apiKey, current.PlaybookID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching active playbook %s: %v\n", current.PlaybookID, err)
+		os.Exit(1)
+	}
+
+	sep := strings.Repeat("─", 72)
+	fmt.Printf("Diff: %s (series %s)\n", draft.SeriesID, draft.SeriesID)
+	fmt.Printf("  current  %s  v%s  %s\n", active.PlaybookID, active.Version, active.Name)
+	fmt.Printf("  proposed %s  v%s  %s\n\n", draft.PlaybookID, draft.Version, draft.Name)
+
+	changed := 0
+
+	diffField := func(label, cur, prop string) {
+		if cur == prop {
+			return
+		}
+		changed++
+		fmt.Printf("── %s %s\n", label, sep[:max(0, 68-len(label))])
+		printDiffBlock("current ", cur)
+		printDiffBlock("proposed", prop)
+		fmt.Println()
+	}
+	diffList := func(label string, cur, prop []string) {
+		cs := strings.Join(cur, "\n")
+		ps := strings.Join(prop, "\n")
+		diffField(label, cs, ps)
+	}
+
+	diffField("name", active.Name, draft.Name)
+	diffField("description", active.Description, draft.Description)
+	diffField("guidance", active.Guidance, draft.Guidance)
+	diffList("symptoms", active.Symptoms, draft.Symptoms)
+	diffList("escalation", active.Escalation, draft.Escalation)
+	diffField("execution_mode", active.ExecutionMode, draft.ExecutionMode)
+	diffField("approval_mode", active.ApprovalMode, draft.ApprovalMode)
+
+	if changed == 0 {
+		fmt.Println("No differences — draft is identical to the current active version.")
+		return
+	}
+	fmt.Printf("%d field(s) changed.\n\n", changed)
+	fmt.Printf("To activate:  faulttest vault activate %s --gateway %s --api-key <key>\n",
+		draft.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
+	fmt.Printf("To discard:   curl -X DELETE %s/api/v1/fleet/playbooks/%s -H 'Authorization: Bearer <key>'\n",
+		strings.TrimSuffix(gatewayURL, "/"), draft.PlaybookID)
+}
+
+// printDiffBlock prints a labelled multi-line value, indenting each line.
+func printDiffBlock(label, value string) {
+	lines := strings.Split(strings.TrimRight(value, "\n"), "\n")
+	prefix := "  " + label + "  "
+	blank := strings.Repeat(" ", len(prefix))
+	for i, line := range lines {
+		if i == 0 {
+			fmt.Printf("%s%s\n", prefix, line)
+		} else {
+			fmt.Printf("%s%s\n", blank, line)
+		}
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // purgeOrphanDrafts deletes every draft whose series_id has the pbs_generated_
