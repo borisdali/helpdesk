@@ -140,6 +140,27 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 			if req.Version != "" {
 				pb.Version = req.Version
 			}
+			// When pinning to an existing series, carry over all operational fields
+			// from the currently-active version. Only knowledge fields (name,
+			// description, guidance, symptoms, escalation, problem_class) should
+			// change between versions — routing, execution mode, and tool permissions
+			// are controlled by operators, not synthesized from traces.
+			if req.SeriesID != "" {
+				if active, ferr := g.fetchPlaybookBySeriesID(r.Context(), req.SeriesID); ferr == nil {
+					pb.ExecutionMode    = active.ExecutionMode
+					pb.ApprovalMode     = active.ApprovalMode
+					pb.AgentName        = active.AgentName
+					pb.TransitionsTo    = active.TransitionsTo
+					pb.EscalatesTo      = active.EscalatesTo
+					pb.EntryPoint       = active.EntryPoint
+					pb.RequiresEvidence = active.RequiresEvidence
+					pb.PermittedTools   = active.PermittedTools
+					pb.TargetHints      = active.TargetHints
+				} else {
+					slog.Warn("from-trace: could not fetch active version; operational fields from LLM will be used",
+						"series_id", req.SeriesID, "err", ferr)
+				}
+			}
 			if pb.SeriesID == "" {
 				pb.SeriesID = "pbs_generated_" + uuid.New().String()[:8]
 			}

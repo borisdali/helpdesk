@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"helpdesk/testing/faultlib"
 )
 
 // ── History file ──────────────────────────────────────────────────────────
@@ -3494,11 +3496,19 @@ func fetchPlaybookByID(gatewayURL, apiKey, playbookID string) (*diffPlaybook, er
 //
 // Single-ID mode:  vault diff <draft-id>        — draft vs currently active in its series
 // Two-ID mode:     vault diff <id1> <id2>        — compare any two versions by playbook_id
+//
+// Pass --judge to request an LLM review of the knowledge-field changes.
 func vaultDiff(args []string) {
 	fs := flag.NewFlagSet("vault diff", flag.ExitOnError)
 	var gatewayURL, apiKey string
+	var judgeEnabled bool
+	var judgeModel, judgeVendor, judgeAPIKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	fs.BoolVar(&judgeEnabled, "judge", false, "Run LLM-as-judge review of the proposed version")
+	fs.StringVar(&judgeModel, "judge-model", "", "Model name for judge (default: HELPDESK_MODEL_NAME)")
+	fs.StringVar(&judgeVendor, "judge-vendor", "", "Model vendor for judge: anthropic or google (default: HELPDESK_MODEL_VENDOR)")
+	fs.StringVar(&judgeAPIKey, "judge-api-key", os.Getenv("HELPDESK_API_KEY"), "API key for judge")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
@@ -3506,6 +3516,7 @@ func vaultDiff(args []string) {
 		fmt.Fprintln(os.Stderr, "Usage: faulttest vault diff <draft-id> [<second-id>] [--gateway ...] [--api-key ...]")
 		fmt.Fprintln(os.Stderr, "  Single ID: compares draft against the currently active version in its series.")
 		fmt.Fprintln(os.Stderr, "  Two IDs:   compares any two versions directly (use 'vault versions' to get IDs).")
+		fmt.Fprintln(os.Stderr, "  --judge:   ask an LLM to review whether the change is an improvement.")
 		os.Exit(1)
 	}
 	for _, arg := range fs.Args() {
@@ -3569,6 +3580,7 @@ func vaultDiff(args []string) {
 	fmt.Printf("  after   %s  v%s  %s\n\n", after.PlaybookID, after.Version, after.Name)
 
 	changed := 0
+	var operationalDrift []string
 
 	diffField := func(label, cur, prop string) {
 		if cur == prop {
@@ -3583,14 +3595,22 @@ func vaultDiff(args []string) {
 	diffList := func(label string, cur, prop []string) {
 		diffField(label, strings.Join(cur, "\n"), strings.Join(prop, "\n"))
 	}
+	// trackOperational records a changed operational field so the judge can flag it.
+	trackOperational := func(label, cur, prop string) {
+		if cur != prop {
+			operationalDrift = append(operationalDrift,
+				fmt.Sprintf("%s: %s → %s", label, cur, prop))
+		}
+		diffField(label, cur, prop)
+	}
 
 	diffField("name", before.Name, after.Name)
 	diffField("description", before.Description, after.Description)
 	diffField("guidance", before.Guidance, after.Guidance)
 	diffList("symptoms", before.Symptoms, after.Symptoms)
 	diffList("escalation", before.Escalation, after.Escalation)
-	diffField("execution_mode", before.ExecutionMode, after.ExecutionMode)
-	diffField("approval_mode", before.ApprovalMode, after.ApprovalMode)
+	trackOperational("execution_mode", before.ExecutionMode, after.ExecutionMode)
+	trackOperational("approval_mode", before.ApprovalMode, after.ApprovalMode)
 
 	if changed == 0 {
 		fmt.Println("No differences — the two versions are identical.")
@@ -3602,6 +3622,83 @@ func vaultDiff(args []string) {
 			after.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
 		fmt.Printf("To discard:   curl -X DELETE %s/api/v1/fleet/playbooks/%s -H 'Authorization: Bearer <key>'\n",
 			strings.TrimSuffix(gatewayURL, "/"), after.PlaybookID)
+	}
+
+	if !judgeEnabled {
+		return
+	}
+
+	// LLM-as-judge review of the proposed version.
+	fmt.Printf("\n── LLM Judge Review %s\n", strings.Repeat("─", 52))
+
+	if len(operationalDrift) > 0 {
+		fmt.Printf("⚠  Operational field changes detected (should be preserved by from-trace):\n")
+		for _, d := range operationalDrift {
+			fmt.Printf("   • %s\n", d)
+		}
+		fmt.Println()
+	}
+
+	cfg := &HarnessConfig{
+		JudgeVendor: judgeVendor,
+		JudgeModel:  judgeModel,
+		JudgeAPIKey: judgeAPIKey,
+	}
+	completer, err := newJudgeCompleter(context.Background(), cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Judge error: could not initialize LLM: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Set HELPDESK_MODEL_VENDOR / HELPDESK_MODEL_NAME / HELPDESK_API_KEY or use --judge-* flags.\n")
+		os.Exit(1)
+	}
+
+	modelName := judgeModel
+	if modelName == "" {
+		modelName = os.Getenv("HELPDESK_MODEL_NAME")
+	}
+
+	result := faultlib.JudgePlaybookDiff(
+		context.Background(),
+		faultlib.PlaybookDiffInput{
+			BeforeID:          before.PlaybookID,
+			AfterID:           after.PlaybookID,
+			BeforeName:        before.Name,
+			BeforeDescription: before.Description,
+			BeforeGuidance:    before.Guidance,
+			BeforeSymptoms:    before.Symptoms,
+			BeforeEscalation:  before.Escalation,
+			AfterName:         after.Name,
+			AfterDescription:  after.Description,
+			AfterGuidance:     after.Guidance,
+			AfterSymptoms:     after.Symptoms,
+			AfterEscalation:   after.Escalation,
+			OperationalDrift:  operationalDrift,
+		},
+		before.Version,
+		after.Version,
+		completer,
+		modelName,
+	)
+
+	if result.Skipped {
+		fmt.Printf("Judge skipped: %s\n", result.Reasoning)
+		return
+	}
+
+	verdictIcon := map[string]string{
+		"APPROVE":      "✓",
+		"NEEDS_REVIEW": "?",
+		"REJECT":       "✗",
+	}
+	icon := verdictIcon[result.Verdict]
+	if icon == "" {
+		icon = "?"
+	}
+	fmt.Printf("Verdict:            %s  %s\n", icon, result.Verdict)
+	fmt.Printf("Guidance quality:   %s\n", result.GuidanceQuality)
+	fmt.Printf("Escalation safety:  %s\n", result.EscalationSafety)
+	fmt.Printf("Reasoning:          %s\n", result.Reasoning)
+	if modelName != "" {
+		fmt.Printf("Judge model:        %s\n", modelName)
 	}
 }
 

@@ -496,6 +496,142 @@ func TestHandlePlaybookFromTrace_NoPinUsesGeneratedSeries(t *testing.T) {
 	}
 }
 
+// ── operational field preservation (suggest-update path) ─────────────────
+
+func TestHandlePlaybookFromTrace_PreservesOperationalFieldsFromActive(t *testing.T) {
+	// When series_id is supplied, the from-trace handler must fetch the currently-
+	// active version and carry over operational fields (execution_mode, approval_mode,
+	// agent_name, transitions_to, escalates_to, entry_point, requires_evidence,
+	// permitted_tools, target_hints) so the LLM cannot inadvertently change them.
+	var gotDraft audit.Playbook
+
+	activePlaybook := audit.Playbook{
+		PlaybookID:       "pb_active_001",
+		SeriesID:         "pbs_conn_triage",
+		Version:          "1.3",
+		IsActive:         true,
+		ExecutionMode:    "agent_approve",
+		ApprovalMode:     "review",
+		AgentName:        "postgres_database_agent",
+		TransitionsTo:    []string{"pbs_conn_remediation"},
+		EscalatesTo:      []string{"pbs_sysadmin_infra"},
+		EntryPoint:       true,
+		RequiresEvidence: []string{"connection refused"},
+		PermittedTools:   []string{"get_active_connections", "kill_idle_connections"},
+		TargetHints:      []string{"primary"},
+	}
+
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events"):
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			// fetchPlaybookBySeriesID response
+			json.NewEncoder(w).Encode(struct { //nolint:errcheck
+				Playbooks []audit.Playbook `json:"playbooks"`
+			}{Playbooks: []audit.Playbook{activePlaybook}})
+		case r.Method == http.MethodPost:
+			body, _ := readAll(r.Body)
+			json.Unmarshal(body, &gotDraft) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_new_draft"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, _ string) (string, error) {
+		// LLM tries to change operational fields — they should be overridden.
+		return "name: Updated Triage\ndescription: desc\nexecution_mode: fleet\napproval_mode: auto\nagent_name: some_other_agent\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{
+		"trace_id":  "tr_opfields",
+		"series_id": "pbs_conn_triage",
+		"version":   "1.4",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	// Knowledge fields: come from LLM.
+	if gotDraft.Name == "" {
+		t.Error("expected non-empty name from LLM")
+	}
+
+	// Operational fields: must come from the active version, not the LLM.
+	if gotDraft.ExecutionMode != "agent_approve" {
+		t.Errorf("ExecutionMode = %q, want agent_approve (from active)", gotDraft.ExecutionMode)
+	}
+	if gotDraft.ApprovalMode != "review" {
+		t.Errorf("ApprovalMode = %q, want review (from active)", gotDraft.ApprovalMode)
+	}
+	if gotDraft.AgentName != "postgres_database_agent" {
+		t.Errorf("AgentName = %q, want postgres_database_agent (from active)", gotDraft.AgentName)
+	}
+	if len(gotDraft.TransitionsTo) != 1 || gotDraft.TransitionsTo[0] != "pbs_conn_remediation" {
+		t.Errorf("TransitionsTo = %v, want [pbs_conn_remediation] (from active)", gotDraft.TransitionsTo)
+	}
+	if len(gotDraft.EscalatesTo) != 1 || gotDraft.EscalatesTo[0] != "pbs_sysadmin_infra" {
+		t.Errorf("EscalatesTo = %v, want [pbs_sysadmin_infra] (from active)", gotDraft.EscalatesTo)
+	}
+	if !gotDraft.EntryPoint {
+		t.Error("EntryPoint should be true (from active)")
+	}
+	if len(gotDraft.RequiresEvidence) != 1 || gotDraft.RequiresEvidence[0] != "connection refused" {
+		t.Errorf("RequiresEvidence = %v, want [connection refused] (from active)", gotDraft.RequiresEvidence)
+	}
+	if len(gotDraft.PermittedTools) != 2 {
+		t.Errorf("PermittedTools = %v, want 2 entries (from active)", gotDraft.PermittedTools)
+	}
+	if len(gotDraft.TargetHints) != 1 || gotDraft.TargetHints[0] != "primary" {
+		t.Errorf("TargetHints = %v, want [primary] (from active)", gotDraft.TargetHints)
+	}
+}
+
+func TestHandlePlaybookFromTrace_OperationalFieldFetchFailureIsSilent(t *testing.T) {
+	// If fetchPlaybookBySeriesID fails (series not yet active, etc.), the draft is
+	// still created — the handler logs a warning but does not abort.
+	var drafted bool
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events"):
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			// Return empty list — no active version yet.
+			json.NewEncoder(w).Encode(struct { //nolint:errcheck
+				Playbooks []audit.Playbook `json:"playbooks"`
+			}{})
+		case r.Method == http.MethodPost:
+			drafted = true
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_no_active"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: Fallback Draft\ndescription: desc\nexecution_mode: fleet\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{
+		"trace_id":  "tr_noactive",
+		"series_id": "pbs_brand_new",
+		"version":   "1.0",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if !drafted {
+		t.Error("draft should still be persisted even when active-version fetch returns empty list")
+	}
+}
+
 // readAll is a helper for test to consume an io.Reader body.
 func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {
 	var buf bytes.Buffer
