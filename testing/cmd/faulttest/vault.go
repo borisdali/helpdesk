@@ -1772,9 +1772,12 @@ func vaultIncidents(args []string) {
 	}
 
 	seriesID := arg
+	faultID := ""
 
-	// Resolve fault ID → diagnosis series ID via catalog.
+	// Resolve fault ID ↔ diagnosis series ID via catalog.
 	if !strings.HasPrefix(arg, "pbs_") {
+		// arg is a fault ID — resolve to series and keep fault for display.
+		faultID = arg
 		cat, err := loadActiveCatalog(cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
@@ -1796,6 +1799,16 @@ func vaultIncidents(args []string) {
 			fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
 			os.Exit(1)
 		}
+	} else {
+		// arg is a series ID — reverse-lookup to find the fault that references it.
+		if cat, err := loadActiveCatalog(cfg); err == nil {
+			for _, f := range cat.Failures {
+				if f.DiagnosisPlaybookSeriesID == arg {
+					faultID = f.ID
+					break
+				}
+			}
+		}
 	}
 
 	runs, err := fetchRunsBySeries(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID, limit)
@@ -1813,15 +1826,17 @@ func vaultIncidents(args []string) {
 	const (
 		colRunID    = 14
 		colDate     = 16
+		colFault    = 28
 		colDiag     = 18 // wide enough for "escalated+resolved"
 		colRemed    = 24 // wide enough for "escalated+resolved 30.0s"
 		colFeedback = 12
 		colScore    = 5
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colRunID, "RUN ID", colDate, "STARTED", colDiag, "DIAG", colRemed, "REMEDIATION",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colDate, "STARTED", colFault, "FAULT",
+		colDiag, "DIAG", colRemed, "REMEDIATION",
 		colFeedback, "FEEDBACK", colScore, "SCORE", "FINDINGS")
-	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+40))
+	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colFault+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+40))
 
 	for _, run := range runs {
 		date := run.StartedAt
@@ -1857,17 +1872,26 @@ func vaultIncidents(args []string) {
 			scoreStr = fmt.Sprintf("%d%%", int(ev.OverallScore*100))
 		}
 
+		faultDisplay := faultID
+		if faultDisplay == "" {
+			faultDisplay = "–"
+		}
+		if len(faultDisplay) > colFault {
+			faultDisplay = faultDisplay[:colFault-3] + "..."
+		}
+
 		findings := run.FindingsSummary
-		if len(findings) > 40 {
-			findings = findings[:37] + "..."
+		if len(findings) > 80 {
+			findings = findings[:77] + "..."
 		}
 		if findings == "" {
 			findings = "–"
 		}
 
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colRunID, run.RunID,
 			colDate, date,
+			colFault, faultDisplay,
 			colDiag, diagOutcome,
 			colRemed, remedStr,
 			colFeedback, feedbackStr,
@@ -2323,6 +2347,18 @@ func vaultSuggestUpdate(args []string) {
 		}
 		traceID = picked
 		fmt.Printf("Auto-selected trace: %s\n\n", traceID)
+	} else if strings.HasPrefix(traceID, "plr_") {
+		// Caller supplied a playbook run ID — tool execution events live under the
+		// triage journey trace, not the PLR ID itself. Resolve via incident narrative.
+		if n, err := fetchIncidentNarrative(gatewayURL, apiKey, traceID); err == nil {
+			for _, j := range n.Journeys {
+				if j.Phase == "triage" && j.TraceID != "" {
+					fmt.Printf("Resolved %s → %s (triage journey)\n\n", traceID, j.TraceID)
+					traceID = j.TraceID
+					break
+				}
+			}
+		}
 	}
 
 	// Step 1: Fetch current active playbook.
