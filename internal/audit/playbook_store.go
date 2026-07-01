@@ -40,9 +40,10 @@ type Playbook struct {
 
 	// Versioning fields (added in Phase 2)
 	SeriesID string `json:"series_id,omitempty"` // "pbs_" + uuid[:8]; groups all versions of a playbook concept; stable across renames
-	IsActive bool   `json:"is_active"`            // exactly one version per series should be active
-	IsSystem bool   `json:"is_system"`            // true = shipped with aiHelpDesk; read-only via API
-	Source   string `json:"source"`               // "system" | "imported" | "manual"
+	IsActive    bool   `json:"is_active"`             // exactly one version per series should be active
+	IsSystem    bool   `json:"is_system"`             // true = shipped with aiHelpDesk; read-only via API
+	Source      string `json:"source"`                // "system" | "imported" | "manual"
+	OriginTrace string `json:"origin_trace,omitempty"` // audit trace or playbook run ID that generated this version
 
 	// Triage routing fields
 	EntryPoint  bool     `json:"entry_point"` // true = preferred starting point for this problem_class
@@ -127,6 +128,7 @@ func (s *PlaybookStore) migrateSchema() error {
 		// Directive split (v0.16): same-domain follow-ons live in transitions_to,
 		// cross-domain handoffs remain in escalates_to.
 		"ALTER TABLE playbooks ADD COLUMN transitions_to     TEXT    NOT NULL DEFAULT '[]'",
+		"ALTER TABLE playbooks ADD COLUMN origin_trace       TEXT    NOT NULL DEFAULT ''",
 	}
 	for _, stmt := range newCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -241,14 +243,14 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		     problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 		     series_id, is_active, is_system, source,
 		     entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
-		     approval_mode, agent_name, transitions_to)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     approval_mode, agent_name, transitions_to, origin_trace)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
 		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode, string(permittedToolsJSON),
-		pb.ApprovalMode, pb.AgentName, string(transitionsToJSON),
+		pb.ApprovalMode, pb.AgentName, string(transitionsToJSON), pb.OriginTrace,
 	)
 	return err
 }
@@ -450,7 +452,7 @@ const playbookColumns = `playbook_id, name, description, target_hints, created_b
 	problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 	series_id, is_active, is_system, source,
 	entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
-	approval_mode, agent_name, transitions_to`
+	approval_mode, agent_name, transitions_to, origin_trace`
 
 // Get returns a playbook by ID, or sql.ErrNoRows if not found.
 func (s *PlaybookStore) Get(ctx context.Context, id string) (*Playbook, error) {
@@ -521,7 +523,7 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 		&relatedJSON, &pb.Author, &lastValidatedStr, &pb.Version,
 		&pb.SeriesID, &isActive, &isSystem, &pb.Source,
 		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode, &permittedToolsJSON,
-		&pb.ApprovalMode, &pb.AgentName, &transitionsToJSON,
+		&pb.ApprovalMode, &pb.AgentName, &transitionsToJSON, &pb.OriginTrace,
 	); err != nil {
 		return nil, err
 	}

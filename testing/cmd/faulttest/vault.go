@@ -2598,6 +2598,8 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 // versionStats mirrors the PlaybookVersionStats struct returned by the gateway.
 type versionStats struct {
 	SeriesID        string  `json:"series_id"`
+	PlaybookID      string  `json:"playbook_id"`
+	OriginTrace     string  `json:"origin_trace"`
 	Version         string  `json:"version"`
 	IsActive        bool    `json:"is_active"`
 	TotalRuns       int     `json:"total_runs"`
@@ -2775,9 +2777,17 @@ func vaultVersions(args []string) {
 			colRemed, remedStr,
 			approachStr,
 		)
+		if v.PlaybookID != "" || v.OriginTrace != "" {
+			detail := "  id=" + v.PlaybookID
+			if v.OriginTrace != "" {
+				detail += "  from=" + v.OriginTrace
+			}
+			fmt.Println(detail)
+		}
 	}
 	fmt.Println()
 	fmt.Println("* = currently active version")
+	fmt.Println("  id/from lines show playbook_id and the run that generated that version")
 }
 
 // ── vault calibration ──────────────────────────────────────────────────────
@@ -3326,8 +3336,10 @@ func fetchPlaybookByID(gatewayURL, apiKey, playbookID string) (*diffPlaybook, er
 	return &pb, nil
 }
 
-// vaultDiff compares a draft playbook against the currently active version in
-// its series, field by field. Unchanged fields are omitted.
+// vaultDiff compares two playbook versions field by field. Unchanged fields are omitted.
+//
+// Single-ID mode:  vault diff <draft-id>        — draft vs currently active in its series
+// Two-ID mode:     vault diff <id1> <id2>        — compare any two versions by playbook_id
 func vaultDiff(args []string) {
 	fs := flag.NewFlagSet("vault diff", flag.ExitOnError)
 	var gatewayURL, apiKey string
@@ -3337,37 +3349,63 @@ func vaultDiff(args []string) {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault diff <draft-id> [--gateway ...] [--api-key ...]")
-		fmt.Fprintln(os.Stderr, "  Run 'faulttest vault drafts' to list pending draft IDs.")
-		os.Exit(1)
-	}
-	draftID := fs.Arg(0)
-
-	draft, err := fetchPlaybookByID(gatewayURL, apiKey, draftID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching draft %s: %v\n", draftID, err)
-		os.Exit(1)
-	}
-	if draft.IsActive {
-		fmt.Fprintf(os.Stderr, "%s is already active — nothing to diff against.\n", draftID)
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault diff <draft-id> [<second-id>] [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Single ID: compares draft against the currently active version in its series.")
+		fmt.Fprintln(os.Stderr, "  Two IDs:   compares any two versions directly (use 'vault versions' to get IDs).")
 		os.Exit(1)
 	}
 
-	current, err := fetchActivePlaybook(gatewayURL, apiKey, draft.SeriesID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching active playbook for series %s: %v\n", draft.SeriesID, err)
-		os.Exit(1)
-	}
-	active, err := fetchPlaybookByID(gatewayURL, apiKey, current.PlaybookID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching active playbook %s: %v\n", current.PlaybookID, err)
-		os.Exit(1)
+	var before, after *diffPlaybook
+
+	if fs.NArg() >= 2 {
+		// Two-ID mode: fetch both by ID, treat the lower version as "before".
+		id1, id2 := fs.Arg(0), fs.Arg(1)
+		pb1, err := fetchPlaybookByID(gatewayURL, apiKey, id1)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id1, err)
+			os.Exit(1)
+		}
+		pb2, err := fetchPlaybookByID(gatewayURL, apiKey, id2)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id2, err)
+			os.Exit(1)
+		}
+		// Order by version so "before" is always the older one.
+		if compareVersions(pb1.Version, pb2.Version) <= 0 {
+			before, after = pb1, pb2
+		} else {
+			before, after = pb2, pb1
+		}
+	} else {
+		// Single-ID mode: draft vs active.
+		draftID := fs.Arg(0)
+		draft, err := fetchPlaybookByID(gatewayURL, apiKey, draftID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching draft %s: %v\n", draftID, err)
+			os.Exit(1)
+		}
+		if draft.IsActive {
+			fmt.Fprintf(os.Stderr, "%s is already active — use two-ID mode: vault diff <id1> <id2>\n", draftID)
+			fmt.Fprintf(os.Stderr, "  Run 'faulttest vault versions <fault-id>' to look up playbook IDs.\n")
+			os.Exit(1)
+		}
+		current, err := fetchActivePlaybook(gatewayURL, apiKey, draft.SeriesID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching active playbook for series %s: %v\n", draft.SeriesID, err)
+			os.Exit(1)
+		}
+		active, err := fetchPlaybookByID(gatewayURL, apiKey, current.PlaybookID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching active playbook %s: %v\n", current.PlaybookID, err)
+			os.Exit(1)
+		}
+		before, after = active, draft
 	}
 
 	sep := strings.Repeat("─", 72)
-	fmt.Printf("Diff: %s (series %s)\n", draft.SeriesID, draft.SeriesID)
-	fmt.Printf("  current  %s  v%s  %s\n", active.PlaybookID, active.Version, active.Name)
-	fmt.Printf("  proposed %s  v%s  %s\n\n", draft.PlaybookID, draft.Version, draft.Name)
+	fmt.Printf("Diff: series %s\n", before.SeriesID)
+	fmt.Printf("  before  %s  v%s  %s\n", before.PlaybookID, before.Version, before.Name)
+	fmt.Printf("  after   %s  v%s  %s\n\n", after.PlaybookID, after.Version, after.Name)
 
 	changed := 0
 
@@ -3377,33 +3415,69 @@ func vaultDiff(args []string) {
 		}
 		changed++
 		fmt.Printf("── %s %s\n", label, sep[:max(0, 68-len(label))])
-		printDiffBlock("current ", cur)
-		printDiffBlock("proposed", prop)
+		printDiffBlock("before", cur)
+		printDiffBlock("after ", prop)
 		fmt.Println()
 	}
 	diffList := func(label string, cur, prop []string) {
-		cs := strings.Join(cur, "\n")
-		ps := strings.Join(prop, "\n")
-		diffField(label, cs, ps)
+		diffField(label, strings.Join(cur, "\n"), strings.Join(prop, "\n"))
 	}
 
-	diffField("name", active.Name, draft.Name)
-	diffField("description", active.Description, draft.Description)
-	diffField("guidance", active.Guidance, draft.Guidance)
-	diffList("symptoms", active.Symptoms, draft.Symptoms)
-	diffList("escalation", active.Escalation, draft.Escalation)
-	diffField("execution_mode", active.ExecutionMode, draft.ExecutionMode)
-	diffField("approval_mode", active.ApprovalMode, draft.ApprovalMode)
+	diffField("name", before.Name, after.Name)
+	diffField("description", before.Description, after.Description)
+	diffField("guidance", before.Guidance, after.Guidance)
+	diffList("symptoms", before.Symptoms, after.Symptoms)
+	diffList("escalation", before.Escalation, after.Escalation)
+	diffField("execution_mode", before.ExecutionMode, after.ExecutionMode)
+	diffField("approval_mode", before.ApprovalMode, after.ApprovalMode)
 
 	if changed == 0 {
-		fmt.Println("No differences — draft is identical to the current active version.")
+		fmt.Println("No differences — the two versions are identical.")
 		return
 	}
 	fmt.Printf("%d field(s) changed.\n\n", changed)
-	fmt.Printf("To activate:  faulttest vault activate %s --gateway %s --api-key <key>\n",
-		draft.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
-	fmt.Printf("To discard:   curl -X DELETE %s/api/v1/fleet/playbooks/%s -H 'Authorization: Bearer <key>'\n",
-		strings.TrimSuffix(gatewayURL, "/"), draft.PlaybookID)
+	if !after.IsActive {
+		fmt.Printf("To activate:  faulttest vault activate %s --gateway %s --api-key <key>\n",
+			after.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
+		fmt.Printf("To discard:   curl -X DELETE %s/api/v1/fleet/playbooks/%s -H 'Authorization: Bearer <key>'\n",
+			strings.TrimSuffix(gatewayURL, "/"), after.PlaybookID)
+	}
+}
+
+// compareVersions compares two dotted-numeric version strings.
+// Returns negative if a < b, 0 if equal, positive if a > b.
+// Non-numeric components fall back to string comparison.
+func compareVersions(a, b string) int {
+	pa := strings.Split(a, ".")
+	pb := strings.Split(b, ".")
+	n := len(pa)
+	if len(pb) > n {
+		n = len(pb)
+	}
+	for i := 0; i < n; i++ {
+		var sa, sb string
+		if i < len(pa) {
+			sa = pa[i]
+		}
+		if i < len(pb) {
+			sb = pb[i]
+		}
+		ia, errA := strconv.Atoi(sa)
+		ib, errB := strconv.Atoi(sb)
+		if errA == nil && errB == nil {
+			if ia != ib {
+				return ia - ib
+			}
+		} else {
+			if sa != sb {
+				if sa < sb {
+					return -1
+				}
+				return 1
+			}
+		}
+	}
+	return 0
 }
 
 // printDiffBlock prints a labelled multi-line value, indenting each line.

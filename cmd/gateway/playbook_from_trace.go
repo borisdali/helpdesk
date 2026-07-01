@@ -130,6 +130,7 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 			pb.Source = "generated"
 			pb.IsActive = false
 			pb.CreatedBy = "from-trace"
+			pb.OriginTrace = req.TraceID
 			// Caller-supplied series_id and version take precedence over whatever
 			// the LLM wrote — this is how suggest-update pins the draft to an
 			// existing series and assigns the correct next version number.

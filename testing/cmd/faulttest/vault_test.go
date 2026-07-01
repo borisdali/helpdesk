@@ -1740,6 +1740,90 @@ func TestPurgeOrphanDrafts_SkipsOnServerError(t *testing.T) {
 	}
 }
 
+// ── fetchPlaybookByID ─────────────────────────────────────────────────────
+
+func TestFetchPlaybookByID_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/playbooks/pb_abc" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"playbook_id": "pb_abc",
+			"series_id":   "pbs_test",
+			"version":     "1.3",
+			"name":        "Test Playbook",
+			"guidance":    "Check connections first.",
+			"is_active":   true,
+		})
+	}))
+	defer srv.Close()
+
+	pb, err := fetchPlaybookByID(srv.URL, "", "pb_abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pb.PlaybookID != "pb_abc" {
+		t.Errorf("playbook_id = %q, want pb_abc", pb.PlaybookID)
+	}
+	if pb.Version != "1.3" {
+		t.Errorf("version = %q, want 1.3", pb.Version)
+	}
+	if pb.Guidance != "Check connections first." {
+		t.Errorf("guidance = %q, want 'Check connections first.'", pb.Guidance)
+	}
+	if !pb.IsActive {
+		t.Error("is_active should be true")
+	}
+}
+
+func TestFetchPlaybookByID_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchPlaybookByID(srv.URL, "", "pb_x")
+	if err == nil {
+		t.Error("expected error for 500 status, got nil")
+	}
+}
+
+func TestFetchPlaybookByID_NetworkError(t *testing.T) {
+	_, err := fetchPlaybookByID("http://127.0.0.1:19999", "", "pb_x")
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchPlaybookByID_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"playbook_id": "pb_x"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchPlaybookByID(srv.URL, "my-key", "pb_x") //nolint:errcheck
+	if gotAuth != "Bearer my-key" {
+		t.Errorf("Authorization = %q, want Bearer my-key", gotAuth)
+	}
+}
+
+func TestFetchPlaybookByID_InvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not json")) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	_, err := fetchPlaybookByID(srv.URL, "", "pb_x")
+	if err == nil {
+		t.Error("expected error for invalid JSON response, got nil")
+	}
+}
+
 // ── nextVersion ───────────────────────────────────────────────────────────
 
 func TestNextVersion(t *testing.T) {
@@ -1824,5 +1908,107 @@ func TestPickBestRunForSuggest_NetworkError(t *testing.T) {
 	_, err := pickBestRunForSuggest("http://127.0.0.1:19999", "", "pbs_test")
 	if err == nil {
 		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+// ── compareVersions ────────────────────────────────────────────────────────
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int // sign only: <0, 0, >0
+	}{
+		{"1.3", "1.4", -1},
+		{"1.4", "1.3", 1},
+		{"1.3", "1.3", 0},
+		{"2", "1.9", 1},
+		{"1.10", "1.9", 1},
+		{"", "1.0", -1},
+		{"1.0", "", 1},
+		{"", "", 0},
+	}
+	sign := func(n int) int {
+		if n < 0 {
+			return -1
+		}
+		if n > 0 {
+			return 1
+		}
+		return 0
+	}
+	for _, tc := range cases {
+		got := sign(compareVersions(tc.a, tc.b))
+		if got != tc.want {
+			t.Errorf("compareVersions(%q, %q) sign = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// ── vault diff two-ID mode ─────────────────────────────────────────────────
+
+func makeDiffPlaybookServer(t *testing.T, playbooks map[string]*diffPlaybook) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// GET /api/v1/fleet/playbooks/{id}
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(parts) < 5 || parts[4] == "" {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		id := parts[4]
+		pb, ok := playbooks[id]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(pb)
+	}))
+}
+
+func TestCompareVersions_TwoIDOrdering(t *testing.T) {
+	// Verify that in two-ID mode the lower version is treated as "before".
+	// We just test compareVersions ordering; the full CLI wiring is covered by
+	// TestCompareVersions above and integration tests.
+	if compareVersions("1.3", "1.4") >= 0 {
+		t.Error("1.3 should be less than 1.4")
+	}
+	if compareVersions("1.4", "1.3") <= 0 {
+		t.Error("1.4 should be greater than 1.3")
+	}
+	if compareVersions("1.3", "1.3") != 0 {
+		t.Error("equal versions should compare as 0")
+	}
+}
+
+func TestFetchPlaybookByID_ReturnsCorrectPlaybook(t *testing.T) {
+	want := &diffPlaybook{
+		PlaybookID:  "pb_v13",
+		SeriesID:    "pbs_conn",
+		Version:     "1.3",
+		Name:        "Conn Remediate",
+		Description: "old description",
+		Guidance:    "old guidance",
+		IsActive:    false,
+	}
+	srv := makeDiffPlaybookServer(t, map[string]*diffPlaybook{"pb_v13": want})
+	defer srv.Close()
+
+	got, err := fetchPlaybookByID(srv.URL, "test-key", "pb_v13")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.PlaybookID != want.PlaybookID || got.Version != want.Version {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestFetchPlaybookByID_Returns404AsError(t *testing.T) {
+	srv := makeDiffPlaybookServer(t, map[string]*diffPlaybook{})
+	defer srv.Close()
+
+	_, err := fetchPlaybookByID(srv.URL, "", "pb_missing")
+	if err == nil {
+		t.Error("expected error for 404, got nil")
 	}
 }

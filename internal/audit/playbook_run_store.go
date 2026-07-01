@@ -83,7 +83,9 @@ type PlaybookRunStats struct {
 // PlaybookVersionStats summarises run history broken down by playbook version.
 // Each row represents one version of a series, ordered by version string.
 type PlaybookVersionStats struct {
-	SeriesID        string  `json:"series_id"`
+	SeriesID    string `json:"series_id"`
+	PlaybookID  string `json:"playbook_id"`  // ID of the playbook version (for vault diff)
+	OriginTrace string `json:"origin_trace"` // trace/run that generated this version; empty for manual/system
 	Version         string  `json:"version"`
 	IsActive        bool    `json:"is_active"`         // currently active version for this series
 	TotalRuns        int     `json:"total_runs"`
@@ -584,6 +586,8 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		SELECT
 		    p.version,
 		    p.is_active,
+		    r.playbook_id,
+		    p.origin_trace,
 		    r.outcome,
 		    r.started_at,
 		    r.completed_at,
@@ -606,6 +610,8 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 
 	type versionAccum struct {
 		isActive        bool
+		playbookID      string
+		originTrace     string
 		totalRuns       int
 		resolved        int
 		transitioned    int
@@ -622,19 +628,19 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	var orderedVersions []string
 
 	for rows.Next() {
-		var version string
+		var version, playbookID, originTrace string
 		var isActiveInt int
 		var outcome, startedStr, completedStr string
 		var stepCount int
 		var diagScoreNull, remedScoreNull sql.NullFloat64
 
-		if err := rows.Scan(&version, &isActiveInt, &outcome, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
+		if err := rows.Scan(&version, &isActiveInt, &playbookID, &originTrace, &outcome, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
 			return nil, err
 		}
 
 		a, ok := acc[version]
 		if !ok {
-			a = &versionAccum{isActive: isActiveInt != 0}
+			a = &versionAccum{isActive: isActiveInt != 0, playbookID: playbookID, originTrace: originTrace}
 			acc[version] = a
 			orderedVersions = append(orderedVersions, version)
 		}
@@ -674,9 +680,11 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	for _, v := range orderedVersions {
 		a := acc[v]
 		st := &PlaybookVersionStats{
-			SeriesID:     seriesID,
-			Version:      v,
-			IsActive:     a.isActive,
+			SeriesID:    seriesID,
+			PlaybookID:  a.playbookID,
+			OriginTrace: a.originTrace,
+			Version:     v,
+			IsActive:    a.isActive,
 			TotalRuns:    a.totalRuns,
 			Resolved:     a.resolved,
 			Transitioned: a.transitioned,

@@ -641,10 +641,15 @@ Version stats for pbs_cache_miss_remediate — 2 version(s)
 VERSION     RUNS    TRANSITIONED  AVG STEPS   AVG TIME    AVG DIAG   AVG REMED  APPROACH OK
 ─────────────────────────────────────────────────────────────────────────────────────────────
 1.0          5      60%           6.2         42s         72%        –          60%
+  id=pb_a1b2c3d4  from=plr_0c58aa4f
 1.1  *       3      100%          4.0         8s          91%        85%        100%
+  id=pb_40729257  from=plr_1e2f3a4b
 
 * = currently active version
+  id/from lines show playbook_id and the run that generated that version
 ```
+
+The `id` and `from` lines appear under each version row and provide the playbook IDs needed for `vault diff <id1> <id2>` post-activation comparison, plus the originating run ID for provenance.
 
 Data sources:
 
@@ -828,40 +833,56 @@ A `!` suffix marks **orphan drafts** — drafts whose `series_id` starts with `p
 
 ### vault diff
 
+`vault diff` has two modes:
+
+**Single-ID mode** — compare a pending draft against the currently active version in its series:
+
 ```bash
 faulttest vault diff <draft-id> \
   --gateway http://gateway:8080 \
   --api-key $HELPDESK_API_KEY
 ```
 
-Compares a pending draft against the currently active version of its series, field by field. Unchanged fields are omitted. Use this before `vault activate` to confirm the proposal is an improvement and hasn't introduced regressions in escalation conditions or execution mode.
+Use this before `vault activate` to confirm the proposal is an improvement and hasn't introduced regressions in escalation conditions or execution mode.
+
+**Two-ID mode** — compare any two playbook versions by ID (works even after both are already activated):
+
+```bash
+faulttest vault diff <id1> <id2> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Use this for post-activation archaeology: if you activated v1.4 and later want to see what changed from v1.3, look up both IDs from `vault versions` (the `id=` lines) and run `vault diff pb_v13_id pb_v14_id`. The lower-versioned ID is always treated as "before" regardless of argument order.
+
+Compares fields field by field. Unchanged fields are omitted.
 
 ```
-Diff: pbs_connection_remediate (series pbs_connection_remediate)
-  current  pb_f49b5eac  v1.3  Idle Connection Pool Exhaustion Recovery
-  proposed pb_40729257  v1.4  Idle Connection Pool Exhaustion Recovery
+Diff: series pbs_connection_remediate
+  before  pb_f49b5eac  v1.3  Idle Connection Pool Exhaustion Recovery
+  after   pb_40729257  v1.4  Idle Connection Pool Exhaustion Recovery
 
 ── guidance ─────────────────────────────────────────────────────────────
-  current   Connection pool exhaustion typically stems from client-side
-            connection leaks or improper connection management.
-            The diagnostic approach is:
-            1. Enumerate idle connections...
-            2. Terminate conservatively...
-  proposed  Connection pool exhaustion typically stems from client-side
-            connection leaks or improper connection management.
-            The diagnostic approach is:
-            1. Enumerate idle connections...
-            2. Safe termination with dry-run: Before terminating any
-               connections, perform a dry-run to forecast impact.
-               Use a threshold (e.g., idle_minutes=5)...
-            3. Escalate if dry-run shows safety risk...
+  before  Connection pool exhaustion typically stems from client-side
+          connection leaks or improper connection management.
+          The diagnostic approach is:
+          1. Enumerate idle connections...
+          2. Terminate conservatively...
+  after   Connection pool exhaustion typically stems from client-side
+          connection leaks or improper connection management.
+          The diagnostic approach is:
+          1. Enumerate idle connections...
+          2. Safe termination with dry-run: Before terminating any
+             connections, perform a dry-run to forecast impact.
+             Use a threshold (e.g., idle_minutes=5)...
+          3. Escalate if dry-run shows safety risk...
 
 ── escalation ───────────────────────────────────────────────────────────
-  current   connection count remains near max_connections after termination
-  proposed  dry-run indicates no idle connections older than safe threshold
-            connection count remains at or near max_connections after termination
-            idle-in-transaction sessions persist after idle connection cleanup
-            application continues to report connection errors immediately after remediation
+  before  connection count remains near max_connections after termination
+  after   dry-run indicates no idle connections older than safe threshold
+          connection count remains at or near max_connections after termination
+          idle-in-transaction sessions persist after idle connection cleanup
+          application continues to report connection errors immediately after remediation
 
 3 field(s) changed.
 
@@ -869,9 +890,11 @@ To activate:  faulttest vault activate pb_40729257 --gateway http://gateway:8080
 To discard:   curl -X DELETE http://gateway:8080/api/v1/fleet/playbooks/pb_40729257 -H 'Authorization: Bearer <key>'
 ```
 
+The `To activate` / `To discard` hints only appear when the `after` version is not yet active (single-ID draft mode). In two-ID mode, both versions are already in the system, so no action hints are printed.
+
 Fields compared: `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`. The `guidance` field is the most important — it is the strategic intent the agent works from, so any wording change there has direct effect on agent behaviour. `escalation` changes are the second-most critical: added or removed conditions change when the agent hands off to a human.
 
-If a field is identical in current and proposed, it is not shown. "No differences" means the LLM reproduced the existing playbook exactly — the draft is safe to discard.
+If a field is identical in both versions, it is not shown. "No differences" means the two versions are identical.
 
 ### vault activate
 
