@@ -893,7 +893,60 @@ The `To activate` / `To discard` hints only appear when the `after` version is n
 
 Fields compared: `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`. The `guidance` field is the most important — it is the strategic intent the agent works from, so any wording change there has direct effect on agent behaviour. `escalation` changes are the second-most critical: added or removed conditions change when the agent hands off to a human.
 
+`execution_mode` and `approval_mode` are **operational fields** — they control how a playbook runs, not what it knows. The `from-trace` endpoint preserves these from the currently-active version when generating a draft, so they should normally be identical in both versions. If they appear in a diff it means they were changed via a manual edit or a direct API call, which warrants extra scrutiny.
+
 If a field is identical in both versions, it is not shown. "No differences" means the two versions are identical.
+
+#### Optional: LLM judge review (`--judge`)
+
+Add `--judge` to request an LLM assessment of whether the knowledge-field changes are an improvement before activating:
+
+```bash
+faulttest vault diff <draft-id> \
+  --judge \
+  --judge-vendor anthropic \
+  --judge-model claude-haiku-4-5-20251001 \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+After the field-by-field diff, the judge prints a structured assessment:
+
+```
+── LLM Judge Review ────────────────────────────────────────────────────────
+Verdict:            ✓  APPROVE
+Guidance quality:   Improved: adds a concrete dry-run threshold before terminating connections.
+Escalation safety:  Tighter: added idle-in-transaction persistence as an escalation condition.
+Reasoning:          The new version is more actionable and tightens the safety net for edge cases.
+Judge model:        claude-haiku-4-5-20251001
+```
+
+| Verdict | Icon | Meaning |
+|---------|------|---------|
+| `APPROVE` | ✓ | Change is clearly beneficial — safe to activate |
+| `NEEDS_REVIEW` | ? | Mixed or uncertain — human review recommended before activating |
+| `REJECT` | ✗ | Change introduces risk or is a regression |
+
+The judge evaluates **knowledge fields only** (`guidance`, `symptoms`, `escalation`, `name`, `description`). It does not score operational fields (`execution_mode`, `approval_mode`) — those are controlled by operators, not synthesised from traces. If an operational field changed anyway (e.g. via a direct API edit), the judge prints a warning banner above the verdict:
+
+```
+⚠  Operational field changes detected (should be preserved by from-trace):
+   • execution_mode: fleet → agent_approve
+
+Verdict:            ?  NEEDS_REVIEW
+...
+```
+
+**Judge flags:**
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--judge` | — | `false` | Enable LLM judge review |
+| `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge |
+| `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor (`anthropic`, `google`) |
+| `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge |
+
+The judge model does not need to match the agent model. A smaller, faster model (Haiku, Flash) is recommended — the rubric is simple and raw capability matters less than instruction following.
 
 ### vault activate
 
@@ -1006,10 +1059,20 @@ The gateway:
 3. Passes the tool call sequence and outcome to the planner LLM
 4. Synthesises a Playbook YAML draft with `name`, `description`, `problem_class`, `symptoms`, `guidance` and `escalation` fields
 5. If `series_id` is provided, overrides the LLM's `series_id` with the caller's value; same for `version`
-6. Auto-persists the draft as `source="generated"`, `is_active=false` (when auditd is configured)
-7. Returns `{"draft": "...", "source": "...", "playbook_id": "pb_..."}` — `playbook_id` is empty when persistence is unavailable
+6. **Operational field preservation**: if `series_id` is provided, fetches the currently-active version of the series and copies all operational fields onto the draft, overriding whatever the LLM emitted. Fields preserved: `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints`. Only knowledge fields (`name`, `description`, `guidance`, `symptoms`, `escalation`, `problem_class`) come from the LLM synthesis. This prevents the LLM from inadvertently changing routing or execution mode based on patterns it observed in the trace.
+7. Auto-persists the draft as `source="generated"`, `is_active=false` (when auditd is configured)
+8. Returns `{"draft": "...", "source": "...", "playbook_id": "pb_..."}` — `playbook_id` is empty when persistence is unavailable
 
 The synthesis prompt grounds the LLM in the actual sequence of tool calls made during the incident. This produces Playbooks that are specific to your environment's tool catalog and agent behavior rather than generic advice.
+
+**Knowledge vs. operational fields.** The distinction matters because the two categories have different owners:
+
+| Field category | Examples | Owner | Updated by `from-trace`? |
+|---------------|----------|-------|--------------------------|
+| Knowledge | `guidance`, `symptoms`, `escalation`, `name`, `description`, `problem_class` | LLM synthesis (from trace) | Yes |
+| Operational | `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints` | Human operator | No — always preserved from the active version |
+
+This means you can run `vault suggest-update` + `vault activate` without worrying that the LLM will silently change how the playbook executes or where it routes.
 
 ```bash
 # Direct call — useful for testing or building on top of from-trace

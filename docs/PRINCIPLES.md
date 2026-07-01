@@ -29,7 +29,7 @@ aiHelpDesk is OSS.
 ## 2. Tools, not prompts
 
 aiHelpDesk does not let the LLM compose and run free-form SQL statements,
-arbitrary shell commands, or ad-hoc `kubectl` invocations.
+arbitrary shell commands or ad-hoc `kubectl` invocations.
 
 Every action the system can take is a named, code-reviewed, pre-approved tool:
 `get_active_connections`, `describe_pod`, `cancel_query`, etc. The full list
@@ -38,7 +38,7 @@ Registry (`GET /api/v1/tools`). Nothing outside that list can execute.
 
 This is not a limitation — it is a deliberate design choice. A system that can
 run any SQL or any shell command cannot be audited meaningfully, cannot enforce
-blast-radius limits, cannot be tested for failure modes, and cannot earn the
+blast-radius limits, cannot be tested for failure modes and cannot earn the
 trust of the operators who have to explain its actions to their organization.
 Narrow tools with known inputs and known effects are the only foundation on
 which safe automation can be built.
@@ -50,11 +50,11 @@ and write/destructive operations (cancelling a query, terminating a session,
 restarting a deployment) are fundamentally different. aiHelpDesk treats them
 differently at every layer:
 
-- All mutation tools are classified explicitly: `read`, `write`, or `destructive`.
+- All mutation tools are classified explicitly: `read`, `write` or `destructive`.
 - Mutations require a two-step **review-and-confirm** workflow — the LLM proposes,
   a human confirms before execution.
 - Blast-radius limits are enforced in code, not by instruction: a policy can cap
-  the number of rows that can be affected, or the number of connections that can
+  the number of rows that can be affected or the number of connections that can
   be terminated, before execution is blocked — not after.
 - Every mutation tool has a mandatory fault-injection test scenario in the test
   suite. A tool is not considered production-ready without one.
@@ -73,7 +73,7 @@ recorded in a tamper-proof, hash-chained audit log. The hash chain means
 that any deletion or modification of a past record is detectable.
 
 The [audit trail](AUDIT.md) at aiHelpDesk is the foundation of everything else: policy enforcement,
-compliance reports, approval workflows, journey reconstruction, and human
+compliance reports, approval workflows, journey reconstruction and human
 oversight. An AI system that cannot account for its own actions cannot be
 trusted. aiHelpDesk starts from the assumption that the audit log must exist
 before anything else, not as an afterthought.
@@ -91,7 +91,7 @@ verification subsystem, which cross-references audit records against the LLM's
 stated reasoning.
 
 This separation is intentional. LLMs are capable of sophisticated multi-step
-reasoning, but they are also capable of hallucination, implicit assumption, and
+reasoning, but they are also capable of hallucination, implicit assumption and
 inconsistent behaviour across runs. The system is engineered to tolerate those
 failure modes rather than depend on the absence of them.
 
@@ -100,12 +100,12 @@ failure modes rather than depend on the absence of them.
 Each sub-agent (e.g. database, Kubernetes, incident) operates in its own context
 window. When the Orchestrator delegates a task, the details of that task are
 confined to the sub-agent's context. When the task completes, only the result
-flows back — the diagnostic details, intermediate steps, and tool outputs are
+flows back — the diagnostic details, intermediate steps and tool outputs are
 discarded from the Orchestrator's context.
 
 This is not only good engineering for context-window management; it is also a
 security boundary. A sub-agent that is only ever asked about Kubernetes does
-not need access to database credentials, and the Orchestrator's context does
+not need access to database credentials and the Orchestrator's context does
 not accumulate verbose low-level output that could distract the model or lead
 to unexpected cross-domain reasoning.
 
@@ -115,7 +115,7 @@ Sub-agents receive everything they need per request: connection strings,
 Kubernetes contexts, target server names. They store nothing between requests.
 This means multiple Orchestrators (for different teams or environments) can
 share the same sub-agent instances, sub-agents can be upgraded or replaced
-independently, and no per-agent configuration sprawl accumulates over time.
+independently and no per-agent configuration sprawl accumulates over time.
 
 The Orchestrator owns the infrastructure inventory. Sub-agents own their tool
 implementations. The audit daemon owns the persistent record. Responsibility
@@ -130,13 +130,13 @@ the decision itself, especially for write and destructive operations for
 production databases, rests with a human.
 
 The approval workflow, the review-and-confirm step, the fleet-runner plan
-review, and the dry-run mode are all expressions of this principle. The goal
+review and the dry-run mode are all expressions of this principle. The goal
 is not to remove humans from the loop; it is to give humans much better
 information when they are in the loop.
 
 This principle has a name: **[Informed Consent](INFORMED_CONSENT.md)**. Borrowed from medical
 ethics, it requires three things before any remediation executes: the operator must be
-*informed* of the diagnosis and proposed steps, must *consent* to the action, and must
+*informed* of the diagnosis and proposed steps, must *consent* to the action and must
 retain the *right to refuse* with the denial permanently recorded. The feedback flywheel
 (`vault accuracy`, `vault calibration`) is what makes the "informed" part verifiable rather
 than just claimed — it measures whether the diagnoses operators are shown are actually correct.
@@ -152,14 +152,14 @@ and what it returns.
 This applies equally to LLMs: the same Orchestrator and sub-agents can run on
 Anthropic Claude or Google Gemini, switched via environment variable. No
 business logic is coupled to a specific model provider. The same extensibility
-point means that a locally-hosted model (Ollama, vLLM, or any
+point means that a locally-hosted model (Ollama, vLLM or any
 OpenAI-compatible inference server) can be substituted for a cloud API,
 enabling fully air-gapped deployments. Adding a new model vendor is a single
 factory change; nothing else in the system needs to know.
 
-## 10. Probabilism is bounded, measured, and governed
+## 10. Probabilism is bounded, measured and governed
 
-The question is never "deterministic or probabilistic" — it is "which layer should reason adaptively, and where must hard guarantees be enforced?"
+The question is never "deterministic or probabilistic" — it is "which layer should reason adaptively and where must hard guarantees be enforced?"
 
 aiHelpDesk has three layers with different contracts:
 
@@ -169,7 +169,7 @@ aiHelpDesk has three layers with different contracts:
   Execution layer   → deterministic, exact, logged           (tool calls)
 ```
 
-The LLM never directly executes anything. It proposes a tool call — `terminate_connection(pid=1234)` — and the governance layer evaluates it against policy rules, blast-radius limits, and approval gates before anything touches your infrastructure. The execution is byte-for-byte deterministic. Determinism at the *reasoning* layer would be harmful: a static mapping of symptom → action is precisely what fails when the root cause of a familiar symptom has changed, or when the environment differs from when the rule was written.
+The LLM never directly executes anything. It proposes a tool call — `terminate_connection(pid=1234)` — and the governance layer evaluates it against policy rules, blast-radius limits and approval gates before anything touches your infrastructure. The execution is byte-for-byte deterministic. Determinism at the *reasoning* layer would be harmful: a static mapping of symptom → action is precisely what fails when the root cause of a familiar symptom has changed or when the environment differs from when the rule was written.
 
 The probabilism in the reasoning layer is not left unchecked:
 
@@ -179,7 +179,7 @@ The probabilism in the reasoning layer is not left unchecked:
 
 When exact step-by-step repeatability is non-negotiable, the fleet runner's explicit job definition format is available: exact tool, exact arguments, exact rollback steps — specified by a human and executed verbatim. The LLM selects *which* Playbook fits; the Playbook constrains what the planner may generate; the policy layer enforces hard limits. How much latitude the planner has is tunable, down to zero.
 
-This principle is the answer to "AI systems are probabilistic — can you trust this in production?" Traditional operations are already probabilistic; the difference is that aiHelpDesk's probabilism is visible, bounded, measured, and continuously improved.
+This principle is the answer to "AI systems are probabilistic — can you trust this in production?" Traditional operations are already probabilistic; the difference is that aiHelpDesk's probabilism is visible, bounded, measured and continuously improved.
 
 ## 11. Model-neutral by design
 
@@ -187,13 +187,15 @@ aiHelpDesk is explicitly designed to be agnostic to two things:
 - LLM model used by the agents and/or by [LLM-as-Judge](LLM_AS_JUDGE.md) 
 - Model's behavior across runs
 
-This is achievable because institutional knowledge lives in versioned, human-readable Playbooks, not in model weights, fine-tuned checkpoints or prompt preambles. The model's job is to follow structured instructions. Models are not expected to stay still. A vendor ships a new model version, model pricing shifts, a better option emerges, etc. aiHelpDesk is designed to rise above all of these changes. Playbooks, governance, the audit trail and tool implementations are unaffected.
+This is achievable because institutional knowledge lives in versioned, human-readable [Playbooks](PLAYBOOKS.md), not in model weights, fine-tuned checkpoints or prompt preambles. The model's job is to follow structured instructions. Models are not expected to stay still. A vendor ships a new model version, model pricing shifts, a better option emerges, etc. aiHelpDesk is designed to rise above all of these changes. Playbooks, [governance](AIGOVERNANCE.md), the [audit trail](AUDIT.md) and [tool implementations](TOOL_REGISTRY.md) are unaffected.
 
-This addresses a failure mode called *model swings*: the same model, the same fault, different confidence scores across runs. A model that diagnoses a WAL stale slot with 97% confidence on one run and 62% on another is operationally unreliable even if its average accuracy is high. The system tolerates that variance not by eliminating it (impossible) but by measuring it and gating on it.
+This addresses a failure mode called *model swings*: the same model, the same fault, different triage results and confidence scores across runs. A model that diagnoses a WAL stale slot with 97% confidence on one run and 62% on another is operationally unreliable even if its average accuracy is high. That's not acceptable.
 
-The mechanism is [*Triage Consistency Certification*](CONSISTENCY.md): inject a known fault repeatedly, measure accuracy and confidence spread, and require both to meet a threshold before a model is promoted. Replacing a model version becomes a measured afternoon command, not weeks of shadow-running and debate.
+aiHelpDesk is designed to deal with that variance not by eliminating it (impossible), but by measuring it and gating on it.
 
 *"The knowledge is yours, not the model's."*
+
+The mechanism to ensure this is called [*Triage Consistency Certification*](CONSISTENCY.md): inject a known fault repeatedly, measure accuracy and confidence spread and require both to meet a threshold before a model is promoted. Replacing a model version becomes a measured afternoon command, not weeks of shadow-running and debate.
 
 *"The LLM is just infrastructure. Commodity infrastructure that you evaluate, certify and replace on your schedule."*
 
