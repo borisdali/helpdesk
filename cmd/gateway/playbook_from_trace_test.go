@@ -460,6 +460,9 @@ func TestHandlePlaybookFromTrace_PinsSeriesAndVersion(t *testing.T) {
 	if gotDraft.Version != "1.4" {
 		t.Errorf("persisted version = %q, want 1.4", gotDraft.Version)
 	}
+	if gotDraft.OriginTrace != "tr_pin" {
+		t.Errorf("persisted origin_trace = %q, want tr_pin", gotDraft.OriginTrace)
+	}
 }
 
 func TestHandlePlaybookFromTrace_NoPinUsesGeneratedSeries(t *testing.T) {

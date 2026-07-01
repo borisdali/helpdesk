@@ -964,6 +964,8 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 		SeriesID string `json:"series_id"`
 		Versions []struct {
 			Version          string  `json:"version"`
+			PlaybookID       string  `json:"playbook_id"`
+			OriginTrace      string  `json:"origin_trace"`
 			IsActive         bool    `json:"is_active"`
 			TotalRuns        int     `json:"total_runs"`
 			Resolved         int     `json:"resolved"`
@@ -986,11 +988,20 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 	if resp.Versions[0].IsActive {
 		t.Error("v1.0 should not be active")
 	}
+	if resp.Versions[0].PlaybookID != pb10.PlaybookID {
+		t.Errorf("versions[0].playbook_id = %q, want %q", resp.Versions[0].PlaybookID, pb10.PlaybookID)
+	}
+	if resp.Versions[0].OriginTrace != "" {
+		t.Errorf("versions[0].origin_trace = %q, want empty (no from-trace origin)", resp.Versions[0].OriginTrace)
+	}
 	if resp.Versions[1].Version != "1.1" {
 		t.Errorf("versions[1].version = %q, want 1.1", resp.Versions[1].Version)
 	}
 	if !resp.Versions[1].IsActive {
 		t.Error("v1.1 should be active")
+	}
+	if resp.Versions[1].PlaybookID != pb11.PlaybookID {
+		t.Errorf("versions[1].playbook_id = %q, want %q", resp.Versions[1].PlaybookID, pb11.PlaybookID)
 	}
 	if resp.Versions[1].TotalRuns != 1 || resp.Versions[1].Resolved != 1 {
 		t.Errorf("v1.1: TotalRuns=%d Resolved=%d, want 1/1",

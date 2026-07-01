@@ -3175,7 +3175,7 @@ func vaultActive(args []string) {
 		os.Exit(1)
 	}
 
-	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=true&include_system=false"
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=true&include_system=true"
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -3353,6 +3353,13 @@ func vaultDiff(args []string) {
 		fmt.Fprintln(os.Stderr, "  Single ID: compares draft against the currently active version in its series.")
 		fmt.Fprintln(os.Stderr, "  Two IDs:   compares any two versions directly (use 'vault versions' to get IDs).")
 		os.Exit(1)
+	}
+	for _, arg := range fs.Args() {
+		if strings.HasPrefix(arg, "pbs_") {
+			fmt.Fprintf(os.Stderr, "Error: %q looks like a series ID, not a playbook ID.\n", arg)
+			fmt.Fprintf(os.Stderr, "  Run: faulttest vault versions %s --gateway ... to list playbook IDs.\n", arg)
+			os.Exit(1)
+		}
 	}
 
 	var before, after *diffPlaybook

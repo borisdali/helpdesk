@@ -618,6 +618,18 @@ func TestPlaybookRunStore_StatsByVersion(t *testing.T) {
 		t.Errorf("v1.1 AvgRecoverySecs = %.1f, want ~10", v11.AvgRecoverySecs)
 	}
 
+	// PlaybookID and OriginTrace must be propagated from the playbooks table.
+	if v10.PlaybookID != id10 {
+		t.Errorf("v1.0 PlaybookID = %q, want %q", v10.PlaybookID, id10)
+	}
+	if v11.PlaybookID != id11 {
+		t.Errorf("v1.1 PlaybookID = %q, want %q", v11.PlaybookID, id11)
+	}
+	// OriginTrace is empty for manually-created playbooks (no from-trace call).
+	if v10.OriginTrace != "" {
+		t.Errorf("v1.0 OriginTrace = %q, want empty (no origin trace set)", v10.OriginTrace)
+	}
+
 	// Empty series returns empty slice.
 	empty, err := runStore.StatsByVersion(ctx, "pbs_nonexistent")
 	if err != nil {
