@@ -519,6 +519,7 @@ func TestHandlePlaybookFromTrace_PreservesOperationalFieldsFromActive(t *testing
 		RequiresEvidence: []string{"connection refused"},
 		PermittedTools:   []string{"get_active_connections", "kill_idle_connections"},
 		TargetHints:      []string{"primary"},
+		PlaybookType:     "triage",
 	}
 
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -588,6 +589,9 @@ func TestHandlePlaybookFromTrace_PreservesOperationalFieldsFromActive(t *testing
 	}
 	if len(gotDraft.TargetHints) != 1 || gotDraft.TargetHints[0] != "primary" {
 		t.Errorf("TargetHints = %v, want [primary] (from active)", gotDraft.TargetHints)
+	}
+	if gotDraft.PlaybookType != "triage" {
+		t.Errorf("PlaybookType = %q, want triage (from active)", gotDraft.PlaybookType)
 	}
 }
 

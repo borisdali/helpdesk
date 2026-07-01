@@ -2150,6 +2150,22 @@ The complete incident trail — from triage chain-of-thought through gate reason
 
 The pair of [triage](../playbooks/templates/triage-template.yaml) and [remediation](../playbooks/templates/remediation-template.yaml) templates is a good starting point for creating a new Playbook.
 
+### `playbook_type` — required for protocol enforcement
+
+Every playbook must declare its type:
+
+```yaml
+playbook_type: triage       # read-only investigation, ends with FINDINGS + signal line
+# or
+playbook_type: remediation  # corrective actions gated on approval
+```
+
+The gateway uses this field to validate drafts produced by `vault suggest-update` before they can be activated. A draft with the wrong or missing `playbook_type` will generate protocol warnings in the `vault suggest-update` output. Playbooks without `playbook_type` (legacy or runbook-style) are not validated.
+
+`playbook_type` is an **operational field** — it is preserved from the active version when `from-trace` synthesises a new draft and is never overwritten by the LLM. If you want to change a playbook's type, do it explicitly via a manual edit before activating the new version.
+
+Both templates ship with `playbook_type` pre-filled to the correct value. Do not change it.
+
 ### Writing effective `description` fields
 
 The `description` is passed verbatim to the fleet planner as the job intent. Write it as a directive:

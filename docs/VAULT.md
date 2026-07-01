@@ -31,9 +31,11 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault drafts](#vault-drafts)
    - [vault diff](#vault-diff)
    - [vault activate](#vault-activate)
+   - [vault discard](#vault-discard)
    - [vault active](#vault-active)
    - [vault history](#vault-history)
 6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
+   - [Protocol validation](#protocol-validation)
 7. [Reviewing and Activating Drafts](#reviewing-and-activating-drafts)
 8. [Three Customer Workflows](#three-customer-workflows)
    - [1. Onboarding — linking your first Playbooks](#1-onboarding--linking-your-first-playbooks)
@@ -893,7 +895,7 @@ The `To activate` / `To discard` hints only appear when the `after` version is n
 
 Fields compared: `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`. The `guidance` field is the most important — it is the strategic intent the agent works from, so any wording change there has direct effect on agent behaviour. `escalation` changes are the second-most critical: added or removed conditions change when the agent hands off to a human.
 
-`execution_mode` and `approval_mode` are **operational fields** — they control how a playbook runs, not what it knows. The `from-trace` endpoint preserves these from the currently-active version when generating a draft, so they should normally be identical in both versions. If they appear in a diff it means they were changed via a manual edit or a direct API call, which warrants extra scrutiny.
+`execution_mode`, `approval_mode`, and `playbook_type` are **operational fields** — they control how a playbook runs and which protocol it declares, not what it knows. The `from-trace` endpoint preserves these from the currently-active version when generating a draft, so they should normally be identical in both versions. If they appear in a diff it means they were changed via a manual edit or a direct API call, which warrants extra scrutiny.
 
 If a field is identical in both versions, it is not shown. "No differences" means the two versions are identical.
 
@@ -966,6 +968,24 @@ faulttest vault active --gateway http://gateway:8080 --api-key <key>
 ```
 
 The `<draft-id>` is the `DRAFT ID` column from `vault drafts`. Once activated, the draft disappears from `vault drafts` (it is no longer inactive) and appears in `vault active` as the current live version.
+
+### vault discard
+
+```bash
+faulttest vault discard <draft-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Permanently deletes a draft that should not be activated — for example, a draft with protocol warnings that cannot be corrected, or a `suggest-update` output that was superseded by a better run. Calls `DELETE /api/v1/fleet/playbooks/{id}` on the gateway.
+
+```
+Discarded: pb_a9258113
+
+faulttest vault drafts --gateway http://gateway:8080
+```
+
+Use `vault drafts --purge-orphans` to remove all orphan drafts (`pbs_generated_*`) in bulk rather than discarding them one at a time.
 
 ### vault active
 
@@ -1057,11 +1077,12 @@ The gateway:
 1. Fetches tool execution events for `trace_id` from the `audit_events` table in auditd
 2. **Fallback**: if `audit_events` returns empty for a `plr_*` ID, fetches from `GET /v1/fleet/playbook-runs/{id}/steps` instead and reformats the step records as `tool_execution` events. This covers the common case where agents emit step events under approval-request trace IDs (`ar_*`) rather than the run ID.
 3. Passes the tool call sequence and outcome to the planner LLM
-4. Synthesises a Playbook YAML draft with `name`, `description`, `problem_class`, `symptoms`, `guidance` and `escalation` fields
+4. Synthesises a Playbook YAML draft with `name`, `description`, `playbook_type`, `problem_class`, `symptoms`, `guidance` and `escalation` fields
 5. If `series_id` is provided, overrides the LLM's `series_id` with the caller's value; same for `version`
-6. **Operational field preservation**: if `series_id` is provided, fetches the currently-active version of the series and copies all operational fields onto the draft, overriding whatever the LLM emitted. Fields preserved: `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints`. Only knowledge fields (`name`, `description`, `guidance`, `symptoms`, `escalation`, `problem_class`) come from the LLM synthesis. This prevents the LLM from inadvertently changing routing or execution mode based on patterns it observed in the trace.
-7. Auto-persists the draft as `source="generated"`, `is_active=false` (when auditd is configured)
-8. Returns `{"draft": "...", "source": "...", "playbook_id": "pb_..."}` — `playbook_id` is empty when persistence is unavailable
+6. **Operational field preservation**: if `series_id` is provided, fetches the currently-active version of the series and copies all operational fields onto the draft, overriding whatever the LLM emitted. Fields preserved: `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints`, `playbook_type`. Only knowledge fields (`name`, `description`, `guidance`, `symptoms`, `escalation`, `problem_class`) come from the LLM synthesis. This prevents the LLM from inadvertently changing routing or execution mode based on patterns it observed in the trace.
+7. **Protocol validation**: after field preservation, checks the draft against the structural rules declared by its `playbook_type`. Violations are returned as `warnings` in the response — the draft is still persisted but must be reviewed before activation. See [Protocol validation](#protocol-validation) below.
+8. Auto-persists the draft as `source="generated"`, `is_active=false` (when auditd is configured)
+9. Returns `{"draft": "...", "source": "...", "playbook_id": "pb_...", "warnings": [...]}` — `playbook_id` is empty when persistence is unavailable; `warnings` is omitted when the draft is clean
 
 The synthesis prompt grounds the LLM in the actual sequence of tool calls made during the incident. This produces Playbooks that are specific to your environment's tool catalog and agent behavior rather than generic advice.
 
@@ -1070,7 +1091,7 @@ The synthesis prompt grounds the LLM in the actual sequence of tool calls made d
 | Field category | Examples | Owner | Updated by `from-trace`? |
 |---------------|----------|-------|--------------------------|
 | Knowledge | `guidance`, `symptoms`, `escalation`, `name`, `description`, `problem_class` | LLM synthesis (from trace) | Yes |
-| Operational | `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints` | Human operator | No — always preserved from the active version |
+| Operational | `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints`, `playbook_type` | Human operator | No — always preserved from the active version |
 
 This means you can run `vault suggest-update` + `vault activate` without worrying that the LLM will silently change how the playbook executes or where it routes.
 
@@ -1086,6 +1107,51 @@ curl -X POST http://gateway:8080/api/v1/fleet/playbooks/from-trace \
     "version":   "1.4"
   }'
 ```
+
+### Protocol validation
+
+Every draft that declares a `playbook_type` is checked against a set of structural invariants before the response is returned. Validation is **non-blocking** — the draft is persisted regardless, but `vault suggest-update` prints a warning section and the raw API response includes a `warnings` array.
+
+The `playbook_type` field is the machine-readable declaration of which protocol a playbook follows. It is set in the playbook YAML (both the templates and all system playbooks ship with it) and is always preserved from the active version when `suggest-update` synthesises a new draft.
+
+| `playbook_type` | Value |
+|----------------|-------|
+| `triage` | Read-only investigation; ends with HYPOTHESIS/FINDINGS/signal line |
+| `remediation` | Corrective actions; gated on operator approval at each write step |
+| *(empty)* | Legacy or runbook-style; no protocol validation applied |
+
+**Triage checks** (`playbook_type: triage`):
+
+| Check | What it catches |
+|-------|-----------------|
+| `name`, `series_id`, `description`, `guidance` non-empty | LLM that produces a skeleton with placeholder fields |
+| `symptoms` ≥ 1 entry | Missing trigger conditions |
+| `escalation` ≥ 1 entry | Missing guardrails |
+| `execution_mode == "agent"` | LLM inadvertently writing `agent_approve` or `fleet` |
+| `guidance` contains `FINDINGS:` | Structured findings line missing — gate cannot parse the outcome |
+| `guidance` contains `TRANSITION_TO:` or `ESCALATE_TO:` | Signal line missing — the informed gate will stall |
+
+**Remediation checks** (`playbook_type: remediation`):
+
+| Check | What it catches |
+|-------|-----------------|
+| `name`, `series_id`, `description`, `guidance` non-empty | Skeleton with placeholder fields |
+| `symptoms` ≥ 1 entry | Missing trigger conditions |
+| `escalation` ≥ 1 entry | Missing safety guardrails |
+| `execution_mode == "agent_approve"` | LLM inadvertently writing `agent` (no approval gates) |
+| `guidance` does NOT contain `TRANSITION_TO:` or `ESCALATE_TO:` | Routing signals that belong only in triage playbooks |
+
+When `vault suggest-update` detects warnings, it prints them before the activation hint:
+
+```
+⚠  Protocol warnings — review before activating:
+   • guidance: missing FINDINGS: line — triage playbooks must emit structured findings
+   • guidance: missing signal line — must end with TRANSITION_TO: <series_id> or ESCALATE_TO: <target|none>
+
+Proposed draft saved as: pb_c7d3e1f2 (inactive, source=generated)
+```
+
+A draft with protocol warnings should not be activated until the guidance is corrected. The most common cause is the LLM synthesising a guidance section without the "Required output" block — this is handled automatically by the trailer preservation step (see operational field preservation above), but can still occur if the active version's guidance had no structured output section.
 
 ---
 

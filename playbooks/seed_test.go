@@ -343,7 +343,7 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		t.Error("pbs_db_pitr_recovery: entry_point = true, want false")
 	}
 
-	// Triage playbooks: execution_mode=agent (converted from fleet to return text responses).
+	// Triage playbooks: execution_mode=agent, playbook_type=triage.
 	for _, sid := range []string{"pbs_vacuum_triage", "pbs_slow_query_triage", "pbs_connection_triage", "pbs_replication_lag"} {
 		pb := bySeriesID[sid]
 		if pb == nil {
@@ -352,6 +352,24 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		}
 		if pb.ExecutionMode != "agent" {
 			t.Errorf("%s: execution_mode = %q, want agent", sid, pb.ExecutionMode)
+		}
+		if pb.PlaybookType != "triage" {
+			t.Errorf("%s: playbook_type = %q, want triage", sid, pb.PlaybookType)
+		}
+	}
+
+	// Remediation playbooks: execution_mode=agent_approve, playbook_type=remediation.
+	for _, sid := range []string{"pbs_vacuum_remediate", "pbs_slow_query_remediate", "pbs_connection_remediate"} {
+		pb := bySeriesID[sid]
+		if pb == nil {
+			t.Errorf("%s not seeded", sid)
+			continue
+		}
+		if pb.ExecutionMode != "agent_approve" {
+			t.Errorf("%s: execution_mode = %q, want agent_approve", sid, pb.ExecutionMode)
+		}
+		if pb.PlaybookType != "remediation" {
+			t.Errorf("%s: playbook_type = %q, want remediation", sid, pb.PlaybookType)
 		}
 	}
 }
