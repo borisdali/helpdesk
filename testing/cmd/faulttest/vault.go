@@ -2665,76 +2665,29 @@ func formatDuration(secs float64) string {
 	return fmt.Sprintf("%ds", s)
 }
 
-// vaultVersions shows per-version run stats for a playbook series.
-// Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]
-func vaultVersions(args []string) {
-	fs := flag.NewFlagSet("vault versions", flag.ExitOnError)
-	cfg := loadConfig(fs, args)
-
-	if cfg.GatewayURL == "" {
-		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault versions")
-		os.Exit(1)
-	}
-	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]")
-		os.Exit(1)
-	}
-
-	arg := fs.Args()[0]
-	seriesID := arg
-
-	// Resolve fault ID → diagnosis series ID via catalog.
-	if !strings.HasPrefix(arg, "pbs_") {
-		cat, err := loadActiveCatalog(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
-			os.Exit(1)
-		}
-		var found bool
-		for _, f := range cat.Failures {
-			if f.ID == arg {
-				if f.DiagnosisPlaybookSeriesID == "" {
-					fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook.\n", arg)
-					os.Exit(1)
-				}
-				seriesID = f.DiagnosisPlaybookSeriesID
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
-			os.Exit(1)
-		}
-	}
-
-	versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching version stats: %v\n", err)
-		os.Exit(1)
-	}
-	if len(versions) == 0 {
-		fmt.Printf("No run history found for series %q.\n", seriesID)
-		return
-	}
-
-	fmt.Printf("Version stats for %s — %d version(s)\n\n", seriesID, len(versions))
-
+// printVersionTable prints a formatted per-version stats table for one series.
+// label is printed as a section header (e.g. "TRIAGE  pbs_connection_triage").
+func printVersionTable(label string, versions []versionStats) {
 	const (
 		colVer      = 10
 		colRuns     = 6
-		colRes      = 12
+		colSuccess  = 9
 		colSteps    = 10
 		colTime     = 10
 		colDiag     = 9
 		colRemed    = 9
 		colApproach = 9
 	)
+	sepWidth := colVer + 2 + colRuns + 2 + colSuccess + 2 + colSteps + 2 + colTime + 2 + colDiag + 2 + colRemed + 2 + colApproach
+
+	if label != "" {
+		fmt.Printf("%s  (%d version(s))\n", label, len(versions))
+	}
 	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colVer, "VERSION", colRuns, "RUNS", colRes, "TRANSITIONED",
+		colVer, "VERSION", colRuns, "RUNS", colSuccess, "SUCCESS%",
 		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG",
 		colRemed, "AVG REMED", "APPROACH OK")
-	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+colDiag+2+colRemed+2+colApproach))
+	fmt.Println(strings.Repeat("─", sepWidth))
 
 	for _, v := range versions {
 		ver := v.Version
@@ -2742,9 +2695,12 @@ func vaultVersions(args []string) {
 			ver += " *"
 		}
 
-		resolvedStr := "–"
+		successStr := "–"
 		if v.TotalRuns > 0 {
-			resolvedStr = fmt.Sprintf("%d%%", int(v.TransitionRate*100))
+			// SUCCESS% = resolved + transitioned: covers both "fixed it" (remediation)
+			// and "handed off successfully" (triage) in one metric.
+			rate := v.ResolutionRate + v.TransitionRate
+			successStr = fmt.Sprintf("%d%%", int(rate*100))
 		}
 
 		stepsStr := "–"
@@ -2772,7 +2728,7 @@ func vaultVersions(args []string) {
 		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colVer, ver,
 			colRuns, v.TotalRuns,
-			colRes, resolvedStr,
+			colSuccess, successStr,
 			colSteps, stepsStr,
 			colTime, timeStr,
 			colDiag, diagStr,
@@ -2788,8 +2744,104 @@ func vaultVersions(args []string) {
 		}
 	}
 	fmt.Println()
-	fmt.Println("* = currently active version")
-	fmt.Println("  id/from lines show playbook_id and the run that generated that version")
+}
+
+// vaultVersions shows per-version run stats for a playbook series or fault.
+//
+// When given a fault ID (e.g. db-max-connections), shows both the triage and
+// remediation series side-by-side so the full incident pipeline is visible.
+// When given a series ID (pbs_* prefix), shows just that series.
+func vaultVersions(args []string) {
+	fs := flag.NewFlagSet("vault versions", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault versions")
+		os.Exit(1)
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]")
+		os.Exit(1)
+	}
+
+	arg := fs.Args()[0]
+
+	// Series ID passed directly — single-series mode.
+	if strings.HasPrefix(arg, "pbs_") {
+		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching version stats: %v\n", err)
+			os.Exit(1)
+		}
+		if len(versions) == 0 {
+			fmt.Printf("No run history found for series %q.\n", arg)
+			return
+		}
+		fmt.Printf("Version stats for %s\n\n", arg)
+		printVersionTable("", versions)
+		fmt.Println("* = currently active   SUCCESS% = resolved + transitioned")
+		fmt.Println("id/from lines show playbook_id and the run that generated that version")
+		return
+	}
+
+	// Fault ID passed — resolve both triage and remediation series.
+	cat, err := loadActiveCatalog(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+		os.Exit(1)
+	}
+	var triageSeries, remediationSeries, faultName string
+	var faultFound bool
+	for _, f := range cat.Failures {
+		if f.ID == arg {
+			triageSeries = f.DiagnosisPlaybookSeriesID
+			remediationSeries = f.Remediation.PlaybookID
+			faultName = f.Name
+			faultFound = true
+			break
+		}
+	}
+	if !faultFound {
+		fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
+		os.Exit(1)
+	}
+
+	if triageSeries == "" && remediationSeries == "" {
+		fmt.Fprintf(os.Stderr, "Fault %q has no triage or remediation playbook series.\n", arg)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Version stats for fault: %s (%s)\n\n", arg, faultName)
+
+	hasAny := false
+	if triageSeries != "" {
+		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, triageSeries)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch triage stats for %s: %v\n", triageSeries, err)
+		} else if len(versions) > 0 {
+			printVersionTable("TRIAGE  "+triageSeries, versions)
+			hasAny = true
+		} else {
+			fmt.Printf("TRIAGE  %s — no run history yet\n\n", triageSeries)
+		}
+	}
+
+	if remediationSeries != "" {
+		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, remediationSeries)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch remediation stats for %s: %v\n", remediationSeries, err)
+		} else if len(versions) > 0 {
+			printVersionTable("REMEDIATION  "+remediationSeries, versions)
+			hasAny = true
+		} else {
+			fmt.Printf("REMEDIATION  %s — no run history yet\n\n", remediationSeries)
+		}
+	}
+
+	if hasAny {
+		fmt.Println("* = currently active   SUCCESS% = resolved + transitioned")
+		fmt.Println("id/from lines show playbook_id and the run that generated that version")
+	}
 }
 
 // ── vault calibration ──────────────────────────────────────────────────────

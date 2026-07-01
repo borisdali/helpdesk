@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2010,6 +2011,86 @@ func TestFetchPlaybookByID_Returns404AsError(t *testing.T) {
 	_, err := fetchPlaybookByID(srv.URL, "", "pb_missing")
 	if err == nil {
 		t.Error("expected error for 404, got nil")
+	}
+}
+
+// ── printVersionTable / SUCCESS% ──────────────────────────────────────────
+
+func TestPrintVersionTable_SuccessRateCombinesResolvedAndTransitioned(t *testing.T) {
+	// Capture stdout.
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printVersionTable("TRIAGE  pbs_test", []versionStats{
+		{Version: "1.0", IsActive: false, TotalRuns: 10, Resolved: 3, ResolutionRate: 0.3, Transitioned: 5, TransitionRate: 0.5},
+		{Version: "1.1", IsActive: true, TotalRuns: 4, Resolved: 2, ResolutionRate: 0.5, Transitioned: 1, TransitionRate: 0.25},
+	})
+
+	w.Close()
+	os.Stdout = old
+	var buf strings.Builder
+	io.Copy(&buf, r) //nolint:errcheck
+	out := buf.String()
+
+	// v1.0: resolved(30%) + transitioned(50%) = 80%
+	if !strings.Contains(out, "80%") {
+		t.Errorf("expected 80%% success rate for v1.0, output:\n%s", out)
+	}
+	// v1.1: resolved(50%) + transitioned(25%) = 75%
+	if !strings.Contains(out, "75%") {
+		t.Errorf("expected 75%% success rate for v1.1, output:\n%s", out)
+	}
+	// Column header renamed from TRANSITIONED to SUCCESS%
+	if !strings.Contains(out, "SUCCESS%") {
+		t.Errorf("expected SUCCESS%% column header, output:\n%s", out)
+	}
+	if strings.Contains(out, "TRANSITIONED") {
+		t.Errorf("old TRANSITIONED column header should not appear, output:\n%s", out)
+	}
+}
+
+func TestPrintVersionTable_ZeroRunsShowsDash(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printVersionTable("", []versionStats{
+		{Version: "1.0", IsActive: true, TotalRuns: 0},
+	})
+
+	w.Close()
+	os.Stdout = old
+	var buf strings.Builder
+	io.Copy(&buf, r) //nolint:errcheck
+	out := buf.String()
+
+	if !strings.Contains(out, "–") {
+		t.Errorf("expected dash for zero-run version, got:\n%s", out)
+	}
+}
+
+func TestPrintVersionTable_ActiveVersionMarked(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printVersionTable("", []versionStats{
+		{Version: "1.3", IsActive: false, TotalRuns: 9, Resolved: 3, ResolutionRate: 0.33},
+		{Version: "1.4", IsActive: true, TotalRuns: 1, Resolved: 1, ResolutionRate: 1.0},
+	})
+
+	w.Close()
+	os.Stdout = old
+	var buf strings.Builder
+	io.Copy(&buf, r) //nolint:errcheck
+	out := buf.String()
+
+	if !strings.Contains(out, "1.4 *") {
+		t.Errorf("expected active version marked with *, got:\n%s", out)
+	}
+	if strings.Contains(out, "1.3 *") {
+		t.Errorf("inactive version 1.3 should not be marked *, got:\n%s", out)
 	}
 }
 

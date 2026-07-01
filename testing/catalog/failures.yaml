@@ -31,9 +31,17 @@ failures:
       # connections free so the verify_sql and agent can still connect.
       # $FAULTTEST_CONN is injected by faulttest from the resolved --conn flag.
       script_inline: |
+        if ! command -v psql >/dev/null 2>&1; then
+          echo "ERROR: psql not found in PATH (required for shell_exec injection)" >&2
+          echo "  macOS: brew install libpq && brew link --force libpq" >&2
+          exit 1
+        fi
+        PSQL_ERR=$(psql "$FAULTTEST_CONN" -t -A -c "SHOW max_connections;" 2>&1 >/dev/null)
         MAX_CONN=$(psql "$FAULTTEST_CONN" -t -A -c "SHOW max_connections;" 2>/dev/null | tr -d ' \n')
         if ! printf '%s' "$MAX_CONN" | grep -qE '^[0-9]+$'; then
-          echo "ERROR: could not read max_connections" >&2; exit 1
+          echo "ERROR: could not read max_connections (conn: $FAULTTEST_CONN)" >&2
+          echo "  psql error: $PSQL_ERR" >&2
+          exit 1
         fi
         SU_RESERVED=$(psql "$FAULTTEST_CONN" -t -A -c "SHOW superuser_reserved_connections;" 2>/dev/null | tr -d ' \n')
         SU_RESERVED=${SU_RESERVED:-3}
