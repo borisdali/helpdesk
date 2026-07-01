@@ -156,6 +156,17 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 					pb.RequiresEvidence = active.RequiresEvidence
 					pb.PermittedTools   = active.PermittedTools
 					pb.TargetHints      = active.TargetHints
+					// Preserve the structured output protocol embedded in guidance.
+					// The "Required output" trailer (HYPOTHESIS_N / FINDINGS /
+					// TRANSITION_TO lines) is an operational instruction, not
+					// knowledge derivable from the trace. The LLM will write new
+					// investigation steps but has no basis to reconstruct this
+					// protocol — without it the agent won't emit the structured
+					// handoff signal and the gate will stall.
+					if idx := strings.Index(active.Guidance, "\nRequired output"); idx >= 0 {
+						trailer := strings.TrimRight(active.Guidance[idx:], "\n")
+						pb.Guidance = strings.TrimRight(pb.Guidance, "\n") + "\n" + trailer
+					}
 				} else {
 					slog.Warn("from-trace: could not fetch active version; operational fields from LLM will be used",
 						"series_id", req.SeriesID, "err", ferr)

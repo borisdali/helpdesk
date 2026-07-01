@@ -632,6 +632,118 @@ func TestHandlePlaybookFromTrace_OperationalFieldFetchFailureIsSilent(t *testing
 	}
 }
 
+// ── "Required output" trailer preservation ────────────────────────────────
+
+func TestHandlePlaybookFromTrace_PreservesRequiredOutputTrailer(t *testing.T) {
+	// When the active version's guidance contains a "Required output" section, it must
+	// be appended to the synthesized guidance — the LLM has no basis to reconstruct
+	// the structured output protocol (HYPOTHESIS_N / FINDINGS / TRANSITION_TO).
+	var gotDraft audit.Playbook
+
+	const activeGuidance = "Investigate the connection pool.\n\nRequired output\n\nWrite these exact lines:\nFINDINGS: ...\nTRANSITION_TO: ..."
+	activePlaybook := audit.Playbook{
+		PlaybookID:    "pb_trailer_active",
+		SeriesID:      "pbs_trailer_test",
+		Version:       "1.3",
+		IsActive:      true,
+		ExecutionMode: "agent_approve",
+		Guidance:      activeGuidance,
+	}
+
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events"):
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			json.NewEncoder(w).Encode(struct { //nolint:errcheck
+				Playbooks []audit.Playbook `json:"playbooks"`
+			}{Playbooks: []audit.Playbook{activePlaybook}})
+		case r.Method == http.MethodPost:
+			body, _ := readAll(r.Body)
+			json.Unmarshal(body, &gotDraft) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_trailer_draft"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer auditd.Close()
+
+	// LLM synthesizes guidance without the trailer.
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: Trailer Test\ndescription: desc\nguidance: Check the pool.\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{
+		"trace_id":  "tr_trailer",
+		"series_id": "pbs_trailer_test",
+		"version":   "1.4",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	const wantTrailer = "\nRequired output\n\nWrite these exact lines:\nFINDINGS: ...\nTRANSITION_TO: ..."
+	if !strings.Contains(gotDraft.Guidance, "Required output") {
+		t.Errorf("draft Guidance missing Required output trailer; got: %q", gotDraft.Guidance)
+	}
+	if !strings.HasSuffix(strings.TrimRight(gotDraft.Guidance, "\n"), strings.TrimRight(wantTrailer, "\n")) {
+		t.Errorf("draft Guidance does not end with active trailer; got: %q", gotDraft.Guidance)
+	}
+}
+
+func TestHandlePlaybookFromTrace_NoTrailerWhenActiveHasNone(t *testing.T) {
+	// When the active version's guidance has no "Required output" section, the
+	// synthesized guidance should not have one appended either.
+	var gotDraft audit.Playbook
+
+	activePlaybook := audit.Playbook{
+		PlaybookID:    "pb_notrailer_active",
+		SeriesID:      "pbs_notrailer_test",
+		Version:       "1.3",
+		IsActive:      true,
+		ExecutionMode: "agent_approve",
+		Guidance:      "Investigate the connection pool. No structured output section here.",
+	}
+
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events"):
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			json.NewEncoder(w).Encode(struct { //nolint:errcheck
+				Playbooks []audit.Playbook `json:"playbooks"`
+			}{Playbooks: []audit.Playbook{activePlaybook}})
+		case r.Method == http.MethodPost:
+			body, _ := readAll(r.Body)
+			json.Unmarshal(body, &gotDraft) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_notrailer_draft"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: No Trailer Test\ndescription: desc\nguidance: Check the pool.\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{
+		"trace_id":  "tr_notrailer",
+		"series_id": "pbs_notrailer_test",
+		"version":   "1.4",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(gotDraft.Guidance, "Required output") {
+		t.Errorf("draft Guidance unexpectedly contains Required output trailer; got: %q", gotDraft.Guidance)
+	}
+}
+
 // readAll is a helper for test to consume an io.Reader body.
 func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {
 	var buf bytes.Buffer

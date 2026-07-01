@@ -138,7 +138,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|suggest|suggest-update|drafts|activate|discard>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -190,6 +190,8 @@ func cmdVault(args []string) {
 		vaultDiff(args[1:])
 	case "history":
 		vaultHistory(args[1:])
+	case "discard":
+		vaultDiscard(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -1478,18 +1480,37 @@ func pickBestRunForSuggest(gatewayURL, apiKey, seriesID string) (string, error) 
 		return "", err
 	}
 	// First pass: prefer resolved runs — they have complete step data.
+	var bestRunID string
 	for _, r := range runs {
 		if r.Outcome == "resolved" {
-			return r.RunID, nil
+			bestRunID = r.RunID
+			break
 		}
 	}
 	// Second pass: fall back to transitioned if no resolved run exists.
-	for _, r := range runs {
-		if r.Outcome == "transitioned" {
-			return r.RunID, nil
+	if bestRunID == "" {
+		for _, r := range runs {
+			if r.Outcome == "transitioned" {
+				bestRunID = r.RunID
+				break
+			}
 		}
 	}
-	return "", fmt.Errorf("no resolved or transitioned runs found for series %s (check: faulttest vault incidents %s)", seriesID, seriesID)
+	if bestRunID == "" {
+		return "", fmt.Errorf("no resolved or transitioned runs found for series %s (check: faulttest vault incidents %s)", seriesID, seriesID)
+	}
+	// Fleet-mode playbook runs log tool execution events under the faulttest
+	// audit trace (e.g. "faulttest-{hash}-{fault-id}"), not the plr_* run ID.
+	// Resolve via the incident's triage journey so from-trace receives the
+	// trace that actually has audit_events entries.
+	if n, ferr := fetchIncidentNarrative(gatewayURL, apiKey, bestRunID); ferr == nil {
+		for _, j := range n.Journeys {
+			if j.Phase == "triage" && j.TraceID != "" {
+				return j.TraceID, nil
+			}
+		}
+	}
+	return bestRunID, nil
 }
 
 // fetchFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
@@ -3905,6 +3926,50 @@ func vaultDrafts(args []string) {
 	fmt.Printf("\nTo activate a draft:\n")
 	fmt.Printf("  faulttest vault activate <DRAFT_ID> --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
 }
+
+// ── vault discard ─────────────────────────────────────────────────────────
+
+func vaultDiscard(args []string) {
+	fs := flag.NewFlagSet("vault discard", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault discard <draft-id> [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Run 'faulttest vault drafts' to list pending draft IDs.")
+		os.Exit(1)
+	}
+	draftID := fs.Arg(0)
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + draftID
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Discarded: %s\n", draftID)
+	fmt.Printf("\nfaulttest vault drafts --gateway %s\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
+// ── vault calibration ─────────────────────────────────────────────────────
 
 // vaultCalibration shows confidence-band calibration: how well diagnosis_score
 // predicts operator-confirmed correctness.

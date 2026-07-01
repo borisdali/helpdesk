@@ -1912,6 +1912,119 @@ func TestPickBestRunForSuggest_NetworkError(t *testing.T) {
 	}
 }
 
+// makeRunsAndIncidentServer serves runs on /api/v1/fleet/playbook-runs and
+// an incident response on /api/v1/incidents/{id}. The incident response may
+// include journeys so tests can verify trace-ID resolution.
+func makeRunsAndIncidentServer(t *testing.T, runs []map[string]any, incidentByID map[string]map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/api/v1/incidents/") {
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			if incident, ok := incidentByID[id]; ok {
+				json.NewEncoder(w).Encode(incident) //nolint:errcheck
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+	}))
+}
+
+func TestPickBestRunForSuggest_ResolvesTriageJourneyTrace(t *testing.T) {
+	// When the incident has a triage journey, pickBestRunForSuggest should
+	// return the journey trace_id instead of the plr_* run ID so that
+	// from-trace can find audit_events (which are keyed to the journey trace).
+	runs := []map[string]any{
+		{"run_id": "plr_abc123", "outcome": "resolved"},
+	}
+	incidents := map[string]map[string]any{
+		"plr_abc123": {
+			"incident_id": "plr_abc123",
+			"journeys": []map[string]any{
+				{"phase": "triage", "trace_id": "faulttest-abc123-db-max-connections"},
+				{"phase": "remediation", "trace_id": "faulttest-abc123-db-max-connections-remed"},
+			},
+		},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, incidents)
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "faulttest-abc123-db-max-connections" {
+		t.Errorf("got %q, want faulttest-abc123-db-max-connections (triage journey trace)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_FallsBackToPLRWhenNoJourneys(t *testing.T) {
+	// When the incident has no journeys (e.g. older run), return the PLR ID.
+	runs := []map[string]any{
+		{"run_id": "plr_nojourneys", "outcome": "resolved"},
+	}
+	incidents := map[string]map[string]any{
+		"plr_nojourneys": {
+			"incident_id": "plr_nojourneys",
+			"journeys":    []map[string]any{},
+		},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, incidents)
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_nojourneys" {
+		t.Errorf("got %q, want plr_nojourneys (PLR fallback when no triage journey)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_FallsBackToPLRWhenIncidentFetchFails(t *testing.T) {
+	// When the incident endpoint returns 404, return the PLR ID rather than erroring.
+	runs := []map[string]any{
+		{"run_id": "plr_old", "outcome": "resolved"},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, map[string]map[string]any{}) // no incident entries → 404
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_old" {
+		t.Errorf("got %q, want plr_old (PLR fallback when incident returns 404)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_IgnoresRemediationJourney(t *testing.T) {
+	// When the incident has only a remediation journey (no triage), fall back to PLR.
+	runs := []map[string]any{
+		{"run_id": "plr_remonly", "outcome": "resolved"},
+	}
+	incidents := map[string]map[string]any{
+		"plr_remonly": {
+			"incident_id": "plr_remonly",
+			"journeys": []map[string]any{
+				{"phase": "remediation", "trace_id": "faulttest-remonly-remed"},
+			},
+		},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, incidents)
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_remonly" {
+		t.Errorf("got %q, want plr_remonly (no triage journey → PLR fallback)", got)
+	}
+}
+
 // ── compareVersions ────────────────────────────────────────────────────────
 
 func TestCompareVersions(t *testing.T) {
