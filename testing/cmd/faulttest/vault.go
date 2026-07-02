@@ -526,7 +526,9 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 func vaultList(args []string) {
 	fs := flag.NewFlagSet("vault list", flag.ExitOnError)
 	var target string
+	var short bool
 	fs.StringVar(&target, "target", "", "Filter last-run history by target (agent-conn alias or hostname)")
+	fs.BoolVar(&short, "short", false, "Compact view: suppress per-version sub-rows")
 	cfg := loadConfig(fs, args)
 
 	cat, err := loadActiveCatalog(cfg)
@@ -699,19 +701,29 @@ func vaultList(args []string) {
 
 		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, colStable, stableCol, incidentCol)
 
-		// Per-version learning signal: show the two newest version sub-rows when
-		// the series has 2+ versions so the before/after comparison is visible.
-		// A single-version fault prints only a pointer — avoids duplicating data
-		// already on the main row while still signalling that vault data exists.
-		if playbookID != "" && cfg.GatewayURL != "" {
-			if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, playbookID); err == nil && len(versions) >= 1 {
+		// Per-version learning signal: prefer the diagnosis (triage) series for
+		// version sub-rows — that's where suggest-update improvements land.
+		// Suppressed when --short is set for a compact single-line-per-fault view.
+		if short {
+			continue
+		}
+		// Fall back to the remediation series when no diagnosis series is set.
+		// Show the two newest versions so the before/after comparison is visible.
+		// A single-version series prints only a pointer to avoid duplicating the
+		// main row's data while still signalling that vault history exists.
+		versionSeriesID := f.DiagnosisPlaybookSeriesID
+		if versionSeriesID == "" {
+			versionSeriesID = playbookID
+		}
+		if versionSeriesID != "" && cfg.GatewayURL != "" {
+			if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, versionSeriesID); err == nil && len(versions) >= 1 {
 				// API returns oldest-first; reverse so active (newest) is first.
 				for i, j := 0, len(versions)-1; i < j; i, j = i+1, j-1 {
 					versions[i], versions[j] = versions[j], versions[i]
 				}
 				if len(versions) == 1 {
 					// One version: just a pointer so the operator knows data exists.
-					fmt.Printf("    → vault versions %s\n", playbookID)
+					fmt.Printf("    → vault versions %s\n", versionSeriesID)
 				} else {
 					// Two or more: show at most 2 (the comparison that matters).
 					show := versions
@@ -739,7 +751,7 @@ func vaultList(args []string) {
 							vs.Version, active, vs.TotalRuns, vs.ResolutionRate*100, effStr, fbStr)
 					}
 					if len(versions) > 2 {
-						fmt.Printf("    → vault versions %s\n", playbookID)
+						fmt.Printf("    → vault versions %s\n", versionSeriesID)
 					}
 				}
 			}
