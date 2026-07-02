@@ -17,7 +17,7 @@ jobs:
       - name: Clone adk-go
         run: |
           mkdir -p ../ADK/github
-          git clone --depth=1 https://github.com/google/adk-go ../ADK/github/adk-go
+          git clone --depth=1 --branch v0.6.0 https://github.com/google/adk-go ../ADK/github/adk-go
 
       - name: Set up Go
         uses: actions/setup-go@v5
