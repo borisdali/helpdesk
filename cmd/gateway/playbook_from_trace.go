@@ -43,6 +43,7 @@ type PlaybookFromTraceResponse struct {
 	Warnings   []string `json:"warnings,omitempty"`     // protocol violations detected in the draft
 }
 
+// fromTracePromptTemplate is used for cold synthesis when no active playbook exists.
 const fromTracePromptTemplate = `You are a playbook authoring assistant for an AI database operations platform.
 
 Given the following sequence of diagnostic tool calls and their outcomes from a %s incident,
@@ -59,6 +60,28 @@ The playbook should cover:
 
 Tool execution trace:
 %s
+
+Respond with YAML only — a single playbook document, no markdown fences, no other text.`
+
+// fromTraceUpdatePromptTemplate is used when updating an existing playbook (suggest-update).
+// It includes the active version so the model improves rather than replaces.
+const fromTraceUpdatePromptTemplate = `You are a playbook authoring assistant for an AI database operations platform.
+
+Given a sequence of diagnostic tool calls from a %s incident, produce an IMPROVED version of the existing playbook below.
+
+EXISTING PLAYBOOK (active version — improve this, do not start from scratch):
+%s
+
+TOOL EXECUTION TRACE (from this incident):
+%s
+
+Improvement rules — follow these exactly:
+1. PRESERVE all numeric thresholds in escalation and guidance. Do not relax, remove, or replace existing escalation criteria — only add new ones alongside them.
+2. ADD investigation steps, heuristics, or patterns clearly observed in the trace that are missing from the current guidance.
+3. IMPROVE name, description, and symptoms if the trace reveals a more precise framing.
+4. TREAT trace-specific observed values as illustrative examples, not universal thresholds. If you reference a specific measurement from the trace (e.g., "50%% dead ratio"), explicitly label it as an example: "e.g., in one observed case: X".
+5. Keep the "Required output" trailer (FINDINGS:/TRANSITION_TO:/ESCALATE_TO: lines) in guidance verbatim — it is an operational protocol, not knowledge content.
+6. Escalation must be at least as strict as the existing version; add criteria but do not relax existing ones.
 
 Respond with YAML only — a single playbook document, no markdown fences, no other text.`
 
@@ -107,7 +130,26 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	prompt := fmt.Sprintf(fromTracePromptTemplate, req.Outcome, traceJSON)
+	// When updating an existing series, fetch the active playbook before synthesis
+	// so the LLM can improve it rather than synthesize from scratch. This prevents
+	// the model from (a) embedding trace-specific values as universal thresholds and
+	// (b) replacing precise numeric escalation gates with narrative prose.
+	var activePlaybook *audit.Playbook
+	if req.SeriesID != "" && g.auditURL != "" {
+		if active, ferr := g.fetchPlaybookBySeriesID(r.Context(), req.SeriesID); ferr == nil {
+			activePlaybook = active
+		} else {
+			slog.Warn("from-trace: could not fetch active version for prompt context; falling back to cold synthesis",
+				"series_id", req.SeriesID, "err", ferr)
+		}
+	}
+
+	var prompt string
+	if activePlaybook != nil {
+		prompt = fmt.Sprintf(fromTraceUpdatePromptTemplate, req.Outcome, formatActivePlaybookYAML(activePlaybook), traceJSON)
+	} else {
+		prompt = fmt.Sprintf(fromTracePromptTemplate, req.Outcome, traceJSON)
+	}
 
 	draft, err := g.plannerLLM(r.Context(), prompt)
 	if err != nil {
@@ -148,7 +190,32 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 			// description, guidance, symptoms, escalation, problem_class) should
 			// change between versions — routing, execution mode, and tool permissions
 			// are controlled by operators, not synthesized from traces.
-			if req.SeriesID != "" {
+			if activePlaybook != nil {
+				pb.ExecutionMode    = activePlaybook.ExecutionMode
+				pb.ApprovalMode     = activePlaybook.ApprovalMode
+				pb.AgentName        = activePlaybook.AgentName
+				pb.TransitionsTo    = activePlaybook.TransitionsTo
+				pb.EscalatesTo      = activePlaybook.EscalatesTo
+				pb.EntryPoint       = activePlaybook.EntryPoint
+				pb.RequiresEvidence = activePlaybook.RequiresEvidence
+				pb.PermittedTools   = activePlaybook.PermittedTools
+				pb.TargetHints      = activePlaybook.TargetHints
+				pb.PlaybookType     = activePlaybook.PlaybookType
+				// Preserve the structured output protocol embedded in guidance.
+				// The "Required output" trailer (HYPOTHESIS_N / FINDINGS /
+				// TRANSITION_TO lines) is an operational instruction, not
+				// knowledge derivable from the trace. When using the update
+				// prompt the LLM is instructed to keep it verbatim, so only
+				// append if the LLM omitted it (cold synthesis path).
+				if idx := strings.Index(activePlaybook.Guidance, "\nRequired output"); idx >= 0 {
+					trailer := strings.TrimRight(activePlaybook.Guidance[idx:], "\n")
+					if !strings.Contains(pb.Guidance, "Required output") {
+						pb.Guidance = strings.TrimRight(pb.Guidance, "\n") + "\n" + trailer
+					}
+				}
+			} else if req.SeriesID != "" {
+				// Active playbook fetch failed earlier (logged above); try once more
+				// for operational field preservation so the draft is still usable.
 				if active, ferr := g.fetchPlaybookBySeriesID(r.Context(), req.SeriesID); ferr == nil {
 					pb.ExecutionMode    = active.ExecutionMode
 					pb.ApprovalMode     = active.ApprovalMode
@@ -160,20 +227,12 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 					pb.PermittedTools   = active.PermittedTools
 					pb.TargetHints      = active.TargetHints
 					pb.PlaybookType     = active.PlaybookType
-					// Preserve the structured output protocol embedded in guidance.
-					// The "Required output" trailer (HYPOTHESIS_N / FINDINGS /
-					// TRANSITION_TO lines) is an operational instruction, not
-					// knowledge derivable from the trace. The LLM will write new
-					// investigation steps but has no basis to reconstruct this
-					// protocol — without it the agent won't emit the structured
-					// handoff signal and the gate will stall.
 					if idx := strings.Index(active.Guidance, "\nRequired output"); idx >= 0 {
 						trailer := strings.TrimRight(active.Guidance[idx:], "\n")
-						pb.Guidance = strings.TrimRight(pb.Guidance, "\n") + "\n" + trailer
+						if !strings.Contains(pb.Guidance, "Required output") {
+							pb.Guidance = strings.TrimRight(pb.Guidance, "\n") + "\n" + trailer
+						}
 					}
-				} else {
-					slog.Warn("from-trace: could not fetch active version; operational fields from LLM will be used",
-						"series_id", req.SeriesID, "err", ferr)
 				}
 			}
 			if pb.SeriesID == "" {
@@ -515,4 +574,33 @@ func validatePlaybookProtocol(pb audit.Playbook) []string {
 	}
 
 	return warns
+}
+
+// formatActivePlaybookYAML renders the knowledge fields of an active playbook as
+// YAML text for inclusion in the update synthesis prompt. Only the fields the LLM
+// is expected to improve are included — operational fields (execution_mode, tools,
+// routing) are preserved separately and must not be re-synthesized.
+func formatActivePlaybookYAML(pb *audit.Playbook) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("name: %s\n", pb.Name))
+	sb.WriteString(fmt.Sprintf("description: |\n  %s\n",
+		strings.ReplaceAll(strings.TrimRight(pb.Description, "\n"), "\n", "\n  ")))
+	if pb.ProblemClass != "" {
+		sb.WriteString(fmt.Sprintf("problem_class: %s\n", pb.ProblemClass))
+	}
+	if len(pb.Symptoms) > 0 {
+		sb.WriteString("symptoms:\n")
+		for _, s := range pb.Symptoms {
+			sb.WriteString(fmt.Sprintf("  - %s\n", s))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("guidance: |\n  %s\n",
+		strings.ReplaceAll(strings.TrimRight(pb.Guidance, "\n"), "\n", "\n  ")))
+	if len(pb.Escalation) > 0 {
+		sb.WriteString("escalation:\n")
+		for _, e := range pb.Escalation {
+			sb.WriteString(fmt.Sprintf("  - %s\n", e))
+		}
+	}
+	return sb.String()
 }
