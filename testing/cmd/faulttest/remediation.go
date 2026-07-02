@@ -196,10 +196,11 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 // approval loop when the run returns pending_approval. Returns the remediation
 // run_id so the caller can fetch steps for the remediation judge.
 func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) (string, error) {
-	// Bridge the local trace-ID slot into faultlib's slot so that RunPlaybook
-	// and ProceedStep set X-Trace-ID on gateway requests.
+	// Give the remediation run a distinct faulttest-* trace so it stays
+	// recognisable as injected (not a real tr_* incident) while remaining a
+	// separate journey from the triage trace (WHY vs WHAT).
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
-		ctx = faultlib.WithFaultTraceID(ctx, id)
+		ctx = faultlib.WithFaultTraceID(ctx, id+"-remed")
 	}
 	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID)
 	if err != nil {
@@ -309,6 +310,13 @@ func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
 // and confidence warning, prompts the operator to approve or deny, and if approved
 // asks which approval mode to use for the remediation playbook.
 func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunResponse) error {
+	// Bridge the faulttest trace ID into faultlib's slot with a -remed suffix so
+	// the gateway-triggered remediation run gets a faulttest-*-remed trace rather
+	// than a gateway-generated tr_* one.
+	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
+		ctx = faultlib.WithFaultTraceID(ctx, id+"-remed")
+	}
+
 	const width = 64
 	sep := strings.Repeat("═", width)
 
@@ -894,12 +902,20 @@ func (r *Remediator) submitFeedback(ctx context.Context, triageRunID, remRunID s
 			v := true
 			fmt.Print("    Remediation approach notes (optional): ")
 			remNotes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(remNotes), "")
+			notes := strings.TrimSpace(remNotes)
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, notes, "")
+			if remRunID != "" {
+				r.postFeedback(ctx, remRunID, "remediation", "post_incident", &v, notes, "")
+			}
 		case "n", "no":
 			v := false
 			fmt.Print("    Notes on remediation approach (optional): ")
-			notes, _ := reader.ReadString('\n')
-			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, strings.TrimSpace(notes), "")
+			notesInput, _ := reader.ReadString('\n')
+			notes := strings.TrimSpace(notesInput)
+			r.postFeedback(ctx, triageRunID, "remediation", "post_incident", &v, notes, "")
+			if remRunID != "" {
+				r.postFeedback(ctx, remRunID, "remediation", "post_incident", &v, notes, "")
+			}
 		}
 	}
 }

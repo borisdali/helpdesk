@@ -23,9 +23,11 @@ used by the primary agent.
    - [Score weights](#52-score-weights)
    - [Catalog schema: narrative field](#53-catalog-schema-narrative-field)
    - [Report output](#54-report-output)
-6. [Benchmarking: scaffolded vs. unguided runs](#6-benchmarking-scaffolded-vs-unguided-runs)
-7. [Planned uses](#7-planned-uses)
-8. [Adding judge evaluation to a new component](#8-adding-judge-evaluation-to-a-new-component)
+6. [Current use: faulttest remediation scoring](#6-current-use-faulttest-remediation-scoring)
+7. [Current use: vault diff --judge (playbook version review)](#7-current-use-vault-diff---judge-playbook-version-review)
+8. [Benchmarking: scaffolded vs. unguided runs](#8-benchmarking-scaffolded-vs-unguided-runs)
+9. [Planned uses](#9-planned-uses)
+10. [Adding judge evaluation to a new component](#10-adding-judge-evaluation-to-a-new-component)
 
 ---
 
@@ -246,7 +248,125 @@ The JSON report includes the judge fields on every result:
 
 ---
 
-## 6. Benchmarking: scaffolded vs. unguided runs
+## 6. Current use: faulttest remediation scoring
+
+The remediation judge (`JudgeRemediation` in `testing/faultlib/remediation_judge.go`) evaluates the quality of a remediation attempt — not just whether it succeeded, but whether the agent took the *right* steps in the *right* order with appropriate blast radius.
+
+Enabled with `--remediation-judge` alongside `--remediate`:
+
+```bash
+faulttest run \
+  --conn "host=staging-db ..." \
+  --remediate \
+  --remediation-judge \
+  --judge-vendor anthropic \
+  --judge-model claude-haiku-4-5-20251001 \
+  --gateway http://gateway:8080
+```
+
+### Remediation rubric
+
+The rubric scores the *approach*, not the outcome:
+
+| LLM score | Float | Meaning |
+|-----------|-------|---------|
+| 3 | 1.00 | Most targeted tool choice; correct sequence; no redundant steps |
+| 2 | 0.67 | Correct approach, but one unnecessary step or mild sequencing issue |
+| 1 | 0.33 | Eventually recovered, but with excessive blast radius or redundant calls |
+| 0 | 0.00 | Wrong tool choice, unnecessary side effects, or no meaningful steps |
+
+### What the judge sees
+
+The judge receives:
+- The fault name and description
+- The playbook guidance (if the playbook has a free-text guidance field)
+- The sequence of steps: `tool(args) → [status] result`
+- The recovery outcome (SUCCEEDED or FAILED) and elapsed time
+
+Connection-plumbing arguments (`host`, `port`, `dbname`, `user`, `password`) are stripped from the step list to keep the prompt focused on the diagnostic and remediation logic.
+
+### Report output
+
+```
+[PASS] db-idle-connection-pool (remediation) - remediation_score: 100%
+       Remediation: "Staged approach with dry-run was optimal; no unnecessary terminations."
+
+[PASS] db-max-connections (remediation) - remediation_score: 67%
+       Remediation: "Correct recovery but included a redundant check_connection call post-termination."
+```
+
+The remediation score is stored in the `run_evaluation` table via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation` and appears in `vault incidents` and `vault calibration` as `remediation_judge_score`.
+
+---
+
+## 7. Current use: vault diff --judge (playbook version review)
+
+`JudgePlaybookDiff` in `testing/faultlib/playbook_judge.go` evaluates whether a proposed playbook version is an improvement over the active one. It is invoked by `vault diff --judge` and produces a structured verdict.
+
+### What is judged
+
+The judge evaluates **knowledge fields only**: `name`, `description`, `guidance`, `symptoms`, `escalation`. It does not score operational fields (`execution_mode`, `approval_mode`, `agent_name`, routing) — those are controlled by operators and preserved automatically by the `from-trace` endpoint; the judge is not authoritative on infrastructure configuration.
+
+### Verdict format
+
+```
+── LLM Judge Review ────────────────────────────────────────────────────────
+Verdict:            ✓  APPROVE
+Guidance quality:   Improved: adds a concrete dry-run threshold before terminating connections.
+Escalation safety:  Tighter: added idle-in-transaction persistence as an escalation condition.
+Reasoning:          The new version is more actionable and tightens the safety net for edge cases.
+Judge model:        claude-haiku-4-5-20251001
+```
+
+| Verdict | Meaning |
+|---------|---------|
+| `APPROVE` | Change is clearly beneficial — safe to activate |
+| `NEEDS_REVIEW` | Mixed or uncertain — human review recommended |
+| `REJECT` | Change is a regression or introduces risk |
+
+### Operational drift warning
+
+If an operational field changed between versions (which should not happen when the draft was produced by `from-trace`, but can happen via direct API edits), the judge prints a banner above the verdict:
+
+```
+⚠  Operational field changes detected (should be preserved by from-trace):
+   • execution_mode: fleet → agent_approve
+```
+
+This is informational — the judge still runs and gives its verdict on the knowledge fields. The operator decides whether the operational change was intentional.
+
+### `PlaybookJudgeResult` struct
+
+```go
+type PlaybookJudgeResult struct {
+    Verdict          string   // "APPROVE" | "NEEDS_REVIEW" | "REJECT"
+    GuidanceQuality  string   // one-sentence assessment of guidance change
+    EscalationSafety string   // "Tighter", "Looser", or "Unchanged"
+    Reasoning        string   // overall one-sentence justification
+    OperationalDrift []string // echoed from the caller (e.g. "execution_mode: fleet → agent_approve")
+    Model            string
+    Skipped          bool
+}
+```
+
+Unlike the diagnosis and remediation judges, `PlaybookJudgeResult` does not use the 0–3 rubric — the outcome is a categorical verdict rather than a numeric score, because "is this playbook better?" is a qualitative question with no ground truth to measure against.
+
+### Enabling it
+
+```bash
+faulttest vault diff pb_be8b5667 pb_31575294 \
+  --judge \
+  --judge-vendor anthropic \
+  --judge-model claude-haiku-4-5-20251001 \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+See [vault diff](VAULT.md#vault-diff) for the full flag reference.
+
+---
+
+## 8. Benchmarking: scaffolded vs. unguided runs
 
 The LLM judge is the right scoring mechanism for A/B comparisons between
 aiHelpDesk's scaffolded playbook runs and unguided (Crystal Ball) runs — keyword
@@ -259,23 +379,21 @@ For the full benchmarking workflow, including Crystal Ball mode setup, the
 
 ---
 
-## 7. Planned uses
+## 9. Planned uses
 
 LLM-as-judge is being extended to other aiHelpDesk components. Each use case
-shares the same `TextCompleter` abstraction and 0–3 scoring rubric but provides
-a domain-specific prompt narrative.
+shares the same `TextCompleter` abstraction and provides a domain-specific prompt.
 
 | Component | What is judged | Where result lands |
 |-----------|---------------|-------------------|
 | **Delegation verification** | Does the agent's diagnostic claim follow from the tool outputs it collected? Replaces pattern matching with semantic evaluation. | `delegation_verification` audit event |
-| **Playbook authoring gate** | Is the playbook guidance actionable? Is the escalation condition specific enough? Does the `symptoms` section match the `problem_class`? | Import response (`confidence`, `warnings`) |
 | **Post-incident quality scoring** | After `create_incident_bundle`: was the root cause correctly identified, was the remediation appropriate, were there missed steps? | `post_incident_review` audit event |
 | **Fleet plan safety review** | Before a fleet job executes: does the plan match the operator's stated intent, and is the blast radius appropriate? | Plan approval / block gate |
 | **Production response monitoring** | Periodic background scoring of production agent responses for quality trend tracking. | Governance dashboard quality metric |
 
 ---
 
-## 8. Adding judge evaluation to a new component
+## 10. Adding judge evaluation to a new component
 
 The integration pattern is the same regardless of the component.
 

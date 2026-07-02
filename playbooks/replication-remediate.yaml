@@ -1,6 +1,7 @@
 series_id: pbs_replication_remediate
 name: Replication Lag — Resume WAL Replay
 version: "1.1"
+playbook_type: remediation
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent

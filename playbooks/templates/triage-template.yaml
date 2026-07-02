@@ -24,6 +24,11 @@ name: "REPLACE ME — Short Description Triage"
 # Start at "1.0". Use semver-style strings ("1.0", "1.1", "2.0").
 version: "1.0"
 
+# REQUIRED. Declares the structured-output protocol this playbook follows.
+# The gateway uses this to validate the draft before activation.
+# For triage playbooks this must always be "triage".
+playbook_type: triage
+
 # true  → selectable directly via the gateway UI / API / faulttest
 # false → only reachable by being chained from another playbook (rare for triage)
 entry_point: true

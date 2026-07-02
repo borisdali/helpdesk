@@ -1,6 +1,7 @@
 series_id: pbs_slow_query_remediate
 name: Slow Query / Lock Contention — Cancel or Terminate Blocking Session
 version: "1.0"
+playbook_type: remediation
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent

@@ -1,6 +1,7 @@
 series_id: pbs_bgwriter_remediate
 name: Checkpoint Warning — Reset bgwriter_lru_maxpages
 version: "1.4"
+playbook_type: remediation
 entry_point: true
 execution_mode: agent_approve
 agent_name: postgres_database_agent

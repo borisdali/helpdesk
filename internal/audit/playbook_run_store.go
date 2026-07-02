@@ -74,12 +74,18 @@ type PlaybookRunStats struct {
 	RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
 	RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
 	RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
+
+	// Efficiency metrics — populated by joining playbook_run_steps and completed_at.
+	AvgStepCount    float64 `json:"avg_step_count,omitempty"`    // mean steps per run; 0 when no step data
+	AvgRecoverySecs float64 `json:"avg_recovery_secs,omitempty"` // mean wall-clock seconds for completed runs
 }
 
 // PlaybookVersionStats summarises run history broken down by playbook version.
 // Each row represents one version of a series, ordered by version string.
 type PlaybookVersionStats struct {
-	SeriesID        string  `json:"series_id"`
+	SeriesID    string `json:"series_id"`
+	PlaybookID  string `json:"playbook_id"`  // ID of the playbook version (for vault diff)
+	OriginTrace string `json:"origin_trace"` // trace/run that generated this version; empty for manual/system
 	Version         string  `json:"version"`
 	IsActive        bool    `json:"is_active"`         // currently active version for this series
 	TotalRuns        int     `json:"total_runs"`
@@ -93,6 +99,10 @@ type PlaybookVersionStats struct {
 	DiagEvalCount       int     `json:"diag_eval_count"`       // number of runs with diagnosis scores
 	AvgRemediationScore float64 `json:"avg_remediation_score"` // average remediation_score; 0 when no remediation data
 	RemedEvalCount      int     `json:"remed_eval_count"`      // number of runs with non-zero remediation scores
+
+	// Human remediation feedback — approach appropriateness verdict from operators.
+	RemFeedbackCount int     `json:"rem_feedback_count"` // runs with remediation feedback
+	RemFeedbackRate  float64 `json:"rem_feedback_rate"`  // fraction rated appropriate; 0 when no feedback
 }
 
 // PlaybookRunStore persists playbook execution records.
@@ -265,6 +275,7 @@ func (s *PlaybookRunStore) Stats(ctx context.Context, seriesID string) (*Playboo
 			st.LastRunAt = lastRunAt.String
 		}
 	}
+	_ = s.augmentEfficiencyStats(ctx, map[string]*PlaybookRunStats{seriesID: st})
 	return st, nil
 }
 
@@ -317,7 +328,11 @@ func (s *PlaybookRunStore) StatsBatch(ctx context.Context, seriesIDs []string) (
 		}
 		result[st.SeriesID] = &st
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = s.augmentEfficiencyStats(ctx, result)
+	return result, nil
 }
 
 // GetByRunID returns a single PlaybookRun by its run_id.
@@ -485,6 +500,84 @@ func formatNullableTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05")
 }
 
+// augmentEfficiencyStats fills AvgStepCount and AvgRecoverySecs on a map of stats
+// by running a single row-scan query across all the given series IDs.
+// Errors are silently ignored — callers get zero values rather than a partial failure.
+func (s *PlaybookRunStore) augmentEfficiencyStats(ctx context.Context, stats map[string]*PlaybookRunStats) error {
+	if len(stats) == 0 {
+		return nil
+	}
+	seriesIDs := make([]string, 0, len(stats))
+	for id := range stats {
+		seriesIDs = append(seriesIDs, id)
+	}
+	placeholders := strings.Repeat("?,", len(seriesIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(seriesIDs))
+	for i, id := range seriesIDs {
+		args[i] = id
+	}
+
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, fmt.Sprintf(`
+		SELECT r.series_id, r.started_at, r.completed_at, COALESCE(sc.cnt, 0) AS step_count
+		FROM playbook_runs r
+		LEFT JOIN (
+		    SELECT run_id, COUNT(*) AS cnt FROM playbook_run_steps GROUP BY run_id
+		) sc ON sc.run_id = r.run_id
+		WHERE r.series_id IN (%s)
+	`, placeholders)), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type accum struct {
+		stepSum         float64
+		totalRuns       int
+		recoverySumSecs float64
+		recoveryCount   int
+	}
+	acc := make(map[string]*accum, len(stats))
+
+	for rows.Next() {
+		var seriesID, startedStr, completedStr string
+		var stepCount int
+		if err := rows.Scan(&seriesID, &startedStr, &completedStr, &stepCount); err != nil {
+			return err
+		}
+		a := acc[seriesID]
+		if a == nil {
+			a = &accum{}
+			acc[seriesID] = a
+		}
+		a.totalRuns++
+		a.stepSum += float64(stepCount)
+		if startedStr != "" && completedStr != "" {
+			started := parseFlexTime(startedStr)
+			completed := parseFlexTime(completedStr)
+			if !started.IsZero() && !completed.IsZero() && completed.After(started) {
+				a.recoverySumSecs += completed.Sub(started).Seconds()
+				a.recoveryCount++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for id, st := range stats {
+		a := acc[id]
+		if a == nil || a.totalRuns == 0 {
+			continue
+		}
+		st.AvgStepCount = a.stepSum / float64(a.totalRuns)
+		if a.recoveryCount > 0 {
+			st.AvgRecoverySecs = a.recoverySumSecs / float64(a.recoveryCount)
+		}
+	}
+	return nil
+}
+
 // StatsByVersion returns per-version run stats for a playbook series, ordered by version.
 // Step counts come from playbook_run_steps; evaluation scores come from run_evaluation.
 // Recovery time is computed in Go from started_at/completed_at strings.
@@ -493,6 +586,8 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		SELECT
 		    p.version,
 		    p.is_active,
+		    r.playbook_id,
+		    p.origin_trace,
 		    r.outcome,
 		    r.started_at,
 		    r.completed_at,
@@ -515,6 +610,8 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 
 	type versionAccum struct {
 		isActive        bool
+		playbookID      string
+		originTrace     string
 		totalRuns       int
 		resolved        int
 		transitioned    int
@@ -531,19 +628,19 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	var orderedVersions []string
 
 	for rows.Next() {
-		var version string
+		var version, playbookID, originTrace string
 		var isActiveInt int
 		var outcome, startedStr, completedStr string
 		var stepCount int
 		var diagScoreNull, remedScoreNull sql.NullFloat64
 
-		if err := rows.Scan(&version, &isActiveInt, &outcome, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
+		if err := rows.Scan(&version, &isActiveInt, &playbookID, &originTrace, &outcome, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
 			return nil, err
 		}
 
 		a, ok := acc[version]
 		if !ok {
-			a = &versionAccum{isActive: isActiveInt != 0}
+			a = &versionAccum{isActive: isActiveInt != 0, playbookID: playbookID, originTrace: originTrace}
 			acc[version] = a
 			orderedVersions = append(orderedVersions, version)
 		}
@@ -579,12 +676,15 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	}
 
 	out := make([]*PlaybookVersionStats, 0, len(orderedVersions))
+	versionIndex := map[string]int{} // version → index in out
 	for _, v := range orderedVersions {
 		a := acc[v]
 		st := &PlaybookVersionStats{
-			SeriesID:     seriesID,
-			Version:      v,
-			IsActive:     a.isActive,
+			SeriesID:    seriesID,
+			PlaybookID:  a.playbookID,
+			OriginTrace: a.originTrace,
+			Version:     v,
+			IsActive:    a.isActive,
 			TotalRuns:    a.totalRuns,
 			Resolved:     a.resolved,
 			Transitioned: a.transitioned,
@@ -605,7 +705,46 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		if a.remedEvalCount > 0 {
 			st.AvgRemediationScore = a.remedScoreSum / float64(a.remedEvalCount)
 		}
+		versionIndex[v] = len(out)
 		out = append(out, st)
 	}
+
+	// Secondary pass: per-version human remediation feedback (stored against the
+	// remediation run directly when the operator submitted post-incident feedback).
+	fbRows, fbErr := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+		SELECT p.version, f.verdict_correct
+		FROM run_feedback f
+		JOIN playbook_runs r ON r.run_id = f.run_id
+		JOIN playbooks p ON r.playbook_id = p.playbook_id
+		WHERE r.series_id = ? AND f.feedback_type = 'remediation'
+	`), seriesID)
+	if fbErr == nil {
+		defer fbRows.Close()
+		type fbAccum struct{ count, correct int }
+		fbAcc := map[string]*fbAccum{}
+		for fbRows.Next() {
+			var version string
+			var verdictNull sql.NullBool
+			if scanErr := fbRows.Scan(&version, &verdictNull); scanErr != nil {
+				break
+			}
+			a, ok := fbAcc[version]
+			if !ok {
+				a = &fbAccum{}
+				fbAcc[version] = a
+			}
+			a.count++
+			if verdictNull.Valid && verdictNull.Bool {
+				a.correct++
+			}
+		}
+		for ver, a := range fbAcc {
+			if idx, ok := versionIndex[ver]; ok && a.count > 0 {
+				out[idx].RemFeedbackCount = a.count
+				out[idx].RemFeedbackRate = float64(a.correct) / float64(a.count)
+			}
+		}
+	}
+
 	return out, nil
 }

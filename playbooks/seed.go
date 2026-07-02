@@ -30,6 +30,7 @@ type systemPlaybookYAML struct {
 	ExecutionMode    string   `yaml:"execution_mode"`
 	AgentName        string   `yaml:"agent_name"`
 	ApprovalMode     string   `yaml:"approval_mode"`
+	PlaybookType     string   `yaml:"playbook_type"`
 }
 
 // SeedSystemPlaybooks reads all embedded *.yaml files and inserts them into the
@@ -80,7 +81,9 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 
 		// Skip if this exact version already exists and is active.
 		// If it exists but is inactive (e.g. seeded before auto-activate logic),
-		// fall through to activate it.
+		// re-activate it — unless a human has already promoted a generated/imported
+		// version in this series, in which case we respect that choice and leave
+		// the series alone.
 		for _, pb := range existing {
 			if pb.Version == y.Version {
 				if pb.IsActive {
@@ -89,7 +92,22 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 					skipped++
 					goto nextFile
 				}
-				// Inactive system version — activate it now.
+				// System version is inactive. Only re-activate if nothing else is
+				// currently active in the series (a human may have promoted a newer
+				// generated version, which deactivated the system baseline).
+				hasActiveVersion := false
+				for _, other := range existing {
+					if other.IsActive {
+						hasActiveVersion = true
+						break
+					}
+				}
+				if hasActiveVersion {
+					slog.Debug("playbooks: system version inactive but series already has active version — skipping re-activation",
+						"series", y.SeriesID, "system_version", y.Version)
+					skipped++
+					goto nextFile
+				}
 				slog.Info("playbooks: activating previously-inactive system version",
 					"series", y.SeriesID, "version", y.Version)
 				if err := store.ActivateSystem(ctx, pb.PlaybookID, y.SeriesID); err != nil {
@@ -120,6 +138,7 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 				ExecutionMode:    y.ExecutionMode,
 				AgentName:        y.AgentName,
 				ApprovalMode:     y.ApprovalMode,
+				PlaybookType:     y.PlaybookType,
 				IsSystem:         true,
 				IsActive:         true,
 				Source:           "system",

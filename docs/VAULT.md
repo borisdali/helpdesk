@@ -1,10 +1,10 @@
 # aiHelpDesk Vault
 
-The Vault is aiHelpDesk's institutional memory for operational knowledge. It is where every [Playbook](PLAYBOOKS.md) lives, where every [Incident](INCIDENTS.md) trace lands, and where the library of known fault→remedy pairings grows. Automatically and with human approval at the gate.
+The Vault is aiHelpDesk's institutional memory for operational knowledge. It is where every [Playbook](PLAYBOOKS.md) lives, where every [Incident](INCIDENTS.md) trace lands and where the library of known fault→remedy pairings grows. Automatically and with human approval at the gate.
 
-A traditional runbook is a static procedure — a fixed sequence of steps written once and followed literally. An aiHelpDesk [Playbook](PLAYBOOKS.md) is fundamentally different: it encodes strategic **intent** and expert **knowledge** that the fleet planner uses to generate an execution plan dynamically, against the current state of your infrastructure and tool catalog. The same Playbook produces different steps when your database configuration differs, when new tools are available, or when the environment has changed. This is what "never a stale script" means in practice.
+A traditional runbook is a static procedure — a fixed sequence of steps written once and followed literally. An aiHelpDesk [Playbook](PLAYBOOKS.md) is fundamentally different: it encodes strategic **intent** and expert **knowledge** that the fleet planner uses to generate an execution plan dynamically, against the current state of your infrastructure and tool catalog. The same Playbook produces different steps when your database configuration differs, when new tools are available or when the environment has changed. This is what "never a stale script" means in practice.
 
-The Vault is the library where these Playbooks live. Tracked, versioned, and continuously improved as your infrastructure, applications that make use of it and agents evolve.
+The Vault is the library where these Playbooks live. Tracked, versioned and continuously improved as your infrastructure, applications that make use of it and agents evolve.
 
 ---
 
@@ -16,19 +16,28 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
    - [2. The incident agent (auto-suggest on resolution)](#2-the-incident-agent-auto-suggest-on-resolution)
    - [3. faulttest auto-suggest (on remediation pass)](#3-faulttest-auto-suggest-on-remediation-pass)
 3. [The Artifact Lifecycle](#the-artifact-lifecycle)
-4. [Vault Commands](#vault-commands)
+4. [Draft Review Flow](#draft-review-flow)
+5. [Vault Commands](#vault-commands)
    - [vault list](#vault-list)
    - [vault accuracy](#vault-accuracy)
    - [vault incidents](#vault-incidents)
+   - [vault journey](#vault-journey)
    - [vault status](#vault-status)
    - [vault drift](#vault-drift)
    - [vault versions](#vault-versions)
    - [vault calibration](#vault-calibration)
    - [vault suggest](#vault-suggest)
    - [vault suggest-update](#vault-suggest-update)
-5. [The `from-trace` Endpoint](#the-from-trace-endpoint)
-6. [Reviewing and Activating Drafts](#reviewing-and-activating-drafts)
-7. [Three Customer Workflows](#three-customer-workflows)
+   - [vault drafts](#vault-drafts)
+   - [vault diff](#vault-diff)
+   - [vault activate](#vault-activate)
+   - [vault discard](#vault-discard)
+   - [vault active](#vault-active)
+   - [vault history](#vault-history)
+6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
+   - [Protocol validation](#protocol-validation)
+7. [Reviewing and Activating Drafts](#reviewing-and-activating-drafts)
+8. [Three Customer Workflows](#three-customer-workflows)
    - [1. Onboarding — linking your first Playbooks](#1-onboarding--linking-your-first-playbooks)
    - [2. Playbook acceptance — review and approve auto-generated drafts](#2-playbook-acceptance--review-and-approve-auto-generated-drafts)
    - [3. Regression monitoring — catching drift before it becomes an incident](#3-regression-monitoring--catching-drift-before-it-becomes-an-incident)
@@ -38,7 +47,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned, and con
 
 ## The Operational SRE/DBA Flywheel
 
-The Vault is the engine of a feedback loop that tightens with every incident:
+The Vault is the engine of a feedback loop that tightens with every incident. As such, it is also a quiantifiable **learning signal** showing how per-version metrics (step count, recovery time, remediation appropriateness) **prove** that the system is improving, not just working: [VAULT_METRICS.md](VAULT_METRICS.md)
 
 ```
   ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -96,13 +105,13 @@ There are three paths by which operational knowledge enters the Vault:
 
 ### 1. System Playbooks (shipped)
 
-At aiHelpDesk Beta we ship 7 expert-authored system Playbooks that are seeded into auditd on startup. They cover the most common PostgreSQL triage scenarios out of the box — vacuum, slow queries, connection exhaustion, replication lag, database-down recovery, and PITR restore.
+At aiHelpDesk Beta we ship 7 expert-authored system Playbooks that are seeded into auditd on startup. They cover the most common PostgreSQL triage scenarios out of the box — vacuum, slow queries, connection exhaustion, replication lag, database-down recovery and PITR restore.
 
 These are read-only in the API (`PUT`/`DELETE` return 400) but can be cloned into a new custom version in the same series. See [PLAYBOOKS.md](PLAYBOOKS.md) for the full list and schema.
 
 ### 2. The incident agent (auto-suggest on resolution)
 
-When your aiHelpDesk incident agent calls `create_incident_bundle` with `outcome="resolved"` or `outcome="escalated"`, and `HELPDESK_GATEWAY_URL` is configured, a Playbook draft is **automatically synthesised** from the audit trace of that incident and saved to the Vault as an inactive draft.
+When your aiHelpDesk incident agent calls `create_incident_bundle` with `outcome="resolved"` or `outcome="escalated"` and `HELPDESK_GATEWAY_URL` is configured, a Playbook draft is **automatically synthesised** from the audit trace of that incident and saved to the Vault as an inactive draft.
 
 The agent signals resolution naturally:
 
@@ -144,7 +153,7 @@ The `generate_playbook_draft: true` field is preserved for backward compatibilit
 
 ### 3. faulttest auto-suggest (on remediation pass)
 
-When `faulttest run --remediate` succeeds for a fault — meaning the injected failure was reproduced, the Playbook was triggered, and the database recovered — faulttest automatically calls the Gateway's `from-trace` endpoint and prints the result:
+When `faulttest run --remediate` succeeds for a fault — meaning the injected failure was reproduced, the Playbook was triggered and the database recovered — faulttest automatically calls the Gateway's `from-trace` endpoint and prints the result:
 
 ```
 Remediation: RECOVERED in 4.2s (score: 100%)
@@ -189,6 +198,57 @@ GET /api/v1/fleet/playbooks?series_id=pbs_db_restart_triage
 
 ---
 
+## Draft Review Flow
+
+Three paths produce a draft. All three converge at the same review gate before anything goes live.
+
+```mermaid
+flowchart TD
+    A1["faulttest run --remediate\n(fault injected, agent recovers)"]
+    A2["vault suggest-update --series-id &lt;id&gt;\n(drift spotted, update proposed)"]
+    A3["Incident agent\ncreate_incident_bundle outcome=resolved"]
+
+    FT["POST /api/v1/fleet/playbooks/from-trace\n(gateway synthesises YAML from tool call trace)"]
+
+    D["Draft saved\nsource=generated · is_active=false\nseries_id pinned · version auto-incremented"]
+
+    DRAFTS["faulttest vault drafts\n(pending review queue)"]
+
+    DIFF["faulttest vault diff &lt;draft-id&gt;\n(field-by-field diff vs active version)"]
+
+    R{Operator reviews\nchanges}
+
+    ACT["faulttest vault activate &lt;draft-id&gt;"]
+    DEL["DELETE /api/v1/fleet/playbooks/&lt;id&gt;\n(discard)"]
+
+    ACTIVE["faulttest vault active\n(confirm live version)"]
+
+    RUN["faulttest run --remediate\n(re-run fault under new version)"]
+
+    VERS["faulttest vault versions &lt;series-id&gt;\nbefore/after comparison"]
+
+    A1 --> FT
+    A2 --> FT
+    A3 --> FT
+    FT --> D
+    D --> DRAFTS
+    DRAFTS --> DIFF
+    DIFF --> R
+    R -->|"looks good"| ACT
+    R -->|"not useful"| DEL
+    ACT --> ACTIVE
+    ACTIVE --> RUN
+    RUN --> VERS
+```
+
+**Key invariants:**
+- Activation is always a human step — no draft promotes itself.
+- `vault activate` atomically promotes the draft and deactivates the previous version in the series. Exactly one version per series is active at any time.
+- System playbooks (shipped with aiHelpDesk, `source=system`) follow a separate path through the seeder and never appear in `vault drafts`. They auto-activate on auditd startup when a new version ships.
+- `vault versions` only shows versions that have run data. A freshly activated v1.4 will not appear until at least one run completes under it.
+
+---
+
 ## Vault Commands
 
 `faulttest vault` provides the operational window into the Vault from the command line. Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores (`keyword_score`, `tool_score`, `diagnosis_score`, `overall_score`) are also written to the auditd `run_evaluation` table via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation`, keyed by the gateway's `plr_*` playbook run ID. The local JSON file acts as a cache; auditd is the durable store.
@@ -200,19 +260,24 @@ faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
                      [--target staging-db]
 ```
 
-Shows the full fault catalog alongside the linked Playbook, date of last test run, pass/fail status, consistency certification verdict, and diagnosis accuracy. When `--gateway` is provided, also verifies that referenced Playbook series IDs exist on the Gateway and fetches live stability certs and accuracy data.
+Shows the full fault catalog alongside the linked Playbook, date of last test run, pass/fail status, consistency certification verdict and diagnosis accuracy. When `--gateway` is provided, also verifies that referenced Playbook series IDs exist on the Gateway and fetches live stability certs and accuracy data.
 
 ```
-FAULT                          PLAYBOOK                   LAST TEST    STATUS  SCORE  STABLE       ACCURACY
------------------------------------------------------------------------------------------------------------------
-db-max-connections             pbs_db_conn_pooling        2026-06-20   PASS    95%    STABLE(5)    100% (4/4)
-db-lock-contention             pbs_lock_chain_triage      2026-06-20   PASS    91%    STABLE(5)    –
-db-idle-in-transaction         pbs_db_idle_txn            2026-06-15   PASS    88%    UNSTABLE(5)  –
-db-high-cache-miss             pbs_cache_miss_triage      (never)      -       –      —            –
-db-table-bloat                 pbs_vacuum_triage          2026-06-01   PASS    90%    STABLE(5) 21d –
-db-connection-refused          pbs_db_restart_triage      2026-04-15   PASS    82%    —            –
-db-pg-hba-corrupt              pbs_db_config_recovery     (never)      -       –      —            –
+FAULT                            PLATFORM   DIAG PLAYBOOK              REMED PLAYBOOK             LAST TEST              STABLE         INCIDENTS
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+db-high-cache-miss               any        pbs_cache_miss_triage      pbs_cache_miss_remediate   2026-06-28  PASS       STABLE(5)      3 runs  100% resolved  4.0 steps  8s recovery  last: 2026-06-28
+    v1.1 *  3r  100%  4.0 steps  8s recovery  100% approach OK
+    v1.0    5r   60%  6.2 steps  42s recovery   60% approach OK
+db-lock-contention               any        pbs_lock_chain_triage      pbs_lock_remediate         2026-06-20  PASS       STABLE(5)      5 runs  80% resolved  –  last: 2026-06-20
+db-max-connections               any        pbs_max_conn_triage        pbs_max_conn_remediate     2026-06-20  PASS       STABLE(5)      4 runs  100% resolved  100% accurate  last: 2026-06-20
+db-idle-in-transaction           any        pbs_db_idle_txn            (none)                     2026-06-15  PASS       UNSTABLE(5)    -
+db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_remediate   2026-04-15  PASS       —              2 runs  50% resolved  last: 2026-04-15
+db-pg-hba-corrupt                any        pbs_db_config_recovery     pbs_db_config_remediate    (never)     -          —              MISSING
 ```
+
+When a remediation playbook has two or more versions with run data, the per-version trend appears as indented rows below the fault. The `*` marks the currently active version. When more than two versions exist, a `→ vault versions <series>` pointer appears for the full history.
+
+The per-version breakdown is the primary learning signal: it shows whether step count and recovery time are improving across playbook versions and whether operators are rating the approach as appropriate. See [VAULT_METRICS.md](VAULT_METRICS.md) for a full explanation of these metrics and how to read the trend.
 
 **STATUS column:**
 
@@ -396,9 +461,120 @@ The `Score` line matches the `SCORE` column in `vault incidents <series-id>` —
 
 The `[auto_judge]` tag on a feedback line means the verdict was submitted automatically by the LLM judge (`feedback_source: "auto_judge"`), not by a human operator. Human-submitted feedback carries no tag. Both sources are counted equally in `vault accuracy` and `vault calibration`.
 
-The deep-dive assembles data from `GET /api/v1/incidents/{runID}` on the gateway, which joins triage, gate, remediation, eval scores, and all four feedback slots into a single timeline view.
+The deep-dive assembles data from `GET /api/v1/incidents/{runID}` on the gateway, which joins triage, gate, remediation, eval scores and all four feedback slots into a single timeline view.
+
+When the incident has an associated audit trail, the deep-dive shows a JOURNEYS section at the bottom listing the `trace_id`(s) for the triage and/or remediation phases:
+
+```
+── JOURNEYS ────────────────────────────────────────────────
+  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)
+
+  triage:                tr_9a4f2b1e
+                         reasoning chain, hypothesis building
+  remediation:           tr_c8d3e7f2
+                         tool calls, approvals, blast-radius decisions
+
+  → vault journey tr_9a4f2b1e
+```
+
+Use the displayed `trace_id` with `vault journey` to see the full tool-by-tool audit trail. See [vault journey](#vault-journey) below.
 
 See also the [Incidents page](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full description of this feature.
+
+### vault journey
+
+```bash
+# List recent journeys (default: last 24h, up to 20)
+faulttest vault journey \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Filter to incident-linked journeys only
+faulttest vault journey --incident \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Filter by category or outcome
+faulttest vault journey --category database --outcome resolved \
+  --since 7d --limit 50 \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Drill into a specific trace
+faulttest vault journey tr_9a4f2b1e \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+`vault journey` is the audit-trail complement to `vault incidents`. Where `vault incidents` shows WHY the agent reached a conclusion (the incident narrative — hypotheses, confidence, evidence), `vault journey` shows WHAT the agent actually did (tool calls, delegations, policy decisions, blast-radius approvals).
+
+**List mode** (no positional argument) shows a table of recent journeys:
+
+```
+Recent journeys — 8 entries (last 24h)
+
+TRACE ID              STARTED           DUR     AGENT         OUTCOME       INCIDENT        TOOLS
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+tr_9a4f2b1e           2026-06-27 14:30   4.2s   database      resolved      plr_a3f7c1b2    get_session_info, kill_idle...
+tr_c8d3e7f2           2026-06-27 14:33  12.1s   database      resolved      plr_a3f7c1b2    get_blocking_queries, termi...
+tr_e1f4a8c3           2026-06-26 09:15   3.8s   kubernetes    resolved      –               describe_pod, get_pod_logs
+tr_b7d2f9e1           2026-06-25 22:44   2.1s   database      denied        –               get_session_info
+```
+
+| Column | Description |
+|--------|-------------|
+| `TRACE ID` | Journey trace ID; pass to `vault journey <trace_id>` for detail |
+| `DUR` | Wall-clock duration from first to last event |
+| `AGENT` | Agent category (`database`, `kubernetes`, `host`) |
+| `OUTCOME` | Highest-priority outcome across all events in the trace |
+| `INCIDENT` | `plr_*` run ID when this journey is linked to an incident run; `–` for ad-hoc sessions |
+| `TOOLS` | Tool names called, truncated to fit; see detail mode for the full list |
+
+A `!` suffix on a TOOLS entry (or anywhere on the row) means `has_mismatch=true` — the agent reported success but no matching tool execution appears in the audit trail. See [§8 in JOURNEYS.md](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection).
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit N` | 20 | Maximum number of journeys to show |
+| `--since duration` | `24h` | Show journeys from the last duration; supports `7d` notation |
+| `--category` | (all) | Filter by `database`, `kubernetes`, or `host` |
+| `--outcome` | (all) | Filter by outcome: `resolved`, `abandoned`, `denied`, `error`, etc. |
+| `--incident` | false | Show only journeys that are linked to an incident run (`incident_run_id` non-empty) |
+
+**Detail mode** (positional `<trace_id>` argument) shows the full journey:
+
+```
+JOURNEY  tr_9a4f2b1e
+──────────────────────────────────────────────────────────────────────────
+  Started:           2026-06-27 14:30:12 UTC
+  Ended:             2026-06-27 14:30:16 UTC
+  Duration:          4.2s
+  Agent:             postgres_database_agent
+  Category:          database
+  Origin:            agent
+  Outcome:           resolved
+  Events:            7
+
+QUERY
+──────────────────────────────────────────────────────────────────────────
+  Connection pool saturation — 108/100 connections, 96 idle
+
+DELEGATIONS
+──────────────────────────────────────────────────────────────────────────
+  1. Diagnose connection pool saturation
+     tools: get_session_info, get_db_info
+
+TOOLS USED
+──────────────────────────────────────────────────────────────────────────
+  • get_db_info
+  • get_session_info
+  • kill_idle_connections
+
+INCIDENT LINK
+──────────────────────────────────────────────────────────────────────────
+  Run ID:            plr_a3f7c1b2
+
+  → vault incidents plr_a3f7c1b2
+```
+
+The INCIDENT LINK section appears when the journey's `trace_id` is associated with a playbook run. Use the navigation hint (`→ vault incidents <plr_>`) to jump to the incident narrative for the WHY behind these tool calls.
 
 ### vault status
 
@@ -406,7 +582,7 @@ See also the [Incidents page](INCIDENTS.md#the-incident-receipt-full-timeline-vi
 faulttest vault status [--since-days 30] [--target staging-db] [--fault db-lock-contention]
 ```
 
-Shows overall pass rates across all runs in the history window, plus a per-fault score breakdown with keyword, tool, category, judge, and remediation columns:
+Shows overall pass rates across all runs in the history window, plus a per-fault score breakdown with keyword, tool, category, judge and remediation columns:
 
 ```
 === Vault Status — staging-db (last 30 days, 4 runs) ===
@@ -458,30 +634,38 @@ faulttest vault versions <fault-id or series-id> \
   --api-key $HELPDESK_API_KEY
 ```
 
-Shows per-version run stats for a playbook series: resolution rate, average step count, average recovery time, and separate diagnosis / remediation scores. Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a series ID (e.g. `pbs_lock_chain_triage`). Requires `--gateway`.
+Shows per-version run stats for a playbook series: resolution rate, average step count, average recovery time and separate diagnosis / remediation scores. Accepts either a fault catalog ID (e.g. `db-lock-contention`) or a series ID (e.g. `pbs_lock_chain_triage`). Requires `--gateway`.
 
 ```
 Version stats for pbs_cache_miss_remediate — 2 version(s)
 
-VERSION     RUNS    RESOLVED    AVG STEPS   AVG TIME    AVG DIAG   AVG REMED
-─────────────────────────────────────────────────────────────────────────────
-1.0          5      60%         6.2         42s         72%        –
-1.1  *       3      100%        4.0         8s          91%        85%
+VERSION     RUNS    TRANSITIONED  AVG STEPS   AVG TIME    AVG DIAG   AVG REMED  APPROACH OK
+─────────────────────────────────────────────────────────────────────────────────────────────
+1.0          5      60%           6.2         42s         72%        –          60%
+  id=pb_a1b2c3d4  from=plr_0c58aa4f
+1.1  *       3      100%          4.0         8s          91%        85%        100%
+  id=pb_40729257  from=plr_1e2f3a4b
 
 * = currently active version
+  id/from lines show playbook_id and the run that generated that version
 ```
+
+The `id` and `from` lines appear under each version row and provide the playbook IDs needed for `vault diff <id1> <id2>` post-activation comparison, plus the originating run ID for provenance.
 
 Data sources:
 
 | Column | Source |
 |--------|--------|
-| `RUNS` / `RESOLVED` | `playbook_runs` table in auditd, grouped by `playbook_id` |
+| `RUNS` / `TRANSITIONED` | `playbook_runs` table in auditd, grouped by `playbook_id`; transition = successful handoff to the next phase |
 | `AVG STEPS` | Average number of steps recorded in `playbook_run_steps` per run |
 | `AVG TIME` | Average wall-clock time between `started_at` and `completed_at` for completed runs |
 | `AVG DIAG` | Average `diagnosis_score` from `run_evaluation`; `–` when no runs have eval data |
 | `AVG REMED` | Average `remediation_score` for runs where remediation was executed (score > 0); `–` when no remediation runs |
+| `APPROACH OK` | Fraction of runs where operators rated the remediation approach as appropriate; collected via post-incident feedback prompt; `–` when no feedback submitted |
 
 The gateway endpoint backing this command: `GET /api/v1/fleet/series/{seriesID}/version-stats`.
+
+For the full explanation of what these metrics mean and how to read the trend across versions, see [VAULT_METRICS.md](VAULT_METRICS.md).
 
 ### vault calibration
 
@@ -558,44 +742,309 @@ faulttest vault suggest \
   --api-key $HELPDESK_API_KEY
 ```
 
-Manually synthesises a Playbook draft from any audit trace ID. Useful when you want to create a Playbook from a specific real incident that wasn't auto-suggested, or when you want to produce an on-demand draft for a trace you know about. Prints the draft YAML to stdout with activation instructions.
+Manually synthesises a Playbook draft from any audit trace ID. Useful when you want to create a Playbook from a specific real incident that wasn't auto-suggested or when you want to produce an on-demand draft for a trace you know about. Prints the draft YAML to stdout with activation instructions.
 
 When the gateway's auditd is configured, the draft is also auto-saved and the `playbook_id` of the persisted draft is printed.
 
 ### vault suggest-update
 
 ```bash
+# Minimal — trace auto-selected from most recent resolved run
 faulttest vault suggest-update \
-  --series-id pbs_db_restart_triage \
-  --trace-id tr_xyz789 \
+  --series-id pbs_connection_remediate \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Explicit trace (when you want to synthesise from a specific run)
+faulttest vault suggest-update \
+  --series-id pbs_connection_remediate \
+  --trace-id plr_0c58aa4f \
   --outcome resolved \
   --gateway http://gateway:8080 \
   --api-key $HELPDESK_API_KEY
 ```
 
-Fetches the current active Playbook for a series, synthesises a proposed update from a recent successful incident trace, and displays both side by side so you can compare and decide whether to activate the proposal:
+Fetches the current active Playbook for a series, synthesises a proposed update from a recent successful incident trace and displays both side by side so you can compare and decide whether to activate the proposal.
+
+**`--trace-id` is optional.** When omitted, `suggest-update` automatically selects the most recent `resolved` run for the series; if no resolved run exists it falls back to the most recent `transitioned` run. The chosen run ID is printed before the proposal so you always know which trace was used:
 
 ```
-=== Playbook Update Proposal: pbs_db_restart_triage ===
+Auto-selected trace: plr_0c58aa4f
+```
 
-Current:  pb_f49b5eac — Database Down — Restart Triage
-Trace:    tr_xyz789 (outcome: resolved)
+Use `faulttest vault incidents <series-id>` to see all available runs and pick a specific one with `--trace-id` when you want to synthesise from something other than the latest.
+
+**Version pinning.** The draft is saved into the same series as the current active Playbook (not a new orphan series) and its version is automatically incremented from the active version: if the current active version is `1.3`, the draft is saved as `1.4`. This means `vault versions` will show the before/after comparison as soon as you activate and run the fault again.
+
+```
+=== Playbook Update Proposal: pbs_connection_remediate ===
+
+Current:  pb_f49b5eac  v1.3 — Idle Connection Pool Exhaustion Recovery
+Trace:    plr_0c58aa4f (outcome: resolved, 5 steps)
 
 --- CURRENT GUIDANCE ---
-Check max_connections first, then inspect pg_stat_activity...
+Check active connections. Identify and terminate idle sessions...
 
---- PROPOSED DRAFT (from trace) ---
-name: Database Down — Restart Triage
+--- PROPOSED DRAFT (v1.4) ---
+name: Idle Connection Pool Exhaustion Recovery
+version: "1.4"
 guidance: |
-  In this incident, the agent first confirmed the database was unreachable
-  via check_connection, then read pod logs to find OOM kill signals...
+  Staged approach: first terminate connections idle for > 10 minutes,
+  then verify connection count has dropped below the warning threshold...
 
-Proposed draft saved as: pb_proposed_001 (inactive, source=generated)
+Proposed draft saved as: pb_proposed_001 (inactive, source=generated, series: pbs_connection_remediate)
 
-# To activate the proposed draft:
+# To review pending drafts: faulttest vault drafts --gateway ... --api-key ...
+# To activate:
 #   curl -X POST .../api/v1/fleet/playbooks/pb_proposed_001/activate \
 #        -H 'Authorization: Bearer <key>'
 ```
+
+Note that activation is always a separate human step — no draft auto-activates, regardless of how it was created. The human gate exists so you can review the LLM's synthesis before it runs on real infrastructure.
+
+### vault drafts
+
+```bash
+faulttest vault drafts \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Remove orphaned drafts (from failed suggest-update runs before series-pinning)
+faulttest vault drafts --purge-orphans \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Lists all inactive `source=generated` Playbook drafts that are waiting for operator review and activation. This is the command to run after `suggest-update`, after a remediation pass or at the start of a review session to see what proposals are pending.
+
+```
+Pending drafts — 2 awaiting review
+
+DRAFT ID      SERIES                          VERSION  NAME                                        CREATED
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+pb_40729257   pbs_connection_remediate        1.4      Idle Connection Pool Exhaustion Recovery    2026-06-30
+pb_b3c1e8f0   pbs_wal_stale_slot              1.2      Stale Replication Slot Detection            2026-06-29 !
+
+! = orphan draft (series not pinned); run with --purge-orphans to delete all 1
+```
+
+A `!` suffix marks **orphan drafts** — drafts whose `series_id` starts with `pbs_generated_` rather than a real series. These are created when `from-trace` is called without a `series_id` binding (e.g. direct API calls or `suggest-update` runs before version pinning was in place). Orphan drafts cannot be activated into a meaningful series; use `--purge-orphans` to remove them all at once.
+
+**`--purge-orphans`** sends `DELETE /api/v1/fleet/playbooks/{id}` for every draft whose `series_id` has the `pbs_generated_` prefix. Non-orphan drafts are never touched. The count of deleted drafts is printed at the end.
+
+### vault diff
+
+`vault diff` has two modes:
+
+**Single-ID mode** — compare a pending draft against the currently active version in its series:
+
+```bash
+faulttest vault diff <draft-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Use this before `vault activate` to confirm the proposal is an improvement and hasn't introduced regressions in escalation conditions or execution mode.
+
+**Two-ID mode** — compare any two playbook versions by ID (works even after both are already activated):
+
+```bash
+faulttest vault diff <id1> <id2> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Use this for post-activation archaeology: if you activated v1.4 and later want to see what changed from v1.3, look up both IDs from `vault versions` (the `id=` lines) and run `vault diff pb_v13_id pb_v14_id`. The lower-versioned ID is always treated as "before" regardless of argument order.
+
+Compares fields field by field. Unchanged fields are omitted.
+
+```
+Diff: series pbs_connection_remediate
+  before  pb_f49b5eac  v1.3  Idle Connection Pool Exhaustion Recovery
+  after   pb_40729257  v1.4  Idle Connection Pool Exhaustion Recovery
+
+── guidance ─────────────────────────────────────────────────────────────
+  before  Connection pool exhaustion typically stems from client-side
+          connection leaks or improper connection management.
+          The diagnostic approach is:
+          1. Enumerate idle connections...
+          2. Terminate conservatively...
+  after   Connection pool exhaustion typically stems from client-side
+          connection leaks or improper connection management.
+          The diagnostic approach is:
+          1. Enumerate idle connections...
+          2. Safe termination with dry-run: Before terminating any
+             connections, perform a dry-run to forecast impact.
+             Use a threshold (e.g., idle_minutes=5)...
+          3. Escalate if dry-run shows safety risk...
+
+── escalation ───────────────────────────────────────────────────────────
+  before  connection count remains near max_connections after termination
+  after   dry-run indicates no idle connections older than safe threshold
+          connection count remains at or near max_connections after termination
+          idle-in-transaction sessions persist after idle connection cleanup
+          application continues to report connection errors immediately after remediation
+
+3 field(s) changed.
+
+To activate:  faulttest vault activate pb_40729257 --gateway http://gateway:8080 --api-key <key>
+To discard:   curl -X DELETE http://gateway:8080/api/v1/fleet/playbooks/pb_40729257 -H 'Authorization: Bearer <key>'
+```
+
+The `To activate` / `To discard` hints only appear when the `after` version is not yet active (single-ID draft mode). In two-ID mode, both versions are already in the system, so no action hints are printed.
+
+Fields compared: `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`. The `guidance` field is the most important — it is the strategic intent the agent works from, so any wording change there has direct effect on agent behaviour. `escalation` changes are the second-most critical: added or removed conditions change when the agent hands off to a human.
+
+`execution_mode`, `approval_mode`, and `playbook_type` are **operational fields** — they control how a playbook runs and which protocol it declares, not what it knows. The `from-trace` endpoint preserves these from the currently-active version when generating a draft, so they should normally be identical in both versions. If they appear in a diff it means they were changed via a manual edit or a direct API call, which warrants extra scrutiny.
+
+If a field is identical in both versions, it is not shown. "No differences" means the two versions are identical.
+
+#### Optional: LLM judge review (`--judge`)
+
+Add `--judge` to request an LLM assessment of whether the knowledge-field changes are an improvement before activating:
+
+```bash
+faulttest vault diff <draft-id> \
+  --judge \
+  --judge-vendor anthropic \
+  --judge-model claude-haiku-4-5-20251001 \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+After the field-by-field diff, the judge prints a structured assessment:
+
+```
+── LLM Judge Review ────────────────────────────────────────────────────────
+Verdict:            ✓  APPROVE
+Guidance quality:   Improved: adds a concrete dry-run threshold before terminating connections.
+Escalation safety:  Tighter: added idle-in-transaction persistence as an escalation condition.
+Reasoning:          The new version is more actionable and tightens the safety net for edge cases.
+Judge model:        claude-haiku-4-5-20251001
+```
+
+| Verdict | Icon | Meaning |
+|---------|------|---------|
+| `APPROVE` | ✓ | Change is clearly beneficial — safe to activate |
+| `NEEDS_REVIEW` | ? | Mixed or uncertain — human review recommended before activating |
+| `REJECT` | ✗ | Change introduces risk or is a regression |
+
+The judge evaluates **knowledge fields only** (`guidance`, `symptoms`, `escalation`, `name`, `description`). It does not score operational fields (`execution_mode`, `approval_mode`) — those are controlled by operators, not synthesised from traces. If an operational field changed anyway (e.g. via a direct API edit), the judge prints a warning banner above the verdict:
+
+```
+⚠  Operational field changes detected (should be preserved by from-trace):
+   • execution_mode: fleet → agent_approve
+
+Verdict:            ?  NEEDS_REVIEW
+...
+```
+
+**Judge flags:**
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--judge` | — | `false` | Enable LLM judge review |
+| `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge |
+| `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor (`anthropic`, `google`) |
+| `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge |
+
+The judge model does not need to match the agent model. A smaller, faster model (Haiku, Flash) is recommended — the rubric is simple and raw capability matters less than instruction following.
+
+### vault activate
+
+```bash
+faulttest vault activate <draft-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Promotes a draft to active status in its series. Atomically deactivates the previous active version. Prints a confirmation line and a hint to check `vault active`:
+
+```
+Activated: pb_40729257  v1.4  Idle Connection Pool Exhaustion Recovery
+Series:    pbs_connection_remediate
+
+faulttest vault active --gateway http://gateway:8080 --api-key <key>
+```
+
+The `<draft-id>` is the `DRAFT ID` column from `vault drafts`. Once activated, the draft disappears from `vault drafts` (it is no longer inactive) and appears in `vault active` as the current live version.
+
+### vault discard
+
+```bash
+faulttest vault discard <draft-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Permanently deletes a draft that should not be activated — for example, a draft with protocol warnings that cannot be corrected, or a `suggest-update` output that was superseded by a better run. Calls `DELETE /api/v1/fleet/playbooks/{id}` on the gateway.
+
+```
+Discarded: pb_a9258113
+
+faulttest vault drafts --gateway http://gateway:8080
+```
+
+Use `vault drafts --purge-orphans` to remove all orphan drafts (`pbs_generated_*`) in bulk rather than discarding them one at a time.
+
+### vault active
+
+```bash
+faulttest vault active \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Lists the currently active version of every Playbook series, across all series on the Gateway. Use this to confirm which version is live after an activation, to audit the state of the Vault or to verify that a `suggest-update` cycle promoted the right draft.
+
+```
+SERIES                              VERSION  SOURCE     UPDATED     NAME
+──────────────────────────────────────────────────────────────────────────────────────────────────
+pbs_connection_remediate            1.4      generated  2026-06-30  Idle Connection Pool Exhaustion Recovery
+pbs_max_connections_triage          1.3      manual     2026-06-15  Max Connections Triage
+pbs_wal_stale_slot                  1.2      system     2026-05-01  Stale Replication Slot Detection
+```
+
+The `SOURCE` column indicates how the active version entered the Vault:
+
+| Source | Meaning |
+|--------|---------|
+| `manual` | Created directly via the API or imported |
+| `generated` | Synthesised by `from-trace` / `suggest-update` and activated by an operator |
+| `system` | Shipped with aiHelpDesk — read-only in the API |
+| `imported` | Imported from Markdown, YAML or Ansible via the import endpoint |
+
+`vault active` only shows system Playbooks that the Gateway is actually serving (i.e. `include_system=true` is the default). To hide system Playbooks and see only operator-managed series, filter them via the API directly: `GET /api/v1/fleet/playbooks?active_only=true&include_system=false`.
+
+### vault history
+
+```bash
+faulttest vault history <series-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Lists **every stored version** of a playbook series — active, inactive, system and generated — regardless of whether any runs have been recorded against them. This is the complete provenance ledger for a series and the primary way to discover playbook IDs for `vault diff <id1> <id2>`.
+
+```
+Version history for pbs_connection_remediate — 2 version(s)
+
+ID              VERSION    SOURCE     CREATED     STATUS / NAME
+──────────────────────────────────────────────────────────────────────────────────
+pb_be8b5667     1.3        system     2026-05-01  * Connection Overload — Terminate Idle Sessions
+pb_31575294     1.4        generated  2026-06-30  Connection Overload — Terminate Idle Sessions
+  from=plr_0c58aa4f
+```
+
+`*` marks the currently active version. The `from=` line under a generated entry shows the playbook run ID that triggered `vault suggest-update` — the trace whose tool call sequence was synthesised into that version.
+
+Use the `ID` column to compare any two versions:
+
+```bash
+faulttest vault diff pb_be8b5667 pb_31575294 --gateway ... --api-key ...
+```
+
+Unlike `vault versions`, which only shows versions that have accumulated run data, `vault history` shows the complete list immediately after seeding or activation — even before a single run has completed under the new version.
 
 ---
 
@@ -608,51 +1057,133 @@ POST /api/v1/fleet/playbooks/from-trace
 Content-Type: application/json
 
 {
-  "trace_id": "tr_abc123",
-  "outcome": "resolved"
+  "trace_id":  "plr_0c58aa4f",
+  "outcome":   "resolved",
+  "series_id": "pbs_connection_remediate",
+  "version":   "1.4"
 }
 ```
 
-The gateway:
-1. Fetches audit events for the given `trace_id` from auditd (when auditd is configured)
-2. Passes the tool call sequence and outcome to the planner LLM
-3. Synthesises a Playbook YAML draft with `name`, `description`, `problem_class`, `symptoms`, `guidance`, and `escalation` fields
-4. Auto-persists the draft as `source="generated"`, `is_active=false` (when auditd is configured)
-5. Returns `{"draft": "...", "source": "...", "playbook_id": "pb_..."}` — `playbook_id` is empty when persistence is unavailable
+| Field | Required | Description |
+|-------|----------|-------------|
+| `trace_id` | yes | Audit trace ID or playbook run ID (`plr_*`) to synthesise from |
+| `outcome` | no | `"resolved"` (default) or `"escalated"` — shapes the synthesis prompt |
+| `series_id` | no | Pin the draft to an existing series. When omitted a new `pbs_generated_*` series is created |
+| `version` | no | Version string for the draft. When omitted, whatever the LLM emits is used (often blank) |
 
-The synthesis prompt grounds the LLM in the actual sequence of tool calls made during the incident, not just the fault metadata. This produces Playbooks that are specific to your environment's tool catalog and agent behavior.
+`series_id` and `version` are set automatically by `vault suggest-update` — they exist so the CLI can ensure the draft lands in the right series with the right version without a separate PATCH call.
+
+The gateway:
+1. Fetches tool execution events for `trace_id` from the `audit_events` table in auditd
+2. **Fallback**: if `audit_events` returns empty for a `plr_*` ID, fetches from `GET /v1/fleet/playbook-runs/{id}/steps` instead and reformats the step records as `tool_execution` events. This covers the common case where agents emit step events under approval-request trace IDs (`ar_*`) rather than the run ID.
+3. Passes the tool call sequence and outcome to the planner LLM
+4. Synthesises a Playbook YAML draft with `name`, `description`, `playbook_type`, `problem_class`, `symptoms`, `guidance` and `escalation` fields
+5. If `series_id` is provided, overrides the LLM's `series_id` with the caller's value; same for `version`
+6. **Operational field preservation**: if `series_id` is provided, fetches the currently-active version of the series and copies all operational fields onto the draft, overriding whatever the LLM emitted. Fields preserved: `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints`, `playbook_type`. Only knowledge fields (`name`, `description`, `guidance`, `symptoms`, `escalation`, `problem_class`) come from the LLM synthesis. This prevents the LLM from inadvertently changing routing or execution mode based on patterns it observed in the trace.
+7. **Protocol validation**: after field preservation, checks the draft against the structural rules declared by its `playbook_type`. Violations are returned as `warnings` in the response — the draft is still persisted but must be reviewed before activation. See [Protocol validation](#protocol-validation) below.
+8. Auto-persists the draft as `source="generated"`, `is_active=false` (when auditd is configured)
+9. Returns `{"draft": "...", "source": "...", "playbook_id": "pb_...", "warnings": [...]}` — `playbook_id` is empty when persistence is unavailable; `warnings` is omitted when the draft is clean
+
+The synthesis prompt grounds the LLM in the actual sequence of tool calls made during the incident. This produces Playbooks that are specific to your environment's tool catalog and agent behavior rather than generic advice.
+
+**Knowledge vs. operational fields.** The distinction matters because the two categories have different owners:
+
+| Field category | Examples | Owner | Updated by `from-trace`? |
+|---------------|----------|-------|--------------------------|
+| Knowledge | `guidance`, `symptoms`, `escalation`, `name`, `description`, `problem_class` | LLM synthesis (from trace) | Yes |
+| Operational | `execution_mode`, `approval_mode`, `agent_name`, `transitions_to`, `escalates_to`, `entry_point`, `requires_evidence`, `permitted_tools`, `target_hints`, `playbook_type` | Human operator | No — always preserved from the active version |
+
+This means you can run `vault suggest-update` + `vault activate` without worrying that the LLM will silently change how the playbook executes or where it routes.
 
 ```bash
-# Manual call — useful for testing or when trace IDs are known
+# Direct call — useful for testing or building on top of from-trace
 curl -X POST http://gateway:8080/api/v1/fleet/playbooks/from-trace \
   -H "Authorization: Bearer $HELPDESK_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"trace_id": "tr_abc123", "outcome": "resolved"}'
+  -d '{
+    "trace_id":  "plr_0c58aa4f",
+    "outcome":   "resolved",
+    "series_id": "pbs_connection_remediate",
+    "version":   "1.4"
+  }'
 ```
+
+### Protocol validation
+
+Every draft that declares a `playbook_type` is checked against a set of structural invariants before the response is returned. Validation is **non-blocking** — the draft is persisted regardless, but `vault suggest-update` prints a warning section and the raw API response includes a `warnings` array.
+
+The `playbook_type` field is the machine-readable declaration of which protocol a playbook follows. It is set in the playbook YAML (both the templates and all system playbooks ship with it) and is always preserved from the active version when `suggest-update` synthesises a new draft.
+
+| `playbook_type` | Value |
+|----------------|-------|
+| `triage` | Read-only investigation; ends with HYPOTHESIS/FINDINGS/signal line |
+| `remediation` | Corrective actions; gated on operator approval at each write step |
+| *(empty)* | Legacy or runbook-style; no protocol validation applied |
+
+**Triage checks** (`playbook_type: triage`):
+
+| Check | What it catches |
+|-------|-----------------|
+| `name`, `series_id`, `description`, `guidance` non-empty | LLM that produces a skeleton with placeholder fields |
+| `symptoms` ≥ 1 entry | Missing trigger conditions |
+| `escalation` ≥ 1 entry | Missing guardrails |
+| `execution_mode == "agent"` | LLM inadvertently writing `agent_approve` or `fleet` |
+| `guidance` contains `FINDINGS:` | Structured findings line missing — gate cannot parse the outcome |
+| `guidance` contains `TRANSITION_TO:` or `ESCALATE_TO:` | Signal line missing — the informed gate will stall |
+
+**Remediation checks** (`playbook_type: remediation`):
+
+| Check | What it catches |
+|-------|-----------------|
+| `name`, `series_id`, `description`, `guidance` non-empty | Skeleton with placeholder fields |
+| `symptoms` ≥ 1 entry | Missing trigger conditions |
+| `escalation` ≥ 1 entry | Missing safety guardrails |
+| `execution_mode == "agent_approve"` | LLM inadvertently writing `agent` (no approval gates) |
+| `guidance` does NOT contain `TRANSITION_TO:` or `ESCALATE_TO:` | Routing signals that belong only in triage playbooks |
+
+When `vault suggest-update` detects warnings, it prints them before the activation hint:
+
+```
+⚠  Protocol warnings — review before activating:
+   • guidance: missing FINDINGS: line — triage playbooks must emit structured findings
+   • guidance: missing signal line — must end with TRANSITION_TO: <series_id> or ESCALATE_TO: <target|none>
+
+Proposed draft saved as: pb_c7d3e1f2 (inactive, source=generated)
+```
+
+A draft with protocol warnings should not be activated until the guidance is corrected. The most common cause is the LLM synthesising a guidance section without the "Required output" block — this is handled automatically by the trailer preservation step (see operational field preservation above), but can still occur if the active version's guidance had no structured output section.
 
 ---
 
 ## Reviewing and Activating Drafts
 
-All auto-generated drafts land as inactive (`is_active=false`). This is intentional — the human stays in the loop before anything is promoted to production use.
+All auto-generated drafts land as inactive (`is_active=false`). This is intentional — the human stays in the loop before anything is promoted to production use. No draft ever auto-activates, including drafts produced by `suggest-update`.
 
-**List pending drafts** (generated, not yet activated):
+**See what's pending:**
 
 ```bash
-# Via the API
-curl -s http://gateway:8080/api/v1/fleet/playbooks?source=generated \
-  -H "Authorization: Bearer $HELPDESK_API_KEY" | jq '.playbooks[] | select(.is_active == false)'
+# All inactive generated drafts — the primary review queue
+faulttest vault drafts --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
 
-# Via vault list (shows latest run status alongside Playbook link)
-faulttest vault list --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+# All currently active versions — confirm state after activation
+faulttest vault active --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
 ```
 
-**Activate a draft** (promotes it in its series, deactivates the previous version):
+**Confirm a draft looks right** before activating:
+
+```bash
+curl -s http://gateway:8080/api/v1/fleet/playbooks/pb_a3f9b2c1 \
+  -H "Authorization: Bearer $HELPDESK_API_KEY" | jq '{name, version, series_id, guidance}'
+```
+
+**Activate a draft** (promotes it in its series, deactivates the previous active version atomically):
 
 ```bash
 curl -X POST http://gateway:8080/api/v1/fleet/playbooks/pb_a3f9b2c1/activate \
   -H "Authorization: Bearer $HELPDESK_API_KEY"
 ```
+
+The response echoes the full Playbook object with `"is_active": true`. Verify the active set with `vault active` afterwards.
 
 **Discard a draft** (if the proposal isn't useful):
 
@@ -661,13 +1192,51 @@ curl -X DELETE http://gateway:8080/api/v1/fleet/playbooks/pb_a3f9b2c1 \
   -H "Authorization: Bearer $HELPDESK_API_KEY"
 ```
 
-If you want to refine the draft before activating, update it:
+**Purge orphan drafts** (drafts with `pbs_generated_*` series IDs, created before series-pinning was in place):
+
+```bash
+faulttest vault drafts --purge-orphans \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+**Refine a draft** before activating:
 
 ```bash
 curl -X PUT http://gateway:8080/api/v1/fleet/playbooks/pb_a3f9b2c1 \
   -H "Authorization: Bearer $HELPDESK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"guidance": "Updated guidance based on operator review..."}'
+```
+
+**The complete improvement cycle** from a drift signal to an activated new version:
+
+```bash
+# 1. Spot the drift
+faulttest vault drift --since-days 90 --gateway $GW --api-key $KEY
+
+# 2. Propose an update (trace auto-selected, version auto-incremented)
+faulttest vault suggest-update --series-id pbs_connection_remediate \
+  --gateway $GW --api-key $KEY
+
+# 3. Review what was proposed
+faulttest vault drafts --gateway $GW --api-key $KEY
+
+# 4. Diff against current active version (guidance, escalation, execution_mode)
+faulttest vault diff pb_new_draft --gateway $GW --api-key $KEY
+
+# 5. Activate
+faulttest vault activate pb_new_draft --gateway $GW --api-key $KEY
+
+# 6. Confirm active state
+faulttest vault active --gateway $GW --api-key $KEY
+
+# 7. Re-run the fault to generate v2 data
+faulttest run --external --ids db-max-connections --remediate \
+  --gateway $GW --api-key $KEY ...
+
+# 8. See the before/after version comparison
+faulttest vault list --gateway $GW --api-key $KEY
+faulttest vault versions pbs_connection_remediate --gateway $GW --api-key $KEY
 ```
 
 ---
@@ -701,16 +1270,19 @@ faulttest vault list \
 After each `faulttest run --remediate` pass or resolved incident, check for pending drafts:
 
 ```bash
-# See which faults now have associated drafts
-faulttest vault list --gateway http://helpdesk-gateway:8080 --api-key $HELPDESK_API_KEY
+# See all pending drafts (generated, inactive, waiting for review)
+faulttest vault drafts --gateway http://helpdesk-gateway:8080 --api-key $HELPDESK_API_KEY
 
 # Review a specific draft
 curl http://helpdesk-gateway:8080/api/v1/fleet/playbooks/pb_a3f9b2c1 \
-  -H "Authorization: Bearer $HELPDESK_API_KEY" | jq .
+  -H "Authorization: Bearer $HELPDESK_API_KEY" | jq '{name, version, series_id, guidance}'
 
 # Activate if it looks good
 curl -X POST http://helpdesk-gateway:8080/api/v1/fleet/playbooks/pb_a3f9b2c1/activate \
   -H "Authorization: Bearer $HELPDESK_API_KEY"
+
+# Confirm the right version is now active
+faulttest vault active --gateway http://helpdesk-gateway:8080 --api-key $HELPDESK_API_KEY
 ```
 
 Run the relevant fault again with `--remediate` after activation to confirm the newly promoted Playbook continues to achieve recovery:

@@ -28,6 +28,10 @@ type IncidentNarrative struct {
 	Feedback    []audit.RunFeedback   `json:"feedback,omitempty"`
 	// Evaluation holds automated faulttest eval scores for the triage run.
 	Evaluation  *audit.RunEvaluation  `json:"evaluation,omitempty"`
+	// Journeys links each phase of this incident to its audit Journey trace.
+	// Triage = the WHY (reasoning chain, hypothesis building).
+	// Remediation = the WHAT (tool calls, approvals, blast-radius decisions).
+	Journeys    []audit.IncidentJourneyRef `json:"journeys,omitempty"`
 }
 
 // TriageChapter holds the investigative phase of the incident.
@@ -142,10 +146,32 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			narrative.ResolvedAt = &t
 			narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
 		}
-	} else if !run.CompletedAt.IsZero() && run.Outcome != audit.OutcomeGatePending {
-		t := run.CompletedAt
-		narrative.ResolvedAt = &t
-		narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
+		// Journey refs: triage trace = WHY, remediation trace = WHAT.
+		if run.TraceID != "" && remRun.TraceID != "" && run.TraceID == remRun.TraceID {
+			narrative.Journeys = []audit.IncidentJourneyRef{
+				{Phase: "triage+remediation", TraceID: run.TraceID},
+			}
+		} else {
+			if run.TraceID != "" {
+				narrative.Journeys = append(narrative.Journeys,
+					audit.IncidentJourneyRef{Phase: "triage", TraceID: run.TraceID})
+			}
+			if remRun.TraceID != "" {
+				narrative.Journeys = append(narrative.Journeys,
+					audit.IncidentJourneyRef{Phase: "remediation", TraceID: remRun.TraceID})
+			}
+		}
+	} else {
+		if !run.CompletedAt.IsZero() && run.Outcome != audit.OutcomeGatePending {
+			t := run.CompletedAt
+			narrative.ResolvedAt = &t
+			narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
+		}
+		if run.TraceID != "" {
+			narrative.Journeys = []audit.IncidentJourneyRef{
+				{Phase: "triage", TraceID: run.TraceID},
+			}
+		}
 	}
 
 	// 4. Feedback — all operator feedback slots for this incident.

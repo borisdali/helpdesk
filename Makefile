@@ -324,10 +324,12 @@ recertify:
 # End-to-end tests (requires full stack + LLM API key)
 # ---------------------------------------------------------------------------
 e2e: image
+	@echo "Tearing down any existing stack..."
+	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v 2>/dev/null || true
 	@echo "Starting full stack..."
 	HELPDESK_IDENTITY_PROVIDER=none HELPDESK_BASE_URL=http://localhost:8080 docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
 	@echo "Running E2E tests..."
-	-go test -tags e2e -timeout 300s -v ./testing/e2e/... 2>&1 | tee $(E2E_LOG)
+	-E2E_USER=alice@example.com go test -tags e2e -timeout 300s -v ./testing/e2e/... 2>&1 | tee $(E2E_LOG)
 	@$(SUMMARY_CMD) $(E2E_LOG)
 	@echo "Stopping full stack..."
 	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v

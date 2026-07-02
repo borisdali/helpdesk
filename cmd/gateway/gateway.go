@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -311,7 +312,8 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /health", auth("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q}\n", buildinfo.Version) //nolint:errcheck
+		hostname, _ := os.Hostname()
+		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q,\"hostname\":%q}\n", buildinfo.Version, hostname) //nolint:errcheck
 	}))
 	// /metrics is unauthenticated (Prometheus scrapes do not carry auth tokens by default).
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -1529,7 +1531,15 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 	// Skipped for direct tool calls (toolName != "") — those are already audited
 	// structurally. Skipped when auditURL is not configured.
 	if toolName == "" && g.auditURL != "" {
-		actionClass := audit.ClassifyDelegation(agentName, prompt)
+		// Classify only the first line of the prompt. Multi-paragraph playbook
+		// prompts include remediation guidance (e.g. "drop_replication_slot") as
+		// instructional context, not as actions the agent is asked to perform;
+		// full-prompt classification produces false-positive destructive hits.
+		classifyTarget := prompt
+		if idx := strings.IndexByte(prompt, '\n'); idx > 0 {
+			classifyTarget = prompt[:idx]
+		}
+		actionClass := audit.ClassifyDelegation(agentName, classifyTarget)
 		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName)
 		// When approval_mode=manual the agent is expected to propose destructive
 		// actions in text without executing them — no tool call will appear in the

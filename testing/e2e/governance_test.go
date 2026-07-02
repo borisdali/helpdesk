@@ -129,6 +129,34 @@ func auditdPost(t *testing.T, auditdURL, path string, body any) map[string]any {
 	return result
 }
 
+// gatewayGet fetches a JSON object from the gateway with the X-User header set
+// from cfg.GatewayUser. Use this (instead of auditdGet) for gateway proxy paths
+// that require authentication when the identity provider is not "none".
+func gatewayGet(t *testing.T, cfg *Config, path string) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.GatewayURL+path, nil)
+	if err != nil {
+		t.Fatalf("build request GET %s: %v", path, err)
+	}
+	if cfg.GatewayUser != "" {
+		req.Header.Set("X-User", cfg.GatewayUser)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		t.Fatalf("GET %s → %d: %s", path, resp.StatusCode, raw)
+	}
+	var result map[string]any
+	json.Unmarshal(raw, &result)
+	return result
+}
+
 // auditdSupportsDelegationVerification probes whether the running auditd binary
 // stores and returns the delegation_verification field. Older images drop
 // unknown JSON keys on the store/retrieve round-trip.
@@ -636,7 +664,7 @@ func TestGovernance_ExplainEndpoint(t *testing.T) {
 
 	// --- Gateway proxy path ---
 	if gatewayOK {
-		result := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/explain"+params)
+		result := gatewayGet(t, cfg, "/api/v1/governance/explain"+params)
 		t.Logf("gateway explain response: %v", result)
 
 		if _, ok := result["enabled"]; ok && result["enabled"] == false {
@@ -723,7 +751,7 @@ func TestGovernance_GetEvent_HasTrace(t *testing.T) {
 
 	// Also verify via the gateway proxy path (GET /api/v1/governance/events/{eventID}).
 	if IsGatewayReachable(cfg.GatewayURL) {
-		gatewayResult := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/events/"+eventID)
+		gatewayResult := gatewayGet(t, cfg, "/api/v1/governance/events/"+eventID)
 		if gatewayResult["event_id"] != eventID {
 			t.Errorf("gateway: event_id = %v, want %s", gatewayResult["event_id"], eventID)
 		}
@@ -794,7 +822,7 @@ func TestGovernance_GetEvent_AgentReasoning(t *testing.T) {
 
 	// Also verify via gateway proxy.
 	if IsGatewayReachable(cfg.GatewayURL) {
-		gatewayResult := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/events/"+eventID)
+		gatewayResult := gatewayGet(t, cfg, "/api/v1/governance/events/"+eventID)
 		if gatewayResult["event_id"] != eventID {
 			t.Errorf("gateway: event_id = %v, want %s", gatewayResult["event_id"], eventID)
 		}
@@ -1003,7 +1031,7 @@ func TestGovernance_GetEvent_DelegationVerification(t *testing.T) {
 
 	// Step 5: verify via gateway proxy path if available.
 	if IsGatewayReachable(cfg.GatewayURL) {
-		gatewayResult := auditdGet(t, cfg.GatewayURL, "/api/v1/governance/events/"+dvEventID)
+		gatewayResult := gatewayGet(t, cfg, "/api/v1/governance/events/"+dvEventID)
 		if gatewayResult["event_id"] != dvEventID {
 			t.Errorf("gateway: event_id = %v, want %s", gatewayResult["event_id"], dvEventID)
 		}

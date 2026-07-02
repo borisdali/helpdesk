@@ -27,7 +27,11 @@ jobs:
 
       - name: Unit tests
         # agents/incident has pre-existing test failures unrelated to this codebase.
+        # set -o pipefail: propagate go test's exit code through the tee pipe so a
+        # failing test suite actually fails the CI step (without it, tee's exit code
+        # of 0 masks the failure and the step goes green even with FAIL lines).
         run: |
+          set -o pipefail
           go test -v -coverprofile=unit.out -covermode=atomic \
             $(go list ./... | grep -v helpdesk/agents/incident) \
             2>&1 | tee /tmp/unit.log

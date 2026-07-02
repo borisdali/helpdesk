@@ -507,7 +507,7 @@ func cmdRun(args []string) {
 					fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 					printIncidentSummary(resp, remResult.RecoveryTimeSecs, cfg.GatewayURL)
 					if cfg.GatewayURL != "" {
-						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
+						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved", f.DiagnosisPlaybookSeriesID); vaultErr != nil {
 							slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
 						} else if pbID != "" {
 							fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
@@ -516,7 +516,7 @@ func cmdRun(args []string) {
 				} else {
 					fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
 				}
-			} else if !repeatMode && cfg.RemediateEnabled && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
+			} else if !repeatMode && cfg.RemediateEnabled && resp.ChainedRunID == "" && (f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "") {
 				remResult := remediator.Remediate(faultCtx, f, resp.RunID)
 				evalResult.RemediationAttempted = true
 				evalResult.RemediationPassed = remResult.Passed
@@ -531,7 +531,7 @@ func cmdRun(args []string) {
 				if remResult.Passed {
 					fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 					if cfg.GatewayURL != "" {
-						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved"); vaultErr != nil {
+						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved", f.DiagnosisPlaybookSeriesID); vaultErr != nil {
 							slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
 						} else if pbID != "" {
 							fmt.Printf("Vault: draft saved → %s (activate with 'faulttest vault list')\n", pbID)
@@ -539,6 +539,9 @@ func cmdRun(args []string) {
 					}
 				} else {
 					fmt.Printf("Remediation: FAILED — %v\n", remResult.Err)
+				}
+				if cfg.ApprovalMode != "force" {
+					remediator.submitFeedback(faultCtx, resp.RunID, remResult.RunID, resp.DiagnosticReport)
 				}
 			} else {
 				evalResult.OverallScore = evalResult.Score
@@ -739,12 +742,18 @@ func postNotify(notifyURL string, report Report) {
 
 // requestVaultDraft POSTs to the gateway's from-trace endpoint to synthesize a
 // playbook draft from the given traceID and saves it to the vault as an inactive
-// draft. Returns the persisted playbook_id, or "" when auditd is not configured.
-func requestVaultDraft(ctx context.Context, cfg *HarnessConfig, traceID, outcome string) (string, error) {
-	reqBody, err := json.Marshal(map[string]string{
+// draft. seriesID pins the draft to an existing series so the handler can fetch
+// the active version and use improvement mode instead of cold synthesis.
+// Returns the persisted playbook_id, or "" when auditd is not configured.
+func requestVaultDraft(ctx context.Context, cfg *HarnessConfig, traceID, outcome, seriesID string) (string, error) {
+	body := map[string]string{
 		"trace_id": traceID,
 		"outcome":  outcome,
-	})
+	}
+	if seriesID != "" {
+		body["series_id"] = seriesID
+	}
+	reqBody, err := json.Marshal(body)
 	if err != nil {
 		return "", fmt.Errorf("marshal: %w", err)
 	}
@@ -763,14 +772,14 @@ func requestVaultDraft(ctx context.Context, cfg *HarnessConfig, traceID, outcome
 		return "", fmt.Errorf("POST from-trace: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+		return "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, respBody)
 	}
 	var result struct {
 		PlaybookID string `json:"playbook_id"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	return result.PlaybookID, nil

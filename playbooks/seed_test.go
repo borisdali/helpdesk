@@ -155,6 +155,85 @@ func TestSeedSystemPlaybooks_NewVersionIsInactive(t *testing.T) {
 	}
 }
 
+// TestSeedSystemPlaybooks_DoesNotClobberActivatedGeneratedVersion verifies that
+// when an operator has promoted a generated playbook version in a series, a
+// subsequent auditd restart (which re-runs the seeder) does not roll the series
+// back to the system baseline.
+func TestSeedSystemPlaybooks_DoesNotClobberActivatedGeneratedVersion(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed shipped system playbooks.
+	if err := playbooks.SeedSystemPlaybooks(ctx, ps); err != nil {
+		t.Fatalf("initial seed: %v", err)
+	}
+
+	// Find any series that was seeded (active system version).
+	all, err := ps.List(ctx, audit.PlaybookListQuery{ActiveOnly: true, IncludeSystem: true})
+	if err != nil || len(all) == 0 {
+		t.Fatalf("need at least one seeded playbook; err=%v len=%d", err, len(all))
+	}
+	systemPB := all[0]
+
+	// Simulate the operator generating and activating v_next (a generated version).
+	generated := &audit.Playbook{
+		SeriesID:     systemPB.SeriesID,
+		Name:         systemPB.Name + " (generated)",
+		Version:      "99.0",
+		ProblemClass: systemPB.ProblemClass,
+		Description:  "operator-improved version",
+		IsSystem:     false,
+		IsActive:     false,
+		Source:       "generated",
+	}
+	if err := ps.Create(ctx, generated); err != nil {
+		t.Fatalf("Create generated version: %v", err)
+	}
+	// Activate the generated version — this deactivates the system version.
+	if err := ps.Activate(ctx, generated.PlaybookID); err != nil {
+		t.Fatalf("Activate generated version: %v", err)
+	}
+
+	// Confirm system version is now inactive.
+	reloaded, err := ps.List(ctx, audit.PlaybookListQuery{
+		SeriesID: systemPB.SeriesID, ActiveOnly: false, IncludeSystem: true,
+	})
+	if err != nil {
+		t.Fatalf("List after activate: %v", err)
+	}
+	for _, pb := range reloaded {
+		if pb.PlaybookID == systemPB.PlaybookID && pb.IsActive {
+			t.Fatal("system version should be inactive after activating generated version")
+		}
+	}
+
+	// Re-run the seeder (simulates auditd restart).
+	if err := playbooks.SeedSystemPlaybooks(ctx, ps); err != nil {
+		t.Fatalf("re-seed: %v", err)
+	}
+
+	// The generated version must still be active; the system version must stay inactive.
+	afterReseed, err := ps.List(ctx, audit.PlaybookListQuery{
+		SeriesID: systemPB.SeriesID, ActiveOnly: false, IncludeSystem: true,
+	})
+	if err != nil {
+		t.Fatalf("List after re-seed: %v", err)
+	}
+	activeCount := 0
+	for _, pb := range afterReseed {
+		if pb.IsActive {
+			activeCount++
+			if pb.PlaybookID != generated.PlaybookID {
+				t.Errorf("wrong version is active after re-seed: got %s (source=%s, version=%s), want generated %s",
+					pb.PlaybookID, pb.Source, pb.Version, generated.PlaybookID)
+			}
+		}
+	}
+	if activeCount != 1 {
+		t.Errorf("expected exactly 1 active version after re-seed, got %d", activeCount)
+	}
+}
+
 func TestSeedSystemPlaybooks_YAMLParseRoundtrip(t *testing.T) {
 	ps := newTestStore(t)
 	ctx := context.Background()
@@ -264,7 +343,7 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		t.Error("pbs_db_pitr_recovery: entry_point = true, want false")
 	}
 
-	// Triage playbooks: execution_mode=agent (converted from fleet to return text responses).
+	// Triage playbooks: execution_mode=agent, playbook_type=triage.
 	for _, sid := range []string{"pbs_vacuum_triage", "pbs_slow_query_triage", "pbs_connection_triage", "pbs_replication_lag"} {
 		pb := bySeriesID[sid]
 		if pb == nil {
@@ -273,6 +352,24 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		}
 		if pb.ExecutionMode != "agent" {
 			t.Errorf("%s: execution_mode = %q, want agent", sid, pb.ExecutionMode)
+		}
+		if pb.PlaybookType != "triage" {
+			t.Errorf("%s: playbook_type = %q, want triage", sid, pb.PlaybookType)
+		}
+	}
+
+	// Remediation playbooks: execution_mode=agent_approve, playbook_type=remediation.
+	for _, sid := range []string{"pbs_vacuum_remediate", "pbs_slow_query_remediate", "pbs_connection_remediate"} {
+		pb := bySeriesID[sid]
+		if pb == nil {
+			t.Errorf("%s not seeded", sid)
+			continue
+		}
+		if pb.ExecutionMode != "agent_approve" {
+			t.Errorf("%s: execution_mode = %q, want agent_approve", sid, pb.ExecutionMode)
+		}
+		if pb.PlaybookType != "remediation" {
+			t.Errorf("%s: playbook_type = %q, want remediation", sid, pb.PlaybookType)
 		}
 	}
 }

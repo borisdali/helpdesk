@@ -787,7 +787,7 @@ func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
 	traceID := audit.NewTraceIDWithPrefix("tr_")
 
 	gw.recordEscalationDecision(context.Background(), traceID, principal,
-		pb, "pbs_db_config_recovery", "connection pool exhaustion detected")
+		pb, "pbs_db_config_recovery", "connection pool exhaustion detected", false)
 
 	ta.mu.Lock()
 	events := ta.events
@@ -850,7 +850,7 @@ func TestRecordEscalationDecision_NoFindingsOmitsThirdStep(t *testing.T) {
 
 	pb := &audit.Playbook{SeriesID: "pbs_db_restart_triage"}
 	gw.recordEscalationDecision(context.Background(), "tr_test123",
-		identity.ResolvedPrincipal{}, pb, "pbs_db_config_recovery", "")
+		identity.ResolvedPrincipal{}, pb, "pbs_db_config_recovery", "", false)
 
 	ta.mu.Lock()
 	events := ta.events
@@ -879,7 +879,7 @@ func TestRecordEscalationDecision_EmptyTraceIDGeneratesOne(t *testing.T) {
 
 	pb := &audit.Playbook{SeriesID: "pbs_triage"}
 	gw.recordEscalationDecision(context.Background(), "",
-		identity.ResolvedPrincipal{}, pb, "pbs_next", "")
+		identity.ResolvedPrincipal{}, pb, "pbs_next", "", false)
 
 	ta.mu.Lock()
 	events := ta.events
@@ -902,7 +902,7 @@ func TestRecordEscalationDecision_NilAuditor(t *testing.T) {
 	pb := &audit.Playbook{SeriesID: "pbs_triage"}
 	// Should be a no-op, not a panic.
 	gw.recordEscalationDecision(context.Background(), "tr_test",
-		identity.ResolvedPrincipal{}, pb, "pbs_next", "")
+		identity.ResolvedPrincipal{}, pb, "pbs_next", "", false)
 }
 
 

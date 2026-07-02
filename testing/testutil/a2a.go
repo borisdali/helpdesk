@@ -50,6 +50,11 @@ type AgentResponse struct {
 	// GateReason is "low_confidence" when the gate was forced by the gateway
 	// because the primary hypothesis confidence was below 50%. Empty otherwise.
 	GateReason string
+	// ChainedRunID is the run ID of the auto-chained follow-on playbook when
+	// the gateway completed a TRANSITION_TO/ESCALATE_TO chain inline (force or
+	// auto approval mode). Non-empty means the gateway already ran remediation —
+	// callers should not trigger a second remediation run.
+	ChainedRunID string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

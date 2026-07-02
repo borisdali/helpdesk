@@ -109,7 +109,7 @@ func TestRequestVaultDraft_Success(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "vault-key"}
-	pbID, err := requestVaultDraft(context.Background(), cfg, "faulttest-abc-db-max-connections", "resolved")
+	pbID, err := requestVaultDraft(context.Background(), cfg, "faulttest-abc-db-max-connections", "resolved", "")
 	if err != nil {
 		t.Fatalf("requestVaultDraft: %v", err)
 	}
@@ -135,6 +135,44 @@ func TestRequestVaultDraft_Success(t *testing.T) {
 	}
 }
 
+func TestRequestVaultDraft_WithSeriesID(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Write([]byte(`{"playbook_id":"pb_series_001"}`))
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	requestVaultDraft(context.Background(), cfg, "trace-x", "resolved", "pbs_vacuum_triage") //nolint:errcheck
+	var body map[string]string
+	if err := json.Unmarshal(gotBody, &body); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if body["series_id"] != "pbs_vacuum_triage" {
+		t.Errorf("series_id = %q, want pbs_vacuum_triage", body["series_id"])
+	}
+}
+
+func TestRequestVaultDraft_EmptySeriesIDOmitted(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	requestVaultDraft(context.Background(), cfg, "trace-x", "resolved", "") //nolint:errcheck
+	var body map[string]string
+	if err := json.Unmarshal(gotBody, &body); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if _, ok := body["series_id"]; ok {
+		t.Errorf("series_id should be absent when empty, got %q", body["series_id"])
+	}
+}
+
 func TestRequestVaultDraft_NoPlaybookID(t *testing.T) {
 	// Gateway returns draft but no playbook_id (auditd not configured).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +181,7 @@ func TestRequestVaultDraft_NoPlaybookID(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
-	pbID, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved")
+	pbID, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,7 +198,7 @@ func TestRequestVaultDraft_ServerError(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
-	_, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved")
+	_, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved", "")
 	if err == nil {
 		t.Error("expected error for 500 response, got nil")
 	}
@@ -168,7 +206,7 @@ func TestRequestVaultDraft_ServerError(t *testing.T) {
 
 func TestRequestVaultDraft_NetworkError(t *testing.T) {
 	cfg := &HarnessConfig{GatewayURL: "http://127.0.0.1:19996"}
-	_, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved")
+	_, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved", "")
 	if err == nil {
 		t.Error("expected error for unreachable server, got nil")
 	}
@@ -183,7 +221,7 @@ func TestRequestVaultDraft_URLPath(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
-	requestVaultDraft(context.Background(), cfg, "t", "resolved") //nolint:errcheck
+	requestVaultDraft(context.Background(), cfg, "t", "resolved", "") //nolint:errcheck
 	if gotPath != "/api/v1/fleet/playbooks/from-trace" {
 		t.Errorf("path = %q, want /api/v1/fleet/playbooks/from-trace", gotPath)
 	}

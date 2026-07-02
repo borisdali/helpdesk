@@ -10,12 +10,15 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"helpdesk/testing/faultlib"
 )
 
 // ── History file ──────────────────────────────────────────────────────────
@@ -135,19 +138,27 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|suggest|suggest-update>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|suggest|suggest-update|drafts|activate|discard>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
 		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
 		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
 		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
+		fmt.Fprintln(os.Stderr, "  journey         Show audit trail for a trace (tools, decisions, delegations)")
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		os.Exit(1)
 	}
+	// Print gateway identity banner before any subcommand output so operators
+	// always know which instance they're talking to (two stacks on the same
+	// port look identical without this).
+	gwURL := scanFlag(args[1:], "gateway", os.Getenv("FAULTTEST_GATEWAY_URL"))
+	gwKey := scanFlag(args[1:], "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"))
+	printGatewayBanner(gwURL, gwKey)
+
 	switch args[0] {
 	case "list":
 		vaultList(args[1:])
@@ -159,6 +170,8 @@ func cmdVault(args []string) {
 		vaultAccuracy(args[1:])
 	case "incidents":
 		vaultIncidents(args[1:])
+	case "journey", "journeys":
+		vaultJourney(args[1:])
 	case "versions":
 		vaultVersions(args[1:])
 	case "calibration":
@@ -167,6 +180,18 @@ func cmdVault(args []string) {
 		vaultSuggest(args[1:])
 	case "suggest-update":
 		vaultSuggestUpdate(args[1:])
+	case "drafts":
+		vaultDrafts(args[1:])
+	case "active":
+		vaultActive(args[1:])
+	case "activate":
+		vaultActivate(args[1:])
+	case "diff":
+		vaultDiff(args[1:])
+	case "history":
+		vaultHistory(args[1:])
+	case "discard":
+		vaultDiscard(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -202,6 +227,10 @@ type playbookGatewayInfo struct {
 	remediationAtGateCorrect       int
 	remediationPostIncidentCount   int
 	remediationPostIncidentCorrect int
+
+	// Efficiency metrics.
+	avgStepCount    float64
+	avgRecoverySecs float64
 }
 
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
@@ -258,6 +287,8 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 				RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
 				RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
 				RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
+				AvgStepCount                  float64 `json:"avg_step_count"`
+				AvgRecoverySecs               float64 `json:"avg_recovery_secs"`
 			} `json:"stats"`
 		} `json:"playbooks"`
 	}
@@ -286,6 +317,8 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 		info.remediationAtGateCorrect = s.RemediationAtGateCorrect
 		info.remediationPostIncidentCount = s.RemediationPostIncidentCount
 		info.remediationPostIncidentCorrect = s.RemediationPostIncidentCorrect
+		info.avgStepCount = s.AvgStepCount
+		info.avgRecoverySecs = s.AvgRecoverySecs
 	}
 	return info
 }
@@ -348,6 +381,72 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		return nil
 	}
 	return &cert
+}
+
+// scanFlag returns the value of --flag=val or --flag val from a []string,
+// falling back to defaultVal when not found. Used for quick pre-parse before
+// full flag.FlagSet parsing so cmdVault can print the gateway banner before
+// dispatching to a subcommand.
+func scanFlag(args []string, name, defaultVal string) string {
+	prefix := "--" + name + "="
+	for i, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return strings.TrimPrefix(a, prefix)
+		}
+		if (a == "--"+name || a == "-"+name) && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return defaultVal
+}
+
+// fetchGatewayIdentity calls /health and returns (version, hostname).
+// Returns empty strings on any error so callers can degrade gracefully.
+func fetchGatewayIdentity(gatewayURL, apiKey string) (version, hostname string) {
+	if gatewayURL == "" {
+		return "", ""
+	}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimSuffix(gatewayURL, "/")+"/health", nil)
+	if err != nil {
+		return "", ""
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Version  string `json:"version"`
+		Hostname string `json:"hostname"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", ""
+	}
+	return body.Version, body.Hostname
+}
+
+// printGatewayBanner prints a one-line "Connected to:" header to stdout so
+// operators always know which gateway instance their vault command is reading.
+func printGatewayBanner(gatewayURL, apiKey string) {
+	if gatewayURL == "" {
+		return
+	}
+	version, hostname := fetchGatewayIdentity(gatewayURL, apiKey)
+	if version == "" && hostname == "" {
+		fmt.Printf("Gateway: %s\n\n", gatewayURL)
+		return
+	}
+	parts := []string{gatewayURL}
+	if version != "" {
+		parts = append(parts, "version: "+version)
+	}
+	if hostname != "" {
+		parts = append(parts, "host: "+hostname)
+	}
+	fmt.Printf("Gateway: %s\n\n", strings.Join(parts, "  ·  "))
 }
 
 // probeGateway does a lightweight health-check against the gateway and returns
@@ -427,7 +526,9 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 func vaultList(args []string) {
 	fs := flag.NewFlagSet("vault list", flag.ExitOnError)
 	var target string
+	var short bool
 	fs.StringVar(&target, "target", "", "Filter last-run history by target (agent-conn alias or hostname)")
+	fs.BoolVar(&short, "short", false, "Compact view: suppress per-version sub-rows")
 	cfg := loadConfig(fs, args)
 
 	cat, err := loadActiveCatalog(cfg)
@@ -477,8 +578,8 @@ func vaultList(args []string) {
 	const (
 		colFault     = 32
 		colPlatform  = 10
-		colDiag      = 26
-		colRemed     = 26
+		colDiag      = 31 // pbs_checkpoint_bgwriter_triage = 30 chars
+		colRemed     = 32 // pbs_k8s_scale_to_zero_remediate = 31 chars
 		colFaultTest = 22 // "2026-04-18  PASS" or "(never)" or "READY"
 		colStable    = 14 // "STABLE(5)" or "UNSTABLE(3)" or "—"
 		// incidents column is the remainder
@@ -553,12 +654,6 @@ func vaultList(args []string) {
 						faultTestCol = "READY"
 					}
 				} else {
-					lastDate := "-"
-					if info.lastRunAt != "" {
-						if t, err := time.Parse(time.RFC3339, info.lastRunAt); err == nil {
-							lastDate = t.Format("2006-01-02")
-						}
-					}
 					// Accuracy feedback is submitted against the triage/diagnosis series,
 					// not the remediation series — fetch it separately when available.
 					feedbackCount := info.feedbackCount
@@ -573,8 +668,16 @@ func vaultList(args []string) {
 					if feedbackCount > 0 {
 						accuracyStr = fmt.Sprintf("%.0f%% accurate", accuracyRate*100)
 					}
-					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s  last: %s%s",
-						info.totalRuns, info.resolutionRate*100, accuracyStr, lastDate, sourceTag)
+					effStr := ""
+					if info.avgStepCount > 0 && info.avgRecoverySecs > 0 {
+						effStr = fmt.Sprintf("  avg: %.1f steps, %s recovery", info.avgStepCount, formatDuration(info.avgRecoverySecs))
+					} else if info.avgStepCount > 0 {
+						effStr = fmt.Sprintf("  avg: %.1f steps", info.avgStepCount)
+					} else if info.avgRecoverySecs > 0 {
+						effStr = fmt.Sprintf("  avg: %s recovery", formatDuration(info.avgRecoverySecs))
+					}
+					incidentCol = fmt.Sprintf("%d runs  %.0f%% resolved  %s%s%s",
+						info.totalRuns, info.resolutionRate*100, accuracyStr, effStr, sourceTag)
 				}
 			}
 		}
@@ -597,6 +700,62 @@ func vaultList(args []string) {
 		}
 
 		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, colStable, stableCol, incidentCol)
+
+		// Per-version learning signal: prefer the diagnosis (triage) series for
+		// version sub-rows — that's where suggest-update improvements land.
+		// Suppressed when --short is set for a compact single-line-per-fault view.
+		if short {
+			continue
+		}
+		// Fall back to the remediation series when no diagnosis series is set.
+		// Show the two newest versions so the before/after comparison is visible.
+		// A single-version series prints only a pointer to avoid duplicating the
+		// main row's data while still signalling that vault history exists.
+		versionSeriesID := f.DiagnosisPlaybookSeriesID
+		if versionSeriesID == "" {
+			versionSeriesID = playbookID
+		}
+		if versionSeriesID != "" && cfg.GatewayURL != "" {
+			if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, versionSeriesID); err == nil && len(versions) >= 1 {
+				// API returns oldest-first; reverse so active (newest) is first.
+				for i, j := 0, len(versions)-1; i < j; i, j = i+1, j-1 {
+					versions[i], versions[j] = versions[j], versions[i]
+				}
+				if len(versions) == 1 {
+					// One version: just a pointer so the operator knows data exists.
+					fmt.Printf("    → vault versions %s\n", versionSeriesID)
+				} else {
+					// Two or more: show at most 2 (the comparison that matters).
+					show := versions
+					if len(show) > 2 {
+						show = show[:2]
+					}
+					for _, vs := range show {
+						active := "  "
+						if vs.IsActive {
+							active = " *"
+						}
+						effStr := ""
+						if vs.AvgStepCount > 0 && vs.AvgRecoverySecs > 0 {
+							effStr = fmt.Sprintf("  avg: %.1f steps, %s recovery", vs.AvgStepCount, formatDuration(vs.AvgRecoverySecs))
+						} else if vs.AvgStepCount > 0 {
+							effStr = fmt.Sprintf("  avg: %.1f steps", vs.AvgStepCount)
+						} else if vs.AvgRecoverySecs > 0 {
+							effStr = fmt.Sprintf("  avg: %s recovery", formatDuration(vs.AvgRecoverySecs))
+						}
+						fbStr := ""
+						if vs.RemFeedbackCount > 0 {
+							fbStr = fmt.Sprintf("  %.0f%% approach OK", vs.RemFeedbackRate*100)
+						}
+						fmt.Printf("    %-5s%s  %dr  %.0f%%%s%s\n",
+							vs.Version, active, vs.TotalRuns, vs.ResolutionRate*100, effStr, fbStr)
+					}
+					if len(versions) > 2 {
+						fmt.Printf("    → vault versions %s\n", versionSeriesID)
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -1283,10 +1442,22 @@ type incidentFeedback struct {
 	Operator       string `json:"operator"`
 }
 
+// fetchRunsByOutcome calls GET /api/v1/fleet/playbook-runs?outcome=<o>&limit=<n>.
+func fetchRunsByOutcome(gatewayURL, apiKey, outcome string, limit int) ([]incidentRun, error) {
+	params := neturl.Values{"outcome": {outcome}, "limit": {fmt.Sprintf("%d", limit)}}
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs?" + params.Encode()
+	return doFetchRuns(u, apiKey)
+}
+
 // fetchRunsBySeries calls GET /api/v1/fleet/playbook-runs?series_id=<sid>&limit=<n>.
 func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incidentRun, error) {
 	url := strings.TrimSuffix(gatewayURL, "/") +
 		fmt.Sprintf("/api/v1/fleet/playbook-runs?series_id=%s&limit=%d", seriesID, limit)
+	return doFetchRuns(url, apiKey)
+}
+
+// doFetchRuns executes GET on a pre-built playbook-runs URL and decodes the result.
+func doFetchRuns(url, apiKey string) ([]incidentRun, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -1310,6 +1481,48 @@ func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incide
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return result.Runs, nil
+}
+
+// pickBestRunForSuggest returns the run ID of the best run for synthesis:
+// prefers "resolved" (which has full tool execution data) over "transitioned"
+// (which may have completed the handoff without tool calls to synthesize from).
+func pickBestRunForSuggest(gatewayURL, apiKey, seriesID string) (string, error) {
+	runs, err := fetchRunsBySeries(gatewayURL, apiKey, seriesID, 20)
+	if err != nil {
+		return "", err
+	}
+	// First pass: prefer resolved runs — they have complete step data.
+	var bestRunID string
+	for _, r := range runs {
+		if r.Outcome == "resolved" {
+			bestRunID = r.RunID
+			break
+		}
+	}
+	// Second pass: fall back to transitioned if no resolved run exists.
+	if bestRunID == "" {
+		for _, r := range runs {
+			if r.Outcome == "transitioned" {
+				bestRunID = r.RunID
+				break
+			}
+		}
+	}
+	if bestRunID == "" {
+		return "", fmt.Errorf("no resolved or transitioned runs found for series %s (check: faulttest vault incidents %s)", seriesID, seriesID)
+	}
+	// Fleet-mode playbook runs log tool execution events under the faulttest
+	// audit trace (e.g. "faulttest-{hash}-{fault-id}"), not the plr_* run ID.
+	// Resolve via the incident's triage journey so from-trace receives the
+	// trace that actually has audit_events entries.
+	if n, ferr := fetchIncidentNarrative(gatewayURL, apiKey, bestRunID); ferr == nil {
+		for _, j := range n.Journeys {
+			if j.Phase == "triage" && j.TraceID != "" {
+				return j.TraceID, nil
+			}
+		}
+	}
+	return bestRunID, nil
 }
 
 // fetchFeedback calls GET /api/v1/fleet/playbook-runs/{runID}/feedback.
@@ -1416,11 +1629,137 @@ func formatRemediationOutcome(r *incidentRun) string {
 
 // vaultIncidents lists incidents (triage run IDs) for a fault or playbook series,
 // including outcome, timestamp, truncated findings, and feedback status.
+// vaultIncidentsRecent shows the most recent playbook runs across all faults
+// by querying resolved and failed outcomes and merging the results.
+func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool) {
+	outcomes := []string{"resolved", "transitioned", "failed", "abandoned", "escalated", "escalated+resolved"}
+	seen := map[string]bool{}
+	var all []incidentRun
+	for _, o := range outcomes {
+		runs, err := fetchRunsByOutcome(cfg.GatewayURL, cfg.GatewayAPIKey, o, limit)
+		if err != nil {
+			continue
+		}
+		for _, r := range runs {
+			if !seen[r.RunID] {
+				seen[r.RunID] = true
+				all = append(all, r)
+			}
+		}
+	}
+
+	if len(all) == 0 {
+		fmt.Println("No recent incidents found.")
+		fmt.Println("Run `faulttest vault incidents <fault-id>` to filter by fault.")
+		return
+	}
+
+	// Sort by started_at descending.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].StartedAt > all[j].StartedAt
+	})
+	if len(all) > limit {
+		all = all[:limit]
+	}
+
+	// Optionally fetch per-run narratives for journey count and source detection.
+	type extra struct {
+		journeyCount int
+		source       string // "injected" or "real" or ""
+	}
+	extras := make([]extra, len(all))
+	if details {
+		fmt.Fprintf(os.Stderr, "Fetching details for %d runs...\n", len(all))
+		for i, run := range all {
+			n, err := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+			if err != nil {
+				continue
+			}
+			extras[i].journeyCount = len(n.Journeys)
+			// Detect injected: any journey trace_id starting with "faulttest-".
+			for _, j := range n.Journeys {
+				if strings.HasPrefix(j.TraceID, "faulttest-") {
+					extras[i].source = "injected"
+					break
+				}
+			}
+			if extras[i].source == "" && len(n.Journeys) > 0 {
+				extras[i].source = "real"
+			}
+		}
+	}
+
+	fmt.Printf("Recent incidents (last %d)", len(all))
+	if details {
+		fmt.Printf(" — SOURCE: injected=faulttest harness, real=human operator")
+	}
+	fmt.Printf("\n\n")
+
+	const (
+		colRunID   = 14
+		colSeries  = 28
+		colDate    = 16
+		colOutcome = 18 // wide enough for "escalated+resolved"
+		colOp      = 20
+		colJourney = 8
+		colSource  = 8
+	)
+	if details {
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+			colRunID, "RUN ID", colSeries, "SERIES", colDate, "STARTED",
+			colOutcome, "OUTCOME", colJourney, "JOURNEYS", colSource, "SOURCE", "OPERATOR")
+		fmt.Println(strings.Repeat("─", colRunID+2+colSeries+2+colDate+2+colOutcome+2+colJourney+2+colSource+2+colOp))
+	} else {
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
+			colRunID, "RUN ID", colSeries, "SERIES", colDate, "STARTED", colOutcome, "OUTCOME", "OPERATOR")
+		fmt.Println(strings.Repeat("─", colRunID+2+colSeries+2+colDate+2+colOutcome+2+colOp+4))
+	}
+
+	for i, run := range all {
+		date := run.StartedAt
+		if t, err := time.Parse(time.RFC3339, run.StartedAt); err == nil {
+			date = t.Format("2006-01-02 15:04")
+		} else if len(run.StartedAt) >= 16 {
+			date = run.StartedAt[:16]
+		}
+		series := run.SeriesID
+		if len(series) > colSeries {
+			series = series[:colSeries-3] + "..."
+		}
+		op := run.Operator
+		if op == "" {
+			op = "–"
+		}
+		if details {
+			jc := "–"
+			if extras[i].journeyCount > 0 {
+				jc = fmt.Sprintf("%d", extras[i].journeyCount)
+			}
+			src := extras[i].source
+			if src == "" {
+				src = "–"
+			}
+			fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+				colRunID, run.RunID, colSeries, series, colDate, date,
+				colOutcome, run.Outcome, colJourney, jc, colSource, src, op)
+		} else {
+			fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
+				colRunID, run.RunID, colSeries, series, colDate, date, colOutcome, run.Outcome, op)
+		}
+	}
+	fmt.Println()
+	fmt.Println("  → vault incidents <plr_*>           full incident narrative")
+	fmt.Println("  → vault incidents <fault-id>        all runs for a fault")
+	fmt.Println("  → vault incidents --details         show JOURNEYS count and SOURCE")
+}
+
 // Usage: faulttest vault incidents <fault-id or series-id> [--limit N]
 func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
 	var limit int
+	var details bool
 	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
+	fs.BoolVar(&details, "details", false, "Fetch per-run journey count and source (slower; makes one extra API call per run)")
 	cfg := loadConfig(fs, args)
 
 	if cfg.GatewayURL == "" {
@@ -1428,8 +1767,8 @@ func vaultIncidents(args []string) {
 		os.Exit(1)
 	}
 	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault incidents <fault-id or series-id or run-id> [--limit N]")
-		os.Exit(1)
+		vaultIncidentsRecent(cfg, limit, details)
+		return
 	}
 
 	arg := fs.Args()[0]
@@ -1445,9 +1784,12 @@ func vaultIncidents(args []string) {
 	}
 
 	seriesID := arg
+	faultID := ""
 
-	// Resolve fault ID → diagnosis series ID via catalog.
+	// Resolve fault ID ↔ diagnosis series ID via catalog.
 	if !strings.HasPrefix(arg, "pbs_") {
+		// arg is a fault ID — resolve to series and keep fault for display.
+		faultID = arg
 		cat, err := loadActiveCatalog(cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
@@ -1469,6 +1811,16 @@ func vaultIncidents(args []string) {
 			fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
 			os.Exit(1)
 		}
+	} else {
+		// arg is a series ID — reverse-lookup to find the fault that references it.
+		if cat, err := loadActiveCatalog(cfg); err == nil {
+			for _, f := range cat.Failures {
+				if f.DiagnosisPlaybookSeriesID == arg {
+					faultID = f.ID
+					break
+				}
+			}
+		}
 	}
 
 	runs, err := fetchRunsBySeries(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID, limit)
@@ -1486,15 +1838,17 @@ func vaultIncidents(args []string) {
 	const (
 		colRunID    = 14
 		colDate     = 16
-		colDiag     = 10
-		colRemed    = 16
+		colFault    = 28
+		colDiag     = 18 // wide enough for "escalated+resolved"
+		colRemed    = 24 // wide enough for "escalated+resolved 30.0s"
 		colFeedback = 12
 		colScore    = 5
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colRunID, "RUN ID", colDate, "STARTED", colDiag, "DIAG", colRemed, "REMEDIATION",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colDate, "STARTED", colFault, "FAULT",
+		colDiag, "DIAG", colRemed, "REMEDIATION",
 		colFeedback, "FEEDBACK", colScore, "SCORE", "FINDINGS")
-	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+40))
+	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colFault+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+40))
 
 	for _, run := range runs {
 		date := run.StartedAt
@@ -1530,17 +1884,26 @@ func vaultIncidents(args []string) {
 			scoreStr = fmt.Sprintf("%d%%", int(ev.OverallScore*100))
 		}
 
+		faultDisplay := faultID
+		if faultDisplay == "" {
+			faultDisplay = "–"
+		}
+		if len(faultDisplay) > colFault {
+			faultDisplay = faultDisplay[:colFault-3] + "..."
+		}
+
 		findings := run.FindingsSummary
-		if len(findings) > 40 {
-			findings = findings[:37] + "..."
+		if len(findings) > 80 {
+			findings = findings[:77] + "..."
 		}
 		if findings == "" {
 			findings = "–"
 		}
 
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colRunID, run.RunID,
 			colDate, date,
+			colFault, faultDisplay,
 			colDiag, diagOutcome,
 			colRemed, remedStr,
 			colFeedback, feedbackStr,
@@ -1557,7 +1920,367 @@ func vaultIncidents(args []string) {
 	fmt.Printf("  (resolution=approved → correct, resolution=denied → wrong diagnosis)\n")
 }
 
+// ── vault journey ─────────────────────────────────────────────────────────
+
+// journeySummary mirrors audit.JourneySummary for JSON decoding.
+type journeySummary struct {
+	TraceID       string               `json:"trace_id"`
+	StartedAt     string               `json:"started_at"`
+	EndedAt       string               `json:"ended_at"`
+	DurationMs    int64                `json:"duration_ms"`
+	UserID        string               `json:"user_id,omitempty"`
+	UserQuery     string               `json:"user_query,omitempty"`
+	Agent         string               `json:"agent,omitempty"`
+	Category      string               `json:"category,omitempty"`
+	Delegations   []delegationSummary  `json:"delegations,omitempty"`
+	ToolsUsed     []string             `json:"tools_used"`
+	Outcome       string               `json:"outcome,omitempty"`
+	EventCount    int                  `json:"event_count"`
+	RetryCount    int                  `json:"retry_count,omitempty"`
+	Origin        string               `json:"origin,omitempty"`
+	HasMismatch   bool                 `json:"has_mismatch,omitempty"`
+	IncidentRunID string               `json:"incident_run_id,omitempty"`
+}
+
+// delegationSummary mirrors audit.DelegationSummary.
+type delegationSummary struct {
+	Intent string   `json:"intent"`
+	Tools  []string `json:"tools"`
+}
+
+// fetchJourneys calls GET /api/v1/governance/journeys with the given query params.
+func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journeySummary, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/governance/journeys"
+	if len(params) > 0 {
+		parts := make([]string, 0, len(params))
+		for k, v := range params {
+			parts = append(parts, k+"="+v)
+		}
+		u += "?" + strings.Join(parts, "&")
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var summaries []journeySummary
+	if err := json.Unmarshal(body, &summaries); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return summaries, nil
+}
+
+// vaultJourney shows the audit trail for one or more journey traces.
+// Usage: faulttest vault journey [<trace_id>] [--limit N] [--since duration] [--category db|k8s] [--outcome X] [--incident]
+func vaultJourney(args []string) {
+	fs := flag.NewFlagSet("vault journey", flag.ExitOnError)
+	var limit int
+	var since string
+	var category string
+	var outcome string
+	var incidentOnly bool
+	fs.IntVar(&limit, "limit", 20, "Maximum number of journeys to show")
+	fs.StringVar(&since, "since", "24h", "Show journeys from the last duration (e.g. 1h, 24h, 7d)")
+	fs.StringVar(&category, "category", "", "Filter by category: database, kubernetes, host")
+	fs.StringVar(&outcome, "outcome", "", "Filter by outcome: resolved, abandoned, escalated, in_progress")
+	fs.BoolVar(&incidentOnly, "incident", false, "Show only journeys linked to an incident run")
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault journey")
+		os.Exit(1)
+	}
+
+	// Detail mode: vault journey <trace_id>
+	if len(fs.Args()) > 0 {
+		traceID := fs.Args()[0]
+		printJourneyDetail(cfg.GatewayURL, cfg.GatewayAPIKey, traceID)
+		return
+	}
+
+	// List mode: show recent journeys.
+	params := map[string]string{
+		"limit": strconv.Itoa(limit),
+	}
+	// Normalise "7d" → "168h" since the server expects Go duration format.
+	sinceDur := since
+	if strings.HasSuffix(since, "d") {
+		if days, err := strconv.Atoi(strings.TrimSuffix(since, "d")); err == nil {
+			sinceDur = fmt.Sprintf("%dh", days*24)
+		}
+	}
+	if sinceDur != "" {
+		params["since"] = sinceDur
+	}
+	if category != "" {
+		params["category"] = category
+	}
+	if outcome != "" {
+		params["outcome"] = outcome
+	}
+
+	journeys, err := fetchJourneys(cfg.GatewayURL, cfg.GatewayAPIKey, params)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching journeys: %v\n", err)
+		os.Exit(1)
+	}
+	if incidentOnly {
+		filtered := journeys[:0]
+		for _, j := range journeys {
+			if j.IncidentRunID != "" {
+				filtered = append(filtered, j)
+			}
+		}
+		journeys = filtered
+	}
+	if len(journeys) == 0 {
+		fmt.Println("No journeys found.")
+		return
+	}
+
+	title := fmt.Sprintf("Recent journeys — %d entries (last %s)", len(journeys), since)
+	if category != "" {
+		title += "  category=" + category
+	}
+	if outcome != "" {
+		title += "  outcome=" + outcome
+	}
+	fmt.Println(title)
+	fmt.Println()
+
+	const (
+		colTrace    = 44
+		colDate     = 16
+		colDur      = 7
+		colAgent    = 25
+		colOutcome  = 17
+		colIncident = 14
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colTrace, "TRACE ID",
+		colDate, "STARTED",
+		colDur, "DUR",
+		colAgent, "AGENT",
+		colOutcome, "OUTCOME",
+		colIncident, "INCIDENT",
+		"TOOLS",
+	)
+	fmt.Println(strings.Repeat("─", colTrace+2+colDate+2+colDur+2+colAgent+2+colOutcome+2+colIncident+2+40))
+
+	for _, j := range journeys {
+		date := j.StartedAt
+		if t, err := time.Parse(time.RFC3339, j.StartedAt); err == nil {
+			date = t.Format("2006-01-02 15:04")
+		} else if len(j.StartedAt) >= 16 {
+			date = j.StartedAt[:16]
+		}
+
+		durStr := "–"
+		if j.DurationMs > 0 {
+			d := time.Duration(j.DurationMs) * time.Millisecond
+			if d < time.Minute {
+				durStr = fmt.Sprintf("%.1fs", d.Seconds())
+			} else {
+				durStr = fmt.Sprintf("%.0fm", d.Minutes())
+			}
+		}
+
+		agent := j.Agent
+		if agent == "" {
+			agent = j.Category
+		}
+		if agent == "" {
+			agent = "–"
+		}
+
+		outcomeStr := j.Outcome
+		if outcomeStr == "" {
+			outcomeStr = "–"
+		}
+
+		incidentStr := "–"
+		if j.IncidentRunID != "" {
+			incidentStr = j.IncidentRunID
+		}
+		mismatchFlag := ""
+		if j.HasMismatch {
+			mismatchFlag = " !"
+		}
+
+		toolStr := strings.Join(j.ToolsUsed, ", ")
+		if len(toolStr) > 40 {
+			toolStr = toolStr[:37] + "..."
+		}
+		if toolStr == "" {
+			toolStr = "–"
+		}
+
+		traceDisplay := j.TraceID
+		if len(traceDisplay) > colTrace {
+			traceDisplay = traceDisplay[:colTrace]
+		}
+
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s%s\n",
+			colTrace, traceDisplay,
+			colDate, date,
+			colDur, durStr,
+			colAgent, agent,
+			colOutcome, outcomeStr,
+			colIncident, incidentStr,
+			toolStr, mismatchFlag,
+		)
+	}
+
+	fmt.Println()
+	fmt.Println("  ! = fabrication mismatch (agent reported success but no tool call recorded)")
+	fmt.Printf("\nTo drill into a trace:\n  faulttest vault journey <trace_id> --gateway %s\n", cfg.GatewayURL)
+}
+
+// printJourneyDetail shows a single journey in full detail.
+func printJourneyDetail(gatewayURL, apiKey, traceID string) {
+	journeys, err := fetchJourneys(gatewayURL, apiKey, map[string]string{
+		"trace_id": traceID,
+		"limit":    "1",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching journey: %v\n", err)
+		os.Exit(1)
+	}
+	if len(journeys) == 0 {
+		fmt.Fprintf(os.Stderr, "No journey found for trace_id %q\n", traceID)
+		os.Exit(1)
+	}
+	j := journeys[0]
+
+	sep := strings.Repeat("─", 70)
+	sectionJ := func(name string) {
+		fmt.Printf("\n%s\n%s\n", name, sep)
+	}
+
+	fmt.Printf("\nJOURNEY  %s\n%s\n", j.TraceID, sep)
+
+	started := j.StartedAt
+	if t, err := time.Parse(time.RFC3339, j.StartedAt); err == nil {
+		started = t.Format("2006-01-02 15:04:05 UTC")
+	}
+	ended := j.EndedAt
+	if t, err := time.Parse(time.RFC3339, j.EndedAt); err == nil {
+		ended = t.Format("2006-01-02 15:04:05 UTC")
+	}
+	durStr := "–"
+	if j.DurationMs > 0 {
+		d := time.Duration(j.DurationMs) * time.Millisecond
+		durStr = fmt.Sprintf("%.1fs", d.Seconds())
+	}
+
+	fmt.Printf("  %-18s %s\n", "Started:", started)
+	fmt.Printf("  %-18s %s\n", "Ended:", ended)
+	fmt.Printf("  %-18s %s\n", "Duration:", durStr)
+	if j.Agent != "" {
+		fmt.Printf("  %-18s %s\n", "Agent:", j.Agent)
+	}
+	if j.Category != "" {
+		fmt.Printf("  %-18s %s\n", "Category:", j.Category)
+	}
+	if j.Origin != "" {
+		fmt.Printf("  %-18s %s\n", "Origin:", j.Origin)
+	}
+	fmt.Printf("  %-18s %s\n", "Outcome:", j.Outcome)
+	fmt.Printf("  %-18s %d\n", "Events:", j.EventCount)
+	if j.RetryCount > 0 {
+		fmt.Printf("  %-18s %d\n", "Retries:", j.RetryCount)
+	}
+
+	if j.UserQuery != "" {
+		sectionJ("QUERY")
+		q := j.UserQuery
+		if idx := strings.IndexByte(q, '\n'); idx >= 0 {
+			q = q[:idx] + " ..."
+		}
+		fmt.Printf("  %s\n", wordWrap(q, 66, "  "))
+	}
+
+	if len(j.Delegations) > 0 {
+		sectionJ("DELEGATIONS")
+		for i, d := range j.Delegations {
+			fmt.Printf("  %d. %s\n", i+1, d.Intent)
+			if len(d.Tools) > 0 {
+				fmt.Printf("     tools: %s\n", strings.Join(d.Tools, ", "))
+			}
+		}
+	}
+
+	if len(j.ToolsUsed) > 0 {
+		sectionJ("TOOLS USED")
+		for _, t := range j.ToolsUsed {
+			fmt.Printf("  • %s\n", t)
+		}
+	}
+
+	if j.HasMismatch {
+		sectionJ("FABRICATION WARNING")
+		fmt.Println("  ! One or more delegations reported success but no matching tool")
+		fmt.Println("    execution was recorded in the audit trail.")
+		fmt.Println("    This may indicate LLM fabrication. Review the agent transcript.")
+	}
+
+	if j.IncidentRunID != "" {
+		sectionJ("INCIDENT LINK")
+		fmt.Printf("  %-18s %s\n", "Run ID:", j.IncidentRunID)
+		fmt.Printf("\n  → vault incidents %s\n", j.IncidentRunID)
+	}
+
+	// If this is a diagnostic journey (not already a remediation trace), check
+	// whether a companion remediation journey exists under the -remed suffix.
+	if !strings.HasSuffix(j.TraceID, "-remed") {
+		remedTraceID := j.TraceID + "-remed"
+		if rems, err := fetchJourneys(gatewayURL, apiKey, map[string]string{
+			"trace_id": remedTraceID,
+			"limit":    "1",
+		}); err == nil && len(rems) > 0 {
+			sectionJ("REMEDIATION JOURNEY")
+			rem := rems[0]
+			fmt.Printf("  %-18s %s\n", "Trace:", rem.TraceID)
+			fmt.Printf("  %-18s %s\n", "Agent:", rem.Agent)
+			fmt.Printf("  %-18s %s\n", "Outcome:", rem.Outcome)
+			if len(rem.ToolsUsed) > 0 {
+				fmt.Printf("  %-18s %s\n", "Tools:", strings.Join(rem.ToolsUsed, ", "))
+			}
+			fmt.Printf("\n  → vault journeys %s\n", rem.TraceID)
+		}
+	}
+
+	fmt.Println()
+}
+
 // ── vault suggest ─────────────────────────────────────────────────────────
+
+// nextVersion increments the minor component of a dotted version string.
+// "1.3" → "1.4", "2" → "2.1", "" → "1.0", "1.3.0" → "1.3.1".
+func nextVersion(current string) string {
+	if current == "" {
+		return "1.0"
+	}
+	parts := strings.Split(current, ".")
+	last := parts[len(parts)-1]
+	n, err := strconv.Atoi(last)
+	if err != nil {
+		return current + ".1"
+	}
+	parts[len(parts)-1] = strconv.Itoa(n + 1)
+	return strings.Join(parts, ".")
+}
 
 // ── vault suggest-update ──────────────────────────────────────────────────
 
@@ -1565,6 +2288,7 @@ func vaultIncidents(args []string) {
 type vaultPlaybook struct {
 	PlaybookID  string `json:"playbook_id"`
 	Name        string `json:"name"`
+	Version     string `json:"version"`
 	Description string `json:"description"`
 	Guidance    string `json:"guidance"`
 }
@@ -1614,16 +2338,39 @@ func vaultSuggestUpdate(args []string) {
 		apiKey     string
 	)
 	fs.StringVar(&seriesID, "series-id", "", "Series ID of the playbook to update (required)")
-	fs.StringVar(&traceID, "trace-id", "", "Audit trace ID of the successful incident (required)")
+	fs.StringVar(&traceID, "trace-id", "", "Run ID or trace ID to synthesize from (auto-selected when omitted)")
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
-	if seriesID == "" || traceID == "" {
-		fmt.Fprintln(os.Stderr, "Error: --series-id and --trace-id are both required")
+	if seriesID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --series-id is required")
 		os.Exit(1)
+	}
+	// Auto-select the most recent resolved run when --trace-id is omitted.
+	if traceID == "" {
+		picked, pickErr := pickBestRunForSuggest(gatewayURL, apiKey, seriesID)
+		if pickErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: --trace-id not provided and could not auto-select a run: %v\n", pickErr)
+			fmt.Fprintf(os.Stderr, "Hint: run `faulttest vault incidents %s` to list available runs.\n", seriesID)
+			os.Exit(1)
+		}
+		traceID = picked
+		fmt.Printf("Auto-selected trace: %s\n\n", traceID)
+	} else if strings.HasPrefix(traceID, "plr_") {
+		// Caller supplied a playbook run ID — tool execution events live under the
+		// triage journey trace, not the PLR ID itself. Resolve via incident narrative.
+		if n, err := fetchIncidentNarrative(gatewayURL, apiKey, traceID); err == nil {
+			for _, j := range n.Journeys {
+				if j.Phase == "triage" && j.TraceID != "" {
+					fmt.Printf("Resolved %s → %s (triage journey)\n\n", traceID, j.TraceID)
+					traceID = j.TraceID
+					break
+				}
+			}
+		}
 	}
 
 	// Step 1: Fetch current active playbook.
@@ -1635,8 +2382,10 @@ func vaultSuggestUpdate(args []string) {
 
 	// Step 2: Synthesize proposed update via from-trace.
 	reqBody, _ := json.Marshal(map[string]string{
-		"trace_id": traceID,
-		"outcome":  outcome,
+		"trace_id":  traceID,
+		"outcome":   outcome,
+		"series_id": seriesID,
+		"version":   nextVersion(current.Version),
 	})
 	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
 	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(reqBody))
@@ -1661,9 +2410,10 @@ func vaultSuggestUpdate(args []string) {
 		os.Exit(1)
 	}
 	var traceResult struct {
-		Draft      string `json:"draft"`
-		Source     string `json:"source"`
-		PlaybookID string `json:"playbook_id"`
+		Draft      string   `json:"draft"`
+		Source     string   `json:"source"`
+		PlaybookID string   `json:"playbook_id"`
+		Warnings   []string `json:"warnings"`
 	}
 	if err := json.Unmarshal(respBody, &traceResult); err != nil {
 		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
@@ -1686,6 +2436,14 @@ func vaultSuggestUpdate(args []string) {
 	fmt.Println("--- PROPOSED DRAFT (from trace) ---")
 	fmt.Println(traceResult.Draft)
 	fmt.Println()
+
+	if len(traceResult.Warnings) > 0 {
+		fmt.Println("⚠  Protocol warnings — review before activating:")
+		for _, w := range traceResult.Warnings {
+			fmt.Printf("   • %s\n", w)
+		}
+		fmt.Println()
+	}
 
 	if traceResult.PlaybookID != "" {
 		fmt.Printf("Proposed draft saved as: %s (inactive, source=generated)\n\n", traceResult.PlaybookID)
@@ -1922,6 +2680,8 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 // versionStats mirrors the PlaybookVersionStats struct returned by the gateway.
 type versionStats struct {
 	SeriesID        string  `json:"series_id"`
+	PlaybookID      string  `json:"playbook_id"`
+	OriginTrace     string  `json:"origin_trace"`
 	Version         string  `json:"version"`
 	IsActive        bool    `json:"is_active"`
 	TotalRuns       int     `json:"total_runs"`
@@ -1935,6 +2695,8 @@ type versionStats struct {
 	DiagEvalCount       int     `json:"diag_eval_count"`
 	AvgRemediationScore float64 `json:"avg_remediation_score"`
 	RemedEvalCount      int     `json:"remed_eval_count"`
+	RemFeedbackCount    int     `json:"rem_feedback_count"`
+	RemFeedbackRate     float64 `json:"rem_feedback_rate"`
 }
 
 // fetchVersionStats calls GET /api/v1/fleet/series/{seriesID}/version-stats.
@@ -1983,74 +2745,29 @@ func formatDuration(secs float64) string {
 	return fmt.Sprintf("%ds", s)
 }
 
-// vaultVersions shows per-version run stats for a playbook series.
-// Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]
-func vaultVersions(args []string) {
-	fs := flag.NewFlagSet("vault versions", flag.ExitOnError)
-	cfg := loadConfig(fs, args)
-
-	if cfg.GatewayURL == "" {
-		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault versions")
-		os.Exit(1)
-	}
-	if len(fs.Args()) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]")
-		os.Exit(1)
-	}
-
-	arg := fs.Args()[0]
-	seriesID := arg
-
-	// Resolve fault ID → diagnosis series ID via catalog.
-	if !strings.HasPrefix(arg, "pbs_") {
-		cat, err := loadActiveCatalog(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
-			os.Exit(1)
-		}
-		var found bool
-		for _, f := range cat.Failures {
-			if f.ID == arg {
-				if f.DiagnosisPlaybookSeriesID == "" {
-					fmt.Fprintf(os.Stderr, "Fault %q has no diagnosis playbook.\n", arg)
-					os.Exit(1)
-				}
-				seriesID = f.DiagnosisPlaybookSeriesID
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
-			os.Exit(1)
-		}
-	}
-
-	versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching version stats: %v\n", err)
-		os.Exit(1)
-	}
-	if len(versions) == 0 {
-		fmt.Printf("No run history found for series %q.\n", seriesID)
-		return
-	}
-
-	fmt.Printf("Version stats for %s — %d version(s)\n\n", seriesID, len(versions))
-
+// printVersionTable prints a formatted per-version stats table for one series.
+// label is printed as a section header (e.g. "TRIAGE  pbs_connection_triage").
+func printVersionTable(label string, versions []versionStats) {
 	const (
-		colVer   = 10
-		colRuns  = 6
-		colRes   = 10
-		colSteps = 10
-		colTime  = 10
-		colDiag  = 9
-		colRemed = 9
+		colVer      = 10
+		colRuns     = 6
+		colSuccess  = 9
+		colSteps    = 10
+		colTime     = 10
+		colDiag     = 9
+		colRemed    = 9
+		colApproach = 9
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colVer, "VERSION", colRuns, "RUNS", colRes, "TRANSITIONED",
-		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG", "AVG REMED")
-	fmt.Println(strings.Repeat("─", colVer+2+colRuns+2+colRes+2+colSteps+2+colTime+2+colDiag+2+colRemed))
+	sepWidth := colVer + 2 + colRuns + 2 + colSuccess + 2 + colSteps + 2 + colTime + 2 + colDiag + 2 + colRemed + 2 + colApproach
+
+	if label != "" {
+		fmt.Printf("%s  (%d version(s))\n", label, len(versions))
+	}
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colVer, "VERSION", colRuns, "RUNS", colSuccess, "SUCCESS%",
+		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG",
+		colRemed, "AVG REMED", "APPROACH OK")
+	fmt.Println(strings.Repeat("─", sepWidth))
 
 	for _, v := range versions {
 		ver := v.Version
@@ -2058,9 +2775,12 @@ func vaultVersions(args []string) {
 			ver += " *"
 		}
 
-		resolvedStr := "–"
+		successStr := "–"
 		if v.TotalRuns > 0 {
-			resolvedStr = fmt.Sprintf("%d%%", int(v.TransitionRate*100))
+			// SUCCESS% = resolved + transitioned: covers both "fixed it" (remediation)
+			// and "handed off successfully" (triage) in one metric.
+			rate := v.ResolutionRate + v.TransitionRate
+			successStr = fmt.Sprintf("%d%%", int(rate*100))
 		}
 
 		stepsStr := "–"
@@ -2080,18 +2800,128 @@ func vaultVersions(args []string) {
 			remedStr = fmt.Sprintf("%d%%", int(v.AvgRemediationScore*100))
 		}
 
-		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %s\n",
+		approachStr := "–"
+		if v.RemFeedbackCount > 0 {
+			approachStr = fmt.Sprintf("%d%%", int(v.RemFeedbackRate*100))
+		}
+
+		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colVer, ver,
 			colRuns, v.TotalRuns,
-			colRes, resolvedStr,
+			colSuccess, successStr,
 			colSteps, stepsStr,
 			colTime, timeStr,
 			colDiag, diagStr,
-			remedStr,
+			colRemed, remedStr,
+			approachStr,
 		)
+		if v.PlaybookID != "" || v.OriginTrace != "" {
+			detail := "  id=" + v.PlaybookID
+			if v.OriginTrace != "" {
+				detail += "  from=" + v.OriginTrace
+			}
+			fmt.Println(detail)
+		}
 	}
 	fmt.Println()
-	fmt.Println("* = currently active version")
+}
+
+// vaultVersions shows per-version run stats for a playbook series or fault.
+//
+// When given a fault ID (e.g. db-max-connections), shows both the triage and
+// remediation series side-by-side so the full incident pipeline is visible.
+// When given a series ID (pbs_* prefix), shows just that series.
+func vaultVersions(args []string) {
+	fs := flag.NewFlagSet("vault versions", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault versions")
+		os.Exit(1)
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]")
+		os.Exit(1)
+	}
+
+	arg := fs.Args()[0]
+
+	// Series ID passed directly — single-series mode.
+	if strings.HasPrefix(arg, "pbs_") {
+		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching version stats: %v\n", err)
+			os.Exit(1)
+		}
+		if len(versions) == 0 {
+			fmt.Printf("No run history found for series %q.\n", arg)
+			return
+		}
+		fmt.Printf("Version stats for %s\n\n", arg)
+		printVersionTable("", versions)
+		fmt.Println("* = currently active   SUCCESS% = resolved + transitioned")
+		fmt.Println("id/from lines show playbook_id and the run that generated that version")
+		return
+	}
+
+	// Fault ID passed — resolve both triage and remediation series.
+	cat, err := loadActiveCatalog(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+		os.Exit(1)
+	}
+	var triageSeries, remediationSeries, faultName string
+	var faultFound bool
+	for _, f := range cat.Failures {
+		if f.ID == arg {
+			triageSeries = f.DiagnosisPlaybookSeriesID
+			remediationSeries = f.Remediation.PlaybookID
+			faultName = f.Name
+			faultFound = true
+			break
+		}
+	}
+	if !faultFound {
+		fmt.Fprintf(os.Stderr, "Unknown fault ID %q. Run `faulttest list` to see available faults.\n", arg)
+		os.Exit(1)
+	}
+
+	if triageSeries == "" && remediationSeries == "" {
+		fmt.Fprintf(os.Stderr, "Fault %q has no triage or remediation playbook series.\n", arg)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Version stats for fault: %s (%s)\n\n", arg, faultName)
+
+	hasAny := false
+	if triageSeries != "" {
+		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, triageSeries)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch triage stats for %s: %v\n", triageSeries, err)
+		} else if len(versions) > 0 {
+			printVersionTable("TRIAGE  "+triageSeries, versions)
+			hasAny = true
+		} else {
+			fmt.Printf("TRIAGE  %s — no run history yet\n\n", triageSeries)
+		}
+	}
+
+	if remediationSeries != "" {
+		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, remediationSeries)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch remediation stats for %s: %v\n", remediationSeries, err)
+		} else if len(versions) > 0 {
+			printVersionTable("REMEDIATION  "+remediationSeries, versions)
+			hasAny = true
+		} else {
+			fmt.Printf("REMEDIATION  %s — no run history yet\n\n", remediationSeries)
+		}
+	}
+
+	if hasAny {
+		fmt.Println("* = currently active   SUCCESS% = resolved + transitioned")
+		fmt.Println("id/from lines show playbook_id and the run that generated that version")
+	}
 }
 
 // ── vault calibration ──────────────────────────────────────────────────────
@@ -2190,6 +3020,12 @@ type narrativeStep struct {
 	Status   string `json:"status"`
 }
 
+// narrativeJourneyRef mirrors audit.IncidentJourneyRef for JSON decoding.
+type narrativeJourneyRef struct {
+	Phase   string `json:"phase"`
+	TraceID string `json:"trace_id"`
+}
+
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
 type incidentNarrative struct {
 	IncidentID  string    `json:"incident_id"`
@@ -2217,8 +3053,9 @@ type incidentNarrative struct {
 		Transcript string          `json:"transcript,omitempty"`
 		Steps      []narrativeStep `json:"steps,omitempty"`
 	} `json:"remediation,omitempty"`
-	Feedback   []narrativeFeedback `json:"feedback,omitempty"`
-	Evaluation *narrativeEval      `json:"evaluation,omitempty"`
+	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
+	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
+	Journeys   []narrativeJourneyRef `json:"journeys,omitempty"`
 }
 
 func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrative, error) {
@@ -2408,6 +3245,31 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			fmt.Printf("  %-28s %s\n", fb.FeedbackType+":", verdict)
 		}
 	}
+
+	// ── JOURNEYS ─────────────────────────────────────────────
+	if len(n.Journeys) > 0 {
+		section("JOURNEYS")
+		fmt.Println("  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)")
+		fmt.Println()
+		for _, j := range n.Journeys {
+			label := j.Phase
+			desc := ""
+			switch j.Phase {
+			case "triage":
+				desc = "reasoning chain, hypothesis building"
+			case "remediation":
+				desc = "tool calls, approvals, blast-radius decisions"
+			case "triage+remediation":
+				desc = "full session: diagnosis through fix"
+			}
+			fmt.Printf("  %-22s %s\n", label+":", j.TraceID)
+			if desc != "" {
+				fmt.Printf("  %-22s %s\n", "", desc)
+			}
+		}
+		fmt.Println()
+		fmt.Printf("  → vault journeys %s\n", n.Journeys[0].TraceID)
+	}
 	fmt.Println()
 }
 
@@ -2434,6 +3296,737 @@ func wordWrap(text string, maxWidth int, indent string) string {
 	}
 	return strings.Join(lines, "\n"+indent)
 }
+
+// ── vault active ──────────────────────────────────────────────────────────
+
+// vaultActive lists the currently active version of every playbook series.
+func vaultActive(args []string) {
+	fs := flag.NewFlagSet("vault active", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=true&include_system=true"
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+			SeriesID   string `json:"series_id"`
+			Version    string `json:"version"`
+			Name       string `json:"name"`
+			Source     string `json:"source"`
+			UpdatedAt  string `json:"updated_at"`
+		} `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	pbs := result.Playbooks
+	if len(pbs) == 0 {
+		fmt.Println("No active playbooks.")
+		return
+	}
+
+	const (
+		colSer  = 34
+		colVer  = 7
+		colSrc  = 9
+		colDate = 10
+		colName = 44
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colSer, "SERIES", colVer, "VERSION", colSrc, "SOURCE", colDate, "UPDATED", "NAME")
+	fmt.Println(strings.Repeat("─", colSer+2+colVer+2+colSrc+2+colDate+2+colName))
+	for _, pb := range pbs {
+		ts := pb.UpdatedAt
+		if len(ts) >= 10 {
+			ts = ts[:10]
+		}
+		name := pb.Name
+		if len(name) > colName {
+			name = name[:colName-1] + "…"
+		}
+		ser := pb.SeriesID
+		if len(ser) > colSer {
+			ser = ser[:colSer-1] + "…"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colSer, ser, colVer, pb.Version, colSrc, pb.Source, colDate, ts, name)
+	}
+}
+
+// ── vault history ─────────────────────────────────────────────────────────
+
+// vaultHistory lists every stored version of a playbook series — active, inactive,
+// system, and generated — regardless of whether any runs have been recorded.
+// This is the complete provenance ledger for a series.
+func vaultHistory(args []string) {
+	fs := flag.NewFlagSet("vault history", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault history <series-id> [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Lists every version stored for a series, including inactive and system versions.")
+		fmt.Fprintln(os.Stderr, "  Use playbook IDs from the ID column with 'vault diff <id1> <id2>'.")
+		os.Exit(1)
+	}
+	seriesID := fs.Arg(0)
+	if strings.HasPrefix(seriesID, "pb_") {
+		fmt.Fprintf(os.Stderr, "Error: %q looks like a playbook ID, not a series ID.\n", seriesID)
+		fmt.Fprintf(os.Stderr, "  Use a series ID like pbs_connection_remediate.\n")
+		os.Exit(1)
+	}
+
+	url := strings.TrimSuffix(gatewayURL, "/") +
+		"/api/v1/fleet/playbooks?series_id=" + seriesID + "&active_only=false&include_system=true"
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID  string `json:"playbook_id"`
+			Version     string `json:"version"`
+			IsActive    bool   `json:"is_active"`
+			Source      string `json:"source"`
+			OriginTrace string `json:"origin_trace"`
+			CreatedAt   string `json:"created_at"`
+			Name        string `json:"name"`
+		} `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result.Playbooks) == 0 {
+		fmt.Printf("No versions found for series %q.\n", seriesID)
+		return
+	}
+
+	fmt.Printf("Version history for %s — %d version(s)\n\n", seriesID, len(result.Playbooks))
+
+	const (
+		colID   = 14
+		colVer  = 9
+		colSrc  = 9
+		colDate = 10
+	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colID, "ID", colVer, "VERSION", colSrc, "SOURCE", colDate, "CREATED", "STATUS / NAME")
+	fmt.Println(strings.Repeat("─", colID+2+colVer+2+colSrc+2+colDate+2+50))
+	for _, pb := range result.Playbooks {
+		ts := pb.CreatedAt
+		if len(ts) >= 10 {
+			ts = ts[:10]
+		}
+		status := ""
+		if pb.IsActive {
+			status = "* "
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n",
+			colID, pb.PlaybookID,
+			colVer, pb.Version,
+			colSrc, pb.Source,
+			colDate, ts,
+			status, pb.Name,
+		)
+		if pb.OriginTrace != "" {
+			fmt.Printf("  %*s  from=%s\n", colID, "", pb.OriginTrace)
+		}
+	}
+	fmt.Println()
+	fmt.Println("* = currently active version")
+	fmt.Println("Use: faulttest vault diff <id1> <id2> to compare any two versions.")
+}
+
+// ── vault drafts ──────────────────────────────────────────────────────────
+
+// ── vault activate ────────────────────────────────────────────────────────
+
+// vaultActivate promotes a draft playbook to active status in its series.
+func vaultActivate(args []string) {
+	fs := flag.NewFlagSet("vault activate", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault activate <draft-id> [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Run 'faulttest vault drafts' to list pending draft IDs.")
+		os.Exit(1)
+	}
+	draftID := fs.Arg(0)
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + draftID + "/activate"
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var pb struct {
+		PlaybookID string `json:"playbook_id"`
+		SeriesID   string `json:"series_id"`
+		Version    string `json:"version"`
+		Name       string `json:"name"`
+		IsActive   bool   `json:"is_active"`
+	}
+	if err := json.Unmarshal(body, &pb); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Activated: %s  v%s  %s\n", pb.PlaybookID, pb.Version, pb.Name)
+	fmt.Printf("Series:    %s\n", pb.SeriesID)
+	fmt.Printf("\nfaulttest vault active --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
+// ── vault diff ────────────────────────────────────────────────────────────
+
+// diffPlaybook holds the fields compared by vault diff.
+type diffPlaybook struct {
+	PlaybookID    string   `json:"playbook_id"`
+	SeriesID      string   `json:"series_id"`
+	Version       string   `json:"version"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description"`
+	Guidance      string   `json:"guidance"`
+	Symptoms      []string `json:"symptoms"`
+	Escalation    []string `json:"escalation"`
+	ExecutionMode string   `json:"execution_mode"`
+	ApprovalMode  string   `json:"approval_mode"`
+	IsActive      bool     `json:"is_active"`
+}
+
+func fetchPlaybookByID(gatewayURL, apiKey, playbookID string) (*diffPlaybook, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + playbookID
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var pb diffPlaybook
+	if err := json.Unmarshal(body, &pb); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &pb, nil
+}
+
+// vaultDiff compares two playbook versions field by field. Unchanged fields are omitted.
+//
+// Single-ID mode:  vault diff <draft-id>        — draft vs currently active in its series
+// Two-ID mode:     vault diff <id1> <id2>        — compare any two versions by playbook_id
+//
+// Pass --judge to request an LLM review of the knowledge-field changes.
+func vaultDiff(args []string) {
+	fs := flag.NewFlagSet("vault diff", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	var judgeEnabled bool
+	var judgeModel, judgeVendor, judgeAPIKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	fs.BoolVar(&judgeEnabled, "judge", false, "Run LLM-as-judge review of the proposed version")
+	fs.StringVar(&judgeModel, "judge-model", "", "Model name for judge (default: HELPDESK_MODEL_NAME)")
+	fs.StringVar(&judgeVendor, "judge-vendor", "", "Model vendor for judge: anthropic or google (default: HELPDESK_MODEL_VENDOR)")
+	fs.StringVar(&judgeAPIKey, "judge-api-key", os.Getenv("HELPDESK_API_KEY"), "API key for judge")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault diff <draft-id> [<second-id>] [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Single ID: compares draft against the currently active version in its series.")
+		fmt.Fprintln(os.Stderr, "  Two IDs:   compares any two versions directly (use 'vault versions' to get IDs).")
+		fmt.Fprintln(os.Stderr, "  --judge:   ask an LLM to review whether the change is an improvement.")
+		os.Exit(1)
+	}
+	for _, arg := range fs.Args() {
+		if strings.HasPrefix(arg, "pbs_") {
+			fmt.Fprintf(os.Stderr, "Error: %q looks like a series ID, not a playbook ID.\n", arg)
+			fmt.Fprintf(os.Stderr, "  Run: faulttest vault versions %s --gateway ... to list playbook IDs.\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	var before, after *diffPlaybook
+
+	if fs.NArg() >= 2 {
+		// Two-ID mode: fetch both by ID, treat the lower version as "before".
+		id1, id2 := fs.Arg(0), fs.Arg(1)
+		pb1, err := fetchPlaybookByID(gatewayURL, apiKey, id1)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id1, err)
+			os.Exit(1)
+		}
+		pb2, err := fetchPlaybookByID(gatewayURL, apiKey, id2)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id2, err)
+			os.Exit(1)
+		}
+		// Order by version so "before" is always the older one.
+		if compareVersions(pb1.Version, pb2.Version) <= 0 {
+			before, after = pb1, pb2
+		} else {
+			before, after = pb2, pb1
+		}
+	} else {
+		// Single-ID mode: draft vs active.
+		draftID := fs.Arg(0)
+		draft, err := fetchPlaybookByID(gatewayURL, apiKey, draftID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching draft %s: %v\n", draftID, err)
+			os.Exit(1)
+		}
+		if draft.IsActive {
+			fmt.Fprintf(os.Stderr, "%s is already active — use two-ID mode: vault diff <id1> <id2>\n", draftID)
+			fmt.Fprintf(os.Stderr, "  Run 'faulttest vault versions <fault-id>' to look up playbook IDs.\n")
+			os.Exit(1)
+		}
+		current, err := fetchActivePlaybook(gatewayURL, apiKey, draft.SeriesID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching active playbook for series %s: %v\n", draft.SeriesID, err)
+			os.Exit(1)
+		}
+		active, err := fetchPlaybookByID(gatewayURL, apiKey, current.PlaybookID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching active playbook %s: %v\n", current.PlaybookID, err)
+			os.Exit(1)
+		}
+		before, after = active, draft
+	}
+
+	sep := strings.Repeat("─", 72)
+	fmt.Printf("Diff: series %s\n", before.SeriesID)
+	fmt.Printf("  before  %s  v%s  %s\n", before.PlaybookID, before.Version, before.Name)
+	fmt.Printf("  after   %s  v%s  %s\n\n", after.PlaybookID, after.Version, after.Name)
+
+	changed := 0
+	var operationalDrift []string
+
+	diffField := func(label, cur, prop string) {
+		if cur == prop {
+			return
+		}
+		changed++
+		fmt.Printf("── %s %s\n", label, sep[:max(0, 68-len(label))])
+		printDiffBlock("before", cur)
+		printDiffBlock("after ", prop)
+		fmt.Println()
+	}
+	diffList := func(label string, cur, prop []string) {
+		diffField(label, strings.Join(cur, "\n"), strings.Join(prop, "\n"))
+	}
+	// trackOperational records a changed operational field so the judge can flag it.
+	trackOperational := func(label, cur, prop string) {
+		if cur != prop {
+			operationalDrift = append(operationalDrift,
+				fmt.Sprintf("%s: %s → %s", label, cur, prop))
+		}
+		diffField(label, cur, prop)
+	}
+
+	diffField("name", before.Name, after.Name)
+	diffField("description", before.Description, after.Description)
+	diffField("guidance", before.Guidance, after.Guidance)
+	diffList("symptoms", before.Symptoms, after.Symptoms)
+	diffList("escalation", before.Escalation, after.Escalation)
+	trackOperational("execution_mode", before.ExecutionMode, after.ExecutionMode)
+	trackOperational("approval_mode", before.ApprovalMode, after.ApprovalMode)
+
+	if changed == 0 {
+		fmt.Println("No differences — the two versions are identical.")
+		return
+	}
+	fmt.Printf("%d field(s) changed.\n\n", changed)
+	if !after.IsActive {
+		fmt.Printf("To activate:  faulttest vault activate %s --gateway %s --api-key <key>\n",
+			after.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
+		fmt.Printf("To discard:   curl -X DELETE %s/api/v1/fleet/playbooks/%s -H 'Authorization: Bearer <key>'\n",
+			strings.TrimSuffix(gatewayURL, "/"), after.PlaybookID)
+	}
+
+	if !judgeEnabled {
+		return
+	}
+
+	// LLM-as-judge review of the proposed version.
+	fmt.Printf("\n── LLM Judge Review %s\n", strings.Repeat("─", 52))
+
+	if len(operationalDrift) > 0 {
+		fmt.Printf("⚠  Operational field changes detected (should be preserved by from-trace):\n")
+		for _, d := range operationalDrift {
+			fmt.Printf("   • %s\n", d)
+		}
+		fmt.Println()
+	}
+
+	cfg := &HarnessConfig{
+		JudgeVendor: judgeVendor,
+		JudgeModel:  judgeModel,
+		JudgeAPIKey: judgeAPIKey,
+	}
+	completer, err := newJudgeCompleter(context.Background(), cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Judge error: could not initialize LLM: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Set HELPDESK_MODEL_VENDOR / HELPDESK_MODEL_NAME / HELPDESK_API_KEY or use --judge-* flags.\n")
+		os.Exit(1)
+	}
+
+	modelName := judgeModel
+	if modelName == "" {
+		modelName = os.Getenv("HELPDESK_MODEL_NAME")
+	}
+
+	result := faultlib.JudgePlaybookDiff(
+		context.Background(),
+		faultlib.PlaybookDiffInput{
+			BeforeID:          before.PlaybookID,
+			AfterID:           after.PlaybookID,
+			BeforeName:        before.Name,
+			BeforeDescription: before.Description,
+			BeforeGuidance:    before.Guidance,
+			BeforeSymptoms:    before.Symptoms,
+			BeforeEscalation:  before.Escalation,
+			AfterName:         after.Name,
+			AfterDescription:  after.Description,
+			AfterGuidance:     after.Guidance,
+			AfterSymptoms:     after.Symptoms,
+			AfterEscalation:   after.Escalation,
+			OperationalDrift:  operationalDrift,
+		},
+		before.Version,
+		after.Version,
+		completer,
+		modelName,
+	)
+
+	if result.Skipped {
+		fmt.Printf("Judge skipped: %s\n", result.Reasoning)
+		return
+	}
+
+	verdictIcon := map[string]string{
+		"APPROVE":      "✓",
+		"NEEDS_REVIEW": "?",
+		"REJECT":       "✗",
+	}
+	icon := verdictIcon[result.Verdict]
+	if icon == "" {
+		icon = "?"
+	}
+	fmt.Printf("Verdict:            %s  %s\n", icon, result.Verdict)
+	fmt.Printf("Guidance quality:   %s\n", result.GuidanceQuality)
+	fmt.Printf("Escalation safety:  %s\n", result.EscalationSafety)
+	fmt.Printf("Reasoning:          %s\n", result.Reasoning)
+	if modelName != "" {
+		fmt.Printf("Judge model:        %s\n", modelName)
+	}
+}
+
+// compareVersions compares two dotted-numeric version strings.
+// Returns negative if a < b, 0 if equal, positive if a > b.
+// Non-numeric components fall back to string comparison.
+func compareVersions(a, b string) int {
+	pa := strings.Split(a, ".")
+	pb := strings.Split(b, ".")
+	n := len(pa)
+	if len(pb) > n {
+		n = len(pb)
+	}
+	for i := 0; i < n; i++ {
+		var sa, sb string
+		if i < len(pa) {
+			sa = pa[i]
+		}
+		if i < len(pb) {
+			sb = pb[i]
+		}
+		ia, errA := strconv.Atoi(sa)
+		ib, errB := strconv.Atoi(sb)
+		if errA == nil && errB == nil {
+			if ia != ib {
+				return ia - ib
+			}
+		} else {
+			if sa != sb {
+				if sa < sb {
+					return -1
+				}
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+// printDiffBlock prints a labelled multi-line value, indenting each line.
+func printDiffBlock(label, value string) {
+	lines := strings.Split(strings.TrimRight(value, "\n"), "\n")
+	prefix := "  " + label + "  "
+	blank := strings.Repeat(" ", len(prefix))
+	for i, line := range lines {
+		if i == 0 {
+			fmt.Printf("%s%s\n", prefix, line)
+		} else {
+			fmt.Printf("%s%s\n", blank, line)
+		}
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// purgeOrphanDrafts deletes every draft whose series_id has the pbs_generated_
+// prefix (orphans created before series-pinning was in place). Returns the count
+// of successfully deleted drafts.
+func purgeOrphanDrafts(gatewayURL, apiKey string, drafts []struct {
+	PlaybookID string `json:"playbook_id"`
+	SeriesID   string `json:"series_id"`
+	Version    string `json:"version"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+}) int {
+	client := &http.Client{Timeout: 15 * time.Second}
+	deleted := 0
+	for _, d := range drafts {
+		if !strings.HasPrefix(d.SeriesID, "pbs_generated_") {
+			continue
+		}
+		delURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + d.PlaybookID
+		delReq, _ := http.NewRequest(http.MethodDelete, delURL, nil)
+		if apiKey != "" {
+			delReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		delResp, delErr := client.Do(delReq)
+		if delErr != nil || delResp.StatusCode >= 300 {
+			fmt.Fprintf(os.Stderr, "Failed to delete %s: %v\n", d.PlaybookID, delErr)
+			continue
+		}
+		delResp.Body.Close()
+		fmt.Printf("Deleted orphan draft %s (%s)\n", d.PlaybookID, d.Name)
+		deleted++
+	}
+	return deleted
+}
+
+// vaultDrafts lists inactive generated playbook drafts waiting for review and activation.
+func vaultDrafts(args []string) {
+	fs := flag.NewFlagSet("vault drafts", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	var purgeOrphans bool
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	fs.BoolVar(&purgeOrphans, "purge-orphans", false, "Delete all drafts whose series_id starts with pbs_generated_ (orphans from failed suggest-update runs)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&source=generated"
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+			SeriesID   string `json:"series_id"`
+			Version    string `json:"version"`
+			Name       string `json:"name"`
+			CreatedAt  string `json:"created_at"`
+			IsActive   bool   `json:"is_active"`
+		} `json:"playbooks"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Filter to inactive only — active generated playbooks have already been
+	// reviewed and promoted; they no longer belong in the pending review queue.
+	var drafts []struct {
+		PlaybookID string `json:"playbook_id"`
+		SeriesID   string `json:"series_id"`
+		Version    string `json:"version"`
+		Name       string `json:"name"`
+		CreatedAt  string `json:"created_at"`
+	}
+	for _, p := range result.Playbooks {
+		if !p.IsActive {
+			drafts = append(drafts, struct {
+				PlaybookID string `json:"playbook_id"`
+				SeriesID   string `json:"series_id"`
+				Version    string `json:"version"`
+				Name       string `json:"name"`
+				CreatedAt  string `json:"created_at"`
+			}{p.PlaybookID, p.SeriesID, p.Version, p.Name, p.CreatedAt})
+		}
+	}
+
+	if purgeOrphans {
+		deleted := purgeOrphanDrafts(gatewayURL, apiKey, drafts)
+		fmt.Printf("\nPurged %d orphan draft(s).\n", deleted)
+		return
+	}
+
+	if len(drafts) == 0 {
+		fmt.Println("No pending drafts.")
+		return
+	}
+
+	fmt.Printf("Pending drafts — %d awaiting review\n\n", len(drafts))
+	const (
+		colID   = 12
+		colSer  = 30
+		colVer  = 7
+		colName = 42
+		colDate = 10
+	)
+	orphans := 0
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colID, "DRAFT ID", colSer, "SERIES", colVer, "VERSION", colName, "NAME", "CREATED")
+	fmt.Println(strings.Repeat("─", colID+2+colSer+2+colVer+2+colName+2+colDate))
+	for _, d := range drafts {
+		ts := d.CreatedAt
+		if len(ts) >= 10 {
+			ts = ts[:10]
+		}
+		name := d.Name
+		if len(name) > colName {
+			name = name[:colName-1] + "…"
+		}
+		ser := d.SeriesID
+		orphan := ""
+		if strings.HasPrefix(ser, "pbs_generated_") {
+			orphan = " !"
+			orphans++
+		}
+		if len(ser) > colSer {
+			ser = ser[:colSer-1] + "…"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n", colID, d.PlaybookID, colSer, ser, colVer, d.Version, colName, name, ts, orphan)
+	}
+	if orphans > 0 {
+		fmt.Printf("\n! = orphan draft (series not pinned); run with --purge-orphans to delete all %d\n", orphans)
+	}
+	fmt.Printf("\nTo activate a draft:\n")
+	fmt.Printf("  faulttest vault activate <DRAFT_ID> --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
+// ── vault discard ─────────────────────────────────────────────────────────
+
+func vaultDiscard(args []string) {
+	fs := flag.NewFlagSet("vault discard", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault discard <draft-id> [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Run 'faulttest vault drafts' to list pending draft IDs.")
+		os.Exit(1)
+	}
+	draftID := fs.Arg(0)
+
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + draftID
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Discarded: %s\n", draftID)
+	fmt.Printf("\nfaulttest vault drafts --gateway %s\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
+// ── vault calibration ─────────────────────────────────────────────────────
 
 // vaultCalibration shows confidence-band calibration: how well diagnosis_score
 // predicts operator-confirmed correctness.

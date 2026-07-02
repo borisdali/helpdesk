@@ -1,6 +1,7 @@
 series_id: pbs_lock_chain_remediate
 name: Transaction Lock Chain — Terminate Root Blocker
 version: "1.4"
+playbook_type: remediation
 execution_mode: agent_approve
 agent_name: postgres_database_agent
 approval_mode: manual

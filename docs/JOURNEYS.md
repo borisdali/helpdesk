@@ -33,10 +33,11 @@ For policy decision history see [GOVEXPLAIN.md](GOVEXPLAIN.md).
    - [6.6 Recent database journeys with retries](#66-recent-database-journeys-with-retries)
    - [6.7 Journey count by user](#67-journey-count-by-user)
    - [6.8 Filter by dispatch path](#68-filter-by-dispatch-path)
-   - [6.9 Drilling Into a Journey](#69-drilling-into-a-journey)
+   - [6.9 Journeys linked to an incident](#69-journeys-linked-to-an-incident)
+   - [6.10 Drilling Into a Journey](#610-drilling-into-a-journey)
 7. [Journey Coverage](#7-journey-coverage)
    - [7.1 Origin values in journeys](#71-origin-values-in-journeys)
-   - [7.2 Playbook incident trails](#72-playbook-incident-trails)
+   - [7.2 Incident ↔ Journey cross-links](#72-incident--journey-cross-links)
 8. [Unverified Claims and LLM Fabrication Detection](#8-unverified-claims-and-llm-fabrication-detection)
 9. [Environment Variables](#9-environment-variables)
 10. [Troubleshooting](#10-troubleshooting)
@@ -218,17 +219,18 @@ are returned.
 ```json
 [
   {
-    "trace_id":    "tr_7c2a1b9e",
-    "started_at":  "2026-03-01T09:14:22Z",
-    "ended_at":    "2026-03-01T09:14:28Z",
-    "duration_ms": 6142,
-    "user_id":     "alice",
-    "user_query":  "show me slow queries on my-db",
-    "agent":       "postgres_database_agent",
-    "tools_used":  ["get_session_info", "run_sql"],
-    "outcome":     "success",
-    "event_count": 5,
-    "origin":      "agent"
+    "trace_id":       "tr_7c2a1b9e",
+    "started_at":     "2026-03-01T09:14:22Z",
+    "ended_at":       "2026-03-01T09:14:28Z",
+    "duration_ms":    6142,
+    "user_id":        "alice",
+    "user_query":     "show me slow queries on my-db",
+    "agent":          "postgres_database_agent",
+    "tools_used":     ["get_session_info", "run_sql"],
+    "outcome":        "success",
+    "event_count":    5,
+    "origin":         "agent",
+    "incident_run_id": "plr_a3f7c1b2"
   },
   {
     "trace_id":    "tr_2e9f4d1a",
@@ -278,6 +280,7 @@ are returned.
 | `retry_count` | Number of mutation-tool re-poll attempts (non-zero means a tool had to wait for state to propagate but ultimately succeeded) |
 | `origin` | Dispatch path for this Journey: `"agent"` for LLM-mediated interactions, `"gateway"` for gateway-originated NL queries. Taken from the first `tool_execution` event in the trace. See [§7.1](#71-origin-values-in-journeys). |
 | `has_mismatch` | `true` when at least one `delegation_verification` event in this Journey has `mismatch=true` — meaning an agent returned success but no matching tool execution appears in the audit trail. Omitted (falsy) when the Journey is clean. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
+| `incident_run_id` | `plr_*` playbook run ID when this Journey is linked to an incident run. Populated for triage and remediation Journeys that originated from a gateway playbook invocation. Empty for ad-hoc or non-incident sessions. |
 
 ### 5.6 Journey outcomes
 
@@ -377,9 +380,32 @@ DIRECT=$(curl -s "http://localhost:1199/v1/events?origin=direct_tool&since=2026-
 echo "direct-dispatch events since midnight: $DIRECT"
 ```
 
+### 6.9 Journeys linked to an incident
+
+```bash
+# Find all journeys that are associated with a playbook run (incident_run_id non-empty)
+curl -s "http://localhost:1199/v1/journeys?limit=100" \
+  | jq '[.[] | select(.incident_run_id != null and .incident_run_id != "")]'
+
+# Find journeys for a specific incident run
+curl -s "http://localhost:1199/v1/journeys?limit=100" \
+  | jq '[.[] | select(.incident_run_id == "plr_a3f7c1b2")]'
+```
+
+Every Journey with a non-empty `incident_run_id` is part of a structured incident — either the triage phase (the WHY: reasoning chain, hypothesis building) or the remediation phase (the WHAT: tool calls, approvals, blast-radius decisions). The same cross-link appears on the incident narrative side:
+
+```bash
+# From the incident, get the journey trace_ids
+curl -s "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" \
+  | jq '.journeys'
+# [{"phase":"triage","trace_id":"tr_9a4f2b1e"}, {"phase":"remediation","trace_id":"tr_c8d3e7f2"}]
+```
+
+See [§7.2](#72-incident--journey-cross-links) for the full cross-link model.
+
 ---
 
-### 6.9 Drilling Into a Journey
+### 6.10 Drilling Into a Journey
 
 Once you have a `trace_id`, fetch every event in that Journey from the events
 endpoint:
@@ -475,21 +501,88 @@ curl "http://localhost:1199/v1/journeys?origin=direct_tool"   # always []
 curl "http://localhost:1199/v1/events?origin=direct_tool&trace_id=dt_abc12345"
 ```
 
-### 7.2 Playbook incident trails
+### 7.2 Incident ↔ Journey cross-links
 
-Playbook runs produce a parallel audit trail that is distinct from the NL-query Journey view. Understanding the difference helps you find the right view for the right question.
+Every playbook-driven incident produces two linked audit trails — one for triage and one for remediation — that are connected bidirectionally to the incident narrative.
+
+**The two views, and when to use each:**
 
 | Question | Use |
 |----------|-----|
 | "What did the agent investigate during this query session?" | `GET /v1/journeys` + drill-in |
-| "What did the agent think while running this Playbook?" | `GET /api/v1/fleet/playbook-runs/{runID}/events` |
+| "Why did the agent conclude what it concluded?" | `GET /api/v1/incidents/{runID}` (triage chapter) |
+| "What tool calls and approvals did remediation make?" | `GET /v1/journeys?trace_id=<rem_trace>` |
 | "What happened across the full triage→gate→remediation incident?" | `GET /api/v1/incidents/{runID}` |
 
-**Why Playbook runs don't appear in `GET /v1/journeys`:**
+**WHY vs. WHAT:**
 
-Every agent-mode Playbook run is assigned a `trace_id` stored on the `PlaybookRun` record. This trace ID uses the run ID as its value (`plr_*`), not the `tr_` prefix that Journey anchors require. This is intentional: Playbook runs have a structured lifecycle (triage → gate → remediation → feedback) that the flat Journey view cannot express. The incident narrative endpoint (`GET /api/v1/incidents/{runID}`) is the Playbook-native equivalent of `GET /v1/journeys` drilling.
+```
+  Incident narrative (GET /api/v1/incidents/plr_*)
+      │   WHY: hypotheses, evidence, confidence, operator decisions
+      │
+      ├── Triage Journey (tr_*)   → the reasoning chain and diagnostic tool calls
+      │
+      └── Remediation Journey (tr_*)  → the tool calls, step approvals, blast-radius decisions
+```
 
-**Accessing the raw event trail:**
+**Journey → Incident (via `incident_run_id`):**
+
+When a Journey is part of a playbook run, its summary includes `incident_run_id`:
+
+```json
+{
+  "trace_id":        "tr_9a4f2b1e",
+  "incident_run_id": "plr_a3f7c1b2",
+  "outcome":         "resolved"
+}
+```
+
+Navigate from a Journey to the incident narrative:
+
+```bash
+# Find the incident_run_id for a trace
+curl "http://localhost:1199/v1/journeys?trace_id=tr_9a4f2b1e" | jq '.[0].incident_run_id'
+
+# Then fetch the full incident narrative
+curl "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" | jq '{triage, gate, remediation}'
+```
+
+**Incident → Journey (via `journeys[]` in the narrative):**
+
+The incident narrative response includes a `journeys` array listing the trace IDs for each phase:
+
+```bash
+curl "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" | jq '.journeys'
+```
+
+```json
+[
+  {"phase": "triage",      "trace_id": "tr_9a4f2b1e"},
+  {"phase": "remediation", "trace_id": "tr_c8d3e7f2"}
+]
+```
+
+When triage and remediation share the same session (the agent ran both in one trace), the phase is `"triage+remediation"` with a single `trace_id`.
+
+Navigate from an incident to the full audit trail:
+
+```bash
+# Get triage trace from the incident
+TRACE=$(curl -s "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" \
+  | jq -r '.journeys[] | select(.phase == "triage") | .trace_id')
+
+# Fetch all events for that trace (reasoning chain, tool calls, policy decisions)
+curl "http://localhost:1199/v1/events?trace_id=$TRACE"
+
+# Or use the CLI
+faulttest vault journey $TRACE --gateway http://gateway:8080 --api-key $KEY
+```
+
+**Why Playbook runs don't appear directly in `GET /v1/journeys`:**
+
+Every agent-mode Playbook run is assigned a `trace_id` stored on the `PlaybookRun` record. The trace ID uses the run ID as its value (`plr_*`), not the `tr_` prefix that Journey anchors require. This is intentional: Playbook runs have a structured lifecycle (triage → gate → remediation → feedback) that the flat Journey view cannot express. The incident narrative endpoint (`GET /api/v1/incidents/{runID}`) is the Playbook-native equivalent of `GET /v1/journeys` drilling. The cross-links above let you move between the two views without losing context.
+
+**Accessing the raw event trail for a Playbook run:**
 
 ```bash
 # Chain-of-thought events via the Gateway (agent_reasoning, tool_execution, policy_decision)
@@ -500,13 +593,6 @@ curl "http://localhost:1199/v1/events?trace_id=plr_a3f7c1b2"
 
 # Filter to reasoning only
 curl "http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/events?types=agent_reasoning"
-```
-
-**The incident narrative:**
-
-```bash
-# Structured triage→gate→remediation view assembled from run records and audit events
-curl "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" | jq '{triage, gate, remediation, feedback}'
 ```
 
 See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a complete walkthrough of both trails in context.

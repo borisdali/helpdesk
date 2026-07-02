@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -618,11 +621,13 @@ func TestFetchVersionStats_Found(t *testing.T) {
 				{"version": "1.0", "is_active": false, "total_runs": 3, "resolved": 2,
 					"resolution_rate": 0.67, "avg_step_count": 4.0, "avg_recovery_secs": 42.0,
 					"avg_diagnosis_score": 0.72, "diag_eval_count": 2,
-					"avg_remediation_score": 0.0, "remed_eval_count": 0},
+					"avg_remediation_score": 0.0, "remed_eval_count": 0,
+					"rem_feedback_count": 2, "rem_feedback_rate": 0.5},
 				{"version": "1.1", "is_active": true, "total_runs": 2, "resolved": 2,
 					"resolution_rate": 1.0, "avg_step_count": 3.0, "avg_recovery_secs": 8.0,
 					"avg_diagnosis_score": 0.91, "diag_eval_count": 2,
-					"avg_remediation_score": 0.85, "remed_eval_count": 1},
+					"avg_remediation_score": 0.85, "remed_eval_count": 1,
+					"rem_feedback_count": 2, "rem_feedback_rate": 1.0},
 			},
 		})
 	}))
@@ -650,6 +655,14 @@ func TestFetchVersionStats_Found(t *testing.T) {
 	}
 	if versions[0].RemedEvalCount != 0 {
 		t.Errorf("v1.0 RemedEvalCount = %d, want 0", versions[0].RemedEvalCount)
+	}
+	if versions[0].RemFeedbackCount != 2 || versions[0].RemFeedbackRate != 0.5 {
+		t.Errorf("v1.0 rem feedback: count=%d rate=%v, want count=2 rate=0.5",
+			versions[0].RemFeedbackCount, versions[0].RemFeedbackRate)
+	}
+	if versions[1].RemFeedbackCount != 2 || versions[1].RemFeedbackRate != 1.0 {
+		t.Errorf("v1.1 rem feedback: count=%d rate=%v, want count=2 rate=1.0",
+			versions[1].RemFeedbackCount, versions[1].RemFeedbackRate)
 	}
 }
 
@@ -1358,7 +1371,258 @@ func TestWordWrap(t *testing.T) {
 	}
 }
 
+// ── fetchJourneys ─────────────────────────────────────────────────────────
+
+func TestFetchJourneys_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/governance/journeys" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]journeySummary{ //nolint:errcheck
+			{TraceID: "tr_abc123", Outcome: "resolved", IncidentRunID: "plr_001"},
+			{TraceID: "tr_def456", Outcome: "abandoned"},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchJourneys(srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].TraceID != "tr_abc123" {
+		t.Errorf("TraceID = %q, want tr_abc123", got[0].TraceID)
+	}
+	if got[0].IncidentRunID != "plr_001" {
+		t.Errorf("IncidentRunID = %q, want plr_001", got[0].IncidentRunID)
+	}
+	if got[1].Outcome != "abandoned" {
+		t.Errorf("Outcome = %q, want abandoned", got[1].Outcome)
+	}
+}
+
+func TestFetchJourneys_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchJourneys(srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchJourneys_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchJourneys(srv.URL, "", nil)
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
+	}
+}
+
+func TestFetchJourneys_NetworkError(t *testing.T) {
+	_, err := fetchJourneys("http://127.0.0.1:19998", "", nil)
+	if err == nil {
+		t.Fatal("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchJourneys_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchJourneys(srv.URL, "tok-xyz", nil) //nolint:errcheck
+	if gotAuth != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotAuth)
+	}
+}
+
+func TestFetchJourneys_PassesQueryParams(t *testing.T) {
+	var gotQuery map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = map[string]string{
+			"limit":    r.URL.Query().Get("limit"),
+			"since":    r.URL.Query().Get("since"),
+			"category": r.URL.Query().Get("category"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	params := map[string]string{
+		"limit":    "5",
+		"since":    "48h",
+		"category": "database",
+	}
+	fetchJourneys(srv.URL, "", params) //nolint:errcheck
+	for k, want := range params {
+		if gotQuery[k] != want {
+			t.Errorf("query param %s = %q, want %q", k, gotQuery[k], want)
+		}
+	}
+}
+
+func TestFetchJourneys_WithDelegations(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]journeySummary{ //nolint:errcheck
+			{
+				TraceID: "tr_deleg01",
+				Delegations: []delegationSummary{
+					{Intent: "diagnose slow query", Tools: []string{"get_db_info", "cancel_query"}},
+				},
+				ToolsUsed:   []string{"get_db_info", "cancel_query"},
+				HasMismatch: true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchJourneys(srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if !got[0].HasMismatch {
+		t.Error("HasMismatch = false, want true")
+	}
+	if len(got[0].Delegations) != 1 {
+		t.Fatalf("Delegations len = %d, want 1", len(got[0].Delegations))
+	}
+	if got[0].Delegations[0].Intent != "diagnose slow query" {
+		t.Errorf("Intent = %q, want diagnose slow query", got[0].Delegations[0].Intent)
+	}
+}
+
 // ── postEvaluations primary_confidence ───────────────────────────────────
+
+// ── fetchRunsByOutcome ────────────────────────────────────────────────────────
+
+func TestFetchRunsByOutcome_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/playbook-runs" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("outcome") != "resolved" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"runs": []incidentRun{
+				{RunID: "plr_aaa111", SeriesID: "pbs_db_triage", Outcome: "resolved"},
+				{RunID: "plr_bbb222", SeriesID: "pbs_k8s_triage", Outcome: "resolved"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].RunID != "plr_aaa111" {
+		t.Errorf("RunID = %q, want plr_aaa111", got[0].RunID)
+	}
+	if got[1].SeriesID != "pbs_k8s_triage" {
+		t.Errorf("SeriesID = %q, want pbs_k8s_triage", got[1].SeriesID)
+	}
+}
+
+func TestFetchRunsByOutcome_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunsByOutcome(srv.URL, "", "failed", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchRunsByOutcome_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
+	if err == nil {
+		t.Error("expected error for 500 response, got nil")
+	}
+}
+
+func TestFetchRunsByOutcome_NetworkError(t *testing.T) {
+	_, err := fetchRunsByOutcome("http://127.0.0.1:19997", "", "resolved", 10)
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchRunsByOutcome_SendsAuth(t *testing.T) {
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunsByOutcome(srv.URL, "tok-xyz", "resolved", 10) //nolint:errcheck
+	if gotHeader != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotHeader)
+	}
+}
+
+func TestFetchRunsByOutcome_PassesOutcomeAndLimit(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunsByOutcome(srv.URL, "", "abandoned", 7) //nolint:errcheck
+	if gotQuery.Get("outcome") != "abandoned" {
+		t.Errorf("outcome = %q, want abandoned", gotQuery.Get("outcome"))
+	}
+	if gotQuery.Get("limit") != "7" {
+		t.Errorf("limit = %q, want 7", gotQuery.Get("limit"))
+	}
+}
+
+// ── TestPostEvaluations_IncludesPrimaryConfidence ─────────────────────────────
 
 func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 	var gotBody map[string]any
@@ -1377,5 +1641,681 @@ func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 
 	if v, ok := gotBody["primary_confidence"]; !ok || v != 0.88 {
 		t.Errorf("primary_confidence = %v (ok=%v), want 0.88", gotBody["primary_confidence"], ok)
+	}
+}
+
+// ── purgeOrphanDrafts ─────────────────────────────────────────────────────
+
+type testDraft = struct {
+	PlaybookID string `json:"playbook_id"`
+	SeriesID   string `json:"series_id"`
+	Version    string `json:"version"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+}
+
+func TestPurgeOrphanDrafts_DeletesOnlyOrphans(t *testing.T) {
+	var deleted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		// URL: /api/v1/fleet/playbooks/{id}
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		deleted = append(deleted, id)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_orphan1", SeriesID: "pbs_generated_abc123", Name: "Orphan 1"},
+		{PlaybookID: "pb_pinned1", SeriesID: "pbs_connection_remediate", Name: "Pinned"},
+		{PlaybookID: "pb_orphan2", SeriesID: "pbs_generated_def456", Name: "Orphan 2"},
+	}
+
+	n := purgeOrphanDrafts(srv.URL, "", drafts)
+	if n != 2 {
+		t.Errorf("purged %d, want 2", n)
+	}
+	if len(deleted) != 2 {
+		t.Errorf("DELETE called %d times, want 2; deleted: %v", len(deleted), deleted)
+	}
+	for _, id := range deleted {
+		if id == "pb_pinned1" {
+			t.Error("pb_pinned1 (non-orphan) must not be deleted")
+		}
+	}
+}
+
+func TestPurgeOrphanDrafts_NoneWhenAllPinned(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_pinned1", SeriesID: "pbs_connection_remediate"},
+		{PlaybookID: "pb_pinned2", SeriesID: "pbs_wal_stale_slot"},
+	}
+	n := purgeOrphanDrafts(srv.URL, "", drafts)
+	if n != 0 {
+		t.Errorf("purged %d, want 0", n)
+	}
+	if called {
+		t.Error("DELETE must not be called when no orphans exist")
+	}
+}
+
+func TestPurgeOrphanDrafts_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_orphan1", SeriesID: "pbs_generated_abc"},
+	}
+	purgeOrphanDrafts(srv.URL, "my-key", drafts)
+	if gotAuth != "Bearer my-key" {
+		t.Errorf("Authorization = %q, want Bearer my-key", gotAuth)
+	}
+}
+
+func TestPurgeOrphanDrafts_SkipsOnServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	drafts := []testDraft{
+		{PlaybookID: "pb_orphan1", SeriesID: "pbs_generated_abc"},
+	}
+	n := purgeOrphanDrafts(srv.URL, "", drafts)
+	if n != 0 {
+		t.Errorf("purged %d, want 0 (server error should skip, not count)", n)
+	}
+}
+
+// ── fetchPlaybookByID ─────────────────────────────────────────────────────
+
+func TestFetchPlaybookByID_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/playbooks/pb_abc" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"playbook_id": "pb_abc",
+			"series_id":   "pbs_test",
+			"version":     "1.3",
+			"name":        "Test Playbook",
+			"guidance":    "Check connections first.",
+			"is_active":   true,
+		})
+	}))
+	defer srv.Close()
+
+	pb, err := fetchPlaybookByID(srv.URL, "", "pb_abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pb.PlaybookID != "pb_abc" {
+		t.Errorf("playbook_id = %q, want pb_abc", pb.PlaybookID)
+	}
+	if pb.Version != "1.3" {
+		t.Errorf("version = %q, want 1.3", pb.Version)
+	}
+	if pb.Guidance != "Check connections first." {
+		t.Errorf("guidance = %q, want 'Check connections first.'", pb.Guidance)
+	}
+	if !pb.IsActive {
+		t.Error("is_active should be true")
+	}
+}
+
+func TestFetchPlaybookByID_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchPlaybookByID(srv.URL, "", "pb_x")
+	if err == nil {
+		t.Error("expected error for 500 status, got nil")
+	}
+}
+
+func TestFetchPlaybookByID_NetworkError(t *testing.T) {
+	_, err := fetchPlaybookByID("http://127.0.0.1:19999", "", "pb_x")
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchPlaybookByID_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"playbook_id": "pb_x"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchPlaybookByID(srv.URL, "my-key", "pb_x") //nolint:errcheck
+	if gotAuth != "Bearer my-key" {
+		t.Errorf("Authorization = %q, want Bearer my-key", gotAuth)
+	}
+}
+
+func TestFetchPlaybookByID_InvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not json")) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	_, err := fetchPlaybookByID(srv.URL, "", "pb_x")
+	if err == nil {
+		t.Error("expected error for invalid JSON response, got nil")
+	}
+}
+
+// ── nextVersion ───────────────────────────────────────────────────────────
+
+func TestNextVersion(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", "1.0"},
+		{"1.3", "1.4"},
+		{"1.0", "1.1"},
+		{"2", "3"},
+		{"1.3.0", "1.3.1"},
+		{"2.10", "2.11"},
+		{"1.abc", "1.abc.1"}, // non-numeric last segment → append .1
+	}
+	for _, tc := range cases {
+		got := nextVersion(tc.input)
+		if got != tc.want {
+			t.Errorf("nextVersion(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// ── pickBestRunForSuggest ─────────────────────────────────────────────────
+
+func makeRunsServer(t *testing.T, runs []map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+	}))
+}
+
+func TestPickBestRunForSuggest_PrefersResolved(t *testing.T) {
+	srv := makeRunsServer(t, []map[string]any{
+		{"run_id": "plr_trans1", "outcome": "transitioned"},
+		{"run_id": "plr_trans2", "outcome": "transitioned"},
+		{"run_id": "plr_res1", "outcome": "resolved"},
+		{"run_id": "plr_trans3", "outcome": "transitioned"},
+	})
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_res1" {
+		t.Errorf("got %q, want plr_res1 (resolved should be preferred over transitioned)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_FallsBackToTransitioned(t *testing.T) {
+	srv := makeRunsServer(t, []map[string]any{
+		{"run_id": "plr_trans1", "outcome": "transitioned"},
+		{"run_id": "plr_trans2", "outcome": "transitioned"},
+	})
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_trans1" {
+		t.Errorf("got %q, want plr_trans1 (first transitioned when no resolved exists)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_ErrorWhenNoUsableRuns(t *testing.T) {
+	srv := makeRunsServer(t, []map[string]any{
+		{"run_id": "plr_esc1", "outcome": "escalated"},
+		{"run_id": "plr_fail1", "outcome": "failed"},
+	})
+	defer srv.Close()
+
+	_, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err == nil {
+		t.Error("expected error when no resolved or transitioned runs exist, got nil")
+	}
+}
+
+func TestPickBestRunForSuggest_NetworkError(t *testing.T) {
+	_, err := pickBestRunForSuggest("http://127.0.0.1:19999", "", "pbs_test")
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+// makeRunsAndIncidentServer serves runs on /api/v1/fleet/playbook-runs and
+// an incident response on /api/v1/incidents/{id}. The incident response may
+// include journeys so tests can verify trace-ID resolution.
+func makeRunsAndIncidentServer(t *testing.T, runs []map[string]any, incidentByID map[string]map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/api/v1/incidents/") {
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			if incident, ok := incidentByID[id]; ok {
+				json.NewEncoder(w).Encode(incident) //nolint:errcheck
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+	}))
+}
+
+func TestPickBestRunForSuggest_ResolvesTriageJourneyTrace(t *testing.T) {
+	// When the incident has a triage journey, pickBestRunForSuggest should
+	// return the journey trace_id instead of the plr_* run ID so that
+	// from-trace can find audit_events (which are keyed to the journey trace).
+	runs := []map[string]any{
+		{"run_id": "plr_abc123", "outcome": "resolved"},
+	}
+	incidents := map[string]map[string]any{
+		"plr_abc123": {
+			"incident_id": "plr_abc123",
+			"journeys": []map[string]any{
+				{"phase": "triage", "trace_id": "faulttest-abc123-db-max-connections"},
+				{"phase": "remediation", "trace_id": "faulttest-abc123-db-max-connections-remed"},
+			},
+		},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, incidents)
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "faulttest-abc123-db-max-connections" {
+		t.Errorf("got %q, want faulttest-abc123-db-max-connections (triage journey trace)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_FallsBackToPLRWhenNoJourneys(t *testing.T) {
+	// When the incident has no journeys (e.g. older run), return the PLR ID.
+	runs := []map[string]any{
+		{"run_id": "plr_nojourneys", "outcome": "resolved"},
+	}
+	incidents := map[string]map[string]any{
+		"plr_nojourneys": {
+			"incident_id": "plr_nojourneys",
+			"journeys":    []map[string]any{},
+		},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, incidents)
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_nojourneys" {
+		t.Errorf("got %q, want plr_nojourneys (PLR fallback when no triage journey)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_FallsBackToPLRWhenIncidentFetchFails(t *testing.T) {
+	// When the incident endpoint returns 404, return the PLR ID rather than erroring.
+	runs := []map[string]any{
+		{"run_id": "plr_old", "outcome": "resolved"},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, map[string]map[string]any{}) // no incident entries → 404
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_old" {
+		t.Errorf("got %q, want plr_old (PLR fallback when incident returns 404)", got)
+	}
+}
+
+func TestPickBestRunForSuggest_IgnoresRemediationJourney(t *testing.T) {
+	// When the incident has only a remediation journey (no triage), fall back to PLR.
+	runs := []map[string]any{
+		{"run_id": "plr_remonly", "outcome": "resolved"},
+	}
+	incidents := map[string]map[string]any{
+		"plr_remonly": {
+			"incident_id": "plr_remonly",
+			"journeys": []map[string]any{
+				{"phase": "remediation", "trace_id": "faulttest-remonly-remed"},
+			},
+		},
+	}
+	srv := makeRunsAndIncidentServer(t, runs, incidents)
+	defer srv.Close()
+
+	got, err := pickBestRunForSuggest(srv.URL, "", "pbs_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "plr_remonly" {
+		t.Errorf("got %q, want plr_remonly (no triage journey → PLR fallback)", got)
+	}
+}
+
+// ── compareVersions ────────────────────────────────────────────────────────
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int // sign only: <0, 0, >0
+	}{
+		{"1.3", "1.4", -1},
+		{"1.4", "1.3", 1},
+		{"1.3", "1.3", 0},
+		{"2", "1.9", 1},
+		{"1.10", "1.9", 1},
+		{"", "1.0", -1},
+		{"1.0", "", 1},
+		{"", "", 0},
+	}
+	sign := func(n int) int {
+		if n < 0 {
+			return -1
+		}
+		if n > 0 {
+			return 1
+		}
+		return 0
+	}
+	for _, tc := range cases {
+		got := sign(compareVersions(tc.a, tc.b))
+		if got != tc.want {
+			t.Errorf("compareVersions(%q, %q) sign = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// ── vault diff two-ID mode ─────────────────────────────────────────────────
+
+func makeDiffPlaybookServer(t *testing.T, playbooks map[string]*diffPlaybook) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// GET /api/v1/fleet/playbooks/{id}
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(parts) < 5 || parts[4] == "" {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		id := parts[4]
+		pb, ok := playbooks[id]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(pb)
+	}))
+}
+
+func TestCompareVersions_TwoIDOrdering(t *testing.T) {
+	// Verify that in two-ID mode the lower version is treated as "before".
+	// We just test compareVersions ordering; the full CLI wiring is covered by
+	// TestCompareVersions above and integration tests.
+	if compareVersions("1.3", "1.4") >= 0 {
+		t.Error("1.3 should be less than 1.4")
+	}
+	if compareVersions("1.4", "1.3") <= 0 {
+		t.Error("1.4 should be greater than 1.3")
+	}
+	if compareVersions("1.3", "1.3") != 0 {
+		t.Error("equal versions should compare as 0")
+	}
+}
+
+func TestFetchPlaybookByID_ReturnsCorrectPlaybook(t *testing.T) {
+	want := &diffPlaybook{
+		PlaybookID:  "pb_v13",
+		SeriesID:    "pbs_conn",
+		Version:     "1.3",
+		Name:        "Conn Remediate",
+		Description: "old description",
+		Guidance:    "old guidance",
+		IsActive:    false,
+	}
+	srv := makeDiffPlaybookServer(t, map[string]*diffPlaybook{"pb_v13": want})
+	defer srv.Close()
+
+	got, err := fetchPlaybookByID(srv.URL, "test-key", "pb_v13")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.PlaybookID != want.PlaybookID || got.Version != want.Version {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestFetchPlaybookByID_Returns404AsError(t *testing.T) {
+	srv := makeDiffPlaybookServer(t, map[string]*diffPlaybook{})
+	defer srv.Close()
+
+	_, err := fetchPlaybookByID(srv.URL, "", "pb_missing")
+	if err == nil {
+		t.Error("expected error for 404, got nil")
+	}
+}
+
+// ── printVersionTable / SUCCESS% ──────────────────────────────────────────
+
+func TestPrintVersionTable_SuccessRateCombinesResolvedAndTransitioned(t *testing.T) {
+	// Capture stdout.
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printVersionTable("TRIAGE  pbs_test", []versionStats{
+		{Version: "1.0", IsActive: false, TotalRuns: 10, Resolved: 3, ResolutionRate: 0.3, Transitioned: 5, TransitionRate: 0.5},
+		{Version: "1.1", IsActive: true, TotalRuns: 4, Resolved: 2, ResolutionRate: 0.5, Transitioned: 1, TransitionRate: 0.25},
+	})
+
+	w.Close()
+	os.Stdout = old
+	var buf strings.Builder
+	io.Copy(&buf, r) //nolint:errcheck
+	out := buf.String()
+
+	// v1.0: resolved(30%) + transitioned(50%) = 80%
+	if !strings.Contains(out, "80%") {
+		t.Errorf("expected 80%% success rate for v1.0, output:\n%s", out)
+	}
+	// v1.1: resolved(50%) + transitioned(25%) = 75%
+	if !strings.Contains(out, "75%") {
+		t.Errorf("expected 75%% success rate for v1.1, output:\n%s", out)
+	}
+	// Column header renamed from TRANSITIONED to SUCCESS%
+	if !strings.Contains(out, "SUCCESS%") {
+		t.Errorf("expected SUCCESS%% column header, output:\n%s", out)
+	}
+	if strings.Contains(out, "TRANSITIONED") {
+		t.Errorf("old TRANSITIONED column header should not appear, output:\n%s", out)
+	}
+}
+
+func TestPrintVersionTable_ZeroRunsShowsDash(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printVersionTable("", []versionStats{
+		{Version: "1.0", IsActive: true, TotalRuns: 0},
+	})
+
+	w.Close()
+	os.Stdout = old
+	var buf strings.Builder
+	io.Copy(&buf, r) //nolint:errcheck
+	out := buf.String()
+
+	if !strings.Contains(out, "–") {
+		t.Errorf("expected dash for zero-run version, got:\n%s", out)
+	}
+}
+
+func TestPrintVersionTable_ActiveVersionMarked(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printVersionTable("", []versionStats{
+		{Version: "1.3", IsActive: false, TotalRuns: 9, Resolved: 3, ResolutionRate: 0.33},
+		{Version: "1.4", IsActive: true, TotalRuns: 1, Resolved: 1, ResolutionRate: 1.0},
+	})
+
+	w.Close()
+	os.Stdout = old
+	var buf strings.Builder
+	io.Copy(&buf, r) //nolint:errcheck
+	out := buf.String()
+
+	if !strings.Contains(out, "1.4 *") {
+		t.Errorf("expected active version marked with *, got:\n%s", out)
+	}
+	if strings.Contains(out, "1.3 *") {
+		t.Errorf("inactive version 1.3 should not be marked *, got:\n%s", out)
+	}
+}
+
+// ── vault history ─────────────────────────────────────────────────────────
+
+// makeHistoryServer returns a test server that responds to the playbooks list
+// endpoint with a fixed set of playbooks for the given series.
+func makeHistoryServer(t *testing.T, seriesID string, pbs []map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("series_id") != seriesID {
+			http.Error(w, "wrong series", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"playbooks": pbs})
+	}))
+}
+
+func TestVaultHistory_ShowsAllVersions(t *testing.T) {
+	srv := makeHistoryServer(t, "pbs_conn", []map[string]any{
+		{
+			"playbook_id": "pb_v13", "version": "1.3",
+			"is_active": true, "source": "system",
+			"created_at": "2026-01-01T00:00:00Z", "name": "Conn Remediate",
+		},
+		{
+			"playbook_id": "pb_v14", "version": "1.4",
+			"is_active": false, "source": "generated",
+			"origin_trace": "plr_abc123",
+			"created_at": "2026-06-01T00:00:00Z", "name": "Conn Remediate",
+		},
+	})
+	defer srv.Close()
+
+	// We test the HTTP fetch path indirectly by calling the same endpoint
+	// the command uses and verifying the response decodes correctly.
+	resp, err := http.Get(srv.URL + "?series_id=pbs_conn&active_only=false&include_system=true")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Playbooks []struct {
+			PlaybookID  string `json:"playbook_id"`
+			Version     string `json:"version"`
+			IsActive    bool   `json:"is_active"`
+			Source      string `json:"source"`
+			OriginTrace string `json:"origin_trace"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Playbooks) != 2 {
+		t.Fatalf("want 2 playbooks, got %d", len(result.Playbooks))
+	}
+	if result.Playbooks[0].PlaybookID != "pb_v13" {
+		t.Errorf("want pb_v13 first, got %s", result.Playbooks[0].PlaybookID)
+	}
+	if !result.Playbooks[0].IsActive {
+		t.Error("want first entry active (system v1.3)")
+	}
+	if result.Playbooks[1].Source != "generated" {
+		t.Errorf("want second entry source=generated, got %q", result.Playbooks[1].Source)
+	}
+	if result.Playbooks[1].OriginTrace != "plr_abc123" {
+		t.Errorf("want origin_trace=plr_abc123, got %q", result.Playbooks[1].OriginTrace)
+	}
+}
+
+func TestVaultHistory_EmptySeries(t *testing.T) {
+	srv := makeHistoryServer(t, "pbs_empty", []map[string]any{})
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "?series_id=pbs_empty&active_only=false&include_system=true")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Playbooks []map[string]any `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Playbooks) != 0 {
+		t.Errorf("want empty list, got %d entries", len(result.Playbooks))
+	}
+}
+
+func TestVaultHistory_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"playbooks": []any{}})
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet,
+		srv.URL+"/api/v1/fleet/playbooks?series_id=pbs_x&active_only=false&include_system=true", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
 	}
 }

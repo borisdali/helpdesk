@@ -1,6 +1,7 @@
 series_id: pbs_lock_chain_triage
 name: Transaction Lock Chain Triage
 version: "1.3"
+playbook_type: triage
 execution_mode: agent
 agent_name: postgres_database_agent
 approval_mode: manual

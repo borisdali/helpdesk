@@ -1,6 +1,7 @@
 series_id: pbs_replication_lag
 name: Replication Lag Triage
 version: "1.1"
+playbook_type: triage
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent

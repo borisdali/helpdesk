@@ -45,6 +45,7 @@ func TestPlaybookStore_CreateAndGet(t *testing.T) {
 		Author:           "alice@example.com",
 		LastValidated:    &lv,
 		Version:          "1.2.0",
+		PlaybookType:     "triage",
 	}
 
 	if err := ps.Create(ctx, pb); err != nil {
@@ -101,6 +102,10 @@ func TestPlaybookStore_CreateAndGet(t *testing.T) {
 	}
 	if !got.LastValidated.Equal(lv) {
 		t.Errorf("LastValidated = %v, want %v", got.LastValidated, lv)
+	}
+
+	if got.PlaybookType != pb.PlaybookType {
+		t.Errorf("PlaybookType = %q, want %q", got.PlaybookType, pb.PlaybookType)
 	}
 
 	// Timestamps set by Create

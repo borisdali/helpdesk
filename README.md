@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml) [![golangci-lint](https://github.com/borisdali/helpdesk/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/golangci-lint.yml) [![Release](https://github.com/borisdali/helpdesk/actions/workflows/release.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/release.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/borisdali/helpdesk)](https://github.com/borisdali/helpdesk/blob/main/go.mod) [![codecov](https://codecov.io/gh/borisdali/helpdesk/badge.svg)](https://codecov.io/gh/borisdali/helpdesk) [![Docs](https://img.shields.io/badge/docs-helpdesk-blue)](https://github.com/borisdali/helpdesk/tree/main/docs)
 
-aiHelpDesk is a Go-based Agentic AI multi-agent database support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) hosted on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment. Your databases, your tool catalog, your operational history. Most importantly to your institutional knowledge. But what's more is that aiHelpDesk couples all that with a strictly governed execution arm that actually fixes problems, not just explains them.
+aiHelpDesk is a Go-based Agentic AI multi-agent database support system for diagnosing and remediating PostgreSQL (and PotsgreSQL derivative databases, like AlloyDB Omni) hosted on Kubernetes and VMs. aiHelpDesk links frontier model reasoning to your specific environment. Your databases, your tool catalog, your operational history. Most importantly, aiHelpDesk links it to **your institutional knowledge**. But what's more is that aiHelpDesk couples all that with a strictly governed execution arm that actually fixes problems, not just explains them.
 
 Two things set aiHelpDesk apart from a general-purpose AI assistant:
 
@@ -92,6 +92,8 @@ See the primary [Architecture page](docs/ARCHITECTURE.md) for system design, con
 
 See the primary [Vault page](docs/VAULT.md) for how aiHelpDesk accumulates and improves operational knowledge over time: the flywheel concept, how playbook drafts are auto-generated from incident traces, the three paths into the Vault, the review-and-activate workflow and the three core customer workflows (onboarding, acceptance, regression monitoring).
 
+**The Vault as a learning signal** — aiHelpDesk tracks three per-version metrics that answer "is the system actually improving?": step count (is the agent becoming more direct?), recovery time (is it responding faster?), and approach appropriateness (is it fixing problems elegantly, or just technically?). A resolution rate tells you whether the system is working. These metrics tell you whether it is getting better. See [here](docs/VAULT_METRICS.md) for the full treatment.
+
 ## Triage Consistency Certification
 
 Before a Playbook enters live rotation, it is certified STABLE by running the same fault N times and verifying that both the pass rate (≥80%) and the confidence spread on the agent's primary hypothesis (≤30pp) are within bounds. A STABLE cert is the pre-promotion gate that ensures the accuracy and calibration signals coming from the flywheel are clean. See [here](docs/CONSISTENCY.md) for the full concept, certification criteria, and per-platform runbooks (Host/VM, Docker, Kubernetes CronJob).
@@ -100,7 +102,7 @@ Before a Playbook enters live rotation, it is certified STABLE by running the sa
 
 aiHelpDesk's Governance system rests on eight subsystems including full [auditing](docs/AUDIT.md), [compliance reporting](docs/COMPLIANCE.md) and the [journeys](docs/JOURNEYS.md). See the primary [AI Governance page](docs/AIGOVERNANCE.md) for the complete reference.
 
-HTTP-level authorization is presented [here](docs/AUTHZ.md). Identity provider configuration (static users, JWT/OIDC, service accounts) is describe [here](docs/IDENTITY.md).
+HTTP-level authorization is presented [here](docs/AUTHZ.md). Identity provider configuration (static users, JWT/OIDC, service accounts) is described [here](docs/IDENTITY.md).
 
 ## Fleet Operations
 

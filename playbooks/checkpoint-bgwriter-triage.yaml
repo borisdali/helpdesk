@@ -1,6 +1,7 @@
 series_id: pbs_checkpoint_bgwriter_triage
 name: Checkpoint & bgwriter Triage
 version: "1.2"
+playbook_type: triage
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent

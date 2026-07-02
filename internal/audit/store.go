@@ -582,6 +582,12 @@ type DelegationSummary struct {
 	Tools  []string `json:"tools"`
 }
 
+// IncidentJourneyRef links a PlaybookRun (plr_*) to an audit Journey by phase.
+type IncidentJourneyRef struct {
+	Phase   string `json:"phase"`    // "triage" | "remediation" | "triage+remediation"
+	TraceID string `json:"trace_id"` // argument to: vault journeys <trace_id>
+}
+
 // JourneySummary summarises a single end-to-end user request (one trace_id).
 type JourneySummary struct {
 	TraceID     string              `json:"trace_id"`
@@ -610,6 +616,9 @@ type JourneySummary struct {
 	// has Mismatch=true — meaning an agent returned success but no matching tool
 	// executions appeared in the audit trail (possible LLM fabrication).
 	HasMismatch bool `json:"has_mismatch,omitempty"`
+	// IncidentRunID is the plr_* playbook run ID for journeys associated with an
+	// incident run. Empty for ad-hoc or non-incident journeys.
+	IncidentRunID string `json:"incident_run_id,omitempty"`
 }
 
 // QueryJourneys returns journey summaries for traces anchored by a
@@ -784,27 +793,37 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		d.count++
 
 		if eventType == string(EventTypeDelegation) {
-			// delegation_decision is authoritative — overwrite any previously set
-			// gateway_request values with the richer orchestrator-side metadata.
-			if userID.Valid && userID.String != "" {
+			// delegation_decision may arrive in two contexts:
+			//
+			//  1. Orchestrator delegation: the orchestrator is the first event seen;
+			//     its session_agent (orchestrator name) should always win for d.agent.
+			//
+			//  2. Playbook escalation: the gateway emits a delegation_decision when
+			//     triage escalates to remediation. The gateway_request anchor for the
+			//     triage trace already set d.userQuery/d.agent; don't overwrite them
+			//     with the internal escalation description.
+			//
+			// Rule: only set scalar journey fields if not already populated.
+			// session_agent (case 1) is always authoritative.
+			if userID.Valid && userID.String != "" && d.userID == "" {
 				d.userID = userID.String
 			}
-			if userQuery.Valid && userQuery.String != "" {
+			if userQuery.Valid && userQuery.String != "" && d.userQuery == "" {
 				d.userQuery = userQuery.String
 			}
-			if purposeCol.Valid && purposeCol.String != "" {
+			if purposeCol.Valid && purposeCol.String != "" && d.purpose == "" {
 				d.purpose = purposeCol.String
 			}
-			if purposeNoteCol.Valid && purposeNoteCol.String != "" {
+			if purposeNoteCol.Valid && purposeNoteCol.String != "" && d.purposeNote == "" {
 				d.purposeNote = purposeNoteCol.String
 			}
 			// Prefer the session's owning agent name (e.g. "helpdesk_orchestrator")
 			// over the sub-agent being delegated to. This makes orchestrator-mediated
 			// journeys show the orchestrator as the top-level agent.
 			if sessionAgent.Valid && sessionAgent.String != "" {
-				d.agent = sessionAgent.String
-			} else if agent.Valid && agent.String != "" {
-				d.agent = agent.String
+				d.agent = sessionAgent.String // session_agent is always authoritative
+			} else if agent.Valid && agent.String != "" && d.agent == "" {
+				d.agent = agent.String // only fall back when no prior agent is known
 			}
 			if d.category == "" && decisionCategory.Valid && decisionCategory.String != "" {
 				d.category = decisionCategory.String
@@ -917,6 +936,32 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			Origin:      d.origin,
 			HasMismatch: d.hasMismatch,
 		})
+	}
+
+	// Enrich summaries with incident run IDs: one query, keyed by trace_id.
+	if len(summaries) > 0 {
+		placeholders := make([]string, len(summaries))
+		args := make([]any, len(summaries))
+		for i, js := range summaries {
+			placeholders[i] = "?"
+			args[i] = js.TraceID
+		}
+		q := "SELECT trace_id, run_id FROM playbook_runs WHERE trace_id IN (" +
+			strings.Join(placeholders, ",") + ")"
+		runRows, err := s.db.QueryContext(ctx, q, args...)
+		if err == nil {
+			traceToRunID := make(map[string]string)
+			for runRows.Next() {
+				var tid, rid string
+				if runRows.Scan(&tid, &rid) == nil {
+					traceToRunID[tid] = rid
+				}
+			}
+			_ = runRows.Close()
+			for i := range summaries {
+				summaries[i].IncidentRunID = traceToRunID[summaries[i].TraceID]
+			}
+		}
 	}
 
 	// Post-aggregation filters (applied in Go after SQL aggregation).

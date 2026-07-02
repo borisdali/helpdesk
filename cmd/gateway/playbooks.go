@@ -504,7 +504,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 					res.outcome = audit.OutcomeTransitioned
 					res.transitionTo = esc.TransitionTo
 					g.recordEscalationDecision(r.Context(), traceID,
-						authz.PrincipalFromContext(r.Context()), pb, esc.TransitionTo, esc.Findings)
+						authz.PrincipalFromContext(r.Context()), pb, esc.TransitionTo, esc.Findings, true)
 				} else if esc.EscalateTo != "" {
 					res.outcome = audit.OutcomeEscalated
 					res.escalatedTo = esc.EscalateTo
@@ -513,7 +513,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 					// agent handoffs, and would produce "unknown agent" audit alerts.
 					if _, isTerminal := terminalEscalations[esc.EscalateTo]; !isTerminal {
 						g.recordEscalationDecision(r.Context(), traceID,
-							authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, esc.Findings)
+							authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, esc.Findings, false)
 					}
 				} else if esc.Findings != "" {
 					res.outcome = "resolved"
@@ -1138,6 +1138,19 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		"approval_mode", remReq.ApprovalMode, "resolved_by", resolvedBy)
 
 	if nextPB.ExecutionMode == "agent_approve" {
+		// proxyToAgentWithTool normally writes the gateway_request anchor that
+		// QueryJourneys uses to discover a trace. agent_approve bypasses that
+		// path (it uses per-step tool calls), so we write the anchor here.
+		if remStartTraceID != "" {
+			g.recordAudit(r.Context(), &audit.GatewayRequest{
+				TraceID:   remStartTraceID,
+				Agent:     nextPB.SeriesID,
+				Method:    r.Method,
+				Endpoint:  r.URL.Path,
+				StartTime: time.Now(),
+				Status:    "success",
+			})
+		}
 		g.handlePlaybookRunApprove(w, r, nextPB, remReq, remRunID, warnings)
 		return
 	}
@@ -1276,10 +1289,12 @@ func appendChainedText(primary, chained *responseCapture) {
 }
 
 // recordEscalationDecision emits a delegation_decision audit event when an
-// agent-mode playbook run signals escalation to a follow-on playbook.
-// This closes the audit gap between "playbook ran" and "next playbook triggered",
-// making the full escalation chain visible in QueryJourneys.
-func (g *Gateway) recordEscalationDecision(ctx context.Context, traceID string, principal identity.ResolvedPrincipal, pb *audit.Playbook, nextSeriesID, findings string) {
+// agent-mode playbook run signals TRANSITION_TO or ESCALATE_TO to a follow-on
+// playbook. This closes the audit gap between "playbook ran" and "next playbook
+// triggered", making the full chain visible in QueryJourneys.
+// isTransition=true for same-domain TRANSITION_TO handoffs; false for true
+// cross-domain ESCALATE_TO escalations.
+func (g *Gateway) recordEscalationDecision(ctx context.Context, traceID string, principal identity.ResolvedPrincipal, pb *audit.Playbook, nextSeriesID, findings string, isTransition bool) {
 	if g.auditor == nil {
 		return
 	}
@@ -1287,9 +1302,20 @@ func (g *Gateway) recordEscalationDecision(ctx context.Context, traceID string, 
 		traceID = audit.NewTraceID()
 	}
 
+	signal := "ESCALATE_TO"
+	verb := "escalating"
+	label := "playbook escalation from " + pb.SeriesID
+	intent := "escalate from playbook " + pb.SeriesID + " to " + nextSeriesID
+	if isTransition {
+		signal = "TRANSITION_TO"
+		verb = "transitioning"
+		label = "playbook transition from " + pb.SeriesID
+		intent = "transition from playbook " + pb.SeriesID + " to " + nextSeriesID
+	}
+
 	reasoningChain := []string{
-		"agent signalled ESCALATE_TO during playbook run: " + pb.SeriesID,
-		"escalating to next playbook: " + nextSeriesID,
+		"agent signalled " + signal + " during playbook run: " + pb.SeriesID,
+		verb + " to next playbook: " + nextSeriesID,
 	}
 	if findings != "" {
 		reasoningChain = append(reasoningChain, "findings: "+findings)
@@ -1308,13 +1334,13 @@ func (g *Gateway) recordEscalationDecision(ctx context.Context, traceID string, 
 		Principal: p,
 		Session:   audit.Session{ID: traceID},
 		Input: audit.Input{
-			UserQuery: "playbook escalation from " + pb.SeriesID,
+			UserQuery: label,
 		},
 		Decision: &audit.Decision{
 			Agent:           nextSeriesID,
 			RequestCategory: audit.CategoryIncident,
 			Confidence:      1.0,
-			UserIntent:      "escalate from playbook " + pb.SeriesID + " to " + nextSeriesID,
+			UserIntent:      intent,
 			ReasoningChain:  reasoningChain,
 		},
 		Outcome: &audit.Outcome{Status: "success"},
