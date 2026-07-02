@@ -4,15 +4,15 @@ The most common question after deploying an AI SRE system is this: **does it mak
 
 A resolution rate tells you whether the system is working. It does not tell you whether it is improving. 
 
-A 75% resolution rate this month and 75% last month could mean the playbook is perfectly stable. This is critically important, because without this stability, your AI system is not reproducable (in diagnosis and remediation) and can't be trusted. In fact, we strongly advocate for this stability and [provide tools](CONSISTENCY.md) to confirm that your playbooks are reliable to generate the same verdict, be it triage or remediation.
+A 75% resolution rate this month and 75% last month could mean the [playbook](PLAYBOOKS.md) is perfectly stable. This is critically important, because without this stability, your AI system is not reproducable (in diagnosis and remediation) and can't be trusted. In fact, we strongly advocate for this stability and [provide tools](CONSISTENCY.md) to confirm that your playbooks are reliable to generate the same verdict, be it triage or remediation.
 
 This verdict consistency and the [Informed Consent](INFORMED_CONSENT.md) are the pillars, the foundation of aiHelpDesk trust.
 
 But it's only half of the story. Because that consistency could mean that a playbook succeeded on different faults, masked regressions on others and got lucky with timing. In fact there are a lot of possible underlying permutations and... well, the numbers could look the same either way.
 
-We should do better. Consistency in diagnosis is the necessary starting point, not the end game. What comes next at aiHelpDesk [Vault](VAULT.md) is the answer to this question: stable yes, but is it getting better? 
+We must do better. Consistency in diagnosis is the necessary starting point, not the end game. What comes next at aiHelpDesk [Vault](VAULT.md) is the answer to this question: stable yes, but is it getting better? 
 
-aiHelpDesk is designed to answwer this question concretely, across three dimensions, tracked per playbook version, so you can see the before-and-after of every improvement cycle. This document shows you how.
+aiHelpDesk is designed to answer this question concretely, across three dimensions, tracked per playbook version, so you can see the before-and-after of every improvement cycle. This document shows you how.
 
 ---
 

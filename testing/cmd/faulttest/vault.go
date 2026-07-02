@@ -748,7 +748,7 @@ func vaultList(args []string) {
 							fbStr = fmt.Sprintf("  %.0f%% approach OK", vs.RemFeedbackRate*100)
 						}
 						fmt.Printf("    %-5s%s  %dr  %.0f%%%s%s\n",
-							vs.Version, active, vs.TotalRuns, vs.ResolutionRate*100, effStr, fbStr)
+							vs.Version, active, vs.TotalRuns, (vs.ResolutionRate+vs.TransitionRate)*100, effStr, fbStr)
 					}
 					if len(versions) > 2 {
 						fmt.Printf("    → vault versions %s\n", versionSeriesID)
