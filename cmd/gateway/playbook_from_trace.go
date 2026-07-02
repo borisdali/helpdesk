@@ -582,24 +582,24 @@ func validatePlaybookProtocol(pb audit.Playbook) []string {
 // routing) are preserved separately and must not be re-synthesized.
 func formatActivePlaybookYAML(pb *audit.Playbook) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("name: %s\n", pb.Name))
-	sb.WriteString(fmt.Sprintf("description: |\n  %s\n",
-		strings.ReplaceAll(strings.TrimRight(pb.Description, "\n"), "\n", "\n  ")))
+	fmt.Fprintf(&sb, "name: %s\n", pb.Name)
+	fmt.Fprintf(&sb, "description: |\n  %s\n",
+		strings.ReplaceAll(strings.TrimRight(pb.Description, "\n"), "\n", "\n  "))
 	if pb.ProblemClass != "" {
-		sb.WriteString(fmt.Sprintf("problem_class: %s\n", pb.ProblemClass))
+		fmt.Fprintf(&sb, "problem_class: %s\n", pb.ProblemClass)
 	}
 	if len(pb.Symptoms) > 0 {
 		sb.WriteString("symptoms:\n")
 		for _, s := range pb.Symptoms {
-			sb.WriteString(fmt.Sprintf("  - %s\n", s))
+			fmt.Fprintf(&sb, "  - %s\n", s)
 		}
 	}
-	sb.WriteString(fmt.Sprintf("guidance: |\n  %s\n",
-		strings.ReplaceAll(strings.TrimRight(pb.Guidance, "\n"), "\n", "\n  ")))
+	fmt.Fprintf(&sb, "guidance: |\n  %s\n",
+		strings.ReplaceAll(strings.TrimRight(pb.Guidance, "\n"), "\n", "\n  "))
 	if len(pb.Escalation) > 0 {
 		sb.WriteString("escalation:\n")
 		for _, e := range pb.Escalation {
-			sb.WriteString(fmt.Sprintf("  - %s\n", e))
+			fmt.Fprintf(&sb, "  - %s\n", e)
 		}
 	}
 	return sb.String()
