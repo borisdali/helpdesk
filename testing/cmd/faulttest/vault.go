@@ -701,60 +701,82 @@ func vaultList(args []string) {
 
 		fmt.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n", colFault, f.ID, colPlatform, platform, colDiag, diagDisplay, colRemed, remedDisplay, colFaultTest, faultTestCol, colStable, stableCol, incidentCol)
 
-		// Per-version learning signal: prefer the diagnosis (triage) series for
-		// version sub-rows — that's where suggest-update improvements land.
-		// Suppressed when --short is set for a compact single-line-per-fault view.
+		// Per-version learning signal: show the two newest versions for both
+		// the diagnosis (triage) and remediation series so improvements in either
+		// phase are visible. Suppressed when --short is set.
 		if short {
 			continue
 		}
-		// Fall back to the remediation series when no diagnosis series is set.
-		// Show the two newest versions so the before/after comparison is visible.
-		// A single-version series prints only a pointer to avoid duplicating the
-		// main row's data while still signalling that vault history exists.
-		versionSeriesID := f.DiagnosisPlaybookSeriesID
-		if versionSeriesID == "" {
-			versionSeriesID = playbookID
+
+		diagSeriesID := f.DiagnosisPlaybookSeriesID
+		remedSeriesID := playbookID // may be empty
+
+		// When both series are distinct, label rows so the reader knows which
+		// playbook type improved. When only one series is present, no label needed.
+		showBoth := diagSeriesID != "" && remedSeriesID != "" && diagSeriesID != remedSeriesID
+		diagLabel := ""
+		remedLabel := ""
+		if showBoth {
+			diagLabel = "diag  "
+			remedLabel = "remed "
 		}
-		if versionSeriesID != "" && cfg.GatewayURL != "" {
-			if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, versionSeriesID); err == nil && len(versions) >= 1 {
-				// API returns oldest-first; reverse so active (newest) is first.
-				for i, j := 0, len(versions)-1; i < j; i, j = i+1, j-1 {
-					versions[i], versions[j] = versions[j], versions[i]
-				}
-				if len(versions) == 1 {
-					// One version: just a pointer so the operator knows data exists.
-					fmt.Printf("    → vault versions %s\n", versionSeriesID)
-				} else {
-					// Two or more: show at most 2 (the comparison that matters).
-					show := versions
-					if len(show) > 2 {
-						show = show[:2]
-					}
-					for _, vs := range show {
-						active := "  "
-						if vs.IsActive {
-							active = " *"
-						}
-						effStr := ""
-						if vs.AvgStepCount > 0 && vs.AvgRecoverySecs > 0 {
-							effStr = fmt.Sprintf("  avg: %.1f steps, %s recovery", vs.AvgStepCount, formatDuration(vs.AvgRecoverySecs))
-						} else if vs.AvgStepCount > 0 {
-							effStr = fmt.Sprintf("  avg: %.1f steps", vs.AvgStepCount)
-						} else if vs.AvgRecoverySecs > 0 {
-							effStr = fmt.Sprintf("  avg: %s recovery", formatDuration(vs.AvgRecoverySecs))
-						}
-						fbStr := ""
-						if vs.RemFeedbackCount > 0 {
-							fbStr = fmt.Sprintf("  %.0f%% approach OK", vs.RemFeedbackRate*100)
-						}
-						fmt.Printf("    %-5s%s  %dr  %.0f%%%s%s\n",
-							vs.Version, active, vs.TotalRuns, (vs.ResolutionRate+vs.TransitionRate)*100, effStr, fbStr)
-					}
-					if len(versions) > 2 {
-						fmt.Printf("    → vault versions %s\n", versionSeriesID)
-					}
-				}
+
+		// printVersionSubRows renders at most 2 version sub-rows for a series.
+		// A single-version series prints only a pointer so the operator knows
+		// vault history exists without duplicating the main row's data.
+		printVersionSubRows := func(seriesID, label string) {
+			if seriesID == "" || cfg.GatewayURL == "" {
+				return
 			}
+			versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID)
+			if err != nil || len(versions) < 1 {
+				return
+			}
+			// API returns oldest-first; reverse so active (newest) is first.
+			for i, j := 0, len(versions)-1; i < j; i, j = i+1, j-1 {
+				versions[i], versions[j] = versions[j], versions[i]
+			}
+			if len(versions) == 1 {
+				fmt.Printf("    %s→ vault versions %s\n", label, seriesID)
+				return
+			}
+			show := versions
+			if len(show) > 2 {
+				show = show[:2]
+			}
+			for _, vs := range show {
+				active := "  "
+				if vs.IsActive {
+					active = " *"
+				}
+				effStr := ""
+				if vs.AvgStepCount > 0 && vs.AvgRecoverySecs > 0 {
+					effStr = fmt.Sprintf("  avg: %.1f steps, %s recovery", vs.AvgStepCount, formatDuration(vs.AvgRecoverySecs))
+				} else if vs.AvgStepCount > 0 {
+					effStr = fmt.Sprintf("  avg: %.1f steps", vs.AvgStepCount)
+				} else if vs.AvgRecoverySecs > 0 {
+					effStr = fmt.Sprintf("  avg: %s recovery", formatDuration(vs.AvgRecoverySecs))
+				}
+				fbStr := ""
+				if vs.RemFeedbackCount > 0 {
+					fbStr = fmt.Sprintf("  %.0f%% approach OK", vs.RemFeedbackRate*100)
+				}
+				fmt.Printf("    %s%-5s%s  %dr  %.0f%%%s%s\n",
+					label, vs.Version, active, vs.TotalRuns, (vs.ResolutionRate+vs.TransitionRate)*100, effStr, fbStr)
+			}
+			if len(versions) > 2 {
+				fmt.Printf("    %s→ vault versions %s\n", label, seriesID)
+			}
+		}
+
+		if diagSeriesID != "" {
+			printVersionSubRows(diagSeriesID, diagLabel)
+		} else {
+			// No diagnosis series: fall back to remediation so something is shown.
+			printVersionSubRows(remedSeriesID, "")
+		}
+		if showBoth {
+			printVersionSubRows(remedSeriesID, remedLabel)
 		}
 	}
 }
@@ -1432,6 +1454,7 @@ type incidentRun struct {
 	CompletedAt     string `json:"completed_at"`
 	FindingsSummary string `json:"findings_summary"`
 	PriorRunID      string `json:"prior_run_id"`
+	TraceID         string `json:"trace_id"`
 }
 
 // incidentFeedback is the feedback response shape from GET .../feedback.
@@ -1602,6 +1625,25 @@ func fetchRemediationRun(gatewayURL, apiKey, triageRunID string) *incidentRun {
 		return nil
 	}
 	return &result.Runs[0]
+}
+
+// faultFromTraceID extracts the fault ID from a faulttest trace ID of the form
+// "faulttest-{8hex}-{fault-id}-r{N}". Returns "" for non-faulttest traces.
+func faultFromTraceID(traceID string) string {
+	const prefix = "faulttest-"
+	if !strings.HasPrefix(traceID, prefix) {
+		return ""
+	}
+	rest := traceID[len(prefix):]
+	// Strip leading 8-char hex segment + dash.
+	if len(rest) > 9 && rest[8] == '-' {
+		rest = rest[9:]
+	}
+	// Strip trailing run-counter suffix (-r{N}).
+	if i := strings.LastIndex(rest, "-r"); i > 0 {
+		rest = rest[:i]
+	}
+	return rest
 }
 
 // formatRemediationOutcome formats a remediation run as "resolved 8.1s", "abandoned", etc.
@@ -1884,7 +1926,12 @@ func vaultIncidents(args []string) {
 			scoreStr = fmt.Sprintf("%d%%", int(ev.OverallScore*100))
 		}
 
+		// Prefer the fault ID embedded in the trace ID (faulttest-{uuid}-{fault}-r{N})
+		// over the static reverse-lookup, which only returns one fault per series.
 		faultDisplay := faultID
+		if id := faultFromTraceID(run.TraceID); id != "" {
+			faultDisplay = id
+		}
 		if faultDisplay == "" {
 			faultDisplay = "–"
 		}
