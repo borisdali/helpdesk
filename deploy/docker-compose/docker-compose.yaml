@@ -7,7 +7,7 @@ services:
       context: ../../..
       dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
-    command: ["/usr/local/bin/auditd"]
+    entrypoint: ["/bin/sh", "-c", "sleep 4 && exec /usr/local/bin/auditd"]
     environment:
       HELPDESK_LOG_LEVEL: ${HELPDESK_LOG_LEVEL:-info}
       # Core audit configuration
@@ -54,6 +54,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   database-agent:
     build:

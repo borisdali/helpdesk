@@ -11,7 +11,7 @@ The sample commands presented below complement the following two blog posts:
 
 For the background on Triage Consistency Certification see [here](CONSISTENCY.md). This Consistency Certification/Badge is part of the greater aiHelpDesk Operational SRE/DBA Flywheel - see [here](VAULT.md#the-operational-sredba-flywheel) for details.
 
-The sample commands below are shown on K8s, but similar samples of running aiHelpDesk in Docker/Podman and on a host/VM available [here](BENCHMARKING_SAMPLE6.md) and [here](BENCHMARKING_SAMPLE7.md) respectively (although not the exact commands shown here).
+The sample commands below are shown on K8s, but similar samples of running aiHelpDesk in Docker/Podman and on a host/VM are available [here](BENCHMARKING_SAMPLE6.md) and [here](BENCHMARKING_SAMPLE7.md) respectively (although not the exact commands shown here).
 
 ## Fault Injection Test
 
