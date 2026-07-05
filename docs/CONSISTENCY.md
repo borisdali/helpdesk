@@ -47,18 +47,18 @@ Consider two playbooks, each tested 5 times against the same injected fault:
 | A | PASS PASS PASS FAIL PASS | 80% | 88–95% (7pp) |
 | B | PASS PASS PASS PASS PASS | 100% | 62–97% (35pp) |
 
-Playbook B has a perfect pass rate but a 35-percentage-point confidence spread — the agent's
+Playbook B has a perfect pass rate but a 35-percentage-point confidence spread. That means the agent's
 certainty in its own answer swings wildly between runs. In production, that variance translates
 to inconsistent gate decisions (sometimes `auto-approve`, sometimes `escalate`), inconsistent
 operator-facing explanations and unreliable calibration data. Playbook A is more honest and
 more operationally predictable, even though it sometimes fails.
 
 The deeper issue: **you cannot build a meaningful calibration curve without consistent inputs**.
-The `vault calibration` command, see [here](VAULT.md), shows whether confidence bands track actual
+The [`vault calibration`](VAULT.md#vault-calibration) command shows whether confidence bands track actual
 accuracy, but if the confidence for the same fault varies 35pp across runs, the band→accuracy
 mapping is noise rather than signal. 
 
->> **Consistency certification is what licenses a playbook to contribute clean data to the calibration loop.**
+> **Consistency certification is what licenses a playbook to contribute clean data to the calibration loop.**
 
 Accuracy and consistency are also independent of each other in ways that matter:
 

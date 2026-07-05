@@ -372,10 +372,10 @@ Fault report: ./faulttest-7823e755-db-max-connections.json
 
 [PASS] Max connections exhausted (db-max-connections) - score: 86% [judge: 67%]
        Keywords: 100% | Tools: 100% | Judge: 67%
-       Reasoning: "Agent correctly identified that idle connections are consuming the connection slots and diagnosed connection pool saturation as root cause, but failed to recommend the two specific remediation actions (terminating idle     connections OR increasing max_connections) explicitly stated in the EXPECTED DIAGNOSIS."
+       Reasoning: "Agent correctly identified that idle connections are consuming the connection slots and diagnosed connection pool saturation as root cause, but failed to recommend the two specific remediation actions (terminating idle connections OR increasing max_connections) explicitly stated in the EXPECTED DIAGNOSIS."
 [PASS] Max connections exhausted (db-max-connections) - score: 86% [judge: 67%]
        Keywords: 100% | Tools: 100% | Judge: 67%
-       Reasoning: "Agent correctly identified that max_connections (100) was exceeded by total_connections (108) with 96 idle connections as the root cause, but failed to recommend the two explicit solutions from EXPECTED DIAGNOSIS: either   terminating idle connections or increasing max_connections—instead only diagnosed a connection pool leak without actionable remediation steps."
+       Reasoning: "Agent correctly identified that max_connections (100) was exceeded by total_connections (108) with 96 idle connections as the root cause, but failed to recommend the two explicit solutions from EXPECTED DIAGNOSIS: either terminating idle connections or increasing max_connections—instead only diagnosed a connection pool leak without actionable remediation steps."
 [PASS] Max connections exhausted (db-max-connections) - score: 100% [judge: 100%]
        Keywords: 100% | Tools: 100% | Judge: 100%
        Reasoning: "Agent correctly identified that max_connections limit (100) was exceeded by total connections (108) due to idle sessions (96) consuming all slots, diagnosed the connection pool exhaustion root cause with high confidence (0.95), and implicitly recommended the solution of closing idle connections while noting that increasing max_connections is also an option, fully addressing all key points in the expected diagnosis."
