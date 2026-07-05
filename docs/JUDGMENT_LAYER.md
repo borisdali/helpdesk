@@ -13,7 +13,7 @@ There is a fourth layer and it belongs to the human operator.
 
 Not because of compliance requirements (we have [Informed Consent](INFORMED_CONSENT.md) and [Compliance Reporting](COMPLIANCE.md) for that). 
 
-Not because AI is untrustworthy in general (we combat it with the [Triage Consistency Certificate](CONSISTENCY.md) badge). 
+Not because AI is inconsistent in general (we combat it with the [Triage Consistency Certificate](CONSISTENCY.md) badge). 
 
 But because there is a specific class of decisions in the
 aiHelpDesk [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) that require knowledge which cannot be derived from

@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#9 (Docker): 
+# aiHelpDesk Sample#9 (Docker): Report Card + New Version of a Playbook (generated with human oversight)
 
 The sample commands presented below complements these two blog post: 
 
@@ -20,7 +20,7 @@ Part 1 is just the normal, previously documented workflow of reviewing the inven
 
 Part 2 is different. The diagnosis for a particular test we chose and the way we decided to run `faulttest` (with `--approval-mode force`), is not confident, which is caught by the judge. So what now? That's Part 2!
 
-## Part 1: Inventory: Failure Scenarios + Vault
+## Part 1-a: Inventory: Failure Scenarios + Vault
 
 Similar to the [previous Docker sample](BENCHMARKING_SAMPLE6.md#lets-get-started), first off fire up aiHelpDesk on Docker and optionally run `helpdesk-client` to verify the deployment. Ask some basic questions, e.g. "which of my dev databases are up, what's their uptime and average load?"
 
@@ -145,7 +145,7 @@ db-wal-stale-slot                any        pbs_wal_stale_slot              pbs_
 db-checkpoint-warning            any        pbs_checkpoint_bgwriter_triage  pbs_bgwriter_remediate           2026-06-22  PASS       STABLE(5)      1 runs  100% resolved  –  avg: 6.0 steps, 16s recovery  (system)
 ```
 
-## Part 1: Fault Injection Test
+## Part 1-b: Fault Injection Test
 
 Again, very similar to the [previous example](), but please note the `--approval-mode force` clause, which still accepts the optional at-gate feeback from an operator, but doesn't prompt for the post-incident feedback. This is because the assumption with the `forced` run is well calibrated and went through the multiple testing iterations already. The rest is very similar to the previous examples:
 
@@ -369,7 +369,7 @@ As mentioned earlier, at the end of the `faulttest`, there was no prompt for the
 
 Overall, there wasn't anything new in the above compared to what we already presented in the previous samples. But here's where the fun begins:
 
-## Part 1: Review `vault versions` for `pbs_connection_triage` playbook
+## Part 1-c: Review `vault versions` for `pbs_connection_triage` playbook
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.19.0-deploy/docker-compose]$ docker run --rm \
@@ -395,7 +395,7 @@ id/from lines show playbook_id and the run that generated that version
 ```
 
 
-## Part 2: The Problem and the Two Options
+## Part 2-a: The Problem and the Two Options
 
 So here's the problem: the triage of this `max connections` fault results in the diagnosis with multiple competing hypotheses, as we saw from the failure injection test earlier. aiHelpDesk flagged this clearly at the [Informed Gate](PLAYBOOKS.md#informed-gate), which is the implementation of aiHelpDesk [Informed Consent](INFORMED_CONSENT.md) policy.
 
@@ -470,7 +470,7 @@ If they converge on the same change, that's a strong signal the fix is right. If
 
 The meta-story here is this: you're using an AI judge to grade your AI SRE, then using a second AI to fix the first AI's playbook, while a human watches to see if any of them got it right.
 
-## Part 2: Option B of `suggest-update`
+## Part 2-b: Option B of `suggest-update`
 
 In the 0.19 release we made `suggest-update` smart enough to not only make use of `--series-id` (not a positional arg), but also auto-pick the most recent resolved run. So here it goes:
 
@@ -629,7 +629,7 @@ user	0m0.022s
 sys	0m0.019s
 ```
 
-## Part 2: Option B Analysis
+## Part 2-c: Option B Analysis
 
 `vault suggest-update` produced rich output. Let's review it in detail:
 
@@ -653,7 +653,7 @@ And replaced it with this:
 
 That's the exact failure mode the judge flagged. The LLM reinforced the wrong behavior instead of correcting it. If you activated pb_d6688d31 "as-is" and ran `faulttest` again, the judge score would likely drop, not improve.
 
-## Part 2: The solution: combine paths A and B
+## Part 2-d: The solution: combine paths A and B
 
 The manual edit is now clearly the right path for this specific fix. The LLM draft is useful as structural scaffolding (keep the decision tree, keep the extended FINDINGS format, keep the new symptom) but the guidance paragraph needs the
   human's targeted fix. And so the ideal v1.4 is a merge:
@@ -726,7 +726,7 @@ index ade9766..e0110d1 100644
    - "active_connections >= max_connections (no slots remaining)"
 ```
 
-## Part 2: Implement the fix
+## Part 2-e: Implement the fix
 
 The quickest way here is to push v1.4 into the running auditd directly. The gateway proxies the playbook create endpoint and so all we need to do is to POST the YAML content as a JSON payloadand let the /import endpoint parses YAML directly. It accepts {"text": "<yaml content>", "format": "yaml"} and returns a draft, then you call activate. Let me construct the full push command:
 
