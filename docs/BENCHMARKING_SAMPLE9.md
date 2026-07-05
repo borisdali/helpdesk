@@ -885,7 +885,9 @@ And the numbers tell the story:
 
 The diagnosti score went up from 89% to 100%, which emans that the `idle_session_timeout=0` trap fix worked on the first run. The time jump (1m15s → 1m38s) is noise from the gate approval wait, not agent behavior.
 
-Now let's run the diff to see exactly what changed between the two versions. That's what `vault diff` is there for to get the before/after guidance diff alongside the score delta:
+## What changed between between versions? `vault diff`
+
+Now let's see exactly what changed between the two versions. That's what `vault diff` is there for to get the before/after guidance diff alongside the score delta:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.19.0-deploy/docker-compose]$ docker run --rm \
