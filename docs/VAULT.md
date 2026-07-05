@@ -1333,3 +1333,4 @@ The drift command identifies which Playbooks may need a guidance update. `sugges
 | [FAULTTEST.md](FAULTTEST.md) | Full faulttest CLI reference, fault catalog, scoring, remediation |
 | [FLEET.md](FLEET.md) | Fleet runner, job definitions, schema drift, planner |
 | [API.md](API.md) | Full REST API reference including `/fleet/playbooks/from-trace` |
+| [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) | What to do when `vault suggest-update` produces `NEEDS_REVIEW`; the manual improvement path; the specific role of human judgment in the flywheel |

@@ -175,7 +175,7 @@ The probabilism in the reasoning layer is not left unchecked:
 
 - **Bounded**: Playbook `guidance` constrains the planner's reasoning space. The LLM works within expert-encoded constraints, not from scratch.
 - **Measured**: `faulttest` gives a concrete reliability figure across repeated runs — a number that static runbooks cannot produce.
-- **Continuously narrowed**: every resolved incident auto-proposes a Playbook draft via the Vault. Every accepted draft encodes more expert knowledge into the guidance field, which further constrains the reasoning space on the next run. Variance shrinks as operational experience accumulates.
+- **Continuously narrowed**: every resolved incident auto-proposes a Playbook draft via the Vault. Every accepted draft encodes more expert knowledge into the guidance field, which further constrains the reasoning space on the next run. Variance shrinks as operational experience accumulates. When the AI's own improvement proposals are wrong — when `vault suggest-update` produces a draft that would make the failure rate worse — the [Judgment Layer](JUDGMENT_LAYER.md) is what catches and corrects them.
 
 When exact step-by-step repeatability is non-negotiable, the fleet runner's explicit job definition format is available: exact tool, exact arguments, exact rollback steps — specified by a human and executed verbatim. The LLM selects *which* Playbook fits; the Playbook constrains what the planner may generate; the policy layer enforces hard limits. How much latitude the planner has is tunable, down to zero.
 

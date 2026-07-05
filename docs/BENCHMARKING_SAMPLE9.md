@@ -1,6 +1,12 @@
 # aiHelpDesk Sample#9 (Docker): 
 
-The sample commands presented below complement this blog post: **[AI SRE Just Got Its First Report Card](https://medium.com/@borisdali/your-ai-sre-just-got-its-first-report-card-d46c47b06fd5)**. This blog posts and the commands below are meant to show how to turn your incident audit trail into a learning curve.
+The sample commands presented below complements these two blog post: 
+
+- **[AI SRE Just Got Its First Report Card](https://medium.com/@borisdali/your-ai-sre-just-got-its-first-report-card-d46c47b06fd5)**. 
+  Turn Your Incident Audit Trail into a Learning Curve
+
+- **[Your AI SRE Tried to Improve Its Own Playbook. Here's What It Got Wrong.](...)**
+  A case study in the limits of automated playbook tuning. And what human judgment still has to add.
 
 It all starts with the [Vault](VAULT.md). If you need a background, start there. Next, head over to [this page](VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](INCIDENTS.md) data into a learning signal.
 
@@ -11,6 +17,7 @@ For more context, aiHelpDesk Fault Injection Testing is well documented [here](F
 The sample commands posted below are broken into two parts and are shown for running aiHelpDesk on Docker, but similar samples of running aiHelpDesk on K8s and on a host/VM are available [here](BENCHMARKING_SAMPLE8.md) and [here](BENCHMARKING_SAMPLE7.md) respectively (although not the exact commands shown on this page).
 
 Part 1 is just the normal, previously documented workflow of reviewing the inventory (failure scenarios, content of the vault) and running a fault injection test.
+
 Part 2 is different. The diagnosis for a particular test we chose and the way we decided to run `faulttest` (with `--approval-mode force`), is not confident, which is caught by the judge. So what now? That's Part 2!
 
 ## Part 1: Inventory: Failure Scenarios + Vault
@@ -25,7 +32,8 @@ Next, get the inventory of the existing failure scenarios (there are presently 1
     -v "$HOME/.faulttest:/root/.faulttest" \
     ghcr.io/borisdali/helpdesk:v0.19.0 \
     faulttest list \
-      --gateway http://gateway:8080 --api-key $HELPDESK_CLIENT_API_KEY
+      --gateway http://gateway:8080 \
+      --api-key $HELPDESK_CLIENT_API_KEY
 
 ID                             CATEGORY     SEVERITY   EXTERNAL DB      SOURCE   NAME
 -----------------------------------------------------------------------------------------------------------
@@ -58,7 +66,9 @@ Next, review the content of the vault for these failure scenarios:
     -v "$HOME/.faulttest:/root/.faulttest" \
     ghcr.io/borisdali/helpdesk:v0.19.0 \
     faulttest vault list \
-      --gateway http://gateway:8080 --api-key $HELPDESK_CLIENT_API_KEY
+      --gateway http://gateway:8080 \
+      --api-key $HELPDESK_CLIENT_API_KEY
+
 Gateway: http://gateway:8080  ·  version: v0.19.0-6278bb2  ·  host: 41c1c6120572
 
 FAULT                            PLATFORM   DIAG PLAYBOOK                   REMED PLAYBOOK                   LAST TEST              STABLE         INCIDENTS
@@ -108,8 +118,10 @@ If you prefer to get the more compact view of the vault, without the breakdown b
     -v "$HOME/.faulttest:/root/.faulttest" \
     ghcr.io/borisdali/helpdesk:v0.19.0 \
     faulttest vault list \
-      --gateway http://gateway:8080 --api-key $HELPDESK_CLIENT_API_KEY \
+      --gateway http://gateway:8080 \
+      --api-key $HELPDESK_CLIENT_API_KEY \
       --short
+
 Gateway: http://gateway:8080  ·  version: v0.19.0-6278bb2  ·  host: 41c1c6120572
 
 FAULT                            PLATFORM   DIAG PLAYBOOK                   REMED PLAYBOOK                   LAST TEST              STABLE         INCIDENTS
@@ -160,6 +172,7 @@ Again, very similar to the [previous example](), but please note the `--approval
 >        --approval-mode force \
 >        --report-per-fault \
 >        --remediate --remediation-judge --emit-and-wait --gate-escalation
+
 Sat Jul  4 09:54:12 EDT 2026
 time=2026-07-04T13:54:12.581Z level=INFO msg=--conn alias=alloydb-on-vm host=host.docker.internal
 
@@ -367,6 +380,7 @@ Overall, there wasn't anything new in the above compared to what we already pres
 >       --gateway http://gateway:8080 \
 >       --api-key $HELPDESK_CLIENT_API_KEY \
 >       pbs_connection_triage
+
 Gateway: http://gateway:8080  ·  version: v0.19.0-6278bb2  ·  host: 41c1c6120572
 
 Version stats for pbs_connection_triage
@@ -471,6 +485,7 @@ In the 0.19 release we made `suggest-update` smart enough to not only make use o
 >       --trace-id plr_e3e9875d \
 >       --gateway http://gateway:8080 \
 >       --api-key $HELPDESK_CLIENT_API_KEY
+
 Sat Jul  4 17:08:14 EDT 2026
 Gateway: http://gateway:8080  ·  version: v0.19.0-6278bb2  ·  host: 41c1c6120572
 
