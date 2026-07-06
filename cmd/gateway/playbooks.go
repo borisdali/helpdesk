@@ -117,11 +117,17 @@ func (g *Gateway) handlePlaybookSetJudgeVerdict(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "playbookID is required")
 		return
 	}
+	// Buffer the body so we can validate it AND forward it intact to auditd.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
 	var body struct {
 		Verdict    string `json:"verdict"`     // "APPROVE" | "NEEDS_REVIEW" | "REJECT"
 		JudgeModel string `json:"judge_model"` // model that issued the verdict
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -129,6 +135,7 @@ func (g *Gateway) handlePlaybookSetJudgeVerdict(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "verdict is required")
 		return
 	}
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/judge-verdict")
 }
 
