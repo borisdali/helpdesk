@@ -32,6 +32,8 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault diff](#vault-diff)
    - [vault activate](#vault-activate)
    - [vault discard](#vault-discard)
+   - [vault import](#vault-import)
+   - [vault judge-accuracy](#vault-judge-accuracy)
    - [vault active](#vault-active)
    - [vault history](#vault-history)
 6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
@@ -639,15 +641,15 @@ Shows per-version run stats for a playbook series: resolution rate, average step
 ```
 Version stats for pbs_cache_miss_remediate — 2 version(s)
 
-VERSION     RUNS    TRANSITIONED  AVG STEPS   AVG TIME    AVG DIAG   AVG REMED  APPROACH OK
-─────────────────────────────────────────────────────────────────────────────────────────────
-1.0          5      60%           6.2         42s         72%        –          60%
+VERSION     RUNS    SUCCESS%   AVG STEPS   AVG TIME    AVG DIAG   AVG REMED  APPROACH OK  JUDGE VERDICT
+──────────────────────────────────────────────────────────────────────────────────────────────────────
+1.0          5      60%        6.2         42s         72%        –          60%          –
   id=pb_a1b2c3d4  from=plr_0c58aa4f
-1.1  *       3      100%          4.0         8s          91%        85%        100%
-  id=pb_40729257  from=plr_1e2f3a4b
+1.1  *       3      100%       4.0         8s          91%        85%        100%         APPROVE
+  id=pb_40729257  from=plr_1e2f3a4b  judge=claude-haiku-4-5-20251001
 
-* = currently active version
-  id/from lines show playbook_id and the run that generated that version
+* = currently active   SUCCESS% = resolved + transitioned
+id/from lines show playbook_id and the run that generated that version
 ```
 
 The `id` and `from` lines appear under each version row and provide the playbook IDs needed for `vault diff <id1> <id2>` post-activation comparison, plus the originating run ID for provenance.
@@ -662,6 +664,9 @@ Data sources:
 | `AVG DIAG` | Average `diagnosis_score` from `run_evaluation`; `–` when no runs have eval data |
 | `AVG REMED` | Average `remediation_score` for runs where remediation was executed (score > 0); `–` when no remediation runs |
 | `APPROACH OK` | Fraction of runs where operators rated the remediation approach as appropriate; collected via post-incident feedback prompt; `–` when no feedback submitted |
+| `JUDGE VERDICT` | Verdict recorded by `vault diff --judge` on this draft before activation; `–` when no judge review was run |
+
+The `JUDGE VERDICT` column closes the accountability loop: once runs accumulate under an activated version, you can compare the judge's pre-activation prediction against the actual `SUCCESS%`.
 
 The gateway endpoint backing this command: `GET /api/v1/fleet/series/{seriesID}/version-stats`.
 
@@ -950,6 +955,8 @@ Verdict:            ?  NEEDS_REVIEW
 
 The judge model does not need to match the agent model. A smaller, faster model (Haiku, Flash) is recommended — the rubric is simple and raw capability matters less than instruction following.
 
+After printing the verdict, `vault diff` automatically persists it to the draft's record in auditd (via `POST /api/v1/fleet/playbooks/{id}/judge-verdict`). This means the verdict appears in `vault versions` under the `JUDGE VERDICT` column once the draft is activated and runs accumulate — no separate step required.
+
 ### vault activate
 
 ```bash
@@ -986,6 +993,84 @@ faulttest vault drafts --gateway http://gateway:8080
 ```
 
 Use `vault drafts --purge-orphans` to remove all orphan drafts (`pbs_generated_*`) in bulk rather than discarding them one at a time.
+
+### vault import
+
+```bash
+faulttest vault import <file.yaml> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Imports a local YAML playbook file as a draft. This is the recommended way to add hand-authored or externally sourced playbooks to the Vault without going through the three-step curl workflow.
+
+The YAML format is the same as [the import endpoint](PLAYBOOKS.md#importing-a-playbook): `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`, `series_id`, etc.
+
+```bash
+# Import as a draft (review with vault diff before activating)
+faulttest vault import playbooks/connection-triage.yaml \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Import and immediately activate (skips the draft review step)
+faulttest vault import playbooks/connection-triage.yaml \
+  --activate \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Force-import even if a draft already exists for the series
+faulttest vault import playbooks/connection-triage.yaml \
+  --force \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Attach the imported playbook to a specific series
+faulttest vault import playbooks/connection-triage.yaml \
+  --series-id pbs_connection_triage \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--activate` | Immediately activate the imported playbook (skips draft review) |
+| `--force` | Replace an existing draft for the same series |
+| `--series-id` | Attach to a specific series ID instead of the one in the YAML |
+
+The imported playbook is saved with `source: imported`. If `--activate` is not set, the draft appears in `vault drafts` and can be reviewed with `vault diff` before activation.
+
+### vault judge-accuracy
+
+```bash
+# All series with recorded verdicts
+faulttest vault judge-accuracy \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Scoped to one fault or series
+faulttest vault judge-accuracy db-lock-contention \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Cross-references judge predictions (recorded by `vault diff --judge`) against the actual run outcomes that accumulated after activation. This is how you verify whether the LLM judge is a reliable pre-activation signal — or whether it approves changes that don't actually improve outcomes.
+
+```
+SERIES                             VERSION  JUDGE VERDICT         RUNS  SUCCESS%  JUDGE MODEL
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+pbs_connection_remediate           1.4      APPROVE                  8    87%      claude-haiku-4-5-20251001
+pbs_max_connections_triage         1.2      NEEDS_REVIEW             3    67%      claude-haiku-4-5-20251001
+pbs_wal_stale_slot                 1.3      APPROVE                  5   100%      claude-haiku-4-5-20251001
+
+JUDGE VERDICT is the prediction recorded by `vault diff`.
+SUCCESS% is the actual outcome after runs on this version.
+```
+
+The gap between `JUDGE VERDICT` and `SUCCESS%` is the accountability signal: an `APPROVE` verdict that correlates with high `SUCCESS%` validates the judge as useful; a pattern of `APPROVE` + low `SUCCESS%` is a signal to tune the judge prompt or raise the bar before activating.
+
+Requires `--gateway`. Verdicts are only recorded when `vault diff --judge` is run before activation.
 
 ### vault active
 

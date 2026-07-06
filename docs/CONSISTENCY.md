@@ -143,6 +143,8 @@ previous cert for the same `fault_id` — one cert per fault, always the latest 
 The `diagnosis_model` field is intentional: a cert issued against `claude-sonnet-4-6` does not
 automatically transfer to a newer model release. See [When to re-certify](#8-when-to-re-certify).
 
+Stability certs are stored with a composite primary key of `(fault_id, diagnosis_model)`. This means running the consistency suite against two different models produces two independent cert records — neither overwrites the other. `vault accuracy` and `vault versions` show model-annotated certs so you can compare stability across model generations side by side. When you upgrade the diagnosis model, re-running the consistency suite against the new model creates new cert rows without touching the existing ones.
+
 ---
 
 ## 4. STABLE vs. UNSTABLE: the criteria
