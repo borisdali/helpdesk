@@ -573,6 +573,30 @@ func (c *GatewayClient) FaultStabilityList(ctx context.Context) ([]map[string]an
 	return wrapper.Certs, nil
 }
 
+// SetJudgeVerdict calls POST /api/v1/fleet/playbooks/{id}/judge-verdict.
+// Returns the HTTP status code.
+func (c *GatewayClient) SetJudgeVerdict(ctx context.Context, playbookID string, body map[string]any) (int, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.BaseURL+"/api/v1/fleet/playbooks/"+playbookID+"/judge-verdict", bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("POST judge-verdict: %w", err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 // rawDo executes an HTTP request and returns the response status code.
 // body may be nil (sends no body). The response body is drained and discarded.
 func (c *GatewayClient) rawDo(ctx context.Context, method, path string, body map[string]any) (int, error) {
