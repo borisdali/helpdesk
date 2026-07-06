@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -511,5 +512,90 @@ func TestCatalog_DiagnosisPlaybookSeriesIDs_Exist(t *testing.T) {
 			t.Errorf("fault %q: diagnosis_playbook_series_id=%q not found in playbooks/",
 				f.ID, f.DiagnosisPlaybookSeriesID)
 		}
+	}
+}
+
+// TestReorderArgs verifies that reorderArgs separates positional arguments from
+// flag arguments so that Go's flag.FlagSet can handle mixed ordering.
+func TestReorderArgs(t *testing.T) {
+	// Build a FlagSet that mirrors a typical vault subcommand:
+	//   --gateway <url>  (value-taking)
+	//   --api-key <key>  (value-taking)
+	//   --json           (boolean)
+	makeFS := func() *flag.FlagSet {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("gateway", "", "")
+		fs.String("api-key", "", "")
+		fs.Bool("json", false, "")
+		return fs
+	}
+
+	tests := []struct {
+		name    string
+		input   []string
+		wantPos []string // positional args expected at the END
+	}{
+		{
+			name:    "flags only",
+			input:   []string{"--gateway", "http://localhost:8080", "--api-key", "secret"},
+			wantPos: nil,
+		},
+		{
+			name:    "positional first",
+			input:   []string{"db-max-connections", "--gateway", "http://localhost:8080"},
+			wantPos: []string{"db-max-connections"},
+		},
+		{
+			name:    "positional between flags",
+			input:   []string{"--gateway", "http://localhost:8080", "db-max-connections", "--api-key", "k"},
+			wantPos: []string{"db-max-connections"},
+		},
+		{
+			name:    "positional after flags",
+			input:   []string{"--gateway", "http://localhost:8080", "--api-key", "k", "db-max-connections"},
+			wantPos: []string{"db-max-connections"},
+		},
+		{
+			name:    "flag with equals",
+			input:   []string{"--gateway=http://localhost:8080", "db-max-connections"},
+			wantPos: []string{"db-max-connections"},
+		},
+		{
+			name:    "bool flag does not consume next token",
+			input:   []string{"--json", "db-max-connections"},
+			wantPos: []string{"db-max-connections"},
+		},
+		{
+			name:    "two positional args",
+			input:   []string{"pb_abc", "--gateway", "http://localhost:8080", "pb_def"},
+			wantPos: []string{"pb_abc", "pb_def"},
+		},
+		{
+			name:    "empty",
+			input:   nil,
+			wantPos: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := makeFS()
+			got := reorderArgs(fs, tc.input)
+
+			// Parse the reordered args; must not error.
+			if err := fs.Parse(got); err != nil {
+				t.Fatalf("Parse after reorder: %v", err)
+			}
+
+			pos := fs.Args()
+			if len(pos) != len(tc.wantPos) {
+				t.Fatalf("positional args = %v, want %v", pos, tc.wantPos)
+			}
+			for i := range pos {
+				if pos[i] != tc.wantPos[i] {
+					t.Errorf("pos[%d] = %q, want %q", i, pos[i], tc.wantPos[i])
+				}
+			}
+		})
 	}
 }

@@ -200,7 +200,9 @@ func TestFaultStabilityStore_Migrate(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	// Create the old schema (no diagnosis_model column).
+	// Create the old schema (no diagnosis_model column, single-column PK).
+	// This triggers both migration steps: add diagnosis_model column AND
+	// recreate table for composite PK.
 	if _, err := store.DB().Exec(`
 CREATE TABLE fault_stability_cert (
     fault_id           TEXT    NOT NULL PRIMARY KEY,
@@ -215,21 +217,32 @@ CREATE TABLE fault_stability_cert (
 )`); err != nil {
 		t.Fatalf("create old schema: %v", err)
 	}
-	// Seed a row without diagnosis_model.
+	// Seed a row so we verify data survives table recreation.
 	if _, err := store.DB().Exec(
-		`INSERT INTO fault_stability_cert (fault_id, n_runs, is_stable) VALUES ('db-old-fault', 3, 1)`,
+		`INSERT INTO fault_stability_cert (fault_id, fault_name, n_runs, is_stable) VALUES ('db-old-fault', 'old name', 3, 1)`,
 	); err != nil {
 		t.Fatalf("seed row: %v", err)
 	}
 
-	// Opening via NewFaultStabilityStore must trigger migrate() and add the column.
+	// migrate() must add diagnosis_model column AND recreate table for composite PK.
 	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
 	if err := fs.migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	// After migration, existing rows should have an empty diagnosis_model and
-	// new rows should round-trip DiagnosisModel correctly.
+	// Old row must survive the table recreation.
+	old, err := fs.GetByFaultID(context.Background(), "db-old-fault")
+	if err != nil {
+		t.Fatalf("GetByFaultID (old row after migration): %v", err)
+	}
+	if old.FaultName != "old name" {
+		t.Errorf("old row FaultName = %q, want 'old name'", old.FaultName)
+	}
+	if old.NRuns != 3 {
+		t.Errorf("old row NRuns = %d, want 3", old.NRuns)
+	}
+
+	// New rows must round-trip DiagnosisModel correctly through composite PK.
 	cert := &FaultStabilityCert{
 		FaultID:        "db-new-fault",
 		DiagnosisModel: "claude-sonnet-4-6",
@@ -249,6 +262,138 @@ CREATE TABLE fault_stability_cert (
 	}
 	if got.JudgeModel != "claude-haiku-4-5-20251001" {
 		t.Errorf("JudgeModel: got %q, want claude-haiku-4-5-20251001", got.JudgeModel)
+	}
+}
+
+// TestFaultStabilityStore_MultiModel_Coexist verifies that certs for the same
+// fault but different diagnosis models are stored independently — the key
+// invariant of the composite PK.
+func TestFaultStabilityStore_MultiModel_Coexist(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	sonnet := &FaultStabilityCert{
+		FaultID:        "db-lock-contention",
+		DiagnosisModel: "claude-sonnet-4-6",
+		NRuns:          5,
+		PassRate:       1.0,
+		IsStable:       true,
+	}
+	haiku := &FaultStabilityCert{
+		FaultID:        "db-lock-contention",
+		DiagnosisModel: "claude-haiku-4-5-20251001",
+		NRuns:          3,
+		PassRate:       0.67,
+		IsStable:       false,
+	}
+	if err := store.Upsert(ctx, sonnet); err != nil {
+		t.Fatalf("Upsert sonnet: %v", err)
+	}
+	if err := store.Upsert(ctx, haiku); err != nil {
+		t.Fatalf("Upsert haiku: %v", err)
+	}
+
+	// GetByFaultID returns the most recent (both were upserted seconds apart).
+	// Both rows must exist — verify via GetByFaultAndModel.
+	gotSonnet, err := store.GetByFaultAndModel(ctx, "db-lock-contention", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel (sonnet): %v", err)
+	}
+	if !gotSonnet.IsStable {
+		t.Error("sonnet cert: IsStable should be true")
+	}
+	if gotSonnet.NRuns != 5 {
+		t.Errorf("sonnet cert: NRuns = %d, want 5", gotSonnet.NRuns)
+	}
+
+	gotHaiku, err := store.GetByFaultAndModel(ctx, "db-lock-contention", "claude-haiku-4-5-20251001")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel (haiku): %v", err)
+	}
+	if gotHaiku.IsStable {
+		t.Error("haiku cert: IsStable should be false")
+	}
+	if gotHaiku.NRuns != 3 {
+		t.Errorf("haiku cert: NRuns = %d, want 3", gotHaiku.NRuns)
+	}
+
+	// Upserting the sonnet cert again must update only its row, not the haiku row.
+	sonnet.PassRate = 0.8
+	sonnet.IsStable = false
+	if err := store.Upsert(ctx, sonnet); err != nil {
+		t.Fatalf("Upsert sonnet (update): %v", err)
+	}
+	updated, err := store.GetByFaultAndModel(ctx, "db-lock-contention", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel after update: %v", err)
+	}
+	if updated.PassRate != 0.8 {
+		t.Errorf("sonnet PassRate after update = %.2f, want 0.80", updated.PassRate)
+	}
+	// Haiku cert must be unchanged.
+	haikuAfter, err := store.GetByFaultAndModel(ctx, "db-lock-contention", "claude-haiku-4-5-20251001")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel (haiku after): %v", err)
+	}
+	if haikuAfter.PassRate != 0.67 {
+		t.Errorf("haiku PassRate changed unexpectedly = %.2f", haikuAfter.PassRate)
+	}
+}
+
+// TestFaultStabilityStore_GetByFaultAndModel_NotFound verifies sql.ErrNoRows
+// is returned when no cert exists for the given (fault, model) pair.
+func TestFaultStabilityStore_GetByFaultAndModel_NotFound(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	_, err := store.GetByFaultAndModel(ctx, "db-lock-contention", "claude-sonnet-4-6")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected sql.ErrNoRows, got %v", err)
+	}
+}
+
+// TestFaultStabilityStore_ListByFaultID verifies all certs for a fault are
+// returned regardless of model, while certs for other faults are excluded.
+func TestFaultStabilityStore_ListByFaultID(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	// Two models for "db-lock-contention", one for "db-max-connections".
+	for _, c := range []*FaultStabilityCert{
+		{FaultID: "db-lock-contention", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true},
+		{FaultID: "db-lock-contention", DiagnosisModel: "claude-haiku-4-5-20251001", NRuns: 3, IsStable: false},
+		{FaultID: "db-max-connections", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true},
+	} {
+		if err := store.Upsert(ctx, c); err != nil {
+			t.Fatalf("Upsert %s/%s: %v", c.FaultID, c.DiagnosisModel, err)
+		}
+	}
+
+	list, err := store.ListByFaultID(ctx, "db-lock-contention")
+	if err != nil {
+		t.Fatalf("ListByFaultID: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("ListByFaultID: got %d entries, want 2", len(list))
+	}
+	models := map[string]bool{}
+	for _, c := range list {
+		if c.FaultID != "db-lock-contention" {
+			t.Errorf("unexpected FaultID %q in list", c.FaultID)
+		}
+		models[c.DiagnosisModel] = true
+	}
+	if !models["claude-sonnet-4-6"] || !models["claude-haiku-4-5-20251001"] {
+		t.Errorf("expected both models in list, got: %v", models)
+	}
+
+	// Other fault must not appear.
+	other, err := store.ListByFaultID(ctx, "db-max-connections")
+	if err != nil {
+		t.Fatalf("ListByFaultID (other): %v", err)
+	}
+	if len(other) != 1 {
+		t.Errorf("db-max-connections: got %d entries, want 1", len(other))
 	}
 }
 

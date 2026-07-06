@@ -331,13 +331,14 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	run := &PlaybookRun{
-		PlaybookID:    "pb_newfields",
-		SeriesID:      "pbs_new_triage",
-		ExecutionMode: "agent",
-		Operator:      "alice",
-		TraceID:       "tr_abc123",
-		PriorRunID:    "plr_prior001",
-		StartedAt:     time.Now().UTC().Truncate(time.Second),
+		PlaybookID:     "pb_newfields",
+		SeriesID:       "pbs_new_triage",
+		ExecutionMode:  "agent",
+		Operator:       "alice",
+		TraceID:        "tr_abc123",
+		PriorRunID:     "plr_prior001",
+		TriggerContext: "ALERT: connection count exceeded 90% threshold",
+		StartedAt:      time.Now().UTC().Truncate(time.Second),
 	}
 	if err := s.Record(ctx, run); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -352,6 +353,9 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 	}
 	if got.PriorRunID != "plr_prior001" {
 		t.Errorf("PriorRunID = %q, want %q", got.PriorRunID, "plr_prior001")
+	}
+	if got.TriggerContext != "ALERT: connection count exceeded 90% threshold" {
+		t.Errorf("TriggerContext = %q, want alert text", got.TriggerContext)
 	}
 	if got.AgentTranscript != "" {
 		t.Errorf("AgentTranscript should be empty before Update, got %q", got.AgentTranscript)
@@ -689,6 +693,82 @@ func TestPlaybookRunStore_StatsByVersion(t *testing.T) {
 	}
 	if v11f.RemFeedbackRate < 0.99 {
 		t.Errorf("v1.1 RemFeedbackRate = %.2f, want 1.0", v11f.RemFeedbackRate)
+	}
+}
+
+// TestPlaybookRunStore_StatsByVersion_JudgeVerdict verifies that a judge verdict
+// set on a playbook via SetJudgeVerdict propagates into StatsByVersion output.
+func TestPlaybookRunStore_StatsByVersion_JudgeVerdict(t *testing.T) {
+	ctx := context.Background()
+	raw, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { raw.Close() })
+
+	runStore, err := NewPlaybookRunStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	pbStore, err := NewPlaybookStore(raw.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookStore: %v", err)
+	}
+	// StatsByVersion JOINs playbook_run_steps and run_evaluation; both tables must exist.
+	if _, err := NewPlaybookRunStepStore(raw.DB(), false); err != nil {
+		t.Fatalf("NewPlaybookRunStepStore: %v", err)
+	}
+	if _, err := NewRunEvaluationStore(raw.DB(), false); err != nil {
+		t.Fatalf("NewRunEvaluationStore: %v", err)
+	}
+
+	const seriesID = "pbs_judge_test"
+
+	pb := &Playbook{
+		Name: "Judge Test Playbook", SeriesID: seriesID,
+		Version: "1.0", IsActive: false, ExecutionMode: "agent", ProblemClass: "test",
+	}
+	if err := pbStore.Create(ctx, pb); err != nil {
+		t.Fatalf("Create playbook: %v", err)
+	}
+	if err := runStore.Record(ctx, &PlaybookRun{
+		RunID: "plr_judge_a", PlaybookID: pb.PlaybookID, SeriesID: seriesID,
+		Outcome: "resolved", StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record run: %v", err)
+	}
+
+	// No verdict yet — JudgeVerdict must be empty.
+	versions, err := runStore.StatsByVersion(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("StatsByVersion (before verdict): %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("want 1 version, got %d", len(versions))
+	}
+	if versions[0].JudgeVerdict != "" {
+		t.Errorf("JudgeVerdict before set = %q, want empty", versions[0].JudgeVerdict)
+	}
+
+	// Set verdict and re-query — third pass must populate the field.
+	if err := pbStore.SetJudgeVerdict(ctx, pb.PlaybookID, "APPROVE", "claude-sonnet-4-6"); err != nil {
+		t.Fatalf("SetJudgeVerdict: %v", err)
+	}
+	versions2, err := runStore.StatsByVersion(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("StatsByVersion (after verdict): %v", err)
+	}
+	if len(versions2) != 1 {
+		t.Fatalf("want 1 version, got %d", len(versions2))
+	}
+	if versions2[0].JudgeVerdict != "APPROVE" {
+		t.Errorf("JudgeVerdict = %q, want APPROVE", versions2[0].JudgeVerdict)
+	}
+	if versions2[0].JudgeModel != "claude-sonnet-4-6" {
+		t.Errorf("JudgeModel = %q, want claude-sonnet-4-6", versions2[0].JudgeModel)
+	}
+	if versions2[0].JudgeAt == "" {
+		t.Error("JudgeAt should not be empty after verdict set")
 	}
 }
 

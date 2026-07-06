@@ -730,3 +730,74 @@ func TestPlaybookHandlers_List_InlineStats_NoRuns(t *testing.T) {
 		t.Error("Stats should be nil (omitempty) when the playbook has no runs")
 	}
 }
+
+// --- handleSetJudgeVerdict ---
+
+func TestPlaybookHandlers_SetJudgeVerdict_OK(t *testing.T) {
+	srv := newPlaybookServer(t)
+	pb := createPlaybookViaHandler(t, srv, map[string]any{
+		"name":        "draft-under-review",
+		"description": "review me",
+	})
+
+	body, _ := json.Marshal(map[string]string{
+		"verdict":     "APPROVE",
+		"judge_model": "claude-sonnet-4-6",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/"+pb.PlaybookID+"/judge-verdict", bytes.NewReader(body))
+	req.SetPathValue("playbookID", pb.PlaybookID)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleSetJudgeVerdict(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("handleSetJudgeVerdict: status = %d, want 204; body: %s", w.Code, w.Body.String())
+	}
+
+	// Verify the verdict persisted via GET.
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/playbooks/"+pb.PlaybookID, nil)
+	getReq.SetPathValue("playbookID", pb.PlaybookID)
+	getW := httptest.NewRecorder()
+	srv.handleGet(getW, getReq)
+	var got audit.Playbook
+	if err := json.NewDecoder(getW.Body).Decode(&got); err != nil {
+		t.Fatalf("decode GET: %v", err)
+	}
+	if got.JudgeVerdict != "APPROVE" {
+		t.Errorf("JudgeVerdict = %q, want APPROVE", got.JudgeVerdict)
+	}
+	if got.JudgeModel != "claude-sonnet-4-6" {
+		t.Errorf("JudgeModel = %q, want claude-sonnet-4-6", got.JudgeModel)
+	}
+}
+
+func TestPlaybookHandlers_SetJudgeVerdict_MissingVerdict(t *testing.T) {
+	srv := newPlaybookServer(t)
+	pb := createPlaybookViaHandler(t, srv, map[string]any{
+		"name": "test", "description": "d",
+	})
+
+	body, _ := json.Marshal(map[string]string{"judge_model": "claude-sonnet-4-6"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/"+pb.PlaybookID+"/judge-verdict", bytes.NewReader(body))
+	req.SetPathValue("playbookID", pb.PlaybookID)
+	w := httptest.NewRecorder()
+	srv.handleSetJudgeVerdict(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for empty verdict", w.Code)
+	}
+}
+
+func TestPlaybookHandlers_SetJudgeVerdict_NotFound(t *testing.T) {
+	srv := newPlaybookServer(t)
+
+	body, _ := json.Marshal(map[string]string{"verdict": "APPROVE"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/playbooks/pb_nonexistent/judge-verdict", bytes.NewReader(body))
+	req.SetPathValue("playbookID", "pb_nonexistent")
+	w := httptest.NewRecorder()
+	srv.handleSetJudgeVerdict(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for unknown playbook", w.Code)
+	}
+}

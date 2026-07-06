@@ -738,3 +738,53 @@ func TestPlaybookStore_EntryPoint(t *testing.T) {
 		t.Error("EntryPoint = false, want true")
 	}
 }
+
+func TestPlaybookStore_SetJudgeVerdict(t *testing.T) {
+	ps := newPlaybookTestStore(t)
+	ctx := context.Background()
+
+	pb := &Playbook{Name: "draft for judging", Description: "desc"}
+	if err := ps.Create(ctx, pb); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Initial state: no verdict.
+	initial, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if initial.JudgeVerdict != "" {
+		t.Errorf("JudgeVerdict before set = %q, want empty", initial.JudgeVerdict)
+	}
+
+	// Set verdict.
+	if err := ps.SetJudgeVerdict(ctx, pb.PlaybookID, "APPROVE", "claude-sonnet-4-6"); err != nil {
+		t.Fatalf("SetJudgeVerdict: %v", err)
+	}
+
+	got, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get after SetJudgeVerdict: %v", err)
+	}
+	if got.JudgeVerdict != "APPROVE" {
+		t.Errorf("JudgeVerdict = %q, want APPROVE", got.JudgeVerdict)
+	}
+	if got.JudgeModel != "claude-sonnet-4-6" {
+		t.Errorf("JudgeModel = %q, want claude-sonnet-4-6", got.JudgeModel)
+	}
+	if got.JudgeAt.IsZero() {
+		t.Error("JudgeAt should not be zero after SetJudgeVerdict")
+	}
+
+	// Overwrite verdict — must update in place.
+	if err := ps.SetJudgeVerdict(ctx, pb.PlaybookID, "NEEDS_REVIEW", "claude-haiku-4-5-20251001"); err != nil {
+		t.Fatalf("SetJudgeVerdict (overwrite): %v", err)
+	}
+	got2, err := ps.Get(ctx, pb.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get after overwrite: %v", err)
+	}
+	if got2.JudgeVerdict != "NEEDS_REVIEW" {
+		t.Errorf("JudgeVerdict after overwrite = %q, want NEEDS_REVIEW", got2.JudgeVerdict)
+	}
+}
