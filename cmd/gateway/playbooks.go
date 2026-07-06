@@ -225,10 +225,11 @@ type approvalContext struct {
 // and context are injected into the triage prompt.
 type PlaybookRunRequest struct {
 	ConnectionString string `json:"connection_string,omitempty"`
-	Context          string `json:"context,omitempty"`    // operator-supplied context (server name, symptoms, etc.)
-	ContextID        string `json:"context_id,omitempty"` // A2A session ID for multi-turn continuity
-	PriorRunID       string `json:"prior_run_id,omitempty"` // run_id of prior investigation for continuity threading
-	PriorFindings    string `json:"-"`                       // populated at runtime from prior run; not from body
+	Context          string `json:"context,omitempty"`          // operator-supplied context (server name, symptoms, etc.)
+	TriggerContext   string `json:"trigger_context,omitempty"`  // original alert text / monitoring signal that initiated the run; persisted on PlaybookRun
+	ContextID        string `json:"context_id,omitempty"`       // A2A session ID for multi-turn continuity
+	PriorRunID       string `json:"prior_run_id,omitempty"`     // run_id of prior investigation for continuity threading
+	PriorFindings    string `json:"-"`                          // populated at runtime from prior run; not from body
 
 	// ApprovalMode controls when approval is required for write/destructive operations
 	// and which playbooks are eligible for auto-chaining.
@@ -347,7 +348,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
 		startTraceID = audit.NewTraceID()
 	}
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, startTraceID, req.PriorRunID, operator)
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, startTraceID, req.PriorRunID, req.TriggerContext, operator)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -886,7 +887,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		}
 	}
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-Trace-ID"), req.PriorRunID, r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-Trace-ID"), req.PriorRunID, "", r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -1131,7 +1132,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, remStartTraceID, runID, resolvedBy)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, remStartTraceID, runID, "", resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -1637,7 +1638,7 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, traceID, priorRunID, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, traceID, priorRunID, triggerContext, operator string) string {
 	if g.auditURL == "" {
 		return ""
 	}
@@ -1649,6 +1650,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		ConnectionString: connStr,
 		TraceID:          traceID,
 		PriorRunID:       priorRunID,
+		TriggerContext:   triggerContext,
 		Operator:         operator,
 	}
 	body, err := json.Marshal(run)

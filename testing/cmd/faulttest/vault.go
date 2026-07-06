@@ -790,7 +790,7 @@ func vaultStatus(args []string) {
 	fs.IntVar(&sinceDays, "since-days", 30, "Days of history to show")
 	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
 	fs.StringVar(&fault, "fault", "", "Filter by fault ID (e.g. db-max-connections)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 
@@ -2389,7 +2389,7 @@ func vaultSuggestUpdate(args []string) {
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if seriesID == "" {
@@ -2521,7 +2521,7 @@ func vaultSuggest(args []string) {
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if traceID == "" {
@@ -3075,11 +3075,12 @@ type narrativeJourneyRef struct {
 
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
 type incidentNarrative struct {
-	IncidentID  string    `json:"incident_id"`
-	StartedAt   time.Time `json:"started_at"`
-	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
-	DurationSec float64   `json:"duration_sec,omitempty"`
-	Operator    string    `json:"operator"`
+	IncidentID     string     `json:"incident_id"`
+	StartedAt      time.Time  `json:"started_at"`
+	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	DurationSec    float64    `json:"duration_sec,omitempty"`
+	Operator       string     `json:"operator"`
+	TriggerContext string     `json:"trigger_context,omitempty"`
 	Triage      struct {
 		RunID            string               `json:"run_id"`
 		Playbook         string               `json:"playbook"`
@@ -3154,6 +3155,9 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	}
 	if n.Operator != "" {
 		fmt.Printf("Operator: %s\n", n.Operator)
+	}
+	if n.TriggerContext != "" {
+		fmt.Printf("Triggered by: %s\n", wordWrap(n.TriggerContext, 70, "              "))
 	}
 	fmt.Printf("%s\n", divider)
 
@@ -3352,7 +3356,7 @@ func vaultActive(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 
@@ -3430,7 +3434,7 @@ func vaultHistory(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -3530,7 +3534,7 @@ func vaultActivate(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -3634,7 +3638,7 @@ func vaultDiff(args []string) {
 	fs.StringVar(&judgeModel, "judge-model", "", "Model name for judge (default: HELPDESK_MODEL_NAME)")
 	fs.StringVar(&judgeVendor, "judge-vendor", "", "Model vendor for judge: anthropic or google (default: HELPDESK_MODEL_VENDOR)")
 	fs.StringVar(&judgeAPIKey, "judge-api-key", os.Getenv("HELPDESK_API_KEY"), "API key for judge")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -3925,7 +3929,7 @@ func vaultDrafts(args []string) {
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
 	fs.BoolVar(&purgeOrphans, "purge-orphans", false, "Delete all drafts whose series_id starts with pbs_generated_ (orphans from failed suggest-update runs)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 
@@ -4038,7 +4042,7 @@ func vaultDiscard(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -4127,6 +4131,24 @@ func vaultCalibration(args []string) {
 	if report.SeriesID != "" {
 		scope = report.SeriesID
 	}
+
+	// Prominent data quality banner before the table when human coverage is low.
+	if report.TotalRuns > 0 && (report.HumanRuns == 0 || float64(report.HumanRuns)/float64(report.TotalRuns) < 0.5) {
+		fmt.Println("┌─────────────────────────────────────────────────────────────────────┐")
+		if report.HumanRuns == 0 {
+			fmt.Printf("│ ⚠  Data quality: 0 of %d run(s) have human operator feedback.       \n", report.TotalRuns)
+		} else {
+			fmt.Printf("│ ⚠  Data quality: only %d of %d run(s) have human operator feedback.  \n", report.HumanRuns, report.TotalRuns)
+		}
+		fmt.Println("│    This table measures self-consistency (LLM judge vs. itself),")
+		fmt.Println("│    not calibration against human judgment. To build a meaningful")
+		fmt.Println("│    calibration dataset, run faulttest interactively (without")
+		fmt.Println("│    --approval-mode force) or submit feedback via:")
+		fmt.Println("│      faulttest vault feedback <run-id> --gateway $GW --api-key $KEY")
+		fmt.Println("└─────────────────────────────────────────────────────────────────────┘")
+		fmt.Println()
+	}
+
 	fmt.Printf("Diagnosis calibration — %s (%d runs with agent confidence + operator feedback)\n", scope, report.TotalRuns)
 	if report.HeuristicCount > 0 {
 		fmt.Printf("(%d run(s) excluded — agent did not emit a CONFIDENCE: value on primary hypothesis)\n", report.HeuristicCount)
