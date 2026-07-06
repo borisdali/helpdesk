@@ -104,6 +104,11 @@ type PlaybookVersionStats struct {
 	// Human remediation feedback — approach appropriateness verdict from operators.
 	RemFeedbackCount int     `json:"rem_feedback_count"` // runs with remediation feedback
 	RemFeedbackRate  float64 `json:"rem_feedback_rate"`  // fraction rated appropriate; 0 when no feedback
+
+	// Judge accountability — verdict recorded by vault diff on this draft.
+	JudgeVerdict string `json:"judge_verdict,omitempty"`
+	JudgeModel   string `json:"judge_model,omitempty"`
+	JudgeAt      string `json:"judge_at,omitempty"`
 }
 
 // PlaybookRunStore persists playbook execution records.
@@ -744,6 +749,34 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 			if idx, ok := versionIndex[ver]; ok && a.count > 0 {
 				out[idx].RemFeedbackCount = a.count
 				out[idx].RemFeedbackRate = float64(a.correct) / float64(a.count)
+			}
+		}
+	}
+
+	// Third pass: fetch judge verdicts from playbooks table.
+	if len(out) > 0 {
+		pbIDIdx := make(map[string]int, len(out))
+		for i, st := range out {
+			if st.PlaybookID != "" {
+				pbIDIdx[st.PlaybookID] = i
+			}
+		}
+		jRows, jErr := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+			SELECT playbook_id, judge_verdict, judge_model, judge_at
+			FROM playbooks
+			WHERE series_id = ? AND judge_verdict != ''
+		`), seriesID)
+		if jErr == nil {
+			defer jRows.Close()
+			for jRows.Next() {
+				var pbID, verdict, model, judgedAt string
+				if sErr := jRows.Scan(&pbID, &verdict, &model, &judgedAt); sErr == nil {
+					if idx, ok := pbIDIdx[pbID]; ok {
+						out[idx].JudgeVerdict = verdict
+						out[idx].JudgeModel = model
+						out[idx].JudgeAt = judgedAt
+					}
+				}
 			}
 		}
 	}

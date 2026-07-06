@@ -108,6 +108,30 @@ func (g *Gateway) handlePlaybookActivate(w http.ResponseWriter, r *http.Request)
 	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/activate")
 }
 
+// handlePlaybookSetJudgeVerdict handles POST /api/v1/fleet/playbooks/{id}/judge-verdict.
+// Records the LLM judge's verdict on a draft so vault versions can later correlate
+// whether the judge's prediction matched the actual improvement after activation.
+func (g *Gateway) handlePlaybookSetJudgeVerdict(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("playbookID")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "playbookID is required")
+		return
+	}
+	var body struct {
+		Verdict    string `json:"verdict"`     // "APPROVE" | "NEEDS_REVIEW" | "REJECT"
+		JudgeModel string `json:"judge_model"` // model that issued the verdict
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Verdict == "" {
+		writeError(w, http.StatusBadRequest, "verdict is required")
+		return
+	}
+	g.proxyToAuditd(w, r, "/v1/fleet/playbooks/"+id+"/judge-verdict")
+}
+
 // ctxKeyApprovalSession is the context key for the approval session ID.
 type ctxKeyApprovalSessionType struct{}
 

@@ -138,7 +138,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|suggest|suggest-update|drafts|activate|discard>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|suggest|suggest-update|drafts|activate|diff|discard|import>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -148,8 +148,14 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  journey         Show audit trail for a trace (tools, decisions, delegations)")
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
+		fmt.Fprintln(os.Stderr, "  judge-accuracy  Compare judge predictions (from vault diff) to actual run outcomes")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
+		fmt.Fprintln(os.Stderr, "  drafts          List inactive (draft) playbooks awaiting activation")
+		fmt.Fprintln(os.Stderr, "  diff            Show field-by-field diff between two playbook versions")
+		fmt.Fprintln(os.Stderr, "  activate        Promote a draft playbook to active status")
+		fmt.Fprintln(os.Stderr, "  discard         Delete a draft playbook")
+		fmt.Fprintln(os.Stderr, "  import          Import a local YAML playbook file as a draft (and optionally activate)")
 		os.Exit(1)
 	}
 	// Print gateway identity banner before any subcommand output so operators
@@ -176,6 +182,8 @@ func cmdVault(args []string) {
 		vaultVersions(args[1:])
 	case "calibration":
 		vaultCalibration(args[1:])
+	case "judge-accuracy":
+		vaultJudgeAccuracy(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -192,6 +200,8 @@ func cmdVault(args []string) {
 		vaultHistory(args[1:])
 	case "discard":
 		vaultDiscard(args[1:])
+	case "import":
+		vaultImport(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -512,6 +522,12 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 		return out
 	}
 	for _, c := range result.Certs {
+		// With composite PK, ListAll returns multiple rows per fault (one per model),
+		// ordered by (fault_id, tested_at DESC). Keep only the first (most recent) cert
+		// per fault_id for the vault list display.
+		if _, exists := out[c.FaultID]; exists {
+			continue
+		}
 		info := stabilityInfo{IsStable: c.IsStable, NRuns: c.NRuns, hasData: true}
 		if c.TestedAt != "" {
 			if t, err := time.Parse(time.RFC3339Nano, c.TestedAt); err == nil {
@@ -1250,7 +1266,7 @@ func vaultAccuracy(args []string) {
 			fmt.Println("  Tip: run `faulttest vault accuracy` (no args) to list all series with feedback.")
 		}
 		if faultID != "" {
-			printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
+			printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID, cfg.DiagnosisModel)
 		}
 		return
 	}
@@ -1298,13 +1314,14 @@ func vaultAccuracy(args []string) {
 	// Triage consistency certification — shown when a fault ID was given
 	// (not a bare series ID, where we don't know which fault to look up).
 	if faultID != "" {
-		printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
+		printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID, cfg.DiagnosisModel)
 	}
 }
 
 // printFaultStabilityCert fetches and prints the stability cert for faultID.
-// Called from both the zero-feedback and post-accuracy paths of vaultAccuracy.
-func printFaultStabilityCert(gatewayURL, apiKey, faultID string) {
+// currentModel, when non-empty, is compared against the cert's diagnosis_model
+// and a warning is printed when they differ.
+func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	fmt.Println()
 	fmt.Println("Triage consistency")
 	cert := fetchStabilityCert(gatewayURL, apiKey, faultID)
@@ -1339,9 +1356,13 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID string) {
 			age := int(time.Since(t).Hours() / 24)
 			fmt.Printf("  Tested at     : %s  (%d days ago)\n", t.Format("2006-01-02 15:04 MST"), age)
 			if age >= 30 {
-				fmt.Println("  [WARN] cert is older than 30 days — consider re-running --repeat to refresh")
+				fmt.Println("  ⚠ cert is older than 30 days — consider re-running --repeat to refresh")
 			}
 		}
+	}
+	if currentModel != "" && cert.DiagnosisModel != "" && cert.DiagnosisModel != currentModel {
+		fmt.Printf("  ⚠ cert was issued for %s but current agent model is %s\n", cert.DiagnosisModel, currentModel)
+		fmt.Printf("    Run: faulttest run --repeat N --agent-model %s ... to re-certify\n", currentModel)
 	}
 }
 
@@ -2744,6 +2765,10 @@ type versionStats struct {
 	RemedEvalCount      int     `json:"remed_eval_count"`
 	RemFeedbackCount    int     `json:"rem_feedback_count"`
 	RemFeedbackRate     float64 `json:"rem_feedback_rate"`
+
+	JudgeVerdict string `json:"judge_verdict,omitempty"`
+	JudgeModel   string `json:"judge_model,omitempty"`
+	JudgeAt      string `json:"judge_at,omitempty"`
 }
 
 // fetchVersionStats calls GET /api/v1/fleet/series/{seriesID}/version-stats.
@@ -2804,16 +2829,17 @@ func printVersionTable(label string, versions []versionStats) {
 		colDiag     = 9
 		colRemed    = 9
 		colApproach = 9
+		colJudge    = 12
 	)
-	sepWidth := colVer + 2 + colRuns + 2 + colSuccess + 2 + colSteps + 2 + colTime + 2 + colDiag + 2 + colRemed + 2 + colApproach
+	sepWidth := colVer + 2 + colRuns + 2 + colSuccess + 2 + colSteps + 2 + colTime + 2 + colDiag + 2 + colRemed + 2 + colApproach + 2 + colJudge
 
 	if label != "" {
 		fmt.Printf("%s  (%d version(s))\n", label, len(versions))
 	}
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colVer, "VERSION", colRuns, "RUNS", colSuccess, "SUCCESS%",
 		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG",
-		colRemed, "AVG REMED", "APPROACH OK")
+		colRemed, "AVG REMED", colApproach, "APPROACH OK", "JUDGE VERDICT")
 	fmt.Println(strings.Repeat("─", sepWidth))
 
 	for _, v := range versions {
@@ -2852,7 +2878,12 @@ func printVersionTable(label string, versions []versionStats) {
 			approachStr = fmt.Sprintf("%d%%", int(v.RemFeedbackRate*100))
 		}
 
-		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		judgeStr := "–"
+		if v.JudgeVerdict != "" {
+			judgeStr = v.JudgeVerdict
+		}
+
+		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colVer, ver,
 			colRuns, v.TotalRuns,
 			colSuccess, successStr,
@@ -2860,12 +2891,16 @@ func printVersionTable(label string, versions []versionStats) {
 			colTime, timeStr,
 			colDiag, diagStr,
 			colRemed, remedStr,
-			approachStr,
+			colApproach, approachStr,
+			judgeStr,
 		)
 		if v.PlaybookID != "" || v.OriginTrace != "" {
 			detail := "  id=" + v.PlaybookID
 			if v.OriginTrace != "" {
 				detail += "  from=" + v.OriginTrace
+			}
+			if v.JudgeModel != "" {
+				detail += "  judge=" + v.JudgeModel
 			}
 			fmt.Println(detail)
 		}
@@ -2969,6 +3004,159 @@ func vaultVersions(args []string) {
 		fmt.Println("* = currently active   SUCCESS% = resolved + transitioned")
 		fmt.Println("id/from lines show playbook_id and the run that generated that version")
 	}
+}
+
+// ── vault judge-accuracy ───────────────────────────────────────────────────
+
+// vaultJudgeAccuracy shows, per series, the judge verdict recorded at diff time
+// and the actual outcome after runs accumulated on that version.  This closes the
+// loop: "the judge said LIKELY_IMPROVEMENT — did run data confirm it?"
+func vaultJudgeAccuracy(args []string) {
+	fs := flag.NewFlagSet("vault judge-accuracy", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault judge-accuracy")
+		os.Exit(1)
+	}
+
+	// Resolve series IDs: if a fault/series ID was given use it, otherwise fall
+	// back to listing all playbooks and collecting unique series IDs.
+	var seriesIDs []string
+	if len(fs.Args()) > 0 {
+		arg := fs.Args()[0]
+		if strings.HasPrefix(arg, "pbs_") {
+			seriesIDs = []string{arg}
+		} else {
+			// Treat as fault ID — resolve via catalog.
+			cat, err := loadActiveCatalog(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+				os.Exit(1)
+			}
+			for _, f := range cat.Failures {
+				if f.ID == arg {
+					if f.DiagnosisPlaybookSeriesID != "" {
+						seriesIDs = append(seriesIDs, f.DiagnosisPlaybookSeriesID)
+					}
+					if f.Remediation.PlaybookID != "" {
+						seriesIDs = append(seriesIDs, f.Remediation.PlaybookID)
+					}
+					break
+				}
+			}
+			if len(seriesIDs) == 0 {
+				fmt.Fprintf(os.Stderr, "Unknown fault %q or no series found.\n", arg)
+				os.Exit(1)
+			}
+		}
+	} else {
+		// No filter — collect series IDs from all playbooks that have judge verdicts.
+		listURL := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false"
+		listReq, _ := http.NewRequest(http.MethodGet, listURL, nil)
+		if cfg.GatewayAPIKey != "" {
+			listReq.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
+		}
+		listResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(listReq)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching playbooks: %v\n", err)
+			os.Exit(1)
+		}
+		defer listResp.Body.Close()
+		var listBody struct {
+			Playbooks []struct {
+				SeriesID     string `json:"series_id"`
+				JudgeVerdict string `json:"judge_verdict"`
+			} `json:"playbooks"`
+		}
+		if err := json.NewDecoder(listResp.Body).Decode(&listBody); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding playbook list: %v\n", err)
+			os.Exit(1)
+		}
+		seen := map[string]bool{}
+		for _, pb := range listBody.Playbooks {
+			if pb.SeriesID != "" && pb.JudgeVerdict != "" && !seen[pb.SeriesID] {
+				seen[pb.SeriesID] = true
+				seriesIDs = append(seriesIDs, pb.SeriesID)
+			}
+		}
+		if len(seriesIDs) == 0 {
+			fmt.Println("No judge verdicts recorded yet. Run `faulttest vault diff` on a draft to generate them.")
+			return
+		}
+	}
+
+	type judgeRow struct {
+		SeriesID     string
+		Version      string
+		JudgeVerdict string
+		JudgeModel   string
+		JudgeAt      string
+		TotalRuns    int
+		SuccessRate  float64
+	}
+
+	var rows []judgeRow
+	for _, sid := range seriesIDs {
+		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch stats for %s: %v\n", sid, err)
+			continue
+		}
+		for _, v := range versions {
+			if v.JudgeVerdict == "" {
+				continue
+			}
+			rows = append(rows, judgeRow{
+				SeriesID:     sid,
+				Version:      v.Version,
+				JudgeVerdict: v.JudgeVerdict,
+				JudgeModel:   v.JudgeModel,
+				JudgeAt:      v.JudgeAt,
+				TotalRuns:    v.TotalRuns,
+				SuccessRate:  v.ResolutionRate + v.TransitionRate,
+			})
+		}
+	}
+
+	if len(rows) == 0 {
+		fmt.Println("No judge verdicts found for the specified series.")
+		return
+	}
+
+	const (
+		colSeries  = 32
+		colVer     = 10
+		colVerdict = 20
+		colRuns    = 6
+		colSuccess = 9
+	)
+	sepWidth := colSeries + 2 + colVer + 2 + colVerdict + 2 + colRuns + 2 + colSuccess + 2 + 20
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colSeries, "SERIES", colVer, "VERSION", colVerdict, "JUDGE VERDICT",
+		colRuns, "RUNS", colSuccess, "SUCCESS%", "JUDGE MODEL")
+	fmt.Println(strings.Repeat("─", sepWidth))
+	for _, r := range rows {
+		successStr := "–"
+		if r.TotalRuns > 0 {
+			successStr = fmt.Sprintf("%d%%", int(r.SuccessRate*100))
+		}
+		series := r.SeriesID
+		if len(series) > colSeries {
+			series = series[:colSeries-1] + "…"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*d  %-*s  %s\n",
+			colSeries, series,
+			colVer, r.Version,
+			colVerdict, r.JudgeVerdict,
+			colRuns, r.TotalRuns,
+			colSuccess, successStr,
+			r.JudgeModel,
+		)
+	}
+	fmt.Println()
+	fmt.Println("JUDGE VERDICT is the prediction recorded by `vault diff`.")
+	fmt.Println("SUCCESS% is the actual outcome after runs on this version.")
 }
 
 // ── vault calibration ──────────────────────────────────────────────────────
@@ -3829,6 +4017,32 @@ func vaultDiff(args []string) {
 	if modelName != "" {
 		fmt.Printf("Judge model:        %s\n", modelName)
 	}
+
+	// Auto-save the verdict to the draft so vault versions can later correlate
+	// whether the judge's prediction matched the actual improvement.
+	if gatewayURL != "" && !result.Skipped && result.Verdict != "" {
+		verdictBody, _ := json.Marshal(map[string]string{
+			"verdict":     result.Verdict,
+			"judge_model": modelName,
+		})
+		verdURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + after.PlaybookID + "/judge-verdict"
+		req, err := http.NewRequest(http.MethodPost, verdURL, strings.NewReader(string(verdictBody)))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			if apiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+			if err != nil || (resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK) {
+				fmt.Printf("(Note: verdict recorded locally but could not be saved to gateway: %v)\n", err)
+			} else {
+				fmt.Printf("Verdict saved to %s.\n", after.PlaybookID)
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+		}
+	}
 }
 
 // compareVersions compares two dotted-numeric version strings.
@@ -4075,6 +4289,189 @@ func vaultDiscard(args []string) {
 
 	fmt.Printf("Discarded: %s\n", draftID)
 	fmt.Printf("\nfaulttest vault drafts --gateway %s\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
+// ── vault import ──────────────────────────────────────────────────────────
+
+// vaultImport reads a local YAML playbook file, imports it via the gateway's
+// /import endpoint (validate only), saves it as a draft, and optionally activates it.
+func vaultImport(args []string) {
+	fs := flag.NewFlagSet("vault import", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	var activate, force bool
+	var seriesHint string
+	fs.StringVar(&gatewayURL, "gateway", os.Getenv("FAULTTEST_GATEWAY_URL"), "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	fs.BoolVar(&activate, "activate", false, "Immediately activate the imported draft")
+	fs.BoolVar(&force, "force", false, "Save draft even when the import response contains warnings")
+	fs.StringVar(&seriesHint, "series-id", "", "Override the series_id in the YAML (useful for re-importing an edited playbook into an existing series)")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault import <file.yaml> [--activate] [--force] [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Reads a YAML playbook file, validates it, saves it as a draft, and optionally activates it.")
+		fmt.Fprintln(os.Stderr, "  --activate     Immediately activate the imported draft (skips manual vault activate step)")
+		fmt.Fprintln(os.Stderr, "  --force        Save draft even when warnings are present")
+		fmt.Fprintln(os.Stderr, "  --series-id    Override the series_id declared in the YAML")
+		os.Exit(1)
+	}
+	if gatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required (or set FAULTTEST_GATEWAY_URL)")
+		os.Exit(1)
+	}
+
+	filePath := fs.Arg(0)
+	yamlBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", filePath, err)
+		os.Exit(1)
+	}
+
+	// Step 1: POST to /import (validates and parses; does NOT persist).
+	hints := map[string]string{}
+	if seriesHint != "" {
+		hints["series_id"] = seriesHint
+	}
+	importBody, err := json.Marshal(map[string]any{
+		"text":   string(yamlBytes),
+		"format": "yaml",
+		"hints":  hints,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshalling import request: %v\n", err)
+		os.Exit(1)
+	}
+
+	importURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/import"
+	importReq, err := http.NewRequest(http.MethodPost, importURL, strings.NewReader(string(importBody)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building request: %v\n", err)
+		os.Exit(1)
+	}
+	importReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		importReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	importResp, err := (&http.Client{Timeout: 30 * time.Second}).Do(importReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error calling import endpoint: %v\n", err)
+		os.Exit(1)
+	}
+	defer importResp.Body.Close()
+	importRespBody, _ := io.ReadAll(importResp.Body)
+	if importResp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Import failed (%d): %s\n", importResp.StatusCode, importRespBody)
+		os.Exit(1)
+	}
+
+	var importResult struct {
+		Draft struct {
+			PlaybookID    string `json:"playbook_id"`
+			SeriesID      string `json:"series_id"`
+			Name          string `json:"name"`
+			Version       string `json:"version"`
+			ApprovalMode  string `json:"approval_mode"`
+			ExecutionMode string `json:"execution_mode"`
+			Guidance      string `json:"guidance"`
+			Description   string `json:"description"`
+		} `json:"draft"`
+		WarningMessages []string `json:"warning_messages"`
+		Confidence      float64  `json:"confidence"`
+	}
+	if err := json.Unmarshal(importRespBody, &importResult); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding import response: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Print warnings.
+	if len(importResult.WarningMessages) > 0 {
+		fmt.Printf("Import warnings (%d):\n", len(importResult.WarningMessages))
+		for _, w := range importResult.WarningMessages {
+			fmt.Printf("  ⚠ %s\n", w)
+		}
+		if !force {
+			fmt.Fprintln(os.Stderr, "\nFix warnings or use --force to save anyway.")
+			os.Exit(1)
+		}
+		fmt.Println()
+	}
+
+	d := importResult.Draft
+	fmt.Printf("Parsed: %s  v%s  (%s)\n", d.Name, d.Version, d.SeriesID)
+	if importResult.Confidence < 1.0 {
+		fmt.Printf("Confidence: %.0f%%\n", importResult.Confidence*100)
+	}
+
+	// Step 2: Save the draft (persist via POST /api/v1/fleet/playbooks).
+	// Re-marshal the draft object as the save body.
+	saveBody, err := json.Marshal(importResult.Draft)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshalling draft: %v\n", err)
+		os.Exit(1)
+	}
+	saveURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks"
+	saveReq, err := http.NewRequest(http.MethodPost, saveURL, strings.NewReader(string(saveBody)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building save request: %v\n", err)
+		os.Exit(1)
+	}
+	saveReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		saveReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	saveResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(saveReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving draft: %v\n", err)
+		os.Exit(1)
+	}
+	defer saveResp.Body.Close()
+	saveRespBody, _ := io.ReadAll(saveResp.Body)
+	if saveResp.StatusCode != http.StatusCreated && saveResp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Save failed (%d): %s\n", saveResp.StatusCode, saveRespBody)
+		os.Exit(1)
+	}
+
+	var saved struct {
+		PlaybookID string `json:"playbook_id"`
+		SeriesID   string `json:"series_id"`
+		Version    string `json:"version"`
+		Name       string `json:"name"`
+	}
+	if err := json.Unmarshal(saveRespBody, &saved); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding save response: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Saved:  %s  v%s  series=%s\n", saved.PlaybookID, saved.Version, saved.SeriesID)
+
+	// Step 3: Optionally activate.
+	if activate {
+		activateURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + saved.PlaybookID + "/activate"
+		actReq, err := http.NewRequest(http.MethodPost, activateURL, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building activate request: %v\n", err)
+			os.Exit(1)
+		}
+		if apiKey != "" {
+			actReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		actResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(actReq)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error activating: %v\n", err)
+			os.Exit(1)
+		}
+		defer actResp.Body.Close()
+		actBody, _ := io.ReadAll(actResp.Body)
+		if actResp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "Activate failed (%d): %s\n", actResp.StatusCode, actBody)
+			os.Exit(1)
+		}
+		fmt.Printf("Activated: %s is now live.\n", saved.PlaybookID)
+	} else {
+		fmt.Printf("\nTo diff before activating:\n  faulttest vault diff %s --gateway %s\n", saved.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
+		fmt.Printf("To activate:\n  faulttest vault activate %s --gateway %s\n", saved.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
+	}
 }
 
 // ── vault calibration ─────────────────────────────────────────────────────

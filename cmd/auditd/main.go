@@ -319,6 +319,7 @@ func main() {
 	mux.HandleFunc("PUT /v1/fleet/playbooks/{playbookID}", auth("PUT /v1/fleet/playbooks/{playbookID}", playbookSrv.handleUpdate))
 	mux.HandleFunc("DELETE /v1/fleet/playbooks/{playbookID}", auth("DELETE /v1/fleet/playbooks/{playbookID}", playbookSrv.handleDelete))
 	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/activate", auth("POST /v1/fleet/playbooks/{playbookID}/activate", playbookSrv.handleActivate))
+	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/judge-verdict", auth("POST /v1/fleet/playbooks/{playbookID}/judge-verdict", playbookSrv.handleSetJudgeVerdict))
 	mux.HandleFunc("POST /v1/fleet/playbooks/{playbookID}/runs", auth("POST /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleRecord))
 	mux.HandleFunc("PATCH /v1/fleet/playbook-runs/{runID}", auth("PATCH /v1/fleet/playbook-runs/{runID}", playbookRunSrv.handleUpdate))
 	mux.HandleFunc("GET /v1/fleet/playbooks/{playbookID}/runs", auth("GET /v1/fleet/playbooks/{playbookID}/runs", playbookRunSrv.handleList))

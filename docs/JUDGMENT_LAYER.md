@@ -257,35 +257,26 @@ $EDITOR playbooks/connection-triage.yaml
 
 Edited source files are not auto-seeded into a running deployment. System
 playbooks are seeded at auditd startup; for a live update without restart, use
-the import API.
+`vault import`:
 
 ```bash
-# Read the file and POST to the import endpoint (parses, validates, returns draft)
-YAML=$(cat playbooks/connection-triage.yaml)
-
-DRAFT=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/import" \
-  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"text\": $(echo "$YAML" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'), \
-       \"format\": \"yaml\", \
-       \"hints\": {\"series_id\": \"pbs_connection_triage\"}}")
-
-echo "$DRAFT" | jq '{warnings, series_id: .draft.series_id, version: .draft.version}'
+faulttest vault import playbooks/connection-triage.yaml \
+  --gateway $GW --api-key $HELPDESK_CLIENT_API_KEY
 ```
 
-The `/import` endpoint **parses and validates but does not persist**. Check
-`warnings` — any protocol violation should be fixed in the source YAML before
-proceeding. Then save the draft:
+The command validates the YAML, prints any warnings, saves the draft and prints
+the draft ID. If the file has warnings and you want to save anyway:
 
 ```bash
-# Save the draft (persist it as an inactive version in its series)
-PLAYBOOK_ID=$(curl -s -X POST "$GW/api/v1/fleet/playbooks" \
-  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$(echo "$DRAFT" | jq '.draft')" \
-  | jq -r '.id')
+faulttest vault import playbooks/connection-triage.yaml --force \
+  --gateway $GW --api-key $HELPDESK_CLIENT_API_KEY
+```
 
-echo "Saved draft: $PLAYBOOK_ID"
+To import and immediately activate in one step:
+
+```bash
+faulttest vault import playbooks/connection-triage.yaml --activate \
+  --gateway $GW --api-key $HELPDESK_CLIENT_API_KEY
 ```
 
 ### Step 5: Diff before activating

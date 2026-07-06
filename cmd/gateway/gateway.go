@@ -366,6 +366,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/fleet/playbooks/{playbookID}", auth("PUT /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookUpdate))
 	mux.HandleFunc("DELETE /api/v1/fleet/playbooks/{playbookID}", auth("DELETE /api/v1/fleet/playbooks/{playbookID}", g.handlePlaybookDelete))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/activate", auth("POST /api/v1/fleet/playbooks/{playbookID}/activate", g.handlePlaybookActivate))
+	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/judge-verdict", auth("POST /api/v1/fleet/playbooks/{playbookID}/judge-verdict", g.handlePlaybookSetJudgeVerdict))
 	mux.HandleFunc("POST /api/v1/fleet/playbooks/{playbookID}/run", auth("POST /api/v1/fleet/playbooks/{playbookID}/run", g.handlePlaybookRun))
 	mux.HandleFunc("GET /api/v1/fleet/playbooks/{playbookID}/runs", auth("GET /api/v1/fleet/playbooks/{playbookID}/runs", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("playbookID")
