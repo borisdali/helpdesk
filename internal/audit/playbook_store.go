@@ -186,10 +186,11 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 	if pb.ExecutionMode == "" {
 		pb.ExecutionMode = "fleet"
 	}
-	// For brand-new series (caller didn't provide SeriesID), default IsActive=true.
-	// For callers that set an explicit SeriesID (e.g., the seeder inserting a later version),
-	// respect whatever IsActive value they provided.
-	if seriesWasEmpty {
+	// For brand-new series (caller didn't provide SeriesID), default IsActive=true
+	// so system/manual playbooks are ready immediately.
+	// Exception: imported and generated drafts always start inactive regardless of
+	// whether the series is new — they require explicit activation via vault activate.
+	if seriesWasEmpty && pb.Source != "imported" && pb.Source != "generated" {
 		pb.IsActive = true
 	}
 

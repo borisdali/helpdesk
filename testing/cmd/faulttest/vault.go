@@ -4110,6 +4110,7 @@ func purgeOrphanDrafts(gatewayURL, apiKey string, drafts []struct {
 	SeriesID   string `json:"series_id"`
 	Version    string `json:"version"`
 	Name       string `json:"name"`
+	Source     string `json:"source"`
 	CreatedAt  string `json:"created_at"`
 }) int {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -4147,7 +4148,7 @@ func vaultDrafts(args []string) {
 		os.Exit(1)
 	}
 
-	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&source=generated"
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false"
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -4170,6 +4171,7 @@ func vaultDrafts(args []string) {
 			SeriesID   string `json:"series_id"`
 			Version    string `json:"version"`
 			Name       string `json:"name"`
+			Source     string `json:"source"`
 			CreatedAt  string `json:"created_at"`
 			IsActive   bool   `json:"is_active"`
 		} `json:"playbooks"`
@@ -4179,24 +4181,27 @@ func vaultDrafts(args []string) {
 		os.Exit(1)
 	}
 
-	// Filter to inactive only — active generated playbooks have already been
-	// reviewed and promoted; they no longer belong in the pending review queue.
+	// Filter to inactive drafts with a tracked source (generated or imported).
+	// Active playbooks have already been reviewed; empty-source records are
+	// internal operational playbooks not intended for this queue.
 	var drafts []struct {
 		PlaybookID string `json:"playbook_id"`
 		SeriesID   string `json:"series_id"`
 		Version    string `json:"version"`
 		Name       string `json:"name"`
+		Source     string `json:"source"`
 		CreatedAt  string `json:"created_at"`
 	}
 	for _, p := range result.Playbooks {
-		if !p.IsActive {
+		if !p.IsActive && (p.Source == "generated" || p.Source == "imported") {
 			drafts = append(drafts, struct {
 				PlaybookID string `json:"playbook_id"`
 				SeriesID   string `json:"series_id"`
 				Version    string `json:"version"`
 				Name       string `json:"name"`
+				Source     string `json:"source"`
 				CreatedAt  string `json:"created_at"`
-			}{p.PlaybookID, p.SeriesID, p.Version, p.Name, p.CreatedAt})
+			}{p.PlaybookID, p.SeriesID, p.Version, p.Name, p.Source, p.CreatedAt})
 		}
 	}
 
@@ -4222,6 +4227,7 @@ func vaultDrafts(args []string) {
 	orphans := 0
 	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colID, "DRAFT ID", colSer, "SERIES", colVer, "VERSION", colName, "NAME", "CREATED")
 	fmt.Println(strings.Repeat("─", colID+2+colSer+2+colVer+2+colName+2+colDate))
+	imported := 0
 	for _, d := range drafts {
 		ts := d.CreatedAt
 		if len(ts) >= 10 {
@@ -4232,18 +4238,24 @@ func vaultDrafts(args []string) {
 			name = name[:colName-1] + "…"
 		}
 		ser := d.SeriesID
-		orphan := ""
+		tag := ""
 		if strings.HasPrefix(ser, "pbs_generated_") {
-			orphan = " !"
+			tag = " !"
 			orphans++
+		} else if d.Source == "imported" {
+			tag = " ↑"
+			imported++
 		}
 		if len(ser) > colSer {
 			ser = ser[:colSer-1] + "…"
 		}
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n", colID, d.PlaybookID, colSer, ser, colVer, d.Version, colName, name, ts, orphan)
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n", colID, d.PlaybookID, colSer, ser, colVer, d.Version, colName, name, ts, tag)
 	}
 	if orphans > 0 {
 		fmt.Printf("\n! = orphan draft (series not pinned); run with --purge-orphans to delete all %d\n", orphans)
+	}
+	if imported > 0 {
+		fmt.Printf("↑ = imported via vault import\n")
 	}
 	fmt.Printf("\nTo activate a draft:\n")
 	fmt.Printf("  faulttest vault activate <DRAFT_ID> --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
@@ -4375,6 +4387,7 @@ func vaultImport(args []string) {
 			ExecutionMode string `json:"execution_mode"`
 			Guidance      string `json:"guidance"`
 			Description   string `json:"description"`
+			Source        string `json:"source"`
 		} `json:"draft"`
 		WarningMessages []string `json:"warning_messages"`
 		Confidence      float64  `json:"confidence"`
@@ -4404,7 +4417,8 @@ func vaultImport(args []string) {
 	}
 
 	// Step 2: Save the draft (persist via POST /api/v1/fleet/playbooks).
-	// Re-marshal the draft object as the save body.
+	// Tag the draft as imported so vault drafts can surface it in the review queue.
+	importResult.Draft.Source = "imported"
 	saveBody, err := json.Marshal(importResult.Draft)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error marshalling draft: %v\n", err)
