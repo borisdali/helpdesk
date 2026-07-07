@@ -2058,11 +2058,13 @@ func vaultJourney(args []string) {
 	var category string
 	var outcome string
 	var incidentOnly bool
+	var detail bool
 	fs.IntVar(&limit, "limit", 20, "Maximum number of journeys to show")
 	fs.StringVar(&since, "since", "24h", "Show journeys from the last duration (e.g. 1h, 24h, 7d)")
 	fs.StringVar(&category, "category", "", "Filter by category: database, kubernetes, host")
 	fs.StringVar(&outcome, "outcome", "", "Filter by outcome: resolved, abandoned, escalated, in_progress")
 	fs.BoolVar(&incidentOnly, "incident", false, "Show only journeys linked to an incident run")
+	fs.BoolVar(&detail, "detail", false, "Show agent reasoning interleaved with tool calls (requires incident run ID)")
 	cfg := loadConfig(fs, args)
 
 	if cfg.GatewayURL == "" {
@@ -2070,10 +2072,10 @@ func vaultJourney(args []string) {
 		os.Exit(1)
 	}
 
-	// Detail mode: vault journey <trace_id>
+	// Detail mode: vault journey <trace_id> [--detail]
 	if len(fs.Args()) > 0 {
 		traceID := fs.Args()[0]
-		printJourneyDetail(cfg.GatewayURL, cfg.GatewayAPIKey, traceID)
+		printJourneyDetail(cfg.GatewayURL, cfg.GatewayAPIKey, traceID, detail)
 		return
 	}
 
@@ -2216,7 +2218,9 @@ func vaultJourney(args []string) {
 }
 
 // printJourneyDetail shows a single journey in full detail.
-func printJourneyDetail(gatewayURL, apiKey, traceID string) {
+// When detail is true it fetches agent_reasoning + tool_execution events and
+// renders them interleaved so the reader can see WHY each tool was called.
+func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	journeys, err := fetchJourneys(gatewayURL, apiKey, map[string]string{
 		"trace_id": traceID,
 		"limit":    "1",
@@ -2289,8 +2293,19 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string) {
 		}
 	}
 
-	if len(j.ToolsUsed) > 0 {
+	if detail && j.IncidentRunID != "" {
+		events, err := fetchRunEvents(gatewayURL, apiKey, j.IncidentRunID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: could not fetch run events: %v\n", err)
+		} else {
+			sectionJ("EXECUTION TRACE")
+			printReasoningTrace(events)
+		}
+	} else if len(j.ToolsUsed) > 0 {
 		sectionJ("TOOLS USED")
+		if detail && j.IncidentRunID == "" {
+			fmt.Println("  (--detail requires an incident run ID; showing tool list only)")
+		}
 		for _, t := range j.ToolsUsed {
 			fmt.Printf("  • %s\n", t)
 		}
@@ -2330,6 +2345,124 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string) {
 	}
 
 	fmt.Println()
+}
+
+// ── journey --detail helpers ───────────────────────────────────────────────
+
+// journeyEvent is a minimal mirror of audit.Event for JSON decoding.
+type journeyEvent struct {
+	EventID   string `json:"event_id"`
+	Timestamp string `json:"timestamp"`
+	EventType string `json:"event_type"`
+	ToolExecution  *journeyToolExec  `json:"tool_execution,omitempty"`
+	AgentReasoning *journeyReasoning `json:"agent_reasoning,omitempty"`
+}
+
+type journeyToolExec struct {
+	Name  string `json:"name"`
+	Error string `json:"error,omitempty"`
+}
+
+type journeyReasoning struct {
+	Reasoning string   `json:"reasoning"`
+	ToolCalls []string `json:"tool_calls"`
+}
+
+// fetchRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events and
+// returns tool_execution and agent_reasoning events sorted by timestamp.
+func fetchRunEvents(gatewayURL, apiKey, runID string) ([]journeyEvent, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") +
+		"/api/v1/fleet/playbook-runs/" + runID +
+		"/events?types=agent_reasoning,tool_execution&limit=500"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var events []journeyEvent
+	if err := json.Unmarshal(body, &events); err != nil {
+		return nil, fmt.Errorf("decode events: %w", err)
+	}
+	return events, nil
+}
+
+// printReasoningTrace renders agent_reasoning and tool_execution events
+// in chronological order, interleaving the model's deliberation text with
+// the tool call it preceded.
+func printReasoningTrace(events []journeyEvent) {
+	if len(events) == 0 {
+		fmt.Println("  (no events found)")
+		return
+	}
+
+	// Track which tool_execution names already had a preceding reasoning block
+	// so we can annotate orphan tool calls.
+	covered := make(map[string]bool)
+
+	for i, ev := range events {
+		switch ev.EventType {
+		case "agent_reasoning":
+			if ev.AgentReasoning == nil {
+				continue
+			}
+			// Mark the next tool calls as having reasoning.
+			for _, tc := range ev.AgentReasoning.ToolCalls {
+				covered[tc] = true
+			}
+			// Print reasoning as a quoted block, wrapping long lines.
+			// First line gets an opening quote, last line a closing quote.
+			lines := wrapLines(ev.AgentReasoning.Reasoning, 64)
+			if len(lines) == 1 {
+				fmt.Printf("  \"%s\"\n", lines[0])
+			} else {
+				for i, line := range lines {
+					switch i {
+					case 0:
+						fmt.Printf("  \"%s\n", line)
+					case len(lines) - 1:
+						fmt.Printf("   %s\"\n", line)
+					default:
+						fmt.Printf("   %s\n", line)
+					}
+				}
+			}
+
+		case "tool_execution":
+			if ev.ToolExecution == nil {
+				continue
+			}
+			name := ev.ToolExecution.Name
+			status := "ok"
+			if ev.ToolExecution.Error != "" {
+				status = "error"
+			}
+			fmt.Printf("  ► %-38s [%s]\n", name, status)
+			if !covered[name] {
+				fmt.Println("    (no preceding reasoning captured)")
+			}
+		}
+
+		// Blank line between groups (not after the last event).
+		if i < len(events)-1 {
+			next := events[i+1]
+			// Insert blank line before each reasoning block or between tool→reasoning.
+			if next.EventType == "agent_reasoning" ||
+				(ev.EventType == "tool_execution" && next.EventType == "tool_execution") {
+				fmt.Println()
+			}
+		}
+	}
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────
@@ -3601,6 +3734,37 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 }
 
 // wordWrap wraps text at maxWidth characters, indenting continuation lines with indent.
+// wrapLines splits text into lines of at most maxWidth characters, breaking
+// on word boundaries. It handles existing newlines in the source text.
+func wrapLines(text string, maxWidth int) []string {
+	var result []string
+	for _, para := range strings.Split(text, "\n") {
+		para = strings.TrimSpace(para)
+		if para == "" {
+			continue
+		}
+		words := strings.Fields(para)
+		current := ""
+		for _, w := range words {
+			if current == "" {
+				current = w
+			} else if len(current)+1+len(w) <= maxWidth {
+				current += " " + w
+			} else {
+				result = append(result, current)
+				current = w
+			}
+		}
+		if current != "" {
+			result = append(result, current)
+		}
+	}
+	if len(result) == 0 {
+		return []string{""}
+	}
+	return result
+}
+
 func wordWrap(text string, maxWidth int, indent string) string {
 	if len(text) <= maxWidth {
 		return text
