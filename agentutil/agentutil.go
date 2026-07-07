@@ -1,6 +1,7 @@
-// Package agentutil provides the SDK surface for building helpdesk agents.
-// It extracts the boilerplate duplicated across sub-agents: config loading,
-// LLM creation, and A2A server startup.
+// Package agentutil provides the library SDK for helpdesk agents: config, LLM
+// creation, policy enforcement, and tool utilities. Server wiring (Serve*,
+// InitAuditStore, InitApprovalClient) lives in agentutil/serve so that
+// non-server consumers (faulttest, gateway) avoid ADK server dependencies.
 package agentutil
 
 import (
@@ -10,29 +11,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 
 	"helpdesk/internal/audit"
-	"helpdesk/internal/authz"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/logging"
 	"helpdesk/internal/model"
@@ -940,91 +932,6 @@ func toolNameFromContext(ctx context.Context) string {
 	return ""
 }
 
-// =============================================================================
-// Tool-call tracking — injects structured tool call data into the A2A response
-// so faulttest (and other evaluation clients) can use exact tool-name matching
-// instead of brittle output-text heuristics.
-// =============================================================================
-
-// toolCallStoreKey is the unexported context key for the per-request store.
-type toolCallStoreKey struct{}
-
-// toolCallStore accumulates tool names seen during one A2A request.
-type toolCallStore struct {
-	mu    sync.Mutex
-	names []string
-}
-
-func (s *toolCallStore) add(name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.names = append(s.names, name)
-}
-
-func (s *toolCallStore) snapshot() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.names) == 0 {
-		return nil
-	}
-	out := make([]string, len(s.names))
-	copy(out, s.names)
-	return out
-}
-
-// toolCallStoreFromContext returns the store injected by newToolCallBeforeCallback,
-// or nil when the callbacks are not installed (e.g. in tests).
-func toolCallStoreFromContext(ctx context.Context) *toolCallStore {
-	s, _ := ctx.Value(toolCallStoreKey{}).(*toolCallStore)
-	return s
-}
-
-// HelpdeskToolCallSummaryMetaKey is the DataPart metadata key used to mark the
-// tool-call-summary artifact part emitted at the end of every A2A response.
-// testutil.extractResponse looks for this key to populate AgentResponse.ToolCalls.
-const HelpdeskToolCallSummaryMetaKey = "helpdesk_type"
-
-// HelpdeskToolCallSummaryMetaValue is the value of HelpdeskToolCallSummaryMetaKey.
-const HelpdeskToolCallSummaryMetaValue = "tool_call_summary"
-
-// newToolCallCallbacks returns the BeforeExecuteCallback and AfterEventCallback
-// pair that tracks tool invocations and injects a DataPart summary into the
-// final A2A artifact. Wire both into every adka2a.ExecutorConfig.
-func newToolCallCallbacks() (adka2a.BeforeExecuteCallback, adka2a.AfterEventCallback) {
-	before := func(ctx context.Context, _ *a2asrv.RequestContext) (context.Context, error) {
-		return context.WithValue(ctx, toolCallStoreKey{}, &toolCallStore{}), nil
-	}
-
-	after := func(ctx adka2a.ExecutorContext, adkEvent *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
-		// Collect FunctionCall names from this ADK event.
-		if adkEvent.Content != nil {
-			if store := toolCallStoreFromContext(ctx); store != nil {
-				for _, part := range adkEvent.Content.Parts {
-					if part.FunctionCall != nil && part.FunctionCall.Name != "" {
-						store.add(part.FunctionCall.Name)
-					}
-				}
-			}
-		}
-
-		// On the final response event, append the summary DataPart to the artifact.
-		if adkEvent.IsFinalResponse() && processed != nil && processed.Artifact != nil {
-			if store := toolCallStoreFromContext(ctx); store != nil {
-				if names := store.snapshot(); len(names) > 0 {
-					processed.Artifact.Parts = append(processed.Artifact.Parts, a2a.DataPart{
-						Data: map[string]any{"tool_calls": names},
-						Metadata: map[string]any{
-							HelpdeskToolCallSummaryMetaKey: HelpdeskToolCallSummaryMetaValue,
-						},
-					})
-				}
-			}
-		}
-		return nil
-	}
-
-	return before, after
-}
 
 // policyCheckReq is the body sent to POST /v1/governance/check.
 // Field names match PolicyCheckRequest in cmd/auditd/governance_handlers.go.
@@ -1179,64 +1086,6 @@ func (e *PolicyEnforcer) handleRemoteResponse(ctx context.Context, resp policyCh
 // InitApprovalClient creates an approval client if approvals are enabled.
 // Returns nil if approvals are disabled or no audit URL is configured.
 // Approvals require a central auditd service.
-func InitApprovalClient(cfg Config) *audit.ApprovalClient {
-	if !cfg.ApprovalEnabled {
-		slog.Debug("approval workflow disabled (HELPDESK_APPROVAL_ENABLED not set)")
-		return nil
-	}
-
-	if cfg.AuditURL == "" {
-		slog.Warn("approval workflow requires HELPDESK_AUDIT_URL to be set")
-		return nil
-	}
-
-	slog.Info("approval workflow enabled",
-		"audit_url", cfg.AuditURL,
-		"timeout", cfg.ApprovalTimeout)
-
-	client := audit.NewApprovalClient(cfg.AuditURL)
-	if cfg.AuditAPIKey != "" {
-		client = client.WithAPIKey(cfg.AuditAPIKey)
-	}
-	return client
-}
-
-// InitAuditStore initializes an audit store for an agent if auditing is enabled.
-// Returns nil if auditing is disabled. The caller should defer store.Close() if non-nil.
-// If HELPDESK_AUDIT_URL is set, uses the central audit service (preferred).
-// Otherwise falls back to local SQLite if HELPDESK_AUDIT_DIR is set.
-func InitAuditStore(cfg Config) (audit.Auditor, error) {
-	if !cfg.AuditEnabled {
-		return nil, nil
-	}
-
-	// Prefer central audit service
-	if cfg.AuditURL != "" {
-		slog.Info("agent audit logging enabled (remote)", "url", cfg.AuditURL)
-		store := audit.NewRemoteStore(cfg.AuditURL)
-		if cfg.AuditAPIKey != "" {
-			store = store.WithAPIKey(cfg.AuditAPIKey)
-		}
-		return store, nil
-	}
-
-	// Fall back to local SQLite
-	auditDir := cfg.AuditDir
-	if auditDir == "" {
-		auditDir = "."
-	}
-
-	store, err := audit.NewStore(audit.StoreConfig{
-		DBPath: filepath.Join(auditDir, "audit.db"),
-		// No socket for agents - only the orchestrator needs the socket
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create audit store: %w", err)
-	}
-
-	slog.Info("agent audit logging enabled (local)", "db", filepath.Join(auditDir, "audit.db"))
-	return store, nil
-}
 
 // CardOptions allows agents to customize the AgentCard beyond the defaults
 // that Serve derives automatically from the ADK agent.
@@ -1290,8 +1139,9 @@ type CardOptions struct {
 	ExtraHandlers map[string]http.Handler
 }
 
-// applyCardOptions merges optional metadata onto an AgentCard.
-func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
+// ApplyCardOptions merges optional metadata onto an AgentCard.
+// Used by agentutil/serve; exported so the sub-package can call it.
+func ApplyCardOptions(card *a2a.AgentCard, opts CardOptions) {
 	if opts.Version != "" {
 		card.Version = opts.Version
 	}
@@ -1328,26 +1178,6 @@ func applyCardOptions(card *a2a.AgentCard, opts CardOptions) {
 			skill.Tags = append(skill.Tags, "schema_hash:"+hash)
 		}
 	}
-}
-
-// registerSchemasHandler registers GET /schemas on mux unconditionally.
-// The endpoint returns a JSON object mapping tool name → JSON Schema properties,
-// allowing gateway discovery to populate ToolEntry.InputSchema.
-// When schemas is nil or empty, it returns an empty JSON object so that
-// agents without declared schemas do not cause gateway discovery to skip them.
-func registerSchemasHandler(mux *http.ServeMux, schemas map[string]map[string]any) {
-	if schemas == nil {
-		schemas = map[string]map[string]any{}
-	}
-	b, err := json.Marshal(schemas)
-	if err != nil {
-		slog.Warn("agentutil: failed to marshal tool schemas", "err", err)
-		return
-	}
-	mux.HandleFunc("GET /schemas", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(b) //nolint:errcheck
-	})
 }
 
 // declarationProvider matches tools that expose Declaration().
@@ -1433,73 +1263,6 @@ func ComputeInputSchemas(tools []tool.Tool) map[string]map[string]any {
 	return result
 }
 
-// Serve starts an A2A server for the given agent on cfg.ListenAddr.
-// It sets up the agent card, JSON-RPC handler, in-memory session service, and blocks.
-// An optional CardOptions can be passed to enrich the agent card with additional metadata.
-// If cfg.ExternalURL is set, it will be used in the agent card instead of the listener address.
-func Serve(ctx context.Context, a agent.Agent, cfg Config, opts ...CardOptions) error {
-	listener, err := net.Listen("tcp", cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
-	}
-
-	// Use ExternalURL if set, otherwise fall back to listener address.
-	// ExternalURL is required in Kubernetes where pods communicate via service names.
-	var baseURL *url.URL
-	if cfg.ExternalURL != "" {
-		baseURL, err = url.Parse(cfg.ExternalURL)
-		if err != nil {
-			return fmt.Errorf("invalid HELPDESK_AGENT_URL: %v", err)
-		}
-	} else {
-		baseURL = &url.URL{Scheme: "http", Host: listener.Addr().String()}
-	}
-
-	agentPath := "/invoke"
-	agentCard := &a2a.AgentCard{
-		Name:               a.Name(),
-		Description:        a.Description(),
-		Skills:             adka2a.BuildAgentSkills(a),
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		URL:                baseURL.JoinPath(agentPath).String(),
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
-	}
-
-	if len(opts) > 0 {
-		applyCardOptions(agentCard, opts[0])
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
-
-	var toolSchemas map[string]map[string]any
-	if len(opts) > 0 {
-		toolSchemas = opts[0].ToolSchemas
-	}
-	registerSchemasHandler(mux, toolSchemas)
-
-	toolCallBefore, toolCallAfter := newToolCallCallbacks()
-	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        a.Name(),
-			Agent:          a,
-			SessionService: session.InMemoryService(),
-		},
-		BeforeExecuteCallback: toolCallBefore,
-		AfterEventCallback:    toolCallAfter,
-	})
-	requestHandler := a2asrv.NewHandler(executor)
-	mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
-
-	slog.Info("starting A2A server",
-		"agent", a.Name(),
-		"url", baseURL.String(),
-		"card", baseURL.String()+"/.well-known/agent-card.json",
-	)
-
-	return http.Serve(listener, mux)
-}
-
 // NewReasoningCallback returns an ADK AfterModelCallback that captures agent-level
 // LLM reasoning to the audit trail. It emits an agent_reasoning event whenever
 // the model produces both text (deliberation) and function calls (tool decision)
@@ -1531,168 +1294,3 @@ func NewReasoningCallback(auditor *audit.ToolAuditor) func(agent.CallbackContext
 	}
 }
 
-// ServeWithTracing starts an A2A server with trace_id extraction from incoming messages.
-// The traceStore is populated with trace_id from A2A message metadata for each request.
-// When auditor is non-nil, a gateway_request anchor event is emitted for every incoming
-// NL-query request so the request is visible as a journey even without an upstream gateway.
-func ServeWithTracing(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, auditor audit.Auditor, opts ...CardOptions) error {
-	listener, err := net.Listen("tcp", cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
-	}
-
-	var baseURL *url.URL
-	if cfg.ExternalURL != "" {
-		baseURL, err = url.Parse(cfg.ExternalURL)
-		if err != nil {
-			return fmt.Errorf("invalid HELPDESK_AGENT_URL: %v", err)
-		}
-	} else {
-		baseURL = &url.URL{Scheme: "http", Host: listener.Addr().String()}
-	}
-
-	agentPath := "/invoke"
-	agentCard := &a2a.AgentCard{
-		Name:               a.Name(),
-		Description:        a.Description(),
-		Skills:             adka2a.BuildAgentSkills(a),
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		URL:                baseURL.JoinPath(agentPath).String(),
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
-	}
-
-	if len(opts) > 0 {
-		applyCardOptions(agentCard, opts[0])
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
-
-	var toolSchemas map[string]map[string]any
-	if len(opts) > 0 {
-		toolSchemas = opts[0].ToolSchemas
-	}
-	registerSchemasHandler(mux, toolSchemas)
-
-	toolCallBefore, toolCallAfter := newToolCallCallbacks()
-	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        a.Name(),
-			Agent:          a,
-			SessionService: session.InMemoryService(),
-		},
-		BeforeExecuteCallback: toolCallBefore,
-		AfterEventCallback:    toolCallAfter,
-	})
-	requestHandler := a2asrv.NewHandler(executor)
-
-	// Wrap with audit-aware trace middleware: extracts or generates a trace_id for
-	// every request and emits a gateway_request anchor event so direct agent calls
-	// are visible as journeys even when bypassing the orchestrator/gateway.
-	tracedHandler := audit.TraceMiddlewareWithAudit(traceStore, auditor, a.Name(), a2asrv.NewJSONRPCHandler(requestHandler))
-	mux.Handle(agentPath, tracedHandler)
-
-	slog.Info("starting A2A server with tracing",
-		"agent", a.Name(),
-		"url", baseURL.String(),
-		"card", baseURL.String()+"/.well-known/agent-card.json",
-	)
-
-	return http.Serve(listener, mux)
-}
-
-// ServeWithTracingAndDirectTools is like ServeWithTracing but also registers
-// a POST /tool/{name} endpoint for deterministic, LLM-bypassing tool dispatch.
-// The registry maps tool names to context.Context-based handler functions.
-// Fleet runner uses this path to execute structured tool calls without LLM narration.
-func ServeWithTracingAndDirectTools(ctx context.Context, a agent.Agent, cfg Config, traceStore *audit.CurrentTraceStore, auditor audit.Auditor, registry *DirectToolRegistry, opts ...CardOptions) error {
-	listener, err := net.Listen("tcp", cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("failed to bind to %s: %v", cfg.ListenAddr, err)
-	}
-
-	var baseURL *url.URL
-	if cfg.ExternalURL != "" {
-		baseURL, err = url.Parse(cfg.ExternalURL)
-		if err != nil {
-			return fmt.Errorf("invalid HELPDESK_AGENT_URL: %v", err)
-		}
-	} else {
-		baseURL = &url.URL{Scheme: "http", Host: listener.Addr().String()}
-	}
-
-	agentPath := "/invoke"
-	agentCard := &a2a.AgentCard{
-		Name:               a.Name(),
-		Description:        a.Description(),
-		Skills:             adka2a.BuildAgentSkills(a),
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		URL:                baseURL.JoinPath(agentPath).String(),
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
-	}
-
-	if len(opts) > 0 {
-		applyCardOptions(agentCard, opts[0])
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
-
-	var toolSchemas map[string]map[string]any
-	if len(opts) > 0 {
-		toolSchemas = opts[0].ToolSchemas
-	}
-	registerSchemasHandler(mux, toolSchemas)
-
-	toolCallBefore, toolCallAfter := newToolCallCallbacks()
-	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        a.Name(),
-			Agent:          a,
-			SessionService: session.InMemoryService(),
-		},
-		BeforeExecuteCallback: toolCallBefore,
-		AfterEventCallback:    toolCallAfter,
-	})
-	requestHandler := a2asrv.NewHandler(executor)
-
-	tracedHandler := audit.TraceMiddlewareWithAudit(traceStore, auditor, a.Name(), a2asrv.NewJSONRPCHandler(requestHandler))
-	mux.Handle(agentPath, tracedHandler)
-
-	if registry != nil {
-		// Build inbound auth for POST /tool/{name}.
-		// When HELPDESK_USERS_FILE is set and HELPDESK_IDENTITY_PROVIDER != "none",
-		// only service accounts with a valid Bearer API key are permitted.
-		// Otherwise logs a warning and leaves the endpoint open (dev/local mode).
-		var idProvider identity.Provider = &identity.NoAuthProvider{}
-		idMode := os.Getenv("HELPDESK_IDENTITY_PROVIDER")
-		enforcing := cfg.UsersFile != "" && idMode != "none"
-		if enforcing {
-			p, err := identity.NewStaticProvider(cfg.UsersFile)
-			if err != nil {
-				return fmt.Errorf("agent inbound auth: failed to load users file %q: %w", cfg.UsersFile, err)
-			}
-			idProvider = p
-			slog.Info("agent inbound auth enabled", "users_file", cfg.UsersFile)
-		} else {
-			slog.Warn("POST /tool/{name} is unauthenticated — set HELPDESK_USERS_FILE to require service-account credentials")
-		}
-		authzr := authz.NewAuthorizer(authz.DefaultAgentPermissions, enforcing)
-		registerDirectToolRoutes(mux, registry, traceStore, idProvider, authzr)
-		slog.Info("direct tool dispatch enabled", "agent", a.Name(), "tools", len(registry.tools))
-	}
-
-	if len(opts) > 0 {
-		for pattern, handler := range opts[0].ExtraHandlers {
-			mux.Handle(pattern, handler)
-		}
-	}
-
-	slog.Info("starting A2A server with tracing",
-		"agent", a.Name(),
-		"url", baseURL.String(),
-		"card", baseURL.String()+"/.well-known/agent-card.json",
-	)
-
-	return http.Serve(listener, mux)
-}

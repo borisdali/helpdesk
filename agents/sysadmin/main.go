@@ -17,6 +17,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 
 	"helpdesk/agentutil"
+	agentserve "helpdesk/agentutil/serve"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/infra"
@@ -51,7 +52,7 @@ func main() {
 	}
 
 	// Initialize audit store if enabled.
-	auditStore, err := agentutil.InitAuditStore(cfg)
+	auditStore, err := agentserve.InitAuditStore(cfg)
 	if err != nil {
 		slog.Error("failed to initialize audit store", "err", err)
 		os.Exit(1)
@@ -75,7 +76,7 @@ func main() {
 	}
 
 	// Initialize approval client for human-in-the-loop workflows.
-	approvalClient := agentutil.InitApprovalClient(cfg)
+	approvalClient := agentserve.InitApprovalClient(cfg)
 
 	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
 		Engine:                     policyEngine,
@@ -155,7 +156,7 @@ func main() {
 		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
 	}
 
-	if err := agentutil.ServeWithTracingAndDirectTools(ctx, sysadminAgent, cfg, traceStore, auditStore, NewSysadminDirectRegistry(), cardOpts); err != nil {
+	if err := agentserve.ServeWithTracingAndDirectTools(ctx, sysadminAgent, cfg, traceStore, auditStore, NewSysadminDirectRegistry(), cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

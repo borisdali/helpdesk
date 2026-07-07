@@ -13,9 +13,6 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 	adktool "google.golang.org/adk/tool"
 
@@ -972,7 +969,7 @@ func TestApplyCardOptions_Empty(t *testing.T) {
 		Name:    "test",
 		Version: "0.1.0",
 	}
-	applyCardOptions(card, CardOptions{})
+	ApplyCardOptions(card, CardOptions{})
 
 	if card.Version != "0.1.0" {
 		t.Errorf("Version changed to %q, expected no change", card.Version)
@@ -981,7 +978,7 @@ func TestApplyCardOptions_Empty(t *testing.T) {
 
 func TestApplyCardOptions_Version(t *testing.T) {
 	card := &a2a.AgentCard{Name: "test", Version: "0.1.0"}
-	applyCardOptions(card, CardOptions{Version: "2.0.0"})
+	ApplyCardOptions(card, CardOptions{Version: "2.0.0"})
 	if card.Version != "2.0.0" {
 		t.Errorf("Version = %q, want %q", card.Version, "2.0.0")
 	}
@@ -989,7 +986,7 @@ func TestApplyCardOptions_Version(t *testing.T) {
 
 func TestApplyCardOptions_DocumentationURL(t *testing.T) {
 	card := &a2a.AgentCard{Name: "test"}
-	applyCardOptions(card, CardOptions{DocumentationURL: "https://docs.example.com"})
+	ApplyCardOptions(card, CardOptions{DocumentationURL: "https://docs.example.com"})
 	if card.DocumentationURL != "https://docs.example.com" {
 		t.Errorf("DocumentationURL = %q, want %q", card.DocumentationURL, "https://docs.example.com")
 	}
@@ -998,7 +995,7 @@ func TestApplyCardOptions_DocumentationURL(t *testing.T) {
 func TestApplyCardOptions_Provider(t *testing.T) {
 	card := &a2a.AgentCard{Name: "test"}
 	provider := &a2a.AgentProvider{Org: "TestOrg", URL: "https://test.org"}
-	applyCardOptions(card, CardOptions{Provider: provider})
+	ApplyCardOptions(card, CardOptions{Provider: provider})
 	if card.Provider == nil {
 		t.Fatal("Provider should be set")
 	}
@@ -1015,7 +1012,7 @@ func TestApplyCardOptions_SkillTagsMerged(t *testing.T) {
 			{ID: "skill-b", Tags: []string{"b-tag"}},
 		},
 	}
-	applyCardOptions(card, CardOptions{
+	ApplyCardOptions(card, CardOptions{
 		SkillTags: map[string][]string{
 			"skill-a": {"new-tag-1", "new-tag-2"},
 		},
@@ -1039,7 +1036,7 @@ func TestApplyCardOptions_SkillExamples(t *testing.T) {
 			{ID: "skill-a", Examples: []string{"old example"}},
 		},
 	}
-	applyCardOptions(card, CardOptions{
+	ApplyCardOptions(card, CardOptions{
 		SkillExamples: map[string][]string{
 			"skill-a": {"example 1", "example 2"},
 		},
@@ -1060,7 +1057,7 @@ func TestApplyCardOptions_SkillFleetEligible(t *testing.T) {
 			{ID: "agent-get_server_info"},
 		},
 	}
-	applyCardOptions(card, CardOptions{
+	ApplyCardOptions(card, CardOptions{
 		SkillFleetEligible: map[string]bool{
 			"agent-get_status_summary": true,
 			"agent-get_server_info":    false, // explicit false should not append fleet:true
@@ -1092,7 +1089,7 @@ func TestApplyCardOptions_SkillCapabilities(t *testing.T) {
 			{ID: "agent-check_connection"},
 		},
 	}
-	applyCardOptions(card, CardOptions{
+	ApplyCardOptions(card, CardOptions{
 		SkillCapabilities: map[string][]string{
 			"agent-get_status_summary": {"uptime", "connection_count"},
 			"agent-check_connection":   {"connectivity"},
@@ -1129,7 +1126,7 @@ func TestApplyCardOptions_SkillSupersedes(t *testing.T) {
 			{ID: "agent-get_server_info"},
 		},
 	}
-	applyCardOptions(card, CardOptions{
+	ApplyCardOptions(card, CardOptions{
 		SkillSupersedes: map[string][]string{
 			"agent-get_status_summary": {"get_server_info", "get_connection_stats"},
 		},
@@ -1156,7 +1153,7 @@ func TestApplyCardOptions_SkillSupersedes(t *testing.T) {
 }
 
 func TestApplyCardOptions_TaxonomyRoundTrip(t *testing.T) {
-	// Verify the full wire format: applyCardOptions serializes typed fields to
+	// Verify the full wire format: ApplyCardOptions serializes typed fields to
 	// key:value tag strings, and parseSkillTags (in toolregistry) deserializes them.
 	// This ensures the two halves of the pipeline agree on the format.
 	card := &a2a.AgentCard{
@@ -1165,7 +1162,7 @@ func TestApplyCardOptions_TaxonomyRoundTrip(t *testing.T) {
 			{ID: "myagent-get_status_summary"},
 		},
 	}
-	applyCardOptions(card, CardOptions{
+	ApplyCardOptions(card, CardOptions{
 		SkillFleetEligible: map[string]bool{
 			"myagent-get_status_summary": true,
 		},
@@ -1495,7 +1492,7 @@ func TestApplyCardOptions_SkillSchemaHash(t *testing.T) {
 			{ID: "myagent-get_pods"},
 		},
 	}
-	applyCardOptions(card, CardOptions{
+	ApplyCardOptions(card, CardOptions{
 		SkillSchemaHash: map[string]string{
 			"myagent-check_connection": "abc123def456",
 		},
@@ -1519,193 +1516,124 @@ func TestApplyCardOptions_SkillSchemaHash(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool call tracking (newToolCallCallbacks)
+// hasSensitiveSensitivity
 // ---------------------------------------------------------------------------
 
-// mockExecutorContext wraps a context.Context to satisfy adka2a.ExecutorContext.
-// Only the context embedding is used by our callback; all other methods return zero values.
-type mockExecutorContext struct {
-	context.Context
-}
-
-func (m mockExecutorContext) SessionID() string                        { return "" }
-func (m mockExecutorContext) UserID() string                           { return "" }
-func (m mockExecutorContext) AgentName() string                        { return "" }
-func (m mockExecutorContext) ReadonlyState() session.ReadonlyState     { return nil }
-func (m mockExecutorContext) Events() session.Events                   { return nil }
-func (m mockExecutorContext) UserContent() *genai.Content              { return nil }
-func (m mockExecutorContext) RequestContext() *a2asrv.RequestContext    { return nil }
-
-var _ adka2a.ExecutorContext = mockExecutorContext{}
-
-func TestToolCallStore_AddSnapshot(t *testing.T) {
-	s := &toolCallStore{}
-	if got := s.snapshot(); got != nil {
-		t.Errorf("snapshot of empty store = %v, want nil", got)
-	}
-
-	s.add("check_connection")
-	s.add("get_table_stats")
-	s.add("get_table_stats") // duplicate — order preserved, deduplication not expected
-
-	got := s.snapshot()
-	want := []string{"check_connection", "get_table_stats", "get_table_stats"}
-	if len(got) != len(want) {
-		t.Fatalf("snapshot = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("snapshot[%d] = %q, want %q", i, got[i], want[i])
-		}
+func TestHasSensitiveSensitivity_NilIsNotSensitive(t *testing.T) {
+	if hasSensitiveSensitivity(nil) {
+		t.Error("nil slice: expected false")
 	}
 }
 
-func TestToolCallStore_SnapshotIsACopy(t *testing.T) {
-	s := &toolCallStore{}
-	s.add("tool-a")
-	snap := s.snapshot()
-	snap[0] = "mutated"
-	// Original store should be unaffected.
-	if s.names[0] != "tool-a" {
-		t.Error("snapshot mutation affected the underlying store")
+func TestHasSensitiveSensitivity_EmptyIsNotSensitive(t *testing.T) {
+	if hasSensitiveSensitivity([]string{}) {
+		t.Error("empty slice: expected false")
 	}
 }
 
-func TestToolCallStoreFromContext_Present(t *testing.T) {
-	store := &toolCallStore{}
-	ctx := context.WithValue(context.Background(), toolCallStoreKey{}, store)
-	got := toolCallStoreFromContext(ctx)
-	if got != store {
-		t.Error("toolCallStoreFromContext did not return the injected store")
+func TestHasSensitiveSensitivity_LowIsNotSensitive(t *testing.T) {
+	if hasSensitiveSensitivity([]string{"low", "internal"}) {
+		t.Error("low/internal: expected false")
 	}
 }
 
-func TestToolCallStoreFromContext_Absent(t *testing.T) {
-	got := toolCallStoreFromContext(context.Background())
-	if got != nil {
-		t.Errorf("toolCallStoreFromContext with no store = %v, want nil", got)
+func TestHasSensitiveSensitivity_PiiIsSensitive(t *testing.T) {
+	if !hasSensitiveSensitivity([]string{"pii"}) {
+		t.Error("pii: expected true")
 	}
 }
 
-func TestNewToolCallCallbacks_BeforeInjectsStore(t *testing.T) {
-	before, _ := newToolCallCallbacks()
-	ctx, err := before(context.Background(), nil)
+func TestHasSensitiveSensitivity_CriticalIsSensitive(t *testing.T) {
+	if !hasSensitiveSensitivity([]string{"critical"}) {
+		t.Error("critical: expected true")
+	}
+}
+
+func TestHasSensitiveSensitivity_MixedContainsPii(t *testing.T) {
+	if !hasSensitiveSensitivity([]string{"low", "pii"}) {
+		t.Error("mixed with pii: expected true")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WithToolName / toolNameFromContext
+// ---------------------------------------------------------------------------
+
+func TestWithToolName_RoundTrip(t *testing.T) {
+	ctx := WithToolName(context.Background(), "kill_idle_connections")
+	if got := toolNameFromContext(ctx); got != "kill_idle_connections" {
+		t.Errorf("toolNameFromContext = %q, want kill_idle_connections", got)
+	}
+}
+
+func TestToolNameFromContext_Absent(t *testing.T) {
+	if got := toolNameFromContext(context.Background()); got != "" {
+		t.Errorf("toolNameFromContext with no value = %q, want empty", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalPendingError
+// ---------------------------------------------------------------------------
+
+func TestApprovalPendingError_ErrorContainsID(t *testing.T) {
+	err := &ApprovalPendingError{ApprovalID: "apv_abc123"}
+	msg := err.Error()
+	if !strings.Contains(msg, "apv_abc123") {
+		t.Errorf("Error() = %q, want approval ID apv_abc123 in message", msg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewPolicyEnforcer with nil engine (enforcement disabled)
+// ---------------------------------------------------------------------------
+
+func TestNewPolicyEnforcer_NilEngineAllowsAll(t *testing.T) {
+	e := NewPolicyEnforcer(nil, nil)
+	if e == nil {
+		t.Fatal("NewPolicyEnforcer returned nil")
+	}
+	// With nil engine, CheckDatabase should allow every operation.
+	if err := e.CheckDatabase(context.Background(), "any-db", "destructive", nil, "", nil); err != nil {
+		t.Errorf("nil-engine enforcer denied: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckDatabaseSessionAge fast-path returns
+// ---------------------------------------------------------------------------
+
+func TestCheckDatabaseSessionAge_NilEngineIsNoOp(t *testing.T) {
+	e := NewPolicyEnforcer(nil, nil)
+	err := e.CheckDatabaseSessionAge(context.Background(), "db", "destructive", nil, 3600, true)
 	if err != nil {
-		t.Fatalf("before callback error: %v", err)
-	}
-	store := toolCallStoreFromContext(ctx)
-	if store == nil {
-		t.Fatal("before callback did not inject a toolCallStore into context")
+		t.Errorf("nil engine: expected nil, got %v", err)
 	}
 }
 
-// makeFunctionCallEvent returns a session.Event whose LLMResponse contains
-// one FunctionCall with the given name. Such events are NOT final responses.
-func makeFunctionCallEvent(name string) *session.Event {
-	evt := &session.Event{}
-	evt.Content = &genai.Content{
-		Parts: []*genai.Part{
-			{FunctionCall: &genai.FunctionCall{Name: name}},
-		},
+func TestCheckDatabaseSessionAge_NoWritesIsNoOp(t *testing.T) {
+	path := writeTempPolicyFile(t, minimalPolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
 	}
-	return evt
-}
-
-// makeFinalResponseEvent returns a session.Event with plain text and no
-// FunctionCalls, so IsFinalResponse() returns true.
-func makeFinalResponseEvent(text string) *session.Event {
-	evt := &session.Event{}
-	evt.Content = &genai.Content{
-		Parts: []*genai.Part{{Text: text}},
-	}
-	return evt
-}
-
-func TestNewToolCallCallbacks_AfterCollectsNames(t *testing.T) {
-	before, after := newToolCallCallbacks()
-	ctx, _ := before(context.Background(), nil)
-	execCtx := mockExecutorContext{ctx}
-
-	// Two tool call events.
-	if err := after(execCtx, makeFunctionCallEvent("check_connection"), nil); err != nil {
-		t.Fatalf("after callback error: %v", err)
-	}
-	if err := after(execCtx, makeFunctionCallEvent("get_table_stats"), nil); err != nil {
-		t.Fatalf("after callback error: %v", err)
-	}
-
-	store := toolCallStoreFromContext(ctx)
-	got := store.snapshot()
-	if len(got) != 2 || got[0] != "check_connection" || got[1] != "get_table_stats" {
-		t.Errorf("store after two tool events = %v, want [check_connection get_table_stats]", got)
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+	// hasWrites=false → no-op regardless of age.
+	if err := e.CheckDatabaseSessionAge(context.Background(), "db", "destructive", nil, 3600, false); err != nil {
+		t.Errorf("hasWrites=false: expected nil, got %v", err)
 	}
 }
 
-func TestNewToolCallCallbacks_AfterInjectsSummaryOnFinalResponse(t *testing.T) {
-	before, after := newToolCallCallbacks()
-	ctx, _ := before(context.Background(), nil)
-	execCtx := mockExecutorContext{ctx}
-
-	// One tool call event followed by a final response.
-	_ = after(execCtx, makeFunctionCallEvent("get_database_stats"), nil)
-
-	artifact := &a2a.Artifact{ID: "art-1"}
-	processed := &a2a.TaskArtifactUpdateEvent{Artifact: artifact}
-	if err := after(execCtx, makeFinalResponseEvent("summary text"), processed); err != nil {
-		t.Fatalf("after callback error on final response: %v", err)
+func TestCheckDatabaseSessionAge_ZeroAgeIsNoOp(t *testing.T) {
+	path := writeTempPolicyFile(t, minimalPolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
 	}
-
-	// Artifact should now have a DataPart with the tool call summary.
-	if len(artifact.Parts) == 0 {
-		t.Fatal("no parts injected into artifact")
-	}
-	dp, ok := artifact.Parts[len(artifact.Parts)-1].(a2a.DataPart)
-	if !ok {
-		t.Fatalf("last artifact part is %T, want a2a.DataPart", artifact.Parts[len(artifact.Parts)-1])
-	}
-	if dp.Metadata[HelpdeskToolCallSummaryMetaKey] != HelpdeskToolCallSummaryMetaValue {
-		t.Errorf("DataPart metadata[%q] = %q, want %q",
-			HelpdeskToolCallSummaryMetaKey, dp.Metadata[HelpdeskToolCallSummaryMetaKey], HelpdeskToolCallSummaryMetaValue)
-	}
-	names, ok := dp.Data["tool_calls"].([]string)
-	if !ok {
-		t.Fatalf("DataPart data[tool_calls] is %T, want []string", dp.Data["tool_calls"])
-	}
-	if len(names) != 1 || names[0] != "get_database_stats" {
-		t.Errorf("tool_calls = %v, want [get_database_stats]", names)
-	}
-}
-
-func TestNewToolCallCallbacks_AfterNoSummaryWhenNoToolCalls(t *testing.T) {
-	before, after := newToolCallCallbacks()
-	ctx, _ := before(context.Background(), nil)
-	execCtx := mockExecutorContext{ctx}
-
-	// Final response with no prior tool calls — no DataPart should be injected.
-	artifact := &a2a.Artifact{ID: "art-empty"}
-	processed := &a2a.TaskArtifactUpdateEvent{Artifact: artifact}
-	if err := after(execCtx, makeFinalResponseEvent("no tools used"), processed); err != nil {
-		t.Fatalf("after callback error: %v", err)
-	}
-
-	for _, p := range artifact.Parts {
-		if dp, ok := p.(a2a.DataPart); ok {
-			if dp.Metadata[HelpdeskToolCallSummaryMetaKey] == HelpdeskToolCallSummaryMetaValue {
-				t.Error("unexpected tool_call_summary DataPart when no tool calls were made")
-			}
-		}
-	}
-}
-
-func TestNewToolCallCallbacks_AfterNoSummaryWhenProcessedNil(t *testing.T) {
-	before, after := newToolCallCallbacks()
-	ctx, _ := before(context.Background(), nil)
-	execCtx := mockExecutorContext{ctx}
-
-	_ = after(execCtx, makeFunctionCallEvent("check_connection"), nil)
-	// processed=nil on final response — should not panic.
-	if err := after(execCtx, makeFinalResponseEvent("done"), nil); err != nil {
-		t.Fatalf("after callback error: %v", err)
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+	// xactAgeSecs=0 → no-op regardless of writes.
+	if err := e.CheckDatabaseSessionAge(context.Background(), "db", "destructive", nil, 0, true); err != nil {
+		t.Errorf("xactAgeSecs=0: expected nil, got %v", err)
 	}
 }
 
