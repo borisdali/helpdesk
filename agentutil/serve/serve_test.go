@@ -603,3 +603,57 @@ func mustGenerateAPIKey(t *testing.T) (rawKey, hash string) {
 	}
 	return rawKey, hash
 }
+
+// ---------------------------------------------------------------------------
+// registerSchemasHandler
+// ---------------------------------------------------------------------------
+
+func TestRegisterSchemasHandler_ServesSchemas(t *testing.T) {
+	schemas := map[string]map[string]any{
+		"check_connection": {"type": "object", "properties": map[string]any{"host": map[string]any{"type": "string"}}},
+		"get_table_stats":  {"type": "object"},
+	}
+	mux := http.NewServeMux()
+	registerSchemasHandler(mux, schemas)
+
+	req := httptest.NewRequest(http.MethodGet, "/schemas", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var got map[string]map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := got["check_connection"]; !ok {
+		t.Errorf("check_connection missing from schemas response")
+	}
+	if _, ok := got["get_table_stats"]; !ok {
+		t.Errorf("get_table_stats missing from schemas response")
+	}
+}
+
+func TestRegisterSchemasHandler_NilSchemasReturnsEmptyObject(t *testing.T) {
+	mux := http.NewServeMux()
+	registerSchemasHandler(mux, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/schemas", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("nil schemas: got %d entries, want 0", len(got))
+	}
+}

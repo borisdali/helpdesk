@@ -13,8 +13,10 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
-	"google.golang.org/genai"
+	"google.golang.org/adk/agent"
+	adkmodel "google.golang.org/adk/model"
 	adktool "google.golang.org/adk/tool"
+	"google.golang.org/genai"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/identity"
@@ -1634,6 +1636,143 @@ func TestCheckDatabaseSessionAge_ZeroAgeIsNoOp(t *testing.T) {
 	// xactAgeSecs=0 → no-op regardless of writes.
 	if err := e.CheckDatabaseSessionAge(context.Background(), "db", "destructive", nil, 0, true); err != nil {
 		t.Errorf("xactAgeSecs=0: expected nil, got %v", err)
+	}
+}
+
+// xactAgePolicyYAML is a policy that allows destructive ops only when the
+// transaction age is within 1800 seconds.
+const xactAgePolicyYAML = `
+version: "1"
+policies:
+  - name: xact-age-limit
+    resources:
+      - type: database
+    rules:
+      - action: destructive
+        effect: allow
+        conditions:
+          max_xact_age_secs: 1800
+`
+
+func TestCheckDatabaseSessionAge_ExceedsLimit_Denied(t *testing.T) {
+	path := writeTempPolicyFile(t, xactAgePolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+	// 7200s > 1800s limit with writes → should be denied.
+	err = e.CheckDatabaseSessionAge(context.Background(), "prod-db", "destructive", nil, 7200, true)
+	if err == nil {
+		t.Fatal("expected denial for transaction older than limit, got nil")
+	}
+	var denied *policy.DeniedError
+	if !errors.As(err, &denied) {
+		t.Errorf("expected *policy.DeniedError, got %T: %v", err, err)
+	}
+}
+
+func TestCheckDatabaseSessionAge_WithinLimit_Allowed(t *testing.T) {
+	path := writeTempPolicyFile(t, xactAgePolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine})
+	// 60s < 1800s limit with writes → allowed.
+	if err := e.CheckDatabaseSessionAge(context.Background(), "prod-db", "destructive", nil, 60, true); err != nil {
+		t.Errorf("within-limit transaction: expected nil, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckKubernetes / CheckKubernetesResult
+// ---------------------------------------------------------------------------
+
+func TestCheckKubernetes_NilEngineAllowsAll(t *testing.T) {
+	e := NewPolicyEnforcer(nil, nil)
+	if err := e.CheckKubernetes(context.Background(), "default", "destructive", nil, "", nil); err != nil {
+		t.Errorf("nil-engine enforcer denied: %v", err)
+	}
+}
+
+func TestCheckKubernetesResult_NilEngineNoOp(t *testing.T) {
+	e := NewPolicyEnforcer(nil, nil)
+	outcome := ToolOutcome{PodsAffected: 5}
+	if err := e.CheckKubernetesResult(context.Background(), "default", "destructive", nil, outcome); err != nil {
+		t.Errorf("nil-engine enforcer denied: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewReasoningCallback
+// ---------------------------------------------------------------------------
+
+func TestNewReasoningCallback_NilAuditor(t *testing.T) {
+	cb := NewReasoningCallback(nil)
+	resp, err := cb(nil, &adkmodel.LLMResponse{Content: &genai.Content{
+		Parts: []*genai.Part{{Text: "thinking"}, {FunctionCall: &genai.FunctionCall{Name: "check_db"}}},
+	}}, nil)
+	if resp != nil || err != nil {
+		t.Errorf("nil auditor: got (%v, %v), want (nil, nil)", resp, err)
+	}
+}
+
+func TestNewReasoningCallback_NilResponse(t *testing.T) {
+	ta := audit.NewToolAuditor(nil, "agent", "sess", "trace")
+	cb := NewReasoningCallback(ta)
+	resp, err := cb(nil, nil, nil)
+	if resp != nil || err != nil {
+		t.Errorf("nil response: got (%v, %v), want (nil, nil)", resp, err)
+	}
+}
+
+func TestNewReasoningCallback_NilContent(t *testing.T) {
+	ta := audit.NewToolAuditor(nil, "agent", "sess", "trace")
+	cb := NewReasoningCallback(ta)
+	resp, err := cb(nil, &adkmodel.LLMResponse{Content: nil}, nil)
+	if resp != nil || err != nil {
+		t.Errorf("nil content: got (%v, %v), want (nil, nil)", resp, err)
+	}
+}
+
+func TestNewReasoningCallback_TextOnly_NoRecord(t *testing.T) {
+	ta := audit.NewToolAuditor(nil, "agent", "sess", "trace")
+	cb := NewReasoningCallback(ta)
+	// Text-only response — no function call, so RecordAgentReasoning must not be called.
+	resp, err := cb(nil, &adkmodel.LLMResponse{Content: &genai.Content{
+		Parts: []*genai.Part{{Text: "final answer"}},
+	}}, nil)
+	if resp != nil || err != nil {
+		t.Errorf("text-only: got (%v, %v), want (nil, nil)", resp, err)
+	}
+}
+
+func TestNewReasoningCallback_FunctionCallOnly_NoRecord(t *testing.T) {
+	ta := audit.NewToolAuditor(nil, "agent", "sess", "trace")
+	cb := NewReasoningCallback(ta)
+	resp, err := cb(nil, &adkmodel.LLMResponse{Content: &genai.Content{
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "get_table_stats"}}},
+	}}, nil)
+	if resp != nil || err != nil {
+		t.Errorf("function-call-only: got (%v, %v), want (nil, nil)", resp, err)
+	}
+}
+
+func TestNewReasoningCallback_TextAndFunctionCall_CallsRecord(t *testing.T) {
+	// ToolAuditor with nil Auditor — RecordAgentReasoning is a no-op, no panic.
+	ta := audit.NewToolAuditor(nil, "agent", "sess", "trace")
+	cb := NewReasoningCallback(ta)
+	// Pass nil for agent.CallbackContext — only used inside RecordAgentReasoning
+	// which returns immediately when ta.auditor == nil.
+	resp, err := cb(agent.CallbackContext(nil), &adkmodel.LLMResponse{Content: &genai.Content{
+		Parts: []*genai.Part{
+			{Text: "I should check the connection count"},
+			{FunctionCall: &genai.FunctionCall{Name: "get_connection_count"}},
+		},
+	}}, nil)
+	if resp != nil || err != nil {
+		t.Errorf("text+function call: got (%v, %v), want (nil, nil)", resp, err)
 	}
 }
 
