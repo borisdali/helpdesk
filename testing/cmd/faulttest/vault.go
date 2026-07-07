@@ -4531,17 +4531,18 @@ func vaultCalibration(args []string) {
 
 	// Prominent data quality banner before the table when human coverage is low.
 	if report.TotalRuns > 0 && (report.HumanRuns == 0 || float64(report.HumanRuns)/float64(report.TotalRuns) < 0.5) {
+		bl := func(s string) { fmt.Printf("│%-69s│\n", s) }
 		fmt.Println("┌─────────────────────────────────────────────────────────────────────┐")
 		if report.HumanRuns == 0 {
-			fmt.Printf("│ ⚠  Data quality: 0 of %d run(s) have human operator feedback.       \n", report.TotalRuns)
+			bl(fmt.Sprintf(" ⚠  Data quality: 0 of %d run(s) have human operator feedback.", report.TotalRuns))
 		} else {
-			fmt.Printf("│ ⚠  Data quality: only %d of %d run(s) have human operator feedback.  \n", report.HumanRuns, report.TotalRuns)
+			bl(fmt.Sprintf(" ⚠  Data quality: only %d of %d run(s) have human operator feedback.", report.HumanRuns, report.TotalRuns))
 		}
-		fmt.Println("│    This table measures self-consistency (LLM judge vs. itself),")
-		fmt.Println("│    not calibration against human judgment. To build a meaningful")
-		fmt.Println("│    calibration dataset, run faulttest interactively (without")
-		fmt.Println("│    --approval-mode force) or submit feedback via:")
-		fmt.Println("│      faulttest vault feedback <run-id> --gateway $GW --api-key $KEY")
+		bl("    This table measures self-consistency (LLM judge vs. itself),")
+		bl("    not calibration against human judgment. To build a meaningful")
+		bl("    calibration dataset, run faulttest interactively (without")
+		bl("    --approval-mode force) or submit feedback via:")
+		bl("      faulttest vault feedback <run-id> --gateway $GW --api-key $KEY")
 		fmt.Println("└─────────────────────────────────────────────────────────────────────┘")
 		fmt.Println()
 	}

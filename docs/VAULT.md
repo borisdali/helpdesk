@@ -723,6 +723,21 @@ CONFIDENCE: value`) — those runs have no confidence score at all and do not ap
 
 The remediation section only appears when there are runs with both a non-zero `remediation_judge_score` and operator remediation feedback (`feedback_type: "remediation"`).
 
+**Data quality banner.** When the table exists but human operator verdicts are absent or sparse (zero human-sourced feedback rows, or fewer than 50% of runs have human verdicts), `vault calibration` prints a warning box before the table:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ ⚠  Data quality: 0 of 3 run(s) have human operator feedback.        │
+│    This table measures self-consistency (LLM judge vs. itself),     │
+│    not calibration against human judgment. To build a meaningful    │
+│    calibration dataset, run faulttest interactively (without        │
+│    --approval-mode force) or submit feedback via:                   │
+│      faulttest vault feedback <run-id> --gateway $GW --api-key $KEY │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+This fires when all feedback rows carry `feedback_source: "auto_judge"` — verdicts derived from the LLM judge's score rather than a human operator confirming the outcome. Auto-judge feedback is still useful for catching obvious regressions, but it is self-consistency, not calibration: the judge is grading itself. The banner disappears once at least 50% of runs have a human-submitted verdict.
+
 Calibration is determined by comparing `ACCURACY` against the midpoint of each band:
 
 | Band | Expected accuracy | WELL_CALIBRATED range |
