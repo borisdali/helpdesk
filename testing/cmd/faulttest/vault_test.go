@@ -2321,6 +2321,351 @@ func TestVaultHistory_SendsAuth(t *testing.T) {
 	}
 }
 
+// ── pct ───────────────────────────────────────────────────────────────────────
+
+func TestPct(t *testing.T) {
+	tests := []struct{ in float64; want string }{
+		{0.0, "0%"},
+		{1.0, "100%"},
+		{0.5, "50%"},
+		{0.876, "88%"},
+		{0.995, "100%"},
+		{0.004, "0%"},
+	}
+	for _, tt := range tests {
+		if got := pct(tt.in); got != tt.want {
+			t.Errorf("pct(%v) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// ── max ───────────────────────────────────────────────────────────────────────
+
+func TestMax(t *testing.T) {
+	if got := max(3, 7); got != 7 {
+		t.Errorf("max(3,7) = %d, want 7", got)
+	}
+	if got := max(9, 2); got != 9 {
+		t.Errorf("max(9,2) = %d, want 9", got)
+	}
+	if got := max(5, 5); got != 5 {
+		t.Errorf("max(5,5) = %d, want 5", got)
+	}
+}
+
+// ── faultFromTraceID ──────────────────────────────────────────────────────────
+
+func TestFaultFromTraceID(t *testing.T) {
+	tests := []struct {
+		name    string
+		traceID string
+		want    string
+	}{
+		{
+			"standard faulttest trace with run counter",
+			"faulttest-a1b2c3d4-db-max-connections-r1",
+			"db-max-connections",
+		},
+		{
+			"no run counter suffix",
+			"faulttest-a1b2c3d4-pbs-vacuum-bloat",
+			"pbs-vacuum-bloat",
+		},
+		{
+			"missing faulttest prefix returns empty",
+			"tr_abc123def",
+			"",
+		},
+		{
+			"empty string returns empty",
+			"",
+			"",
+		},
+		{
+			"bare prefix with no rest returns empty",
+			"faulttest-",
+			"",
+		},
+		{
+			"multi-segment fault id preserved",
+			"faulttest-deadbeef-k8s-pod-crash-loop-r3",
+			"k8s-pod-crash-loop",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := faultFromTraceID(tt.traceID); got != tt.want {
+				t.Errorf("faultFromTraceID(%q) = %q, want %q", tt.traceID, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── formatRemediationOutcome ──────────────────────────────────────────────────
+
+func TestFormatRemediationOutcome(t *testing.T) {
+	t.Run("nil run returns dash", func(t *testing.T) {
+		if got := formatRemediationOutcome(nil); got != "–" {
+			t.Errorf("got %q, want –", got)
+		}
+	})
+
+	t.Run("outcome with duration under 60s", func(t *testing.T) {
+		r := &incidentRun{
+			Outcome:     "resolved",
+			StartedAt:   "2026-06-01T10:00:00Z",
+			CompletedAt: "2026-06-01T10:00:08Z",
+		}
+		got := formatRemediationOutcome(r)
+		if got != "resolved 8.0s" {
+			t.Errorf("got %q, want 'resolved 8.0s'", got)
+		}
+	})
+
+	t.Run("outcome with duration over 60s shows minutes", func(t *testing.T) {
+		r := &incidentRun{
+			Outcome:     "resolved",
+			StartedAt:   "2026-06-01T10:00:00Z",
+			CompletedAt: "2026-06-01T10:02:00Z",
+		}
+		got := formatRemediationOutcome(r)
+		if got != "resolved 2m" {
+			t.Errorf("got %q, want 'resolved 2m'", got)
+		}
+	})
+
+	t.Run("empty outcome falls back to unknown", func(t *testing.T) {
+		r := &incidentRun{Outcome: ""}
+		if got := formatRemediationOutcome(r); got != "unknown" {
+			t.Errorf("got %q, want unknown", got)
+		}
+	})
+
+	t.Run("missing timestamps returns outcome only", func(t *testing.T) {
+		r := &incidentRun{Outcome: "abandoned"}
+		if got := formatRemediationOutcome(r); got != "abandoned" {
+			t.Errorf("got %q, want abandoned", got)
+		}
+	})
+
+	t.Run("invalid timestamps returns outcome only", func(t *testing.T) {
+		r := &incidentRun{
+			Outcome:     "escalated",
+			StartedAt:   "not-a-date",
+			CompletedAt: "also-not-a-date",
+		}
+		if got := formatRemediationOutcome(r); got != "escalated" {
+			t.Errorf("got %q, want escalated", got)
+		}
+	})
+}
+
+// ── scanFlag ──────────────────────────────────────────────────────────────────
+
+func TestScanFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		flag       string
+		defaultVal string
+		want       string
+	}{
+		{
+			"equals form",
+			[]string{"--gateway=http://localhost:8080", "--other=x"},
+			"gateway", "", "http://localhost:8080",
+		},
+		{
+			"space form",
+			[]string{"--gateway", "http://localhost:9090"},
+			"gateway", "", "http://localhost:9090",
+		},
+		{
+			"single dash space form",
+			[]string{"-gateway", "http://localhost:7070"},
+			"gateway", "", "http://localhost:7070",
+		},
+		{
+			"not present returns default",
+			[]string{"--other=foo"},
+			"gateway", "http://default:8080", "http://default:8080",
+		},
+		{
+			"empty args returns default",
+			nil,
+			"gateway", "fallback", "fallback",
+		},
+		{
+			"flag at end with no value returns default",
+			[]string{"--gateway"},
+			"gateway", "def", "def",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scanFlag(tt.args, tt.flag, tt.defaultVal)
+			if got != tt.want {
+				t.Errorf("scanFlag(%v, %q, %q) = %q, want %q", tt.args, tt.flag, tt.defaultVal, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── fetchStabilityCert ────────────────────────────────────────────────────────
+
+func TestFetchStabilityCert_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/fault-stability/db-max-connections" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":   "db-max-connections",
+			"fault_name": "DB Max Connections",
+			"n_runs":     5,
+			"pass_rate":  0.8,
+			"is_stable":  true,
+		})
+	}))
+	defer srv.Close()
+
+	got := fetchStabilityCert(srv.URL, "", "db-max-connections")
+	if got == nil {
+		t.Fatal("expected cert, got nil")
+	}
+	if got.FaultID != "db-max-connections" {
+		t.Errorf("FaultID = %q, want db-max-connections", got.FaultID)
+	}
+	if !got.IsStable {
+		t.Error("IsStable = false, want true")
+	}
+	if got.NRuns != 5 {
+		t.Errorf("NRuns = %d, want 5", got.NRuns)
+	}
+}
+
+func TestFetchStabilityCert_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if got := fetchStabilityCert(srv.URL, "", "unknown-fault"); got != nil {
+		t.Errorf("expected nil for 404, got %+v", got)
+	}
+}
+
+func TestFetchStabilityCert_NetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close() // closed immediately; dial will be refused
+	if got := fetchStabilityCert(url, "", "any"); got != nil {
+		t.Errorf("expected nil for network error, got %+v", got)
+	}
+}
+
+func TestFetchStabilityCert_EmptyGatewayURL(t *testing.T) {
+	if got := fetchStabilityCert("", "", "any"); got != nil {
+		t.Errorf("expected nil for empty URL, got %+v", got)
+	}
+}
+
+func TestFetchStabilityCert_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"fault_id": "x"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchStabilityCert(srv.URL, "tok-cert", "x")
+	if gotAuth != "Bearer tok-cert" {
+		t.Errorf("Authorization = %q, want Bearer tok-cert", gotAuth)
+	}
+}
+
+// ── postStabilityCert ─────────────────────────────────────────────────────────
+
+func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{
+		GatewayURL:     srv.URL,
+		DiagnosisModel: "claude-sonnet-4-6",
+		JudgeModel:     "claude-opus-4-8",
+	}
+	f := Failure{
+		ID:                        "db-max-connections",
+		Name:                      "DB Max Connections",
+		DiagnosisPlaybookSeriesID: "pbs_db_triage",
+	}
+	sr := StabilityReport{
+		FailureID:   "db-max-connections",
+		FailureName: "DB Max Connections",
+		N:           5,
+		PassCount:   4,
+	}
+	postStabilityCert(context.Background(), cfg, f, sr)
+
+	if gotBody["fault_id"] != "db-max-connections" {
+		t.Errorf("fault_id = %v, want db-max-connections", gotBody["fault_id"])
+	}
+	if gotBody["playbook_series_id"] != "pbs_db_triage" {
+		t.Errorf("playbook_series_id = %v, want pbs_db_triage", gotBody["playbook_series_id"])
+	}
+	if gotBody["diagnosis_model"] != "claude-sonnet-4-6" {
+		t.Errorf("diagnosis_model = %v, want claude-sonnet-4-6", gotBody["diagnosis_model"])
+	}
+	if gotBody["judge_model"] != "claude-opus-4-8" {
+		t.Errorf("judge_model = %v, want claude-opus-4-8", gotBody["judge_model"])
+	}
+	if gotBody["n_runs"] != float64(5) {
+		t.Errorf("n_runs = %v, want 5", gotBody["n_runs"])
+	}
+}
+
+func TestPostStabilityCert_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "tok-stability"}
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{})
+	if gotAuth != "Bearer tok-stability" {
+		t.Errorf("Authorization = %q, want Bearer tok-stability", gotAuth)
+	}
+}
+
+func TestPostStabilityCert_NoopWhenEmptyGateway(t *testing.T) {
+	// Should not panic or dial anything when GatewayURL is empty.
+	cfg := &HarnessConfig{GatewayURL: ""}
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{})
+}
+
+func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	// Should log a warning but not panic.
+	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1})
+}
+
 // ── wrapLines ────────────────────────────────────────────────────────────────
 
 func TestWrapLines(t *testing.T) {
