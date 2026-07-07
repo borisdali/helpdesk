@@ -2796,7 +2796,60 @@ func fetchVersionStats(gatewayURL, apiKey, seriesID string) ([]versionStats, err
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
 	}
-	return body.Versions, nil
+	versions := body.Versions
+
+	// Append pending drafts that have a judge verdict but no runs yet.
+	// These show in vault versions as a preview of the next activation.
+	draftURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&series_id=" + seriesID
+	draftReq, _ := http.NewRequest(http.MethodGet, draftURL, nil)
+	if apiKey != "" {
+		draftReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if draftResp, err := (&http.Client{Timeout: 10 * time.Second}).Do(draftReq); err == nil {
+		defer draftResp.Body.Close()
+		var drafts struct {
+			Playbooks []struct {
+				PlaybookID   string `json:"playbook_id"`
+				Version      string `json:"version"`
+				IsActive     bool   `json:"is_active"`
+				JudgeVerdict string `json:"judge_verdict"`
+				JudgeModel   string `json:"judge_model"`
+				JudgeAt      string `json:"judge_at"`
+			} `json:"playbooks"`
+		}
+		if json.NewDecoder(draftResp.Body).Decode(&drafts) == nil {
+			// Index playbooks already in the stats slice so we don't double-add.
+			inStats := map[string]bool{}
+			for _, v := range versions {
+				if v.PlaybookID != "" {
+					inStats[v.PlaybookID] = true
+				}
+			}
+			for _, d := range drafts.Playbooks {
+				if d.JudgeVerdict == "" || inStats[d.PlaybookID] {
+					continue
+				}
+				ver := d.Version
+				if ver == "" {
+					if d.IsActive {
+						ver = "(active, no runs)"
+					} else {
+						ver = "(pending)"
+					}
+				}
+				versions = append(versions, versionStats{
+					PlaybookID:   d.PlaybookID,
+					Version:      ver,
+					IsActive:     d.IsActive,
+					JudgeVerdict: d.JudgeVerdict,
+					JudgeModel:   d.JudgeModel,
+					JudgeAt:      d.JudgeAt,
+				})
+			}
+		}
+	}
+
+	return versions, nil
 }
 
 // formatDuration formats seconds as a compact string: 42s / 1m23s / 1h5m.
@@ -3096,26 +3149,61 @@ func vaultJudgeAccuracy(args []string) {
 		SuccessRate  float64
 	}
 
+	// Build rows by reading judge verdicts directly from each playbook in the
+	// series — this includes drafts (no runs yet). Run stats are fetched
+	// separately and merged by playbook_id so unactivated drafts show TotalRuns=0.
 	var rows []judgeRow
 	for _, sid := range seriesIDs {
-		versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+		// Fetch all playbooks in this series (active and draft) to read verdicts.
+		pbURL := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&series_id=" + sid
+		pbReq, _ := http.NewRequest(http.MethodGet, pbURL, nil)
+		if cfg.GatewayAPIKey != "" {
+			pbReq.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
+		}
+		pbResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(pbReq)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not fetch stats for %s: %v\n", sid, err)
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch playbooks for %s: %v\n", sid, err)
 			continue
 		}
-		for _, v := range versions {
-			if v.JudgeVerdict == "" {
+		var pbBody struct {
+			Playbooks []struct {
+				PlaybookID   string `json:"playbook_id"`
+				Version      string `json:"version"`
+				JudgeVerdict string `json:"judge_verdict"`
+				JudgeModel   string `json:"judge_model"`
+				JudgeAt      string `json:"judge_at"`
+			} `json:"playbooks"`
+		}
+		if err := json.NewDecoder(pbResp.Body).Decode(&pbBody); err != nil {
+			pbResp.Body.Close()
+			continue
+		}
+		pbResp.Body.Close()
+
+		// Build a map of playbook_id → run stats for enrichment.
+		runsByPB := map[string]versionStats{}
+		if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, sid); err == nil {
+			for _, v := range versions {
+				runsByPB[v.PlaybookID] = v
+			}
+		}
+
+		for _, pb := range pbBody.Playbooks {
+			if pb.JudgeVerdict == "" {
 				continue
 			}
-			rows = append(rows, judgeRow{
+			row := judgeRow{
 				SeriesID:     sid,
-				Version:      v.Version,
-				JudgeVerdict: v.JudgeVerdict,
-				JudgeModel:   v.JudgeModel,
-				JudgeAt:      v.JudgeAt,
-				TotalRuns:    v.TotalRuns,
-				SuccessRate:  v.ResolutionRate + v.TransitionRate,
-			})
+				Version:      pb.Version,
+				JudgeVerdict: pb.JudgeVerdict,
+				JudgeModel:   pb.JudgeModel,
+				JudgeAt:      pb.JudgeAt,
+			}
+			if v, ok := runsByPB[pb.PlaybookID]; ok {
+				row.TotalRuns = v.TotalRuns
+				row.SuccessRate = v.ResolutionRate + v.TransitionRate
+			}
+			rows = append(rows, row)
 		}
 	}
 

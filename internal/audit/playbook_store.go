@@ -433,6 +433,26 @@ func (s *PlaybookStore) Activate(ctx context.Context, playbookID string) error {
 		return ErrSystemPlaybook
 	}
 
+	// If the draft has no version, auto-assign the next one from the current active.
+	var draftVersion string
+	if err = tx.QueryRowContext(ctx,
+		`SELECT version FROM playbooks WHERE playbook_id = ?`, playbookID).
+		Scan(&draftVersion); err != nil {
+		return err
+	}
+	if draftVersion == "" {
+		var currentVersion string
+		_ = tx.QueryRowContext(ctx,
+			`SELECT version FROM playbooks WHERE series_id = ? AND is_active = 1`, seriesID).
+			Scan(&currentVersion)
+		if next := nextVersion(currentVersion); next != "" {
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE playbooks SET version = ? WHERE playbook_id = ?`, next, playbookID); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Deactivate all other versions in this series.
 	if _, err = tx.ExecContext(ctx,
 		`UPDATE playbooks SET is_active=0 WHERE series_id=? AND playbook_id != ?`,
@@ -446,6 +466,25 @@ func (s *PlaybookStore) Activate(ctx context.Context, playbookID string) error {
 	}
 
 	return tx.Commit()
+}
+
+// nextVersion increments the minor component of a "major.minor" version string.
+// "1.4" → "1.5", "2" → "2.1", "" → "1.0". Returns "" if the format is unrecognised.
+func nextVersion(current string) string {
+	if current == "" {
+		return "1.0"
+	}
+	parts := strings.SplitN(current, ".", 2)
+	if len(parts) == 1 {
+		// Single integer like "2" → "2.1"
+		return current + ".1"
+	}
+	major := parts[0]
+	var minor int
+	if _, err := fmt.Sscanf(parts[1], "%d", &minor); err != nil {
+		return "" // unrecognised format; leave version blank
+	}
+	return fmt.Sprintf("%s.%d", major, minor+1)
 }
 
 // ActivateSystem is like Activate but works for system playbooks. Used by the seeder.
