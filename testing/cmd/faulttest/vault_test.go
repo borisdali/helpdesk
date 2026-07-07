@@ -2320,3 +2320,299 @@ func TestVaultHistory_SendsAuth(t *testing.T) {
 		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
 	}
 }
+
+// ── wrapLines ────────────────────────────────────────────────────────────────
+
+func TestWrapLines(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		maxWidth int
+		want     []string
+	}{
+		{
+			"short text fits one line",
+			"hello world",
+			20,
+			[]string{"hello world"},
+		},
+		{
+			"wraps at word boundary",
+			"one two three four five",
+			13,
+			[]string{"one two three", "four five"},
+		},
+		{
+			"empty string returns single empty element",
+			"",
+			10,
+			[]string{""},
+		},
+		{
+			"newline in source creates new paragraph",
+			"first sentence.\nsecond sentence.",
+			40,
+			[]string{"first sentence.", "second sentence."},
+		},
+		{
+			"blank line between paragraphs is skipped",
+			"para one.\n\npara two.",
+			40,
+			[]string{"para one.", "para two."},
+		},
+		{
+			"long word is not split",
+			"superlongwordthatexceedswidth",
+			10,
+			[]string{"superlongwordthatexceedswidth"},
+		},
+		{
+			"multi-line wrapping across paragraph",
+			"I need to check the connection before proceeding with the query.",
+			30,
+			[]string{
+				"I need to check the connection",
+				"before proceeding with the",
+				"query.",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapLines(tt.text, tt.maxWidth)
+			if len(got) != len(tt.want) {
+				t.Fatalf("wrapLines(%q, %d) = %v (len %d), want %v (len %d)",
+					tt.text, tt.maxWidth, got, len(got), tt.want, len(tt.want))
+			}
+			for i, line := range tt.want {
+				if got[i] != line {
+					t.Errorf("line[%d] = %q, want %q", i, got[i], line)
+				}
+			}
+		})
+	}
+}
+
+// ── fetchRunEvents ────────────────────────────────────────────────────────────
+
+func twoEvents() []journeyEvent {
+	return []journeyEvent{
+		{
+			EventID:   "rsn_001",
+			EventType: "agent_reasoning",
+			AgentReasoning: &journeyReasoning{
+				Reasoning: "I will check the connection first.",
+				ToolCalls: []string{"check_connection"},
+			},
+		},
+		{
+			EventID:   "evt_001",
+			EventType: "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "check_connection"},
+		},
+	}
+}
+
+func TestFetchRunEvents_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/fleet/playbook-runs/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(twoEvents()) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunEvents(srv.URL, "", "plr_abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].EventType != "agent_reasoning" {
+		t.Errorf("event[0].EventType = %q, want agent_reasoning", got[0].EventType)
+	}
+	if got[1].EventType != "tool_execution" {
+		t.Errorf("event[1].EventType = %q, want tool_execution", got[1].EventType)
+	}
+}
+
+func TestFetchRunEvents_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunEvents(srv.URL, "", "plr_empty")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchRunEvents_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchRunEvents(srv.URL, "", "plr_x")
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
+	}
+}
+
+func TestFetchRunEvents_NetworkError(t *testing.T) {
+	_, err := fetchRunEvents("http://127.0.0.1:19997", "", "plr_x")
+	if err == nil {
+		t.Fatal("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchRunEvents_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunEvents(srv.URL, "tok-abc", "plr_x") //nolint:errcheck
+	if gotAuth != "Bearer tok-abc" {
+		t.Errorf("Authorization = %q, want Bearer tok-abc", gotAuth)
+	}
+}
+
+func TestFetchRunEvents_RequestsCorrectEventTypes(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunEvents(srv.URL, "", "plr_x") //nolint:errcheck
+	types := gotQuery.Get("types")
+	if !strings.Contains(types, "agent_reasoning") {
+		t.Errorf("types = %q, want to contain agent_reasoning", types)
+	}
+	if !strings.Contains(types, "tool_execution") {
+		t.Errorf("types = %q, want to contain tool_execution", types)
+	}
+}
+
+func TestFetchRunEvents_UsesRunIDInPath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunEvents(srv.URL, "", "plr_xyz999") //nolint:errcheck
+	if !strings.Contains(gotPath, "plr_xyz999") {
+		t.Errorf("path = %q, want plr_xyz999 in path", gotPath)
+	}
+}
+
+// ── printReasoningTrace ───────────────────────────────────────────────────────
+
+func TestPrintReasoningTrace_Empty(t *testing.T) {
+	out := captureStdout(func() { printReasoningTrace(nil) })
+	if !strings.Contains(out, "no events found") {
+		t.Errorf("empty events: got %q, want 'no events found'", out)
+	}
+}
+
+func TestPrintReasoningTrace_ReasoningBeforeTool(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType: "agent_reasoning",
+			AgentReasoning: &journeyReasoning{
+				Reasoning: "I will check the connection first.",
+				ToolCalls: []string{"check_connection"},
+			},
+		},
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "check_connection"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if !strings.Contains(out, "I will check the connection first.") {
+		t.Errorf("reasoning text missing from output: %q", out)
+	}
+	if !strings.Contains(out, "check_connection") {
+		t.Errorf("tool name missing from output: %q", out)
+	}
+	if !strings.Contains(out, "[ok]") {
+		t.Errorf("status [ok] missing: %q", out)
+	}
+	if strings.Contains(out, "no preceding reasoning") {
+		t.Errorf("unexpected orphan annotation for covered tool: %q", out)
+	}
+}
+
+func TestPrintReasoningTrace_OrphanTool(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "vacuum_table"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if !strings.Contains(out, "vacuum_table") {
+		t.Errorf("tool name missing: %q", out)
+	}
+	if !strings.Contains(out, "no preceding reasoning") {
+		t.Errorf("orphan annotation missing for uncovered tool: %q", out)
+	}
+}
+
+func TestPrintReasoningTrace_ToolError(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "cancel_query", Error: "connection refused"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if !strings.Contains(out, "[error]") {
+		t.Errorf("error status missing: %q", out)
+	}
+}
+
+func TestPrintReasoningTrace_MultipleToolsOneSummary(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType: "agent_reasoning",
+			AgentReasoning: &journeyReasoning{
+				Reasoning: "Checking both stats and connection.",
+				ToolCalls: []string{"check_connection", "get_table_stats"},
+			},
+		},
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "check_connection"},
+		},
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "get_table_stats"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if strings.Contains(out, "no preceding reasoning") {
+		t.Errorf("unexpected orphan annotation: both tools were in reasoning.ToolCalls: %q", out)
+	}
+	if !strings.Contains(out, "check_connection") || !strings.Contains(out, "get_table_stats") {
+		t.Errorf("one or both tool names missing: %q", out)
+	}
+}
