@@ -1651,6 +1651,7 @@ type testDraft = struct {
 	SeriesID   string `json:"series_id"`
 	Version    string `json:"version"`
 	Name       string `json:"name"`
+	Source     string `json:"source"`
 	CreatedAt  string `json:"created_at"`
 }
 
