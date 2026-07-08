@@ -1162,6 +1162,8 @@ Compares consistency certification results across two diagnosis models, fault by
 
 The command is vendor-agnostic. `model-a` and `model-b` are treated as opaque strings that must match the `diagnosis_model` field stored when certs were generated. Any combination of providers works: Claude → Claude, Claude → Gemini, Gemini → a self-hosted model, and so on.
 
+**What the cert measures — and what it doesn't.** `cert-compare` compares *triage diagnosis certs* only: did the agent consistently identify the correct root cause, call the expected tools, and produce the expected diagnostic keywords? It does not cover remediation quality (did the playbook fix the database?), resolution rate, recovery time, or operator-confirmed accuracy. A STABLE triage cert is a necessary condition for model promotion, not a sufficient one. Remediation cert comparison is a planned extension.
+
 **Prerequisite:** stability certs must exist for both models. Generate them with `faulttest run --repeat N` with each model configured as the diagnosis model. The results are posted to auditd automatically when `--gateway` is configured.
 
 ```bash

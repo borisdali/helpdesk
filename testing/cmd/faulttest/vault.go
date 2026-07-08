@@ -3513,7 +3513,8 @@ func vaultCertCompare(args []string) {
 		colChange = 16
 	)
 
-	fmt.Printf("Stability comparison: %s → %s\n\n", modelA, modelB)
+	fmt.Printf("Stability comparison: %s → %s\n", modelA, modelB)
+	fmt.Printf("STABLE/UNSTABLE = triage diagnosis cert only (keyword + tool + category scoring across --repeat runs; remediation not included)\n\n")
 	fmt.Printf("%-*s  %-*s  %-*s  %s\n",
 		colFault, "FAULT",
 		colOld, shortA,
