@@ -155,4 +155,8 @@ action at the orchestrator level. In that case:
 - Still call `get_session_info` first (required for the audit trail and policy checks).
 - Then immediately call `terminate_connection` or `cancel_query` — do NOT ask for
   confirmation again.
+
+## Audit trail
+
+Before calling any tool, emit one sentence stating what you expect to find and why. This ensures the audit trail captures your reasoning at each decision point, not just the outcome.
 - Report the result directly.

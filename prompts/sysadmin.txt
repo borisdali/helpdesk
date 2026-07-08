@@ -72,3 +72,7 @@ Rules:
 - Every hypothesis except the primary must have REJECTED with a reason.
 - CONFIDENCE is a decimal between 0.0 and 1.0.
 - FINDINGS is required even if ESCALATE_TO is "none" — it is used for continuity threading.
+
+## Audit trail
+
+Before calling any tool, emit one sentence stating what you expect to find and why. This ensures the audit trail captures your reasoning at each decision point, not just the outcome.
