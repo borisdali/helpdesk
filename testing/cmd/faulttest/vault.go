@@ -3513,7 +3513,7 @@ func vaultCertCompare(args []string) {
 		colChange = 16
 	)
 
-	fmt.Printf("\nStability comparison: %s → %s\n\n", modelA, modelB)
+	fmt.Printf("Stability comparison: %s → %s\n\n", modelA, modelB)
 	fmt.Printf("%-*s  %-*s  %-*s  %s\n",
 		colFault, "FAULT",
 		colOld, shortA,
@@ -3532,10 +3532,10 @@ func vaultCertCompare(args []string) {
 			colNew, newStr,
 			change,
 		)
-		// For regressions: show pass-rate delta as context.
+		// For regressions: show diagnosis-rate delta as context.
 		if r.oldCert != nil && r.newCert != nil && r.oldCert.isStable && !r.newCert.isStable {
 			delta := r.newCert.passRate - r.oldCert.passRate
-			fmt.Printf("  %s pass rate: %.0f%% → %.0f%%  (Δ%+.0f%%)\n",
+			fmt.Printf("  %s diag_rate: %.0f%% → %.0f%%  (Δ%+.0f%%)\n",
 				r.faultID, r.oldCert.passRate*100, r.newCert.passRate*100, delta*100)
 		}
 	}

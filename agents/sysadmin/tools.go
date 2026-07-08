@@ -351,6 +351,16 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 		logOutput = strings.Join(filtered, "\n")
 	}
 
+	// When docker/podman logs return nothing, PostgreSQL is almost certainly
+	// configured with logging_collector=on, which silences container stdout.
+	// Tell the agent explicitly — an empty result here is not a dead end,
+	// it is the signal to call read_pg_log_file next.
+	if logOutput == "" && runtime != "" {
+		logOutput = "(no output in container stdout/stderr — logging_collector=on is likely active, " +
+			"which redirects all PostgreSQL output to an on-disk log file. " +
+			"Call read_pg_log_file to read the PostgreSQL log.)"
+	}
+
 	linesReturned := 0
 	if logOutput != "" {
 		linesReturned = len(strings.Split(logOutput, "\n"))
