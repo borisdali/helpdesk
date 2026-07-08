@@ -21,7 +21,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault list](#vault-list)
    - [vault accuracy](#vault-accuracy)
    - [vault incidents](#vault-incidents)
-   - [vault journey](#vault-journey)
+   - [vault journey](#vault-journey) — [`--detail`: reasoning interleaved with tool calls](#--detail-reasoning-interleaved-with-tool-calls)
    - [vault status](#vault-status)
    - [vault drift](#vault-drift)
    - [vault versions](#vault-versions)
@@ -502,6 +502,10 @@ faulttest vault journey --category database --outcome resolved \
 # Drill into a specific trace
 faulttest vault journey tr_9a4f2b1e \
   --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Drill in with reasoning interleaved (requires an incident-linked journey)
+faulttest vault journey tr_9a4f2b1e --detail \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
 ```
 
 `vault journey` is the audit-trail complement to `vault incidents`. Where `vault incidents` shows WHY the agent reached a conclusion (the incident narrative — hypotheses, confidence, evidence), `vault journey` shows WHAT the agent actually did (tool calls, delegations, policy decisions, blast-radius approvals).
@@ -539,6 +543,7 @@ A `!` suffix on a TOOLS entry (or anywhere on the row) means `has_mismatch=true`
 | `--category` | (all) | Filter by `database`, `kubernetes`, or `host` |
 | `--outcome` | (all) | Filter by outcome: `resolved`, `abandoned`, `denied`, `error`, etc. |
 | `--incident` | false | Show only journeys that are linked to an incident run (`incident_run_id` non-empty) |
+| `--detail` | false | Interleave agent reasoning with tool calls in the EXECUTION TRACE section (see below); requires the journey to be incident-linked |
 
 **Detail mode** (positional `<trace_id>` argument) shows the full journey:
 
@@ -577,6 +582,54 @@ INCIDENT LINK
 ```
 
 The INCIDENT LINK section appears when the journey's `trace_id` is associated with a playbook run. Use the navigation hint (`→ vault incidents <plr_>`) to jump to the incident narrative for the WHY behind these tool calls.
+
+#### `--detail`: reasoning interleaved with tool calls
+
+Pass `--detail` on any incident-linked journey to replace the flat TOOLS USED list with an EXECUTION TRACE that interleaves the agent's deliberation text with each tool call it produced:
+
+```
+faulttest vault journey tr_9a4f2b1e --detail \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+```
+JOURNEY  tr_9a4f2b1e
+──────────────────────────────────────────────────────────────────────────
+  Started:           2026-06-27 14:30:12 UTC
+  ...
+
+EXECUTION TRACE
+──────────────────────────────────────────────────────────────────────────
+  "I need to check the current session distribution before deciding
+   whether to terminate idle connections — get_db_info will give me
+   the connection limit, get_session_info the breakdown."
+  ► get_db_info                          [ok]
+  ► get_session_info                     [ok]
+
+  "108 connections are active, 96 of them idle. The limit is 100 and we
+   are already over it. Safe to terminate idle sessions older than 5 min."
+  ► kill_idle_connections                [ok]
+
+INCIDENT LINK
+──────────────────────────────────────────────────────────────────────────
+  Run ID:            plr_a3f7c1b2
+
+  → vault incidents plr_a3f7c1b2
+```
+
+Each reasoning block is the verbatim text the model emitted before deciding which tool to call next, stored as an `agent_reasoning` audit event by the `NewReasoningCallback` hook in the agent server. The block is displayed as a quoted paragraph; long lines are word-wrapped at 64 characters.
+
+Tool calls are shown as `► name [ok]` or `► name [error]`. If a tool call has no preceding reasoning event in the audit trail — for example, because the agent batched multiple tools in a single turn without emitting intermediate text — a `(no preceding reasoning captured)` annotation appears on the next line.
+
+**When `--detail` is not available:**
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Journey is not incident-linked (`INCIDENT` column is `–`) | Falls back to the flat TOOLS USED list; a note explains that `--detail` requires an incident run ID |
+| Incident-linked but no `agent_reasoning` events in the run | EXECUTION TRACE section shows only the tool calls with `(no preceding reasoning captured)` on each |
+| Gateway returns an error fetching events | A warning is printed and the flat TOOLS USED list is shown instead |
+
+`--detail` fetches events from `GET /api/v1/fleet/playbook-runs/{runID}/events?types=agent_reasoning,tool_execution&limit=500`. The gateway endpoint requires `--gateway` and `--api-key` to be set. `agent_reasoning` events are only present for runs where the agent server was started with the reasoning callback enabled (the default for all aiHelpDesk agents since v0.19).
 
 ### vault status
 
