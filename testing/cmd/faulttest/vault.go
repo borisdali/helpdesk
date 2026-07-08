@@ -2129,19 +2129,21 @@ func vaultJourney(args []string) {
 		colDate     = 16
 		colDur      = 7
 		colAgent    = 25
+		colOrigin   = 12
 		colOutcome  = 17
 		colIncident = 14
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colTrace, "TRACE ID",
 		colDate, "STARTED",
 		colDur, "DUR",
 		colAgent, "AGENT",
+		colOrigin, "ORIGIN",
 		colOutcome, "OUTCOME",
 		colIncident, "INCIDENT",
 		"TOOLS",
 	)
-	fmt.Println(strings.Repeat("─", colTrace+2+colDate+2+colDur+2+colAgent+2+colOutcome+2+colIncident+2+40))
+	fmt.Println(strings.Repeat("─", colTrace+2+colDate+2+colDur+2+colAgent+2+colOrigin+2+colOutcome+2+colIncident+2+40))
 
 	for _, j := range journeys {
 		date := j.StartedAt
@@ -2167,6 +2169,11 @@ func vaultJourney(args []string) {
 		}
 		if agent == "" {
 			agent = "–"
+		}
+
+		originStr := j.Origin
+		if originStr == "" {
+			originStr = "–"
 		}
 
 		outcomeStr := j.Outcome
@@ -2196,11 +2203,12 @@ func vaultJourney(args []string) {
 			traceDisplay = traceDisplay[:colTrace]
 		}
 
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s%s\n",
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s%s\n",
 			colTrace, traceDisplay,
 			colDate, date,
 			colDur, durStr,
 			colAgent, agent,
+			colOrigin, originStr,
 			colOutcome, outcomeStr,
 			colIncident, incidentStr,
 			toolStr, mismatchFlag,
