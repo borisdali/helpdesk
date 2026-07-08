@@ -108,7 +108,16 @@ There are three paths by which operational knowledge enters the Vault:
 
 ### 1. System Playbooks (shipped)
 
-At aiHelpDesk Beta we ship 7 expert-authored system Playbooks that are seeded into auditd on startup. They cover the most common PostgreSQL triage scenarios out of the box — vacuum, slow queries, connection exhaustion, replication lag, database-down recovery and PITR restore.
+aiHelpDesk ships 34 expert-authored system Playbooks that are seeded into auditd on startup, spanning three domains:
+
+**PostgreSQL (24 playbooks — 14 triage, 8 remediation, 2 recovery)**  
+Connection exhaustion, lock contention and lock chains, slow queries, vacuum and bloat, high cache miss ratio, replication lag, stale replication slots, WAL disk full, checkpoint and bgwriter pressure, disk pressure, authentication failures, pg_hba.conf rejections, database-down restart, config recovery, and PITR restore.
+
+**Kubernetes (8 playbooks — 6 triage, 2 remediation)**  
+Pod crashes (OOMKill, CrashLoopBackOff), ImagePullBackOff, pods stuck in Pending, PVC provisioning failures, services with no endpoints, StatefulSets scaled to zero.
+
+**Host / Docker (2 playbooks — 1 triage, 1 remediation)**  
+Docker container inspection and container restart for host-managed database processes.
 
 These are read-only in the API (`PUT`/`DELETE` return 400) but can be cloned into a new custom version in the same series. See [PLAYBOOKS.md](PLAYBOOKS.md) for the full list and schema.
 
