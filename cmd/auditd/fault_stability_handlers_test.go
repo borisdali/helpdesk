@@ -211,3 +211,66 @@ func TestFaultStabilityHandlers_Upsert_Overwrites(t *testing.T) {
 		t.Errorf("NRuns: got %d, want 5", got.NRuns)
 	}
 }
+
+// TestFaultStabilityHandlers_List_MultiModel verifies that handleList returns one
+// row per (fault_id, diagnosis_model) pair — the data shape cert-compare depends on.
+// If the handler ever deduplicates by fault_id, cert-compare silently loses data.
+func TestFaultStabilityHandlers_List_MultiModel(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+
+	post := func(faultID, model string, stable bool) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"fault_id":        faultID,
+			"diagnosis_model": model,
+			"n_runs":          3,
+			"pass_rate":       map[bool]float64{true: 1.0, false: 0.33}[stable],
+			"is_stable":       stable,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/fleet/fault-stability", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.handleUpsert(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("POST %s/%s: got %d", faultID, model, rec.Code)
+		}
+	}
+
+	// Same fault, two models — the regression case for cert-compare.
+	post("db-lock-contention", "claude-sonnet-4-5", true)
+	post("db-lock-contention", "claude-sonnet-4-6", false)
+	// Different fault for good measure.
+	post("db-max-connections", "claude-sonnet-4-5", true)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability", nil)
+	rec := httptest.NewRecorder()
+	srv.handleList(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET list: got %d, want 200", rec.Code)
+	}
+
+	var result struct {
+		Certs []audit.FaultStabilityCert `json:"certs"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+
+	if len(result.Certs) != 3 {
+		t.Fatalf("got %d certs, want 3 (two models for db-lock-contention + one for db-max-connections)", len(result.Certs))
+	}
+
+	// Verify both model rows for db-lock-contention are present with correct stability.
+	stable := map[string]bool{}
+	for _, c := range result.Certs {
+		if c.FaultID == "db-lock-contention" {
+			stable[c.DiagnosisModel] = c.IsStable
+		}
+	}
+	if !stable["claude-sonnet-4-5"] {
+		t.Error("claude-sonnet-4-5 cert for db-lock-contention: want IsStable=true")
+	}
+	if stable["claude-sonnet-4-6"] {
+		t.Error("claude-sonnet-4-6 cert for db-lock-contention: want IsStable=false")
+	}
+}

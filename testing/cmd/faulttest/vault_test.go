@@ -2961,3 +2961,304 @@ func TestPrintReasoningTrace_MultipleToolsOneSummary(t *testing.T) {
 		t.Errorf("one or both tool names missing: %q", out)
 	}
 }
+
+// ── vault cert-compare ────────────────────────────────────────────────────
+
+func stableEntry() *certCompareEntry  { return &certCompareEntry{isStable: true, passRate: 1.0, nRuns: 3} }
+func unstableEntry() *certCompareEntry { return &certCompareEntry{isStable: false, passRate: 0.3, nRuns: 3} }
+
+func TestChangeLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		row  certCompareRow
+		want string
+	}{
+		{"regression", certCompareRow{oldCert: stableEntry(), newCert: unstableEntry()}, "⚠ REGRESSION"},
+		{"improvement", certCompareRow{oldCert: unstableEntry(), newCert: stableEntry()}, "✓ IMPROVEMENT"},
+		{"unchanged stable", certCompareRow{oldCert: stableEntry(), newCert: stableEntry()}, "—"},
+		{"unchanged unstable", certCompareRow{oldCert: unstableEntry(), newCert: unstableEntry()}, "—"},
+		{"old missing", certCompareRow{oldCert: nil, newCert: stableEntry()}, "? NOT RUN YET"},
+		{"new missing", certCompareRow{oldCert: stableEntry(), newCert: nil}, "? NOT RUN YET"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := changeLabel(tt.row); got != tt.want {
+				t.Errorf("changeLabel = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChangeOrder(t *testing.T) {
+	regression := certCompareRow{oldCert: stableEntry(), newCert: unstableEntry()}
+	improvement := certCompareRow{oldCert: unstableEntry(), newCert: stableEntry()}
+	stableStable := certCompareRow{oldCert: stableEntry(), newCert: stableEntry()}
+	unstableUnstable := certCompareRow{oldCert: unstableEntry(), newCert: unstableEntry()}
+	missing := certCompareRow{oldCert: stableEntry(), newCert: nil}
+
+	if changeOrder(regression) >= changeOrder(improvement) {
+		t.Error("regression should sort before improvement")
+	}
+	if changeOrder(improvement) >= changeOrder(stableStable) {
+		t.Error("improvement should sort before stable-stable")
+	}
+	if changeOrder(stableStable) >= changeOrder(unstableUnstable) {
+		t.Error("stable-stable should sort before unstable-unstable")
+	}
+	if changeOrder(unstableUnstable) >= changeOrder(missing) {
+		t.Error("unstable-unstable should sort before missing")
+	}
+}
+
+func TestCertStatusStr(t *testing.T) {
+	if got := certStatusStr(nil); got != "(no data)" {
+		t.Errorf("nil → %q, want \"(no data)\"", got)
+	}
+	if got := certStatusStr(stableEntry()); got != "STABLE" {
+		t.Errorf("stable → %q, want \"STABLE\"", got)
+	}
+	if got := certStatusStr(unstableEntry()); got != "UNSTABLE" {
+		t.Errorf("unstable → %q, want \"UNSTABLE\"", got)
+	}
+}
+
+func TestShortModelName(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"claude-sonnet-4-5", "sonnet-4-5"},
+		{"claude-opus-4-8", "opus-4-8"},
+		{"sonnet-4-5", "sonnet-4-5"},   // already short — returned as-is
+		{"claude", "claude"},           // single token
+	}
+	for _, tt := range tests {
+		if got := shortModelName(tt.in); got != tt.want {
+			t.Errorf("shortModelName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	if got := truncate("hello", 10); got != "hello" {
+		t.Errorf("within limit: got %q", got)
+	}
+	if got := truncate("hello", 5); got != "hello" {
+		t.Errorf("at limit: got %q", got)
+	}
+	if got := truncate("hello world", 8); len([]rune(got)) != 8 {
+		t.Errorf("truncated length = %d, want 8: %q", len(got), got)
+	}
+	if !strings.HasSuffix(truncate("hello world", 8), "…") {
+		t.Errorf("truncated string should end with ellipsis")
+	}
+}
+
+func TestFetchAllStabilityCerts_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/fault-stability" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-oom","fault_name":"DB OOM","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+			{"fault_id":"db-oom","fault_name":"DB OOM","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":0.33,"is_stable":false},
+			{"fault_id":"k8s-crash","fault_name":"K8s Crash","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":0.66,"is_stable":false}
+		]}`)
+	}))
+	defer srv.Close()
+
+	certs, err := fetchAllStabilityCerts(srv.URL, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(certs) != 3 {
+		t.Fatalf("len(certs) = %d, want 3", len(certs))
+	}
+	// Verify first cert fields.
+	if certs[0].FaultID != "db-oom" || certs[0].DiagnosisModel != "claude-sonnet-4-5" || !certs[0].IsStable {
+		t.Errorf("unexpected first cert: %+v", certs[0])
+	}
+}
+
+func TestFetchAllStabilityCerts_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"certs":[]}`)
+	}))
+	defer srv.Close()
+
+	certs, err := fetchAllStabilityCerts(srv.URL, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(certs) != 0 {
+		t.Errorf("expected empty slice, got %d certs", len(certs))
+	}
+}
+
+func TestFetchAllStabilityCerts_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchAllStabilityCerts(srv.URL, "")
+	if err == nil {
+		t.Error("expected error on 500 response")
+	}
+}
+
+func TestFetchAllStabilityCerts_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"certs":[]}`)
+	}))
+	defer srv.Close()
+
+	fetchAllStabilityCerts(srv.URL, "secret-key") //nolint:errcheck
+	if gotAuth != "Bearer secret-key" {
+		t.Errorf("Authorization = %q, want \"Bearer secret-key\"", gotAuth)
+	}
+}
+
+// ── vaultCertCompare end-to-end ───────────────────────────────────────────
+
+// newCertCompareServer returns an httptest.Server that serves a realistic
+// multi-model cert dataset for cert-compare tests.
+//
+// Dataset:
+//   db-lock-contention  sonnet-4-5=STABLE  sonnet-4-6=UNSTABLE  → REGRESSION
+//   db-max-connections  sonnet-4-5=UNSTABLE sonnet-4-6=STABLE   → IMPROVEMENT
+//   db-vacuum-needed    sonnet-4-5=STABLE  sonnet-4-6=STABLE    → unchanged
+//   db-wal-disk-full    sonnet-4-5=STABLE  (no sonnet-4-6 cert) → NOT RUN YET
+func newCertCompareServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/fleet/fault-stability":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"certs":[
+				{"fault_id":"db-lock-contention","fault_name":"Lock Contention","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-lock-contention","fault_name":"Lock Contention","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":0.33,"is_stable":false},
+				{"fault_id":"db-max-connections","fault_name":"Max Connections","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":0.33,"is_stable":false},
+				{"fault_id":"db-max-connections","fault_name":"Max Connections","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-wal-disk-full","fault_name":"WAL Disk Full","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true}
+			]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestVaultCertCompare_RegressionFirst(t *testing.T) {
+	srv := newCertCompareServer(t)
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	// Regression must appear.
+	if !strings.Contains(out, "REGRESSION") {
+		t.Errorf("expected REGRESSION in output:\n%s", out)
+	}
+	// Improvement must appear.
+	if !strings.Contains(out, "IMPROVEMENT") {
+		t.Errorf("expected IMPROVEMENT in output:\n%s", out)
+	}
+	// NOT RUN YET must appear for the missing cert.
+	if !strings.Contains(out, "NOT RUN YET") {
+		t.Errorf("expected NOT RUN YET in output:\n%s", out)
+	}
+	// Regression row includes pass-rate delta.
+	if !strings.Contains(out, "33%") {
+		t.Errorf("expected pass-rate delta (33%%) in output:\n%s", out)
+	}
+	// Summary line warns about regression.
+	if !strings.Contains(out, "regression") {
+		t.Errorf("expected summary line mentioning regression:\n%s", out)
+	}
+}
+
+func TestVaultCertCompare_RegressionSortedFirst(t *testing.T) {
+	srv := newCertCompareServer(t)
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	// Verify regressions appear before improvements in the output.
+	rIdx := strings.Index(out, "REGRESSION")
+	iIdx := strings.Index(out, "IMPROVEMENT")
+	if rIdx == -1 || iIdx == -1 {
+		t.Fatalf("missing REGRESSION or IMPROVEMENT in output:\n%s", out)
+	}
+	if rIdx > iIdx {
+		t.Errorf("REGRESSION (pos %d) should appear before IMPROVEMENT (pos %d)", rIdx, iIdx)
+	}
+}
+
+func TestVaultCertCompare_NoRegressions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+			{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":1.0,"is_stable":true}
+		]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if strings.Contains(out, "REGRESSION") {
+		t.Errorf("unexpected REGRESSION in no-regression output:\n%s", out)
+	}
+	if !strings.Contains(out, "cert-equivalent") {
+		t.Errorf("expected cert-equivalent summary:\n%s", out)
+	}
+}
+
+func TestVaultCertCompare_NoCertsForEitherModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Return certs for a completely different model — neither requested model matches.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-vacuum-needed","diagnosis_model":"claude-haiku-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true}
+		]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if !strings.Contains(out, "No stability certs found") {
+		t.Errorf("expected no-certs message:\n%s", out)
+	}
+}

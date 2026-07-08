@@ -34,6 +34,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault discard](#vault-discard)
    - [vault import](#vault-import)
    - [vault judge-accuracy](#vault-judge-accuracy)
+   - [vault cert-compare](#vault-cert-compare)
    - [vault active](#vault-active)
    - [vault history](#vault-history)
 6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
@@ -1139,6 +1140,77 @@ SUCCESS% is the actual outcome after runs on this version.
 The gap between `JUDGE VERDICT` and `SUCCESS%` is the accountability signal: an `APPROVE` verdict that correlates with high `SUCCESS%` validates the judge as useful; a pattern of `APPROVE` + low `SUCCESS%` is a signal to tune the judge prompt or raise the bar before activating.
 
 Requires `--gateway`. Verdicts are only recorded when `vault diff --judge` is run before activation.
+
+### vault cert-compare
+
+```bash
+faulttest vault cert-compare <model-a> <model-b> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Compares consistency certification results across two diagnosis models, fault by fault. This is the primary gate for model upgrade decisions: before promoting a new model into production — whether a newer version of the same model family, a different provider, or an entirely different architecture — run the full cert suite against both the current model and the candidate and use `cert-compare` to confirm there are no regressions.
+
+The command is vendor-agnostic. `model-a` and `model-b` are treated as opaque strings that must match the `diagnosis_model` field stored when certs were generated. Any combination of providers works: Claude → Claude, Claude → Gemini, Gemini → a self-hosted model, and so on.
+
+**Prerequisite:** stability certs must exist for both models. Generate them with `faulttest run --repeat N` with each model configured as the diagnosis model. The results are posted to auditd automatically when `--gateway` is configured.
+
+```bash
+# 1. Generate certs for the baseline model
+HELPDESK_MODEL_NAME=claude-sonnet-4-5 \
+faulttest run --external --repeat 5 --gateway $GW --api-key $KEY
+
+# 2. Generate certs for the candidate model (same or different vendor)
+HELPDESK_MODEL_NAME=claude-sonnet-4-6 \
+faulttest run --external --repeat 5 --gateway $GW --api-key $KEY
+
+# 3. Compare — model names must exactly match what was set during the runs
+faulttest vault cert-compare claude-sonnet-4-5 claude-sonnet-4-6 \
+  --gateway $GW --api-key $KEY
+```
+
+```
+Stability comparison: claude-sonnet-4-5 → claude-sonnet-4-6
+
+FAULT                               sonnet-4-5    sonnet-4-6    CHANGE
+────────────────────────────────────────────────────────────────────────
+Lock Contention / Deadlock          STABLE        UNSTABLE      ⚠ REGRESSION
+  db-lock-contention pass rate: 100% → 33%  (Δ-67%)
+Max Connections Exhaustion          UNSTABLE      STABLE        ✓ IMPROVEMENT
+Vacuum Bloat                        STABLE        STABLE        —
+WAL Disk Full                       STABLE        (no data)     ? NOT RUN YET
+
+4 fault(s) total  ·  1 regression(s) ⚠  ·  1 improvement(s) ✓  ·  1 unchanged  ·  1 not run under both models ?
+
+⚠  1 regression(s) detected — promote claude-sonnet-4-6 only after investigating the faults above.
+```
+
+The table is sorted so regressions appear first, then improvements, then unchanged stable faults, then unchanged unstable faults, then faults missing a cert for one or both models.
+
+For each regression, a pass-rate delta line is printed beneath the row showing the raw pass rate under each model and the percentage-point drop.
+
+**CHANGE column values:**
+
+| Value | Meaning |
+|-------|---------|
+| `⚠ REGRESSION` | Was STABLE under model-a, UNSTABLE under model-b |
+| `✓ IMPROVEMENT` | Was UNSTABLE under model-a, STABLE under model-b |
+| `—` | No change (both STABLE or both UNSTABLE) |
+| `? NOT RUN YET` | Cert exists for one model but not the other |
+
+**Summary line and promotion guidance:**
+
+After the table, a summary line counts each category and a one-line verdict is printed:
+
+| Verdict | Condition |
+|---------|-----------|
+| `⚠  N regression(s) detected — promote <model-b> only after investigating...` | Any regressions present |
+| `?  N fault(s) not yet certified under both models — complete the cert suite before promoting.` | No regressions, but some faults not yet certified under both models |
+| `✓  No regressions. <model-b> is cert-equivalent to <model-a> across all N fault(s).` | All faults stable under both models; no regressions |
+
+**Data source.** `cert-compare` calls `GET /api/v1/fleet/fault-stability` on the gateway, which returns every `(fault_id, diagnosis_model)` row stored in the `fault_stability_cert` table in auditd. No deduplication is applied — each model's cert for each fault is a separate row with its own pass rate, run count, and stability verdict. If a fault has never been run under a given model, the corresponding cell shows `(no data)`.
+
+**Model name display.** The `claude-` vendor prefix is stripped from column headers (`claude-sonnet-4-6` → `sonnet-4-6`) to keep the table readable. Full model names are used everywhere else (summary line, pass-rate delta lines, error messages).
 
 ### vault active
 

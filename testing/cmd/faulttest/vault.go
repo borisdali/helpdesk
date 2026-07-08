@@ -138,7 +138,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|suggest|suggest-update|drafts|activate|diff|discard|import>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|cert-compare|suggest|suggest-update|drafts|activate|diff|discard|import>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -149,6 +149,7 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
 		fmt.Fprintln(os.Stderr, "  judge-accuracy  Compare judge predictions (from vault diff) to actual run outcomes")
+	fmt.Fprintln(os.Stderr, "  cert-compare    Compare stability certs across two diagnosis models (model upgrade gating)")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		fmt.Fprintln(os.Stderr, "  drafts          List inactive (draft) playbooks awaiting activation")
@@ -184,6 +185,8 @@ func cmdVault(args []string) {
 		vaultCalibration(args[1:])
 	case "judge-accuracy":
 		vaultJudgeAccuracy(args[1:])
+	case "cert-compare":
+		vaultCertCompare(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -3381,6 +3384,286 @@ func vaultJudgeAccuracy(args []string) {
 	fmt.Println()
 	fmt.Println("JUDGE VERDICT is the prediction recorded by `vault diff`.")
 	fmt.Println("SUCCESS% is the actual outcome after runs on this version.")
+}
+
+// ── vault cert-compare ────────────────────────────────────────────────────
+
+// certCompareRow holds the per-fault data for one row in the comparison table.
+type certCompareRow struct {
+	faultID   string
+	faultName string
+	oldCert   *certCompareEntry // nil = not run under old model
+	newCert   *certCompareEntry // nil = not run under new model
+}
+
+type certCompareEntry struct {
+	isStable bool
+	passRate float64
+	nRuns    int
+	testedAt string
+}
+
+// vaultCertCompare compares stability certs for two diagnosis models.
+// Usage: faulttest vault cert-compare <model-a> <model-b> [--gateway ...] [--api-key ...]
+func vaultCertCompare(args []string) {
+	fs := flag.NewFlagSet("vault cert-compare", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	positional := fs.Args()
+	if len(positional) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault cert-compare <model-a> <model-b> [--gateway URL] [--api-key KEY]")
+		fmt.Fprintln(os.Stderr, "  model-a  baseline model (e.g. claude-sonnet-4-5)")
+		fmt.Fprintln(os.Stderr, "  model-b  candidate model (e.g. claude-sonnet-4-6)")
+		os.Exit(1)
+	}
+	modelA := positional[0]
+	modelB := positional[1]
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault cert-compare")
+		os.Exit(1)
+	}
+
+	// Fetch all certs (every fault × model row).
+	allCerts, err := fetchAllStabilityCerts(cfg.GatewayURL, cfg.GatewayAPIKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching stability certs: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Index by (fault_id, diagnosis_model).
+	type certKey struct{ faultID, model string }
+	byKey := make(map[certKey]*certCompareEntry)
+	names := make(map[string]string) // fault_id → fault_name
+	for _, c := range allCerts {
+		byKey[certKey{c.FaultID, c.DiagnosisModel}] = &certCompareEntry{
+			isStable: c.IsStable,
+			passRate: c.PassRate,
+			nRuns:    c.NRuns,
+			testedAt: c.TestedAt,
+		}
+		if c.FaultName != "" {
+			names[c.FaultID] = c.FaultName
+		} else {
+			names[c.FaultID] = c.FaultID
+		}
+	}
+
+	// Collect all fault IDs that appear under either model.
+	seen := make(map[string]bool)
+	for k := range byKey {
+		if k.model == modelA || k.model == modelB {
+			seen[k.faultID] = true
+		}
+	}
+	if len(seen) == 0 {
+		fmt.Printf("No stability certs found for models %q or %q.\n", modelA, modelB)
+		fmt.Println("Run `faulttest run --repeat N` with --agent-model set to each model to generate certs.")
+		return
+	}
+
+	// Build sorted rows.
+	faultIDs := make([]string, 0, len(seen))
+	for id := range seen {
+		faultIDs = append(faultIDs, id)
+	}
+	sort.Strings(faultIDs)
+
+	rows := make([]certCompareRow, 0, len(faultIDs))
+	for _, id := range faultIDs {
+		rows = append(rows, certCompareRow{
+			faultID:   id,
+			faultName: names[id],
+			oldCert:   byKey[certKey{id, modelA}],
+			newCert:   byKey[certKey{id, modelB}],
+		})
+	}
+
+	// Sort: regressions first, then improvements, then unchanged, then missing.
+	sort.SliceStable(rows, func(i, j int) bool {
+		return changeOrder(rows[i]) < changeOrder(rows[j])
+	})
+
+	// Tally.
+	var nRegression, nImprovement, nUnchanged, nMissing, nMatchedStable int
+	for _, r := range rows {
+		switch changeLabel(r) {
+		case "⚠ REGRESSION":
+			nRegression++
+		case "✓ IMPROVEMENT":
+			nImprovement++
+		case "—":
+			nUnchanged++
+			if r.oldCert != nil && r.oldCert.isStable {
+				nMatchedStable++
+			}
+		default:
+			nMissing++
+		}
+	}
+
+	// Shorten model names for column headers (last two dash-separated segments).
+	shortA := shortModelName(modelA)
+	shortB := shortModelName(modelB)
+
+	const (
+		colFault  = 34
+		colOld    = 12
+		colNew    = 12
+		colChange = 16
+	)
+
+	fmt.Printf("\nStability comparison: %s → %s\n\n", modelA, modelB)
+	fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+		colFault, "FAULT",
+		colOld, shortA,
+		colNew, shortB,
+		"CHANGE",
+	)
+	fmt.Println(strings.Repeat("─", colFault+2+colOld+2+colNew+2+colChange))
+
+	for _, r := range rows {
+		oldStr := certStatusStr(r.oldCert)
+		newStr := certStatusStr(r.newCert)
+		change := changeLabel(r)
+		fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+			colFault, truncate(r.faultName, colFault),
+			colOld, oldStr,
+			colNew, newStr,
+			change,
+		)
+		// For regressions: show pass-rate delta as context.
+		if r.oldCert != nil && r.newCert != nil && r.oldCert.isStable && !r.newCert.isStable {
+			delta := r.newCert.passRate - r.oldCert.passRate
+			fmt.Printf("  %s pass rate: %.0f%% → %.0f%%  (Δ%+.0f%%)\n",
+				r.faultID, r.oldCert.passRate*100, r.newCert.passRate*100, delta*100)
+		}
+	}
+
+	fmt.Println()
+	total := len(rows)
+	fmt.Printf("%d fault(s) total", total)
+	if nRegression > 0 {
+		fmt.Printf("  ·  %d regression(s) ⚠", nRegression)
+	}
+	if nImprovement > 0 {
+		fmt.Printf("  ·  %d improvement(s) ✓", nImprovement)
+	}
+	if nUnchanged > 0 {
+		fmt.Printf("  ·  %d unchanged", nUnchanged)
+	}
+	if nMissing > 0 {
+		fmt.Printf("  ·  %d not run under both models ?", nMissing)
+	}
+	fmt.Println()
+
+	if nRegression > 0 {
+		fmt.Printf("\n⚠  %d regression(s) detected — promote %s only after investigating the faults above.\n", nRegression, modelB)
+	} else if nMissing > 0 {
+		fmt.Printf("\n?  %d fault(s) not yet certified under both models — complete the cert suite before promoting.\n", nMissing)
+	} else {
+		fmt.Printf("\n✓  No regressions. %s is cert-equivalent to %s across all %d fault(s).\n", modelB, modelA, nMatchedStable+nImprovement)
+	}
+}
+
+// fetchAllStabilityCerts retrieves every (fault, model) cert row from the gateway.
+func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
+	FaultID        string  `json:"fault_id"`
+	FaultName      string  `json:"fault_name"`
+	DiagnosisModel string  `json:"diagnosis_model"`
+	NRuns          int     `json:"n_runs"`
+	PassRate       float64 `json:"pass_rate"`
+	IsStable       bool    `json:"is_stable"`
+	TestedAt       string  `json:"tested_at"`
+}, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Certs []struct {
+			FaultID        string  `json:"fault_id"`
+			FaultName      string  `json:"fault_name"`
+			DiagnosisModel string  `json:"diagnosis_model"`
+			NRuns          int     `json:"n_runs"`
+			PassRate       float64 `json:"pass_rate"`
+			IsStable       bool    `json:"is_stable"`
+			TestedAt       string  `json:"tested_at"`
+		} `json:"certs"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return result.Certs, nil
+}
+
+func certStatusStr(e *certCompareEntry) string {
+	if e == nil {
+		return "(no data)"
+	}
+	if e.isStable {
+		return "STABLE"
+	}
+	return "UNSTABLE"
+}
+
+func changeLabel(r certCompareRow) string {
+	if r.oldCert == nil || r.newCert == nil {
+		return "? NOT RUN YET"
+	}
+	if r.oldCert.isStable && !r.newCert.isStable {
+		return "⚠ REGRESSION"
+	}
+	if !r.oldCert.isStable && r.newCert.isStable {
+		return "✓ IMPROVEMENT"
+	}
+	return "—"
+}
+
+// changeOrder returns a sort key: regressions first, then improvements, then stable, then unstable, then missing.
+func changeOrder(r certCompareRow) int {
+	switch changeLabel(r) {
+	case "⚠ REGRESSION":
+		return 0
+	case "✓ IMPROVEMENT":
+		return 1
+	case "—":
+		if r.oldCert != nil && r.oldCert.isStable {
+			return 2 // stable/stable unchanged
+		}
+		return 3 // unstable/unstable unchanged
+	default:
+		return 4 // missing
+	}
+}
+
+// shortModelName strips the leading "claude-" vendor prefix if present,
+// e.g. "claude-sonnet-4-5" → "sonnet-4-5". Returns the name unchanged otherwise.
+func shortModelName(model string) string {
+	if after, ok := strings.CutPrefix(model, "claude-"); ok {
+		return after
+	}
+	return model
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 // ── vault calibration ──────────────────────────────────────────────────────
