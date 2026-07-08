@@ -620,6 +620,9 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("origin"); v != "" {
 		opts.Origin = v
 	}
+	if q.Get("incident_only") == "true" {
+		opts.IncidentOnly = true
+	}
 
 	journeys, err := s.store.QueryJourneys(r.Context(), opts)
 	if err != nil {

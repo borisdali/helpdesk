@@ -170,6 +170,9 @@ func localHandleJourneys(store *audit.Store) http.HandlerFunc {
 				opts.Limit = n
 			}
 		}
+		if q.Get("incident_only") == "true" {
+			opts.IncidentOnly = true
+		}
 
 		journeys, err := store.QueryJourneys(r.Context(), opts)
 		if err != nil {

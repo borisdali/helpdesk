@@ -573,6 +573,7 @@ type JourneyOptions struct {
 	TraceID         string        // filter by exact trace ID; returns at most one journey
 	TraceIDPrefix   string        // filter by trace ID prefix (e.g. "plan_" for planner journeys)
 	Origin          string        // filter by dispatch origin (e.g. "agent", "gateway"); post-aggregation
+	IncidentOnly    bool          // only journeys linked to a playbook_run (incident_run_id != "")
 }
 
 // DelegationSummary captures one orchestrator-to-sub-agent delegation turn:
@@ -676,6 +677,9 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	if !opts.Until.IsZero() {
 		q1 += " AND timestamp < ?"
 		args1 = append(args1, opts.Until.UTC().Format(sqliteTimeFormat))
+	}
+	if opts.IncidentOnly {
+		q1 += " AND EXISTS (SELECT 1 FROM playbook_runs pr WHERE pr.trace_id = audit_events.trace_id)"
 	}
 	q1 += " GROUP BY trace_id ORDER BY first_event DESC LIMIT ?"
 	args1 = append(args1, opts.Limit)

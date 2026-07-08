@@ -2100,19 +2100,14 @@ func vaultJourney(args []string) {
 		params["outcome"] = outcome
 	}
 
+	if incidentOnly {
+		params["incident_only"] = "true"
+	}
+
 	journeys, err := fetchJourneys(cfg.GatewayURL, cfg.GatewayAPIKey, params)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error fetching journeys: %v\n", err)
 		os.Exit(1)
-	}
-	if incidentOnly {
-		filtered := journeys[:0]
-		for _, j := range journeys {
-			if j.IncidentRunID != "" {
-				filtered = append(filtered, j)
-			}
-		}
-		journeys = filtered
 	}
 	if len(journeys) == 0 {
 		fmt.Println("No journeys found.")
