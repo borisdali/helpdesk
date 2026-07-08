@@ -2349,7 +2349,7 @@ type journeyEvent struct {
 	EventID   string `json:"event_id"`
 	Timestamp string `json:"timestamp"`
 	EventType string `json:"event_type"`
-	ToolExecution  *journeyToolExec  `json:"tool_execution,omitempty"`
+	ToolExecution  *journeyToolExec  `json:"tool,omitempty"`
 	AgentReasoning *journeyReasoning `json:"agent_reasoning,omitempty"`
 }
 
