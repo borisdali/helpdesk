@@ -1811,3 +1811,128 @@ func TestPlaybooks_EvaluationRoundtrip(t *testing.T) {
 
 	t.Logf("evaluation roundtrip OK: run_id=%s", runID)
 }
+
+// TestPlaybooks_TriggerContextRoundtrip verifies that a trigger_context value
+// passed in a POST /run body is persisted and returned by GET /runs/{runID}.
+func TestPlaybooks_TriggerContextRoundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Find any active playbook (prefer fleet-mode to avoid LLM dependency).
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	var pbID string
+	for _, pb := range playbooks {
+		if sid, _ := pb["series_id"].(string); sid == "pbs_vacuum_triage" {
+			pbID, _ = pb["playbook_id"].(string)
+			break
+		}
+	}
+	if pbID == "" && len(playbooks) > 0 {
+		pbID, _ = playbooks[0]["playbook_id"].(string)
+	}
+	if pbID == "" {
+		t.Skip("no playbook available")
+	}
+
+	const wantContext = "E2E alert: autovacuum falling behind on public.orders"
+
+	// Trigger a run with trigger_context. The run may fail (no LLM) — that's OK;
+	// the run record is written before the agent call.
+	client.PlaybookRun(ctx, pbID, map[string]any{ //nolint:errcheck
+		"connection_string": cfg.ConnStr,
+		"trigger_context":   wantContext,
+	})
+
+	// Fetch the most recent run and verify trigger_context was persisted.
+	runsResp, err := client.PlaybookRuns(ctx, pbID)
+	if err != nil {
+		t.Fatalf("PlaybookRuns: %v", err)
+	}
+	runs, _ := runsResp["runs"].([]any)
+	if len(runs) == 0 {
+		t.Skip("no runs recorded — auditd may not be configured")
+	}
+	latest, _ := runs[0].(map[string]any)
+	runID, _ := latest["run_id"].(string)
+	if runID == "" {
+		t.Skip("latest run has no run_id")
+	}
+
+	run, err := client.PlaybookRunGet(ctx, runID)
+	if err != nil {
+		t.Fatalf("PlaybookRunGet(%s): %v", runID, err)
+	}
+	if got, _ := run["trigger_context"].(string); got != wantContext {
+		t.Errorf("trigger_context = %q, want %q", got, wantContext)
+	}
+	t.Logf("trigger_context roundtrip OK: run_id=%s", runID)
+}
+
+// TestPlaybooks_JudgeVerdictRoundtrip verifies that the POST
+// /api/v1/fleet/playbooks/{id}/judge-verdict endpoint persists the verdict and
+// it is returned by the subsequent GET.
+func TestPlaybooks_JudgeVerdictRoundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Create a draft playbook to hold the verdict.
+	pb, err := client.PlaybookCreate(ctx, map[string]any{
+		"name":        "e2e-judge-verdict-test",
+		"description": "created by TestPlaybooks_JudgeVerdictRoundtrip",
+	})
+	if err != nil {
+		t.Fatalf("PlaybookCreate: %v", err)
+	}
+	pbID, _ := pb["playbook_id"].(string)
+	if pbID == "" {
+		t.Fatalf("PlaybookCreate returned no playbook_id: %v", pb)
+	}
+	t.Cleanup(func() {
+		cleanCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		client.PlaybookDelete(cleanCtx, pbID) //nolint:errcheck
+	})
+
+	// POST the judge verdict.
+	status, err := client.SetJudgeVerdict(ctx, pbID, map[string]any{
+		"verdict":     "APPROVE",
+		"judge_model": "claude-sonnet-4-6",
+	})
+	if err != nil {
+		t.Fatalf("SetJudgeVerdict: %v", err)
+	}
+	if status != 204 {
+		t.Fatalf("SetJudgeVerdict status = %d, want 204", status)
+	}
+
+	// GET the playbook and verify the verdict was persisted.
+	got, err := client.PlaybookGet(ctx, pbID)
+	if err != nil {
+		t.Fatalf("PlaybookGet after verdict: %v", err)
+	}
+	if v, _ := got["judge_verdict"].(string); v != "APPROVE" {
+		t.Errorf("judge_verdict = %q, want APPROVE", v)
+	}
+	if m, _ := got["judge_model"].(string); m != "claude-sonnet-4-6" {
+		t.Errorf("judge_model = %q, want claude-sonnet-4-6", m)
+	}
+	if got["judge_at"] == nil || got["judge_at"] == "" {
+		t.Error("judge_at should be set after verdict")
+	}
+	t.Logf("judge verdict roundtrip OK: playbook_id=%s verdict=%v", pbID, got["judge_verdict"])
+}

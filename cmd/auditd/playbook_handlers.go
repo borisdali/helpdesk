@@ -198,6 +198,37 @@ func (s *playbookServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleSetJudgeVerdict records a judge verdict on a draft playbook.
+func (s *playbookServer) handleSetJudgeVerdict(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("playbookID")
+	if id == "" {
+		http.Error(w, "missing playbook ID", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Verdict    string `json:"verdict"`
+		JudgeModel string `json:"judge_model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.Verdict == "" {
+		http.Error(w, "verdict is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.SetJudgeVerdict(r.Context(), id, body.Verdict, body.JudgeModel); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "playbook not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to set judge verdict", "id", id, "err", err)
+		http.Error(w, "failed to record judge verdict", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleActivate promotes a playbook version: deactivates all other versions in its
 // series and marks the target active. Returns the updated playbook.
 func (s *playbookServer) handleActivate(w http.ResponseWriter, r *http.Request) {

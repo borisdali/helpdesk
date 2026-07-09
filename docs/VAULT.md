@@ -21,7 +21,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault list](#vault-list)
    - [vault accuracy](#vault-accuracy)
    - [vault incidents](#vault-incidents)
-   - [vault journey](#vault-journey)
+   - [vault journey](#vault-journey) — [`--detail`: reasoning interleaved with tool calls](#--detail-reasoning-interleaved-with-tool-calls)
    - [vault status](#vault-status)
    - [vault drift](#vault-drift)
    - [vault versions](#vault-versions)
@@ -32,6 +32,9 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault diff](#vault-diff)
    - [vault activate](#vault-activate)
    - [vault discard](#vault-discard)
+   - [vault import](#vault-import)
+   - [vault judge-accuracy](#vault-judge-accuracy)
+   - [vault cert-compare](#vault-cert-compare)
    - [vault active](#vault-active)
    - [vault history](#vault-history)
 6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
@@ -105,7 +108,16 @@ There are three paths by which operational knowledge enters the Vault:
 
 ### 1. System Playbooks (shipped)
 
-At aiHelpDesk Beta we ship 7 expert-authored system Playbooks that are seeded into auditd on startup. They cover the most common PostgreSQL triage scenarios out of the box — vacuum, slow queries, connection exhaustion, replication lag, database-down recovery and PITR restore.
+aiHelpDesk ships 34 expert-authored system Playbooks that are seeded into auditd on startup, spanning three domains:
+
+**PostgreSQL (24 playbooks — 14 triage, 8 remediation, 2 recovery)**  
+Connection exhaustion, lock contention and lock chains, slow queries, vacuum and bloat, high cache miss ratio, replication lag, stale replication slots, WAL disk full, checkpoint and bgwriter pressure, disk pressure, authentication failures, pg_hba.conf rejections, database-down restart, config recovery, and PITR restore.
+
+**Kubernetes (8 playbooks — 6 triage, 2 remediation)**  
+Pod crashes (OOMKill, CrashLoopBackOff), ImagePullBackOff, pods stuck in Pending, PVC provisioning failures, services with no endpoints, StatefulSets scaled to zero.
+
+**Host / Docker (2 playbooks — 1 triage, 1 remediation)**  
+Docker container inspection and container restart for host-managed database processes.
 
 These are read-only in the API (`PUT`/`DELETE` return 400) but can be cloned into a new custom version in the same series. See [PLAYBOOKS.md](PLAYBOOKS.md) for the full list and schema.
 
@@ -500,6 +512,10 @@ faulttest vault journey --category database --outcome resolved \
 # Drill into a specific trace
 faulttest vault journey tr_9a4f2b1e \
   --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+
+# Drill in with reasoning interleaved (requires an incident-linked journey)
+faulttest vault journey tr_9a4f2b1e --detail \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
 ```
 
 `vault journey` is the audit-trail complement to `vault incidents`. Where `vault incidents` shows WHY the agent reached a conclusion (the incident narrative — hypotheses, confidence, evidence), `vault journey` shows WHAT the agent actually did (tool calls, delegations, policy decisions, blast-radius approvals).
@@ -537,6 +553,7 @@ A `!` suffix on a TOOLS entry (or anywhere on the row) means `has_mismatch=true`
 | `--category` | (all) | Filter by `database`, `kubernetes`, or `host` |
 | `--outcome` | (all) | Filter by outcome: `resolved`, `abandoned`, `denied`, `error`, etc. |
 | `--incident` | false | Show only journeys that are linked to an incident run (`incident_run_id` non-empty) |
+| `--detail` | false | Interleave agent reasoning with tool calls in the EXECUTION TRACE section (see below); requires the journey to be incident-linked |
 
 **Detail mode** (positional `<trace_id>` argument) shows the full journey:
 
@@ -575,6 +592,54 @@ INCIDENT LINK
 ```
 
 The INCIDENT LINK section appears when the journey's `trace_id` is associated with a playbook run. Use the navigation hint (`→ vault incidents <plr_>`) to jump to the incident narrative for the WHY behind these tool calls.
+
+#### `--detail`: reasoning interleaved with tool calls
+
+Pass `--detail` on any incident-linked journey to replace the flat TOOLS USED list with an EXECUTION TRACE that interleaves the agent's deliberation text with each tool call it produced:
+
+```
+faulttest vault journey tr_9a4f2b1e --detail \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+```
+JOURNEY  tr_9a4f2b1e
+──────────────────────────────────────────────────────────────────────────
+  Started:           2026-06-27 14:30:12 UTC
+  ...
+
+EXECUTION TRACE
+──────────────────────────────────────────────────────────────────────────
+  "I need to check the current session distribution before deciding
+   whether to terminate idle connections — get_db_info will give me
+   the connection limit, get_session_info the breakdown."
+  ► get_db_info                          [ok]
+  ► get_session_info                     [ok]
+
+  "108 connections are active, 96 of them idle. The limit is 100 and we
+   are already over it. Safe to terminate idle sessions older than 5 min."
+  ► kill_idle_connections                [ok]
+
+INCIDENT LINK
+──────────────────────────────────────────────────────────────────────────
+  Run ID:            plr_a3f7c1b2
+
+  → vault incidents plr_a3f7c1b2
+```
+
+Each reasoning block is the verbatim text the model emitted before deciding which tool to call next, stored as an `agent_reasoning` audit event by the `NewReasoningCallback` hook in the agent server. The block is displayed as a quoted paragraph; long lines are word-wrapped at 64 characters.
+
+Tool calls are shown as `► name [ok]` or `► name [error]`. If a tool call has no preceding reasoning event in the audit trail — for example, because the agent batched multiple tools in a single turn without emitting intermediate text — a `(no preceding reasoning captured)` annotation appears on the next line.
+
+**When `--detail` is not available:**
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Journey is not incident-linked (`INCIDENT` column is `–`) | Falls back to the flat TOOLS USED list; a note explains that `--detail` requires an incident run ID |
+| Incident-linked but no `agent_reasoning` events in the run | EXECUTION TRACE section shows only the tool calls with `(no preceding reasoning captured)` on each |
+| Gateway returns an error fetching events | A warning is printed and the flat TOOLS USED list is shown instead |
+
+`--detail` fetches events from `GET /api/v1/fleet/playbook-runs/{runID}/events?types=agent_reasoning,tool_execution&limit=500`. The gateway endpoint requires `--gateway` and `--api-key` to be set. `agent_reasoning` events are only present for runs where the agent server was started with the reasoning callback enabled (the default for all aiHelpDesk agents since v0.19).
 
 ### vault status
 
@@ -639,15 +704,15 @@ Shows per-version run stats for a playbook series: resolution rate, average step
 ```
 Version stats for pbs_cache_miss_remediate — 2 version(s)
 
-VERSION     RUNS    TRANSITIONED  AVG STEPS   AVG TIME    AVG DIAG   AVG REMED  APPROACH OK
-─────────────────────────────────────────────────────────────────────────────────────────────
-1.0          5      60%           6.2         42s         72%        –          60%
+VERSION     RUNS    SUCCESS%   AVG STEPS   AVG TIME    AVG DIAG   AVG REMED  APPROACH OK  JUDGE VERDICT
+──────────────────────────────────────────────────────────────────────────────────────────────────────
+1.0          5      60%        6.2         42s         72%        –          60%          –
   id=pb_a1b2c3d4  from=plr_0c58aa4f
-1.1  *       3      100%          4.0         8s          91%        85%        100%
-  id=pb_40729257  from=plr_1e2f3a4b
+1.1  *       3      100%       4.0         8s          91%        85%        100%         APPROVE
+  id=pb_40729257  from=plr_1e2f3a4b  judge=claude-haiku-4-5-20251001
 
-* = currently active version
-  id/from lines show playbook_id and the run that generated that version
+* = currently active   SUCCESS% = resolved + transitioned
+id/from lines show playbook_id and the run that generated that version
 ```
 
 The `id` and `from` lines appear under each version row and provide the playbook IDs needed for `vault diff <id1> <id2>` post-activation comparison, plus the originating run ID for provenance.
@@ -662,6 +727,9 @@ Data sources:
 | `AVG DIAG` | Average `diagnosis_score` from `run_evaluation`; `–` when no runs have eval data |
 | `AVG REMED` | Average `remediation_score` for runs where remediation was executed (score > 0); `–` when no remediation runs |
 | `APPROACH OK` | Fraction of runs where operators rated the remediation approach as appropriate; collected via post-incident feedback prompt; `–` when no feedback submitted |
+| `JUDGE VERDICT` | Verdict recorded by `vault diff --judge` on this draft before activation; `–` when no judge review was run |
+
+The `JUDGE VERDICT` column closes the accountability loop: once runs accumulate under an activated version, you can compare the judge's pre-activation prediction against the actual `SUCCESS%`.
 
 The gateway endpoint backing this command: `GET /api/v1/fleet/series/{seriesID}/version-stats`.
 
@@ -717,6 +785,21 @@ This is distinct from the *excluded* runs reported in the header line (`agent di
 CONFIDENCE: value`) — those runs have no confidence score at all and do not appear in any band.
 
 The remediation section only appears when there are runs with both a non-zero `remediation_judge_score` and operator remediation feedback (`feedback_type: "remediation"`).
+
+**Data quality banner.** When the table exists but human operator verdicts are absent or sparse (zero human-sourced feedback rows, or fewer than 50% of runs have human verdicts), `vault calibration` prints a warning box before the table:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ ⚠  Data quality: 0 of 3 run(s) have human operator feedback.        │
+│    This table measures self-consistency (LLM judge vs. itself),     │
+│    not calibration against human judgment. To build a meaningful    │
+│    calibration dataset, run faulttest interactively (without        │
+│    --approval-mode force) or submit feedback via:                   │
+│      faulttest vault feedback <run-id> --gateway $GW --api-key $KEY │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+This fires when all feedback rows carry `feedback_source: "auto_judge"` — verdicts derived from the LLM judge's score rather than a human operator confirming the outcome. Auto-judge feedback is still useful for catching obvious regressions, but it is self-consistency, not calibration: the judge is grading itself. The banner disappears once at least 50% of runs have a human-submitted verdict.
 
 Calibration is determined by comparing `ACCURACY` against the midpoint of each band:
 
@@ -950,6 +1033,8 @@ Verdict:            ?  NEEDS_REVIEW
 
 The judge model does not need to match the agent model. A smaller, faster model (Haiku, Flash) is recommended — the rubric is simple and raw capability matters less than instruction following.
 
+After printing the verdict, `vault diff` automatically persists it to the draft's record in auditd (via `POST /api/v1/fleet/playbooks/{id}/judge-verdict`). This means the verdict appears in `vault versions` under the `JUDGE VERDICT` column once the draft is activated and runs accumulate — no separate step required.
+
 ### vault activate
 
 ```bash
@@ -986,6 +1071,157 @@ faulttest vault drafts --gateway http://gateway:8080
 ```
 
 Use `vault drafts --purge-orphans` to remove all orphan drafts (`pbs_generated_*`) in bulk rather than discarding them one at a time.
+
+### vault import
+
+```bash
+faulttest vault import <file.yaml> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Imports a local YAML playbook file as a draft. This is the recommended way to add hand-authored or externally sourced playbooks to the Vault without going through the three-step curl workflow.
+
+The YAML format is the same as [the import endpoint](PLAYBOOKS.md#importing-a-playbook): `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`, `series_id`, etc.
+
+```bash
+# Import as a draft (review with vault diff before activating)
+faulttest vault import playbooks/connection-triage.yaml \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Import and immediately activate (skips the draft review step)
+faulttest vault import playbooks/connection-triage.yaml \
+  --activate \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Force-import even if a draft already exists for the series
+faulttest vault import playbooks/connection-triage.yaml \
+  --force \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Attach the imported playbook to a specific series
+faulttest vault import playbooks/connection-triage.yaml \
+  --series-id pbs_connection_triage \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--activate` | Immediately activate the imported playbook (skips draft review) |
+| `--force` | Replace an existing draft for the same series |
+| `--series-id` | Attach to a specific series ID instead of the one in the YAML |
+
+The imported playbook is saved with `source: imported`. If `--activate` is not set, the draft appears in `vault drafts` and can be reviewed with `vault diff` before activation.
+
+### vault judge-accuracy
+
+```bash
+# All series with recorded verdicts
+faulttest vault judge-accuracy \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+
+# Scoped to one fault or series
+faulttest vault judge-accuracy db-lock-contention \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Cross-references judge predictions (recorded by `vault diff --judge`) against the actual run outcomes that accumulated after activation. This is how you verify whether the LLM judge is a reliable pre-activation signal — or whether it approves changes that don't actually improve outcomes.
+
+```
+SERIES                             VERSION  JUDGE VERDICT         RUNS  SUCCESS%  JUDGE MODEL
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+pbs_connection_remediate           1.4      APPROVE                  8    87%      claude-haiku-4-5-20251001
+pbs_max_connections_triage         1.2      NEEDS_REVIEW             3    67%      claude-haiku-4-5-20251001
+pbs_wal_stale_slot                 1.3      APPROVE                  5   100%      claude-haiku-4-5-20251001
+
+JUDGE VERDICT is the prediction recorded by `vault diff`.
+SUCCESS% is the actual outcome after runs on this version.
+```
+
+The gap between `JUDGE VERDICT` and `SUCCESS%` is the accountability signal: an `APPROVE` verdict that correlates with high `SUCCESS%` validates the judge as useful; a pattern of `APPROVE` + low `SUCCESS%` is a signal to tune the judge prompt or raise the bar before activating.
+
+Requires `--gateway`. Verdicts are only recorded when `vault diff --judge` is run before activation.
+
+### vault cert-compare
+
+```bash
+faulttest vault cert-compare <model-a> <model-b> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY
+```
+
+Compares consistency certification results across two diagnosis models, fault by fault. This is the primary gate for model upgrade decisions: before promoting a new model into production — whether a newer version of the same model family, a different provider, or an entirely different architecture — run the full cert suite against both the current model and the candidate and use `cert-compare` to confirm there are no regressions.
+
+The command is vendor-agnostic. `model-a` and `model-b` are treated as opaque strings that must match the `diagnosis_model` field stored when certs were generated. Any combination of providers works: Claude → Claude, Claude → Gemini, Gemini → a self-hosted model, and so on.
+
+**What the cert measures — and what it doesn't.** `cert-compare` compares *triage diagnosis certs* only: did the agent consistently identify the correct root cause, call the expected tools, and produce the expected diagnostic keywords? It does not cover remediation quality (did the playbook fix the database?), resolution rate, recovery time, or operator-confirmed accuracy. A STABLE triage cert is a necessary condition for model promotion, not a sufficient one. Remediation cert comparison is a planned extension.
+
+**Prerequisite:** stability certs must exist for both models. Generate them with `faulttest run --repeat N` with each model configured as the diagnosis model. The results are posted to auditd automatically when `--gateway` is configured.
+
+```bash
+# 1. Generate certs for the baseline model
+HELPDESK_MODEL_NAME=claude-sonnet-4-5 \
+faulttest run --external --repeat 5 --gateway $GW --api-key $KEY
+
+# 2. Generate certs for the candidate model (same or different vendor)
+HELPDESK_MODEL_NAME=claude-sonnet-4-6 \
+faulttest run --external --repeat 5 --gateway $GW --api-key $KEY
+
+# 3. Compare — model names must exactly match what was set during the runs
+faulttest vault cert-compare claude-sonnet-4-5 claude-sonnet-4-6 \
+  --gateway $GW --api-key $KEY
+```
+
+```
+Stability comparison: claude-sonnet-4-5 → claude-sonnet-4-6
+
+FAULT                               sonnet-4-5    sonnet-4-6    CHANGE
+────────────────────────────────────────────────────────────────────────
+Lock Contention / Deadlock          STABLE        UNSTABLE      ⚠ REGRESSION
+  db-lock-contention pass rate: 100% → 33%  (Δ-67%)
+Max Connections Exhaustion          UNSTABLE      STABLE        ✓ IMPROVEMENT
+Vacuum Bloat                        STABLE        STABLE        —
+WAL Disk Full                       STABLE        (no data)     ? NOT RUN YET
+
+4 fault(s) total  ·  1 regression(s) ⚠  ·  1 improvement(s) ✓  ·  1 unchanged  ·  1 not run under both models ?
+
+⚠  1 regression(s) detected — promote claude-sonnet-4-6 only after investigating the faults above.
+```
+
+The table is sorted so regressions appear first, then improvements, then unchanged stable faults, then unchanged unstable faults, then faults missing a cert for one or both models.
+
+For each regression, a pass-rate delta line is printed beneath the row showing the raw pass rate under each model and the percentage-point drop.
+
+**CHANGE column values:**
+
+| Value | Meaning |
+|-------|---------|
+| `⚠ REGRESSION` | Was STABLE under model-a, UNSTABLE under model-b |
+| `✓ IMPROVEMENT` | Was UNSTABLE under model-a, STABLE under model-b |
+| `—` | No change (both STABLE or both UNSTABLE) |
+| `? NOT RUN YET` | Cert exists for one model but not the other |
+
+**Summary line and promotion guidance:**
+
+After the table, a summary line counts each category and a one-line verdict is printed:
+
+| Verdict | Condition |
+|---------|-----------|
+| `⚠  N regression(s) detected — promote <model-b> only after investigating...` | Any regressions present |
+| `?  N fault(s) not yet certified under both models — complete the cert suite before promoting.` | No regressions, but some faults not yet certified under both models |
+| `✓  No regressions. <model-b> is cert-equivalent to <model-a> across all N fault(s).` | All faults stable under both models; no regressions |
+
+**Data source.** `cert-compare` calls `GET /api/v1/fleet/fault-stability` on the gateway, which returns every `(fault_id, diagnosis_model)` row stored in the `fault_stability_cert` table in auditd. No deduplication is applied — each model's cert for each fault is a separate row with its own pass rate, run count, and stability verdict. If a fault has never been run under a given model, the corresponding cell shows `(no data)`.
+
+**Model name display.** The `claude-` vendor prefix is stripped from column headers (`claude-sonnet-4-6` → `sonnet-4-6`) to keep the table readable. Full model names are used everywhere else (summary line, pass-rate delta lines, error messages).
 
 ### vault active
 

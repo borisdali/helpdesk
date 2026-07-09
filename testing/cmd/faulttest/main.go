@@ -80,6 +80,40 @@ Commands:
 `)
 }
 
+// reorderArgs moves positional (non-flag) args after flag args so that Go's
+// flag package can parse flags regardless of where positional args appear.
+// For example "vault versions pbs_foo --gateway http://x" becomes valid input.
+func reorderArgs(fs *flag.FlagSet, args []string) []string {
+	type boolFlag interface{ IsBoolFlag() bool }
+	valuedFlags := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) {
+		if bf, ok := f.Value.(boolFlag); !ok || !bf.IsBoolFlag() {
+			valuedFlags[f.Name] = true
+		}
+	})
+	var flagArgs, posArgs []string
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			posArgs = append(posArgs, arg)
+			i++
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		if eq := strings.Index(name, "="); eq >= 0 {
+			name = name[:eq]
+		}
+		flagArgs = append(flagArgs, arg)
+		i++
+		if valuedFlags[name] && !strings.Contains(arg, "=") && i < len(args) && !strings.HasPrefix(args[i], "-") {
+			flagArgs = append(flagArgs, args[i])
+			i++
+		}
+	}
+	return append(flagArgs, posArgs...)
+}
+
 // defaultTestingDir returns the testing/ directory relative to the binary or cwd.
 func defaultTestingDir() string {
 	// Try relative to cwd.
@@ -163,7 +197,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.BoolVar(&cfg.GateEscalation, "gate-escalation", false, "Send gate_escalation=true on playbook run requests so the gateway intercepts ESCALATE_TO at the phase boundary")
 	fs.BoolVar(&cfg.EmitAndWait, "emit-and-wait", false, "Poll for gate and step approvals instead of reading from /dev/tty (safe in K8s Jobs and Docker containers)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -617,7 +651,11 @@ func cmdRun(args []string) {
 		if repeatMode {
 			sr := buildStabilityReport(f, repResults)
 			sr.Print()
-			postStabilityCert(ctx, cfg, f, sr)
+			if cfg.DiagnosisModel == "" {
+				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
+			} else {
+				postStabilityCert(ctx, cfg, f, sr)
+			}
 		}
 
 		if cfg.ReportPerFault {

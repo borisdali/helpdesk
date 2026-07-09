@@ -364,6 +364,8 @@ faulttest vault diff pb_be8b5667 pb_31575294 \
 
 See [vault diff](VAULT.md#vault-diff) for the full flag reference.
 
+**Verdict persistence.** After printing the verdict, `vault diff` automatically persists it to the draft's record in auditd. This enables `vault versions` to show a `JUDGE VERDICT` column alongside the performance metrics accumulated after activation, and `vault judge-accuracy` to cross-reference predictions against actual outcomes — closing the accountability loop without any additional commands.
+
 ---
 
 ## 8. Benchmarking: scaffolded vs. unguided runs

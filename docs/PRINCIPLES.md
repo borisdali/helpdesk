@@ -123,6 +123,9 @@ is clearly partitioned.
 
 ## 8. Informed Consent: human in the loop is not optional
 
+> The full enumeration of customer entitlements derived from this and the other principles
+> is in the [Customer Bill of Rights](CUSTOMER_RIGHTS.md).
+
 aiHelpDesk is a shift-left support tool, not a replacement for human
 judgment or accountability. The system is designed to dramatically reduce the time it takes to
 diagnose a problem and to surface the right information for a decision — but

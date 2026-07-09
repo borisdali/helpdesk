@@ -62,6 +62,13 @@ type Playbook struct {
 	ApprovalMode     string   `json:"approval_mode,omitempty"`    // "auto"|"session"|"manual"; playbook-level default (overridden per run)
 	AgentName        string   `json:"agent_name,omitempty"`       // A2A agent to invoke; defaults to postgres_database_agent
 
+	// Judge verdict (recorded when vault diff --judge is run against a draft).
+	// Persisted on the playbook record so vault versions can show whether the
+	// judge's prediction matched the observed improvement after activation.
+	JudgeVerdict string    `json:"judge_verdict,omitempty"` // "APPROVE" | "NEEDS_REVIEW" | "REJECT"
+	JudgeModel   string    `json:"judge_model,omitempty"`   // model that issued the verdict
+	JudgeAt      time.Time `json:"judge_at,omitempty"`      // when the verdict was recorded
+
 	// Computed fields (not persisted; populated on demand)
 	Stats *PlaybookRunStats `json:"stats,omitempty"` // run statistics, injected by handleList
 }
@@ -131,6 +138,10 @@ func (s *PlaybookStore) migrateSchema() error {
 		"ALTER TABLE playbooks ADD COLUMN transitions_to     TEXT    NOT NULL DEFAULT '[]'",
 		"ALTER TABLE playbooks ADD COLUMN origin_trace       TEXT    NOT NULL DEFAULT ''",
 		"ALTER TABLE playbooks ADD COLUMN playbook_type      TEXT    NOT NULL DEFAULT ''",
+		// Judge verdict (v0.20): recorded when vault diff --judge is run against a draft.
+		"ALTER TABLE playbooks ADD COLUMN judge_verdict      TEXT    NOT NULL DEFAULT ''",
+		"ALTER TABLE playbooks ADD COLUMN judge_model        TEXT    NOT NULL DEFAULT ''",
+		"ALTER TABLE playbooks ADD COLUMN judge_at           TEXT    NOT NULL DEFAULT ''",
 	}
 	for _, stmt := range newCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -175,10 +186,11 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 	if pb.ExecutionMode == "" {
 		pb.ExecutionMode = "fleet"
 	}
-	// For brand-new series (caller didn't provide SeriesID), default IsActive=true.
-	// For callers that set an explicit SeriesID (e.g., the seeder inserting a later version),
-	// respect whatever IsActive value they provided.
-	if seriesWasEmpty {
+	// For brand-new series (caller didn't provide SeriesID), default IsActive=true
+	// so system/manual playbooks are ready immediately.
+	// Exception: imported and generated drafts always start inactive regardless of
+	// whether the series is new — they require explicit activation via vault activate.
+	if seriesWasEmpty && pb.Source != "imported" && pb.Source != "generated" {
 		pb.IsActive = true
 	}
 
@@ -245,14 +257,16 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		     problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 		     series_id, is_active, is_system, source,
 		     entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
-		     approval_mode, agent_name, transitions_to, origin_trace, playbook_type)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     approval_mode, agent_name, transitions_to, origin_trace, playbook_type,
+		     judge_verdict, judge_model, judge_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
 		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode, string(permittedToolsJSON),
 		pb.ApprovalMode, pb.AgentName, string(transitionsToJSON), pb.OriginTrace, pb.PlaybookType,
+		pb.JudgeVerdict, pb.JudgeModel, formatNullableTime(pb.JudgeAt),
 	)
 	return err
 }
@@ -375,6 +389,24 @@ func (s *PlaybookStore) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// SetJudgeVerdict records the LLM judge verdict on a draft playbook. Called when
+// vault diff --judge is run; stores the verdict so vault versions can later
+// correlate whether the judge's prediction matched the observed improvement.
+func (s *PlaybookStore) SetJudgeVerdict(ctx context.Context, playbookID, verdict, judgeModel string) error {
+	judgeAt := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE playbooks SET judge_verdict = ?, judge_model = ?, judge_at = ? WHERE playbook_id = ?`,
+		verdict, judgeModel, judgeAt, playbookID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // Activate atomically promotes a playbook version: deactivates all other versions
 // in the same series and marks the target active. Idempotent.
 // Returns sql.ErrNoRows if the playbook does not exist.
@@ -401,6 +433,26 @@ func (s *PlaybookStore) Activate(ctx context.Context, playbookID string) error {
 		return ErrSystemPlaybook
 	}
 
+	// If the draft has no version, auto-assign the next one from the current active.
+	var draftVersion string
+	if err = tx.QueryRowContext(ctx,
+		`SELECT version FROM playbooks WHERE playbook_id = ?`, playbookID).
+		Scan(&draftVersion); err != nil {
+		return err
+	}
+	if draftVersion == "" {
+		var currentVersion string
+		_ = tx.QueryRowContext(ctx,
+			`SELECT version FROM playbooks WHERE series_id = ? AND is_active = 1`, seriesID).
+			Scan(&currentVersion)
+		if next := nextVersion(currentVersion); next != "" {
+			if _, err = tx.ExecContext(ctx,
+				`UPDATE playbooks SET version = ? WHERE playbook_id = ?`, next, playbookID); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Deactivate all other versions in this series.
 	if _, err = tx.ExecContext(ctx,
 		`UPDATE playbooks SET is_active=0 WHERE series_id=? AND playbook_id != ?`,
@@ -414,6 +466,25 @@ func (s *PlaybookStore) Activate(ctx context.Context, playbookID string) error {
 	}
 
 	return tx.Commit()
+}
+
+// nextVersion increments the minor component of a "major.minor" version string.
+// "1.4" → "1.5", "2" → "2.1", "" → "1.0". Returns "" if the format is unrecognised.
+func nextVersion(current string) string {
+	if current == "" {
+		return "1.0"
+	}
+	parts := strings.SplitN(current, ".", 2)
+	if len(parts) == 1 {
+		// Single integer like "2" → "2.1"
+		return current + ".1"
+	}
+	major := parts[0]
+	var minor int
+	if _, err := fmt.Sscanf(parts[1], "%d", &minor); err != nil {
+		return "" // unrecognised format; leave version blank
+	}
+	return fmt.Sprintf("%s.%d", major, minor+1)
 }
 
 // ActivateSystem is like Activate but works for system playbooks. Used by the seeder.
@@ -454,7 +525,8 @@ const playbookColumns = `playbook_id, name, description, target_hints, created_b
 	problem_class, symptoms, guidance, escalation, related_playbooks, author, last_validated, version,
 	series_id, is_active, is_system, source,
 	entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
-	approval_mode, agent_name, transitions_to, origin_trace, playbook_type`
+	approval_mode, agent_name, transitions_to, origin_trace, playbook_type,
+	judge_verdict, judge_model, judge_at`
 
 // Get returns a playbook by ID, or sql.ErrNoRows if not found.
 func (s *PlaybookStore) Get(ctx context.Context, id string) (*Playbook, error) {
@@ -517,6 +589,7 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 	var createdAt, updatedAt string
 	var lastValidatedStr *string
 	var isActive, isSystem, entryPoint int // SQLite stores bools as INTEGER; scan into int then convert
+	var judgeAtStr string
 
 	if err := s.Scan(
 		&pb.PlaybookID, &pb.Name, &pb.Description, &hintsJSON,
@@ -526,8 +599,12 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 		&pb.SeriesID, &isActive, &isSystem, &pb.Source,
 		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode, &permittedToolsJSON,
 		&pb.ApprovalMode, &pb.AgentName, &transitionsToJSON, &pb.OriginTrace, &pb.PlaybookType,
+		&pb.JudgeVerdict, &pb.JudgeModel, &judgeAtStr,
 	); err != nil {
 		return nil, err
+	}
+	if judgeAtStr != "" {
+		pb.JudgeAt = parseFlexTime(judgeAtStr)
 	}
 
 	pb.IsActive = isActive != 0

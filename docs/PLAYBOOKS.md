@@ -654,12 +654,23 @@ Optional request body:
 | `prior_run_id` | `plr_*` run ID of a previous investigation to continue from (see [Continuity threading](#continuity-threading)) |
 | `approval_mode` | `auto`, `session`, `manual`, or `force` — controls tool-call gating and chaining eligibility (see [Approval modes](#approval-modes)) |
 | `approval_session` | Required when `approval_mode=session`. The `aps_*` session ID from `POST /v1/approval/sessions` on auditd |
+| `trigger_context` | The original alert text or event description that initiated this run. Persisted on the run record and surfaced in the incident narrative under `Triggered by:`. Use this to thread the original PagerDuty/OpsGenie alert body into the audit trail. |
 
 ```bash
 # Triage a down database (agent mode)
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
   -H "Content-Type: application/json" \
   -d '{"connection_string":"postgres://prod-db.example.com/app","context":"pod in CrashLoopBackOff since 10:00 UTC"}' \
+  | jq .text
+
+# Include the originating alert so the audit trail shows what triggered the run
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "postgres://prod-db.example.com/app",
+    "context": "pod in CrashLoopBackOff since 10:00 UTC",
+    "trigger_context": "PagerDuty: connection count exceeded 90% threshold on prod-pg-01"
+  }' \
   | jq .text
 ```
 

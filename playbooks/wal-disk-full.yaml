@@ -1,6 +1,6 @@
 series_id: pbs_wal_disk_full
 name: WAL Disk Full — Recovery
-version: "1.1"
+version: "1.2"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -27,12 +27,24 @@ guidance: |
   manages WAL segment recycling; deleting the wrong file causes unrecoverable
   data loss. The safe cleanup paths are listed in Step 3.
 
-  Step 1 — Confirm the root cause from container logs:
-  Call check_host with the connection_string to confirm the container exited.
-  Then call get_host_logs. Look for the PANIC line:
-    PANIC:  could not write to file "pg_wal/<segment>": No space left on device
-  This confirms WAL disk full, not a process crash (exit 137) or clean stop
-  (exit 0). Note the segment name — it helps estimate how much WAL is held.
+  Step 1 — Confirm the root cause from container and PostgreSQL logs:
+  Call check_host to confirm the container exited (exitcode=137 from SIGKILL
+  is normal here — it is not an OOM kill). Then call BOTH of the following:
+
+  a) get_host_logs — reads the container's stdout/stderr stream. With
+     logging_collector=on (the default in most PostgreSQL Docker images),
+     PostgreSQL writes logs to a file, not to stdout, so this call may return
+     nothing useful. That is expected — do not stop here.
+
+  b) read_pg_log_file with filter="PANIC" — reads the on-disk PostgreSQL log
+     file directly from inside the container. This is where the PANIC line will
+     appear when logging_collector=on:
+       PANIC:  could not write to file "pg_wal/<segment>": No space left on device
+     Note the segment name — it helps estimate how much WAL is held.
+
+  Both tools must be called before forming a hypothesis. Do not conclude
+  "cause unknown" based on get_host_logs alone — if it returns nothing,
+  read_pg_log_file is the authoritative source.
 
   Step 2 — Diagnose WHY the WAL directory filled:
   Call check_disk with the data directory path to see current usage.

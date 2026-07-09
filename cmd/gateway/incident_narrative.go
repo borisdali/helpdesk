@@ -15,11 +15,12 @@ import (
 // IncidentNarrative is the unified timeline view for a single triage incident:
 // triage → operator gate → remediation, with evaluation scores and all feedback slots.
 type IncidentNarrative struct {
-	IncidentID  string                `json:"incident_id"`            // triage run_id
-	StartedAt   time.Time             `json:"started_at"`
-	ResolvedAt  *time.Time            `json:"resolved_at,omitempty"`
-	DurationSec float64               `json:"duration_sec,omitempty"`
-	Operator    string                `json:"operator"`
+	IncidentID     string                `json:"incident_id"`               // triage run_id
+	StartedAt      time.Time             `json:"started_at"`
+	ResolvedAt     *time.Time            `json:"resolved_at,omitempty"`
+	DurationSec    float64               `json:"duration_sec,omitempty"`
+	Operator       string                `json:"operator"`
+	TriggerContext string                `json:"trigger_context,omitempty"` // original alert text that initiated the run
 	Triage      TriageChapter         `json:"triage"`
 	Gate        *GateChapter          `json:"gate,omitempty"`
 	Remediation *RemediationChapter   `json:"remediation,omitempty"`
@@ -85,9 +86,10 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	narrative := IncidentNarrative{
-		IncidentID: runID,
-		StartedAt:  run.StartedAt,
-		Operator:   run.Operator,
+		IncidentID:     runID,
+		StartedAt:      run.StartedAt,
+		Operator:       run.Operator,
+		TriggerContext: run.TriggerContext,
 		Triage: TriageChapter{
 			RunID:            run.RunID,
 			Playbook:         run.SeriesID,

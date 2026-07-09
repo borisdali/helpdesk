@@ -150,6 +150,7 @@ type importPlaybookYAML struct {
 	TransitionsTo    []string    `yaml:"transitions_to"`
 	RequiresEvidence []string    `yaml:"requires_evidence"`
 	ExecutionMode    string      `yaml:"execution_mode"`
+	ApprovalMode     string      `yaml:"approval_mode"`
 }
 
 // parsePlaybookYAML parses a canonical YAML playbook and returns a draft response.
@@ -189,6 +190,7 @@ func parsePlaybookYAML(text string, hints PlaybookImportHints) (*PlaybookImportR
 		TransitionsTo:    y.TransitionsTo,
 		RequiresEvidence: y.RequiresEvidence,
 		ExecutionMode:    executionMode,
+		ApprovalMode:     y.ApprovalMode,
 		Source:           "imported",
 	}
 
@@ -309,6 +311,7 @@ func parseImportResponse(raw string) (*audit.Playbook, []string, float64, error)
 			Version          string   `json:"version"`
 			SeriesID         string   `json:"series_id"`
 			ExecutionMode    string   `json:"execution_mode"`
+			ApprovalMode     string   `json:"approval_mode"`
 			EntryPoint       bool     `json:"entry_point"`
 			EscalatesTo      []string `json:"escalates_to"`
 			TransitionsTo    []string `json:"transitions_to"`
@@ -347,6 +350,7 @@ func parseImportResponse(raw string) (*audit.Playbook, []string, float64, error)
 		Version:          p.Version,
 		SeriesID:         p.SeriesID,
 		ExecutionMode:    executionMode,
+		ApprovalMode:     p.ApprovalMode,
 		EntryPoint:       p.EntryPoint,
 		EscalatesTo:      p.EscalatesTo,
 		TransitionsTo:    p.TransitionsTo,

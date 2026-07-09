@@ -1651,6 +1651,7 @@ type testDraft = struct {
 	SeriesID   string `json:"series_id"`
 	Version    string `json:"version"`
 	Name       string `json:"name"`
+	Source     string `json:"source"`
 	CreatedAt  string `json:"created_at"`
 }
 
@@ -2317,5 +2318,947 @@ func TestVaultHistory_SendsAuth(t *testing.T) {
 
 	if gotAuth != "Bearer test-key" {
 		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
+	}
+}
+
+// ── pct ───────────────────────────────────────────────────────────────────────
+
+func TestPct(t *testing.T) {
+	tests := []struct{ in float64; want string }{
+		{0.0, "0%"},
+		{1.0, "100%"},
+		{0.5, "50%"},
+		{0.876, "88%"},
+		{0.995, "100%"},
+		{0.004, "0%"},
+	}
+	for _, tt := range tests {
+		if got := pct(tt.in); got != tt.want {
+			t.Errorf("pct(%v) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// ── max ───────────────────────────────────────────────────────────────────────
+
+func TestMax(t *testing.T) {
+	if got := max(3, 7); got != 7 {
+		t.Errorf("max(3,7) = %d, want 7", got)
+	}
+	if got := max(9, 2); got != 9 {
+		t.Errorf("max(9,2) = %d, want 9", got)
+	}
+	if got := max(5, 5); got != 5 {
+		t.Errorf("max(5,5) = %d, want 5", got)
+	}
+}
+
+// ── faultFromTraceID ──────────────────────────────────────────────────────────
+
+func TestFaultFromTraceID(t *testing.T) {
+	tests := []struct {
+		name    string
+		traceID string
+		want    string
+	}{
+		{
+			"standard faulttest trace with run counter",
+			"faulttest-a1b2c3d4-db-max-connections-r1",
+			"db-max-connections",
+		},
+		{
+			"no run counter suffix",
+			"faulttest-a1b2c3d4-pbs-vacuum-bloat",
+			"pbs-vacuum-bloat",
+		},
+		{
+			"missing faulttest prefix returns empty",
+			"tr_abc123def",
+			"",
+		},
+		{
+			"empty string returns empty",
+			"",
+			"",
+		},
+		{
+			"bare prefix with no rest returns empty",
+			"faulttest-",
+			"",
+		},
+		{
+			"multi-segment fault id preserved",
+			"faulttest-deadbeef-k8s-pod-crash-loop-r3",
+			"k8s-pod-crash-loop",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := faultFromTraceID(tt.traceID); got != tt.want {
+				t.Errorf("faultFromTraceID(%q) = %q, want %q", tt.traceID, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── formatRemediationOutcome ──────────────────────────────────────────────────
+
+func TestFormatRemediationOutcome(t *testing.T) {
+	t.Run("nil run returns dash", func(t *testing.T) {
+		if got := formatRemediationOutcome(nil); got != "–" {
+			t.Errorf("got %q, want –", got)
+		}
+	})
+
+	t.Run("outcome with duration under 60s", func(t *testing.T) {
+		r := &incidentRun{
+			Outcome:     "resolved",
+			StartedAt:   "2026-06-01T10:00:00Z",
+			CompletedAt: "2026-06-01T10:00:08Z",
+		}
+		got := formatRemediationOutcome(r)
+		if got != "resolved 8.0s" {
+			t.Errorf("got %q, want 'resolved 8.0s'", got)
+		}
+	})
+
+	t.Run("outcome with duration over 60s shows minutes", func(t *testing.T) {
+		r := &incidentRun{
+			Outcome:     "resolved",
+			StartedAt:   "2026-06-01T10:00:00Z",
+			CompletedAt: "2026-06-01T10:02:00Z",
+		}
+		got := formatRemediationOutcome(r)
+		if got != "resolved 2m" {
+			t.Errorf("got %q, want 'resolved 2m'", got)
+		}
+	})
+
+	t.Run("empty outcome falls back to unknown", func(t *testing.T) {
+		r := &incidentRun{Outcome: ""}
+		if got := formatRemediationOutcome(r); got != "unknown" {
+			t.Errorf("got %q, want unknown", got)
+		}
+	})
+
+	t.Run("missing timestamps returns outcome only", func(t *testing.T) {
+		r := &incidentRun{Outcome: "abandoned"}
+		if got := formatRemediationOutcome(r); got != "abandoned" {
+			t.Errorf("got %q, want abandoned", got)
+		}
+	})
+
+	t.Run("invalid timestamps returns outcome only", func(t *testing.T) {
+		r := &incidentRun{
+			Outcome:     "escalated",
+			StartedAt:   "not-a-date",
+			CompletedAt: "also-not-a-date",
+		}
+		if got := formatRemediationOutcome(r); got != "escalated" {
+			t.Errorf("got %q, want escalated", got)
+		}
+	})
+}
+
+// ── scanFlag ──────────────────────────────────────────────────────────────────
+
+func TestScanFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		flag       string
+		defaultVal string
+		want       string
+	}{
+		{
+			"equals form",
+			[]string{"--gateway=http://localhost:8080", "--other=x"},
+			"gateway", "", "http://localhost:8080",
+		},
+		{
+			"space form",
+			[]string{"--gateway", "http://localhost:9090"},
+			"gateway", "", "http://localhost:9090",
+		},
+		{
+			"single dash space form",
+			[]string{"-gateway", "http://localhost:7070"},
+			"gateway", "", "http://localhost:7070",
+		},
+		{
+			"not present returns default",
+			[]string{"--other=foo"},
+			"gateway", "http://default:8080", "http://default:8080",
+		},
+		{
+			"empty args returns default",
+			nil,
+			"gateway", "fallback", "fallback",
+		},
+		{
+			"flag at end with no value returns default",
+			[]string{"--gateway"},
+			"gateway", "def", "def",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scanFlag(tt.args, tt.flag, tt.defaultVal)
+			if got != tt.want {
+				t.Errorf("scanFlag(%v, %q, %q) = %q, want %q", tt.args, tt.flag, tt.defaultVal, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── fetchStabilityCert ────────────────────────────────────────────────────────
+
+func TestFetchStabilityCert_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/fault-stability/db-max-connections" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":   "db-max-connections",
+			"fault_name": "DB Max Connections",
+			"n_runs":     5,
+			"pass_rate":  0.8,
+			"is_stable":  true,
+		})
+	}))
+	defer srv.Close()
+
+	got := fetchStabilityCert(srv.URL, "", "db-max-connections")
+	if got == nil {
+		t.Fatal("expected cert, got nil")
+	}
+	if got.FaultID != "db-max-connections" {
+		t.Errorf("FaultID = %q, want db-max-connections", got.FaultID)
+	}
+	if !got.IsStable {
+		t.Error("IsStable = false, want true")
+	}
+	if got.NRuns != 5 {
+		t.Errorf("NRuns = %d, want 5", got.NRuns)
+	}
+}
+
+func TestFetchStabilityCert_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if got := fetchStabilityCert(srv.URL, "", "unknown-fault"); got != nil {
+		t.Errorf("expected nil for 404, got %+v", got)
+	}
+}
+
+func TestFetchStabilityCert_NetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close() // closed immediately; dial will be refused
+	if got := fetchStabilityCert(url, "", "any"); got != nil {
+		t.Errorf("expected nil for network error, got %+v", got)
+	}
+}
+
+func TestFetchStabilityCert_EmptyGatewayURL(t *testing.T) {
+	if got := fetchStabilityCert("", "", "any"); got != nil {
+		t.Errorf("expected nil for empty URL, got %+v", got)
+	}
+}
+
+func TestFetchStabilityCert_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"fault_id": "x"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchStabilityCert(srv.URL, "tok-cert", "x")
+	if gotAuth != "Bearer tok-cert" {
+		t.Errorf("Authorization = %q, want Bearer tok-cert", gotAuth)
+	}
+}
+
+// ── postStabilityCert ─────────────────────────────────────────────────────────
+
+func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{
+		GatewayURL:     srv.URL,
+		DiagnosisModel: "claude-sonnet-4-6",
+		JudgeModel:     "claude-opus-4-8",
+	}
+	f := Failure{
+		ID:                        "db-max-connections",
+		Name:                      "DB Max Connections",
+		DiagnosisPlaybookSeriesID: "pbs_db_triage",
+	}
+	sr := StabilityReport{
+		FailureID:   "db-max-connections",
+		FailureName: "DB Max Connections",
+		N:           5,
+		PassCount:   4,
+	}
+	postStabilityCert(context.Background(), cfg, f, sr)
+
+	if gotBody["fault_id"] != "db-max-connections" {
+		t.Errorf("fault_id = %v, want db-max-connections", gotBody["fault_id"])
+	}
+	if gotBody["playbook_series_id"] != "pbs_db_triage" {
+		t.Errorf("playbook_series_id = %v, want pbs_db_triage", gotBody["playbook_series_id"])
+	}
+	if gotBody["diagnosis_model"] != "claude-sonnet-4-6" {
+		t.Errorf("diagnosis_model = %v, want claude-sonnet-4-6", gotBody["diagnosis_model"])
+	}
+	if gotBody["judge_model"] != "claude-opus-4-8" {
+		t.Errorf("judge_model = %v, want claude-opus-4-8", gotBody["judge_model"])
+	}
+	if gotBody["n_runs"] != float64(5) {
+		t.Errorf("n_runs = %v, want 5", gotBody["n_runs"])
+	}
+}
+
+func TestPostStabilityCert_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "tok-stability"}
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{})
+	if gotAuth != "Bearer tok-stability" {
+		t.Errorf("Authorization = %q, want Bearer tok-stability", gotAuth)
+	}
+}
+
+func TestPostStabilityCert_NoopWhenEmptyGateway(t *testing.T) {
+	// Should not panic or dial anything when GatewayURL is empty.
+	cfg := &HarnessConfig{GatewayURL: ""}
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{})
+}
+
+func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	// Should log a warning but not panic.
+	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1})
+}
+
+// ── wrapLines ────────────────────────────────────────────────────────────────
+
+func TestWrapLines(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		maxWidth int
+		want     []string
+	}{
+		{
+			"short text fits one line",
+			"hello world",
+			20,
+			[]string{"hello world"},
+		},
+		{
+			"wraps at word boundary",
+			"one two three four five",
+			13,
+			[]string{"one two three", "four five"},
+		},
+		{
+			"empty string returns single empty element",
+			"",
+			10,
+			[]string{""},
+		},
+		{
+			"newline in source creates new paragraph",
+			"first sentence.\nsecond sentence.",
+			40,
+			[]string{"first sentence.", "second sentence."},
+		},
+		{
+			"blank line between paragraphs is skipped",
+			"para one.\n\npara two.",
+			40,
+			[]string{"para one.", "para two."},
+		},
+		{
+			"long word is not split",
+			"superlongwordthatexceedswidth",
+			10,
+			[]string{"superlongwordthatexceedswidth"},
+		},
+		{
+			"multi-line wrapping across paragraph",
+			"I need to check the connection before proceeding with the query.",
+			30,
+			[]string{
+				"I need to check the connection",
+				"before proceeding with the",
+				"query.",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapLines(tt.text, tt.maxWidth)
+			if len(got) != len(tt.want) {
+				t.Fatalf("wrapLines(%q, %d) = %v (len %d), want %v (len %d)",
+					tt.text, tt.maxWidth, got, len(got), tt.want, len(tt.want))
+			}
+			for i, line := range tt.want {
+				if got[i] != line {
+					t.Errorf("line[%d] = %q, want %q", i, got[i], line)
+				}
+			}
+		})
+	}
+}
+
+// ── fetchRunEvents ────────────────────────────────────────────────────────────
+
+func twoEvents() []journeyEvent {
+	return []journeyEvent{
+		{
+			EventID:   "rsn_001",
+			EventType: "agent_reasoning",
+			AgentReasoning: &journeyReasoning{
+				Reasoning: "I will check the connection first.",
+				ToolCalls: []string{"check_connection"},
+			},
+		},
+		{
+			EventID:   "evt_001",
+			EventType: "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "check_connection"},
+		},
+	}
+}
+
+func TestFetchRunEvents_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/fleet/playbook-runs/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(twoEvents()) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunEvents(srv.URL, "", "plr_abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].EventType != "agent_reasoning" {
+		t.Errorf("event[0].EventType = %q, want agent_reasoning", got[0].EventType)
+	}
+	if got[1].EventType != "tool_execution" {
+		t.Errorf("event[1].EventType = %q, want tool_execution", got[1].EventType)
+	}
+}
+
+func TestFetchRunEvents_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchRunEvents(srv.URL, "", "plr_empty")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchRunEvents_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchRunEvents(srv.URL, "", "plr_x")
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
+	}
+}
+
+func TestFetchRunEvents_NetworkError(t *testing.T) {
+	_, err := fetchRunEvents("http://127.0.0.1:19997", "", "plr_x")
+	if err == nil {
+		t.Fatal("expected error for unreachable server, got nil")
+	}
+}
+
+func TestFetchRunEvents_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunEvents(srv.URL, "tok-abc", "plr_x") //nolint:errcheck
+	if gotAuth != "Bearer tok-abc" {
+		t.Errorf("Authorization = %q, want Bearer tok-abc", gotAuth)
+	}
+}
+
+func TestFetchRunEvents_RequestsCorrectEventTypes(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunEvents(srv.URL, "", "plr_x") //nolint:errcheck
+	types := gotQuery.Get("types")
+	if !strings.Contains(types, "agent_reasoning") {
+		t.Errorf("types = %q, want to contain agent_reasoning", types)
+	}
+	if !strings.Contains(types, "tool_execution") {
+		t.Errorf("types = %q, want to contain tool_execution", types)
+	}
+}
+
+func TestFetchRunEvents_UsesRunIDInPath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunEvents(srv.URL, "", "plr_xyz999") //nolint:errcheck
+	if !strings.Contains(gotPath, "plr_xyz999") {
+		t.Errorf("path = %q, want plr_xyz999 in path", gotPath)
+	}
+}
+
+// ── printReasoningTrace ───────────────────────────────────────────────────────
+
+func TestPrintReasoningTrace_Empty(t *testing.T) {
+	out := captureStdout(func() { printReasoningTrace(nil) })
+	if !strings.Contains(out, "no events found") {
+		t.Errorf("empty events: got %q, want 'no events found'", out)
+	}
+}
+
+func TestPrintReasoningTrace_ReasoningBeforeTool(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType: "agent_reasoning",
+			AgentReasoning: &journeyReasoning{
+				Reasoning: "I will check the connection first.",
+				ToolCalls: []string{"check_connection"},
+			},
+		},
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "check_connection"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if !strings.Contains(out, "I will check the connection first.") {
+		t.Errorf("reasoning text missing from output: %q", out)
+	}
+	if !strings.Contains(out, "check_connection") {
+		t.Errorf("tool name missing from output: %q", out)
+	}
+	if !strings.Contains(out, "[ok]") {
+		t.Errorf("status [ok] missing: %q", out)
+	}
+	if strings.Contains(out, "no preceding reasoning") {
+		t.Errorf("unexpected orphan annotation for covered tool: %q", out)
+	}
+}
+
+func TestPrintReasoningTrace_OrphanTool(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "vacuum_table"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if !strings.Contains(out, "vacuum_table") {
+		t.Errorf("tool name missing: %q", out)
+	}
+	if !strings.Contains(out, "no preceding reasoning") {
+		t.Errorf("orphan annotation missing for uncovered tool: %q", out)
+	}
+}
+
+func TestPrintReasoningTrace_ToolError(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "cancel_query", Error: "connection refused"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if !strings.Contains(out, "[error]") {
+		t.Errorf("error status missing: %q", out)
+	}
+}
+
+func TestPrintReasoningTrace_MultipleToolsOneSummary(t *testing.T) {
+	events := []journeyEvent{
+		{
+			EventType: "agent_reasoning",
+			AgentReasoning: &journeyReasoning{
+				Reasoning: "Checking both stats and connection.",
+				ToolCalls: []string{"check_connection", "get_table_stats"},
+			},
+		},
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "check_connection"},
+		},
+		{
+			EventType:     "tool_execution",
+			ToolExecution: &journeyToolExec{Name: "get_table_stats"},
+		},
+	}
+	out := captureStdout(func() { printReasoningTrace(events) })
+	if strings.Contains(out, "no preceding reasoning") {
+		t.Errorf("unexpected orphan annotation: both tools were in reasoning.ToolCalls: %q", out)
+	}
+	if !strings.Contains(out, "check_connection") || !strings.Contains(out, "get_table_stats") {
+		t.Errorf("one or both tool names missing: %q", out)
+	}
+}
+
+// ── vault cert-compare ────────────────────────────────────────────────────
+
+func stableEntry() *certCompareEntry  { return &certCompareEntry{isStable: true, passRate: 1.0, nRuns: 3} }
+func unstableEntry() *certCompareEntry { return &certCompareEntry{isStable: false, passRate: 0.3, nRuns: 3} }
+
+func TestChangeLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		row  certCompareRow
+		want string
+	}{
+		{"regression", certCompareRow{oldCert: stableEntry(), newCert: unstableEntry()}, "⚠ REGRESSION"},
+		{"improvement", certCompareRow{oldCert: unstableEntry(), newCert: stableEntry()}, "✓ IMPROVEMENT"},
+		{"unchanged stable", certCompareRow{oldCert: stableEntry(), newCert: stableEntry()}, "—"},
+		{"unchanged unstable", certCompareRow{oldCert: unstableEntry(), newCert: unstableEntry()}, "—"},
+		{"old missing", certCompareRow{oldCert: nil, newCert: stableEntry()}, "? NOT RUN YET"},
+		{"new missing", certCompareRow{oldCert: stableEntry(), newCert: nil}, "? NOT RUN YET"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := changeLabel(tt.row); got != tt.want {
+				t.Errorf("changeLabel = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChangeOrder(t *testing.T) {
+	regression := certCompareRow{oldCert: stableEntry(), newCert: unstableEntry()}
+	improvement := certCompareRow{oldCert: unstableEntry(), newCert: stableEntry()}
+	stableStable := certCompareRow{oldCert: stableEntry(), newCert: stableEntry()}
+	unstableUnstable := certCompareRow{oldCert: unstableEntry(), newCert: unstableEntry()}
+	missing := certCompareRow{oldCert: stableEntry(), newCert: nil}
+
+	if changeOrder(regression) >= changeOrder(improvement) {
+		t.Error("regression should sort before improvement")
+	}
+	if changeOrder(improvement) >= changeOrder(stableStable) {
+		t.Error("improvement should sort before stable-stable")
+	}
+	if changeOrder(stableStable) >= changeOrder(unstableUnstable) {
+		t.Error("stable-stable should sort before unstable-unstable")
+	}
+	if changeOrder(unstableUnstable) >= changeOrder(missing) {
+		t.Error("unstable-unstable should sort before missing")
+	}
+}
+
+func TestCertStatusStr(t *testing.T) {
+	if got := certStatusStr(nil); got != "(no data)" {
+		t.Errorf("nil → %q, want \"(no data)\"", got)
+	}
+	if got := certStatusStr(stableEntry()); got != "STABLE" {
+		t.Errorf("stable → %q, want \"STABLE\"", got)
+	}
+	if got := certStatusStr(unstableEntry()); got != "UNSTABLE" {
+		t.Errorf("unstable → %q, want \"UNSTABLE\"", got)
+	}
+}
+
+func TestShortModelName(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"claude-sonnet-4-5", "sonnet-4-5"},
+		{"claude-opus-4-8", "opus-4-8"},
+		{"sonnet-4-5", "sonnet-4-5"},   // already short — returned as-is
+		{"claude", "claude"},           // single token
+	}
+	for _, tt := range tests {
+		if got := shortModelName(tt.in); got != tt.want {
+			t.Errorf("shortModelName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	if got := truncate("hello", 10); got != "hello" {
+		t.Errorf("within limit: got %q", got)
+	}
+	if got := truncate("hello", 5); got != "hello" {
+		t.Errorf("at limit: got %q", got)
+	}
+	if got := truncate("hello world", 8); len([]rune(got)) != 8 {
+		t.Errorf("truncated length = %d, want 8: %q", len(got), got)
+	}
+	if !strings.HasSuffix(truncate("hello world", 8), "…") {
+		t.Errorf("truncated string should end with ellipsis")
+	}
+}
+
+func TestFetchAllStabilityCerts_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/fault-stability" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-oom","fault_name":"DB OOM","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+			{"fault_id":"db-oom","fault_name":"DB OOM","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":0.33,"is_stable":false},
+			{"fault_id":"k8s-crash","fault_name":"K8s Crash","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":0.66,"is_stable":false}
+		]}`)
+	}))
+	defer srv.Close()
+
+	certs, err := fetchAllStabilityCerts(srv.URL, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(certs) != 3 {
+		t.Fatalf("len(certs) = %d, want 3", len(certs))
+	}
+	// Verify first cert fields.
+	if certs[0].FaultID != "db-oom" || certs[0].DiagnosisModel != "claude-sonnet-4-5" || !certs[0].IsStable {
+		t.Errorf("unexpected first cert: %+v", certs[0])
+	}
+}
+
+func TestFetchAllStabilityCerts_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"certs":[]}`)
+	}))
+	defer srv.Close()
+
+	certs, err := fetchAllStabilityCerts(srv.URL, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(certs) != 0 {
+		t.Errorf("expected empty slice, got %d certs", len(certs))
+	}
+}
+
+func TestFetchAllStabilityCerts_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchAllStabilityCerts(srv.URL, "")
+	if err == nil {
+		t.Error("expected error on 500 response")
+	}
+}
+
+func TestFetchAllStabilityCerts_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"certs":[]}`)
+	}))
+	defer srv.Close()
+
+	fetchAllStabilityCerts(srv.URL, "secret-key") //nolint:errcheck
+	if gotAuth != "Bearer secret-key" {
+		t.Errorf("Authorization = %q, want \"Bearer secret-key\"", gotAuth)
+	}
+}
+
+// ── vaultCertCompare end-to-end ───────────────────────────────────────────
+
+// newCertCompareServer returns an httptest.Server that serves a realistic
+// multi-model cert dataset for cert-compare tests.
+//
+// Dataset:
+//   db-lock-contention  sonnet-4-5=STABLE  sonnet-4-6=UNSTABLE  → REGRESSION
+//   db-max-connections  sonnet-4-5=UNSTABLE sonnet-4-6=STABLE   → IMPROVEMENT
+//   db-vacuum-needed    sonnet-4-5=STABLE  sonnet-4-6=STABLE    → unchanged
+//   db-wal-disk-full    sonnet-4-5=STABLE  (no sonnet-4-6 cert) → NOT RUN YET
+func newCertCompareServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/fleet/fault-stability":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"certs":[
+				{"fault_id":"db-lock-contention","fault_name":"Lock Contention","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-lock-contention","fault_name":"Lock Contention","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":0.33,"is_stable":false},
+				{"fault_id":"db-max-connections","fault_name":"Max Connections","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":0.33,"is_stable":false},
+				{"fault_id":"db-max-connections","fault_name":"Max Connections","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":1.0,"is_stable":true},
+				{"fault_id":"db-wal-disk-full","fault_name":"WAL Disk Full","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true}
+			]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestVaultCertCompare_RegressionFirst(t *testing.T) {
+	srv := newCertCompareServer(t)
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	// Regression must appear.
+	if !strings.Contains(out, "REGRESSION") {
+		t.Errorf("expected REGRESSION in output:\n%s", out)
+	}
+	// Improvement must appear.
+	if !strings.Contains(out, "IMPROVEMENT") {
+		t.Errorf("expected IMPROVEMENT in output:\n%s", out)
+	}
+	// NOT RUN YET must appear for the missing cert.
+	if !strings.Contains(out, "NOT RUN YET") {
+		t.Errorf("expected NOT RUN YET in output:\n%s", out)
+	}
+	// Regression row includes pass-rate delta.
+	if !strings.Contains(out, "33%") {
+		t.Errorf("expected pass-rate delta (33%%) in output:\n%s", out)
+	}
+	// Summary line warns about regression.
+	if !strings.Contains(out, "regression") {
+		t.Errorf("expected summary line mentioning regression:\n%s", out)
+	}
+}
+
+func TestVaultCertCompare_RegressionSortedFirst(t *testing.T) {
+	srv := newCertCompareServer(t)
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	// Verify regressions appear before improvements in the output.
+	rIdx := strings.Index(out, "REGRESSION")
+	iIdx := strings.Index(out, "IMPROVEMENT")
+	if rIdx == -1 || iIdx == -1 {
+		t.Fatalf("missing REGRESSION or IMPROVEMENT in output:\n%s", out)
+	}
+	if rIdx > iIdx {
+		t.Errorf("REGRESSION (pos %d) should appear before IMPROVEMENT (pos %d)", rIdx, iIdx)
+	}
+}
+
+func TestVaultCertCompare_NoRegressions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true},
+			{"fault_id":"db-vacuum-needed","fault_name":"Vacuum Needed","diagnosis_model":"claude-sonnet-4-6","n_runs":3,"pass_rate":1.0,"is_stable":true}
+		]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if strings.Contains(out, "REGRESSION") {
+		t.Errorf("unexpected REGRESSION in no-regression output:\n%s", out)
+	}
+	if !strings.Contains(out, "cert-equivalent") {
+		t.Errorf("expected cert-equivalent summary:\n%s", out)
+	}
+}
+
+func TestVaultCertCompare_NoCertsForEitherModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Return certs for a completely different model — neither requested model matches.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-vacuum-needed","diagnosis_model":"claude-haiku-4-5","n_runs":3,"pass_rate":1.0,"is_stable":true}
+		]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if !strings.Contains(out, "No stability certs found") {
+		t.Errorf("expected no-certs message:\n%s", out)
 	}
 }

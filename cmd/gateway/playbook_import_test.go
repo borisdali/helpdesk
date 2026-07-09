@@ -383,6 +383,7 @@ name: DB Down Triage
 description: Triage a completely unresponsive PostgreSQL instance.
 problem_class: availability
 execution_mode: agent
+approval_mode: agent
 entry_point: true
 escalates_to:
   - pbs_db_config_recovery
@@ -406,6 +407,9 @@ requires_evidence:
 	d := resp.Draft
 	if d.ExecutionMode != "agent" {
 		t.Errorf("execution_mode = %q, want agent", d.ExecutionMode)
+	}
+	if d.ApprovalMode != "agent" {
+		t.Errorf("approval_mode = %q, want agent", d.ApprovalMode)
 	}
 	if !d.EntryPoint {
 		t.Error("entry_point should be true")
@@ -451,6 +455,7 @@ func TestParseImportResponse_NewFields(t *testing.T) {
 			"name": "Config Recovery",
 			"description": "Recover from a misconfigured postgresql.conf.",
 			"execution_mode": "agent",
+			"approval_mode": "agent",
 			"entry_point": false,
 			"escalates_to": ["pbs_db_pitr_recovery"],
 			"requires_evidence": ["FATAL.*invalid value for parameter", "FATAL.*configuration file"]
@@ -465,6 +470,9 @@ func TestParseImportResponse_NewFields(t *testing.T) {
 	}
 	if pb.ExecutionMode != "agent" {
 		t.Errorf("execution_mode = %q, want agent", pb.ExecutionMode)
+	}
+	if pb.ApprovalMode != "agent" {
+		t.Errorf("approval_mode = %q, want agent", pb.ApprovalMode)
 	}
 	if pb.EntryPoint {
 		t.Error("entry_point should be false")

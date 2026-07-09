@@ -97,4 +97,8 @@ For LoadBalancer services, pay attention to:
 - Port mappings between the service and target pods
 - Endpoint health
 
+## Audit trail
+
+Before calling any tool, emit one sentence stating what you expect to find and why. This ensures the audit trail captures your reasoning at each decision point, not just the outcome.
+
 Always explain your findings and suggest next steps to the user.

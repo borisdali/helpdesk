@@ -138,7 +138,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|suggest|suggest-update|drafts|activate|discard>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|cert-compare|suggest|suggest-update|drafts|activate|diff|discard|import>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -148,8 +148,15 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  journey         Show audit trail for a trace (tools, decisions, delegations)")
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
+		fmt.Fprintln(os.Stderr, "  judge-accuracy  Compare judge predictions (from vault diff) to actual run outcomes")
+	fmt.Fprintln(os.Stderr, "  cert-compare    Compare stability certs across two diagnosis models (model upgrade gating)")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
+		fmt.Fprintln(os.Stderr, "  drafts          List inactive (draft) playbooks awaiting activation")
+		fmt.Fprintln(os.Stderr, "  diff            Show field-by-field diff between two playbook versions")
+		fmt.Fprintln(os.Stderr, "  activate        Promote a draft playbook to active status")
+		fmt.Fprintln(os.Stderr, "  discard         Delete a draft playbook")
+		fmt.Fprintln(os.Stderr, "  import          Import a local YAML playbook file as a draft (and optionally activate)")
 		os.Exit(1)
 	}
 	// Print gateway identity banner before any subcommand output so operators
@@ -176,6 +183,10 @@ func cmdVault(args []string) {
 		vaultVersions(args[1:])
 	case "calibration":
 		vaultCalibration(args[1:])
+	case "judge-accuracy":
+		vaultJudgeAccuracy(args[1:])
+	case "cert-compare":
+		vaultCertCompare(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -192,6 +203,8 @@ func cmdVault(args []string) {
 		vaultHistory(args[1:])
 	case "discard":
 		vaultDiscard(args[1:])
+	case "import":
+		vaultImport(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown vault subcommand: %q\n", args[0])
 		os.Exit(1)
@@ -512,6 +525,12 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 		return out
 	}
 	for _, c := range result.Certs {
+		// With composite PK, ListAll returns multiple rows per fault (one per model),
+		// ordered by (fault_id, tested_at DESC). Keep only the first (most recent) cert
+		// per fault_id for the vault list display.
+		if _, exists := out[c.FaultID]; exists {
+			continue
+		}
 		info := stabilityInfo{IsStable: c.IsStable, NRuns: c.NRuns, hasData: true}
 		if c.TestedAt != "" {
 			if t, err := time.Parse(time.RFC3339Nano, c.TestedAt); err == nil {
@@ -790,7 +809,7 @@ func vaultStatus(args []string) {
 	fs.IntVar(&sinceDays, "since-days", 30, "Days of history to show")
 	fs.StringVar(&target, "target", "", "Filter by target (agent-conn alias or hostname)")
 	fs.StringVar(&fault, "fault", "", "Filter by fault ID (e.g. db-max-connections)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 
@@ -1250,7 +1269,7 @@ func vaultAccuracy(args []string) {
 			fmt.Println("  Tip: run `faulttest vault accuracy` (no args) to list all series with feedback.")
 		}
 		if faultID != "" {
-			printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
+			printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID, cfg.DiagnosisModel)
 		}
 		return
 	}
@@ -1298,13 +1317,14 @@ func vaultAccuracy(args []string) {
 	// Triage consistency certification — shown when a fault ID was given
 	// (not a bare series ID, where we don't know which fault to look up).
 	if faultID != "" {
-		printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID)
+		printFaultStabilityCert(cfg.GatewayURL, cfg.GatewayAPIKey, faultID, cfg.DiagnosisModel)
 	}
 }
 
 // printFaultStabilityCert fetches and prints the stability cert for faultID.
-// Called from both the zero-feedback and post-accuracy paths of vaultAccuracy.
-func printFaultStabilityCert(gatewayURL, apiKey, faultID string) {
+// currentModel, when non-empty, is compared against the cert's diagnosis_model
+// and a warning is printed when they differ.
+func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	fmt.Println()
 	fmt.Println("Triage consistency")
 	cert := fetchStabilityCert(gatewayURL, apiKey, faultID)
@@ -1339,9 +1359,13 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID string) {
 			age := int(time.Since(t).Hours() / 24)
 			fmt.Printf("  Tested at     : %s  (%d days ago)\n", t.Format("2006-01-02 15:04 MST"), age)
 			if age >= 30 {
-				fmt.Println("  [WARN] cert is older than 30 days — consider re-running --repeat to refresh")
+				fmt.Println("  ⚠ cert is older than 30 days — consider re-running --repeat to refresh")
 			}
 		}
+	}
+	if currentModel != "" && cert.DiagnosisModel != "" && cert.DiagnosisModel != currentModel {
+		fmt.Printf("  ⚠ cert was issued for %s but current agent model is %s\n", cert.DiagnosisModel, currentModel)
+		fmt.Printf("    Run: faulttest run --repeat N --agent-model %s ... to re-certify\n", currentModel)
 	}
 }
 
@@ -2037,11 +2061,13 @@ func vaultJourney(args []string) {
 	var category string
 	var outcome string
 	var incidentOnly bool
+	var detail bool
 	fs.IntVar(&limit, "limit", 20, "Maximum number of journeys to show")
 	fs.StringVar(&since, "since", "24h", "Show journeys from the last duration (e.g. 1h, 24h, 7d)")
 	fs.StringVar(&category, "category", "", "Filter by category: database, kubernetes, host")
 	fs.StringVar(&outcome, "outcome", "", "Filter by outcome: resolved, abandoned, escalated, in_progress")
 	fs.BoolVar(&incidentOnly, "incident", false, "Show only journeys linked to an incident run")
+	fs.BoolVar(&detail, "detail", false, "Show agent reasoning interleaved with tool calls (requires incident run ID)")
 	cfg := loadConfig(fs, args)
 
 	if cfg.GatewayURL == "" {
@@ -2049,11 +2075,24 @@ func vaultJourney(args []string) {
 		os.Exit(1)
 	}
 
-	// Detail mode: vault journey <trace_id>
+	// Detail mode: vault journey <trace_id> [--detail]
 	if len(fs.Args()) > 0 {
 		traceID := fs.Args()[0]
-		printJourneyDetail(cfg.GatewayURL, cfg.GatewayAPIKey, traceID)
+		printJourneyDetail(cfg.GatewayURL, cfg.GatewayAPIKey, traceID, detail)
 		return
+	}
+
+	// --incident without an explicit --since: widen to 7d so historical
+	// incident runs (which accumulate over days) aren't silently hidden by
+	// the 24h default.
+	var sinceExplicit bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "since" {
+			sinceExplicit = true
+		}
+	})
+	if incidentOnly && !sinceExplicit {
+		since = "7d"
 	}
 
 	// List mode: show recent journeys.
@@ -2077,19 +2116,14 @@ func vaultJourney(args []string) {
 		params["outcome"] = outcome
 	}
 
+	if incidentOnly {
+		params["incident_only"] = "true"
+	}
+
 	journeys, err := fetchJourneys(cfg.GatewayURL, cfg.GatewayAPIKey, params)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error fetching journeys: %v\n", err)
 		os.Exit(1)
-	}
-	if incidentOnly {
-		filtered := journeys[:0]
-		for _, j := range journeys {
-			if j.IncidentRunID != "" {
-				filtered = append(filtered, j)
-			}
-		}
-		journeys = filtered
 	}
 	if len(journeys) == 0 {
 		fmt.Println("No journeys found.")
@@ -2111,19 +2145,21 @@ func vaultJourney(args []string) {
 		colDate     = 16
 		colDur      = 7
 		colAgent    = 25
+		colOrigin   = 12
 		colOutcome  = 17
 		colIncident = 14
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colTrace, "TRACE ID",
 		colDate, "STARTED",
 		colDur, "DUR",
 		colAgent, "AGENT",
+		colOrigin, "ORIGIN",
 		colOutcome, "OUTCOME",
 		colIncident, "INCIDENT",
 		"TOOLS",
 	)
-	fmt.Println(strings.Repeat("─", colTrace+2+colDate+2+colDur+2+colAgent+2+colOutcome+2+colIncident+2+40))
+	fmt.Println(strings.Repeat("─", colTrace+2+colDate+2+colDur+2+colAgent+2+colOrigin+2+colOutcome+2+colIncident+2+40))
 
 	for _, j := range journeys {
 		date := j.StartedAt
@@ -2149,6 +2185,11 @@ func vaultJourney(args []string) {
 		}
 		if agent == "" {
 			agent = "–"
+		}
+
+		originStr := j.Origin
+		if originStr == "" {
+			originStr = "–"
 		}
 
 		outcomeStr := j.Outcome
@@ -2178,11 +2219,12 @@ func vaultJourney(args []string) {
 			traceDisplay = traceDisplay[:colTrace]
 		}
 
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s%s\n",
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s%s\n",
 			colTrace, traceDisplay,
 			colDate, date,
 			colDur, durStr,
 			colAgent, agent,
+			colOrigin, originStr,
 			colOutcome, outcomeStr,
 			colIncident, incidentStr,
 			toolStr, mismatchFlag,
@@ -2195,7 +2237,9 @@ func vaultJourney(args []string) {
 }
 
 // printJourneyDetail shows a single journey in full detail.
-func printJourneyDetail(gatewayURL, apiKey, traceID string) {
+// When detail is true it fetches agent_reasoning + tool_execution events and
+// renders them interleaved so the reader can see WHY each tool was called.
+func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	journeys, err := fetchJourneys(gatewayURL, apiKey, map[string]string{
 		"trace_id": traceID,
 		"limit":    "1",
@@ -2268,8 +2312,19 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string) {
 		}
 	}
 
-	if len(j.ToolsUsed) > 0 {
+	if detail && j.IncidentRunID != "" {
+		events, err := fetchRunEvents(gatewayURL, apiKey, j.IncidentRunID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: could not fetch run events: %v\n", err)
+		} else {
+			sectionJ("EXECUTION TRACE")
+			printReasoningTrace(events)
+		}
+	} else if len(j.ToolsUsed) > 0 {
 		sectionJ("TOOLS USED")
+		if detail && j.IncidentRunID == "" {
+			fmt.Println("  (--detail requires an incident run ID; showing tool list only)")
+		}
 		for _, t := range j.ToolsUsed {
 			fmt.Printf("  • %s\n", t)
 		}
@@ -2309,6 +2364,124 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string) {
 	}
 
 	fmt.Println()
+}
+
+// ── journey --detail helpers ───────────────────────────────────────────────
+
+// journeyEvent is a minimal mirror of audit.Event for JSON decoding.
+type journeyEvent struct {
+	EventID   string `json:"event_id"`
+	Timestamp string `json:"timestamp"`
+	EventType string `json:"event_type"`
+	ToolExecution  *journeyToolExec  `json:"tool,omitempty"`
+	AgentReasoning *journeyReasoning `json:"agent_reasoning,omitempty"`
+}
+
+type journeyToolExec struct {
+	Name  string `json:"name"`
+	Error string `json:"error,omitempty"`
+}
+
+type journeyReasoning struct {
+	Reasoning string   `json:"reasoning"`
+	ToolCalls []string `json:"tool_calls"`
+}
+
+// fetchRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events and
+// returns tool_execution and agent_reasoning events sorted by timestamp.
+func fetchRunEvents(gatewayURL, apiKey, runID string) ([]journeyEvent, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") +
+		"/api/v1/fleet/playbook-runs/" + runID +
+		"/events?types=agent_reasoning,tool_execution&limit=500"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var events []journeyEvent
+	if err := json.Unmarshal(body, &events); err != nil {
+		return nil, fmt.Errorf("decode events: %w", err)
+	}
+	return events, nil
+}
+
+// printReasoningTrace renders agent_reasoning and tool_execution events
+// in chronological order, interleaving the model's deliberation text with
+// the tool call it preceded.
+func printReasoningTrace(events []journeyEvent) {
+	if len(events) == 0 {
+		fmt.Println("  (no events found)")
+		return
+	}
+
+	// Track which tool_execution names already had a preceding reasoning block
+	// so we can annotate orphan tool calls.
+	covered := make(map[string]bool)
+
+	for i, ev := range events {
+		switch ev.EventType {
+		case "agent_reasoning":
+			if ev.AgentReasoning == nil {
+				continue
+			}
+			// Mark the next tool calls as having reasoning.
+			for _, tc := range ev.AgentReasoning.ToolCalls {
+				covered[tc] = true
+			}
+			// Print reasoning as a quoted block, wrapping long lines.
+			// First line gets an opening quote, last line a closing quote.
+			lines := wrapLines(ev.AgentReasoning.Reasoning, 64)
+			if len(lines) == 1 {
+				fmt.Printf("  \"%s\"\n", lines[0])
+			} else {
+				for i, line := range lines {
+					switch i {
+					case 0:
+						fmt.Printf("  \"%s\n", line)
+					case len(lines) - 1:
+						fmt.Printf("   %s\"\n", line)
+					default:
+						fmt.Printf("   %s\n", line)
+					}
+				}
+			}
+
+		case "tool_execution":
+			if ev.ToolExecution == nil {
+				continue
+			}
+			name := ev.ToolExecution.Name
+			status := "ok"
+			if ev.ToolExecution.Error != "" {
+				status = "error"
+			}
+			fmt.Printf("  ► %-38s [%s]\n", name, status)
+			if !covered[name] {
+				fmt.Println("    (no preceding reasoning captured)")
+			}
+		}
+
+		// Blank line between groups (not after the last event).
+		if i < len(events)-1 {
+			next := events[i+1]
+			// Insert blank line before each reasoning block or between tool→reasoning.
+			if next.EventType == "agent_reasoning" ||
+				(ev.EventType == "tool_execution" && next.EventType == "tool_execution") {
+				fmt.Println()
+			}
+		}
+	}
 }
 
 // ── vault suggest ─────────────────────────────────────────────────────────
@@ -2389,7 +2562,7 @@ func vaultSuggestUpdate(args []string) {
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if seriesID == "" {
@@ -2521,7 +2694,7 @@ func vaultSuggest(args []string) {
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if traceID == "" {
@@ -2744,6 +2917,10 @@ type versionStats struct {
 	RemedEvalCount      int     `json:"remed_eval_count"`
 	RemFeedbackCount    int     `json:"rem_feedback_count"`
 	RemFeedbackRate     float64 `json:"rem_feedback_rate"`
+
+	JudgeVerdict string `json:"judge_verdict,omitempty"`
+	JudgeModel   string `json:"judge_model,omitempty"`
+	JudgeAt      string `json:"judge_at,omitempty"`
 }
 
 // fetchVersionStats calls GET /api/v1/fleet/series/{seriesID}/version-stats.
@@ -2771,7 +2948,60 @@ func fetchVersionStats(gatewayURL, apiKey, seriesID string) ([]versionStats, err
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
 	}
-	return body.Versions, nil
+	versions := body.Versions
+
+	// Append pending drafts that have a judge verdict but no runs yet.
+	// These show in vault versions as a preview of the next activation.
+	draftURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&series_id=" + seriesID
+	draftReq, _ := http.NewRequest(http.MethodGet, draftURL, nil)
+	if apiKey != "" {
+		draftReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if draftResp, err := (&http.Client{Timeout: 10 * time.Second}).Do(draftReq); err == nil {
+		defer draftResp.Body.Close()
+		var drafts struct {
+			Playbooks []struct {
+				PlaybookID   string `json:"playbook_id"`
+				Version      string `json:"version"`
+				IsActive     bool   `json:"is_active"`
+				JudgeVerdict string `json:"judge_verdict"`
+				JudgeModel   string `json:"judge_model"`
+				JudgeAt      string `json:"judge_at"`
+			} `json:"playbooks"`
+		}
+		if json.NewDecoder(draftResp.Body).Decode(&drafts) == nil {
+			// Index playbooks already in the stats slice so we don't double-add.
+			inStats := map[string]bool{}
+			for _, v := range versions {
+				if v.PlaybookID != "" {
+					inStats[v.PlaybookID] = true
+				}
+			}
+			for _, d := range drafts.Playbooks {
+				if d.JudgeVerdict == "" || inStats[d.PlaybookID] {
+					continue
+				}
+				ver := d.Version
+				if ver == "" {
+					if d.IsActive {
+						ver = "(active, no runs)"
+					} else {
+						ver = "(pending)"
+					}
+				}
+				versions = append(versions, versionStats{
+					PlaybookID:   d.PlaybookID,
+					Version:      ver,
+					IsActive:     d.IsActive,
+					JudgeVerdict: d.JudgeVerdict,
+					JudgeModel:   d.JudgeModel,
+					JudgeAt:      d.JudgeAt,
+				})
+			}
+		}
+	}
+
+	return versions, nil
 }
 
 // formatDuration formats seconds as a compact string: 42s / 1m23s / 1h5m.
@@ -2804,16 +3034,17 @@ func printVersionTable(label string, versions []versionStats) {
 		colDiag     = 9
 		colRemed    = 9
 		colApproach = 9
+		colJudge    = 12
 	)
-	sepWidth := colVer + 2 + colRuns + 2 + colSuccess + 2 + colSteps + 2 + colTime + 2 + colDiag + 2 + colRemed + 2 + colApproach
+	sepWidth := colVer + 2 + colRuns + 2 + colSuccess + 2 + colSteps + 2 + colTime + 2 + colDiag + 2 + colRemed + 2 + colApproach + 2 + colJudge
 
 	if label != "" {
 		fmt.Printf("%s  (%d version(s))\n", label, len(versions))
 	}
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colVer, "VERSION", colRuns, "RUNS", colSuccess, "SUCCESS%",
 		colSteps, "AVG STEPS", colTime, "AVG TIME", colDiag, "AVG DIAG",
-		colRemed, "AVG REMED", "APPROACH OK")
+		colRemed, "AVG REMED", colApproach, "APPROACH OK", "JUDGE VERDICT")
 	fmt.Println(strings.Repeat("─", sepWidth))
 
 	for _, v := range versions {
@@ -2852,7 +3083,12 @@ func printVersionTable(label string, versions []versionStats) {
 			approachStr = fmt.Sprintf("%d%%", int(v.RemFeedbackRate*100))
 		}
 
-		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		judgeStr := "–"
+		if v.JudgeVerdict != "" {
+			judgeStr = v.JudgeVerdict
+		}
+
+		fmt.Printf("%-*s  %-*d  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colVer, ver,
 			colRuns, v.TotalRuns,
 			colSuccess, successStr,
@@ -2860,12 +3096,16 @@ func printVersionTable(label string, versions []versionStats) {
 			colTime, timeStr,
 			colDiag, diagStr,
 			colRemed, remedStr,
-			approachStr,
+			colApproach, approachStr,
+			judgeStr,
 		)
 		if v.PlaybookID != "" || v.OriginTrace != "" {
 			detail := "  id=" + v.PlaybookID
 			if v.OriginTrace != "" {
 				detail += "  from=" + v.OriginTrace
+			}
+			if v.JudgeModel != "" {
+				detail += "  judge=" + v.JudgeModel
 			}
 			fmt.Println(detail)
 		}
@@ -2969,6 +3209,475 @@ func vaultVersions(args []string) {
 		fmt.Println("* = currently active   SUCCESS% = resolved + transitioned")
 		fmt.Println("id/from lines show playbook_id and the run that generated that version")
 	}
+}
+
+// ── vault judge-accuracy ───────────────────────────────────────────────────
+
+// vaultJudgeAccuracy shows, per series, the judge verdict recorded at diff time
+// and the actual outcome after runs accumulated on that version.  This closes the
+// loop: "the judge said LIKELY_IMPROVEMENT — did run data confirm it?"
+func vaultJudgeAccuracy(args []string) {
+	fs := flag.NewFlagSet("vault judge-accuracy", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault judge-accuracy")
+		os.Exit(1)
+	}
+
+	// Resolve series IDs: if a fault/series ID was given use it, otherwise fall
+	// back to listing all playbooks and collecting unique series IDs.
+	var seriesIDs []string
+	if len(fs.Args()) > 0 {
+		arg := fs.Args()[0]
+		if strings.HasPrefix(arg, "pbs_") {
+			seriesIDs = []string{arg}
+		} else {
+			// Treat as fault ID — resolve via catalog.
+			cat, err := loadActiveCatalog(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading catalog: %v\n", err)
+				os.Exit(1)
+			}
+			for _, f := range cat.Failures {
+				if f.ID == arg {
+					if f.DiagnosisPlaybookSeriesID != "" {
+						seriesIDs = append(seriesIDs, f.DiagnosisPlaybookSeriesID)
+					}
+					if f.Remediation.PlaybookID != "" {
+						seriesIDs = append(seriesIDs, f.Remediation.PlaybookID)
+					}
+					break
+				}
+			}
+			if len(seriesIDs) == 0 {
+				fmt.Fprintf(os.Stderr, "Unknown fault %q or no series found.\n", arg)
+				os.Exit(1)
+			}
+		}
+	} else {
+		// No filter — collect series IDs from all playbooks that have judge verdicts.
+		listURL := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false"
+		listReq, _ := http.NewRequest(http.MethodGet, listURL, nil)
+		if cfg.GatewayAPIKey != "" {
+			listReq.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
+		}
+		listResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(listReq)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching playbooks: %v\n", err)
+			os.Exit(1)
+		}
+		defer listResp.Body.Close()
+		var listBody struct {
+			Playbooks []struct {
+				SeriesID     string `json:"series_id"`
+				JudgeVerdict string `json:"judge_verdict"`
+			} `json:"playbooks"`
+		}
+		if err := json.NewDecoder(listResp.Body).Decode(&listBody); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding playbook list: %v\n", err)
+			os.Exit(1)
+		}
+		seen := map[string]bool{}
+		for _, pb := range listBody.Playbooks {
+			if pb.SeriesID != "" && pb.JudgeVerdict != "" && !seen[pb.SeriesID] {
+				seen[pb.SeriesID] = true
+				seriesIDs = append(seriesIDs, pb.SeriesID)
+			}
+		}
+		if len(seriesIDs) == 0 {
+			fmt.Println("No judge verdicts recorded yet. Run `faulttest vault diff` on a draft to generate them.")
+			return
+		}
+	}
+
+	type judgeRow struct {
+		SeriesID     string
+		Version      string
+		JudgeVerdict string
+		JudgeModel   string
+		JudgeAt      string
+		TotalRuns    int
+		SuccessRate  float64
+	}
+
+	// Build rows by reading judge verdicts directly from each playbook in the
+	// series — this includes drafts (no runs yet). Run stats are fetched
+	// separately and merged by playbook_id so unactivated drafts show TotalRuns=0.
+	var rows []judgeRow
+	for _, sid := range seriesIDs {
+		// Fetch all playbooks in this series (active and draft) to read verdicts.
+		pbURL := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&series_id=" + sid
+		pbReq, _ := http.NewRequest(http.MethodGet, pbURL, nil)
+		if cfg.GatewayAPIKey != "" {
+			pbReq.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
+		}
+		pbResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(pbReq)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch playbooks for %s: %v\n", sid, err)
+			continue
+		}
+		var pbBody struct {
+			Playbooks []struct {
+				PlaybookID   string `json:"playbook_id"`
+				Version      string `json:"version"`
+				JudgeVerdict string `json:"judge_verdict"`
+				JudgeModel   string `json:"judge_model"`
+				JudgeAt      string `json:"judge_at"`
+			} `json:"playbooks"`
+		}
+		if err := json.NewDecoder(pbResp.Body).Decode(&pbBody); err != nil {
+			pbResp.Body.Close()
+			continue
+		}
+		pbResp.Body.Close()
+
+		// Build a map of playbook_id → run stats for enrichment.
+		runsByPB := map[string]versionStats{}
+		if versions, err := fetchVersionStats(cfg.GatewayURL, cfg.GatewayAPIKey, sid); err == nil {
+			for _, v := range versions {
+				runsByPB[v.PlaybookID] = v
+			}
+		}
+
+		for _, pb := range pbBody.Playbooks {
+			if pb.JudgeVerdict == "" {
+				continue
+			}
+			row := judgeRow{
+				SeriesID:     sid,
+				Version:      pb.Version,
+				JudgeVerdict: pb.JudgeVerdict,
+				JudgeModel:   pb.JudgeModel,
+				JudgeAt:      pb.JudgeAt,
+			}
+			if v, ok := runsByPB[pb.PlaybookID]; ok {
+				row.TotalRuns = v.TotalRuns
+				row.SuccessRate = v.ResolutionRate + v.TransitionRate
+			}
+			rows = append(rows, row)
+		}
+	}
+
+	if len(rows) == 0 {
+		fmt.Println("No judge verdicts found for the specified series.")
+		return
+	}
+
+	const (
+		colSeries  = 32
+		colVer     = 10
+		colVerdict = 20
+		colRuns    = 6
+		colSuccess = 9
+	)
+	sepWidth := colSeries + 2 + colVer + 2 + colVerdict + 2 + colRuns + 2 + colSuccess + 2 + 20
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colSeries, "SERIES", colVer, "VERSION", colVerdict, "JUDGE VERDICT",
+		colRuns, "RUNS", colSuccess, "SUCCESS%", "JUDGE MODEL")
+	fmt.Println(strings.Repeat("─", sepWidth))
+	for _, r := range rows {
+		successStr := "–"
+		if r.TotalRuns > 0 {
+			successStr = fmt.Sprintf("%d%%", int(r.SuccessRate*100))
+		}
+		series := r.SeriesID
+		if len(series) > colSeries {
+			series = series[:colSeries-1] + "…"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*d  %-*s  %s\n",
+			colSeries, series,
+			colVer, r.Version,
+			colVerdict, r.JudgeVerdict,
+			colRuns, r.TotalRuns,
+			colSuccess, successStr,
+			r.JudgeModel,
+		)
+	}
+	fmt.Println()
+	fmt.Println("JUDGE VERDICT is the prediction recorded by `vault diff`.")
+	fmt.Println("SUCCESS% is the actual outcome after runs on this version.")
+}
+
+// ── vault cert-compare ────────────────────────────────────────────────────
+
+// certCompareRow holds the per-fault data for one row in the comparison table.
+type certCompareRow struct {
+	faultID   string
+	faultName string
+	oldCert   *certCompareEntry // nil = not run under old model
+	newCert   *certCompareEntry // nil = not run under new model
+}
+
+type certCompareEntry struct {
+	isStable bool
+	passRate float64
+	nRuns    int
+	testedAt string
+}
+
+// vaultCertCompare compares stability certs for two diagnosis models.
+// Usage: faulttest vault cert-compare <model-a> <model-b> [--gateway ...] [--api-key ...]
+func vaultCertCompare(args []string) {
+	fs := flag.NewFlagSet("vault cert-compare", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	positional := fs.Args()
+	if len(positional) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault cert-compare <model-a> <model-b> [--gateway URL] [--api-key KEY]")
+		fmt.Fprintln(os.Stderr, "  model-a  baseline model (e.g. claude-sonnet-4-5)")
+		fmt.Fprintln(os.Stderr, "  model-b  candidate model (e.g. claude-sonnet-4-6)")
+		os.Exit(1)
+	}
+	modelA := positional[0]
+	modelB := positional[1]
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault cert-compare")
+		os.Exit(1)
+	}
+
+	// Fetch all certs (every fault × model row).
+	allCerts, err := fetchAllStabilityCerts(cfg.GatewayURL, cfg.GatewayAPIKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching stability certs: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Index by (fault_id, diagnosis_model).
+	type certKey struct{ faultID, model string }
+	byKey := make(map[certKey]*certCompareEntry)
+	names := make(map[string]string) // fault_id → fault_name
+	for _, c := range allCerts {
+		byKey[certKey{c.FaultID, c.DiagnosisModel}] = &certCompareEntry{
+			isStable: c.IsStable,
+			passRate: c.PassRate,
+			nRuns:    c.NRuns,
+			testedAt: c.TestedAt,
+		}
+		if c.FaultName != "" {
+			names[c.FaultID] = c.FaultName
+		} else {
+			names[c.FaultID] = c.FaultID
+		}
+	}
+
+	// Collect all fault IDs that appear under either model.
+	seen := make(map[string]bool)
+	for k := range byKey {
+		if k.model == modelA || k.model == modelB {
+			seen[k.faultID] = true
+		}
+	}
+	if len(seen) == 0 {
+		fmt.Printf("No stability certs found for models %q or %q.\n", modelA, modelB)
+		fmt.Println("Run `faulttest run --repeat N` with --agent-model set to each model to generate certs.")
+		return
+	}
+
+	// Build sorted rows.
+	faultIDs := make([]string, 0, len(seen))
+	for id := range seen {
+		faultIDs = append(faultIDs, id)
+	}
+	sort.Strings(faultIDs)
+
+	rows := make([]certCompareRow, 0, len(faultIDs))
+	for _, id := range faultIDs {
+		rows = append(rows, certCompareRow{
+			faultID:   id,
+			faultName: names[id],
+			oldCert:   byKey[certKey{id, modelA}],
+			newCert:   byKey[certKey{id, modelB}],
+		})
+	}
+
+	// Sort: regressions first, then improvements, then unchanged, then missing.
+	sort.SliceStable(rows, func(i, j int) bool {
+		return changeOrder(rows[i]) < changeOrder(rows[j])
+	})
+
+	// Tally.
+	var nRegression, nImprovement, nUnchanged, nMissing, nMatchedStable int
+	for _, r := range rows {
+		switch changeLabel(r) {
+		case "⚠ REGRESSION":
+			nRegression++
+		case "✓ IMPROVEMENT":
+			nImprovement++
+		case "—":
+			nUnchanged++
+			if r.oldCert != nil && r.oldCert.isStable {
+				nMatchedStable++
+			}
+		default:
+			nMissing++
+		}
+	}
+
+	// Shorten model names for column headers (last two dash-separated segments).
+	shortA := shortModelName(modelA)
+	shortB := shortModelName(modelB)
+
+	const (
+		colFault  = 34
+		colOld    = 12
+		colNew    = 12
+		colChange = 16
+	)
+
+	fmt.Printf("Stability comparison: %s → %s\n", modelA, modelB)
+	fmt.Printf("STABLE/UNSTABLE = triage diagnosis cert only (keyword + tool + category scoring across --repeat runs; remediation not included)\n\n")
+	fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+		colFault, "FAULT",
+		colOld, shortA,
+		colNew, shortB,
+		"CHANGE",
+	)
+	fmt.Println(strings.Repeat("─", colFault+2+colOld+2+colNew+2+colChange))
+
+	for _, r := range rows {
+		oldStr := certStatusStr(r.oldCert)
+		newStr := certStatusStr(r.newCert)
+		change := changeLabel(r)
+		fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+			colFault, truncate(r.faultName, colFault),
+			colOld, oldStr,
+			colNew, newStr,
+			change,
+		)
+		// For regressions: show diagnosis-rate delta as context.
+		if r.oldCert != nil && r.newCert != nil && r.oldCert.isStable && !r.newCert.isStable {
+			delta := r.newCert.passRate - r.oldCert.passRate
+			fmt.Printf("  %s diag_rate: %.0f%% → %.0f%%  (Δ%+.0f%%)\n",
+				r.faultID, r.oldCert.passRate*100, r.newCert.passRate*100, delta*100)
+		}
+	}
+
+	fmt.Println()
+	total := len(rows)
+	fmt.Printf("%d fault(s) total", total)
+	if nRegression > 0 {
+		fmt.Printf("  ·  %d regression(s) ⚠", nRegression)
+	}
+	if nImprovement > 0 {
+		fmt.Printf("  ·  %d improvement(s) ✓", nImprovement)
+	}
+	if nUnchanged > 0 {
+		fmt.Printf("  ·  %d unchanged", nUnchanged)
+	}
+	if nMissing > 0 {
+		fmt.Printf("  ·  %d not run under both models ?", nMissing)
+	}
+	fmt.Println()
+
+	if nRegression > 0 {
+		fmt.Printf("\n⚠  %d regression(s) detected — promote %s only after investigating the faults above.\n", nRegression, modelB)
+	} else if nMissing > 0 {
+		fmt.Printf("\n?  %d fault(s) not yet certified under both models — complete the cert suite before promoting.\n", nMissing)
+	} else {
+		fmt.Printf("\n✓  No regressions. %s is cert-equivalent to %s across all %d fault(s).\n", modelB, modelA, nMatchedStable+nImprovement)
+	}
+}
+
+// fetchAllStabilityCerts retrieves every (fault, model) cert row from the gateway.
+func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
+	FaultID        string  `json:"fault_id"`
+	FaultName      string  `json:"fault_name"`
+	DiagnosisModel string  `json:"diagnosis_model"`
+	NRuns          int     `json:"n_runs"`
+	PassRate       float64 `json:"pass_rate"`
+	IsStable       bool    `json:"is_stable"`
+	TestedAt       string  `json:"tested_at"`
+}, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Certs []struct {
+			FaultID        string  `json:"fault_id"`
+			FaultName      string  `json:"fault_name"`
+			DiagnosisModel string  `json:"diagnosis_model"`
+			NRuns          int     `json:"n_runs"`
+			PassRate       float64 `json:"pass_rate"`
+			IsStable       bool    `json:"is_stable"`
+			TestedAt       string  `json:"tested_at"`
+		} `json:"certs"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return result.Certs, nil
+}
+
+func certStatusStr(e *certCompareEntry) string {
+	if e == nil {
+		return "(no data)"
+	}
+	if e.isStable {
+		return "STABLE"
+	}
+	return "UNSTABLE"
+}
+
+func changeLabel(r certCompareRow) string {
+	if r.oldCert == nil || r.newCert == nil {
+		return "? NOT RUN YET"
+	}
+	if r.oldCert.isStable && !r.newCert.isStable {
+		return "⚠ REGRESSION"
+	}
+	if !r.oldCert.isStable && r.newCert.isStable {
+		return "✓ IMPROVEMENT"
+	}
+	return "—"
+}
+
+// changeOrder returns a sort key: regressions first, then improvements, then stable, then unstable, then missing.
+func changeOrder(r certCompareRow) int {
+	switch changeLabel(r) {
+	case "⚠ REGRESSION":
+		return 0
+	case "✓ IMPROVEMENT":
+		return 1
+	case "—":
+		if r.oldCert != nil && r.oldCert.isStable {
+			return 2 // stable/stable unchanged
+		}
+		return 3 // unstable/unstable unchanged
+	default:
+		return 4 // missing
+	}
+}
+
+// shortModelName strips the leading "claude-" vendor prefix if present,
+// e.g. "claude-sonnet-4-5" → "sonnet-4-5". Returns the name unchanged otherwise.
+func shortModelName(model string) string {
+	if after, ok := strings.CutPrefix(model, "claude-"); ok {
+		return after
+	}
+	return model
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 // ── vault calibration ──────────────────────────────────────────────────────
@@ -3075,11 +3784,12 @@ type narrativeJourneyRef struct {
 
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
 type incidentNarrative struct {
-	IncidentID  string    `json:"incident_id"`
-	StartedAt   time.Time `json:"started_at"`
-	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
-	DurationSec float64   `json:"duration_sec,omitempty"`
-	Operator    string    `json:"operator"`
+	IncidentID     string     `json:"incident_id"`
+	StartedAt      time.Time  `json:"started_at"`
+	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	DurationSec    float64    `json:"duration_sec,omitempty"`
+	Operator       string     `json:"operator"`
+	TriggerContext string     `json:"trigger_context,omitempty"`
 	Triage      struct {
 		RunID            string               `json:"run_id"`
 		Playbook         string               `json:"playbook"`
@@ -3154,6 +3864,9 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	}
 	if n.Operator != "" {
 		fmt.Printf("Operator: %s\n", n.Operator)
+	}
+	if n.TriggerContext != "" {
+		fmt.Printf("Triggered by: %s\n", wordWrap(n.TriggerContext, 70, "              "))
 	}
 	fmt.Printf("%s\n", divider)
 
@@ -3321,6 +4034,37 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 }
 
 // wordWrap wraps text at maxWidth characters, indenting continuation lines with indent.
+// wrapLines splits text into lines of at most maxWidth characters, breaking
+// on word boundaries. It handles existing newlines in the source text.
+func wrapLines(text string, maxWidth int) []string {
+	var result []string
+	for _, para := range strings.Split(text, "\n") {
+		para = strings.TrimSpace(para)
+		if para == "" {
+			continue
+		}
+		words := strings.Fields(para)
+		current := ""
+		for _, w := range words {
+			if current == "" {
+				current = w
+			} else if len(current)+1+len(w) <= maxWidth {
+				current += " " + w
+			} else {
+				result = append(result, current)
+				current = w
+			}
+		}
+		if current != "" {
+			result = append(result, current)
+		}
+	}
+	if len(result) == 0 {
+		return []string{""}
+	}
+	return result
+}
+
 func wordWrap(text string, maxWidth int, indent string) string {
 	if len(text) <= maxWidth {
 		return text
@@ -3352,7 +4096,7 @@ func vaultActive(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 
@@ -3430,7 +4174,7 @@ func vaultHistory(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -3530,7 +4274,7 @@ func vaultActivate(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -3634,7 +4378,7 @@ func vaultDiff(args []string) {
 	fs.StringVar(&judgeModel, "judge-model", "", "Model name for judge (default: HELPDESK_MODEL_NAME)")
 	fs.StringVar(&judgeVendor, "judge-vendor", "", "Model vendor for judge: anthropic or google (default: HELPDESK_MODEL_VENDOR)")
 	fs.StringVar(&judgeAPIKey, "judge-api-key", os.Getenv("HELPDESK_API_KEY"), "API key for judge")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -3825,6 +4569,32 @@ func vaultDiff(args []string) {
 	if modelName != "" {
 		fmt.Printf("Judge model:        %s\n", modelName)
 	}
+
+	// Auto-save the verdict to the draft so vault versions can later correlate
+	// whether the judge's prediction matched the actual improvement.
+	if gatewayURL != "" && !result.Skipped && result.Verdict != "" {
+		verdictBody, _ := json.Marshal(map[string]string{
+			"verdict":     result.Verdict,
+			"judge_model": modelName,
+		})
+		verdURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + after.PlaybookID + "/judge-verdict"
+		req, err := http.NewRequest(http.MethodPost, verdURL, strings.NewReader(string(verdictBody)))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			if apiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+			if err != nil || (resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK) {
+				fmt.Printf("(Note: verdict recorded locally but could not be saved to gateway: %v)\n", err)
+			} else {
+				fmt.Printf("Verdict saved to %s.\n", after.PlaybookID)
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+		}
+	}
 }
 
 // compareVersions compares two dotted-numeric version strings.
@@ -3892,6 +4662,7 @@ func purgeOrphanDrafts(gatewayURL, apiKey string, drafts []struct {
 	SeriesID   string `json:"series_id"`
 	Version    string `json:"version"`
 	Name       string `json:"name"`
+	Source     string `json:"source"`
 	CreatedAt  string `json:"created_at"`
 }) int {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -3925,11 +4696,11 @@ func vaultDrafts(args []string) {
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
 	fs.BoolVar(&purgeOrphans, "purge-orphans", false, "Delete all drafts whose series_id starts with pbs_generated_ (orphans from failed suggest-update runs)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 
-	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false&source=generated"
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?active_only=false"
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -3952,6 +4723,7 @@ func vaultDrafts(args []string) {
 			SeriesID   string `json:"series_id"`
 			Version    string `json:"version"`
 			Name       string `json:"name"`
+			Source     string `json:"source"`
 			CreatedAt  string `json:"created_at"`
 			IsActive   bool   `json:"is_active"`
 		} `json:"playbooks"`
@@ -3961,24 +4733,27 @@ func vaultDrafts(args []string) {
 		os.Exit(1)
 	}
 
-	// Filter to inactive only — active generated playbooks have already been
-	// reviewed and promoted; they no longer belong in the pending review queue.
+	// Filter to inactive drafts with a tracked source (generated or imported).
+	// Active playbooks have already been reviewed; empty-source records are
+	// internal operational playbooks not intended for this queue.
 	var drafts []struct {
 		PlaybookID string `json:"playbook_id"`
 		SeriesID   string `json:"series_id"`
 		Version    string `json:"version"`
 		Name       string `json:"name"`
+		Source     string `json:"source"`
 		CreatedAt  string `json:"created_at"`
 	}
 	for _, p := range result.Playbooks {
-		if !p.IsActive {
+		if !p.IsActive && (p.Source == "generated" || p.Source == "imported") {
 			drafts = append(drafts, struct {
 				PlaybookID string `json:"playbook_id"`
 				SeriesID   string `json:"series_id"`
 				Version    string `json:"version"`
 				Name       string `json:"name"`
+				Source     string `json:"source"`
 				CreatedAt  string `json:"created_at"`
-			}{p.PlaybookID, p.SeriesID, p.Version, p.Name, p.CreatedAt})
+			}{p.PlaybookID, p.SeriesID, p.Version, p.Name, p.Source, p.CreatedAt})
 		}
 	}
 
@@ -4004,6 +4779,7 @@ func vaultDrafts(args []string) {
 	orphans := 0
 	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n", colID, "DRAFT ID", colSer, "SERIES", colVer, "VERSION", colName, "NAME", "CREATED")
 	fmt.Println(strings.Repeat("─", colID+2+colSer+2+colVer+2+colName+2+colDate))
+	imported := 0
 	for _, d := range drafts {
 		ts := d.CreatedAt
 		if len(ts) >= 10 {
@@ -4014,18 +4790,24 @@ func vaultDrafts(args []string) {
 			name = name[:colName-1] + "…"
 		}
 		ser := d.SeriesID
-		orphan := ""
+		tag := ""
 		if strings.HasPrefix(ser, "pbs_generated_") {
-			orphan = " !"
+			tag = " !"
 			orphans++
+		} else if d.Source == "imported" {
+			tag = " ↑"
+			imported++
 		}
 		if len(ser) > colSer {
 			ser = ser[:colSer-1] + "…"
 		}
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n", colID, d.PlaybookID, colSer, ser, colVer, d.Version, colName, name, ts, orphan)
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s%s\n", colID, d.PlaybookID, colSer, ser, colVer, d.Version, colName, name, ts, tag)
 	}
 	if orphans > 0 {
 		fmt.Printf("\n! = orphan draft (series not pinned); run with --purge-orphans to delete all %d\n", orphans)
+	}
+	if imported > 0 {
+		fmt.Printf("↑ = imported via vault import\n")
 	}
 	fmt.Printf("\nTo activate a draft:\n")
 	fmt.Printf("  faulttest vault activate <DRAFT_ID> --gateway %s --api-key <key>\n", strings.TrimSuffix(gatewayURL, "/"))
@@ -4038,7 +4820,7 @@ func vaultDiscard(args []string) {
 	var gatewayURL, apiKey string
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 	if fs.NArg() == 0 {
@@ -4071,6 +4853,191 @@ func vaultDiscard(args []string) {
 
 	fmt.Printf("Discarded: %s\n", draftID)
 	fmt.Printf("\nfaulttest vault drafts --gateway %s\n", strings.TrimSuffix(gatewayURL, "/"))
+}
+
+// ── vault import ──────────────────────────────────────────────────────────
+
+// vaultImport reads a local YAML playbook file, imports it via the gateway's
+// /import endpoint (validate only), saves it as a draft, and optionally activates it.
+func vaultImport(args []string) {
+	fs := flag.NewFlagSet("vault import", flag.ExitOnError)
+	var gatewayURL, apiKey string
+	var activate, force bool
+	var seriesHint string
+	fs.StringVar(&gatewayURL, "gateway", os.Getenv("FAULTTEST_GATEWAY_URL"), "Gateway base URL")
+	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
+	fs.BoolVar(&activate, "activate", false, "Immediately activate the imported draft")
+	fs.BoolVar(&force, "force", false, "Save draft even when the import response contains warnings")
+	fs.StringVar(&seriesHint, "series-id", "", "Override the series_id in the YAML (useful for re-importing an edited playbook into an existing series)")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault import <file.yaml> [--activate] [--force] [--gateway ...] [--api-key ...]")
+		fmt.Fprintln(os.Stderr, "  Reads a YAML playbook file, validates it, saves it as a draft, and optionally activates it.")
+		fmt.Fprintln(os.Stderr, "  --activate     Immediately activate the imported draft (skips manual vault activate step)")
+		fmt.Fprintln(os.Stderr, "  --force        Save draft even when warnings are present")
+		fmt.Fprintln(os.Stderr, "  --series-id    Override the series_id declared in the YAML")
+		os.Exit(1)
+	}
+	if gatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required (or set FAULTTEST_GATEWAY_URL)")
+		os.Exit(1)
+	}
+
+	filePath := fs.Arg(0)
+	yamlBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", filePath, err)
+		os.Exit(1)
+	}
+
+	// Step 1: POST to /import (validates and parses; does NOT persist).
+	hints := map[string]string{}
+	if seriesHint != "" {
+		hints["series_id"] = seriesHint
+	}
+	importBody, err := json.Marshal(map[string]any{
+		"text":   string(yamlBytes),
+		"format": "yaml",
+		"hints":  hints,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshalling import request: %v\n", err)
+		os.Exit(1)
+	}
+
+	importURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/import"
+	importReq, err := http.NewRequest(http.MethodPost, importURL, strings.NewReader(string(importBody)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building request: %v\n", err)
+		os.Exit(1)
+	}
+	importReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		importReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	importResp, err := (&http.Client{Timeout: 30 * time.Second}).Do(importReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error calling import endpoint: %v\n", err)
+		os.Exit(1)
+	}
+	defer importResp.Body.Close()
+	importRespBody, _ := io.ReadAll(importResp.Body)
+	if importResp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Import failed (%d): %s\n", importResp.StatusCode, importRespBody)
+		os.Exit(1)
+	}
+
+	var importResult struct {
+		Draft struct {
+			PlaybookID    string `json:"playbook_id"`
+			SeriesID      string `json:"series_id"`
+			Name          string `json:"name"`
+			Version       string `json:"version"`
+			ApprovalMode  string `json:"approval_mode"`
+			ExecutionMode string `json:"execution_mode"`
+			Guidance      string `json:"guidance"`
+			Description   string `json:"description"`
+			Source        string `json:"source"`
+		} `json:"draft"`
+		WarningMessages []string `json:"warning_messages"`
+		Confidence      float64  `json:"confidence"`
+	}
+	if err := json.Unmarshal(importRespBody, &importResult); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding import response: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Print warnings.
+	if len(importResult.WarningMessages) > 0 {
+		fmt.Printf("Import warnings (%d):\n", len(importResult.WarningMessages))
+		for _, w := range importResult.WarningMessages {
+			fmt.Printf("  ⚠ %s\n", w)
+		}
+		if !force {
+			fmt.Fprintln(os.Stderr, "\nFix warnings or use --force to save anyway.")
+			os.Exit(1)
+		}
+		fmt.Println()
+	}
+
+	d := importResult.Draft
+	fmt.Printf("Parsed: %s  v%s  (%s)\n", d.Name, d.Version, d.SeriesID)
+	if importResult.Confidence < 1.0 {
+		fmt.Printf("Confidence: %.0f%%\n", importResult.Confidence*100)
+	}
+
+	// Step 2: Save the draft (persist via POST /api/v1/fleet/playbooks).
+	// Tag the draft as imported so vault drafts can surface it in the review queue.
+	importResult.Draft.Source = "imported"
+	saveBody, err := json.Marshal(importResult.Draft)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshalling draft: %v\n", err)
+		os.Exit(1)
+	}
+	saveURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks"
+	saveReq, err := http.NewRequest(http.MethodPost, saveURL, strings.NewReader(string(saveBody)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building save request: %v\n", err)
+		os.Exit(1)
+	}
+	saveReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		saveReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	saveResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(saveReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving draft: %v\n", err)
+		os.Exit(1)
+	}
+	defer saveResp.Body.Close()
+	saveRespBody, _ := io.ReadAll(saveResp.Body)
+	if saveResp.StatusCode != http.StatusCreated && saveResp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Save failed (%d): %s\n", saveResp.StatusCode, saveRespBody)
+		os.Exit(1)
+	}
+
+	var saved struct {
+		PlaybookID string `json:"playbook_id"`
+		SeriesID   string `json:"series_id"`
+		Version    string `json:"version"`
+		Name       string `json:"name"`
+	}
+	if err := json.Unmarshal(saveRespBody, &saved); err != nil {
+		fmt.Fprintf(os.Stderr, "Error decoding save response: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Saved:  %s  v%s  series=%s\n", saved.PlaybookID, saved.Version, saved.SeriesID)
+
+	// Step 3: Optionally activate.
+	if activate {
+		activateURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/" + saved.PlaybookID + "/activate"
+		actReq, err := http.NewRequest(http.MethodPost, activateURL, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building activate request: %v\n", err)
+			os.Exit(1)
+		}
+		if apiKey != "" {
+			actReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		actResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(actReq)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error activating: %v\n", err)
+			os.Exit(1)
+		}
+		defer actResp.Body.Close()
+		actBody, _ := io.ReadAll(actResp.Body)
+		if actResp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "Activate failed (%d): %s\n", actResp.StatusCode, actBody)
+			os.Exit(1)
+		}
+		fmt.Printf("Activated: %s is now live.\n", saved.PlaybookID)
+	} else {
+		fmt.Printf("\nTo diff before activating:\n  faulttest vault diff %s --gateway %s\n", saved.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
+		fmt.Printf("To activate:\n  faulttest vault activate %s --gateway %s\n", saved.PlaybookID, strings.TrimSuffix(gatewayURL, "/"))
+	}
 }
 
 // ── vault calibration ─────────────────────────────────────────────────────
@@ -4127,6 +5094,25 @@ func vaultCalibration(args []string) {
 	if report.SeriesID != "" {
 		scope = report.SeriesID
 	}
+
+	// Prominent data quality banner before the table when human coverage is low.
+	if report.TotalRuns > 0 && (report.HumanRuns == 0 || float64(report.HumanRuns)/float64(report.TotalRuns) < 0.5) {
+		bl := func(s string) { fmt.Printf("│%-69s│\n", s) }
+		fmt.Println("┌─────────────────────────────────────────────────────────────────────┐")
+		if report.HumanRuns == 0 {
+			bl(fmt.Sprintf(" ⚠  Data quality: 0 of %d run(s) have human operator feedback.", report.TotalRuns))
+		} else {
+			bl(fmt.Sprintf(" ⚠  Data quality: only %d of %d run(s) have human operator feedback.", report.HumanRuns, report.TotalRuns))
+		}
+		bl("    This table measures self-consistency (LLM judge vs. itself),")
+		bl("    not calibration against human judgment. To build a meaningful")
+		bl("    calibration dataset, run faulttest interactively (without")
+		bl("    --approval-mode force) or submit feedback via:")
+		bl("      faulttest vault feedback <run-id> --gateway $GW --api-key $KEY")
+		fmt.Println("└─────────────────────────────────────────────────────────────────────┘")
+		fmt.Println()
+	}
+
 	fmt.Printf("Diagnosis calibration — %s (%d runs with agent confidence + operator feedback)\n", scope, report.TotalRuns)
 	if report.HeuristicCount > 0 {
 		fmt.Printf("(%d run(s) excluded — agent did not emit a CONFIDENCE: value on primary hypothesis)\n", report.HeuristicCount)
