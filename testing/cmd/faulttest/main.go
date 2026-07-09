@@ -651,7 +651,11 @@ func cmdRun(args []string) {
 		if repeatMode {
 			sr := buildStabilityReport(f, repResults)
 			sr.Print()
-			postStabilityCert(ctx, cfg, f, sr)
+			if cfg.DiagnosisModel == "" {
+				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
+			} else {
+				postStabilityCert(ctx, cfg, f, sr)
+			}
 		}
 
 		if cfg.ReportPerFault {
