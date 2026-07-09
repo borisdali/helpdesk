@@ -14,6 +14,9 @@ ignore:
   - "agents/sysadmin/main.go"
   - "agents/research/main.go"
   - "agents/incident/main.go"
+  # agentutil/serve — server wiring extracted from agentutil during the v0.20.0 split;
+  # Serve/ServeWithTracing/InitApprovalClient require a live process to exercise.
+  - "agentutil/serve/**"
   # Pure HTTP client wrappers — require a live auditd server to test
   - "internal/audit/approval_client.go"
   - "internal/audit/remote_store.go"
