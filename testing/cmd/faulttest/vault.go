@@ -2082,6 +2082,19 @@ func vaultJourney(args []string) {
 		return
 	}
 
+	// --incident without an explicit --since: widen to 7d so historical
+	// incident runs (which accumulate over days) aren't silently hidden by
+	// the 24h default.
+	var sinceExplicit bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "since" {
+			sinceExplicit = true
+		}
+	})
+	if incidentOnly && !sinceExplicit {
+		since = "7d"
+	}
+
 	// List mode: show recent journeys.
 	params := map[string]string{
 		"limit": strconv.Itoa(limit),
