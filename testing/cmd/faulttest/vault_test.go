@@ -3485,3 +3485,188 @@ func TestFetchRunFindings_SendsAuth(t *testing.T) {
 		t.Errorf("Authorization = %q, want Bearer tok-findings", gotAuth)
 	}
 }
+
+// ── v0.21.0: fetchRootCauseClasses tests ─────────────────────────────────
+
+func TestFetchRootCauseClasses_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"playbooks":[{"root_cause_classes":{"version":"1.0","classes":["connection-pool-saturation","connection-pool-leak"]}}]}`)
+	}))
+	defer srv.Close()
+
+	classes, version := fetchRootCauseClasses(srv.URL, "", "pbs_connection_triage")
+	if len(classes) != 2 {
+		t.Errorf("classes: got %d, want 2", len(classes))
+	}
+	if version != "1.0" {
+		t.Errorf("version: got %q, want 1.0", version)
+	}
+	if len(classes) > 0 && classes[0] != "connection-pool-saturation" {
+		t.Errorf("classes[0]: got %q, want connection-pool-saturation", classes[0])
+	}
+}
+
+func TestFetchRootCauseClasses_NilClasses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"playbooks":[{"root_cause_classes":null}]}`)
+	}))
+	defer srv.Close()
+
+	classes, version := fetchRootCauseClasses(srv.URL, "", "pbs_connection_triage")
+	if classes != nil {
+		t.Errorf("classes: want nil, got %v", classes)
+	}
+	if version != "" {
+		t.Errorf("version: want empty, got %q", version)
+	}
+}
+
+func TestFetchRootCauseClasses_EmptyPlaybooks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"playbooks":[]}`)
+	}))
+	defer srv.Close()
+
+	classes, version := fetchRootCauseClasses(srv.URL, "", "pbs_connection_triage")
+	if classes != nil {
+		t.Errorf("classes: want nil, got %v", classes)
+	}
+	if version != "" {
+		t.Errorf("version: want empty, got %q", version)
+	}
+}
+
+func TestFetchRootCauseClasses_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	classes, version := fetchRootCauseClasses(srv.URL, "", "pbs_connection_triage")
+	if classes != nil {
+		t.Errorf("classes: want nil on server error, got %v", classes)
+	}
+	if version != "" {
+		t.Errorf("version: want empty on server error, got %q", version)
+	}
+}
+
+func TestFetchRootCauseClasses_EmptyGatewayURL(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	classes, version := fetchRootCauseClasses("", "", "pbs_connection_triage")
+	if called {
+		t.Error("server should not be called when gatewayURL is empty")
+	}
+	if classes != nil || version != "" {
+		t.Errorf("expected nil/empty, got classes=%v version=%q", classes, version)
+	}
+}
+
+func TestFetchRootCauseClasses_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if gotAuth != "Bearer test-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"playbooks":[{"root_cause_classes":{"version":"1.0","classes":["pool-saturation"]}}]}`)
+	}))
+	defer srv.Close()
+
+	classes, _ := fetchRootCauseClasses(srv.URL, "test-key", "pbs_connection_triage")
+	if len(classes) == 0 {
+		t.Errorf("expected classes to be returned when auth header is correct")
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization: got %q, want Bearer test-key", gotAuth)
+	}
+}
+
+// ── v0.21.0: vault list attribution display tests ────────────────────────
+
+// newVaultListAttributionServer returns a mock gateway that:
+//   - Handles probeGateway (GET /api/v1/fleet/playbooks?limit=1 → empty list)
+//   - Handles fetchStabilityCerts (GET /api/v1/fleet/fault-stability → cert with attribution)
+//   - Returns empty playbook list for any other /playbooks request (fetchPlaybookInfo → not found)
+func newVaultListAttributionServer(t *testing.T, certFaultID, primaryAttribution string, consistent bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v1/fleet/fault-stability") && r.URL.Path == "/api/v1/fleet/fault-stability":
+			attrJSON, _ := json.Marshal(map[string]any{
+				"certs": []map[string]any{
+					{
+						"fault_id":               certFaultID,
+						"n_runs":                 3,
+						"is_stable":              true,
+						"primary_attribution":    primaryAttribution,
+						"attribution_consistent": consistent,
+					},
+				},
+			})
+			w.Write(attrJSON) //nolint:errcheck
+		default:
+			// Handle probeGateway and fetchPlaybookInfo with empty playbook list.
+			fmt.Fprint(w, `{"playbooks":[]}`)
+		}
+	}))
+}
+
+func TestVaultList_AttributionShown(t *testing.T) {
+	srv := newVaultListAttributionServer(t, "db-max-connections", "connection-pool-saturation", true)
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultList([]string{"--gateway", srv.URL})
+	})
+
+	if !strings.Contains(out, "attr=connection-pool-saturation") {
+		t.Errorf("expected attr=connection-pool-saturation in vault list output:\n%s", out)
+	}
+}
+
+func TestVaultList_SplitAttributionShown(t *testing.T) {
+	srv := newVaultListAttributionServer(t, "db-max-connections", "connection-pool-saturation", false)
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultList([]string{"--gateway", srv.URL})
+	})
+
+	if !strings.Contains(out, "attr=connection-pool-saturation(split)") {
+		t.Errorf("expected attr=....(split) in vault list output:\n%s", out)
+	}
+}
+
+func TestVaultList_NoAttributionWhenEmpty(t *testing.T) {
+	// Cert with empty primary_attribution — no attr= label should appear.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/fleet/fault-stability" {
+			fmt.Fprint(w, `{"certs":[{"fault_id":"db-max-connections","n_runs":3,"is_stable":true,"primary_attribution":"","attribution_consistent":false}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"playbooks":[]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultList([]string{"--gateway", srv.URL})
+	})
+
+	if strings.Contains(out, "attr=") {
+		t.Errorf("expected no attr= in output when primary_attribution is empty:\n%s", out)
+	}
+}
