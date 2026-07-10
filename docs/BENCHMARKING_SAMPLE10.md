@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#10 (Host/VM): Calibration Data Quality Banner + 
+# aiHelpDesk Sample#10 (Host/VM): Calibration Data Quality Banner + Consistency Certs Comparison + Journey's Agent Reasoning and the Chain-of-Thought
 
 The sample commands presented below complements these two blog post: 
 
@@ -46,7 +46,7 @@ Running headless (--services-only). Press Ctrl-C to stop all services.
 ```
 
 
-## Calibration Quality Banner
+## Calibration Data Quality Banner
 
 With no human-graded runs (`human_runs == 0`), aiHelpDesk shows a warning banner above the calibration table. See [here](VAULT.md#vault-calibration) for details:
 
@@ -85,7 +85,7 @@ Note: all 1 run(s) above use auto_judge feedback (LLM judge score ≥ 0.8, --app
 ```
 
 
-## Compare model consistency certs
+## Compare Model Consistency Certs
 
 Want to upgrade the model to a new version or switch to a different model or even to a different vendor entirely? [Get the numbers first](VAULT.md#vault-cert-compare). Compares consistency certification results across two diagnosis models, fault by fault. Here's how:
 
@@ -234,7 +234,7 @@ db-checkpoint-warning            any        pbs_checkpoint_bgwriter_triage  pbs_
 ```
 
 
-## Agent Reasoning, Chain-of-Thought
+## Journey's Agent Reasoning and Chain-of-Thought
 
 The API endpoint to get the full agent reasoning and the chain-of-thought is `GET /api/v1/fleet/playbook-runs/{runID}/events` see [here](PLAYBOOKS.md#run-events-chain-of-thought) for details. Quoting that section directly here:
 
