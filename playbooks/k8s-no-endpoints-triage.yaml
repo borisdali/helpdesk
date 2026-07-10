@@ -1,6 +1,6 @@
 series_id: pbs_k8s_no_endpoints_triage
 name: "K8s Service — No Endpoints Triage"
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -14,6 +14,12 @@ description: |
   is either a label mismatch between the Service selector and pod labels, or the
   absence of running pods in the namespace. Identifies which label key or value
   is causing the mismatch.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - label-selector-mismatch
+    - no-running-pods
+    - readiness-probe-failing
 symptoms:
   - "database connections timing out from application"
   - "Service has no endpoints — kubectl get endpoints shows empty"

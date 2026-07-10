@@ -176,9 +176,9 @@ func (s *PlaybookRunStore) migrate() error {
 		{"trigger_context", `ALTER TABLE playbook_runs ADD COLUMN trigger_context TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
-			// SQLite returns "duplicate column name" when the column already
-			// exists; treat that as a no-op so restarts on new DBs also work.
-			if !strings.Contains(err.Error(), "duplicate column name: "+col.name) {
+			// SQLite says "duplicate column name: X"; Postgres says
+			// "column X of relation ... already exists". Accept both.
+			if !containsAny(err.Error(), "duplicate column", "already exists") {
 				return fmt.Errorf("migrate playbook_runs.%s: %w", col.name, err)
 			}
 		}

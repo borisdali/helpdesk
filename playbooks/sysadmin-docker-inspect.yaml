@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "1.5"
+version: "1.6"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -20,6 +20,14 @@ description: |
   Determine whether the container exited cleanly (manual stop / graceful shutdown)
   or crashed (OOM kill, panic, unexpected exit), revise the prior DB agent's root
   cause hypothesis if necessary, and provide evidence-based remediation guidance.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - clean-shutdown
+    - oom-kill
+    - wal-disk-full
+    - process-crash
+    - data-corruption
 symptoms:
   - "DB agent diagnosed 'connection refused' but could not read docker container logs"
   - "docker-hosted PostgreSQL is unreachable"

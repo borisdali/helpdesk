@@ -336,12 +336,56 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 	return info
 }
 
+// fetchRootCauseClasses fetches the root_cause_classes for a playbook series
+// from the gateway. Returns empty slice when the playbook has no taxonomy or
+// on any error. Also returns the taxonomy version string.
+func fetchRootCauseClasses(gatewayURL, apiKey, seriesID string) (classes []string, version string) {
+	if gatewayURL == "" || seriesID == "" {
+		return nil, ""
+	}
+	reqURL := gatewayURL + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, ""
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil, ""
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Playbooks []struct {
+			RootCauseClasses *struct {
+				Version string   `json:"version"`
+				Classes []string `json:"classes"`
+			} `json:"root_cause_classes"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Playbooks) == 0 {
+		return nil, ""
+	}
+	rcc := result.Playbooks[0].RootCauseClasses
+	if rcc == nil || len(rcc.Classes) == 0 {
+		return nil, ""
+	}
+	return rcc.Classes, rcc.Version
+}
+
 // stabilityInfo is a lightweight view of one fault's stability cert for vault list.
 type stabilityInfo struct {
-	IsStable    bool
-	NRuns       int
-	TestedAt    time.Time
-	hasData     bool
+	IsStable              bool
+	NRuns                 int
+	TestedAt              time.Time
+	PrimaryAttribution    string
+	AttributionConsistent bool
+	hasData               bool
 }
 
 // fetchStabilityCert fetches the stability cert for a single fault from the gateway.
@@ -515,10 +559,12 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 
 	var result struct {
 		Certs []struct {
-			FaultID  string  `json:"fault_id"`
-			NRuns    int     `json:"n_runs"`
-			IsStable bool    `json:"is_stable"`
-			TestedAt string  `json:"tested_at"`
+			FaultID               string `json:"fault_id"`
+			NRuns                 int    `json:"n_runs"`
+			IsStable              bool   `json:"is_stable"`
+			TestedAt              string `json:"tested_at"`
+			PrimaryAttribution    string `json:"primary_attribution"`
+			AttributionConsistent bool   `json:"attribution_consistent"`
 		} `json:"certs"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -531,7 +577,13 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 		if _, exists := out[c.FaultID]; exists {
 			continue
 		}
-		info := stabilityInfo{IsStable: c.IsStable, NRuns: c.NRuns, hasData: true}
+		info := stabilityInfo{
+			IsStable:              c.IsStable,
+			NRuns:                 c.NRuns,
+			PrimaryAttribution:    c.PrimaryAttribution,
+			AttributionConsistent: c.AttributionConsistent,
+			hasData:               true,
+		}
 		if c.TestedAt != "" {
 			if t, err := time.Parse(time.RFC3339Nano, c.TestedAt); err == nil {
 				info.TestedAt = t
@@ -709,6 +761,14 @@ func vaultList(args []string) {
 				label = "STABLE"
 			}
 			stableCol = fmt.Sprintf("%s(%d)", label, si.NRuns)
+			// Append attribution label when available.
+			if si.PrimaryAttribution != "" && si.PrimaryAttribution != "UNKNOWN" {
+				if si.AttributionConsistent {
+					stableCol += fmt.Sprintf(" attr=%s", si.PrimaryAttribution)
+				} else {
+					stableCol += fmt.Sprintf(" attr=%s(split)", si.PrimaryAttribution)
+				}
+			}
 			// Append age in days when older than 14 days.
 			if !si.TestedAt.IsZero() {
 				age := int(time.Since(si.TestedAt).Hours() / 24)
@@ -2320,6 +2380,13 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 			sectionJ("EXECUTION TRACE")
 			printReasoningTrace(events)
 		}
+		// Show the structured FINDINGS from the playbook run's diagnostic_report.
+		// This is the agent's final conclusion that often falls after the last tool
+		// call and is not captured as an agent_reasoning event.
+		if runSummary := fetchRunFindings(gatewayURL, apiKey, j.IncidentRunID); runSummary != "" {
+			sectionJ("FINDINGS")
+			fmt.Printf("  %s\n", wordWrap(runSummary, 68, "  "))
+		}
 	} else if len(j.ToolsUsed) > 0 {
 		sectionJ("TOOLS USED")
 		if detail && j.IncidentRunID == "" {
@@ -2385,6 +2452,38 @@ type journeyToolExec struct {
 type journeyReasoning struct {
 	Reasoning string   `json:"reasoning"`
 	ToolCalls []string `json:"tool_calls"`
+}
+
+// fetchRunFindings fetches the findings_summary from a single playbook run.
+// Returns empty string when not found or on error. This surfaces the agent's
+// final FINDINGS line that is stored on the run record rather than as an event.
+func fetchRunFindings(gatewayURL, apiKey, runID string) string {
+	if gatewayURL == "" || runID == "" {
+		return ""
+	}
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var run struct {
+		FindingsSummary string `json:"findings_summary"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
+		return ""
+	}
+	return run.FindingsSummary
 }
 
 // fetchRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events and
@@ -2847,7 +2946,7 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 // postStabilityCert posts a fault triage consistency certification to auditd
 // via the gateway. Silently skipped when --gateway is not set. Errors are
 // logged but never cause the run to fail.
-func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport) {
+func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport, attr *attributionSummary) {
 	if cfg.GatewayURL == "" {
 		return
 	}
@@ -2861,6 +2960,13 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		"pass_rate":          sr.passRate(),
 		"conf_range_pp":      int(math.Round(sr.confRange() * 100)),
 		"is_stable":          sr.isStable(),
+	}
+	if attr != nil {
+		payload["primary_attribution"] = attr.PrimaryAttribution
+		payload["attribution_consistent"] = attr.AttributionConsistent
+		payload["attribution_distribution"] = attr.AttributionDistribution
+		payload["judge_spread"] = attr.JudgeSpread
+		payload["taxonomy_version"] = attr.TaxonomyVersion
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -3410,10 +3516,14 @@ type certCompareRow struct {
 }
 
 type certCompareEntry struct {
-	isStable bool
-	passRate float64
-	nRuns    int
-	testedAt string
+	isStable              bool
+	passRate              float64
+	nRuns                 int
+	testedAt              string
+	primaryAttribution    string
+	attributionConsistent bool
+	taxonomyVersion       string
+	judgeSpread           float64
 }
 
 // vaultCertCompare compares stability certs for two diagnosis models.
@@ -3450,10 +3560,14 @@ func vaultCertCompare(args []string) {
 	names := make(map[string]string) // fault_id → fault_name
 	for _, c := range allCerts {
 		byKey[certKey{c.FaultID, c.DiagnosisModel}] = &certCompareEntry{
-			isStable: c.IsStable,
-			passRate: c.PassRate,
-			nRuns:    c.NRuns,
-			testedAt: c.TestedAt,
+			isStable:              c.IsStable,
+			passRate:              c.PassRate,
+			nRuns:                 c.NRuns,
+			testedAt:              c.TestedAt,
+			primaryAttribution:    c.PrimaryAttribution,
+			attributionConsistent: c.AttributionConsistent,
+			taxonomyVersion:       c.TaxonomyVersion,
+			judgeSpread:           c.JudgeSpread,
 		}
 		if c.FaultName != "" {
 			names[c.FaultID] = c.FaultName
@@ -3546,11 +3660,32 @@ func vaultCertCompare(args []string) {
 			colNew, newStr,
 			change,
 		)
-		// For regressions: show diagnosis-rate delta as context.
+		// For regressions: show diagnosis-rate delta and attribution context.
 		if r.oldCert != nil && r.newCert != nil && r.oldCert.isStable && !r.newCert.isStable {
 			delta := r.newCert.passRate - r.oldCert.passRate
 			fmt.Printf("  %s diag_rate: %.0f%% → %.0f%%  (Δ%+.0f%%)\n",
 				r.faultID, r.oldCert.passRate*100, r.newCert.passRate*100, delta*100)
+		}
+		// Attribution comparison when both certs have taxonomy data.
+		if r.oldCert != nil && r.newCert != nil &&
+			r.oldCert.primaryAttribution != "" && r.newCert.primaryAttribution != "" {
+			oldTV := r.oldCert.taxonomyVersion
+			newTV := r.newCert.taxonomyVersion
+			taxWarning := ""
+			if oldTV != "" && newTV != "" && majorVersion(oldTV) != majorVersion(newTV) {
+				taxWarning = fmt.Sprintf("  ⚠ TAXONOMY MAJOR %s→%s: attribution comparison invalid", oldTV, newTV)
+			}
+			oldAttr := r.oldCert.primaryAttribution
+			if !r.oldCert.attributionConsistent {
+				oldAttr += "(split)"
+			}
+			newAttr := r.newCert.primaryAttribution
+			if !r.newCert.attributionConsistent {
+				newAttr += "(split)"
+			}
+			if oldAttr != newAttr || taxWarning != "" {
+				fmt.Printf("  attribution: %s → %s%s\n", oldAttr, newAttr, taxWarning)
+			}
 		}
 	}
 
@@ -3582,13 +3717,17 @@ func vaultCertCompare(args []string) {
 
 // fetchAllStabilityCerts retrieves every (fault, model) cert row from the gateway.
 func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
-	FaultID        string  `json:"fault_id"`
-	FaultName      string  `json:"fault_name"`
-	DiagnosisModel string  `json:"diagnosis_model"`
-	NRuns          int     `json:"n_runs"`
-	PassRate       float64 `json:"pass_rate"`
-	IsStable       bool    `json:"is_stable"`
-	TestedAt       string  `json:"tested_at"`
+	FaultID               string  `json:"fault_id"`
+	FaultName             string  `json:"fault_name"`
+	DiagnosisModel        string  `json:"diagnosis_model"`
+	NRuns                 int     `json:"n_runs"`
+	PassRate              float64 `json:"pass_rate"`
+	IsStable              bool    `json:"is_stable"`
+	TestedAt              string  `json:"tested_at"`
+	PrimaryAttribution    string  `json:"primary_attribution"`
+	AttributionConsistent bool    `json:"attribution_consistent"`
+	TaxonomyVersion       string  `json:"taxonomy_version"`
+	JudgeSpread           float64 `json:"judge_spread"`
 }, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
@@ -3609,13 +3748,17 @@ func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
 	}
 	var result struct {
 		Certs []struct {
-			FaultID        string  `json:"fault_id"`
-			FaultName      string  `json:"fault_name"`
-			DiagnosisModel string  `json:"diagnosis_model"`
-			NRuns          int     `json:"n_runs"`
-			PassRate       float64 `json:"pass_rate"`
-			IsStable       bool    `json:"is_stable"`
-			TestedAt       string  `json:"tested_at"`
+			FaultID               string  `json:"fault_id"`
+			FaultName             string  `json:"fault_name"`
+			DiagnosisModel        string  `json:"diagnosis_model"`
+			NRuns                 int     `json:"n_runs"`
+			PassRate              float64 `json:"pass_rate"`
+			IsStable              bool    `json:"is_stable"`
+			TestedAt              string  `json:"tested_at"`
+			PrimaryAttribution    string  `json:"primary_attribution"`
+			AttributionConsistent bool    `json:"attribution_consistent"`
+			TaxonomyVersion       string  `json:"taxonomy_version"`
+			JudgeSpread           float64 `json:"judge_spread"`
 		} `json:"certs"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -3662,6 +3805,15 @@ func changeOrder(r certCompareRow) int {
 	default:
 		return 4 // missing
 	}
+}
+
+// majorVersion extracts the major component of a semver string "MAJOR.minor".
+// Returns the whole string when no dot is present.
+func majorVersion(v string) string {
+	if i := strings.IndexByte(v, '.'); i > 0 {
+		return v[:i]
+	}
+	return v
 }
 
 // shortModelName strips the leading "claude-" vendor prefix if present,

@@ -2615,7 +2615,7 @@ func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
 		N:           5,
 		PassCount:   4,
 	}
-	postStabilityCert(context.Background(), cfg, f, sr)
+	postStabilityCert(context.Background(), cfg, f, sr, nil)
 
 	if gotBody["fault_id"] != "db-max-connections" {
 		t.Errorf("fault_id = %v, want db-max-connections", gotBody["fault_id"])
@@ -2643,7 +2643,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "tok-stability"}
-	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{})
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, nil)
 	if gotAuth != "Bearer tok-stability" {
 		t.Errorf("Authorization = %q, want Bearer tok-stability", gotAuth)
 	}
@@ -2652,7 +2652,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 func TestPostStabilityCert_NoopWhenEmptyGateway(t *testing.T) {
 	// Should not panic or dial anything when GatewayURL is empty.
 	cfg := &HarnessConfig{GatewayURL: ""}
-	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{})
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, nil)
 }
 
 func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
@@ -2663,7 +2663,7 @@ func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
 	// Should log a warning but not panic.
-	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1})
+	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1}, nil)
 }
 
 // ── wrapLines ────────────────────────────────────────────────────────────────

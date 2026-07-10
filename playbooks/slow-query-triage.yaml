@@ -1,6 +1,6 @@
 series_id: pbs_slow_query_triage
 name: Slow Query Triage
-version: "1.5"
+version: "1.6"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -19,6 +19,13 @@ description: |
   Investigate slow query performance on the target database. Identify the top
   queries by execution time, examine current wait events, detect blocking chains,
   and optionally run EXPLAIN ANALYZE on the most expensive query.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - missing-index-causing-sequential-scan
+    - lock-contention-blocking-queries
+    - inefficient-query-plan
+    - high-query-volume
 symptoms:
   - "p99 or p95 latency elevated"
   - "application timeouts increasing"

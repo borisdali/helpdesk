@@ -1,6 +1,6 @@
 series_id: pbs_pg_hba_triage
 name: pg_hba.conf Rejection — Triage
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -15,6 +15,12 @@ description: |
   rejects connection". Because the database connection itself is rejected, most
   psql-based diagnostic tools cannot be used — diagnosis relies on capturing the
   exact connection error and the target address from the connection string.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - hba-rejects-all-non-local-connections
+    - hba-rejects-specific-host
+    - hba-credential-error-not-hba
 symptoms:
   - "all application connections failing with pg_hba.conf rejects connection"
   - "psql authentication error on every non-local connection"

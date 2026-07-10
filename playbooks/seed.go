@@ -31,6 +31,13 @@ type systemPlaybookYAML struct {
 	AgentName        string   `yaml:"agent_name"`
 	ApprovalMode     string   `yaml:"approval_mode"`
 	PlaybookType     string   `yaml:"playbook_type"`
+	RootCauseClasses *rootCauseClassesYAML `yaml:"root_cause_classes"`
+}
+
+// rootCauseClassesYAML is the YAML representation of a root-cause taxonomy block.
+type rootCauseClassesYAML struct {
+	Version string   `yaml:"version"`
+	Classes []string `yaml:"classes"`
 }
 
 // SeedSystemPlaybooks reads all embedded *.yaml files and inserts them into the
@@ -120,6 +127,13 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 
 		{
 			// System playbooks always activate the newest version automatically.
+			var rcc *audit.RootCauseClassification
+			if y.RootCauseClasses != nil {
+				rcc = &audit.RootCauseClassification{
+					Version: y.RootCauseClasses.Version,
+					Classes: y.RootCauseClasses.Classes,
+				}
+			}
 			pb := &audit.Playbook{
 				SeriesID:         y.SeriesID,
 				Name:             y.Name,
@@ -139,6 +153,7 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 				AgentName:        y.AgentName,
 				ApprovalMode:     y.ApprovalMode,
 				PlaybookType:     y.PlaybookType,
+				RootCauseClasses: rcc,
 				IsSystem:         true,
 				IsActive:         true,
 				Source:           "system",

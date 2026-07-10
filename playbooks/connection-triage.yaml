@@ -1,6 +1,6 @@
 series_id: pbs_connection_triage
 name: Connection & Lock Triage
-version: "1.4"
+version: "1.5"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -12,6 +12,13 @@ description: |
   Investigate high connection counts, connection pool saturation, or lock
   contention that may be causing availability degradation. Identify idle
   connections, blocking transactions, and sessions holding long-running locks.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - connection-pool-saturation
+    - connection-pool-leak
+    - connection-limit-misconfiguration
+    - idle-connection-accumulation
 symptoms:
   - "connection pool exhausted"
   - "FATAL: remaining connection slots are reserved"

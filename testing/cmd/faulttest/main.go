@@ -654,7 +654,16 @@ func cmdRun(args []string) {
 			if cfg.DiagnosisModel == "" {
 				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
 			} else {
-				postStabilityCert(ctx, cfg, f, sr)
+				var attrSummary *attributionSummary
+				if f.DiagnosisPlaybookSeriesID != "" {
+					classes, taxonomyVersion := fetchRootCauseClasses(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID)
+					if len(classes) > 0 {
+						completer := newAttributionCompleter(ctx, cfg)
+						s := computeAttributionSummary(ctx, completer, repResults, classes, taxonomyVersion)
+						attrSummary = &s
+					}
+				}
+				postStabilityCert(ctx, cfg, f, sr, attrSummary)
 			}
 		}
 

@@ -1,6 +1,6 @@
 series_id: pbs_k8s_scale_to_zero_triage
 name: "K8s StatefulSet Scaled to Zero — Triage"
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -15,6 +15,11 @@ description: |
   in recent events), scaling back up to 1 replica is a safe, reversible action.
   Distinguishes a deliberate scale-down from a crash loop by examining recent
   events.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - deliberate-scale-down
+    - crash-loop-induced-zero
 symptoms:
   - "database unavailable — no postgres pod is running"
   - "kubectl get pods shows no postgres pods in the namespace"

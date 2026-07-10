@@ -1,6 +1,6 @@
 series_id: pbs_db_restart_triage
 name: Database Down — Restart Triage
-version: "1.4"
+version: "1.5"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -19,6 +19,14 @@ description: |
   a controlled restart if the logs indicate a clean shutdown or transient OOM kill.
   Use stored baseline data (data_directory, log paths) from prior get_server_info
   snapshots to orient recovery when the database cannot be directly queried.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - clean-shutdown
+    - oom-kill
+    - config-error
+    - data-corruption
+    - storage-mount-failure
 symptoms:
   - "database is not accepting connections"
   - "check_connection returns connection refused or timeout"

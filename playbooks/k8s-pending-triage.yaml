@@ -1,6 +1,6 @@
 series_id: pbs_k8s_pending_triage
 name: "K8s Pod Stuck in Pending — Triage"
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -14,6 +14,13 @@ description: |
   Identifies the scheduling failure reason from events and resource requests, and
   determines whether the root cause is an oversized resource request, a node
   affinity/toleration mismatch, or an unbound PVC.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - insufficient-node-memory
+    - insufficient-node-cpu
+    - node-affinity-mismatch
+    - pvc-unbound
 symptoms:
   - "pod stuck in Pending state — never transitions to Running"
   - "kubectl get pods shows STATUS=Pending for an extended period"

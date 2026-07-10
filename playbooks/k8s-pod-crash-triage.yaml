@@ -1,6 +1,6 @@
 series_id: pbs_k8s_pod_crash_triage
 name: "K8s Pod Crash — Diagnosis"
-version: "1.2"
+version: "1.3"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -12,6 +12,14 @@ description: |
   Diagnose a crashing or restarting Kubernetes pod running PostgreSQL.
   Identify the root cause from pod state, exit code, and on-disk logs,
   and provide evidence-based remediation guidance.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - oom-kill
+    - wal-disk-full
+    - clean-shutdown
+    - process-error
+    - data-corruption
 symptoms:
   - "PostgreSQL pod is restarting or in CrashLoopBackOff"
   - "pod status shows Completed (exit 0) or OOMKilled (exit 137)"

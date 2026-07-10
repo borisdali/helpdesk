@@ -1,6 +1,6 @@
 series_id: pbs_wal_stale_slot
 name: WAL Accumulation — Stale Replication Slot
-version: "1.3"
+version: "1.4"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -15,6 +15,13 @@ description: |
   remains fully operational until the data volume fills. Safe remediation is
   pg_drop_replication_slot, which requires operator confirmation because it
   permanently removes the replica's reconnection point.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - inactive-replication-slot
+    - archive-command-failure
+    - long-running-transaction
+    - write-volume-exceeds-max-wal-size
 symptoms:
   - "pg_wal directory growing without bound"
   - "storage alert on PostgreSQL data volume — writes still succeeding"
