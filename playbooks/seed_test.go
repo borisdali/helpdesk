@@ -510,3 +510,56 @@ func TestPlaybookStructure_SeriesIDConvention(t *testing.T) {
 		}
 	}
 }
+
+// TestPlaybookStructure_RootCauseClasses verifies that every triage playbook
+// carries a non-nil RootCauseClasses with version "1.0" and at least 2 classes,
+// and that remediation playbooks carry none.
+func TestPlaybookStructure_RootCauseClasses(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+	if err := playbooks.SeedSystemPlaybooks(ctx, ps); err != nil {
+		t.Fatalf("SeedSystemPlaybooks: %v", err)
+	}
+
+	all, err := ps.List(ctx, audit.PlaybookListQuery{IncludeSystem: true, ActiveOnly: false})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	for _, pb := range all {
+		switch pb.PlaybookType {
+		case "triage":
+			if pb.RootCauseClasses == nil {
+				t.Errorf("%s (%s): triage playbook has nil RootCauseClasses", pb.SeriesID, pb.Name)
+				continue
+			}
+			if pb.RootCauseClasses.Version == "" {
+				t.Errorf("%s: RootCauseClasses.Version is empty", pb.SeriesID)
+			}
+			if len(pb.RootCauseClasses.Classes) < 2 {
+				t.Errorf("%s: RootCauseClasses.Classes has %d entries, want >= 2",
+					pb.SeriesID, len(pb.RootCauseClasses.Classes))
+			}
+			for _, cls := range pb.RootCauseClasses.Classes {
+				if cls == "" {
+					t.Errorf("%s: RootCauseClasses contains empty class string", pb.SeriesID)
+				}
+			}
+		case "remediation":
+			if pb.RootCauseClasses != nil {
+				t.Errorf("%s (%s): remediation playbook should have nil RootCauseClasses, got %+v",
+					pb.SeriesID, pb.Name, pb.RootCauseClasses)
+			}
+		}
+	}
+
+	triageWithClasses := 0
+	for _, pb := range all {
+		if pb.PlaybookType == "triage" && pb.RootCauseClasses != nil {
+			triageWithClasses++
+		}
+	}
+	if triageWithClasses < 21 {
+		t.Errorf("expected >= 21 triage playbooks with root_cause_classes, got %d", triageWithClasses)
+	}
+}

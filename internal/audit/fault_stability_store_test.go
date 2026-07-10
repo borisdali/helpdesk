@@ -420,3 +420,213 @@ func TestFaultStabilityStore_TestedAt_Preserved(t *testing.T) {
 		t.Errorf("TestedAt: got %v, want ~%v", got.TestedAt, fixed)
 	}
 }
+
+// ── v0.21.0 attribution field tests ──────────────────────────────────────────
+
+func TestFaultStabilityCert_AttributionFields_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	dist := map[string]int{"connection-pool-saturation": 3, "connection-pool-leak": 2}
+	cert := &FaultStabilityCert{
+		FaultID:                 "db-max-connections",
+		FaultName:               "Max Connections",
+		DiagnosisModel:          "claude-sonnet-4-6",
+		NRuns:                   5,
+		PassRate:                0.8,
+		IsStable:                true,
+		PrimaryAttribution:      "connection-pool-saturation",
+		AttributionConsistent:   false,
+		AttributionDistribution: dist,
+		JudgeSpread:             0.12,
+		TaxonomyVersion:         "1.0",
+	}
+
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+
+	if got.PrimaryAttribution != cert.PrimaryAttribution {
+		t.Errorf("PrimaryAttribution: got %q, want %q", got.PrimaryAttribution, cert.PrimaryAttribution)
+	}
+	if got.AttributionConsistent != cert.AttributionConsistent {
+		t.Errorf("AttributionConsistent: got %v, want %v", got.AttributionConsistent, cert.AttributionConsistent)
+	}
+	if got.TaxonomyVersion != cert.TaxonomyVersion {
+		t.Errorf("TaxonomyVersion: got %q, want %q", got.TaxonomyVersion, cert.TaxonomyVersion)
+	}
+	if len(got.AttributionDistribution) != len(dist) {
+		t.Errorf("AttributionDistribution len: got %d, want %d",
+			len(got.AttributionDistribution), len(dist))
+	}
+	for k, v := range dist {
+		if got.AttributionDistribution[k] != v {
+			t.Errorf("AttributionDistribution[%q]: got %d, want %d",
+				k, got.AttributionDistribution[k], v)
+		}
+	}
+	if got.JudgeSpread < 0.11 || got.JudgeSpread > 0.13 {
+		t.Errorf("JudgeSpread: got %v, want ~0.12", got.JudgeSpread)
+	}
+}
+
+func TestFaultStabilityCert_AttributionConsistent_True(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:               "db-lock-contention",
+		DiagnosisModel:        "claude-haiku-4-5",
+		NRuns:                 3,
+		IsStable:              true,
+		AttributionConsistent: true,
+		PrimaryAttribution:    "row-level-lock-contention",
+		TaxonomyVersion:       "1.0",
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if !got.AttributionConsistent {
+		t.Error("AttributionConsistent: got false, want true")
+	}
+	if got.PrimaryAttribution != "row-level-lock-contention" {
+		t.Errorf("PrimaryAttribution: got %q, want row-level-lock-contention", got.PrimaryAttribution)
+	}
+}
+
+func TestFaultStabilityCert_AttributionDistribution_Empty(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:        "db-vacuum-needed",
+		DiagnosisModel: "gemini-2.0-flash",
+		NRuns:          5,
+		IsStable:       false,
+		// No attribution fields set.
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if len(got.AttributionDistribution) != 0 {
+		t.Errorf("AttributionDistribution: got %v, want empty", got.AttributionDistribution)
+	}
+	if got.PrimaryAttribution != "" {
+		t.Errorf("PrimaryAttribution: got %q, want empty", got.PrimaryAttribution)
+	}
+	if got.TaxonomyVersion != "" {
+		t.Errorf("TaxonomyVersion: got %q, want empty", got.TaxonomyVersion)
+	}
+}
+
+// TestFaultStabilityStore_Migrate_AttributionColumns verifies that a database
+// with the v0.20.0 schema (composite PK, no attribution columns) gets the
+// attribution columns added by migrate().
+func TestFaultStabilityStore_Migrate_AttributionColumns(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "migrate_attr.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// Create a pre-v0.21.0 schema: composite PK but no attribution columns.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert (
+    fault_id           TEXT    NOT NULL,
+    fault_name         TEXT    NOT NULL DEFAULT '',
+    playbook_series_id TEXT    NOT NULL DEFAULT '',
+    model              TEXT    NOT NULL DEFAULT '',
+    diagnosis_model    TEXT    NOT NULL DEFAULT '',
+    n_runs             INTEGER NOT NULL DEFAULT 0,
+    pass_rate          REAL    NOT NULL DEFAULT 0,
+    conf_range_pp      INTEGER NOT NULL DEFAULT 0,
+    is_stable          INTEGER NOT NULL DEFAULT 0,
+    tested_at          TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (fault_id, diagnosis_model)
+)`); err != nil {
+		t.Fatalf("create pre-v0.21.0 schema: %v", err)
+	}
+	// Seed a row to verify data survives.
+	if _, err := store.DB().Exec(
+		`INSERT INTO fault_stability_cert (fault_id, fault_name, n_runs, is_stable, diagnosis_model)
+         VALUES ('db-old-fault', 'Old Fault', 3, 1, 'test-model')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	// migrate() detects pkCols=2 → calls addAttributionColumnsSQLite().
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Old row must survive.
+	old, err := fs.GetByFaultAndModel(context.Background(), "db-old-fault", "test-model")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel (old row): %v", err)
+	}
+	if old.FaultName != "Old Fault" {
+		t.Errorf("FaultName after migration: got %q, want Old Fault", old.FaultName)
+	}
+
+	// New rows can use attribution fields after migration.
+	cert := &FaultStabilityCert{
+		FaultID:            "db-new-fault",
+		DiagnosisModel:     "claude-sonnet-4-6",
+		NRuns:              5,
+		IsStable:           true,
+		PrimaryAttribution: "connection-pool-saturation",
+		TaxonomyVersion:    "1.0",
+	}
+	if err := fs.Upsert(context.Background(), cert); err != nil {
+		t.Fatalf("Upsert after migration: %v", err)
+	}
+	got, err := fs.GetByFaultAndModel(context.Background(), cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel after migration: %v", err)
+	}
+	if got.PrimaryAttribution != "connection-pool-saturation" {
+		t.Errorf("PrimaryAttribution: got %q, want connection-pool-saturation", got.PrimaryAttribution)
+	}
+	if got.TaxonomyVersion != "1.0" {
+		t.Errorf("TaxonomyVersion: got %q, want 1.0", got.TaxonomyVersion)
+	}
+}
+
+// TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent verifies that
+// calling migrate() on a fully-migrated database (all attribution columns
+// already present) does not fail.
+func TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent(t *testing.T) {
+	// newFaultStabilityStore calls NewFaultStabilityStore which runs createSchema+migrate.
+	store := newFaultStabilityStore(t)
+	ctx := context.Background()
+
+	// A second migrate() call must be idempotent.
+	if err := store.migrate(); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+
+	// Store must still be usable.
+	cert := &FaultStabilityCert{
+		FaultID:            "db-max-connections",
+		DiagnosisModel:     "claude-sonnet-4-6",
+		NRuns:              3,
+		PrimaryAttribution: "connection-pool-saturation",
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert after idempotent migrate: %v", err)
+	}
+}

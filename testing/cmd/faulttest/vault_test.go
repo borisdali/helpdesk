@@ -3262,3 +3262,226 @@ func TestVaultCertCompare_NoCertsForEitherModel(t *testing.T) {
 		t.Errorf("expected no-certs message:\n%s", out)
 	}
 }
+
+// ── v0.21.0: attribution payload in postStabilityCert ─────────────────────────
+
+func TestPostStabilityCert_AttributionPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	attr := &attributionSummary{
+		PrimaryAttribution:     "connection-pool-saturation",
+		AttributionConsistent:  true,
+		AttributionDistribution: map[string]int{"connection-pool-saturation": 3},
+		JudgeSpread:            0.08,
+		TaxonomyVersion:        "1.0",
+	}
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-max-connections"}, StabilityReport{N: 3, PassCount: 3}, attr)
+
+	if gotBody["primary_attribution"] != "connection-pool-saturation" {
+		t.Errorf("primary_attribution = %v", gotBody["primary_attribution"])
+	}
+	if gotBody["attribution_consistent"] != true {
+		t.Errorf("attribution_consistent = %v, want true", gotBody["attribution_consistent"])
+	}
+	if gotBody["taxonomy_version"] != "1.0" {
+		t.Errorf("taxonomy_version = %v, want 1.0", gotBody["taxonomy_version"])
+	}
+	// judge_spread and attribution_distribution are always included when attr != nil.
+	if gotBody["judge_spread"] == nil {
+		t.Error("judge_spread missing from payload")
+	}
+	if gotBody["attribution_distribution"] == nil {
+		t.Error("attribution_distribution missing from payload")
+	}
+}
+
+func TestPostStabilityCert_NilAttribution_NoExtraFields(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3}, nil)
+
+	if _, ok := gotBody["primary_attribution"]; ok {
+		t.Error("primary_attribution should not be in payload when attr=nil")
+	}
+	if _, ok := gotBody["taxonomy_version"]; ok {
+		t.Error("taxonomy_version should not be in payload when attr=nil")
+	}
+}
+
+// ── v0.21.0: cert-compare taxonomy major warning ─────────────────────────────
+
+func newCertCompareTaxonomyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Two certs for the same fault — old model uses taxonomy 1.0, new model uses 2.0.
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-max-connections","fault_name":"Max Connections",
+			 "diagnosis_model":"old-model","n_runs":3,"pass_rate":1.0,"is_stable":true,
+			 "primary_attribution":"connection-pool-saturation","attribution_consistent":true,"taxonomy_version":"1.0"},
+			{"fault_id":"db-max-connections","fault_name":"Max Connections",
+			 "diagnosis_model":"new-model","n_runs":3,"pass_rate":1.0,"is_stable":true,
+			 "primary_attribution":"connection-pool-saturation","attribution_consistent":true,"taxonomy_version":"2.0"}
+		]}`)
+	}))
+}
+
+func TestVaultCertCompare_TaxonomyMajor(t *testing.T) {
+	srv := newCertCompareTaxonomyServer(t)
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{"old-model", "new-model", "--gateway", srv.URL})
+	})
+
+	if !strings.Contains(out, "TAXONOMY MAJOR") {
+		t.Errorf("expected TAXONOMY MAJOR warning in output:\n%s", out)
+	}
+	if !strings.Contains(out, "1.0") || !strings.Contains(out, "2.0") {
+		t.Errorf("expected taxonomy versions in output:\n%s", out)
+	}
+}
+
+func TestVaultCertCompare_AttributionDiverged(t *testing.T) {
+	// Two certs for the same fault, same taxonomy major, but different primary_attribution.
+	// cert-compare should print an attribution line showing the divergence.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"certs":[
+			{"fault_id":"db-max-connections","fault_name":"Max Connections",
+			 "diagnosis_model":"model-a","n_runs":3,"pass_rate":1.0,"is_stable":true,
+			 "primary_attribution":"connection-pool-saturation","attribution_consistent":true,"taxonomy_version":"1.0"},
+			{"fault_id":"db-max-connections","fault_name":"Max Connections",
+			 "diagnosis_model":"model-b","n_runs":3,"pass_rate":1.0,"is_stable":true,
+			 "primary_attribution":"connection-pool-leak","attribution_consistent":true,"taxonomy_version":"1.1"}
+		]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{"model-a", "model-b", "--gateway", srv.URL})
+	})
+
+	// attribution line must show both class names.
+	if !strings.Contains(out, "connection-pool-saturation") {
+		t.Errorf("old attribution missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, "connection-pool-leak") {
+		t.Errorf("new attribution missing from output:\n%s", out)
+	}
+	// Same major version (1) → no TAXONOMY MAJOR warning.
+	if strings.Contains(out, "TAXONOMY MAJOR") {
+		t.Errorf("unexpected TAXONOMY MAJOR warning for same major version:\n%s", out)
+	}
+}
+
+// ── v0.21.0: fetchRunFindings ─────────────────────────────────────────────────
+
+func TestFetchRunFindings_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/fleet/playbook-runs/plr_findings01" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"run_id":           "plr_findings01",
+			"findings_summary": "Lock chain detected: backend 42 blocks 17 others via row-level lock.",
+		})
+	}))
+	defer srv.Close()
+
+	got := fetchRunFindings(srv.URL, "", "plr_findings01")
+	want := "Lock chain detected: backend 42 blocks 17 others via row-level lock."
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFetchRunFindings_EmptyRunID(t *testing.T) {
+	got := fetchRunFindings("http://localhost:9999", "", "")
+	if got != "" {
+		t.Errorf("expected empty string for empty runID, got %q", got)
+	}
+}
+
+func TestFetchRunFindings_EmptyGatewayURL(t *testing.T) {
+	got := fetchRunFindings("", "", "plr_findings01")
+	if got != "" {
+		t.Errorf("expected empty string for empty gatewayURL, got %q", got)
+	}
+}
+
+func TestFetchRunFindings_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	got := fetchRunFindings(srv.URL, "", "plr_ghost")
+	if got != "" {
+		t.Errorf("expected empty string for 404, got %q", got)
+	}
+}
+
+func TestFetchRunFindings_EmptyFindingsSummary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"run_id":           "plr_empty",
+			"findings_summary": "",
+		})
+	}))
+	defer srv.Close()
+
+	got := fetchRunFindings(srv.URL, "", "plr_empty")
+	if got != "" {
+		t.Errorf("expected empty string when findings_summary is empty, got %q", got)
+	}
+}
+
+func TestFetchRunFindings_NetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	got := fetchRunFindings(url, "", "plr_x")
+	if got != "" {
+		t.Errorf("expected empty string for network error, got %q", got)
+	}
+}
+
+func TestFetchRunFindings_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"findings_summary": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchRunFindings(srv.URL, "tok-findings", "plr_x")
+	if gotAuth != "Bearer tok-findings" {
+		t.Errorf("Authorization = %q, want Bearer tok-findings", gotAuth)
+	}
+}
