@@ -5,7 +5,7 @@ The sample commands presented below complements these two blog post:
 - **[AI SRE Just Got Its First Report Card](https://medium.com/@borisdali/your-ai-sre-just-got-its-first-report-card-d46c47b06fd5)**. 
   Turn Your Incident Audit Trail into a Learning Curve
 
-- **[Your AI SRE Tried to Improve Its Own Playbook. Here's What It Got Wrong.](...)**
+- **[Your AI SRE Tried to Improve Its Own Playbook. Here's What It Got Wrong.](https://levelup.gitconnected.com/ai-to-take-over-your-job-heres-what-happened-when-ai-sre-tried-to-improve-its-own-playbook-c7a6338fae37#59e2)**
   A case study in the limits of automated playbook tuning. And what human judgment still has to add.
 
 It all starts with the [Vault](VAULT.md). If you need a background, start there. Next, head over to [this page](VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](INCIDENTS.md) data into a learning signal.
