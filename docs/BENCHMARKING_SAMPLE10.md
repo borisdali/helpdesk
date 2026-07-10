@@ -2,7 +2,7 @@
 
 The sample commands presented below complements these two blog post: 
 
-- **["The AI Said So". Blind Trust Is Not a Feature. It's Liability](...)**. 
+- **["The AI Said So". Blind Trust Is Not a Feature. It's Liability](https://levelup.gitconnected.com/the-ai-said-so-blind-trust-is-not-a-feature-its-liability-ce5d12e03d27)**. 
   94% Confident. Zero Accountable. That's the opposite of trust. 
   The AI SRE and AI Ops industry is selling you confidence scores with no denominator, no audit trail of any reasoning that went into a decision making and no mechanism for a second opinion before an irreversible action. 
   Here's what informed consent looks like when it's actually enforced by design
