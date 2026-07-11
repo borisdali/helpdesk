@@ -306,8 +306,12 @@ The per-version breakdown is the primary learning signal: it shows whether step 
 |-------|---------|
 | `STABLE(N)` | Certified STABLE in the last N runs: pass rate ≥ 80% and confidence spread ≤ 30pp |
 | `STABLE(N) Xd` | STABLE but cert is X days old — shown after 14 days as an age reminder |
+| `STABLE(N)  attr=<class>` | Outcome-stable and conclusion-stable: all N runs attributed to the same root-cause class |
+| `STABLE(N)  attr=<class>(split)` | Outcome-stable but conclusion-unstable: runs attributed to different classes within the same taxonomy |
 | `UNSTABLE(N)` | Certified UNSTABLE — pass rate or confidence spread outside bounds; playbook needs attention before promotion |
 | `—` | No certification run has been posted for this fault |
+
+The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md).
 
 The `ACCURACY` column shows the diagnosis accuracy rate from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
 
@@ -620,6 +624,15 @@ EXECUTION TRACE
    are already over it. Safe to terminate idle sessions older than 5 min."
   ► kill_idle_connections                [ok]
 
+FINDINGS
+──────────────────────────────────────────────────────────────────────────
+  Root cause: connection pool saturation — 108 active connections exceeded
+  the pg_max_connections limit of 100. 96 idle sessions were holding open
+  connections without active queries.
+
+  Recommended: terminate idle connections older than 5 minutes and review
+  application connection pool max-size configuration.
+
 INCIDENT LINK
 ──────────────────────────────────────────────────────────────────────────
   Run ID:            plr_a3f7c1b2
@@ -636,6 +649,8 @@ Tool calls are shown as `► name [ok]` or `► name [error]`. If a tool call ha
 | Situation | Behaviour |
 |-----------|-----------|
 | Journey is not incident-linked (`INCIDENT` column is `–`) | Falls back to the flat TOOLS USED list; a note explains that `--detail` requires an incident run ID |
+| Incident-linked with `diagnostic_report` set | Full EXECUTION TRACE + FINDINGS section |
+| Incident-linked but no `diagnostic_report` | EXECUTION TRACE only; FINDINGS section omitted |
 | Incident-linked but no `agent_reasoning` events in the run | EXECUTION TRACE section shows only the tool calls with `(no preceding reasoning captured)` on each |
 | Gateway returns an error fetching events | A warning is printed and the flat TOOLS USED list is shown instead |
 
@@ -1218,6 +1233,27 @@ After the table, a summary line counts each category and a one-line verdict is p
 | `⚠  N regression(s) detected — promote <model-b> only after investigating...` | Any regressions present |
 | `?  N fault(s) not yet certified under both models — complete the cert suite before promoting.` | No regressions, but some faults not yet certified under both models |
 | `✓  No regressions. <model-b> is cert-equivalent to <model-a> across all N fault(s).` | All faults stable under both models; no regressions |
+
+#### Attribution and taxonomy warnings
+
+When attribution data is available, `cert-compare` shows an additional line per fault indicating whether the attributions are consistent between the two models:
+
+```
+db-lock-contention   STABLE        STABLE        —
+  attr: row-level-lock-contention → row-level-lock-contention  (consistent)
+```
+
+When taxonomy major versions differ between the two certs, attribution comparison is flagged:
+
+```
+db-max-connections   STABLE        STABLE        —  ⚠ TAXONOMY MAJOR
+  attribution comparison invalid — taxonomy v1.0 vs v2.0 is a breaking change
+  re-run cert suite under taxonomy 2.0 before using for model gating
+```
+
+`⚠ TAXONOMY MAJOR` does not affect the STABLE/UNSTABLE comparison — that always reflects outcome stability and is always valid. It flags only that the attribution labels are not directly comparable across the two certs. When a taxonomy major bump has occurred, re-certify both models under the new taxonomy before drawing conclusions from the attribution columns.
+
+See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md) for the full taxonomy versioning rules.
 
 **Data source.** `cert-compare` calls `GET /api/v1/fleet/fault-stability` on the gateway, which returns every `(fault_id, diagnosis_model)` row stored in the `fault_stability_cert` table in auditd. No deduplication is applied — each model's cert for each fault is a separate row with its own pass rate, run count, and stability verdict. If a fault has never been run under a given model, the corresponding cell shows `(no data)`.
 

@@ -391,16 +391,21 @@ type stabilityInfo struct {
 // fetchStabilityCert fetches the stability cert for a single fault from the gateway.
 // Returns nil when not found or on error.
 func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
-	FaultID          string  `json:"fault_id"`
-	FaultName        string  `json:"fault_name"`
-	PlaybookSeriesID string  `json:"playbook_series_id"`
-	DiagnosisModel   string  `json:"diagnosis_model"`
-	JudgeModel       string  `json:"judge_model"`
-	NRuns            int     `json:"n_runs"`
-	PassRate         float64 `json:"pass_rate"`
-	ConfRangePP      int     `json:"conf_range_pp"`
-	IsStable         bool    `json:"is_stable"`
-	TestedAt         string  `json:"tested_at"`
+	FaultID                 string         `json:"fault_id"`
+	FaultName               string         `json:"fault_name"`
+	PlaybookSeriesID        string         `json:"playbook_series_id"`
+	DiagnosisModel          string         `json:"diagnosis_model"`
+	JudgeModel              string         `json:"judge_model"`
+	NRuns                   int            `json:"n_runs"`
+	PassRate                float64        `json:"pass_rate"`
+	ConfRangePP             int            `json:"conf_range_pp"`
+	IsStable                bool           `json:"is_stable"`
+	TestedAt                string         `json:"tested_at"`
+	PrimaryAttribution      string         `json:"primary_attribution"`
+	AttributionConsistent   bool           `json:"attribution_consistent"`
+	AttributionDistribution map[string]int `json:"attribution_distribution"`
+	JudgeSpread             float64        `json:"judge_spread"`
+	TaxonomyVersion         string         `json:"taxonomy_version"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -423,16 +428,21 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	}
 	defer resp.Body.Close()
 	var cert struct {
-		FaultID          string  `json:"fault_id"`
-		FaultName        string  `json:"fault_name"`
-		PlaybookSeriesID string  `json:"playbook_series_id"`
-		DiagnosisModel   string  `json:"diagnosis_model"`
-		JudgeModel       string  `json:"judge_model"`
-		NRuns            int     `json:"n_runs"`
-		PassRate         float64 `json:"pass_rate"`
-		ConfRangePP      int     `json:"conf_range_pp"`
-		IsStable         bool    `json:"is_stable"`
-		TestedAt         string  `json:"tested_at"`
+		FaultID                 string         `json:"fault_id"`
+		FaultName               string         `json:"fault_name"`
+		PlaybookSeriesID        string         `json:"playbook_series_id"`
+		DiagnosisModel          string         `json:"diagnosis_model"`
+		JudgeModel              string         `json:"judge_model"`
+		NRuns                   int            `json:"n_runs"`
+		PassRate                float64        `json:"pass_rate"`
+		ConfRangePP             int            `json:"conf_range_pp"`
+		IsStable                bool           `json:"is_stable"`
+		TestedAt                string         `json:"tested_at"`
+		PrimaryAttribution      string         `json:"primary_attribution"`
+		AttributionConsistent   bool           `json:"attribution_consistent"`
+		AttributionDistribution map[string]int `json:"attribution_distribution"`
+		JudgeSpread             float64        `json:"judge_spread"`
+		TaxonomyVersion         string         `json:"taxonomy_version"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
 		return nil
@@ -1426,6 +1436,40 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	if currentModel != "" && cert.DiagnosisModel != "" && cert.DiagnosisModel != currentModel {
 		fmt.Printf("  ⚠ cert was issued for %s but current agent model is %s\n", cert.DiagnosisModel, currentModel)
 		fmt.Printf("    Run: faulttest run --repeat N --agent-model %s ... to re-certify\n", currentModel)
+	}
+	if cert.PrimaryAttribution != "" && cert.PrimaryAttribution != attributionUnknown {
+		fmt.Println()
+		taxStr := ""
+		if cert.TaxonomyVersion != "" {
+			taxStr = fmt.Sprintf(" (taxonomy %s)", cert.TaxonomyVersion)
+		}
+		fmt.Printf("  Attribution%s\n", taxStr)
+		totalRuns := 0
+		for _, v := range cert.AttributionDistribution {
+			totalRuns += v
+		}
+		primaryCount := cert.AttributionDistribution[cert.PrimaryAttribution]
+		consistent := "yes"
+		if !cert.AttributionConsistent {
+			consistent = "no (split)"
+		}
+		fmt.Printf("  Primary class  : %s\n", cert.PrimaryAttribution)
+		if totalRuns > 0 {
+			fmt.Printf("  Consistent     : %s  (%d/%d runs)\n", consistent, primaryCount, totalRuns)
+		} else {
+			fmt.Printf("  Consistent     : %s\n", consistent)
+		}
+		if len(cert.AttributionDistribution) > 1 {
+			var parts []string
+			for k, v := range cert.AttributionDistribution {
+				parts = append(parts, fmt.Sprintf("%s=%d", k, v))
+			}
+			sort.Strings(parts)
+			fmt.Printf("  Distribution   : %s\n", strings.Join(parts, ", "))
+		}
+		if cert.JudgeSpread > 1e-10 {
+			fmt.Printf("  Judge spread   : %.2f\n", cert.JudgeSpread)
+		}
 	}
 }
 

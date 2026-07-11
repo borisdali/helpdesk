@@ -23,6 +23,7 @@ it on each deployment platform.
 1. [Why Consistency is a separate signal from Accuracy](#1-why-consistency-is-a-separate-signal-from-accuracy)
 2. [Where certification fits in the flywheel](#2-where-certification-fits-in-the-flywheel)
 3. [What a stability cert contains](#3-what-a-stability-cert-contains)
+   - [Attribution fields (v0.21.0)](#attribution-fields-v0210)
 4. [STABLE vs. UNSTABLE: the criteria](#4-stable-vs-unstable-the-criteria)
 5. [Running a certification](#5-running-a-certification)
    - [From source (make recertify)](#51-from-source-make-recertify)
@@ -142,6 +143,20 @@ previous cert for the same `fault_id` — one cert per fault, always the latest 
 
 The `diagnosis_model` field is intentional: a cert issued against `claude-sonnet-4-6` does not
 automatically transfer to a newer model release. See [When to re-certify](#8-when-to-re-certify).
+
+### Attribution fields (v0.21.0)
+
+Five additional columns capture conclusion stability — whether the agent reached the same root-cause attribution across all N runs. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md) for the full treatment.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `primary_attribution` | string | Plurality root-cause class across cert runs; `UNKNOWN` when classifier couldn't match or was unavailable |
+| `attribution_consistent` | bool | `true` when all N runs attributed to the same non-`UNKNOWN` class |
+| `attribution_distribution` | JSON | Per-class run count, e.g. `{"connection-pool-saturation":3,"connection-pool-leak":2}` |
+| `judge_spread` | float | Std dev of `diagnosis_score` across runs; only meaningful when `attribution_consistent=true` |
+| `taxonomy_version` | string | Semver version of `root_cause_classes` used for this cert (e.g. `"1.0"`) |
+
+These fields are populated when `HELPDESK_API_KEY` is available at cert time and the triage playbook has `root_cause_classes` defined. When absent, the cert behaves identically to pre-v0.21.0.
 
 Stability certs are stored with a composite primary key of `(fault_id, diagnosis_model)`. This means running the consistency suite against two different models produces two independent cert records — neither overwrites the other. `vault accuracy` and `vault versions` show model-annotated certs so you can compare stability across model generations side by side. When you upgrade the diagnosis model, re-running the consistency suite against the new model creates new cert rows without touching the existing ones.
 
@@ -444,8 +459,12 @@ db-table-bloat                 pbs_vacuum_triage          2026-06-01   PASS    9
 |---------------|---------|
 | `STABLE(N)` | Certified STABLE in the last N runs |
 | `STABLE(N) Xd` | STABLE but cert is X days old (shown after 14 days as an age reminder) |
+| `STABLE(N)  attr=<class>` | Outcome-stable and conclusion-stable: all N runs attributed to the same root-cause class |
+| `STABLE(N)  attr=<class>(split)` | Outcome-stable but conclusion-unstable: runs attributed to different classes within the same taxonomy |
 | `UNSTABLE(N)` | Certified UNSTABLE in the last N runs — playbook needs attention |
 | `—` | No certification run has been posted for this fault |
+
+The `attr=` label appears only when the playbook's `root_cause_classes` field is populated and the attribution API key is available during certification. When absent, output is identical to pre-v0.21.0.
 
 ### 7.2 `vault accuracy` — full cert detail
 
@@ -498,6 +517,7 @@ following changes should trigger a re-certification run:
 | **Significant playbook edit** | Adding or removing hypothesis format fields, changing escalation conditions, or rewording diagnostic guidance can shift confidence and pass rates materially. Minor wording edits typically don't require re-certification. |
 | **Significant infrastructure change** | If the agent's tool catalog changes (new tools added, existing tools removed) or the database configuration drifts significantly from the state at certification time, prior certs may no longer reflect real-world behaviour. |
 | **Cert age > 30 days** | Shown as a warning in `vault accuracy`. Not a hard expiry — a STABLE cert doesn't automatically become invalid — but a prompt to re-verify on a realistic schedule. |
+| **Taxonomy major bump** | Classes in `root_cause_classes` were split, merged, or renamed (version bumped from 1.x to 2.0). Attribution from prior certs is non-comparable under the new taxonomy. Re-run the cert suite under the new taxonomy before using attribution columns for model gating. |
 
 The recommended cadence for established deployments is a weekly CronJob (see [Kubernetes](#54-kubernetes-job--cronjob))
 covering all external-compatible faults. This is approximately 85 LLM calls against 17 faults
@@ -516,6 +536,7 @@ are complementary, not redundant.
 | Signal | Question answered | When it runs |
 |--------|-------------------|--------------|
 | **Consistency cert** (this doc) | Is this playbook stable enough to trust in production? | Pre-promotion gate; re-run on model/playbook change |
+| **[Attribution certs](ATTRIBUTION_CERTS.md)** | Is the agent reaching the same conclusion each time, or just passing? | After each certification run (requires `HELPDESK_API_KEY` and `root_cause_classes`) |
 | **[Benchmarking](BENCHMARKING.md)** | How much does aiHelpDesk's scaffolding improve over a bare LLM? | One-time or after major scaffolding changes |
 | **[LLM-as-judge](LLM_AS_JUDGE.md)** | Is the diagnosis semantically correct on this specific run? | During faulttest runs (opt-in `--judge`) |
 | **[Vault calibration](VAULT.md#vault-calibration)** | When the agent says 90%, is it right 90% of the time? | After accumulating ≥10 runs with operator feedback |
