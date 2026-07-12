@@ -257,10 +257,10 @@ func (inj *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 	return inj.cfg.ConnStr, ""
 }
 
-// resolvedContainerName returns the container_name from the infra config for
-// the current --conn target, or "" if not configured. Exposed to inject scripts
-// as $FAULTTEST_CONTAINER so docker-based external faults can target the right
-// container without hardcoding a name.
+// resolvedContainerName returns the container name for the current injection
+// target. Checked in order: (1) infra config container_name for the --conn key,
+// (2) AutoDBContainerName when --auto-db is active. Exposed as $FAULTTEST_CONTAINER
+// to shell_exec inject/teardown scripts so they never need to hardcode a name.
 func (inj *Injector) resolvedContainerName() string {
 	if inj.cfg.InfraConfigPath != "" {
 		if cfg, err := infra.Load(inj.cfg.InfraConfigPath); err == nil {
@@ -269,7 +269,7 @@ func (inj *Injector) resolvedContainerName() string {
 			}
 		}
 	}
-	return ""
+	return inj.cfg.AutoDBContainerName
 }
 
 // execSSH runs a script on a remote host via SSH.

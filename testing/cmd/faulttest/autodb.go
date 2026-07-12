@@ -12,9 +12,9 @@ import (
 const autoDBImage = "postgres:16-alpine"
 
 // startAutoDBContainer spins up a temporary Docker PostgreSQL container,
-// waits for it to accept connections, and returns the libpq connection string
-// and a teardown function. The container is removed on teardown.
-func startAutoDBContainer(ctx context.Context) (connStr string, teardown func(), err error) {
+// waits for it to accept connections, and returns the libpq connection string,
+// the container name, and a teardown function. The container is removed on teardown.
+func startAutoDBContainer(ctx context.Context) (connStr, containerName string, teardown func(), err error) {
 	name := fmt.Sprintf("faulttest-auto-db-%08x", rand.Uint32())
 	password := "faulttest"
 	dbname := "faulttest"
@@ -30,7 +30,7 @@ func startAutoDBContainer(ctx context.Context) (connStr string, teardown func(),
 	}
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err != nil {
-		return "", nil, fmt.Errorf("docker run failed: %w\n%s", err, out)
+		return "", "", nil, fmt.Errorf("docker run failed: %w\n%s", err, out)
 	}
 
 	remove := func() {
@@ -40,17 +40,17 @@ func startAutoDBContainer(ctx context.Context) (connStr string, teardown func(),
 	port, err := resolveAutoDBPort(ctx, name)
 	if err != nil {
 		remove()
-		return "", nil, err
+		return "", "", nil, err
 	}
 
 	dsn := fmt.Sprintf("host=127.0.0.1 port=%s dbname=%s user=postgres password=%s sslmode=disable", port, dbname, password)
 
 	if err := waitForAutoDBReady(ctx, dsn); err != nil {
 		remove()
-		return "", nil, fmt.Errorf("postgres not ready: %w", err)
+		return "", "", nil, fmt.Errorf("postgres not ready: %w", err)
 	}
 
-	return dsn, remove, nil
+	return dsn, name, remove, nil
 }
 
 func resolveAutoDBPort(ctx context.Context, name string) (string, error) {

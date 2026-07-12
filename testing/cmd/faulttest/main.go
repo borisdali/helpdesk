@@ -319,13 +319,14 @@ func cmdRun(args []string) {
 	if cfg.AutoDB {
 		cfg.External = true
 		fmt.Printf("Starting temporary PostgreSQL container (%s)...\n", autoDBImage)
-		connStr, teardown, err := startAutoDBContainer(context.Background())
+		connStr, containerName, teardown, err := startAutoDBContainer(context.Background())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: --auto-db: %v\n", err)
 			os.Exit(1)
 		}
 		defer teardown()
 		cfg.ConnStr = connStr
+		cfg.AutoDBContainerName = containerName
 		fmt.Printf("Auto-DB ready: %s\n\n", connStr)
 		if cfg.GatewayURL != "" {
 			if err := registerAutoDBWithGateway(cfg.GatewayURL, cfg.GatewayAPIKey, connStr); err != nil {
@@ -462,6 +463,10 @@ func cmdRun(args []string) {
 			} else {
 				if judgeCompleter != nil {
 					evalResult = EvaluateWithJudge(ctx, f, resp, judgeCompleter, judgeModel, auditTools)
+					if evalResult.JudgeFatalError && cfg.JudgeEnabled {
+						fmt.Fprintf(os.Stderr, "\nError: judge authentication failed (non-transient) — check --judge-api-key / HELPDESK_API_KEY\n  %s\n", evalResult.JudgeReasoning)
+						os.Exit(1)
+					}
 				} else {
 					evalResult = Evaluate(f, resp, auditTools)
 				}

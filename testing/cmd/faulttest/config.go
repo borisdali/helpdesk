@@ -142,6 +142,10 @@ type HarnessConfig struct {
 	// AutoDB instructs faulttest to spin up a temporary Docker PostgreSQL and use
 	// it as the injection target. Implies External=true. Only auto-db-compat faults run.
 	AutoDB bool
+	// AutoDBContainerName is the docker container name for the auto-db instance
+	// (e.g. "faulttest-auto-db-deadbeef"). Set by main after startAutoDBContainer
+	// returns; exposed as $FAULTTEST_CONTAINER to shell_exec inject/teardown scripts.
+	AutoDBContainerName string
 	// Repeat is the number of inject→triage→teardown cycles to run per fault.
 	// Values > 1 enable stability testing: remediation is skipped and a
 	// StabilityReport is printed after all cycles complete. Default 1.

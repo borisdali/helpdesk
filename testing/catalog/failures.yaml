@@ -403,14 +403,16 @@ failures:
     external_inject:
       type: shell_exec
       script_inline: |
-        docker stop helpdesk-test-pg
-        echo "PostgreSQL container helpdesk-test-pg stopped"
+        set -e
+        docker stop "$FAULTTEST_CONTAINER"
+        echo "PostgreSQL container $FAULTTEST_CONTAINER stopped"
     external_teardown:
       type: shell_exec
       script_inline: |
-        docker start helpdesk-test-pg
+        set -e
+        docker start "$FAULTTEST_CONTAINER"
         sleep 3
-        echo "PostgreSQL container helpdesk-test-pg started"
+        echo "PostgreSQL container $FAULTTEST_CONTAINER started"
     remediation:
       playbook_id: pbs_db_restart_action
       verify_sql: "SELECT 1"
