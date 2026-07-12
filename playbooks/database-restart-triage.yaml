@@ -1,6 +1,6 @@
 series_id: pbs_db_restart_triage
 name: Database Down — Restart Triage
-version: "1.6"
+version: "1.7"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -79,6 +79,12 @@ guidance: |
     was killed by the OOM killer — a restart will likely succeed but the root
     cause (memory pressure) must be addressed. Completed/Succeeded indicates the
     process exited cleanly — check for intentional shutdown.
+  - If there is NO Known Infrastructure entry for this server, or the hosting type
+    cannot be determined: default to escalation. Emit ESCALATE_TO:
+    pbs_sysadmin_docker_inspect. The sysadmin agent can inspect the host and
+    determine whether the server is bare-metal, containerised, or K8s-managed.
+    Do NOT withhold escalation because you cannot confirm the hosting type —
+    unknown hosting is itself a signal that the sysadmin path is appropriate.
 
   Step 3 — Read the logs (Kubernetes only):
   Use get_pod_logs to retrieve the last 100–200 lines of PostgreSQL output.

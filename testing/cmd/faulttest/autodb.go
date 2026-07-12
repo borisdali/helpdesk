@@ -20,7 +20,7 @@ func startAutoDBContainer(ctx context.Context) (connStr, containerName string, t
 	dbname := "faulttest"
 
 	args := []string{
-		"run", "--rm", "-d",
+		"run", "-d",
 		"-p", "127.0.0.1::5432",
 		"-e", "POSTGRES_PASSWORD=" + password,
 		"-e", "POSTGRES_DB=" + dbname,

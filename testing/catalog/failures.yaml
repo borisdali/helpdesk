@@ -434,7 +434,7 @@ failures:
           - "not accepting"
       expected_diagnosis:
         category: "connection_refused"
-        narrative: "The agent should identify that the PostgreSQL server is not running or not accepting connections, and recommend starting or restarting the database service."
+        narrative: "The agent should identify that the PostgreSQL server is not running or not accepting connections (connection refused error). The agent should note the very recent server uptime as evidence of a prior outage that has since recovered, or identify that the server is currently unreachable. For a Docker-hosted or container-hosted server, the correct action is to escalate to the sysadmin agent for container inspection (ESCALATE_TO: pbs_sysadmin_docker_inspect) since the agent cannot access Docker logs or container state directly — this escalation is the right outcome, not a premature one."
     timeout: 30s
 
   - id: db-auth-failure

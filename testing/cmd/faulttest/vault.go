@@ -611,6 +611,10 @@ func vaultList(args []string) {
 	fs.StringVar(&target, "target", "", "Filter last-run history by target (agent-conn alias or hostname)")
 	fs.BoolVar(&short, "short", false, "Compact view: suppress per-version sub-rows")
 	cfg := loadConfig(fs, args)
+	// Positional arguments are fault IDs (e.g. `vault list db-connection-refused`).
+	if positional := fs.Args(); len(positional) > 0 && len(cfg.FailureIDs) == 0 {
+		cfg.FailureIDs = positional
+	}
 
 	cat, err := loadActiveCatalog(cfg)
 	if err != nil {
