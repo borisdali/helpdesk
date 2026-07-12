@@ -391,6 +391,7 @@ failures:
     severity: critical
     description: >
       The PostgreSQL server is stopped and not accepting connections.
+    external_compat: true
     inject:
       type: docker
       action: stop
@@ -399,8 +400,19 @@ failures:
       type: docker
       action: start
       service: postgres
+    external_inject:
+      type: shell_exec
+      script_inline: |
+        docker stop helpdesk-test-pg
+        echo "PostgreSQL container helpdesk-test-pg stopped"
+    external_teardown:
+      type: shell_exec
+      script_inline: |
+        docker start helpdesk-test-pg
+        sleep 3
+        echo "PostgreSQL container helpdesk-test-pg started"
     remediation:
-      playbook_id: pbs_db_restart_triage
+      playbook_id: pbs_db_restart_action
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
     diagnosis_playbook_series_id: pbs_db_restart_triage
