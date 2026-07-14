@@ -329,7 +329,7 @@ func cmdRun(args []string) {
 		cfg.AutoDBContainerName = containerName
 		fmt.Printf("Auto-DB ready: %s\n\n", connStr)
 		if cfg.GatewayURL != "" {
-			if err := registerAutoDBWithGateway(cfg.GatewayURL, cfg.GatewayAPIKey, connStr); err != nil {
+			if err := registerAutoDBWithGateway(cfg.GatewayURL, cfg.GatewayAPIKey, connStr, containerName); err != nil {
 				slog.Warn("could not register auto-DB with gateway — DB agent may reject connection", "err", err)
 			}
 		}
@@ -727,7 +727,7 @@ func cmdRun(args []string) {
 // registerAutoDBWithGateway calls POST /api/v1/admin/infra/register-db on the gateway
 // so that both the gateway and the DB agent can resolve the auto-created connection string.
 // The entry gets "chaos" and "test" tags so governance policy allows it.
-func registerAutoDBWithGateway(gatewayURL, apiKey, connStr string) error {
+func registerAutoDBWithGateway(gatewayURL, apiKey, connStr, containerName string) error {
 	// Derive a stable server_id from the port in the connection string.
 	serverID := "faulttest-auto"
 	for _, part := range strings.Fields(connStr) {
@@ -741,6 +741,8 @@ func registerAutoDBWithGateway(gatewayURL, apiKey, connStr string) error {
 		"name":              "Auto-DB faulttest instance",
 		"connection_string": connStr,
 		"tags":              []string{"chaos", "test"},
+		"hosting_type":      "docker",
+		"container_name":    containerName,
 	})
 	if err != nil {
 		return err

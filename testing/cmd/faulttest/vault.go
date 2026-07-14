@@ -2701,12 +2701,14 @@ func vaultSuggestUpdate(args []string) {
 		seriesID   string
 		traceID    string
 		outcome    string
+		filePath   string
 		gatewayURL string
 		apiKey     string
 	)
 	fs.StringVar(&seriesID, "series-id", "", "Series ID of the playbook to update (required)")
 	fs.StringVar(&traceID, "trace-id", "", "Run ID or trace ID to synthesize from (auto-selected when omitted)")
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
+	fs.StringVar(&filePath, "file", "", "Upload a local YAML file as a draft instead of synthesizing from a trace")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
@@ -2715,6 +2717,96 @@ func vaultSuggestUpdate(args []string) {
 	if seriesID == "" {
 		fmt.Fprintln(os.Stderr, "Error: --series-id is required")
 		os.Exit(1)
+	}
+
+	// --file path: upload local YAML directly via /import, skip trace synthesis.
+	if filePath != "" {
+		yamlBytes, err := os.ReadFile(filePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", filePath, err)
+			os.Exit(1)
+		}
+		body, _ := json.Marshal(map[string]any{
+			"text":   string(yamlBytes),
+			"format": "yaml",
+			"hints":  map[string]string{"series_id": seriesID},
+		})
+		reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/import"
+		req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(body))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error uploading file: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, respBody)
+			os.Exit(1)
+		}
+
+		// /import validates and parses only — it does NOT persist. Extract the draft
+		// and POST to /api/v1/fleet/playbooks to save it and get a real playbook_id.
+		var importedRaw struct {
+			Draft json.RawMessage `json:"draft"`
+		}
+		if err := json.Unmarshal(respBody, &importedRaw); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding import response: %v\n", err)
+			os.Exit(1)
+		}
+		var draftMap map[string]any
+		if err := json.Unmarshal(importedRaw.Draft, &draftMap); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding draft: %v\n", err)
+			os.Exit(1)
+		}
+		draftMap["source"] = "imported"
+		saveBody, _ := json.Marshal(draftMap)
+		saveURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks"
+		saveReq, err := http.NewRequest(http.MethodPost, saveURL, bytes.NewReader(saveBody))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building save request: %v\n", err)
+			os.Exit(1)
+		}
+		saveReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			saveReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		saveResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(saveReq)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving draft: %v\n", err)
+			os.Exit(1)
+		}
+		defer saveResp.Body.Close()
+		saveRespBody, _ := io.ReadAll(saveResp.Body)
+		if saveResp.StatusCode != http.StatusCreated && saveResp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "Save failed (%d): %s\n", saveResp.StatusCode, saveRespBody)
+			os.Exit(1)
+		}
+		var saved struct {
+			PlaybookID string `json:"playbook_id"`
+			SeriesID   string `json:"series_id"`
+			Version    string `json:"version"`
+			Name       string `json:"name"`
+		}
+		if err := json.Unmarshal(saveRespBody, &saved); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding save response: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Uploaded: %s  v%s  %s\n", saved.PlaybookID, saved.Version, saved.Name)
+		fmt.Printf("Series:   %s\n\n", saved.SeriesID)
+		fmt.Printf("# To diff against active version:\n")
+		fmt.Printf("#   faulttest vault diff --judge <active-id> %s --gateway %s --api-key <key>\n", saved.PlaybookID, gatewayURL)
+		fmt.Printf("# To activate:\n")
+		fmt.Printf("#   faulttest vault activate %s --gateway %s --api-key <key>\n", saved.PlaybookID, gatewayURL)
+		return
 	}
 	// Auto-select the most recent resolved run when --trace-id is omitted.
 	if traceID == "" {
