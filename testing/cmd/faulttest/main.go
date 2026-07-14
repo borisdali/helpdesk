@@ -328,9 +328,15 @@ func cmdRun(args []string) {
 		cfg.ConnStr = connStr
 		cfg.AutoDBContainerName = containerName
 		fmt.Printf("Auto-DB ready: %s\n\n", connStr)
+		serverID := autoDBServerID(connStr)
 		if cfg.GatewayURL != "" {
 			if err := registerAutoDBWithGateway(cfg.GatewayURL, cfg.GatewayAPIKey, connStr, containerName); err != nil {
 				slog.Warn("could not register auto-DB with gateway — DB agent may reject connection", "err", err)
+			}
+		}
+		if cfg.SysadminAgentURL != "" {
+			if err := registerAutoDBWithSysadmin(cfg.SysadminAgentURL, serverID, containerName); err != nil {
+				slog.Warn("could not register auto-DB with sysadmin agent — sysadmin tools may fail to resolve container", "err", err)
 			}
 		}
 	}
@@ -728,14 +734,7 @@ func cmdRun(args []string) {
 // so that both the gateway and the DB agent can resolve the auto-created connection string.
 // The entry gets "chaos" and "test" tags so governance policy allows it.
 func registerAutoDBWithGateway(gatewayURL, apiKey, connStr, containerName string) error {
-	// Derive a stable server_id from the port in the connection string.
-	serverID := "faulttest-auto"
-	for _, part := range strings.Fields(connStr) {
-		if strings.HasPrefix(part, "port=") {
-			serverID = "faulttest-auto-" + strings.TrimPrefix(part, "port=")
-			break
-		}
-	}
+	serverID := autoDBServerID(connStr)
 	body, err := json.Marshal(map[string]any{
 		"server_id":         serverID,
 		"name":              "Auto-DB faulttest instance",
@@ -764,6 +763,47 @@ func registerAutoDBWithGateway(gatewayURL, apiKey, connStr, containerName string
 		return fmt.Errorf("gateway returned %d", resp.StatusCode)
 	}
 	slog.Info("auto-DB registered with gateway", "server_id", serverID)
+	return nil
+}
+
+// autoDBServerID derives the stable server_id used when registering an auto-DB
+// container from the port field in the connection string.
+func autoDBServerID(connStr string) string {
+	for _, part := range strings.Fields(connStr) {
+		if strings.HasPrefix(part, "port=") {
+			return "faulttest-auto-" + strings.TrimPrefix(part, "port=")
+		}
+	}
+	return "faulttest-auto"
+}
+
+// registerAutoDBWithSysadmin registers the ephemeral auto-DB container with the
+// sysadmin agent via its register_infra_db direct-tool endpoint. This is needed
+// so the sysadmin agent can resolve the container for check_host and restart_container.
+func registerAutoDBWithSysadmin(sysadminURL, serverID, containerName string) error {
+	body, err := json.Marshal(map[string]any{
+		"server_id":      serverID,
+		"container_name": containerName,
+		"runtime":        "docker",
+	})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimSuffix(sysadminURL, "/") + "/tool/register_infra_db"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("sysadmin returned %d", resp.StatusCode)
+	}
+	slog.Info("auto-DB registered with sysadmin agent", "server_id", serverID)
 	return nil
 }
 

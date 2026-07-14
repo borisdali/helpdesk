@@ -83,8 +83,13 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
 	}
 
-	// Find the remediation run that was started by proceed-escalation.
-	remRunID := r.findChildRunID(ctx, gate.RunID)
+	// Wait for the escalation chain (e.g. inspect → restart action) to complete
+	// before polling recovery. The chain runs asynchronously after gate approval,
+	// so without waiting here pollRecovery would start while the container is still
+	// down. waitForChildRunComplete waits for the immediate child run, which gives
+	// downstream transitions (e.g. pbs_sysadmin_docker_inspect → pbs_db_restart_action)
+	// time to run and restart the service before we check connectivity.
+	remRunID := r.waitForChildRunComplete(ctx, gate.RunID, 5*time.Minute)
 
 	spec := f.Remediation
 	verifySQL := spec.VerifySQL
@@ -255,6 +260,83 @@ func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) stri
 		return ""
 	}
 	return result.Runs[0].RunID
+}
+
+// fetchRunOutcome fetches the current outcome of a playbook run from auditd.
+// Returns "" if the run is still active or cannot be fetched.
+func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
+	if r.cfg.AuditURL == "" || runID == "" {
+		return ""
+	}
+	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs/" + runID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ""
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+	return result.Outcome
+}
+
+// waitForChildRunComplete waits for the escalation chain triggered by parentRunID
+// to finish. It first polls findChildRunID until the child run appears (the gateway
+// starts it asynchronously after gate approval), then polls fetchRunOutcome until
+// the run reaches a terminal state. Returns the child run ID (may be "" on timeout).
+func (r *Remediator) waitForChildRunComplete(ctx context.Context, parentRunID string, timeout time.Duration) string {
+	if r.cfg.AuditURL == "" {
+		return r.findChildRunID(ctx, parentRunID)
+	}
+	deadline := time.Now().Add(timeout)
+
+	// Phase 1: wait for the child run to appear in auditd (gateway starts it async).
+	var childRunID string
+	for time.Now().Before(deadline) {
+		childRunID = r.findChildRunID(ctx, parentRunID)
+		if childRunID != "" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(3 * time.Second):
+		}
+	}
+	if childRunID == "" {
+		slog.Warn("waitForChildRunComplete: no child run appeared within timeout", "parent", parentRunID)
+		return ""
+	}
+
+	// Phase 2: poll until the child run reaches a terminal outcome.
+	slog.Info("waitForChildRunComplete: watching child run", "child", childRunID)
+	for time.Now().Before(deadline) {
+		outcome := r.fetchRunOutcome(ctx, childRunID)
+		if outcome != "" {
+			slog.Info("waitForChildRunComplete: child run complete", "child", childRunID, "outcome", outcome)
+			return childRunID
+		}
+		select {
+		case <-ctx.Done():
+			return childRunID
+		case <-time.After(5 * time.Second):
+		}
+	}
+	slog.Warn("waitForChildRunComplete: timed out waiting for child run", "child", childRunID)
+	return childRunID
 }
 
 // printGatePreviewAndReport prints the remediation plan preview and structured

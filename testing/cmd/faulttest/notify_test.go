@@ -242,7 +242,7 @@ func TestRegisterAutoDBWithGateway_PostsCorrectPayload(t *testing.T) {
 	defer srv.Close()
 
 	connStr := "host=127.0.0.1 port=61195 dbname=faulttest user=postgres password=faulttest sslmode=disable"
-	if err := registerAutoDBWithGateway(srv.URL, "test-key", connStr); err != nil {
+	if err := registerAutoDBWithGateway(srv.URL, "test-key", connStr, "faulttest-auto-61195"); err != nil {
 		t.Fatalf("registerAutoDBWithGateway: %v", err)
 	}
 	if gotMethod != http.MethodPost {
@@ -279,7 +279,7 @@ func TestRegisterAutoDBWithGateway_ServerIDFromPort(t *testing.T) {
 	defer srv.Close()
 
 	// Port extracted regardless of field order.
-	registerAutoDBWithGateway(srv.URL, "", "dbname=faulttest port=55000 host=127.0.0.1 user=postgres") //nolint:errcheck
+	registerAutoDBWithGateway(srv.URL, "", "dbname=faulttest port=55000 host=127.0.0.1 user=postgres", "faulttest-auto-55000") //nolint:errcheck
 	var payload map[string]any
 	json.Unmarshal(gotBody, &payload) //nolint:errcheck
 	if payload["server_id"] != "faulttest-auto-55000" {
@@ -295,7 +295,7 @@ func TestRegisterAutoDBWithGateway_NoPort_FallbackID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	registerAutoDBWithGateway(srv.URL, "", "host=localhost dbname=faulttest user=postgres") //nolint:errcheck
+	registerAutoDBWithGateway(srv.URL, "", "host=localhost dbname=faulttest user=postgres", "") //nolint:errcheck
 	var payload map[string]any
 	json.Unmarshal(gotBody, &payload) //nolint:errcheck
 	if payload["server_id"] != "faulttest-auto" {
@@ -309,14 +309,14 @@ func TestRegisterAutoDBWithGateway_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := registerAutoDBWithGateway(srv.URL, "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres")
+	err := registerAutoDBWithGateway(srv.URL, "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres", "faulttest-auto-61195")
 	if err == nil {
 		t.Error("want error for 500 response")
 	}
 }
 
 func TestRegisterAutoDBWithGateway_NetworkError(t *testing.T) {
-	err := registerAutoDBWithGateway("http://127.0.0.1:19994", "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres")
+	err := registerAutoDBWithGateway("http://127.0.0.1:19994", "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres", "faulttest-auto-61195")
 	if err == nil {
 		t.Error("want error for unreachable server")
 	}

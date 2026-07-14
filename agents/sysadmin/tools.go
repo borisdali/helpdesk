@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/tool"
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
 
@@ -43,6 +45,10 @@ func (execRunner) Run(ctx context.Context, name string, args []string, env []str
 
 // cmdRunner is the active command runner. Override in tests.
 var cmdRunner CommandRunner = execRunner{}
+
+// infraConfigMu guards concurrent reads and writes to infraConfig, which may be
+// updated at runtime via the register_infra_db direct tool.
+var infraConfigMu sync.RWMutex
 
 // argsToStruct converts a map[string]any to a typed struct via JSON round-trip.
 func argsToStruct[T any](args map[string]any) (T, error) {
@@ -75,14 +81,17 @@ type resolvedHost struct {
 // sysadmin tools need. It handles both VM-hosted (docker/podman/systemd) and
 // Kubernetes-hosted databases.
 func resolveHost(serverID string) (resolvedHost, error) {
-	if infraConfig == nil {
+	infraConfigMu.RLock()
+	ic := infraConfig
+	infraConfigMu.RUnlock()
+	if ic == nil {
 		return resolvedHost{}, fmt.Errorf("no infrastructure config loaded; set HELPDESK_INFRA_CONFIG")
 	}
 	serverID = strings.TrimSpace(serverID)
-	db, ok := infraConfig.DBServers[serverID]
+	db, ok := ic.DBServers[serverID]
 	if !ok {
-		known := make([]string, 0, len(infraConfig.DBServers))
-		for id := range infraConfig.DBServers {
+		known := make([]string, 0, len(ic.DBServers))
+		for id := range ic.DBServers {
 			known = append(known, id)
 		}
 		sort.Strings(known)
@@ -92,7 +101,7 @@ func resolveHost(serverID string) (resolvedHost, error) {
 
 	// ── Kubernetes path ──────────────────────────────────────────────────────
 	if db.K8sCluster != "" {
-		k8s, ok := infraConfig.K8sClusters[db.K8sCluster]
+		k8s, ok := ic.K8sClusters[db.K8sCluster]
 		if !ok {
 			return resolvedHost{}, fmt.Errorf(
 				"server %q references K8s cluster %q which is not defined in infrastructure config", serverID, db.K8sCluster)
@@ -119,7 +128,7 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		return resolvedHost{}, fmt.Errorf(
 			"server %q has neither vm_name nor k8s_cluster; sysadmin operations require one of these in infrastructure config", serverID)
 	}
-	vm, ok := infraConfig.VMs[db.VMName]
+	vm, ok := ic.VMs[db.VMName]
 	if !ok {
 		return resolvedHost{}, fmt.Errorf(
 			"server %q references VM %q which is not defined in infrastructure config", serverID, db.VMName)
@@ -205,6 +214,65 @@ func containerRuntimeBin(host resolvedHost) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown runtime %q (supported: docker, podman, or empty for systemd)", host.Runtime)
 	}
+}
+
+// ── register_infra_db ─────────────────────────────────────────────────────────
+
+// RegisterInfraDBArgs holds the payload for the register_infra_db direct tool.
+// Not exposed to the LLM — only callable via POST /tool/register_infra_db.
+type RegisterInfraDBArgs struct {
+	ServerID      string `json:"server_id"`
+	ContainerName string `json:"container_name"`
+	Runtime       string `json:"runtime,omitempty"` // "docker" or "podman"; defaults to "docker"
+	ConnStr       string `json:"conn_str,omitempty"`
+}
+
+const localVMKey = "__faulttest_local__"
+
+// registerInfraDB adds a server entry to the in-memory infraConfig so sysadmin
+// tools can resolve ephemeral containers (e.g. faulttest --auto-db) that are not
+// present in the on-disk HELPDESK_INFRA_CONFIG.
+func registerInfraDB(args RegisterInfraDBArgs) error {
+	if args.ServerID == "" {
+		return fmt.Errorf("register_infra_db: server_id is required")
+	}
+	if args.ContainerName == "" {
+		return fmt.Errorf("register_infra_db: container_name is required")
+	}
+	runtime := args.Runtime
+	if runtime == "" {
+		runtime = "docker"
+	}
+
+	infraConfigMu.Lock()
+	defer infraConfigMu.Unlock()
+
+	if infraConfig == nil {
+		infraConfig = &infra.Config{
+			DBServers: make(map[string]infra.DBServer),
+			VMs:       make(map[string]infra.VM),
+		}
+	}
+	if infraConfig.DBServers == nil {
+		infraConfig.DBServers = make(map[string]infra.DBServer)
+	}
+	if infraConfig.VMs == nil {
+		infraConfig.VMs = make(map[string]infra.VM)
+	}
+
+	infraConfig.VMs[localVMKey] = infra.VM{
+		Name:    localVMKey,
+		Runtime: runtime,
+	}
+	infraConfig.DBServers[args.ServerID] = infra.DBServer{
+		Name:             args.ServerID,
+		ConnectionString: args.ConnStr,
+		VMName:           localVMKey,
+		ContainerName:    args.ContainerName,
+		Tags:             []string{"chaos", "test"},
+	}
+	slog.Info("register_infra_db: server registered", "server_id", args.ServerID, "container", args.ContainerName)
+	return nil
 }
 
 // ── check_host ───────────────────────────────────────────────────────────────
@@ -888,6 +956,19 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		return marshalResult(result)
+	})
+
+	// register_infra_db is an admin-only tool: not exposed to the LLM but callable
+	// via POST /tool/register_infra_db so faulttest can register ephemeral containers.
+	r.Register("register_infra_db", func(_ context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RegisterInfraDBArgs](args)
+		if err != nil {
+			return "", err
+		}
+		if err := registerInfraDB(a); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
 	})
 
 	return r

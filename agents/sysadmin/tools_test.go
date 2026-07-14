@@ -661,6 +661,102 @@ func TestExecInProcess_K8s_NoPodFound(t *testing.T) {
 	}
 }
 
+// ── registerInfraDB ──────────────────────────────────────────────────────────
+
+func TestRegisterInfraDB_AddsServerToConfig(t *testing.T) {
+	// Start with nil infraConfig to test creation path.
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-15432",
+		ContainerName: "faulttest-auto-db-abc123",
+		Runtime:       "docker",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	infraConfigMu.RLock()
+	ic := infraConfig
+	infraConfigMu.RUnlock()
+
+	if ic == nil {
+		t.Fatal("infraConfig still nil after registerInfraDB")
+	}
+	db, ok := ic.DBServers["faulttest-auto-15432"]
+	if !ok {
+		t.Fatal("server not found in DBServers")
+	}
+	if db.ContainerName != "faulttest-auto-db-abc123" {
+		t.Errorf("ContainerName = %q, want faulttest-auto-db-abc123", db.ContainerName)
+	}
+	vm, ok := ic.VMs[localVMKey]
+	if !ok {
+		t.Fatal("local VM not created")
+	}
+	if vm.Runtime != "docker" {
+		t.Errorf("VM.Runtime = %q, want docker", vm.Runtime)
+	}
+}
+
+func TestRegisterInfraDB_DefaultsRuntimeToDocker(t *testing.T) {
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-15433",
+		ContainerName: "faulttest-auto-db-def456",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	infraConfigMu.RLock()
+	vm := infraConfig.VMs[localVMKey]
+	infraConfigMu.RUnlock()
+	if vm.Runtime != "docker" {
+		t.Errorf("default runtime = %q, want docker", vm.Runtime)
+	}
+}
+
+func TestRegisterInfraDB_ResolveHostAfterRegister(t *testing.T) {
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-15434",
+		ContainerName: "faulttest-auto-db-ghi789",
+		Runtime:       "docker",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	host, err := resolveHost("faulttest-auto-15434")
+	if err != nil {
+		t.Fatalf("resolveHost after register: %v", err)
+	}
+	if host.ContainerName != "faulttest-auto-db-ghi789" {
+		t.Errorf("ContainerName = %q, want faulttest-auto-db-ghi789", host.ContainerName)
+	}
+	if host.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker", host.Runtime)
+	}
+}
+
+func TestRegisterInfraDB_MissingServerIDReturnsError(t *testing.T) {
+	if err := registerInfraDB(RegisterInfraDBArgs{ContainerName: "some-container"}); err == nil {
+		t.Error("expected error for missing server_id")
+	}
+}
+
+func TestRegisterInfraDB_MissingContainerNameReturnsError(t *testing.T) {
+	if err := registerInfraDB(RegisterInfraDBArgs{ServerID: "faulttest-auto-15435"}); err == nil {
+		t.Error("expected error for missing container_name")
+	}
+}
+
 // multiMockRunner returns pre-configured responses in order.
 type mockResponse struct {
 	output string
