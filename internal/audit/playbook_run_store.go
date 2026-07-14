@@ -598,6 +598,7 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		    r.playbook_id,
 		    p.origin_trace,
 		    r.outcome,
+		    r.escalated_to,
 		    r.started_at,
 		    r.completed_at,
 		    COALESCE(sc.cnt, 0) AS step_count,
@@ -640,11 +641,11 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	for rows.Next() {
 		var version, playbookID, originTrace string
 		var isActiveInt int
-		var outcome, startedStr, completedStr string
+		var outcome, escalatedTo, startedStr, completedStr string
 		var stepCount int
 		var diagScoreNull, remedScoreNull sql.NullFloat64
 
-		if err := rows.Scan(&version, &isActiveInt, &playbookID, &originTrace, &outcome, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
+		if err := rows.Scan(&version, &isActiveInt, &playbookID, &originTrace, &outcome, &escalatedTo, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
 			return nil, err
 		}
 
@@ -661,7 +662,7 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		if outcome == OutcomeTransitioned {
 			a.transitioned++
 		}
-		if outcome == OutcomeEscalated {
+		if outcome == OutcomeEscalated || (outcome == OutcomeGatePending && escalatedTo != "") {
 			a.escalated++
 		}
 		a.stepSum += float64(stepCount)
