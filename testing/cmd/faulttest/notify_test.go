@@ -321,3 +321,83 @@ func TestRegisterAutoDBWithGateway_NetworkError(t *testing.T) {
 		t.Error("want error for unreachable server")
 	}
 }
+
+// ── autoDBServerID ────────────────────────────────────────────────────────────
+
+func TestAutoDBServerID_ExtractsPort(t *testing.T) {
+	id := autoDBServerID("host=127.0.0.1 port=15432 dbname=faulttest user=postgres sslmode=disable")
+	if id != "faulttest-auto-15432" {
+		t.Errorf("got %q, want faulttest-auto-15432", id)
+	}
+}
+
+func TestAutoDBServerID_PortAnyOrder(t *testing.T) {
+	id := autoDBServerID("dbname=faulttest port=55000 host=127.0.0.1 user=postgres")
+	if id != "faulttest-auto-55000" {
+		t.Errorf("got %q, want faulttest-auto-55000", id)
+	}
+}
+
+func TestAutoDBServerID_NoPort_FallbackID(t *testing.T) {
+	id := autoDBServerID("host=localhost dbname=faulttest user=postgres")
+	if id != "faulttest-auto" {
+		t.Errorf("got %q, want faulttest-auto (no port)", id)
+	}
+}
+
+// ── registerAutoDBWithSysadmin ────────────────────────────────────────────────
+
+func TestRegisterAutoDBWithSysadmin_PostsCorrectPayload(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	if err := registerAutoDBWithSysadmin(srv.URL, "faulttest-auto-15432", "faulttest-auto-db-abc123"); err != nil {
+		t.Fatalf("registerAutoDBWithSysadmin: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/tool/register_infra_db" {
+		t.Errorf("path = %q, want /tool/register_infra_db", gotPath)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if payload["server_id"] != "faulttest-auto-15432" {
+		t.Errorf("server_id = %v, want faulttest-auto-15432", payload["server_id"])
+	}
+	if payload["container_name"] != "faulttest-auto-db-abc123" {
+		t.Errorf("container_name = %v, want faulttest-auto-db-abc123", payload["container_name"])
+	}
+	if payload["runtime"] != "docker" {
+		t.Errorf("runtime = %v, want docker", payload["runtime"])
+	}
+}
+
+func TestRegisterAutoDBWithSysadmin_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	err := registerAutoDBWithSysadmin(srv.URL, "faulttest-auto-15432", "container")
+	if err == nil {
+		t.Error("want error for 500 response")
+	}
+}
+
+func TestRegisterAutoDBWithSysadmin_NetworkError(t *testing.T) {
+	err := registerAutoDBWithSysadmin("http://127.0.0.1:19995", "faulttest-auto-15432", "container")
+	if err == nil {
+		t.Error("want error for unreachable server")
+	}
+}
