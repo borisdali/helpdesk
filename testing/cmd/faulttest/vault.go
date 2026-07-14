@@ -3155,6 +3155,8 @@ type versionStats struct {
 	ResolutionRate  float64 `json:"resolution_rate"`
 	Transitioned    int     `json:"transitioned"`
 	TransitionRate  float64 `json:"transition_rate"`
+	Escalated       int     `json:"escalated"`
+	EscalationRate  float64 `json:"escalation_rate"`
 	AvgStepCount    float64 `json:"avg_step_count"`
 	AvgRecoverySecs float64 `json:"avg_recovery_secs"`
 	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`
@@ -3538,13 +3540,14 @@ func vaultJudgeAccuracy(args []string) {
 	}
 
 	type judgeRow struct {
-		SeriesID     string
-		Version      string
-		JudgeVerdict string
-		JudgeModel   string
-		JudgeAt      string
-		TotalRuns    int
-		SuccessRate  float64
+		SeriesID       string
+		Version        string
+		JudgeVerdict   string
+		JudgeModel     string
+		JudgeAt        string
+		TotalRuns      int
+		ResolvedRate   float64
+		EscalatedRate  float64
 	}
 
 	// Build rows by reading judge verdicts directly from each playbook in the
@@ -3598,8 +3601,9 @@ func vaultJudgeAccuracy(args []string) {
 				JudgeAt:      pb.JudgeAt,
 			}
 			if v, ok := runsByPB[pb.PlaybookID]; ok {
-				row.TotalRuns = v.TotalRuns
-				row.SuccessRate = v.ResolutionRate + v.TransitionRate
+				row.TotalRuns     = v.TotalRuns
+				row.ResolvedRate  = v.ResolutionRate + v.TransitionRate
+				row.EscalatedRate = v.EscalationRate
 			}
 			rows = append(rows, row)
 		}
@@ -3611,38 +3615,43 @@ func vaultJudgeAccuracy(args []string) {
 	}
 
 	const (
-		colSeries  = 32
-		colVer     = 10
-		colVerdict = 20
-		colRuns    = 6
-		colSuccess = 9
+		colSeries   = 32
+		colVer      = 10
+		colVerdict  = 20
+		colRuns     = 6
+		colResolved = 10
+		colEscalated = 11
 	)
-	sepWidth := colSeries + 2 + colVer + 2 + colVerdict + 2 + colRuns + 2 + colSuccess + 2 + 20
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	sepWidth := colSeries + 2 + colVer + 2 + colVerdict + 2 + colRuns + 2 + colResolved + 2 + colEscalated + 2 + 20
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colSeries, "SERIES", colVer, "VERSION", colVerdict, "JUDGE VERDICT",
-		colRuns, "RUNS", colSuccess, "SUCCESS%", "JUDGE MODEL")
+		colRuns, "RUNS", colResolved, "RESOLVED%", colEscalated, "ESCALATED%", "JUDGE MODEL")
 	fmt.Println(strings.Repeat("─", sepWidth))
 	for _, r := range rows {
-		successStr := "–"
+		resolvedStr := "–"
+		escalatedStr := "–"
 		if r.TotalRuns > 0 {
-			successStr = fmt.Sprintf("%d%%", int(r.SuccessRate*100))
+			resolvedStr = fmt.Sprintf("%d%%", int(r.ResolvedRate*100))
+			escalatedStr = fmt.Sprintf("%d%%", int(r.EscalatedRate*100))
 		}
 		series := r.SeriesID
 		if len(series) > colSeries {
 			series = series[:colSeries-1] + "…"
 		}
-		fmt.Printf("%-*s  %-*s  %-*s  %-*d  %-*s  %s\n",
+		fmt.Printf("%-*s  %-*s  %-*s  %-*d  %-*s  %-*s  %s\n",
 			colSeries, series,
 			colVer, r.Version,
 			colVerdict, r.JudgeVerdict,
 			colRuns, r.TotalRuns,
-			colSuccess, successStr,
+			colResolved, resolvedStr,
+			colEscalated, escalatedStr,
 			r.JudgeModel,
 		)
 	}
 	fmt.Println()
 	fmt.Println("JUDGE VERDICT is the prediction recorded by `vault diff`.")
-	fmt.Println("SUCCESS% is the actual outcome after runs on this version.")
+	fmt.Println("RESOLVED% = fraction of runs resolved (or transitioned to remediation) by this version.")
+	fmt.Println("ESCALATED% = fraction of runs that correctly escalated to a specialist agent.")
 }
 
 // ── vault cert-compare ────────────────────────────────────────────────────
