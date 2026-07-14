@@ -492,10 +492,11 @@ This chain runs in one API call when `approval_mode=auto`, or returns `suggested
 | Series | Mode | Agent | SysAdmin involvement |
 |---|---|---|---|
 | `pbs_db_restart_triage` | `agent` | database | Classifies failure; escalates to SysAdmin agent for Docker-hosted DBs |
-| `pbs_sysadmin_docker_inspect` | `agent` | **sysadmin** | Reads container state + logs; revises or confirms prior hypothesis |
+| `pbs_sysadmin_docker_inspect` | `agent` | **sysadmin** | Reads container state + logs; revises or confirms prior hypothesis; transitions to `pbs_db_restart_action` when a restart is warranted |
+| `pbs_db_restart_action` | `agent` | **sysadmin** | Calls `restart_container` to bring the container back up; verifies the DB accepts connections before declaring success |
 | `pbs_db_config_recovery` | `agent` | database | Config-error recovery; no SysAdmin involvement |
 | `pbs_db_pitr_recovery` | `agent` | database | WAL/data corruption recovery; always requires human DBA |
 
-The `agent_approve` and `agent_auto` modes (for playbooks where the SysAdmin agent also *executes* remediation, not just diagnoses) are planned for a future release.
+The full chain for a Docker DB-down scenario is: `pbs_db_restart_triage` → escalate → `pbs_sysadmin_docker_inspect` → transition → `pbs_db_restart_action`. All three stages run within a single `faulttest --remediate` session when `--sysadmin-agent` is configured alongside `--gateway`.
 
 See [Playbooks](PLAYBOOKS.md) for the full `execution_mode` and `agent_name` specification.

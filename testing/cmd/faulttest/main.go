@@ -137,6 +137,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.DBAgentURL, "db-agent", "", "Database agent A2A URL")
 	fs.StringVar(&cfg.K8sAgentURL, "k8s-agent", "", "Kubernetes agent A2A URL")
 	fs.StringVar(&cfg.SysadminAgentURL, "sysadmin-agent", "", "Sysadmin agent A2A URL")
+	fs.StringVar(&cfg.SysadminAPIKey, "sysadmin-api-key", os.Getenv("FAULTTEST_SYSADMIN_API_KEY"), "Bearer token for sysadmin agent /tool/ endpoint (required when HELPDESK_USERS_FILE is set on the sysadmin agent)")
 	fs.StringVar(&cfg.OrchestratorURL, "orchestrator", "", "Orchestrator agent A2A URL")
 	fs.StringVar(&cfg.KubeContext, "context", "", "Kubernetes context")
 
@@ -335,7 +336,7 @@ func cmdRun(args []string) {
 			}
 		}
 		if cfg.SysadminAgentURL != "" {
-			if err := registerAutoDBWithSysadmin(cfg.SysadminAgentURL, serverID, containerName); err != nil {
+			if err := registerAutoDBWithSysadmin(cfg.SysadminAgentURL, cfg.SysadminAPIKey, serverID, containerName); err != nil {
 				slog.Warn("could not register auto-DB with sysadmin agent — sysadmin tools may fail to resolve container", "err", err)
 			}
 		}
@@ -780,7 +781,7 @@ func autoDBServerID(connStr string) string {
 // registerAutoDBWithSysadmin registers the ephemeral auto-DB container with the
 // sysadmin agent via its register_infra_db direct-tool endpoint. This is needed
 // so the sysadmin agent can resolve the container for check_host and restart_container.
-func registerAutoDBWithSysadmin(sysadminURL, serverID, containerName string) error {
+func registerAutoDBWithSysadmin(sysadminURL, apiKey, serverID, containerName string) error {
 	body, err := json.Marshal(map[string]any{
 		"server_id":      serverID,
 		"container_name": containerName,
@@ -795,6 +796,9 @@ func registerAutoDBWithSysadmin(sysadminURL, serverID, containerName string) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
 		return err

@@ -348,18 +348,19 @@ func TestAutoDBServerID_NoPort_FallbackID(t *testing.T) {
 // ── registerAutoDBWithSysadmin ────────────────────────────────────────────────
 
 func TestRegisterAutoDBWithSysadmin_PostsCorrectPayload(t *testing.T) {
-	var gotPath, gotMethod string
+	var gotPath, gotMethod, gotAuth string
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
-	if err := registerAutoDBWithSysadmin(srv.URL, "faulttest-auto-15432", "faulttest-auto-db-abc123"); err != nil {
+	if err := registerAutoDBWithSysadmin(srv.URL, "sk-sysadmin-test", "faulttest-auto-15432", "faulttest-auto-db-abc123"); err != nil {
 		t.Fatalf("registerAutoDBWithSysadmin: %v", err)
 	}
 	if gotMethod != http.MethodPost {
@@ -367,6 +368,9 @@ func TestRegisterAutoDBWithSysadmin_PostsCorrectPayload(t *testing.T) {
 	}
 	if gotPath != "/tool/register_infra_db" {
 		t.Errorf("path = %q, want /tool/register_infra_db", gotPath)
+	}
+	if gotAuth != "Bearer sk-sysadmin-test" {
+		t.Errorf("Authorization = %q, want Bearer sk-sysadmin-test", gotAuth)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(gotBody, &payload); err != nil {
@@ -383,20 +387,37 @@ func TestRegisterAutoDBWithSysadmin_PostsCorrectPayload(t *testing.T) {
 	}
 }
 
+func TestRegisterAutoDBWithSysadmin_NoAPIKey_OmitsAuthHeader(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	if err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "container"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty when no API key", gotAuth)
+	}
+}
+
 func TestRegisterAutoDBWithSysadmin_ServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
-	err := registerAutoDBWithSysadmin(srv.URL, "faulttest-auto-15432", "container")
+	err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "container")
 	if err == nil {
 		t.Error("want error for 500 response")
 	}
 }
 
 func TestRegisterAutoDBWithSysadmin_NetworkError(t *testing.T) {
-	err := registerAutoDBWithSysadmin("http://127.0.0.1:19995", "faulttest-auto-15432", "container")
+	err := registerAutoDBWithSysadmin("http://127.0.0.1:19995", "", "faulttest-auto-15432", "container")
 	if err == nil {
 		t.Error("want error for unreachable server")
 	}

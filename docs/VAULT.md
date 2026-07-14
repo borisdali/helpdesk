@@ -283,7 +283,7 @@ db-high-cache-miss               any        pbs_cache_miss_triage      pbs_cache
 db-lock-contention               any        pbs_lock_chain_triage      pbs_lock_remediate         2026-06-20  PASS       STABLE(5)      5 runs  80% resolved  –  last: 2026-06-20
 db-max-connections               any        pbs_max_conn_triage        pbs_max_conn_remediate     2026-06-20  PASS       STABLE(5)      4 runs  100% resolved  100% accurate  last: 2026-06-20
 db-idle-in-transaction           any        pbs_db_idle_txn            (none)                     2026-06-15  PASS       UNSTABLE(5)    -
-db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_remediate   2026-04-15  PASS       —              2 runs  50% resolved  last: 2026-04-15
+db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_action      2026-07-10  PASS       STABLE(3)      3 runs  100% escalated  last: 2026-07-10
 db-pg-hba-corrupt                any        pbs_db_config_recovery     pbs_db_config_remediate    (never)     -          —              MISSING
 ```
 
@@ -1151,17 +1151,21 @@ faulttest vault judge-accuracy db-lock-contention \
 Cross-references judge predictions (recorded by `vault diff --judge`) against the actual run outcomes that accumulated after activation. This is how you verify whether the LLM judge is a reliable pre-activation signal — or whether it approves changes that don't actually improve outcomes.
 
 ```
-SERIES                             VERSION  JUDGE VERDICT         RUNS  SUCCESS%  JUDGE MODEL
-─────────────────────────────────────────────────────────────────────────────────────────────────────
-pbs_connection_remediate           1.4      APPROVE                  8    87%      claude-haiku-4-5-20251001
-pbs_max_connections_triage         1.2      NEEDS_REVIEW             3    67%      claude-haiku-4-5-20251001
-pbs_wal_stale_slot                 1.3      APPROVE                  5   100%      claude-haiku-4-5-20251001
+SERIES                             VERSION  JUDGE VERDICT         RUNS  RESOLVED%  ESCALATED%  JUDGE MODEL
+───────────────────────────────────────────────────────────────────────────────────────────────────────────
+pbs_connection_remediate           1.4      APPROVE                  8    87%        –           claude-haiku-4-5-20251001
+pbs_max_connections_triage         1.2      NEEDS_REVIEW             3    67%        –           claude-haiku-4-5-20251001
+pbs_wal_stale_slot                 1.3      APPROVE                  5   100%        –           claude-haiku-4-5-20251001
+pbs_db_restart_triage              1.7      APPROVE                  3     –        100%         claude-haiku-4-5-20251001
 
 JUDGE VERDICT is the prediction recorded by `vault diff`.
-SUCCESS% is the actual outcome after runs on this version.
+RESOLVED% = fraction of runs resolved (or transitioned to remediation) by this version.
+ESCALATED% = fraction of runs that correctly escalated to a specialist agent.
 ```
 
-The gap between `JUDGE VERDICT` and `SUCCESS%` is the accountability signal: an `APPROVE` verdict that correlates with high `SUCCESS%` validates the judge as useful; a pattern of `APPROVE` + low `SUCCESS%` is a signal to tune the judge prompt or raise the bar before activating.
+`SUCCESS%` is now split into `RESOLVED%` and `ESCALATED%` so that single-step remediation playbooks and escalation-heavy triage playbooks both read correctly. A triage playbook whose job is to escalate (e.g. `pbs_db_restart_triage`) will show 0% `RESOLVED%` and 100% `ESCALATED%` when working correctly — collapsing both into one metric would make it appear to have 0% success.
+
+The gap between `JUDGE VERDICT` and the actual outcome rate is the accountability signal: an `APPROVE` verdict that correlates with high `RESOLVED%` or `ESCALATED%` (as appropriate for the playbook type) validates the judge as useful; a pattern of `APPROVE` + low rates is a signal to tune the judge prompt or raise the bar before activating.
 
 Requires `--gateway`. Verdicts are only recorded when `vault diff --judge` is run before activation.
 

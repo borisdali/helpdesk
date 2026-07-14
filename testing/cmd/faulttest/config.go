@@ -156,6 +156,10 @@ type HarnessConfig struct {
 	GatewayURL string
 	// GatewayAPIKey is the Bearer token for gateway/auditd auth during remediation.
 	GatewayAPIKey string
+	// SysadminAPIKey is the Bearer token for the sysadmin agent's /tool/ endpoint.
+	// Required when HELPDESK_USERS_FILE is set on the sysadmin agent (service-account auth).
+	// Create a service account in the sysadmin's users.yaml and pass its API key here.
+	SysadminAPIKey string
 	// GatewayPurpose is the declared purpose sent in gateway requests (default: "diagnostic").
 	GatewayPurpose string
 	// ApprovalMode overrides the playbook's default approval_mode for this run.
