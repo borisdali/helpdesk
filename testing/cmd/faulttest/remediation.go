@@ -656,8 +656,15 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	return nil
 }
 
-// waitForGateEmitAndWait prints the gate summary and polls until the operator
-// externally resolves the gate via the Decision Hub or proceed-escalation endpoint.
+// waitForGateEmitAndWait prints the gate summary and either auto-approves it
+// (when --approval-mode force) or polls until the operator resolves it externally
+// via the Decision Hub or proceed-escalation endpoint.
+//
+// With --approval-mode force the gate is approved immediately via
+// proceed-escalation using the configured approval mode, ensuring downstream
+// playbooks (e.g. pbs_db_restart_action, which has approval_mode=manual) are
+// still allowed to auto-chain. Without force the function behaves as before:
+// print the gate URL and block until an external actor resolves it.
 func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.ApproveRunResponse) error {
 	resolveURL := r.cfg.GatewayURL + "/api/v1/decisions/gate:" + gate.RunID + "/resolve"
 	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
@@ -665,7 +672,7 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("  Body fields:\n")
 	fmt.Printf("    resolution        : \"approved\" | \"denied\"\n")
 	fmt.Printf("    resolved_by       : your email or user ID\n")
-	fmt.Printf("    approval_mode     : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
+	fmt.Printf("    approval_mode     : \"force\" | \"auto\" | \"review\" | \"manual\" — use \"force\" to allow the full remediation chain to auto-run\n")
 	fmt.Printf("    reason            : optional — free-text operator comment\n")
 	fmt.Printf("    verdict_correct : true | false  (triage/at_gate feedback, before remediation runs)\n")
 	fmt.Printf("    verdict_notes   : string        (required when verdict_correct=false)\n")
@@ -673,6 +680,44 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("\n  Remediation feedback (separate call, same gate window):\n")
 	fmt.Printf("    POST %s\n", feedbackURL)
 	fmt.Printf("    {\"feedback_type\":\"remediation\",\"feedback_time\":\"at_gate\",\"verdict_correct\":true,\"verdict_notes\":\"...\"}\n\n")
+
+	// When --approval-mode force: auto-approve immediately so that downstream
+	// playbooks with approval_mode=manual (e.g. pbs_db_restart_action) are
+	// still allowed to auto-chain within the same proceed-escalation call.
+	// Without force the gate must be resolved externally.
+	//
+	// --operator is required for auto-approval: it becomes the resolved_by
+	// identity on the audit record. Without it the gate would be recorded as
+	// approved by the anonymous sentinel "operator", producing an audit trail
+	// with no accountable identity.
+	if r.cfg.ApprovalMode == "force" {
+		if r.cfg.OperatorID == "" {
+			return fmt.Errorf("--approval-mode force requires --operator <id> when using --emit-and-wait: " +
+				"the gate approval is recorded in the audit log and must carry an accountable identity")
+		}
+		connStr := r.cfg.ConnStr
+		if r.cfg.AgentConnStr != "" {
+			connStr = r.cfg.AgentConnStr
+		}
+		slog.Info("emit-and-wait: auto-approving gate with force mode", "run_id", gate.RunID, "operator", r.cfg.OperatorID)
+		resp, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+			Resolution:       "approved",
+			ResolvedBy:       r.cfg.OperatorID,
+			ApprovalMode:     "force",
+			ConnectionString: connStr,
+		})
+		if err != nil {
+			return fmt.Errorf("proceed-escalation: %w", err)
+		}
+		if resp.Status == "pending_approval" {
+			return r.runApprovalLoop(ctx, *resp)
+		}
+		slog.Info("gate auto-approved", "run_id", gate.RunID, "status", resp.Status)
+		if resp.Status == "denied" {
+			return errGateDenied
+		}
+		return nil
+	}
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
 	if err != nil {
