@@ -103,3 +103,12 @@ service_accounts:
     roles: [sre-automation]
     api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$BEcHY8UvVbYfeBg86LSU4Q$Uar1wecHDNkfSqj9LcjCZLZ4VggbMrVscwPUZii7l2c"
 
+  # faulttest: called by the faulttest harness to register ephemeral auto-DB
+  # containers with the sysadmin agent at runtime (POST /tool/register_infra_db).
+  # Set FAULTTEST_SYSADMIN_API_KEY to the plaintext key on the machine running faulttest.
+  - id: faulttest
+    roles: [sre-automation]
+    # Hash of example key "faulttest-api-key" — replace in production:
+    #   openssl rand -hex 32 | tee /dev/stderr | go run ./cmd/hashapikey
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$+3mQASWNvDtUM+8HU/HNJg$ucQS10Yc0bbapNUciGik2n5AErWTi5BaT4fTlvtMpp8"
+

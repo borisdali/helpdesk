@@ -776,3 +776,93 @@ func (m *multiMockRunner) Run(_ context.Context, _ string, _ []string, _ []strin
 	m.idx++
 	return r.output, r.err
 }
+
+// ── connStrPort / resolveHost port-fallback ───────────────────────────────────
+
+func TestConnStrPort(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"host=127.0.0.1 port=58989 dbname=postgres user=postgres", "58989"},
+		{"port=5432 host=localhost", "5432"},
+		{"127.0.0.1:15432", "15432"},
+		{"postgresql://user:pass@host:9999/db", "9999"},
+		{"postgres://localhost:5432/mydb", "5432"},
+		{"58989", "58989"},
+		{"5432", "5432"},
+		{"prod_db", ""},            // plain server ID — no port
+		{"host=localhost", ""},     // no port field
+		{"localhost", ""},          // no port
+	}
+	for _, tc := range cases {
+		got := connStrPort(tc.input)
+		if got != tc.want {
+			t.Errorf("connStrPort(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// withDockerInfraWithPort sets up infraConfig where the db server has a
+// connection string containing a port, to test the port-based fallback.
+func withDockerInfraWithPort(t *testing.T, port string) {
+	t.Helper()
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"faulttest-auto": {
+				Name:             "faulttest-auto",
+				ConnectionString: "host=127.0.0.1 port=" + port + " dbname=postgres user=postgres",
+				VMName:           "__faulttest_local__",
+				ContainerName:    "faulttest-auto-container",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"__faulttest_local__": {
+				Name:    "__faulttest_local__",
+				Runtime: "docker",
+			},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+func TestResolveHost_PortFallback_LibpqConnStr(t *testing.T) {
+	withDockerInfraWithPort(t, "58989")
+	defer withMockRunner("running (running=true, restarting=false, oomkilled=false, dead=false, exitcode=0)", nil)()
+
+	// Target is the full DSN — server ID "faulttest-auto" is NOT passed.
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{
+		Target: "host=127.0.0.1 port=58989 dbname=postgres user=postgres",
+	})
+	if err != nil {
+		t.Fatalf("checkHostImpl: %v", err)
+	}
+	if result.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker", result.Runtime)
+	}
+}
+
+func TestResolveHost_PortFallback_BarePort(t *testing.T) {
+	withDockerInfraWithPort(t, "58989")
+	defer withMockRunner("running (running=true, restarting=false, oomkilled=false, dead=false, exitcode=0)", nil)()
+
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "58989"})
+	if err != nil {
+		t.Fatalf("checkHostImpl with bare port: %v", err)
+	}
+	if result.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker", result.Runtime)
+	}
+}
+
+func TestResolveHost_PortFallback_NoMatch(t *testing.T) {
+	withDockerInfraWithPort(t, "58989")
+	// Wrong port — should fail with "not found".
+	_, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "host=127.0.0.1 port=9999"})
+	if err == nil {
+		t.Error("expected error for unmatched port, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error %q should mention 'not found'", err.Error())
+	}
+}

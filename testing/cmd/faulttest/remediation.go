@@ -228,14 +228,25 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	return runResp.RunID, nil
 }
 
-// findChildRunID queries auditd for the remediation run that was started by a
-// proceed-escalation call on the given triage run. Returns "" when the run
-// cannot be found (e.g. auditd not configured, or run not yet committed).
+// findChildRunID queries auditd (or the gateway when auditd URL is absent) for
+// the run that was started by a proceed-escalation call on the given triage run.
+// Returns "" when the run cannot be found.
 func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) string {
-	if r.cfg.AuditURL == "" || priorRunID == "" {
+	if priorRunID == "" {
 		return ""
 	}
-	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + priorRunID + "&limit=1"
+	// Prefer auditd for direct access; fall back to gateway proxy which forwards
+	// the full query string (including ?prior_run_id=) to auditd.
+	base := r.cfg.AuditURL
+	path := "/v1/fleet/playbook-runs"
+	if base == "" {
+		if r.cfg.GatewayURL == "" {
+			return ""
+		}
+		base = r.cfg.GatewayURL
+		path = "/api/v1/fleet/playbook-runs"
+	}
+	url := strings.TrimSuffix(base, "/") + path + "?prior_run_id=" + priorRunID + "&limit=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ""
@@ -262,13 +273,23 @@ func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) stri
 	return result.Runs[0].RunID
 }
 
-// fetchRunOutcome fetches the current outcome of a playbook run from auditd.
-// Returns "" if the run is still active or cannot be fetched.
+// fetchRunOutcome fetches the current outcome of a playbook run from auditd (or
+// the gateway when auditd URL is absent). Returns "" if the run is still active
+// or cannot be fetched.
 func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
-	if r.cfg.AuditURL == "" || runID == "" {
+	if runID == "" {
 		return ""
 	}
-	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs/" + runID
+	base := r.cfg.AuditURL
+	path := "/v1/fleet/playbook-runs/" + runID
+	if base == "" {
+		if r.cfg.GatewayURL == "" {
+			return ""
+		}
+		base = r.cfg.GatewayURL
+		path = "/api/v1/fleet/playbook-runs/" + runID
+	}
+	url := strings.TrimSuffix(base, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ""
@@ -296,14 +317,18 @@ func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
 // waitForChildRunComplete waits for the escalation chain triggered by parentRunID
 // to finish. It first polls findChildRunID until the child run appears (the gateway
 // starts it asynchronously after gate approval), then polls fetchRunOutcome until
-// the run reaches a terminal state. Returns the child run ID (may be "" on timeout).
+// the run reaches a terminal state. When the immediate child transitions to another
+// run (outcome="transitioned"), it follows the chain recursively so that the caller
+// doesn't start pollRecovery until the full chain (e.g. inspect → restart_action)
+// has completed. Returns the deepest child run ID reached (may be "" on timeout).
+// Requires either AuditURL or GatewayURL to be set; returns "" without either.
 func (r *Remediator) waitForChildRunComplete(ctx context.Context, parentRunID string, timeout time.Duration) string {
-	if r.cfg.AuditURL == "" {
-		return r.findChildRunID(ctx, parentRunID)
+	if r.cfg.AuditURL == "" && r.cfg.GatewayURL == "" {
+		return ""
 	}
 	deadline := time.Now().Add(timeout)
 
-	// Phase 1: wait for the child run to appear in auditd (gateway starts it async).
+	// Phase 1: wait for the child run to appear (gateway starts it async after gate approval).
 	var childRunID string
 	for time.Now().Before(deadline) {
 		childRunID = r.findChildRunID(ctx, parentRunID)
@@ -325,7 +350,20 @@ func (r *Remediator) waitForChildRunComplete(ctx context.Context, parentRunID st
 	slog.Info("waitForChildRunComplete: watching child run", "child", childRunID)
 	for time.Now().Before(deadline) {
 		outcome := r.fetchRunOutcome(ctx, childRunID)
-		if outcome != "" {
+		switch outcome {
+		case "":
+			// still running — keep polling
+		case "transitioned":
+			// This run handed off to another playbook (e.g. inspect → restart_action).
+			// Follow the chain: wait for the grandchild to complete.
+			remaining := time.Until(deadline)
+			slog.Info("waitForChildRunComplete: child transitioned, following chain", "child", childRunID, "remaining", remaining)
+			grandchild := r.waitForChildRunComplete(ctx, childRunID, remaining)
+			if grandchild != "" {
+				return grandchild
+			}
+			return childRunID
+		default:
 			slog.Info("waitForChildRunComplete: child run complete", "child", childRunID, "outcome", outcome)
 			return childRunID
 		}

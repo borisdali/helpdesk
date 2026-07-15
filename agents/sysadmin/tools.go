@@ -77,18 +77,70 @@ type resolvedHost struct {
 	Sensitivity []string
 }
 
+// connStrPort extracts the port number from a libpq connection string or
+// "host:port" address. Returns "" when no port is found.
+func connStrPort(s string) string {
+	// libpq keyword format: "... port=5432 ..."
+	for _, field := range strings.Fields(s) {
+		if strings.HasPrefix(field, "port=") {
+			p := strings.TrimPrefix(field, "port=")
+			if p != "" {
+				return p
+			}
+		}
+	}
+	// "host:port" format (after stripping any scheme prefix)
+	s = strings.TrimPrefix(s, "postgresql://")
+	s = strings.TrimPrefix(s, "postgres://")
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		p := s[idx+1:]
+		// strip any trailing path/query
+		if sl := strings.IndexAny(p, "/?"); sl >= 0 {
+			p = p[:sl]
+		}
+		if p != "" && p != s {
+			return p
+		}
+	}
+	// bare port (digits only)
+	if strings.TrimFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }) == "" && s != "" {
+		return s
+	}
+	return ""
+}
+
 // resolveHost looks up a DB server by ID and assembles the resolvedHost the
 // sysadmin tools need. It handles both VM-hosted (docker/podman/systemd) and
 // Kubernetes-hosted databases.
+// As a fallback, target may also be a connection string or port number — in
+// that case the server is identified by matching the port against registered
+// connection strings (useful for ephemeral auto-DB servers whose ID is not
+// known to the LLM at startup time).
 func resolveHost(serverID string) (resolvedHost, error) {
 	infraConfigMu.RLock()
 	ic := infraConfig
-	infraConfigMu.RUnlock()
 	if ic == nil {
+		infraConfigMu.RUnlock()
 		return resolvedHost{}, fmt.Errorf("no infrastructure config loaded; set HELPDESK_INFRA_CONFIG")
 	}
 	serverID = strings.TrimSpace(serverID)
 	db, ok := ic.DBServers[serverID]
+	if !ok {
+		// Fallback: treat target as a connection string and match by port.
+		// This allows the LLM to pass the connection string from triage findings
+		// when it doesn't know the server ID (e.g. ephemeral auto-DB containers).
+		if port := connStrPort(serverID); port != "" {
+			for id, candidate := range ic.DBServers {
+				if connStrPort(candidate.ConnectionString) == port {
+					db = candidate
+					serverID = id
+					ok = true
+					break
+				}
+			}
+		}
+	}
+	infraConfigMu.RUnlock()
 	if !ok {
 		known := make([]string, 0, len(ic.DBServers))
 		for id := range ic.DBServers {
@@ -279,7 +331,7 @@ func registerInfraDB(args RegisterInfraDBArgs) error {
 
 // CheckHostArgs defines arguments for check_host.
 type CheckHostArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config (e.g. 'prod_db'). Must match a key in db_servers."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config (e.g. 'prod_db'), or a connection string / port (e.g. 'host=127.0.0.1 port=5432' or '5432') when the server ID is unknown — resolved by port matching."`
 }
 
 func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, error) {
@@ -366,7 +418,7 @@ func checkHostTool(ctx tool.Context, args CheckHostArgs) (CheckHostResult, error
 
 // GetHostLogsArgs defines arguments for get_host_logs.
 type GetHostLogsArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config, or a connection string / port — resolved by port matching."`
 	Lines  int    `json:"lines,omitempty" jsonschema:"Number of recent log lines to return (default 100)."`
 	Filter string `json:"filter,omitempty" jsonschema:"Optional substring to filter log lines (case-sensitive)."`
 }
@@ -725,7 +777,7 @@ func hostRuntimeLabel(host resolvedHost) string {
 
 // RestartContainerArgs defines arguments for restart_container.
 type RestartContainerArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config, or a connection string / port — resolved by port matching."`
 	Reason string `json:"reason" jsonschema:"required,Human-readable reason for the restart. Logged for audit trail."`
 }
 
@@ -796,7 +848,7 @@ func restartContainerTool(ctx tool.Context, args RestartContainerArgs) (RestartR
 
 // RestartServiceArgs defines arguments for restart_service.
 type RestartServiceArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config, or a connection string / port — resolved by port matching."`
 	Reason string `json:"reason" jsonschema:"required,Human-readable reason for the restart. Logged for audit trail."`
 }
 

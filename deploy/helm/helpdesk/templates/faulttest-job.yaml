@@ -181,6 +181,13 @@ spec:
                   name: {{ .Values.faulttest.gatewayAPIKeySecret }}
                   key: {{ .Values.faulttest.gatewayAPIKeyKey | default "api-key" }}
             {{- end }}
+            {{- if .Values.faulttest.sysadminAPIKeySecret }}
+            - name: FAULTTEST_SYSADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.faulttest.sysadminAPIKeySecret }}
+                  key: {{ .Values.faulttest.sysadminAPIKeyKey | default "api-key" }}
+            {{- end }}
             {{- if .Values.faulttest.dbPasswordSecret.name }}
             - name: {{ .Values.faulttest.dbPasswordSecret.envVar | default "PGPASSWORD" }}
               valueFrom:
