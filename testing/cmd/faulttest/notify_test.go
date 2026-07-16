@@ -360,7 +360,7 @@ func TestRegisterAutoDBWithSysadmin_PostsCorrectPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := registerAutoDBWithSysadmin(srv.URL, "sk-sysadmin-test", "faulttest-auto-15432", "faulttest-auto-db-abc123"); err != nil {
+	if err := registerAutoDBWithSysadmin(srv.URL, "sk-sysadmin-test", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "faulttest-auto-db-abc123"); err != nil {
 		t.Fatalf("registerAutoDBWithSysadmin: %v", err)
 	}
 	if gotMethod != http.MethodPost {
@@ -396,7 +396,7 @@ func TestRegisterAutoDBWithSysadmin_NoAPIKey_OmitsAuthHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "container"); err != nil {
+	if err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "container"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if gotAuth != "" {
@@ -410,14 +410,14 @@ func TestRegisterAutoDBWithSysadmin_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "container")
+	err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "container")
 	if err == nil {
 		t.Error("want error for 500 response")
 	}
 }
 
 func TestRegisterAutoDBWithSysadmin_NetworkError(t *testing.T) {
-	err := registerAutoDBWithSysadmin("http://127.0.0.1:19995", "", "faulttest-auto-15432", "container")
+	err := registerAutoDBWithSysadmin("http://127.0.0.1:19995", "", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "container")
 	if err == nil {
 		t.Error("want error for unreachable server")
 	}

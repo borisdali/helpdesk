@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/testing/faultlib"
@@ -695,6 +697,9 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 			return fmt.Errorf("--approval-mode force requires --operator <id> when using --emit-and-wait: " +
 				"the gate approval is recorded in the audit log and must carry an accountable identity")
 		}
+		if err := validateOperatorInUsersFile(r.cfg.UsersFile, r.cfg.OperatorID); err != nil {
+			return err
+		}
 		connStr := r.cfg.ConnStr
 		if r.cfg.AgentConnStr != "" {
 			connStr = r.cfg.AgentConnStr
@@ -1165,6 +1170,34 @@ func printIncidentSummary(resp testutil.AgentResponse, recoverySecs float64, gat
 		base := strings.TrimSuffix(gatewayURL, "/")
 		fmt.Printf("  Narrative  : GET %s/api/v1/incidents/%s\n", base, resp.RunID)
 	}
+}
+
+// validateOperatorInUsersFile checks that operatorID exists as a human user
+// in the users.yaml file at path. Returns nil when path is empty (no check) or
+// when the operator is found. The check guards force-mode auto-approval so that
+// only real, recognised identities appear as resolved_by in the audit log.
+func validateOperatorInUsersFile(path, operatorID string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("--users-file %q: %w", path, err)
+	}
+	var cfg struct {
+		Users []struct {
+			ID string `yaml:"id"`
+		} `yaml:"users"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("--users-file %q: parse error: %w", path, err)
+	}
+	for _, u := range cfg.Users {
+		if u.ID == operatorID {
+			return nil
+		}
+	}
+	return fmt.Errorf("--operator %q is not a recognised human user in %s — add them to users.yaml or use a valid user ID", operatorID, path)
 }
 
 // wrapText breaks s into lines of at most width runes, splitting on spaces.

@@ -170,6 +170,10 @@ type HarnessConfig struct {
 	// Must match a user in users.yaml with roles required for the run
 	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
 	OperatorID string
+	// UsersFile is the path to users.yaml. When set and --approval-mode force is used,
+	// the harness validates that OperatorID exists as a human user in that file before
+	// calling ProceedEscalation. Prevents fake identities from appearing in the audit log.
+	UsersFile string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
 	InfraConfigPath string
 	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty

@@ -164,6 +164,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 	fs.StringVar(&cfg.ApprovalMode, "approval-mode", "", "Override playbook approval_mode for this run (auto|session|manual|force). Empty = playbook default. Use 'force' to bypass manual gates in automated runs.")
 	fs.StringVar(&cfg.OperatorID, "operator", os.Getenv("HELPDESK_OPERATOR"), "User identity sent as X-User on gateway requests (e.g. alice@example.com). Must have roles required by approval_override_roles to avoid mode clamping.")
+	fs.StringVar(&cfg.UsersFile, "users-file", os.Getenv("HELPDESK_USERS_FILE"), "Path to users.yaml; when set, --operator must be a known human user in that file before force-mode auto-approval is accepted (or HELPDESK_USERS_FILE)")
 
 	// Policy safety check.
 	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")
@@ -336,7 +337,7 @@ func cmdRun(args []string) {
 			}
 		}
 		if cfg.SysadminAgentURL != "" {
-			if err := registerAutoDBWithSysadmin(cfg.SysadminAgentURL, cfg.SysadminAPIKey, serverID, containerName); err != nil {
+			if err := registerAutoDBWithSysadmin(cfg.SysadminAgentURL, cfg.SysadminAPIKey, serverID, connStr, containerName); err != nil {
 				slog.Warn("could not register auto-DB with sysadmin agent — sysadmin tools may fail to resolve container", "err", err)
 			}
 		}
@@ -781,11 +782,12 @@ func autoDBServerID(connStr string) string {
 // registerAutoDBWithSysadmin registers the ephemeral auto-DB container with the
 // sysadmin agent via its register_infra_db direct-tool endpoint. This is needed
 // so the sysadmin agent can resolve the container for check_host and restart_container.
-func registerAutoDBWithSysadmin(sysadminURL, apiKey, serverID, containerName string) error {
+func registerAutoDBWithSysadmin(sysadminURL, apiKey, serverID, connStr, containerName string) error {
 	body, err := json.Marshal(map[string]any{
 		"server_id":      serverID,
 		"container_name": containerName,
 		"runtime":        "docker",
+		"conn_str":       connStr,
 	})
 	if err != nil {
 		return err
