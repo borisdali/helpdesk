@@ -953,6 +953,34 @@ func (g *Gateway) handleRegisterEphemeralDB(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Forward to the sysadmin agent's /tool/register_infra_db so check_host and
+	// restart_container can resolve ephemeral docker/podman containers by connection string.
+	if (req.HostingType == "docker" || req.HostingType == "podman") && req.ContainerName != "" {
+		if sysAgent, ok := g.agents[agentNameSysadmin]; ok {
+			agentBase := strings.TrimSuffix(sysAgent.InvokeURL, "/invoke")
+			agentURL := agentBase + "/tool/register_infra_db"
+			sysBody, _ := json.Marshal(map[string]any{
+				"server_id":      req.ServerID,
+				"container_name": req.ContainerName,
+				"runtime":        req.HostingType,
+				"conn_str":       req.ConnectionString,
+			})
+			sysReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, agentURL, bytes.NewReader(sysBody))
+			if err == nil {
+				sysReq.Header.Set("Content-Type", "application/json")
+				if g.agentAPIKey != "" {
+					sysReq.Header.Set("Authorization", "Bearer "+g.agentAPIKey)
+				}
+				if resp, err := http.DefaultClient.Do(sysReq); err != nil {
+					slog.Warn("failed to forward register_infra_db to sysadmin agent", "url", agentURL, "err", err)
+				} else {
+					resp.Body.Close()
+					slog.Info("forwarded register_infra_db to sysadmin agent", "url", agentURL, "status", resp.StatusCode)
+				}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"server_id": req.ServerID, "status": "registered"})
 }
 

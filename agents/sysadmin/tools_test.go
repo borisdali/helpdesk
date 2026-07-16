@@ -745,6 +745,30 @@ func TestRegisterInfraDB_ResolveHostAfterRegister(t *testing.T) {
 	}
 }
 
+func TestRegisterInfraDB_ResolveHostByContainerName(t *testing.T) {
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-59001",
+		ContainerName: "faulttest-auto-db-abc123",
+		Runtime:       "docker",
+		ConnStr:       "host=127.0.0.1 port=59001 dbname=faulttest user=postgres password=faulttest sslmode=disable",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	// Fallback 2: resolve by container name directly.
+	host, err := resolveHost("faulttest-auto-db-abc123")
+	if err != nil {
+		t.Fatalf("resolveHost by container name: %v", err)
+	}
+	if host.ContainerName != "faulttest-auto-db-abc123" {
+		t.Errorf("ContainerName = %q, want faulttest-auto-db-abc123", host.ContainerName)
+	}
+}
+
 func TestRegisterInfraDB_MissingServerIDReturnsError(t *testing.T) {
 	if err := registerInfraDB(RegisterInfraDBArgs{ContainerName: "some-container"}); err == nil {
 		t.Error("expected error for missing server_id")

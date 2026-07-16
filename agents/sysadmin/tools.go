@@ -126,7 +126,7 @@ func resolveHost(serverID string) (resolvedHost, error) {
 	serverID = strings.TrimSpace(serverID)
 	db, ok := ic.DBServers[serverID]
 	if !ok {
-		// Fallback: treat target as a connection string and match by port.
+		// Fallback 1: treat target as a connection string and match by port.
 		// This allows the LLM to pass the connection string from triage findings
 		// when it doesn't know the server ID (e.g. ephemeral auto-DB containers).
 		if port := connStrPort(serverID); port != "" {
@@ -137,6 +137,20 @@ func resolveHost(serverID string) (resolvedHost, error) {
 					ok = true
 					break
 				}
+			}
+		}
+	}
+	if !ok {
+		// Fallback 2: match by container name. The LLM often extracts the
+		// container name from prior-run findings instead of using the server ID
+		// or connection string. Scanning for a matching ContainerName lets it
+		// succeed without knowing the server ID.
+		for id, candidate := range ic.DBServers {
+			if candidate.ContainerName == serverID {
+				db = candidate
+				serverID = id
+				ok = true
+				break
 			}
 		}
 	}
