@@ -1392,8 +1392,14 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	// Open with an unambiguous action command when a target is specified.
 	// A direct tool-invocation instruction as the very first line prevents the model
 	// from falling back to its default clarification behavior before reading context.
+	// Sysadmin-agent playbooks use check_host (not check_connection, which is a
+	// DB-agent tool that does not exist in the sysadmin tool set).
 	if req.ConnectionString != "" {
-		fmt.Fprintf(&b, "Call check_connection with connection_string=%q and begin diagnosing why it is unavailable. Do not ask which database — the target is %q.\n", req.ConnectionString, req.ConnectionString)
+		if pb.AgentName == agentNameSysadmin {
+			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use check_host and restart_container as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString)
+		} else {
+			fmt.Fprintf(&b, "Call check_connection with connection_string=%q and begin diagnosing why it is unavailable. Do not ask which database — the target is %q.\n", req.ConnectionString, req.ConnectionString)
+		}
 		if serverTypeHint != "" {
 			fmt.Fprintf(&b, "%s\n", serverTypeHint)
 		}

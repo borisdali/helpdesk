@@ -1,6 +1,6 @@
 series_id: pbs_db_restart_action
 name: "Sysadmin — Docker Container Restart"
-version: "1.0"
+version: "1.1"
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent
