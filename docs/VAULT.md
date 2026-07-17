@@ -283,7 +283,7 @@ db-high-cache-miss               any        pbs_cache_miss_triage      pbs_cache
 db-lock-contention               any        pbs_lock_chain_triage      pbs_lock_remediate         2026-06-20  PASS       STABLE(5)      5 runs  80% resolved  –  last: 2026-06-20
 db-max-connections               any        pbs_max_conn_triage        pbs_max_conn_remediate     2026-06-20  PASS       STABLE(5)      4 runs  100% resolved  100% accurate  last: 2026-06-20
 db-idle-in-transaction           any        pbs_db_idle_txn            (none)                     2026-06-15  PASS       UNSTABLE(5)    -
-db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_remediate   2026-04-15  PASS       —              2 runs  50% resolved  last: 2026-04-15
+db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_action      2026-07-10  PASS       STABLE(3)      3 runs  100% escalated  last: 2026-07-10
 db-pg-hba-corrupt                any        pbs_db_config_recovery     pbs_db_config_remediate    (never)     -          —              MISSING
 ```
 
@@ -306,8 +306,12 @@ The per-version breakdown is the primary learning signal: it shows whether step 
 |-------|---------|
 | `STABLE(N)` | Certified STABLE in the last N runs: pass rate ≥ 80% and confidence spread ≤ 30pp |
 | `STABLE(N) Xd` | STABLE but cert is X days old — shown after 14 days as an age reminder |
+| `STABLE(N)  attr=<class>` | Outcome-stable and conclusion-stable: all N runs attributed to the same root-cause class |
+| `STABLE(N)  attr=<class>(split)` | Outcome-stable but conclusion-unstable: runs attributed to different classes within the same taxonomy |
 | `UNSTABLE(N)` | Certified UNSTABLE — pass rate or confidence spread outside bounds; playbook needs attention before promotion |
 | `—` | No certification run has been posted for this fault |
+
+The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md).
 
 The `ACCURACY` column shows the diagnosis accuracy rate from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
 
@@ -620,6 +624,15 @@ EXECUTION TRACE
    are already over it. Safe to terminate idle sessions older than 5 min."
   ► kill_idle_connections                [ok]
 
+FINDINGS
+──────────────────────────────────────────────────────────────────────────
+  Root cause: connection pool saturation — 108 active connections exceeded
+  the pg_max_connections limit of 100. 96 idle sessions were holding open
+  connections without active queries.
+
+  Recommended: terminate idle connections older than 5 minutes and review
+  application connection pool max-size configuration.
+
 INCIDENT LINK
 ──────────────────────────────────────────────────────────────────────────
   Run ID:            plr_a3f7c1b2
@@ -636,6 +649,8 @@ Tool calls are shown as `► name [ok]` or `► name [error]`. If a tool call ha
 | Situation | Behaviour |
 |-----------|-----------|
 | Journey is not incident-linked (`INCIDENT` column is `–`) | Falls back to the flat TOOLS USED list; a note explains that `--detail` requires an incident run ID |
+| Incident-linked with `diagnostic_report` set | Full EXECUTION TRACE + FINDINGS section |
+| Incident-linked but no `diagnostic_report` | EXECUTION TRACE only; FINDINGS section omitted |
 | Incident-linked but no `agent_reasoning` events in the run | EXECUTION TRACE section shows only the tool calls with `(no preceding reasoning captured)` on each |
 | Gateway returns an error fetching events | A warning is printed and the flat TOOLS USED list is shown instead |
 
@@ -1136,17 +1151,21 @@ faulttest vault judge-accuracy db-lock-contention \
 Cross-references judge predictions (recorded by `vault diff --judge`) against the actual run outcomes that accumulated after activation. This is how you verify whether the LLM judge is a reliable pre-activation signal — or whether it approves changes that don't actually improve outcomes.
 
 ```
-SERIES                             VERSION  JUDGE VERDICT         RUNS  SUCCESS%  JUDGE MODEL
-─────────────────────────────────────────────────────────────────────────────────────────────────────
-pbs_connection_remediate           1.4      APPROVE                  8    87%      claude-haiku-4-5-20251001
-pbs_max_connections_triage         1.2      NEEDS_REVIEW             3    67%      claude-haiku-4-5-20251001
-pbs_wal_stale_slot                 1.3      APPROVE                  5   100%      claude-haiku-4-5-20251001
+SERIES                             VERSION  JUDGE VERDICT         RUNS  RESOLVED%  ESCALATED%  JUDGE MODEL
+───────────────────────────────────────────────────────────────────────────────────────────────────────────
+pbs_connection_remediate           1.4      APPROVE                  8    87%        –           claude-haiku-4-5-20251001
+pbs_max_connections_triage         1.2      NEEDS_REVIEW             3    67%        –           claude-haiku-4-5-20251001
+pbs_wal_stale_slot                 1.3      APPROVE                  5   100%        –           claude-haiku-4-5-20251001
+pbs_db_restart_triage              1.7      APPROVE                  3     –        100%         claude-haiku-4-5-20251001
 
 JUDGE VERDICT is the prediction recorded by `vault diff`.
-SUCCESS% is the actual outcome after runs on this version.
+RESOLVED% = fraction of runs resolved (or transitioned to remediation) by this version.
+ESCALATED% = fraction of runs that correctly escalated to a specialist agent.
 ```
 
-The gap between `JUDGE VERDICT` and `SUCCESS%` is the accountability signal: an `APPROVE` verdict that correlates with high `SUCCESS%` validates the judge as useful; a pattern of `APPROVE` + low `SUCCESS%` is a signal to tune the judge prompt or raise the bar before activating.
+`SUCCESS%` is now split into `RESOLVED%` and `ESCALATED%` so that single-step remediation playbooks and escalation-heavy triage playbooks both read correctly. A triage playbook whose job is to escalate (e.g. `pbs_db_restart_triage`) will show 0% `RESOLVED%` and 100% `ESCALATED%` when working correctly — collapsing both into one metric would make it appear to have 0% success.
+
+The gap between `JUDGE VERDICT` and the actual outcome rate is the accountability signal: an `APPROVE` verdict that correlates with high `RESOLVED%` or `ESCALATED%` (as appropriate for the playbook type) validates the judge as useful; a pattern of `APPROVE` + low rates is a signal to tune the judge prompt or raise the bar before activating.
 
 Requires `--gateway`. Verdicts are only recorded when `vault diff --judge` is run before activation.
 
@@ -1218,6 +1237,27 @@ After the table, a summary line counts each category and a one-line verdict is p
 | `⚠  N regression(s) detected — promote <model-b> only after investigating...` | Any regressions present |
 | `?  N fault(s) not yet certified under both models — complete the cert suite before promoting.` | No regressions, but some faults not yet certified under both models |
 | `✓  No regressions. <model-b> is cert-equivalent to <model-a> across all N fault(s).` | All faults stable under both models; no regressions |
+
+#### Attribution and taxonomy warnings
+
+When attribution data is available, `cert-compare` shows an additional line per fault indicating whether the attributions are consistent between the two models:
+
+```
+db-lock-contention   STABLE        STABLE        —
+  attr: row-level-lock-contention → row-level-lock-contention  (consistent)
+```
+
+When taxonomy major versions differ between the two certs, attribution comparison is flagged:
+
+```
+db-max-connections   STABLE        STABLE        —  ⚠ TAXONOMY MAJOR
+  attribution comparison invalid — taxonomy v1.0 vs v2.0 is a breaking change
+  re-run cert suite under taxonomy 2.0 before using for model gating
+```
+
+`⚠ TAXONOMY MAJOR` does not affect the STABLE/UNSTABLE comparison — that always reflects outcome stability and is always valid. It flags only that the attribution labels are not directly comparable across the two certs. When a taxonomy major bump has occurred, re-certify both models under the new taxonomy before drawing conclusions from the attribution columns.
+
+See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md) for the full taxonomy versioning rules.
 
 **Data source.** `cert-compare` calls `GET /api/v1/fleet/fault-stability` on the gateway, which returns every `(fault_id, diagnosis_model)` row stored in the `fault_stability_cert` table in auditd. No deduplication is applied — each model's cert for each fault is a separate row with its own pass rate, run count, and stability verdict. If a fault has never been run under a given model, the corresponding cell shows `(no data)`.
 

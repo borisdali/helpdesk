@@ -1,6 +1,6 @@
 series_id: pbs_auth_failure_triage
 name: Authentication Failure — Triage
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -17,6 +17,13 @@ description: |
   within the database agent — the fix requires updating credentials or
   PostgreSQL role configuration, which is a credential management action
   outside this agent's scope.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - wrong-password
+    - role-missing
+    - hba-rejection
+    - ssl-mismatch
 symptoms:
   - "application cannot connect to the database"
   - "password authentication failed errors in application logs"

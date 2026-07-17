@@ -204,6 +204,10 @@ type HarnessConfig struct {
 	// Must match a user in users.yaml with the roles required for the run
 	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
 	OperatorID string
+	// UsersFile is the path to users.yaml. When set and --approval-mode force is used,
+	// the harness validates that OperatorID exists as a human user in that file before
+	// calling ProceedEscalation. Prevents fake identities from appearing in the audit log.
+	UsersFile string
 
 	// AuditURL is the base URL of the audit service (e.g. "http://localhost:7070").
 	// When set, the harness queries tool execution events after each agent call

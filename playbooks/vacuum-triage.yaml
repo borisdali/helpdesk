@@ -1,6 +1,6 @@
 series_id: pbs_vacuum_triage
 name: Vacuum & Bloat Triage
-version: "1.3"
+version: "1.4"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -12,6 +12,13 @@ description: |
   Investigate tables with high dead tuple ratios and autovacuum lag.
   Check disk usage trends and identify tables that need immediate attention.
   Review non-default autovacuum settings that may be contributing to bloat.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - autovacuum-not-running
+    - autovacuum-blocked-by-long-transaction
+    - bloat-exceeds-threshold
+    - wraparound-risk
 symptoms:
   - "table bloat increasing"
   - "autovacuum not keeping up"

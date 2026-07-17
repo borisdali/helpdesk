@@ -918,7 +918,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		}
 	}
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-Trace-ID"), req.PriorRunID, "", r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -1392,8 +1392,14 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	// Open with an unambiguous action command when a target is specified.
 	// A direct tool-invocation instruction as the very first line prevents the model
 	// from falling back to its default clarification behavior before reading context.
+	// Sysadmin-agent playbooks use check_host (not check_connection, which is a
+	// DB-agent tool that does not exist in the sysadmin tool set).
 	if req.ConnectionString != "" {
-		fmt.Fprintf(&b, "Call check_connection with connection_string=%q and begin diagnosing why it is unavailable. Do not ask which database — the target is %q.\n", req.ConnectionString, req.ConnectionString)
+		if pb.AgentName == agentNameSysadmin {
+			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use check_host and restart_container as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString)
+		} else {
+			fmt.Fprintf(&b, "Call check_connection with connection_string=%q and begin diagnosing why it is unavailable. Do not ask which database — the target is %q.\n", req.ConnectionString, req.ConnectionString)
+		}
 		if serverTypeHint != "" {
 			fmt.Fprintf(&b, "%s\n", serverTypeHint)
 		}
@@ -2060,15 +2066,46 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 	var hypotheses []audit.DiagnosticHypothesis
 	var rootCauseRef, actionTaken string
 
-	for _, line := range strings.Split(text, "\n") {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		// Strip markdown bold markers so **HYPOTHESIS_N:** is handled identically
-		// to plain HYPOTHESIS_N:. Also handles trailing ** on the same token.
-		trimmed = strings.TrimLeft(trimmed, "*")
+		// to plain HYPOTHESIS_N:. Trim both leading and trailing * to handle
+		// **HYPOTHESIS_1: text** (closing bold marker on the same line).
+		trimmed = strings.Trim(trimmed, "*")
 
 		// HYPOTHESIS_N: ...
 		if hypMatch := matchHypothesisLine(trimmed); hypMatch != nil {
 			hypotheses = append(hypotheses, *hypMatch)
+			// Look ahead up to 5 lines for CONFIDENCE/EVIDENCE/REJECTED on separate
+			// lines — LLMs sometimes emit these as standalone lines after the
+			// hypothesis header instead of pipe-delimited on the same line.
+			last := &hypotheses[len(hypotheses)-1]
+			for j := i + 1; j < len(lines) && j <= i+5; j++ {
+				next := strings.TrimSpace(strings.Trim(lines[j], "*"))
+				if next == "" {
+					continue
+				}
+				if after, ok := strings.CutPrefix(next, "CONFIDENCE:"); ok {
+					if last.Confidence == 0 {
+						if c, err := strconv.ParseFloat(strings.TrimSpace(after), 64); err == nil {
+							last.Confidence = c
+						}
+					}
+				} else if after, ok := strings.CutPrefix(next, "EVIDENCE:"); ok {
+					if last.Evidence == "" {
+						ev := strings.TrimSpace(after)
+						ev = strings.Trim(ev, "\"")
+						last.Evidence = ev
+					}
+				} else if after, ok := strings.CutPrefix(next, "REJECTED:"); ok {
+					if last.RejectedReason == "" {
+						last.RejectedReason = strings.TrimSpace(after)
+					}
+				} else {
+					break // stop at any non-continuation line
+				}
+			}
 			continue
 		}
 		if strings.HasPrefix(trimmed, "ROOT_CAUSE:") {

@@ -792,18 +792,20 @@ These faults target PostgreSQL running in Kubernetes and require kubectl access 
 
 Some faults carry a `remediation` block that identifies the recovery action. When `--remediate` is set, `faulttest` triggers this action after the diagnosis phase.
 
-| Fault | Playbook | Agent |
-|-------|----------|-------|
-| `db-connection-refused` | `pbs_db_restart_triage` | db |
-| `db-pg-hba-corrupt` | `pbs_db_config_recovery` | db |
-| `db-process-kill` | `pbs_db_restart_triage` | db |
-| `db-checkpoint-warning` | `pbs_checkpoint_bgwriter_triage` | db |
-| `db-tx-lock-chain-blocker` | `pbs_lock_chain_triage` | db |
-| `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin |
-| `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s |
-| `db-wal-stale-slot` | `pbs_wal_stale_slot` | postgres_database_agent |
+| Fault | Playbook | Agent | Notes |
+|-------|----------|-------|-------|
+| `db-connection-refused` | `pbs_db_restart_action` | sysadmin | Requires `--sysadmin-agent`; DB triage escalates to sysadmin, which restarts the container |
+| `db-pg-hba-corrupt` | `pbs_db_config_recovery` | db | |
+| `db-process-kill` | `pbs_db_restart_triage` | db | |
+| `db-checkpoint-warning` | `pbs_checkpoint_bgwriter_triage` | db | |
+| `db-tx-lock-chain-blocker` | `pbs_lock_chain_triage` | db | |
+| `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin | |
+| `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s | |
+| `db-wal-stale-slot` | `pbs_wal_stale_slot` | postgres_database_agent | |
 
 The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
+
+For `db-connection-refused`, the remediation runs as a two-step cross-agent chain: the DB triage playbook (`pbs_db_restart_triage`) escalates to the SysAdmin agent via `pbs_sysadmin_docker_inspect`, which then transitions to `pbs_db_restart_action` to restart the container. `faulttest` waits for the full chain to complete before polling for recovery. Pass `--sysadmin-agent http://localhost:1103` (alongside `--gateway`) so that the SysAdmin agent knows about the ephemeral container.
 
 Each fault's `remediation` block specifies a `verify_sql` query that confirms the specific condition has resolved. Generic `SELECT 1` (the default) only checks connectivity; fault-specific queries confirm the actual state was corrected:
 

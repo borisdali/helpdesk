@@ -142,6 +142,10 @@ type HarnessConfig struct {
 	// AutoDB instructs faulttest to spin up a temporary Docker PostgreSQL and use
 	// it as the injection target. Implies External=true. Only auto-db-compat faults run.
 	AutoDB bool
+	// AutoDBContainerName is the docker container name for the auto-db instance
+	// (e.g. "faulttest-auto-db-deadbeef"). Set by main after startAutoDBContainer
+	// returns; exposed as $FAULTTEST_CONTAINER to shell_exec inject/teardown scripts.
+	AutoDBContainerName string
 	// Repeat is the number of inject→triage→teardown cycles to run per fault.
 	// Values > 1 enable stability testing: remediation is skipped and a
 	// StabilityReport is printed after all cycles complete. Default 1.
@@ -152,6 +156,10 @@ type HarnessConfig struct {
 	GatewayURL string
 	// GatewayAPIKey is the Bearer token for gateway/auditd auth during remediation.
 	GatewayAPIKey string
+	// SysadminAPIKey is the Bearer token for the sysadmin agent's /tool/ endpoint.
+	// Required when HELPDESK_USERS_FILE is set on the sysadmin agent (service-account auth).
+	// Create a service account in the sysadmin's users.yaml and pass its API key here.
+	SysadminAPIKey string
 	// GatewayPurpose is the declared purpose sent in gateway requests (default: "diagnostic").
 	GatewayPurpose string
 	// ApprovalMode overrides the playbook's default approval_mode for this run.
@@ -162,6 +170,10 @@ type HarnessConfig struct {
 	// Must match a user in users.yaml with roles required for the run
 	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
 	OperatorID string
+	// UsersFile is the path to users.yaml. When set and --approval-mode force is used,
+	// the harness validates that OperatorID exists as a human user in that file before
+	// calling ProceedEscalation. Prevents fake identities from appearing in the audit log.
+	UsersFile string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
 	InfraConfigPath string
 	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty

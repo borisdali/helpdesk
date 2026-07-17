@@ -1,6 +1,6 @@
 series_id: pbs_db_restart_triage
 name: Database Down — Restart Triage
-version: "1.4"
+version: "1.7"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -19,27 +19,52 @@ description: |
   a controlled restart if the logs indicate a clean shutdown or transient OOM kill.
   Use stored baseline data (data_directory, log paths) from prior get_server_info
   snapshots to orient recovery when the database cannot be directly queried.
+root_cause_classes:
+  version: "1.1"
+  classes:
+    - clean-shutdown
+    - oom-kill
+    - config-error
+    - data-corruption
+    - storage-mount-failure
+    - max-connections-exceeded
+    - pg-hba-auth-blocked
 symptoms:
   - "database is not accepting connections"
   - "check_connection returns connection refused or timeout"
   - "monitoring alert: database_up=0"
   - "application errors: could not connect to server"
+  - "application errors: sorry, too many clients already"
   - "K8s pod in CrashLoopBackOff or Error state"
   - "pg_isready returns 'no response'"
 guidance: |
   IMPORTANT: When the database is down, psql-based tools (get_server_info,
   get_slow_queries, etc.) will fail immediately. Use check_connection first
-  to confirm the failure mode (connection refused vs. timeout vs. auth error),
-  then shift to K8s tools and baseline history.
+  to confirm the failure mode, then shift to K8s tools and baseline history.
 
   Step 1 — Confirm and classify the outage:
-  Run check_connection to capture the exact error. "Connection refused" means
-  the PostgreSQL process is not running. "Connection timed out" may indicate a
-  network or firewall issue rather than a DB failure — check K8s service and
-  endpoint health. "Password authentication failed" means the DB is up but
-  pg_hba.conf or credentials changed — this is not a restart scenario.
+  Run check_connection to capture the exact error. Different errors indicate
+  very different root causes — read the message carefully before proceeding:
+  - "connection refused" → the PostgreSQL process is not listening on that port.
+    Either the server is stopped, or a firewall is blocking the TCP connection.
+    Proceed to Step 2 to determine which. Do NOT restart until Step 3/4 confirm
+    the server is actually down.
+  - "sorry, too many clients already" or "remaining connection slots are reserved"
+    → max_connections is exhausted. The database IS running. Do NOT restart —
+    that would disrupt every active connection for no benefit. Check
+    pg_stat_activity for idle/idle-in-transaction sessions; use
+    kill_idle_connections or terminate_connection to free slots. Set
+    restart_safe=false and failure_type=max_connections_exceeded in FINDINGS.
+  - "no pg_hba.conf entry for host" or "password authentication failed" → the
+    database IS running but the connection is blocked by authentication config.
+    Do NOT restart. Set failure_type=pg_hba_auth_blocked in FINDINGS and
+    recommend inspecting pg_hba.conf or the credentials used.
+  - "connection timed out" → may indicate a network or firewall issue. Check K8s
+    service and endpoint health before assuming the DB process is down. Set
+    failure_type=unknown in FINDINGS.
 
   Step 2 — Identify the hosting type and check container/pod state:
+  Only proceed here when Step 1 confirmed "connection refused" (server likely stopped).
   Look at the Known Infrastructure section of your context for this server's entry.
   - If the entry shows "[docker container: ...]" or "[podman container: ...]": the
     server is container-hosted on a VM. You cannot read docker logs or inspect the
@@ -49,11 +74,17 @@ guidance: |
     to determine definitively whether the container crashed, was stopped cleanly,
     or hit a disk/OOM issue. Do NOT guess or skip this escalation step.
   - If the entry shows "Kubernetes: ...": use get_pod_status to determine the
-  container state. CrashLoopBackOff means PostgreSQL is repeatedly failing to
-  start — config or data issue, not a simple restart. OOMKilled means the pod
-  was killed by the OOM killer — a restart will likely succeed but the root
-  cause (memory pressure) must be addressed. Completed/Succeeded indicates the
-  process exited cleanly — check for intentional shutdown.
+    container state. CrashLoopBackOff means PostgreSQL is repeatedly failing to
+    start — config or data issue, not a simple restart. OOMKilled means the pod
+    was killed by the OOM killer — a restart will likely succeed but the root
+    cause (memory pressure) must be addressed. Completed/Succeeded indicates the
+    process exited cleanly — check for intentional shutdown.
+  - If there is NO Known Infrastructure entry for this server, or the hosting type
+    cannot be determined: default to escalation. Emit ESCALATE_TO:
+    pbs_sysadmin_docker_inspect. The sysadmin agent can inspect the host and
+    determine whether the server is bare-metal, containerised, or K8s-managed.
+    Do NOT withhold escalation because you cannot confirm the hosting type —
+    unknown hosting is itself a signal that the sysadmin path is appropriate.
 
   Step 3 — Read the logs (Kubernetes only):
   Use get_pod_logs to retrieve the last 100–200 lines of PostgreSQL output.
@@ -73,6 +104,13 @@ guidance: |
   (PVC not bound, volume unavailable) cannot be resolved by a restart.
 
   Step 5 — Attempt restart (only if logs show clean shutdown or OOM kill):
+  Before triggering a rolling restart, assess blast radius:
+  - A rolling restart of a live pod will briefly disconnect all active clients.
+    If the pod is already down (Terminated/Error), there are no active connections
+    to protect — restart is safe from a client perspective.
+  - If the pod is still Running but unhealthy, check pg_stat_activity for sessions
+    with backend_xid set (uncommitted writes) — those transactions will be rolled
+    back. Confirm this is acceptable before proceeding.
   Use restart_deployment to trigger a rolling restart. Watch get_pod_status
   for the new pod to reach Running state. Then retry check_connection — if
   the database accepts connections within 60 seconds, the incident is resolved.
@@ -94,7 +132,7 @@ guidance: |
   HYPOTHESIS_1: <primary hypothesis about failure type> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from pod logs or events>"
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1
-  FINDINGS: hosting=<k8s|docker|bare_metal>; failure_type=<clean_shutdown|oom_kill|config_error|data_corruption|unknown>; restart_safe=<true|false>; escalate_to=<pbs_series_id | none>
+  FINDINGS: hosting=<k8s|docker|bare_metal>; connection_refused_cause=<server_stopped|max_connections|pg_hba|network|unknown>; failure_type=<clean_shutdown|oom_kill|config_error|data_corruption|max_connections_exceeded|pg_hba_auth_blocked|unknown>; restart_safe=<true|false>; escalate_to=<pbs_series_id | none>
 escalation:
   - "pod logs contain 'invalid page in block' or 'checksum failure'"
   - "pod logs contain PANIC (not FATAL) — indicates unrecoverable state"
@@ -102,4 +140,5 @@ escalation:
   - "storage mount failure or PVC not bound — requires infrastructure intervention"
   - "database does not accept connections within 5 minutes of pod restart"
   - "get_events shows node NotReady or repeated evictions — node-level issue"
+  - "check_connection returns max_connections or pg_hba error — server is running, restart is wrong remedy"
 target_hints: []

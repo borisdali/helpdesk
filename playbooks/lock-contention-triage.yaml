@@ -1,6 +1,6 @@
 series_id: pbs_lock_contention_triage
 name: Lock Contention — Blocked Sessions Triage
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -15,6 +15,12 @@ description: |
   paused after acquiring the lock) or actively executing. Identify the root
   lock holder, assess the blocked session count and lock type, and determine
   whether cancel or terminate is required to release the lock.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - idle-in-transaction-lock-holder
+    - active-ddl-holding-access-exclusive
+    - row-level-lock-contention
 symptoms:
   - "queries hanging on a specific table"
   - "Lock wait events visible in pg_stat_activity"

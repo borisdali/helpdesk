@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/infra"
 )
 
@@ -661,6 +663,126 @@ func TestExecInProcess_K8s_NoPodFound(t *testing.T) {
 	}
 }
 
+// ── registerInfraDB ──────────────────────────────────────────────────────────
+
+func TestRegisterInfraDB_AddsServerToConfig(t *testing.T) {
+	// Start with nil infraConfig to test creation path.
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-15432",
+		ContainerName: "faulttest-auto-db-abc123",
+		Runtime:       "docker",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	infraConfigMu.RLock()
+	ic := infraConfig
+	infraConfigMu.RUnlock()
+
+	if ic == nil {
+		t.Fatal("infraConfig still nil after registerInfraDB")
+	}
+	db, ok := ic.DBServers["faulttest-auto-15432"]
+	if !ok {
+		t.Fatal("server not found in DBServers")
+	}
+	if db.ContainerName != "faulttest-auto-db-abc123" {
+		t.Errorf("ContainerName = %q, want faulttest-auto-db-abc123", db.ContainerName)
+	}
+	vm, ok := ic.VMs[localVMKey]
+	if !ok {
+		t.Fatal("local VM not created")
+	}
+	if vm.Runtime != "docker" {
+		t.Errorf("VM.Runtime = %q, want docker", vm.Runtime)
+	}
+}
+
+func TestRegisterInfraDB_DefaultsRuntimeToDocker(t *testing.T) {
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-15433",
+		ContainerName: "faulttest-auto-db-def456",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	infraConfigMu.RLock()
+	vm := infraConfig.VMs[localVMKey]
+	infraConfigMu.RUnlock()
+	if vm.Runtime != "docker" {
+		t.Errorf("default runtime = %q, want docker", vm.Runtime)
+	}
+}
+
+func TestRegisterInfraDB_ResolveHostAfterRegister(t *testing.T) {
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-15434",
+		ContainerName: "faulttest-auto-db-ghi789",
+		Runtime:       "docker",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	host, err := resolveHost("faulttest-auto-15434")
+	if err != nil {
+		t.Fatalf("resolveHost after register: %v", err)
+	}
+	if host.ContainerName != "faulttest-auto-db-ghi789" {
+		t.Errorf("ContainerName = %q, want faulttest-auto-db-ghi789", host.ContainerName)
+	}
+	if host.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker", host.Runtime)
+	}
+}
+
+func TestRegisterInfraDB_ResolveHostByContainerName(t *testing.T) {
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	if err := registerInfraDB(RegisterInfraDBArgs{
+		ServerID:      "faulttest-auto-59001",
+		ContainerName: "faulttest-auto-db-abc123",
+		Runtime:       "docker",
+		ConnStr:       "host=127.0.0.1 port=59001 dbname=faulttest user=postgres password=faulttest sslmode=disable",
+	}); err != nil {
+		t.Fatalf("registerInfraDB: %v", err)
+	}
+
+	// Fallback 2: resolve by container name directly.
+	host, err := resolveHost("faulttest-auto-db-abc123")
+	if err != nil {
+		t.Fatalf("resolveHost by container name: %v", err)
+	}
+	if host.ContainerName != "faulttest-auto-db-abc123" {
+		t.Errorf("ContainerName = %q, want faulttest-auto-db-abc123", host.ContainerName)
+	}
+}
+
+func TestRegisterInfraDB_MissingServerIDReturnsError(t *testing.T) {
+	if err := registerInfraDB(RegisterInfraDBArgs{ContainerName: "some-container"}); err == nil {
+		t.Error("expected error for missing server_id")
+	}
+}
+
+func TestRegisterInfraDB_MissingContainerNameReturnsError(t *testing.T) {
+	if err := registerInfraDB(RegisterInfraDBArgs{ServerID: "faulttest-auto-15435"}); err == nil {
+		t.Error("expected error for missing container_name")
+	}
+}
+
 // multiMockRunner returns pre-configured responses in order.
 type mockResponse struct {
 	output string
@@ -679,4 +801,205 @@ func (m *multiMockRunner) Run(_ context.Context, _ string, _ []string, _ []strin
 	r := m.responses[m.idx]
 	m.idx++
 	return r.output, r.err
+}
+
+// ── connStrPort / resolveHost port-fallback ───────────────────────────────────
+
+func TestConnStrPort(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"host=127.0.0.1 port=58989 dbname=postgres user=postgres", "58989"},
+		{"port=5432 host=localhost", "5432"},
+		{"127.0.0.1:15432", "15432"},
+		{"postgresql://user:pass@host:9999/db", "9999"},
+		{"postgres://localhost:5432/mydb", "5432"},
+		{"58989", "58989"},
+		{"5432", "5432"},
+		{"prod_db", ""},            // plain server ID — no port
+		{"host=localhost", ""},     // no port field
+		{"localhost", ""},          // no port
+	}
+	for _, tc := range cases {
+		got := connStrPort(tc.input)
+		if got != tc.want {
+			t.Errorf("connStrPort(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// withDockerInfraWithPort sets up infraConfig where the db server has a
+// connection string containing a port, to test the port-based fallback.
+func withDockerInfraWithPort(t *testing.T, port string) {
+	t.Helper()
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"faulttest-auto": {
+				Name:             "faulttest-auto",
+				ConnectionString: "host=127.0.0.1 port=" + port + " dbname=postgres user=postgres",
+				VMName:           "__faulttest_local__",
+				ContainerName:    "faulttest-auto-container",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"__faulttest_local__": {
+				Name:    "__faulttest_local__",
+				Runtime: "docker",
+			},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+func TestResolveHost_PortFallback_LibpqConnStr(t *testing.T) {
+	withDockerInfraWithPort(t, "58989")
+	defer withMockRunner("running (running=true, restarting=false, oomkilled=false, dead=false, exitcode=0)", nil)()
+
+	// Target is the full DSN — server ID "faulttest-auto" is NOT passed.
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{
+		Target: "host=127.0.0.1 port=58989 dbname=postgres user=postgres",
+	})
+	if err != nil {
+		t.Fatalf("checkHostImpl: %v", err)
+	}
+	if result.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker", result.Runtime)
+	}
+}
+
+func TestResolveHost_PortFallback_BarePort(t *testing.T) {
+	withDockerInfraWithPort(t, "58989")
+	defer withMockRunner("running (running=true, restarting=false, oomkilled=false, dead=false, exitcode=0)", nil)()
+
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "58989"})
+	if err != nil {
+		t.Fatalf("checkHostImpl with bare port: %v", err)
+	}
+	if result.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker", result.Runtime)
+	}
+}
+
+func TestResolveHost_PortFallback_NoMatch(t *testing.T) {
+	withDockerInfraWithPort(t, "58989")
+	// Wrong port — should fail with "not found".
+	_, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "host=127.0.0.1 port=9999"})
+	if err == nil {
+		t.Error("expected error for unmatched port, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error %q should mention 'not found'", err.Error())
+	}
+}
+
+// ── containerRuntimeBin ───────────────────────────────────────────────────────
+
+func TestContainerRuntimeBin(t *testing.T) {
+	cases := []struct {
+		runtime string
+		want    string
+		wantErr bool
+	}{
+		{"docker", "docker", false},
+		{"podman", "podman", false},
+		{"", "", false},       // systemd path — empty string, no error
+		{"lxc", "", true},     // unknown runtime
+	}
+	for _, tc := range cases {
+		h := resolvedHost{Runtime: tc.runtime}
+		got, err := containerRuntimeBin(h)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("containerRuntimeBin(%q): expected error, got nil", tc.runtime)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("containerRuntimeBin(%q): unexpected error: %v", tc.runtime, err)
+			}
+			if got != tc.want {
+				t.Errorf("containerRuntimeBin(%q) = %q, want %q", tc.runtime, got, tc.want)
+			}
+		}
+	}
+}
+
+// ── policy enforcement ────────────────────────────────────────────────────────
+
+func writeTempSysadminPolicyFile(t *testing.T, content string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "sysadmin-policies-*.yaml")
+	if err != nil {
+		t.Fatalf("create temp policy file: %v", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatalf("write temp policy file: %v", err)
+	}
+	_ = f.Close()
+	return f.Name()
+}
+
+func withSysadminPolicyEnforcer(e *agentutil.PolicyEnforcer) func() {
+	old := policyEnforcer
+	policyEnforcer = e
+	return func() { policyEnforcer = old }
+}
+
+func newDenyHostDestructiveEnforcer(t *testing.T) *agentutil.PolicyEnforcer {
+	t.Helper()
+	const yaml = `
+version: "1"
+policies:
+  - name: deny-host-destructive
+    resources:
+      - type: host
+    rules:
+      - action: destructive
+        effect: deny
+        message: "host destructive operations are not permitted in this test"
+`
+	path := writeTempSysadminPolicyFile(t, yaml)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+func TestRestartContainer_PolicyDenied(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner("", nil)()
+	defer withSysadminPolicyEnforcer(newDenyHostDestructiveEnforcer(t))()
+
+	_, err := restartContainerImpl(context.Background(), RestartContainerArgs{
+		Target: "prod_db",
+		Reason: "test restart",
+	})
+	if err == nil {
+		t.Fatal("expected policy denial, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not permitted") {
+		t.Errorf("error %q should mention 'not permitted'", err.Error())
+	}
+}
+
+func TestRestartService_PolicyDenied(t *testing.T) {
+	withSystemdInfra(t)
+	defer withMockRunner("", nil)()
+	defer withSysadminPolicyEnforcer(newDenyHostDestructiveEnforcer(t))()
+
+	_, err := restartServiceImpl(context.Background(), RestartServiceArgs{
+		Target: "prod_db",
+		Reason: "test restart",
+	})
+	if err == nil {
+		t.Fatal("expected policy denial, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not permitted") {
+		t.Errorf("error %q should mention 'not permitted'", err.Error())
+	}
 }

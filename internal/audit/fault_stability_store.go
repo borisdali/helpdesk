@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -22,6 +23,15 @@ type FaultStabilityCert struct {
 	ConfRangePP      int       `json:"conf_range_pp"` // primary-confidence range in percentage points (passing runs only)
 	IsStable         bool      `json:"is_stable"`
 	TestedAt         time.Time `json:"tested_at"`
+
+	// Attribution fields (v0.21.0): conclusion-stability measurement.
+	// PrimaryAttribution is the plurality root-cause label across all cert runs;
+	// "UNKNOWN" when the classifier could not match any run's FINDINGS.
+	PrimaryAttribution      string         `json:"primary_attribution,omitempty"`
+	AttributionConsistent   bool           `json:"attribution_consistent"`
+	AttributionDistribution map[string]int `json:"attribution_distribution,omitempty"`
+	JudgeSpread             float64        `json:"judge_spread,omitempty"`
+	TaxonomyVersion         string         `json:"taxonomy_version,omitempty"`
 }
 
 // FaultStabilityStore persists and retrieves fault triage consistency certs.
@@ -46,16 +56,21 @@ func NewFaultStabilityStore(db *sql.DB, isPostgres bool) (*FaultStabilityStore, 
 func (s *FaultStabilityStore) createSchema() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS fault_stability_cert (
-    fault_id           TEXT    NOT NULL,
-    fault_name         TEXT    NOT NULL DEFAULT '',
-    playbook_series_id TEXT    NOT NULL DEFAULT '',
-    model              TEXT    NOT NULL DEFAULT '',
-    diagnosis_model    TEXT    NOT NULL DEFAULT '',
-    n_runs             INTEGER NOT NULL DEFAULT 0,
-    pass_rate          REAL    NOT NULL DEFAULT 0,
-    conf_range_pp      INTEGER NOT NULL DEFAULT 0,
-    is_stable          INTEGER NOT NULL DEFAULT 0,
-    tested_at          TEXT    NOT NULL DEFAULT '',
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread              REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (fault_id, diagnosis_model)
 )`)
 	return err
@@ -92,8 +107,8 @@ func (s *FaultStabilityStore) migrateSQLite() error {
 		return fmt.Errorf("check PK columns: %w", err)
 	}
 	if pkCols >= 2 {
-		// Already composite PK — no migration needed.
-		return nil
+		// Composite PK already in place — only need the additive attribution columns.
+		return s.addAttributionColumnsSQLite()
 	}
 
 	// Ensure diagnosis_model column exists before migration (it was added in a prior release).
@@ -142,7 +157,30 @@ func (s *FaultStabilityStore) migrateSQLite() error {
 		tx.Rollback() //nolint:errcheck
 		return fmt.Errorf("rename cert table: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.addAttributionColumnsSQLite()
+}
+
+// addAttributionColumnsSQLite adds the v0.21.0 attribution columns to existing
+// SQLite databases. Duplicate-column errors are silently ignored.
+func (s *FaultStabilityStore) addAttributionColumnsSQLite() error {
+	attrCols := []string{
+		`ALTER TABLE fault_stability_cert ADD COLUMN primary_attribution      TEXT    NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN attribution_consistent   INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN attribution_distribution TEXT    NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN judge_spread             REAL    NOT NULL DEFAULT 0`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN taxonomy_version         TEXT    NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range attrCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if !containsAny(err.Error(), "duplicate column", "already exists") {
+				return fmt.Errorf("cert migrate: %s: %w", stmt, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *FaultStabilityStore) migratePostgres() error {
@@ -159,14 +197,27 @@ func (s *FaultStabilityStore) migratePostgres() error {
 			SELECT constraint_name FROM information_schema.table_constraints
 			WHERE table_name = 'fault_stability_cert' AND constraint_type = 'PRIMARY KEY'
 		  )`).Scan(&pkColCount)
-	if err != nil || pkColCount >= 2 {
-		return nil // already composite or error checking (non-fatal)
+	if err == nil && pkColCount < 2 {
+		if _, err := s.db.Exec(`ALTER TABLE fault_stability_cert DROP CONSTRAINT fault_stability_cert_pkey`); err != nil {
+			return fmt.Errorf("drop old PK: %w", err)
+		}
+		if _, err := s.db.Exec(`ALTER TABLE fault_stability_cert ADD PRIMARY KEY (fault_id, diagnosis_model)`); err != nil {
+			return fmt.Errorf("add composite PK: %w", err)
+		}
 	}
-	if _, err := s.db.Exec(`ALTER TABLE fault_stability_cert DROP CONSTRAINT fault_stability_cert_pkey`); err != nil {
-		return fmt.Errorf("drop old PK: %w", err)
+
+	// v0.21.0 attribution columns.
+	attrCols := []string{
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS primary_attribution      TEXT    NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS attribution_consistent   INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS attribution_distribution TEXT    NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS judge_spread             REAL    NOT NULL DEFAULT 0`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS taxonomy_version         TEXT    NOT NULL DEFAULT ''`,
 	}
-	if _, err := s.db.Exec(`ALTER TABLE fault_stability_cert ADD PRIMARY KEY (fault_id, diagnosis_model)`); err != nil {
-		return fmt.Errorf("add composite PK: %w", err)
+	for _, stmt := range attrCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("cert migrate postgres: %s: %w", stmt, err)
+		}
 	}
 	return nil
 }
@@ -181,22 +232,42 @@ func (s *FaultStabilityStore) Upsert(ctx context.Context, cert *FaultStabilityCe
 	if cert.IsStable {
 		stableInt = 1
 	}
+	attrConsistentInt := 0
+	if cert.AttributionConsistent {
+		attrConsistentInt = 1
+	}
+	attrDistJSON := []byte("{}")
+	if len(cert.AttributionDistribution) > 0 {
+		var err error
+		attrDistJSON, err = json.Marshal(cert.AttributionDistribution)
+		if err != nil {
+			attrDistJSON = []byte("{}")
+		}
+	}
 	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 INSERT INTO fault_stability_cert
-    (fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at,
+     primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
-    fault_name         = excluded.fault_name,
-    playbook_series_id = excluded.playbook_series_id,
-    model              = excluded.model,
-    n_runs             = excluded.n_runs,
-    pass_rate          = excluded.pass_rate,
-    conf_range_pp      = excluded.conf_range_pp,
-    is_stable          = excluded.is_stable,
-    tested_at          = excluded.tested_at`),
+    fault_name                = excluded.fault_name,
+    playbook_series_id        = excluded.playbook_series_id,
+    model                     = excluded.model,
+    n_runs                    = excluded.n_runs,
+    pass_rate                 = excluded.pass_rate,
+    conf_range_pp             = excluded.conf_range_pp,
+    is_stable                 = excluded.is_stable,
+    tested_at                 = excluded.tested_at,
+    primary_attribution       = excluded.primary_attribution,
+    attribution_consistent    = excluded.attribution_consistent,
+    attribution_distribution  = excluded.attribution_distribution,
+    judge_spread              = excluded.judge_spread,
+    taxonomy_version          = excluded.taxonomy_version`),
 		cert.FaultID, cert.FaultName, cert.PlaybookSeriesID, cert.JudgeModel, cert.DiagnosisModel,
 		cert.NRuns, cert.PassRate, cert.ConfRangePP,
 		stableInt, cert.TestedAt.UTC().Format(time.RFC3339Nano),
+		cert.PrimaryAttribution, attrConsistentInt, string(attrDistJSON),
+		cert.JudgeSpread, cert.TaxonomyVersion,
 	)
 	return err
 }
@@ -206,7 +277,7 @@ ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultID(ctx context.Context, faultID string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), faultID)
 	return scanCert(row)
 }
@@ -215,7 +286,7 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), 
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultAndModel(ctx context.Context, faultID, model string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
 FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), faultID, model)
 	return scanCert(row)
 }
@@ -224,7 +295,7 @@ FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), faultID,
 // When only one model has ever been used the slice has one element.
 func (s *FaultStabilityStore) ListByFaultID(ctx context.Context, faultID string) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 	if err != nil {
 		return nil, err
@@ -236,7 +307,7 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 // ListAll returns all stability certs, ordered by fault_id then by tested_at desc.
 func (s *FaultStabilityStore) ListAll(ctx context.Context) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
 FROM fault_stability_cert ORDER BY fault_id, tested_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list fault stability certs: %w", err)
@@ -251,17 +322,28 @@ type certScanner interface {
 
 func scanCert(s certScanner) (*FaultStabilityCert, error) {
 	var (
-		cert      FaultStabilityCert
-		stableInt int
-		testedStr string
+		cert              FaultStabilityCert
+		stableInt         int
+		attrConsistentInt int
+		attrDistJSON      string
+		testedStr         string
 	)
 	if err := s.Scan(
 		&cert.FaultID, &cert.FaultName, &cert.PlaybookSeriesID, &cert.JudgeModel, &cert.DiagnosisModel,
 		&cert.NRuns, &cert.PassRate, &cert.ConfRangePP, &stableInt, &testedStr,
+		&cert.PrimaryAttribution, &attrConsistentInt, &attrDistJSON,
+		&cert.JudgeSpread, &cert.TaxonomyVersion,
 	); err != nil {
 		return nil, err
 	}
 	cert.IsStable = stableInt != 0
+	cert.AttributionConsistent = attrConsistentInt != 0
+	if attrDistJSON != "" && attrDistJSON != "{}" {
+		var dist map[string]int
+		if err := json.Unmarshal([]byte(attrDistJSON), &dist); err == nil {
+			cert.AttributionDistribution = dist
+		}
+	}
 	if testedStr != "" {
 		if t, err := time.Parse(time.RFC3339Nano, testedStr); err == nil {
 			cert.TestedAt = t

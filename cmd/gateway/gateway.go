@@ -897,6 +897,8 @@ func (g *Gateway) handleRegisterEphemeralDB(w http.ResponseWriter, r *http.Reque
 		Name             string   `json:"name"`
 		ConnectionString string   `json:"connection_string"`
 		Tags             []string `json:"tags"`
+		HostingType      string   `json:"hosting_type"`   // "docker" or "podman"
+		ContainerName    string   `json:"container_name"` // used when hosting_type is docker/podman
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
@@ -911,17 +913,30 @@ func (g *Gateway) handleRegisterEphemeralDB(w http.ResponseWriter, r *http.Reque
 	if g.infra == nil {
 		g.infra = &infra.Config{
 			DBServers:   make(map[string]infra.DBServer),
+			VMs:         make(map[string]infra.VM),
 			K8sClusters: make(map[string]infra.K8sCluster),
 		}
 	}
 	if g.infra.DBServers == nil {
 		g.infra.DBServers = make(map[string]infra.DBServer)
 	}
-	g.infra.DBServers[req.ServerID] = infra.DBServer{
+	db := infra.DBServer{
 		Name:             req.Name,
 		ConnectionString: req.ConnectionString,
 		Tags:             req.Tags,
 	}
+	if req.HostingType == "docker" || req.HostingType == "podman" {
+		// Register a synthetic VM entry so buildServerTypeHint can return the
+		// container runtime and container name to the sysadmin agent's LLM.
+		const ephemeralVMKey = "__ephemeral_local__"
+		if g.infra.VMs == nil {
+			g.infra.VMs = make(map[string]infra.VM)
+		}
+		g.infra.VMs[ephemeralVMKey] = infra.VM{Name: ephemeralVMKey, Runtime: req.HostingType}
+		db.VMName = ephemeralVMKey
+		db.ContainerName = req.ContainerName
+	}
+	g.infra.DBServers[req.ServerID] = db
 	slog.Info("ephemeral DB registered in gateway infra", "server_id", req.ServerID)
 
 	// Forward to the DB agent's /admin/register-db so it can resolve the connection string.
@@ -935,6 +950,34 @@ func (g *Gateway) handleRegisterEphemeralDB(w http.ResponseWriter, r *http.Reque
 		} else {
 			resp.Body.Close()
 			slog.Info("forwarded register-db to DB agent", "url", agentURL, "status", resp.StatusCode)
+		}
+	}
+
+	// Forward to the sysadmin agent's /tool/register_infra_db so check_host and
+	// restart_container can resolve ephemeral docker/podman containers by connection string.
+	if (req.HostingType == "docker" || req.HostingType == "podman") && req.ContainerName != "" {
+		if sysAgent, ok := g.agents[agentNameSysadmin]; ok {
+			agentBase := strings.TrimSuffix(sysAgent.InvokeURL, "/invoke")
+			agentURL := agentBase + "/tool/register_infra_db"
+			sysBody, _ := json.Marshal(map[string]any{
+				"server_id":      req.ServerID,
+				"container_name": req.ContainerName,
+				"runtime":        req.HostingType,
+				"conn_str":       req.ConnectionString,
+			})
+			sysReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, agentURL, bytes.NewReader(sysBody))
+			if err == nil {
+				sysReq.Header.Set("Content-Type", "application/json")
+				if g.agentAPIKey != "" {
+					sysReq.Header.Set("Authorization", "Bearer "+g.agentAPIKey)
+				}
+				if resp, err := http.DefaultClient.Do(sysReq); err != nil {
+					slog.Warn("failed to forward register_infra_db to sysadmin agent", "url", agentURL, "err", err)
+				} else {
+					resp.Body.Close()
+					slog.Info("forwarded register_infra_db to sysadmin agent", "url", agentURL, "status", resp.StatusCode)
+				}
+			}
 		}
 	}
 

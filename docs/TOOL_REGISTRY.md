@@ -30,6 +30,7 @@ The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
   "description": "Returns a concise status snapshot: server uptime, PostgreSQL version, active connection count, idle connection count, and cache hit ratio.",
   "action_class": "read",
   "fleet_eligible": true,
+  "auto_remediation_eligible": false,
   "capabilities": ["uptime", "version", "connection_count", "cache_hit_ratio"],
   "supersedes": ["get_server_info", "get_connection_stats"],
   "agent_version": "1.2.0",
@@ -43,6 +44,7 @@ The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
 | `agent` | Agent that owns this tool. |
 | `action_class` | `read`, `write`, or `destructive`. |
 | `fleet_eligible` | Whether the fleet planner may include this tool in generated job plans. |
+| `auto_remediation_eligible` | Whether this tool may execute without per-step approval in `agent_auto` playbooks. Currently declared only by sysadmin remediation tools (`restart_container`, `restart_service`). |
 | `capabilities` | Closed-vocabulary labels describing what the tool provides. |
 | `supersedes` | Other tools whose output is fully covered by this tool. |
 | `agent_version` | Semver of the agent binary that registered this tool. |
@@ -90,6 +92,8 @@ Example: `get_status_summary` supersedes `get_server_info` and `get_connection_s
 | `CapConfig` | `config` | `get_config_parameter` |
 | `CapConnectivity` | `connectivity` | `check_connection` |
 | `CapSessionInspect` | `session_inspect` | `get_session_info` |
+| `CapDiskUsage` | `disk_usage` | `get_baseline` |
+| `CapExtensions` | `extensions` | `get_baseline` |
 
 ### Kubernetes domain
 
@@ -224,6 +228,9 @@ cardOpts := agentutil.CardOptions{
     SkillFleetEligible: map[string]bool{
         "my_agent-summary_tool": true,
     },
+    SkillAutoRemediationEligible: map[string]bool{
+        "my_agent-restart_tool": true,
+    },
     SkillCapabilities: map[string][]string{
         "my_agent-summary_tool": {
             toolregistry.CapUptime,
@@ -242,6 +249,10 @@ cardOpts := agentutil.CardOptions{
 
 The skill ID key format is `<agent-name>-<skill-id>`, matching the A2A card's skill identifier format.
 
+**`SkillTags` vs `SkillCapabilities`**
+
+`SkillCapabilities` uses the typed constants from `internal/toolregistry/capabilities.go` and is the right choice for fleet-eligible tools where the planner needs to reason over capability coverage. For agents whose tools are not fleet-eligible (e.g., the sysadmin agent), `SkillTags` accepts free-form strings and is sufficient for discoverability and UI grouping without requiring a typed vocabulary entry. The sysadmin agent uses `SkillTags` with values like `"host"`, `"container"`, and `"remediation"` rather than `SkillCapabilities`.
+
 ### Rules for declaring taxonomy
 
 - **Fleet eligibility**: mark a tool `true` only if it is safe and appropriate for automated fleet-wide execution. Non-fleet tools remain accessible for interactive use — they simply do not appear in the planner's catalog.
@@ -256,6 +267,7 @@ The skill ID key format is `<agent-name>-<skill-id>`, matching the A2A card's sk
 | Typed field | Tag string |
 |-------------|------------|
 | `SkillFleetEligible[id] = true` | `fleet:true` |
+| `SkillAutoRemediationEligible[id] = true` | `auto_remediation:true` |
 | `SkillCapabilities[id] = ["uptime", ...]` | `cap:uptime`, `cap:...` |
 | `SkillSupersedes[id] = ["tool_a"]` | `supersedes:tool_a` |
 | `SkillSchemaHash[id] = "a3f9c2..."` | `schema_hash:a3f9c2...` |

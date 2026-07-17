@@ -1,6 +1,6 @@
 series_id: pbs_k8s_pvc_triage
 name: "K8s PVC Pending — StorageClass Triage"
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -14,6 +14,12 @@ description: |
   exist in the cluster, preventing the PVC from being provisioned and leaving
   the dependent pod in Pending state. Distinguishes between a genuinely broken
   StorageClass reference and normal WaitForFirstConsumer binding mode behavior.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - storage-class-not-found
+    - csi-provisioner-missing
+    - wait-for-first-consumer
 symptoms:
   - "pod stuck in Pending state due to unbound PVC"
   - "PVC stays in Pending — no PersistentVolume is created"

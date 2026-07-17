@@ -1,6 +1,6 @@
 series_id: pbs_cache_miss_triage
 name: High Cache Miss Ratio — Triage
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -15,6 +15,12 @@ description: |
   then resets pg_stat, causing blks_read to be elevated relative to blks_hit.
   Identifies whether the root cause is undersized shared_buffers or excessive
   sequential scan activity.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - shared-buffers-undersized
+    - large-sequential-scan-evicting-hot-pages
+    - stats-window-too-short-for-diagnosis
 symptoms:
   - "slow read queries despite low concurrency"
   - "high disk I/O on the database server"

@@ -83,7 +83,7 @@ func (r StabilityReport) isStable() bool {
 }
 
 // Print writes the stability report to stdout.
-func (r StabilityReport) Print() {
+func (r StabilityReport) Print(a *attributionSummary) {
 	const width = 64
 	sep := strings.Repeat("─", width)
 	fmt.Printf("\n  Stability report (%d runs):\n", r.N)
@@ -123,6 +123,30 @@ func (r StabilityReport) Print() {
 		fmt.Printf("    Verdict:      STABLE\n")
 	} else {
 		fmt.Printf("    Verdict:      UNSTABLE\n")
+	}
+	if a != nil && a.PrimaryAttribution != "" && a.PrimaryAttribution != attributionUnknown {
+		consistent := "yes"
+		if !a.AttributionConsistent {
+			consistent = "no (split)"
+		}
+		totalRuns := 0
+		for _, v := range a.AttributionDistribution {
+			totalRuns += v
+		}
+		primaryCount := a.AttributionDistribution[a.PrimaryAttribution]
+		taxStr := ""
+		if a.TaxonomyVersion != "" {
+			taxStr = fmt.Sprintf("  [taxonomy %s]", a.TaxonomyVersion)
+		}
+		fmt.Printf("    Attribution:  %s (%d/%d)  consistent: %s%s\n",
+			a.PrimaryAttribution, primaryCount, totalRuns, consistent, taxStr)
+		if len(a.AttributionDistribution) > 1 {
+			for k, v := range a.AttributionDistribution {
+				if k != a.PrimaryAttribution {
+					fmt.Printf("                  %s: %d\n", k, v)
+				}
+			}
+		}
 	}
 	fmt.Printf("  %s\n", sep)
 }

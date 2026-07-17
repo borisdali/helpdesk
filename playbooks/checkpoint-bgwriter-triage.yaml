@@ -1,6 +1,6 @@
 series_id: pbs_checkpoint_bgwriter_triage
 name: Checkpoint & bgwriter Triage
-version: "1.2"
+version: "1.3"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -16,6 +16,13 @@ description: |
   limit), and elevated buffers_backend (backends forced to write dirty pages
   themselves). These conditions do not threaten data integrity but cause periodic
   I/O bursts that degrade query latency during each checkpoint.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - max-wal-size-too-small
+    - bgwriter-lru-maxpages-too-low
+    - checkpoint-completion-target-misconfigured
+    - high-write-workload
 symptoms:
   - "LOG: checkpoints are occurring too frequently (X seconds apart)"
   - "elevated write latency or I/O spikes at regular intervals"

@@ -17,21 +17,25 @@ func RunSQL(ctx context.Context, connStr, scriptPath string) error {
 	return RunSQLString(ctx, connStr, string(script))
 }
 
-// RunSQLBool executes a SQL query that returns a single boolean row and returns
-// nil only when the result is "t" (true). Used by pollRecovery to check
-// verify_sql conditions — queries like "SELECT count(*) = 0 FROM ..." exit
-// with code 0 regardless of the result, so the exit code alone is not enough.
+// RunSQLBool executes a SQL query and returns nil when the result indicates
+// success. Used by pollRecovery to check verify_sql conditions.
+//
+// Success values: "t" (boolean true) or "1" (integer, as returned by SELECT 1
+// connectivity checks). Any other non-empty output is treated as false so that
+// condition queries like "SELECT count(*) = 0 FROM ..." correctly fail when
+// the count is non-zero.
 func RunSQLBool(ctx context.Context, connStr, sql string) error {
 	cmd := exec.CommandContext(ctx, "psql", connStr,
 		"-v", "ON_ERROR_STOP=1",
-		"-t", "-A", // tuples-only, unaligned: output is just "t" or "f"
+		"-t", "-A", // tuples-only, unaligned: output is just "t", "f", or a value
 		"-c", sql,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("psql: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "t" {
+	result := strings.TrimSpace(string(out))
+	if result != "t" && result != "1" {
 		return fmt.Errorf("verify_sql returned false")
 	}
 	return nil

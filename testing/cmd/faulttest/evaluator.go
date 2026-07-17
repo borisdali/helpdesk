@@ -38,9 +38,10 @@ type EvalResult struct {
 	KeywordScore   float64 `json:"keyword_score"`             // 0.0 or 1.0 (any-of match)
 	ToolScore      float64 `json:"tool_score"`                // 0.0-1.0 (fraction of expected tools found)
 	DiagnosisScore float64 `json:"diagnosis_score"`           // 0.0-1.0 from judge or category match
-	JudgeReasoning string  `json:"judge_reasoning,omitempty"`
-	JudgeModel     string  `json:"judge_model,omitempty"`
-	JudgeSkipped   bool    `json:"judge_skipped,omitempty"`
+	JudgeReasoning  string `json:"judge_reasoning,omitempty"`
+	JudgeModel      string `json:"judge_model,omitempty"`
+	JudgeSkipped    bool   `json:"judge_skipped,omitempty"`
+	JudgeFatalError bool   `json:"judge_fatal_error,omitempty"` // 401/403 — will not recover on retry
 
 	// CrystalBall is true when the gateway ran without playbook scaffolding.
 	// Set only on --via-gateway runs; false on direct A2A calls.
@@ -357,6 +358,7 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	result.JudgeSkipped = judgeResult.Skipped
 	result.JudgeReasoning = judgeResult.Reasoning
 	result.JudgeModel = judgeResult.Model
+	result.JudgeFatalError = judgeResult.FatalError
 
 	// Log when judge skips unexpectedly (error, not just missing narrative).
 	if judgeResult.Skipped && judgeResult.Reasoning != "" {

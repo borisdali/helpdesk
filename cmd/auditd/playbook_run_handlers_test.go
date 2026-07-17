@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -1025,6 +1026,71 @@ func TestPlaybookRunHandlers_VersionStats(t *testing.T) {
 	srv.handleVersionStats(rec2, req2)
 	if rec2.Code != http.StatusOK {
 		t.Errorf("empty series status = %d, want 200", rec2.Code)
+	}
+}
+
+func TestPlaybookRunHandlers_VersionStats_EscalatedCount(t *testing.T) {
+	ctx := context.Background()
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	prs, _ := audit.NewPlaybookRunStore(store.DB(), false)
+	pbs, _ := audit.NewPlaybookStore(store.DB(), false)
+	audit.NewPlaybookRunStepStore(store.DB(), false) //nolint:errcheck
+	audit.NewRunEvaluationStore(store.DB(), false)   //nolint:errcheck
+	srv := &playbookRunServer{store: prs, playbookStore: pbs}
+
+	const sid = "pbs_esc_count_test"
+	pb := &audit.Playbook{SeriesID: sid, Version: "1.0", IsActive: true, ExecutionMode: "agent"}
+	if err := pbs.Create(ctx, pb); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	now := time.Now().UTC()
+	for i, outcome := range []string{"escalated", "escalated", "resolved"} {
+		if err := prs.Record(ctx, &audit.PlaybookRun{
+			RunID: "plr_esc_" + strconv.Itoa(i),
+			PlaybookID: pb.PlaybookID, SeriesID: sid,
+			Outcome: outcome, StartedAt: now, CompletedAt: now.Add(5 * time.Second),
+		}); err != nil {
+			t.Fatalf("Record %s: %v", outcome, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/series/"+sid+"/version-stats", nil)
+	req.SetPathValue("seriesID", sid)
+	rec := httptest.NewRecorder()
+	srv.handleVersionStats(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Versions []struct {
+			TotalRuns      int     `json:"total_runs"`
+			Resolved       int     `json:"resolved"`
+			Escalated      int     `json:"escalated"`
+			EscalationRate float64 `json:"escalation_rate"`
+		} `json:"versions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Versions) != 1 {
+		t.Fatalf("want 1 version, got %d", len(resp.Versions))
+	}
+	v := resp.Versions[0]
+	if v.TotalRuns != 3 {
+		t.Errorf("total_runs = %d, want 3", v.TotalRuns)
+	}
+	if v.Escalated != 2 {
+		t.Errorf("escalated = %d, want 2", v.Escalated)
+	}
+	if v.Resolved != 1 {
+		t.Errorf("resolved = %d, want 1", v.Resolved)
+	}
+	if v.EscalationRate < 0.66 || v.EscalationRate > 0.68 {
+		t.Errorf("escalation_rate = %v, want ~0.667", v.EscalationRate)
 	}
 }
 

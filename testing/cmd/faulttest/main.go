@@ -137,6 +137,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.DBAgentURL, "db-agent", "", "Database agent A2A URL")
 	fs.StringVar(&cfg.K8sAgentURL, "k8s-agent", "", "Kubernetes agent A2A URL")
 	fs.StringVar(&cfg.SysadminAgentURL, "sysadmin-agent", "", "Sysadmin agent A2A URL")
+	fs.StringVar(&cfg.SysadminAPIKey, "sysadmin-api-key", os.Getenv("FAULTTEST_SYSADMIN_API_KEY"), "Bearer token for sysadmin agent /tool/ endpoint (required when HELPDESK_USERS_FILE is set on the sysadmin agent)")
 	fs.StringVar(&cfg.OrchestratorURL, "orchestrator", "", "Orchestrator agent A2A URL")
 	fs.StringVar(&cfg.KubeContext, "context", "", "Kubernetes context")
 
@@ -163,6 +164,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.GatewayPurpose, "purpose", "diagnostic", "Purpose declared in gateway requests (diagnostic, remediation, maintenance, …)")
 	fs.StringVar(&cfg.ApprovalMode, "approval-mode", "", "Override playbook approval_mode for this run (auto|session|manual|force). Empty = playbook default. Use 'force' to bypass manual gates in automated runs.")
 	fs.StringVar(&cfg.OperatorID, "operator", os.Getenv("HELPDESK_OPERATOR"), "User identity sent as X-User on gateway requests (e.g. alice@example.com). Must have roles required by approval_override_roles to avoid mode clamping.")
+	fs.StringVar(&cfg.UsersFile, "users-file", os.Getenv("HELPDESK_USERS_FILE"), "Path to users.yaml; when set, --operator must be a known human user in that file before force-mode auto-approval is accepted (or HELPDESK_USERS_FILE)")
 
 	// Policy safety check.
 	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")
@@ -319,17 +321,24 @@ func cmdRun(args []string) {
 	if cfg.AutoDB {
 		cfg.External = true
 		fmt.Printf("Starting temporary PostgreSQL container (%s)...\n", autoDBImage)
-		connStr, teardown, err := startAutoDBContainer(context.Background())
+		connStr, containerName, teardown, err := startAutoDBContainer(context.Background())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: --auto-db: %v\n", err)
 			os.Exit(1)
 		}
 		defer teardown()
 		cfg.ConnStr = connStr
+		cfg.AutoDBContainerName = containerName
 		fmt.Printf("Auto-DB ready: %s\n\n", connStr)
+		serverID := autoDBServerID(connStr)
 		if cfg.GatewayURL != "" {
-			if err := registerAutoDBWithGateway(cfg.GatewayURL, cfg.GatewayAPIKey, connStr); err != nil {
+			if err := registerAutoDBWithGateway(cfg.GatewayURL, cfg.GatewayAPIKey, connStr, containerName); err != nil {
 				slog.Warn("could not register auto-DB with gateway — DB agent may reject connection", "err", err)
+			}
+		}
+		if cfg.SysadminAgentURL != "" {
+			if err := registerAutoDBWithSysadmin(cfg.SysadminAgentURL, cfg.SysadminAPIKey, serverID, connStr, containerName); err != nil {
+				slog.Warn("could not register auto-DB with sysadmin agent — sysadmin tools may fail to resolve container", "err", err)
 			}
 		}
 	}
@@ -462,6 +471,10 @@ func cmdRun(args []string) {
 			} else {
 				if judgeCompleter != nil {
 					evalResult = EvaluateWithJudge(ctx, f, resp, judgeCompleter, judgeModel, auditTools)
+					if evalResult.JudgeFatalError && cfg.JudgeEnabled {
+						fmt.Fprintf(os.Stderr, "\nError: judge authentication failed (non-transient) — check --judge-api-key / HELPDESK_API_KEY\n  %s\n", evalResult.JudgeReasoning)
+						os.Exit(1)
+					}
 				} else {
 					evalResult = Evaluate(f, resp, auditTools)
 				}
@@ -650,11 +663,20 @@ func cmdRun(args []string) {
 
 		if repeatMode {
 			sr := buildStabilityReport(f, repResults)
-			sr.Print()
+			var attrSummary *attributionSummary
+			if cfg.DiagnosisModel != "" && f.DiagnosisPlaybookSeriesID != "" {
+				classes, taxonomyVersion := fetchRootCauseClasses(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID)
+				if len(classes) > 0 {
+					completer := newAttributionCompleter(ctx, cfg)
+					s := computeAttributionSummary(ctx, completer, repResults, classes, taxonomyVersion)
+					attrSummary = &s
+				}
+			}
+			sr.Print(attrSummary)
 			if cfg.DiagnosisModel == "" {
 				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
 			} else {
-				postStabilityCert(ctx, cfg, f, sr)
+				postStabilityCert(ctx, cfg, f, sr, attrSummary)
 			}
 		}
 
@@ -713,20 +735,15 @@ func cmdRun(args []string) {
 // registerAutoDBWithGateway calls POST /api/v1/admin/infra/register-db on the gateway
 // so that both the gateway and the DB agent can resolve the auto-created connection string.
 // The entry gets "chaos" and "test" tags so governance policy allows it.
-func registerAutoDBWithGateway(gatewayURL, apiKey, connStr string) error {
-	// Derive a stable server_id from the port in the connection string.
-	serverID := "faulttest-auto"
-	for _, part := range strings.Fields(connStr) {
-		if strings.HasPrefix(part, "port=") {
-			serverID = "faulttest-auto-" + strings.TrimPrefix(part, "port=")
-			break
-		}
-	}
+func registerAutoDBWithGateway(gatewayURL, apiKey, connStr, containerName string) error {
+	serverID := autoDBServerID(connStr)
 	body, err := json.Marshal(map[string]any{
 		"server_id":         serverID,
 		"name":              "Auto-DB faulttest instance",
 		"connection_string": connStr,
 		"tags":              []string{"chaos", "test"},
+		"hosting_type":      "docker",
+		"container_name":    containerName,
 	})
 	if err != nil {
 		return err
@@ -748,6 +765,51 @@ func registerAutoDBWithGateway(gatewayURL, apiKey, connStr string) error {
 		return fmt.Errorf("gateway returned %d", resp.StatusCode)
 	}
 	slog.Info("auto-DB registered with gateway", "server_id", serverID)
+	return nil
+}
+
+// autoDBServerID derives the stable server_id used when registering an auto-DB
+// container from the port field in the connection string.
+func autoDBServerID(connStr string) string {
+	for _, part := range strings.Fields(connStr) {
+		if strings.HasPrefix(part, "port=") {
+			return "faulttest-auto-" + strings.TrimPrefix(part, "port=")
+		}
+	}
+	return "faulttest-auto"
+}
+
+// registerAutoDBWithSysadmin registers the ephemeral auto-DB container with the
+// sysadmin agent via its register_infra_db direct-tool endpoint. This is needed
+// so the sysadmin agent can resolve the container for check_host and restart_container.
+func registerAutoDBWithSysadmin(sysadminURL, apiKey, serverID, connStr, containerName string) error {
+	body, err := json.Marshal(map[string]any{
+		"server_id":      serverID,
+		"container_name": containerName,
+		"runtime":        "docker",
+		"conn_str":       connStr,
+	})
+	if err != nil {
+		return err
+	}
+	url := strings.TrimSuffix(sysadminURL, "/") + "/tool/register_infra_db"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("sysadmin returned %d", resp.StatusCode)
+	}
+	slog.Info("auto-DB registered with sysadmin agent", "server_id", serverID)
 	return nil
 }
 

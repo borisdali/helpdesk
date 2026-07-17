@@ -81,6 +81,48 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		len(playbooks), systemCount, seriesFound)
 }
 
+// TestPlaybooks_TriagePlaybooksHaveRootCauseClasses verifies that v0.21.0
+// root_cause_classes field is present on triage playbooks after seeding,
+// confirming the YAML → DB → API serialization path works end-to-end.
+func TestPlaybooks_TriagePlaybooksHaveRootCauseClasses(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Fetch pbs_connection_triage by series_id — a triage playbook that always
+	// has root_cause_classes after v0.21.0 seeding.
+	playbooks, err := client.PlaybookList(ctx, "series_id=pbs_connection_triage&active_only=false")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	if len(playbooks) == 0 {
+		t.Skip("pbs_connection_triage not found — gateway may not be seeded with v0.21.0 playbooks")
+	}
+
+	pb := playbooks[0]
+
+	// root_cause_classes must be non-nil and contain a version and classes.
+	// Skip if not present — means gateway hasn't been updated to v0.21.0 yet.
+	rcc, ok := pb["root_cause_classes"].(map[string]any)
+	if !ok || rcc == nil {
+		t.Skip("root_cause_classes not present on pbs_connection_triage — deploy v0.21.0 and restart to exercise this test")
+	}
+	version, _ := rcc["version"].(string)
+	if version == "" {
+		t.Errorf("root_cause_classes.version: empty on pbs_connection_triage")
+	}
+	classes, _ := rcc["classes"].([]any)
+	if len(classes) < 2 {
+		t.Errorf("root_cause_classes.classes: got %d entries, want >= 2", len(classes))
+	}
+	t.Logf("pbs_connection_triage root_cause_classes: version=%q classes=%v", version, classes)
+}
+
 // TestPlaybooks_SystemPlaybooksAreReadOnly verifies that PUT and DELETE on a
 // system playbook return 400 Bad Request through the gateway→auditd path.
 func TestPlaybooks_SystemPlaybooksAreReadOnly(t *testing.T) {

@@ -299,15 +299,37 @@ func TestFaultInjection(t *testing.T) {
 			}
 
 			// 5. Remediation phase (opt-in via FAULTTEST_REMEDIATE=true).
-			if cfg.RemediateEnabled && f.Remediation.PlaybookID != "" {
-				t.Log("Running remediation...")
+			if cfg.RemediateEnabled {
 				remediator := faultlib.NewRemediator(cfg)
-				remResult := remediator.Remediate(faultCtx, f, resp.RunID)
-				if remResult.Err != nil {
-					t.Errorf("Remediation failed: %v", remResult.Err)
-				} else {
-					t.Logf("Remediation: method=%s, recovered_in=%.1fs, score=%.2f",
-						remResult.Method, remResult.RecoveryTimeSecs, remResult.Score)
+				switch {
+				case resp.Status == "pending_gate":
+					// Triage ended at an escalation gate (e.g. sysadmin cross-domain hand-off).
+					// Drive gate approval so the downstream chain actually runs. Calling Remediate
+					// directly here would bypass the gate and leave a dangling pending_gate run.
+					gate := &faultlib.ApproveRunResponse{
+						RunID:              resp.RunID,
+						Status:             resp.Status,
+						EscalationTarget:   resp.EscalationTarget,
+						TransitionTarget:   resp.TransitionTarget,
+						EscalationFindings: resp.EscalationFindings,
+						ConfidenceWarning:  resp.ConfidenceWarning,
+						GateReason:         resp.GateReason,
+					}
+					if err := remediator.RunGateLoop(faultCtx, gate); err != nil {
+						t.Logf("Gate loop: %v", err)
+					}
+				case resp.ChainedRunID != "":
+					// Gateway already auto-chained remediation inline; nothing to do.
+					t.Logf("Remediation auto-chained by gateway (run=%s)", resp.ChainedRunID)
+				case f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "":
+					t.Log("Running remediation...")
+					remResult := remediator.Remediate(faultCtx, f, resp.RunID)
+					if remResult.Err != nil {
+						t.Errorf("Remediation failed: %v", remResult.Err)
+					} else {
+						t.Logf("Remediation: method=%s, recovered_in=%.1fs, score=%.2f",
+							remResult.Method, remResult.RecoveryTimeSecs, remResult.Score)
+					}
 				}
 			}
 		})

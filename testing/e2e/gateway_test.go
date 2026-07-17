@@ -454,6 +454,70 @@ func TestGatewayFaultStabilityRoundtrip(t *testing.T) {
 	}
 }
 
+// TestGatewayFaultStability_AttributionRoundtrip verifies that all 5 v0.21.0
+// attribution fields survive a POST → GET round-trip through gateway→auditd.
+func TestGatewayFaultStability_AttributionRoundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("Gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const faultID = "e2e-test-fault-attribution"
+	cert := map[string]any{
+		"fault_id":                 faultID,
+		"fault_name":               "E2E attribution test",
+		"diagnosis_model":          "claude-sonnet-4-6",
+		"n_runs":                   3,
+		"pass_rate":                1.0,
+		"is_stable":                true,
+		"primary_attribution":      "connection-pool-saturation",
+		"attribution_consistent":   true,
+		"attribution_distribution": map[string]any{"connection-pool-saturation": 3, "connection-pool-leak": 0},
+		"judge_spread":             0.12,
+		"taxonomy_version":         "1.0",
+	}
+
+	code, err := client.FaultStabilityUpsert(ctx, cert)
+	if err != nil {
+		t.Fatalf("FaultStabilityUpsert: %v", err)
+	}
+	if code != http.StatusNoContent {
+		t.Fatalf("POST fault-stability: got HTTP %d, want 204", code)
+	}
+
+	got, err := client.FaultStabilityGet(ctx, faultID)
+	if err != nil {
+		t.Fatalf("FaultStabilityGet: %v", err)
+	}
+
+	// Skip attribution assertions if the gateway doesn't have v0.21.0 schema yet.
+	// This makes the test CI-safe on deployments that haven't been updated.
+	pa, _ := got["primary_attribution"].(string)
+	if pa == "" {
+		t.Skip("gateway does not return attribution fields — deploy v0.21.0 and restart to exercise this test")
+	}
+
+	if pa != "connection-pool-saturation" {
+		t.Errorf("primary_attribution: got %q, want connection-pool-saturation", pa)
+	}
+	if ac, _ := got["attribution_consistent"].(bool); !ac {
+		t.Errorf("attribution_consistent: got %v, want true", got["attribution_consistent"])
+	}
+	if tv, _ := got["taxonomy_version"].(string); tv != "1.0" {
+		t.Errorf("taxonomy_version: got %q, want 1.0", tv)
+	}
+	if js, _ := got["judge_spread"].(float64); js < 0.11 || js > 0.13 {
+		t.Errorf("judge_spread: got %v, want ~0.12", got["judge_spread"])
+	}
+	if ad, ok := got["attribution_distribution"].(map[string]any); !ok || len(ad) == 0 {
+		t.Errorf("attribution_distribution: got %v, want non-empty map", got["attribution_distribution"])
+	}
+}
+
 // TestGatewayMetricsEndpoint verifies that GET /metrics on the gateway returns
 // Prometheus text format with the gateway_fabrication_mismatches_total counter
 // declared. The counter value may be zero if no mismatches have occurred.

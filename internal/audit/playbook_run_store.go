@@ -94,6 +94,8 @@ type PlaybookVersionStats struct {
 	ResolutionRate   float64 `json:"resolution_rate"`    // resolved / total_runs; 0 when no runs
 	Transitioned     int     `json:"transitioned"`
 	TransitionRate   float64 `json:"transition_rate"`    // transitioned / total_runs; meaningful for triage series
+	Escalated        int     `json:"escalated"`
+	EscalationRate   float64 `json:"escalation_rate"`    // escalated / total_runs; meaningful for triage series that cross domain
 	AvgStepCount    float64 `json:"avg_step_count"`    // average steps per run; 0 when no step data
 	AvgRecoverySecs float64 `json:"avg_recovery_secs"` // average wall-clock seconds for completed runs; 0 when no data
 	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`   // average diagnosis_score; 0 when no eval data
@@ -176,9 +178,9 @@ func (s *PlaybookRunStore) migrate() error {
 		{"trigger_context", `ALTER TABLE playbook_runs ADD COLUMN trigger_context TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
-			// SQLite returns "duplicate column name" when the column already
-			// exists; treat that as a no-op so restarts on new DBs also work.
-			if !strings.Contains(err.Error(), "duplicate column name: "+col.name) {
+			// SQLite says "duplicate column name: X"; Postgres says
+			// "column X of relation ... already exists". Accept both.
+			if !containsAny(err.Error(), "duplicate column", "already exists") {
 				return fmt.Errorf("migrate playbook_runs.%s: %w", col.name, err)
 			}
 		}
@@ -596,6 +598,7 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		    r.playbook_id,
 		    p.origin_trace,
 		    r.outcome,
+		    r.escalated_to,
 		    r.started_at,
 		    r.completed_at,
 		    COALESCE(sc.cnt, 0) AS step_count,
@@ -622,6 +625,7 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		totalRuns       int
 		resolved        int
 		transitioned    int
+		escalated       int
 		stepSum         float64
 		recoverySumSecs float64
 		recoveryCount   int
@@ -637,11 +641,11 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	for rows.Next() {
 		var version, playbookID, originTrace string
 		var isActiveInt int
-		var outcome, startedStr, completedStr string
+		var outcome, escalatedTo, startedStr, completedStr string
 		var stepCount int
 		var diagScoreNull, remedScoreNull sql.NullFloat64
 
-		if err := rows.Scan(&version, &isActiveInt, &playbookID, &originTrace, &outcome, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
+		if err := rows.Scan(&version, &isActiveInt, &playbookID, &originTrace, &outcome, &escalatedTo, &startedStr, &completedStr, &stepCount, &diagScoreNull, &remedScoreNull); err != nil {
 			return nil, err
 		}
 
@@ -657,6 +661,9 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 		}
 		if outcome == OutcomeTransitioned {
 			a.transitioned++
+		}
+		if outcome == OutcomeEscalated || (outcome == OutcomeGatePending && escalatedTo != "") {
+			a.escalated++
 		}
 		a.stepSum += float64(stepCount)
 
@@ -695,12 +702,14 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 			TotalRuns:    a.totalRuns,
 			Resolved:     a.resolved,
 			Transitioned: a.transitioned,
+			Escalated:    a.escalated,
 			DiagEvalCount:  a.diagEvalCount,
 			RemedEvalCount: a.remedEvalCount,
 		}
 		if a.totalRuns > 0 {
 			st.ResolutionRate  = float64(a.resolved)     / float64(a.totalRuns)
 			st.TransitionRate  = float64(a.transitioned) / float64(a.totalRuns)
+			st.EscalationRate  = float64(a.escalated)    / float64(a.totalRuns)
 			st.AvgStepCount   = a.stepSum / float64(a.totalRuns)
 		}
 		if a.recoveryCount > 0 {

@@ -1,6 +1,6 @@
 series_id: pbs_disk_pressure_triage
 name: Disk Pressure / Large Table Growth — Triage
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -14,6 +14,12 @@ description: |
   data loss) or live data growth (requires archival or partitioning). Also checks
   whether autovacuum is enabled — disabled autovacuum is a common cause of
   sustained bloat accumulation.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - dead-tuple-bloat
+    - live-data-growth
+    - autovacuum-disabled
 symptoms:
   - "disk usage growing faster than write volume suggests"
   - "PostgreSQL data volume filling up"

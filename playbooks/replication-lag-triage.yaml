@@ -1,6 +1,6 @@
 series_id: pbs_replication_lag
 name: Replication Lag Triage
-version: "1.1"
+version: "1.2"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -12,6 +12,13 @@ description: |
   Investigate replication lag on PostgreSQL streaming replicas. Identify the
   source of lag (WAL sender state, network, replica load) and assess the risk
   to read workloads and failover readiness.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - replica-cannot-keep-up-with-write-volume
+    - stale-replication-slot-accumulating-wal
+    - replica-disconnected
+    - transient-batch-write-spike
 symptoms:
   - "replica lag > acceptable threshold"
   - "monitoring alert: replication_lag_seconds elevated"

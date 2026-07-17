@@ -13,10 +13,11 @@ type TextCompleter func(ctx context.Context, prompt string) (string, error)
 
 // JudgeResult holds the output of the LLM judge.
 type JudgeResult struct {
-	Score     float64 // 0.0, 0.33, 0.67, or 1.0
-	Reasoning string
-	Model     string
-	Skipped   bool // true when narrative is empty or completer is nil
+	Score      float64 // 0.0, 0.33, 0.67, or 1.0
+	Reasoning  string
+	Model      string
+	Skipped    bool // true when narrative is empty or completer is nil
+	FatalError bool // true when the error is non-transient (e.g. 401/403 auth failure)
 }
 
 const judgePromptTemplate = `You are evaluating an AI database operations agent's diagnostic response.
@@ -61,7 +62,11 @@ func Judge(ctx context.Context, f Failure, responseText string, completer TextCo
 
 	raw, err := completer(ctx, prompt)
 	if err != nil {
-		return JudgeResult{Skipped: true, Reasoning: fmt.Sprintf("judge call failed: %v", err)}
+		return JudgeResult{
+			Skipped:    true,
+			Reasoning:  fmt.Sprintf("judge call failed: %v", err),
+			FatalError: isAuthError(err),
+		}
 	}
 
 	// Extract JSON from response (model may wrap it in markdown fences).
@@ -86,6 +91,17 @@ func Judge(ctx context.Context, f Failure, responseText string, completer TextCo
 		Reasoning: parsed.Reasoning,
 		Model:     model,
 	}
+}
+
+// isAuthError returns true when err looks like a non-transient authentication
+// failure (401 Unauthorized, 403 Forbidden). These will not resolve on retry
+// and should cause the caller to fail fast rather than silently skip scoring.
+func isAuthError(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "401") ||
+		strings.Contains(s, "403") ||
+		strings.Contains(s, "Unauthorized") ||
+		strings.Contains(s, "authentication_error")
 }
 
 // extractJSON pulls the first {...} block from s, handling markdown code fences.

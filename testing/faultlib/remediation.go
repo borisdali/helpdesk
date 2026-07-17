@@ -83,6 +83,11 @@ type Remediator struct {
 	client *http.Client
 }
 
+// longClient is used for calls that block while an agent chain runs (e.g.
+// proceed-escalation). It carries no fixed timeout; the caller's context
+// provides the only deadline.
+var longClient = &http.Client{}
+
 // NewRemediator creates a new Remediator with the given config.
 func NewRemediator(cfg *HarnessConfig) *Remediator {
 	return &Remediator{
@@ -472,7 +477,11 @@ func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req Pr
 		httpReq.Header.Set("X-Trace-ID", id)
 	}
 
-	resp, err := r.client.Do(httpReq)
+	// proceed-escalation blocks until the full downstream agent chain completes
+	// (synchronously in the gateway handler). Use longClient so the 30s short
+	// timeout on r.client doesn't fire mid-chain; the caller's ctx deadline is
+	// the only limit.
+	resp, err := longClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", reqURL, err)
 	}

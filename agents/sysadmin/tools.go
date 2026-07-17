@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/tool"
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
 
@@ -44,6 +46,10 @@ func (execRunner) Run(ctx context.Context, name string, args []string, env []str
 // cmdRunner is the active command runner. Override in tests.
 var cmdRunner CommandRunner = execRunner{}
 
+// infraConfigMu guards concurrent reads and writes to infraConfig, which may be
+// updated at runtime via the register_infra_db direct tool.
+var infraConfigMu sync.RWMutex
+
 // argsToStruct converts a map[string]any to a typed struct via JSON round-trip.
 func argsToStruct[T any](args map[string]any) (T, error) {
 	var result T
@@ -71,18 +77,87 @@ type resolvedHost struct {
 	Sensitivity []string
 }
 
+// connStrPort extracts the port number from a libpq connection string or
+// "host:port" address. Returns "" when no port is found.
+func connStrPort(s string) string {
+	// libpq keyword format: "... port=5432 ..."
+	for _, field := range strings.Fields(s) {
+		if strings.HasPrefix(field, "port=") {
+			p := strings.TrimPrefix(field, "port=")
+			if p != "" {
+				return p
+			}
+		}
+	}
+	// "host:port" format (after stripping any scheme prefix)
+	s = strings.TrimPrefix(s, "postgresql://")
+	s = strings.TrimPrefix(s, "postgres://")
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		p := s[idx+1:]
+		// strip any trailing path/query
+		if sl := strings.IndexAny(p, "/?"); sl >= 0 {
+			p = p[:sl]
+		}
+		if p != "" && p != s {
+			return p
+		}
+	}
+	// bare port (digits only)
+	if strings.TrimFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }) == "" && s != "" {
+		return s
+	}
+	return ""
+}
+
 // resolveHost looks up a DB server by ID and assembles the resolvedHost the
 // sysadmin tools need. It handles both VM-hosted (docker/podman/systemd) and
 // Kubernetes-hosted databases.
+// As a fallback, target may also be a connection string or port number — in
+// that case the server is identified by matching the port against registered
+// connection strings (useful for ephemeral auto-DB servers whose ID is not
+// known to the LLM at startup time).
 func resolveHost(serverID string) (resolvedHost, error) {
-	if infraConfig == nil {
+	infraConfigMu.RLock()
+	ic := infraConfig
+	if ic == nil {
+		infraConfigMu.RUnlock()
 		return resolvedHost{}, fmt.Errorf("no infrastructure config loaded; set HELPDESK_INFRA_CONFIG")
 	}
 	serverID = strings.TrimSpace(serverID)
-	db, ok := infraConfig.DBServers[serverID]
+	db, ok := ic.DBServers[serverID]
 	if !ok {
-		known := make([]string, 0, len(infraConfig.DBServers))
-		for id := range infraConfig.DBServers {
+		// Fallback 1: treat target as a connection string and match by port.
+		// This allows the LLM to pass the connection string from triage findings
+		// when it doesn't know the server ID (e.g. ephemeral auto-DB containers).
+		if port := connStrPort(serverID); port != "" {
+			for id, candidate := range ic.DBServers {
+				if connStrPort(candidate.ConnectionString) == port {
+					db = candidate
+					serverID = id
+					ok = true
+					break
+				}
+			}
+		}
+	}
+	if !ok {
+		// Fallback 2: match by container name. The LLM often extracts the
+		// container name from prior-run findings instead of using the server ID
+		// or connection string. Scanning for a matching ContainerName lets it
+		// succeed without knowing the server ID.
+		for id, candidate := range ic.DBServers {
+			if candidate.ContainerName == serverID {
+				db = candidate
+				serverID = id
+				ok = true
+				break
+			}
+		}
+	}
+	infraConfigMu.RUnlock()
+	if !ok {
+		known := make([]string, 0, len(ic.DBServers))
+		for id := range ic.DBServers {
 			known = append(known, id)
 		}
 		sort.Strings(known)
@@ -92,7 +167,7 @@ func resolveHost(serverID string) (resolvedHost, error) {
 
 	// ── Kubernetes path ──────────────────────────────────────────────────────
 	if db.K8sCluster != "" {
-		k8s, ok := infraConfig.K8sClusters[db.K8sCluster]
+		k8s, ok := ic.K8sClusters[db.K8sCluster]
 		if !ok {
 			return resolvedHost{}, fmt.Errorf(
 				"server %q references K8s cluster %q which is not defined in infrastructure config", serverID, db.K8sCluster)
@@ -119,7 +194,7 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		return resolvedHost{}, fmt.Errorf(
 			"server %q has neither vm_name nor k8s_cluster; sysadmin operations require one of these in infrastructure config", serverID)
 	}
-	vm, ok := infraConfig.VMs[db.VMName]
+	vm, ok := ic.VMs[db.VMName]
 	if !ok {
 		return resolvedHost{}, fmt.Errorf(
 			"server %q references VM %q which is not defined in infrastructure config", serverID, db.VMName)
@@ -207,11 +282,70 @@ func containerRuntimeBin(host resolvedHost) (string, error) {
 	}
 }
 
+// ── register_infra_db ─────────────────────────────────────────────────────────
+
+// RegisterInfraDBArgs holds the payload for the register_infra_db direct tool.
+// Not exposed to the LLM — only callable via POST /tool/register_infra_db.
+type RegisterInfraDBArgs struct {
+	ServerID      string `json:"server_id"`
+	ContainerName string `json:"container_name"`
+	Runtime       string `json:"runtime,omitempty"` // "docker" or "podman"; defaults to "docker"
+	ConnStr       string `json:"conn_str,omitempty"`
+}
+
+const localVMKey = "__faulttest_local__"
+
+// registerInfraDB adds a server entry to the in-memory infraConfig so sysadmin
+// tools can resolve ephemeral containers (e.g. faulttest --auto-db) that are not
+// present in the on-disk HELPDESK_INFRA_CONFIG.
+func registerInfraDB(args RegisterInfraDBArgs) error {
+	if args.ServerID == "" {
+		return fmt.Errorf("register_infra_db: server_id is required")
+	}
+	if args.ContainerName == "" {
+		return fmt.Errorf("register_infra_db: container_name is required")
+	}
+	runtime := args.Runtime
+	if runtime == "" {
+		runtime = "docker"
+	}
+
+	infraConfigMu.Lock()
+	defer infraConfigMu.Unlock()
+
+	if infraConfig == nil {
+		infraConfig = &infra.Config{
+			DBServers: make(map[string]infra.DBServer),
+			VMs:       make(map[string]infra.VM),
+		}
+	}
+	if infraConfig.DBServers == nil {
+		infraConfig.DBServers = make(map[string]infra.DBServer)
+	}
+	if infraConfig.VMs == nil {
+		infraConfig.VMs = make(map[string]infra.VM)
+	}
+
+	infraConfig.VMs[localVMKey] = infra.VM{
+		Name:    localVMKey,
+		Runtime: runtime,
+	}
+	infraConfig.DBServers[args.ServerID] = infra.DBServer{
+		Name:             args.ServerID,
+		ConnectionString: args.ConnStr,
+		VMName:           localVMKey,
+		ContainerName:    args.ContainerName,
+		Tags:             []string{"chaos", "test"},
+	}
+	slog.Info("register_infra_db: server registered", "server_id", args.ServerID, "container", args.ContainerName)
+	return nil
+}
+
 // ── check_host ───────────────────────────────────────────────────────────────
 
 // CheckHostArgs defines arguments for check_host.
 type CheckHostArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config (e.g. 'prod_db'). Must match a key in db_servers."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config (e.g. 'prod_db'), or a connection string / port (e.g. 'host=127.0.0.1 port=5432' or '5432') when the server ID is unknown — resolved by port matching."`
 }
 
 func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, error) {
@@ -298,7 +432,7 @@ func checkHostTool(ctx tool.Context, args CheckHostArgs) (CheckHostResult, error
 
 // GetHostLogsArgs defines arguments for get_host_logs.
 type GetHostLogsArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config, or a connection string / port — resolved by port matching."`
 	Lines  int    `json:"lines,omitempty" jsonschema:"Number of recent log lines to return (default 100)."`
 	Filter string `json:"filter,omitempty" jsonschema:"Optional substring to filter log lines (case-sensitive)."`
 }
@@ -657,7 +791,7 @@ func hostRuntimeLabel(host resolvedHost) string {
 
 // RestartContainerArgs defines arguments for restart_container.
 type RestartContainerArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config, or a connection string / port — resolved by port matching."`
 	Reason string `json:"reason" jsonschema:"required,Human-readable reason for the restart. Logged for audit trail."`
 }
 
@@ -728,7 +862,7 @@ func restartContainerTool(ctx tool.Context, args RestartContainerArgs) (RestartR
 
 // RestartServiceArgs defines arguments for restart_service.
 type RestartServiceArgs struct {
-	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config."`
+	Target string `json:"target" jsonschema:"required,Server ID from infrastructure config, or a connection string / port — resolved by port matching."`
 	Reason string `json:"reason" jsonschema:"required,Human-readable reason for the restart. Logged for audit trail."`
 }
 
@@ -888,6 +1022,19 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		return marshalResult(result)
+	})
+
+	// register_infra_db is an admin-only tool: not exposed to the LLM but callable
+	// via POST /tool/register_infra_db so faulttest can register ephemeral containers.
+	r.Register("register_infra_db", func(_ context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RegisterInfraDBArgs](args)
+		if err != nil {
+			return "", err
+		}
+		if err := registerInfraDB(a); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
 	})
 
 	return r

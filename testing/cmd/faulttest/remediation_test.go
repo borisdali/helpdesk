@@ -468,3 +468,115 @@ func TestPostFeedback_RemediationAtGate_NoGateway(t *testing.T) {
 	v := true
 	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "", "")
 }
+
+// ── fetchRunOutcome ──────────────────────────────────────────────────────────
+
+func TestFetchRunOutcome_ReturnsOutcome(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/fleet/playbook-runs/plr_abc123" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"outcome": "transitioned"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL, GatewayAPIKey: "key"}}
+	outcome := r.fetchRunOutcome(context.Background(), "plr_abc123")
+	if outcome != "transitioned" {
+		t.Errorf("outcome = %q, want transitioned", outcome)
+	}
+}
+
+func TestFetchRunOutcome_ReturnsEmptyOnNonOK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL}}
+	outcome := r.fetchRunOutcome(context.Background(), "plr_missing")
+	if outcome != "" {
+		t.Errorf("outcome = %q, want empty for 404", outcome)
+	}
+}
+
+func TestFetchRunOutcome_ReturnsEmptyWhenNoAuditURL(t *testing.T) {
+	r := &Remediator{cfg: &HarnessConfig{AuditURL: ""}}
+	outcome := r.fetchRunOutcome(context.Background(), "plr_abc123")
+	if outcome != "" {
+		t.Errorf("outcome = %q, want empty when AuditURL unset", outcome)
+	}
+}
+
+// ── waitForChildRunComplete ──────────────────────────────────────────────────
+
+// auditMux builds a minimal auditd mock that serves:
+//   - GET /v1/fleet/playbook-runs?prior_run_id=<parent> → child run list
+//   - GET /v1/fleet/playbook-runs/<child_id>            → run with given outcome
+func auditMux(parentID, childID, childOutcome string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/fleet/playbook-runs", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("prior_run_id") == parentID {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"runs": []map[string]any{{"run_id": childID}},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{}}) //nolint:errcheck
+	})
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"outcome": childOutcome}) //nolint:errcheck
+	})
+	return mux
+}
+
+func TestWaitForChildRunComplete_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(auditMux("plr_parent", "plr_child", "transitioned"))
+	defer srv.Close()
+
+	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL, GatewayAPIKey: "key"}}
+	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 5*time.Second)
+	if got != "plr_child" {
+		t.Errorf("childRunID = %q, want plr_child", got)
+	}
+}
+
+func TestWaitForChildRunComplete_NoAuditURL_FallsBackToFindChild(t *testing.T) {
+	// When AuditURL is empty, falls back to findChildRunID which also returns ""
+	// because there is no server to query.
+	r := &Remediator{cfg: &HarnessConfig{AuditURL: ""}}
+	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 100*time.Millisecond)
+	if got != "" {
+		t.Errorf("expected empty when AuditURL unset, got %q", got)
+	}
+}
+
+func TestWaitForChildRunComplete_EmptyOutcomeEventuallyTerminal(t *testing.T) {
+	// First outcome call returns "" (still running), second returns "resolved".
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("prior_run_id") != "" {
+			json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{{"run_id": "plr_child2"}}}) //nolint:errcheck
+			return
+		}
+		callCount++
+		outcome := ""
+		if callCount >= 2 {
+			outcome = "resolved"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"outcome": outcome}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL}}
+	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 10*time.Second)
+	if got != "plr_child2" {
+		t.Errorf("childRunID = %q, want plr_child2", got)
+	}
+}

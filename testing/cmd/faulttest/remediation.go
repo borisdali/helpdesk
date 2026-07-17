@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/testing/faultlib"
@@ -83,8 +85,13 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		return RemediationResult{Err: fmt.Errorf("gate: %w", err), Method: "playbook"}
 	}
 
-	// Find the remediation run that was started by proceed-escalation.
-	remRunID := r.findChildRunID(ctx, gate.RunID)
+	// Wait for the escalation chain (e.g. inspect → restart action) to complete
+	// before polling recovery. The chain runs asynchronously after gate approval,
+	// so without waiting here pollRecovery would start while the container is still
+	// down. waitForChildRunComplete waits for the immediate child run, which gives
+	// downstream transitions (e.g. pbs_sysadmin_docker_inspect → pbs_db_restart_action)
+	// time to run and restart the service before we check connectivity.
+	remRunID := r.waitForChildRunComplete(ctx, gate.RunID, 5*time.Minute)
 
 	spec := f.Remediation
 	verifySQL := spec.VerifySQL
@@ -223,14 +230,25 @@ func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID s
 	return runResp.RunID, nil
 }
 
-// findChildRunID queries auditd for the remediation run that was started by a
-// proceed-escalation call on the given triage run. Returns "" when the run
-// cannot be found (e.g. auditd not configured, or run not yet committed).
+// findChildRunID queries auditd (or the gateway when auditd URL is absent) for
+// the run that was started by a proceed-escalation call on the given triage run.
+// Returns "" when the run cannot be found.
 func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) string {
-	if r.cfg.AuditURL == "" || priorRunID == "" {
+	if priorRunID == "" {
 		return ""
 	}
-	url := strings.TrimSuffix(r.cfg.AuditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + priorRunID + "&limit=1"
+	// Prefer auditd for direct access; fall back to gateway proxy which forwards
+	// the full query string (including ?prior_run_id=) to auditd.
+	base := r.cfg.AuditURL
+	path := "/v1/fleet/playbook-runs"
+	if base == "" {
+		if r.cfg.GatewayURL == "" {
+			return ""
+		}
+		base = r.cfg.GatewayURL
+		path = "/api/v1/fleet/playbook-runs"
+	}
+	url := strings.TrimSuffix(base, "/") + path + "?prior_run_id=" + priorRunID + "&limit=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ""
@@ -255,6 +273,110 @@ func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) stri
 		return ""
 	}
 	return result.Runs[0].RunID
+}
+
+// fetchRunOutcome fetches the current outcome of a playbook run from auditd (or
+// the gateway when auditd URL is absent). Returns "" if the run is still active
+// or cannot be fetched.
+func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
+	if runID == "" {
+		return ""
+	}
+	base := r.cfg.AuditURL
+	path := "/v1/fleet/playbook-runs/" + runID
+	if base == "" {
+		if r.cfg.GatewayURL == "" {
+			return ""
+		}
+		base = r.cfg.GatewayURL
+		path = "/api/v1/fleet/playbook-runs/" + runID
+	}
+	url := strings.TrimSuffix(base, "/") + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ""
+	}
+	if r.cfg.GatewayAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+	return result.Outcome
+}
+
+// waitForChildRunComplete waits for the escalation chain triggered by parentRunID
+// to finish. It first polls findChildRunID until the child run appears (the gateway
+// starts it asynchronously after gate approval), then polls fetchRunOutcome until
+// the run reaches a terminal state. When the immediate child transitions to another
+// run (outcome="transitioned"), it follows the chain recursively so that the caller
+// doesn't start pollRecovery until the full chain (e.g. inspect → restart_action)
+// has completed. Returns the deepest child run ID reached (may be "" on timeout).
+// Requires either AuditURL or GatewayURL to be set; returns "" without either.
+func (r *Remediator) waitForChildRunComplete(ctx context.Context, parentRunID string, timeout time.Duration) string {
+	if r.cfg.AuditURL == "" && r.cfg.GatewayURL == "" {
+		return ""
+	}
+	deadline := time.Now().Add(timeout)
+
+	// Phase 1: wait for the child run to appear (gateway starts it async after gate approval).
+	var childRunID string
+	for time.Now().Before(deadline) {
+		childRunID = r.findChildRunID(ctx, parentRunID)
+		if childRunID != "" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(3 * time.Second):
+		}
+	}
+	if childRunID == "" {
+		slog.Warn("waitForChildRunComplete: no child run appeared within timeout", "parent", parentRunID)
+		return ""
+	}
+
+	// Phase 2: poll until the child run reaches a terminal outcome.
+	slog.Info("waitForChildRunComplete: watching child run", "child", childRunID)
+	for time.Now().Before(deadline) {
+		outcome := r.fetchRunOutcome(ctx, childRunID)
+		switch outcome {
+		case "":
+			// still running — keep polling
+		case "transitioned":
+			// This run handed off to another playbook (e.g. inspect → restart_action).
+			// Follow the chain: wait for the grandchild to complete.
+			remaining := time.Until(deadline)
+			slog.Info("waitForChildRunComplete: child transitioned, following chain", "child", childRunID, "remaining", remaining)
+			grandchild := r.waitForChildRunComplete(ctx, childRunID, remaining)
+			if grandchild != "" {
+				return grandchild
+			}
+			return childRunID
+		default:
+			slog.Info("waitForChildRunComplete: child run complete", "child", childRunID, "outcome", outcome)
+			return childRunID
+		}
+		select {
+		case <-ctx.Done():
+			return childRunID
+		case <-time.After(5 * time.Second):
+		}
+	}
+	slog.Warn("waitForChildRunComplete: timed out waiting for child run", "child", childRunID)
+	return childRunID
 }
 
 // printGatePreviewAndReport prints the remediation plan preview and structured
@@ -536,8 +658,15 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	return nil
 }
 
-// waitForGateEmitAndWait prints the gate summary and polls until the operator
-// externally resolves the gate via the Decision Hub or proceed-escalation endpoint.
+// waitForGateEmitAndWait prints the gate summary and either auto-approves it
+// (when --approval-mode force) or polls until the operator resolves it externally
+// via the Decision Hub or proceed-escalation endpoint.
+//
+// With --approval-mode force the gate is approved immediately via
+// proceed-escalation using the configured approval mode, ensuring downstream
+// playbooks (e.g. pbs_db_restart_action, which has approval_mode=manual) are
+// still allowed to auto-chain. Without force the function behaves as before:
+// print the gate URL and block until an external actor resolves it.
 func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.ApproveRunResponse) error {
 	resolveURL := r.cfg.GatewayURL + "/api/v1/decisions/gate:" + gate.RunID + "/resolve"
 	fmt.Printf("\nGate pending — run_id=%s\n", gate.RunID)
@@ -545,7 +674,7 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("  Body fields:\n")
 	fmt.Printf("    resolution        : \"approved\" | \"denied\"\n")
 	fmt.Printf("    resolved_by       : your email or user ID\n")
-	fmt.Printf("    approval_mode     : \"auto\" | \"review\" | \"manual\" (default: playbook setting)\n")
+	fmt.Printf("    approval_mode     : \"force\" | \"auto\" | \"review\" | \"manual\" — use \"force\" to allow the full remediation chain to auto-run\n")
 	fmt.Printf("    reason            : optional — free-text operator comment\n")
 	fmt.Printf("    verdict_correct : true | false  (triage/at_gate feedback, before remediation runs)\n")
 	fmt.Printf("    verdict_notes   : string        (required when verdict_correct=false)\n")
@@ -553,6 +682,47 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	fmt.Printf("\n  Remediation feedback (separate call, same gate window):\n")
 	fmt.Printf("    POST %s\n", feedbackURL)
 	fmt.Printf("    {\"feedback_type\":\"remediation\",\"feedback_time\":\"at_gate\",\"verdict_correct\":true,\"verdict_notes\":\"...\"}\n\n")
+
+	// When --approval-mode force: auto-approve immediately so that downstream
+	// playbooks with approval_mode=manual (e.g. pbs_db_restart_action) are
+	// still allowed to auto-chain within the same proceed-escalation call.
+	// Without force the gate must be resolved externally.
+	//
+	// --operator is required for auto-approval: it becomes the resolved_by
+	// identity on the audit record. Without it the gate would be recorded as
+	// approved by the anonymous sentinel "operator", producing an audit trail
+	// with no accountable identity.
+	if r.cfg.ApprovalMode == "force" {
+		if r.cfg.OperatorID == "" {
+			return fmt.Errorf("--approval-mode force requires --operator <id> when using --emit-and-wait: " +
+				"the gate approval is recorded in the audit log and must carry an accountable identity")
+		}
+		if err := validateOperatorInUsersFile(r.cfg.UsersFile, r.cfg.OperatorID); err != nil {
+			return err
+		}
+		connStr := r.cfg.ConnStr
+		if r.cfg.AgentConnStr != "" {
+			connStr = r.cfg.AgentConnStr
+		}
+		slog.Info("emit-and-wait: auto-approving gate with force mode", "run_id", gate.RunID, "operator", r.cfg.OperatorID)
+		resp, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
+			Resolution:       "approved",
+			ResolvedBy:       r.cfg.OperatorID,
+			ApprovalMode:     "force",
+			ConnectionString: connStr,
+		})
+		if err != nil {
+			return fmt.Errorf("proceed-escalation: %w", err)
+		}
+		if resp.Status == "pending_approval" {
+			return r.runApprovalLoop(ctx, *resp)
+		}
+		slog.Info("gate auto-approved", "run_id", gate.RunID, "status", resp.Status)
+		if resp.Status == "denied" {
+			return errGateDenied
+		}
+		return nil
+	}
 
 	resp, err := r.inner.WaitForGateResolution(ctx, gate.RunID)
 	if err != nil {
@@ -1000,6 +1170,34 @@ func printIncidentSummary(resp testutil.AgentResponse, recoverySecs float64, gat
 		base := strings.TrimSuffix(gatewayURL, "/")
 		fmt.Printf("  Narrative  : GET %s/api/v1/incidents/%s\n", base, resp.RunID)
 	}
+}
+
+// validateOperatorInUsersFile checks that operatorID exists as a human user
+// in the users.yaml file at path. Returns nil when path is empty (no check) or
+// when the operator is found. The check guards force-mode auto-approval so that
+// only real, recognised identities appear as resolved_by in the audit log.
+func validateOperatorInUsersFile(path, operatorID string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("--users-file %q: %w", path, err)
+	}
+	var cfg struct {
+		Users []struct {
+			ID string `yaml:"id"`
+		} `yaml:"users"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("--users-file %q: parse error: %w", path, err)
+	}
+	for _, u := range cfg.Users {
+		if u.ID == operatorID {
+			return nil
+		}
+	}
+	return fmt.Errorf("--operator %q is not a recognised human user in %s — add them to users.yaml or use a valid user ID", operatorID, path)
 }
 
 // wrapText breaks s into lines of at most width runes, splitting on spaces.

@@ -336,27 +336,76 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 	return info
 }
 
+// fetchRootCauseClasses fetches the root_cause_classes for a playbook series
+// from the gateway. Returns empty slice when the playbook has no taxonomy or
+// on any error. Also returns the taxonomy version string.
+func fetchRootCauseClasses(gatewayURL, apiKey, seriesID string) (classes []string, version string) {
+	if gatewayURL == "" || seriesID == "" {
+		return nil, ""
+	}
+	reqURL := gatewayURL + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, ""
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil, ""
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Playbooks []struct {
+			RootCauseClasses *struct {
+				Version string   `json:"version"`
+				Classes []string `json:"classes"`
+			} `json:"root_cause_classes"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Playbooks) == 0 {
+		return nil, ""
+	}
+	rcc := result.Playbooks[0].RootCauseClasses
+	if rcc == nil || len(rcc.Classes) == 0 {
+		return nil, ""
+	}
+	return rcc.Classes, rcc.Version
+}
+
 // stabilityInfo is a lightweight view of one fault's stability cert for vault list.
 type stabilityInfo struct {
-	IsStable    bool
-	NRuns       int
-	TestedAt    time.Time
-	hasData     bool
+	IsStable              bool
+	NRuns                 int
+	TestedAt              time.Time
+	PrimaryAttribution    string
+	AttributionConsistent bool
+	hasData               bool
 }
 
 // fetchStabilityCert fetches the stability cert for a single fault from the gateway.
 // Returns nil when not found or on error.
 func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
-	FaultID          string  `json:"fault_id"`
-	FaultName        string  `json:"fault_name"`
-	PlaybookSeriesID string  `json:"playbook_series_id"`
-	DiagnosisModel   string  `json:"diagnosis_model"`
-	JudgeModel       string  `json:"judge_model"`
-	NRuns            int     `json:"n_runs"`
-	PassRate         float64 `json:"pass_rate"`
-	ConfRangePP      int     `json:"conf_range_pp"`
-	IsStable         bool    `json:"is_stable"`
-	TestedAt         string  `json:"tested_at"`
+	FaultID                 string         `json:"fault_id"`
+	FaultName               string         `json:"fault_name"`
+	PlaybookSeriesID        string         `json:"playbook_series_id"`
+	DiagnosisModel          string         `json:"diagnosis_model"`
+	JudgeModel              string         `json:"judge_model"`
+	NRuns                   int            `json:"n_runs"`
+	PassRate                float64        `json:"pass_rate"`
+	ConfRangePP             int            `json:"conf_range_pp"`
+	IsStable                bool           `json:"is_stable"`
+	TestedAt                string         `json:"tested_at"`
+	PrimaryAttribution      string         `json:"primary_attribution"`
+	AttributionConsistent   bool           `json:"attribution_consistent"`
+	AttributionDistribution map[string]int `json:"attribution_distribution"`
+	JudgeSpread             float64        `json:"judge_spread"`
+	TaxonomyVersion         string         `json:"taxonomy_version"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -379,16 +428,21 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	}
 	defer resp.Body.Close()
 	var cert struct {
-		FaultID          string  `json:"fault_id"`
-		FaultName        string  `json:"fault_name"`
-		PlaybookSeriesID string  `json:"playbook_series_id"`
-		DiagnosisModel   string  `json:"diagnosis_model"`
-		JudgeModel       string  `json:"judge_model"`
-		NRuns            int     `json:"n_runs"`
-		PassRate         float64 `json:"pass_rate"`
-		ConfRangePP      int     `json:"conf_range_pp"`
-		IsStable         bool    `json:"is_stable"`
-		TestedAt         string  `json:"tested_at"`
+		FaultID                 string         `json:"fault_id"`
+		FaultName               string         `json:"fault_name"`
+		PlaybookSeriesID        string         `json:"playbook_series_id"`
+		DiagnosisModel          string         `json:"diagnosis_model"`
+		JudgeModel              string         `json:"judge_model"`
+		NRuns                   int            `json:"n_runs"`
+		PassRate                float64        `json:"pass_rate"`
+		ConfRangePP             int            `json:"conf_range_pp"`
+		IsStable                bool           `json:"is_stable"`
+		TestedAt                string         `json:"tested_at"`
+		PrimaryAttribution      string         `json:"primary_attribution"`
+		AttributionConsistent   bool           `json:"attribution_consistent"`
+		AttributionDistribution map[string]int `json:"attribution_distribution"`
+		JudgeSpread             float64        `json:"judge_spread"`
+		TaxonomyVersion         string         `json:"taxonomy_version"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
 		return nil
@@ -515,10 +569,12 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 
 	var result struct {
 		Certs []struct {
-			FaultID  string  `json:"fault_id"`
-			NRuns    int     `json:"n_runs"`
-			IsStable bool    `json:"is_stable"`
-			TestedAt string  `json:"tested_at"`
+			FaultID               string `json:"fault_id"`
+			NRuns                 int    `json:"n_runs"`
+			IsStable              bool   `json:"is_stable"`
+			TestedAt              string `json:"tested_at"`
+			PrimaryAttribution    string `json:"primary_attribution"`
+			AttributionConsistent bool   `json:"attribution_consistent"`
 		} `json:"certs"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -531,7 +587,13 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 		if _, exists := out[c.FaultID]; exists {
 			continue
 		}
-		info := stabilityInfo{IsStable: c.IsStable, NRuns: c.NRuns, hasData: true}
+		info := stabilityInfo{
+			IsStable:              c.IsStable,
+			NRuns:                 c.NRuns,
+			PrimaryAttribution:    c.PrimaryAttribution,
+			AttributionConsistent: c.AttributionConsistent,
+			hasData:               true,
+		}
 		if c.TestedAt != "" {
 			if t, err := time.Parse(time.RFC3339Nano, c.TestedAt); err == nil {
 				info.TestedAt = t
@@ -549,6 +611,10 @@ func vaultList(args []string) {
 	fs.StringVar(&target, "target", "", "Filter last-run history by target (agent-conn alias or hostname)")
 	fs.BoolVar(&short, "short", false, "Compact view: suppress per-version sub-rows")
 	cfg := loadConfig(fs, args)
+	// Positional arguments are fault IDs (e.g. `vault list db-connection-refused`).
+	if positional := fs.Args(); len(positional) > 0 && len(cfg.FailureIDs) == 0 {
+		cfg.FailureIDs = positional
+	}
 
 	cat, err := loadActiveCatalog(cfg)
 	if err != nil {
@@ -709,6 +775,14 @@ func vaultList(args []string) {
 				label = "STABLE"
 			}
 			stableCol = fmt.Sprintf("%s(%d)", label, si.NRuns)
+			// Append attribution label when available.
+			if si.PrimaryAttribution != "" && si.PrimaryAttribution != "UNKNOWN" {
+				if si.AttributionConsistent {
+					stableCol += fmt.Sprintf(" attr=%s", si.PrimaryAttribution)
+				} else {
+					stableCol += fmt.Sprintf(" attr=%s(split)", si.PrimaryAttribution)
+				}
+			}
 			// Append age in days when older than 14 days.
 			if !si.TestedAt.IsZero() {
 				age := int(time.Since(si.TestedAt).Hours() / 24)
@@ -1366,6 +1440,40 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	if currentModel != "" && cert.DiagnosisModel != "" && cert.DiagnosisModel != currentModel {
 		fmt.Printf("  ⚠ cert was issued for %s but current agent model is %s\n", cert.DiagnosisModel, currentModel)
 		fmt.Printf("    Run: faulttest run --repeat N --agent-model %s ... to re-certify\n", currentModel)
+	}
+	if cert.PrimaryAttribution != "" && cert.PrimaryAttribution != attributionUnknown {
+		fmt.Println()
+		taxStr := ""
+		if cert.TaxonomyVersion != "" {
+			taxStr = fmt.Sprintf(" (taxonomy %s)", cert.TaxonomyVersion)
+		}
+		fmt.Printf("  Attribution%s\n", taxStr)
+		totalRuns := 0
+		for _, v := range cert.AttributionDistribution {
+			totalRuns += v
+		}
+		primaryCount := cert.AttributionDistribution[cert.PrimaryAttribution]
+		consistent := "yes"
+		if !cert.AttributionConsistent {
+			consistent = "no (split)"
+		}
+		fmt.Printf("  Primary class  : %s\n", cert.PrimaryAttribution)
+		if totalRuns > 0 {
+			fmt.Printf("  Consistent     : %s  (%d/%d runs)\n", consistent, primaryCount, totalRuns)
+		} else {
+			fmt.Printf("  Consistent     : %s\n", consistent)
+		}
+		if len(cert.AttributionDistribution) > 1 {
+			var parts []string
+			for k, v := range cert.AttributionDistribution {
+				parts = append(parts, fmt.Sprintf("%s=%d", k, v))
+			}
+			sort.Strings(parts)
+			fmt.Printf("  Distribution   : %s\n", strings.Join(parts, ", "))
+		}
+		if cert.JudgeSpread > 1e-10 {
+			fmt.Printf("  Judge spread   : %.2f\n", cert.JudgeSpread)
+		}
 	}
 }
 
@@ -2320,6 +2428,13 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 			sectionJ("EXECUTION TRACE")
 			printReasoningTrace(events)
 		}
+		// Show the structured FINDINGS from the playbook run's diagnostic_report.
+		// This is the agent's final conclusion that often falls after the last tool
+		// call and is not captured as an agent_reasoning event.
+		if runSummary := fetchRunFindings(gatewayURL, apiKey, j.IncidentRunID); runSummary != "" {
+			sectionJ("FINDINGS")
+			fmt.Printf("  %s\n", wordWrap(runSummary, 68, "  "))
+		}
 	} else if len(j.ToolsUsed) > 0 {
 		sectionJ("TOOLS USED")
 		if detail && j.IncidentRunID == "" {
@@ -2385,6 +2500,38 @@ type journeyToolExec struct {
 type journeyReasoning struct {
 	Reasoning string   `json:"reasoning"`
 	ToolCalls []string `json:"tool_calls"`
+}
+
+// fetchRunFindings fetches the findings_summary from a single playbook run.
+// Returns empty string when not found or on error. This surfaces the agent's
+// final FINDINGS line that is stored on the run record rather than as an event.
+func fetchRunFindings(gatewayURL, apiKey, runID string) string {
+	if gatewayURL == "" || runID == "" {
+		return ""
+	}
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs/" + runID
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var run struct {
+		FindingsSummary string `json:"findings_summary"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
+		return ""
+	}
+	return run.FindingsSummary
 }
 
 // fetchRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events and
@@ -2554,12 +2701,14 @@ func vaultSuggestUpdate(args []string) {
 		seriesID   string
 		traceID    string
 		outcome    string
+		filePath   string
 		gatewayURL string
 		apiKey     string
 	)
 	fs.StringVar(&seriesID, "series-id", "", "Series ID of the playbook to update (required)")
 	fs.StringVar(&traceID, "trace-id", "", "Run ID or trace ID to synthesize from (auto-selected when omitted)")
 	fs.StringVar(&outcome, "outcome", "resolved", "Incident outcome: resolved or escalated")
+	fs.StringVar(&filePath, "file", "", "Upload a local YAML file as a draft instead of synthesizing from a trace")
 	fs.StringVar(&gatewayURL, "gateway", "http://localhost:8080", "Gateway base URL")
 	fs.StringVar(&apiKey, "api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Gateway API key")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
@@ -2568,6 +2717,96 @@ func vaultSuggestUpdate(args []string) {
 	if seriesID == "" {
 		fmt.Fprintln(os.Stderr, "Error: --series-id is required")
 		os.Exit(1)
+	}
+
+	// --file path: upload local YAML directly via /import, skip trace synthesis.
+	if filePath != "" {
+		yamlBytes, err := os.ReadFile(filePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", filePath, err)
+			os.Exit(1)
+		}
+		body, _ := json.Marshal(map[string]any{
+			"text":   string(yamlBytes),
+			"format": "yaml",
+			"hints":  map[string]string{"series_id": seriesID},
+		})
+		reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/import"
+		req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(body))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error uploading file: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "Gateway returned %d: %s\n", resp.StatusCode, respBody)
+			os.Exit(1)
+		}
+
+		// /import validates and parses only — it does NOT persist. Extract the draft
+		// and POST to /api/v1/fleet/playbooks to save it and get a real playbook_id.
+		var importedRaw struct {
+			Draft json.RawMessage `json:"draft"`
+		}
+		if err := json.Unmarshal(respBody, &importedRaw); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding import response: %v\n", err)
+			os.Exit(1)
+		}
+		var draftMap map[string]any
+		if err := json.Unmarshal(importedRaw.Draft, &draftMap); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding draft: %v\n", err)
+			os.Exit(1)
+		}
+		draftMap["source"] = "imported"
+		saveBody, _ := json.Marshal(draftMap)
+		saveURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks"
+		saveReq, err := http.NewRequest(http.MethodPost, saveURL, bytes.NewReader(saveBody))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building save request: %v\n", err)
+			os.Exit(1)
+		}
+		saveReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			saveReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		saveResp, err := (&http.Client{Timeout: 15 * time.Second}).Do(saveReq)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving draft: %v\n", err)
+			os.Exit(1)
+		}
+		defer saveResp.Body.Close()
+		saveRespBody, _ := io.ReadAll(saveResp.Body)
+		if saveResp.StatusCode != http.StatusCreated && saveResp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "Save failed (%d): %s\n", saveResp.StatusCode, saveRespBody)
+			os.Exit(1)
+		}
+		var saved struct {
+			PlaybookID string `json:"playbook_id"`
+			SeriesID   string `json:"series_id"`
+			Version    string `json:"version"`
+			Name       string `json:"name"`
+		}
+		if err := json.Unmarshal(saveRespBody, &saved); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding save response: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Uploaded: %s  v%s  %s\n", saved.PlaybookID, saved.Version, saved.Name)
+		fmt.Printf("Series:   %s\n\n", saved.SeriesID)
+		fmt.Printf("# To diff against active version:\n")
+		fmt.Printf("#   faulttest vault diff --judge <active-id> %s --gateway %s --api-key <key>\n", saved.PlaybookID, gatewayURL)
+		fmt.Printf("# To activate:\n")
+		fmt.Printf("#   faulttest vault activate %s --gateway %s --api-key <key>\n", saved.PlaybookID, gatewayURL)
+		return
 	}
 	// Auto-select the most recent resolved run when --trace-id is omitted.
 	if traceID == "" {
@@ -2847,7 +3086,7 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 // postStabilityCert posts a fault triage consistency certification to auditd
 // via the gateway. Silently skipped when --gateway is not set. Errors are
 // logged but never cause the run to fail.
-func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport) {
+func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport, attr *attributionSummary) {
 	if cfg.GatewayURL == "" {
 		return
 	}
@@ -2861,6 +3100,13 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		"pass_rate":          sr.passRate(),
 		"conf_range_pp":      int(math.Round(sr.confRange() * 100)),
 		"is_stable":          sr.isStable(),
+	}
+	if attr != nil {
+		payload["primary_attribution"] = attr.PrimaryAttribution
+		payload["attribution_consistent"] = attr.AttributionConsistent
+		payload["attribution_distribution"] = attr.AttributionDistribution
+		payload["judge_spread"] = attr.JudgeSpread
+		payload["taxonomy_version"] = attr.TaxonomyVersion
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2909,6 +3155,8 @@ type versionStats struct {
 	ResolutionRate  float64 `json:"resolution_rate"`
 	Transitioned    int     `json:"transitioned"`
 	TransitionRate  float64 `json:"transition_rate"`
+	Escalated       int     `json:"escalated"`
+	EscalationRate  float64 `json:"escalation_rate"`
 	AvgStepCount    float64 `json:"avg_step_count"`
 	AvgRecoverySecs float64 `json:"avg_recovery_secs"`
 	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`
@@ -3292,13 +3540,14 @@ func vaultJudgeAccuracy(args []string) {
 	}
 
 	type judgeRow struct {
-		SeriesID     string
-		Version      string
-		JudgeVerdict string
-		JudgeModel   string
-		JudgeAt      string
-		TotalRuns    int
-		SuccessRate  float64
+		SeriesID       string
+		Version        string
+		JudgeVerdict   string
+		JudgeModel     string
+		JudgeAt        string
+		TotalRuns      int
+		ResolvedRate   float64
+		EscalatedRate  float64
 	}
 
 	// Build rows by reading judge verdicts directly from each playbook in the
@@ -3352,8 +3601,9 @@ func vaultJudgeAccuracy(args []string) {
 				JudgeAt:      pb.JudgeAt,
 			}
 			if v, ok := runsByPB[pb.PlaybookID]; ok {
-				row.TotalRuns = v.TotalRuns
-				row.SuccessRate = v.ResolutionRate + v.TransitionRate
+				row.TotalRuns     = v.TotalRuns
+				row.ResolvedRate  = v.ResolutionRate + v.TransitionRate
+				row.EscalatedRate = v.EscalationRate
 			}
 			rows = append(rows, row)
 		}
@@ -3365,38 +3615,43 @@ func vaultJudgeAccuracy(args []string) {
 	}
 
 	const (
-		colSeries  = 32
-		colVer     = 10
-		colVerdict = 20
-		colRuns    = 6
-		colSuccess = 9
+		colSeries   = 32
+		colVer      = 10
+		colVerdict  = 20
+		colRuns     = 6
+		colResolved = 10
+		colEscalated = 11
 	)
-	sepWidth := colSeries + 2 + colVer + 2 + colVerdict + 2 + colRuns + 2 + colSuccess + 2 + 20
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+	sepWidth := colSeries + 2 + colVer + 2 + colVerdict + 2 + colRuns + 2 + colResolved + 2 + colEscalated + 2 + 20
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 		colSeries, "SERIES", colVer, "VERSION", colVerdict, "JUDGE VERDICT",
-		colRuns, "RUNS", colSuccess, "SUCCESS%", "JUDGE MODEL")
+		colRuns, "RUNS", colResolved, "RESOLVED%", colEscalated, "ESCALATED%", "JUDGE MODEL")
 	fmt.Println(strings.Repeat("─", sepWidth))
 	for _, r := range rows {
-		successStr := "–"
+		resolvedStr := "–"
+		escalatedStr := "–"
 		if r.TotalRuns > 0 {
-			successStr = fmt.Sprintf("%d%%", int(r.SuccessRate*100))
+			resolvedStr = fmt.Sprintf("%d%%", int(r.ResolvedRate*100))
+			escalatedStr = fmt.Sprintf("%d%%", int(r.EscalatedRate*100))
 		}
 		series := r.SeriesID
 		if len(series) > colSeries {
 			series = series[:colSeries-1] + "…"
 		}
-		fmt.Printf("%-*s  %-*s  %-*s  %-*d  %-*s  %s\n",
+		fmt.Printf("%-*s  %-*s  %-*s  %-*d  %-*s  %-*s  %s\n",
 			colSeries, series,
 			colVer, r.Version,
 			colVerdict, r.JudgeVerdict,
 			colRuns, r.TotalRuns,
-			colSuccess, successStr,
+			colResolved, resolvedStr,
+			colEscalated, escalatedStr,
 			r.JudgeModel,
 		)
 	}
 	fmt.Println()
 	fmt.Println("JUDGE VERDICT is the prediction recorded by `vault diff`.")
-	fmt.Println("SUCCESS% is the actual outcome after runs on this version.")
+	fmt.Println("RESOLVED% = fraction of runs resolved (or transitioned to remediation) by this version.")
+	fmt.Println("ESCALATED% = fraction of runs that correctly escalated to a specialist agent.")
 }
 
 // ── vault cert-compare ────────────────────────────────────────────────────
@@ -3410,10 +3665,14 @@ type certCompareRow struct {
 }
 
 type certCompareEntry struct {
-	isStable bool
-	passRate float64
-	nRuns    int
-	testedAt string
+	isStable              bool
+	passRate              float64
+	nRuns                 int
+	testedAt              string
+	primaryAttribution    string
+	attributionConsistent bool
+	taxonomyVersion       string
+	judgeSpread           float64
 }
 
 // vaultCertCompare compares stability certs for two diagnosis models.
@@ -3450,10 +3709,14 @@ func vaultCertCompare(args []string) {
 	names := make(map[string]string) // fault_id → fault_name
 	for _, c := range allCerts {
 		byKey[certKey{c.FaultID, c.DiagnosisModel}] = &certCompareEntry{
-			isStable: c.IsStable,
-			passRate: c.PassRate,
-			nRuns:    c.NRuns,
-			testedAt: c.TestedAt,
+			isStable:              c.IsStable,
+			passRate:              c.PassRate,
+			nRuns:                 c.NRuns,
+			testedAt:              c.TestedAt,
+			primaryAttribution:    c.PrimaryAttribution,
+			attributionConsistent: c.AttributionConsistent,
+			taxonomyVersion:       c.TaxonomyVersion,
+			judgeSpread:           c.JudgeSpread,
 		}
 		if c.FaultName != "" {
 			names[c.FaultID] = c.FaultName
@@ -3546,11 +3809,32 @@ func vaultCertCompare(args []string) {
 			colNew, newStr,
 			change,
 		)
-		// For regressions: show diagnosis-rate delta as context.
+		// For regressions: show diagnosis-rate delta and attribution context.
 		if r.oldCert != nil && r.newCert != nil && r.oldCert.isStable && !r.newCert.isStable {
 			delta := r.newCert.passRate - r.oldCert.passRate
 			fmt.Printf("  %s diag_rate: %.0f%% → %.0f%%  (Δ%+.0f%%)\n",
 				r.faultID, r.oldCert.passRate*100, r.newCert.passRate*100, delta*100)
+		}
+		// Attribution comparison when both certs have taxonomy data.
+		if r.oldCert != nil && r.newCert != nil &&
+			r.oldCert.primaryAttribution != "" && r.newCert.primaryAttribution != "" {
+			oldTV := r.oldCert.taxonomyVersion
+			newTV := r.newCert.taxonomyVersion
+			taxWarning := ""
+			if oldTV != "" && newTV != "" && majorVersion(oldTV) != majorVersion(newTV) {
+				taxWarning = fmt.Sprintf("  ⚠ TAXONOMY MAJOR %s→%s: attribution comparison invalid", oldTV, newTV)
+			}
+			oldAttr := r.oldCert.primaryAttribution
+			if !r.oldCert.attributionConsistent {
+				oldAttr += "(split)"
+			}
+			newAttr := r.newCert.primaryAttribution
+			if !r.newCert.attributionConsistent {
+				newAttr += "(split)"
+			}
+			if oldAttr != newAttr || taxWarning != "" {
+				fmt.Printf("  attribution: %s → %s%s\n", oldAttr, newAttr, taxWarning)
+			}
 		}
 	}
 
@@ -3582,13 +3866,17 @@ func vaultCertCompare(args []string) {
 
 // fetchAllStabilityCerts retrieves every (fault, model) cert row from the gateway.
 func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
-	FaultID        string  `json:"fault_id"`
-	FaultName      string  `json:"fault_name"`
-	DiagnosisModel string  `json:"diagnosis_model"`
-	NRuns          int     `json:"n_runs"`
-	PassRate       float64 `json:"pass_rate"`
-	IsStable       bool    `json:"is_stable"`
-	TestedAt       string  `json:"tested_at"`
+	FaultID               string  `json:"fault_id"`
+	FaultName             string  `json:"fault_name"`
+	DiagnosisModel        string  `json:"diagnosis_model"`
+	NRuns                 int     `json:"n_runs"`
+	PassRate              float64 `json:"pass_rate"`
+	IsStable              bool    `json:"is_stable"`
+	TestedAt              string  `json:"tested_at"`
+	PrimaryAttribution    string  `json:"primary_attribution"`
+	AttributionConsistent bool    `json:"attribution_consistent"`
+	TaxonomyVersion       string  `json:"taxonomy_version"`
+	JudgeSpread           float64 `json:"judge_spread"`
 }, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
@@ -3609,13 +3897,17 @@ func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
 	}
 	var result struct {
 		Certs []struct {
-			FaultID        string  `json:"fault_id"`
-			FaultName      string  `json:"fault_name"`
-			DiagnosisModel string  `json:"diagnosis_model"`
-			NRuns          int     `json:"n_runs"`
-			PassRate       float64 `json:"pass_rate"`
-			IsStable       bool    `json:"is_stable"`
-			TestedAt       string  `json:"tested_at"`
+			FaultID               string  `json:"fault_id"`
+			FaultName             string  `json:"fault_name"`
+			DiagnosisModel        string  `json:"diagnosis_model"`
+			NRuns                 int     `json:"n_runs"`
+			PassRate              float64 `json:"pass_rate"`
+			IsStable              bool    `json:"is_stable"`
+			TestedAt              string  `json:"tested_at"`
+			PrimaryAttribution    string  `json:"primary_attribution"`
+			AttributionConsistent bool    `json:"attribution_consistent"`
+			TaxonomyVersion       string  `json:"taxonomy_version"`
+			JudgeSpread           float64 `json:"judge_spread"`
 		} `json:"certs"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -3662,6 +3954,15 @@ func changeOrder(r certCompareRow) int {
 	default:
 		return 4 // missing
 	}
+}
+
+// majorVersion extracts the major component of a semver string "MAJOR.minor".
+// Returns the whole string when no dot is present.
+func majorVersion(v string) string {
+	if i := strings.IndexByte(v, '.'); i > 0 {
+		return v[:i]
+	}
+	return v
 }
 
 // shortModelName strips the leading "claude-" vendor prefix if present,

@@ -242,7 +242,7 @@ func TestRegisterAutoDBWithGateway_PostsCorrectPayload(t *testing.T) {
 	defer srv.Close()
 
 	connStr := "host=127.0.0.1 port=61195 dbname=faulttest user=postgres password=faulttest sslmode=disable"
-	if err := registerAutoDBWithGateway(srv.URL, "test-key", connStr); err != nil {
+	if err := registerAutoDBWithGateway(srv.URL, "test-key", connStr, "faulttest-auto-61195"); err != nil {
 		t.Fatalf("registerAutoDBWithGateway: %v", err)
 	}
 	if gotMethod != http.MethodPost {
@@ -279,7 +279,7 @@ func TestRegisterAutoDBWithGateway_ServerIDFromPort(t *testing.T) {
 	defer srv.Close()
 
 	// Port extracted regardless of field order.
-	registerAutoDBWithGateway(srv.URL, "", "dbname=faulttest port=55000 host=127.0.0.1 user=postgres") //nolint:errcheck
+	registerAutoDBWithGateway(srv.URL, "", "dbname=faulttest port=55000 host=127.0.0.1 user=postgres", "faulttest-auto-55000") //nolint:errcheck
 	var payload map[string]any
 	json.Unmarshal(gotBody, &payload) //nolint:errcheck
 	if payload["server_id"] != "faulttest-auto-55000" {
@@ -295,7 +295,7 @@ func TestRegisterAutoDBWithGateway_NoPort_FallbackID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	registerAutoDBWithGateway(srv.URL, "", "host=localhost dbname=faulttest user=postgres") //nolint:errcheck
+	registerAutoDBWithGateway(srv.URL, "", "host=localhost dbname=faulttest user=postgres", "") //nolint:errcheck
 	var payload map[string]any
 	json.Unmarshal(gotBody, &payload) //nolint:errcheck
 	if payload["server_id"] != "faulttest-auto" {
@@ -309,14 +309,115 @@ func TestRegisterAutoDBWithGateway_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := registerAutoDBWithGateway(srv.URL, "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres")
+	err := registerAutoDBWithGateway(srv.URL, "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres", "faulttest-auto-61195")
 	if err == nil {
 		t.Error("want error for 500 response")
 	}
 }
 
 func TestRegisterAutoDBWithGateway_NetworkError(t *testing.T) {
-	err := registerAutoDBWithGateway("http://127.0.0.1:19994", "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres")
+	err := registerAutoDBWithGateway("http://127.0.0.1:19994", "", "host=127.0.0.1 port=61195 dbname=faulttest user=postgres", "faulttest-auto-61195")
+	if err == nil {
+		t.Error("want error for unreachable server")
+	}
+}
+
+// ── autoDBServerID ────────────────────────────────────────────────────────────
+
+func TestAutoDBServerID_ExtractsPort(t *testing.T) {
+	id := autoDBServerID("host=127.0.0.1 port=15432 dbname=faulttest user=postgres sslmode=disable")
+	if id != "faulttest-auto-15432" {
+		t.Errorf("got %q, want faulttest-auto-15432", id)
+	}
+}
+
+func TestAutoDBServerID_PortAnyOrder(t *testing.T) {
+	id := autoDBServerID("dbname=faulttest port=55000 host=127.0.0.1 user=postgres")
+	if id != "faulttest-auto-55000" {
+		t.Errorf("got %q, want faulttest-auto-55000", id)
+	}
+}
+
+func TestAutoDBServerID_NoPort_FallbackID(t *testing.T) {
+	id := autoDBServerID("host=localhost dbname=faulttest user=postgres")
+	if id != "faulttest-auto" {
+		t.Errorf("got %q, want faulttest-auto (no port)", id)
+	}
+}
+
+// ── registerAutoDBWithSysadmin ────────────────────────────────────────────────
+
+func TestRegisterAutoDBWithSysadmin_PostsCorrectPayload(t *testing.T) {
+	var gotPath, gotMethod, gotAuth string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	if err := registerAutoDBWithSysadmin(srv.URL, "sk-sysadmin-test", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "faulttest-auto-db-abc123"); err != nil {
+		t.Fatalf("registerAutoDBWithSysadmin: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/tool/register_infra_db" {
+		t.Errorf("path = %q, want /tool/register_infra_db", gotPath)
+	}
+	if gotAuth != "Bearer sk-sysadmin-test" {
+		t.Errorf("Authorization = %q, want Bearer sk-sysadmin-test", gotAuth)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if payload["server_id"] != "faulttest-auto-15432" {
+		t.Errorf("server_id = %v, want faulttest-auto-15432", payload["server_id"])
+	}
+	if payload["container_name"] != "faulttest-auto-db-abc123" {
+		t.Errorf("container_name = %v, want faulttest-auto-db-abc123", payload["container_name"])
+	}
+	if payload["runtime"] != "docker" {
+		t.Errorf("runtime = %v, want docker", payload["runtime"])
+	}
+}
+
+func TestRegisterAutoDBWithSysadmin_NoAPIKey_OmitsAuthHeader(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	if err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "container"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty when no API key", gotAuth)
+	}
+}
+
+func TestRegisterAutoDBWithSysadmin_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	err := registerAutoDBWithSysadmin(srv.URL, "", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "container")
+	if err == nil {
+		t.Error("want error for 500 response")
+	}
+}
+
+func TestRegisterAutoDBWithSysadmin_NetworkError(t *testing.T) {
+	err := registerAutoDBWithSysadmin("http://127.0.0.1:19995", "", "faulttest-auto-15432", "host=127.0.0.1 port=15432 dbname=faulttest", "container")
 	if err == nil {
 		t.Error("want error for unreachable server")
 	}

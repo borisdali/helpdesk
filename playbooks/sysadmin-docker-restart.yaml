@@ -1,6 +1,6 @@
 series_id: pbs_db_restart_action
 name: "Sysadmin — Docker Container Restart"
-version: "1.0"
+version: "1.1"
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent
@@ -36,23 +36,21 @@ guidance: |
 
   Step 2 — Confirm the container is running:
   Call check_host with the same connection_string. Verify Status=running
-  and Restarting=false.
+  and Restarting=false. Also check the recent container logs for PostgreSQL
+  startup messages ("database system is ready to accept connections").
 
-  Step 3 — Confirm PostgreSQL is accepting connections:
-  Call check_connection with the connection_string. If it succeeds, the
-  service is restored. If it fails, wait 5 seconds and try once more — the
-  PostgreSQL startup sequence takes a moment.
-
-  Step 4 — Report outcome:
+  Step 3 — Report outcome:
   Emit FINDINGS with:
   - Whether the restart succeeded or failed
   - The container state after restart (Status, ExitCode, StartedAt)
-  - Whether PostgreSQL is now accepting connections
+  - PostgreSQL readiness from the container logs
   - Any anomalies observed (unexpected exit codes, slow startup, log warnings)
 
   Do NOT call any write or destructive tools beyond restart_container.
   Do NOT retry more than once — if the container fails to start, report the
   failure and stop so a human can investigate.
+  Do NOT emit TRANSITION_TO or ESCALATE_TO — this is a terminal action
+  playbook. Your job ends with FINDINGS.
 
 escalation:
   - "container fails to start after restart_service — may indicate a config or data issue"

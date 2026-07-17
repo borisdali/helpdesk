@@ -7,8 +7,9 @@ import (
 	"helpdesk/internal/infra"
 )
 
-// expectedSysadminTools is the canonical list of tools that must be registered
-// in NewSysadminDirectRegistry. Update whenever a tool is added or removed.
+// expectedSysadminTools is the canonical list of LLM-callable tools that must
+// be registered in NewSysadminDirectRegistry. Admin-only tools (register_infra_db)
+// are tested separately and intentionally excluded here.
 var expectedSysadminTools = []string{
 	"check_host",
 	"get_host_logs",
@@ -91,5 +92,41 @@ func TestSysadminDirectRegistry_CheckHost(t *testing.T) {
 	}
 	if out == "" {
 		t.Error("expected non-empty output from check_host")
+	}
+}
+
+// TestSysadminDirectRegistry_RegisterInfraDB verifies that register_infra_db is
+// callable via the registry and that the registered server can subsequently be
+// resolved by sysadmin tools.
+func TestSysadminDirectRegistry_RegisterInfraDB(t *testing.T) {
+	old := infraConfig
+	infraConfig = nil
+	t.Cleanup(func() { infraConfig = old })
+
+	r := NewSysadminDirectRegistry()
+	fn, ok := r.Get("register_infra_db")
+	if !ok {
+		t.Fatal("register_infra_db not registered in NewSysadminDirectRegistry()")
+	}
+
+	out, err := fn(context.Background(), map[string]any{
+		"server_id":      "faulttest-auto-15432",
+		"container_name": "faulttest-auto-db-abc",
+		"runtime":        "docker",
+	})
+	if err != nil {
+		t.Fatalf("register_infra_db via registry: %v", err)
+	}
+	if out != `{"ok":true}` {
+		t.Errorf("output = %q, want {\"ok\":true}", out)
+	}
+
+	// Verify the server is now resolvable by sysadmin tools.
+	host, err := resolveHost("faulttest-auto-15432")
+	if err != nil {
+		t.Fatalf("resolveHost after registry registration: %v", err)
+	}
+	if host.ContainerName != "faulttest-auto-db-abc" {
+		t.Errorf("ContainerName = %q, want faulttest-auto-db-abc", host.ContainerName)
 	}
 }

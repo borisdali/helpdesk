@@ -69,8 +69,23 @@ type Playbook struct {
 	JudgeModel   string    `json:"judge_model,omitempty"`   // model that issued the verdict
 	JudgeAt      time.Time `json:"judge_at,omitempty"`      // when the verdict was recorded
 
+	// Attribution classification taxonomy (v0.21.0). Triage playbooks carry a
+	// closed enum of plausible root-cause labels. faulttest uses these at cert
+	// time to classify each eval run's FINDINGS text, enabling conclusion-stability
+	// measurement independent of the pass/fail outcome score.
+	RootCauseClasses *RootCauseClassification `json:"root_cause_classes,omitempty"`
+
 	// Computed fields (not persisted; populated on demand)
 	Stats *PlaybookRunStats `json:"stats,omitempty"` // run statistics, injected by handleList
+}
+
+// RootCauseClassification is a versioned closed enum of plausible root-cause
+// attribution labels for a triage playbook. Semver-versioned: minor bumps
+// (new class added) are backwards-comparable; major bumps (split/merge/rename)
+// invalidate attribution comparisons across the version boundary.
+type RootCauseClassification struct {
+	Version string   `json:"version"`
+	Classes []string `json:"classes"`
 }
 
 // PlaybookStore persists fleet playbooks.
@@ -142,6 +157,8 @@ func (s *PlaybookStore) migrateSchema() error {
 		"ALTER TABLE playbooks ADD COLUMN judge_verdict      TEXT    NOT NULL DEFAULT ''",
 		"ALTER TABLE playbooks ADD COLUMN judge_model        TEXT    NOT NULL DEFAULT ''",
 		"ALTER TABLE playbooks ADD COLUMN judge_at           TEXT    NOT NULL DEFAULT ''",
+		// Attribution taxonomy (v0.21): closed enum for conclusion-stability measurement.
+		"ALTER TABLE playbooks ADD COLUMN root_cause_classes TEXT    NOT NULL DEFAULT '{}'",
 	}
 	for _, stmt := range newCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -232,6 +249,14 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		return fmt.Errorf("marshal permitted_tools: %w", err)
 	}
 
+	rootCauseClassesJSON := []byte("{}")
+	if pb.RootCauseClasses != nil {
+		rootCauseClassesJSON, err = json.Marshal(pb.RootCauseClasses)
+		if err != nil {
+			return fmt.Errorf("marshal root_cause_classes: %w", err)
+		}
+	}
+
 	var lastValidatedStr *string
 	if pb.LastValidated != nil {
 		s := pb.LastValidated.UTC().Format(time.RFC3339Nano)
@@ -258,15 +283,15 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		     series_id, is_active, is_system, source,
 		     entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
 		     approval_mode, agent_name, transitions_to, origin_trace, playbook_type,
-		     judge_verdict, judge_model, judge_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     judge_verdict, judge_model, judge_at, root_cause_classes)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
 		entryPointInt, string(escalatesToJSON), string(requiresEvidenceJSON), pb.ExecutionMode, string(permittedToolsJSON),
 		pb.ApprovalMode, pb.AgentName, string(transitionsToJSON), pb.OriginTrace, pb.PlaybookType,
-		pb.JudgeVerdict, pb.JudgeModel, formatNullableTime(pb.JudgeAt),
+		pb.JudgeVerdict, pb.JudgeModel, formatNullableTime(pb.JudgeAt), string(rootCauseClassesJSON),
 	)
 	return err
 }
@@ -526,7 +551,8 @@ const playbookColumns = `playbook_id, name, description, target_hints, created_b
 	series_id, is_active, is_system, source,
 	entry_point, escalates_to, requires_evidence, execution_mode, permitted_tools,
 	approval_mode, agent_name, transitions_to, origin_trace, playbook_type,
-	judge_verdict, judge_model, judge_at`
+	judge_verdict, judge_model, judge_at,
+	root_cause_classes`
 
 // Get returns a playbook by ID, or sql.ErrNoRows if not found.
 func (s *PlaybookStore) Get(ctx context.Context, id string) (*Playbook, error) {
@@ -590,6 +616,7 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 	var lastValidatedStr *string
 	var isActive, isSystem, entryPoint int // SQLite stores bools as INTEGER; scan into int then convert
 	var judgeAtStr string
+	var rootCauseClassesJSON string
 
 	if err := s.Scan(
 		&pb.PlaybookID, &pb.Name, &pb.Description, &hintsJSON,
@@ -600,8 +627,15 @@ func scanPlaybook(s scanner) (*Playbook, error) {
 		&entryPoint, &escalatesToJSON, &requiresEvidenceJSON, &pb.ExecutionMode, &permittedToolsJSON,
 		&pb.ApprovalMode, &pb.AgentName, &transitionsToJSON, &pb.OriginTrace, &pb.PlaybookType,
 		&pb.JudgeVerdict, &pb.JudgeModel, &judgeAtStr,
+		&rootCauseClassesJSON,
 	); err != nil {
 		return nil, err
+	}
+	if rootCauseClassesJSON != "" && rootCauseClassesJSON != "{}" {
+		var rcc RootCauseClassification
+		if err := json.Unmarshal([]byte(rootCauseClassesJSON), &rcc); err == nil && len(rcc.Classes) > 0 {
+			pb.RootCauseClasses = &rcc
+		}
 	}
 	if judgeAtStr != "" {
 		pb.JudgeAt = parseFlexTime(judgeAtStr)

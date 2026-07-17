@@ -532,6 +532,64 @@ func TestPlaybookStore_ListActiveOnly(t *testing.T) {
 	}
 }
 
+func TestPlaybookStore_ActivateSystem(t *testing.T) {
+	ps := newPlaybookTestStore(t)
+	ctx := context.Background()
+
+	const series = "pbs_lock_chain_triage"
+	v1 := &Playbook{Name: "Lock Chain v1", Description: "d", SeriesID: series, IsSystem: true, IsActive: true}
+	v2 := &Playbook{Name: "Lock Chain v2", Description: "d", SeriesID: series, IsSystem: true, IsActive: false}
+	for _, pb := range []*Playbook{v1, v2} {
+		if err := ps.Create(ctx, pb); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	// ActivateSystem should promote v2 and deactivate v1.
+	if err := ps.ActivateSystem(ctx, v2.PlaybookID, series); err != nil {
+		t.Fatalf("ActivateSystem: %v", err)
+	}
+
+	got1, err := ps.Get(ctx, v1.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get v1: %v", err)
+	}
+	if got1.IsActive {
+		t.Error("v1 should be inactive after ActivateSystem")
+	}
+
+	got2, err := ps.Get(ctx, v2.PlaybookID)
+	if err != nil {
+		t.Fatalf("Get v2: %v", err)
+	}
+	if !got2.IsActive {
+		t.Error("v2 should be active after ActivateSystem")
+	}
+}
+
+func TestNextVersion(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", "1.0"},
+		{"2", "2.1"},
+		{"1.3", "1.4"},
+		{"2.9", "2.10"},
+		{"1.0", "1.1"},
+	}
+	for _, tc := range cases {
+		got := nextVersion(tc.in)
+		if got != tc.want {
+			t.Errorf("nextVersion(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// Unrecognised format returns blank — caller treats blank as error.
+	if got := nextVersion("1.x"); got != "" {
+		t.Errorf("nextVersion(\"1.x\") = %q, want \"\"", got)
+	}
+}
+
 func TestPlaybookStore_ListBySeries(t *testing.T) {
 	ps := newPlaybookTestStore(t)
 	ctx := context.Background()
