@@ -775,6 +775,93 @@ func TestPlaybookRunStore_StatsByVersion_JudgeVerdict(t *testing.T) {
 // TestPlaybookRunStore_Stats_EfficiencyMetrics verifies that augmentEfficiencyStats
 // populates AvgStepCount and AvgRecoverySecs in Stats() and StatsBatch() when run
 // steps and completed_at timestamps are present.
+func TestPlaybookRunStore_ListBySeriesID(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	for _, r := range []*PlaybookRun{
+		{PlaybookID: "pb_v1", SeriesID: "pbs_vacuum_triage", ExecutionMode: "agent", Outcome: "resolved", StartedAt: time.Now().UTC()},
+		{PlaybookID: "pb_v2", SeriesID: "pbs_vacuum_triage", ExecutionMode: "agent", Outcome: "escalated", StartedAt: time.Now().UTC()},
+		{PlaybookID: "pb_other", SeriesID: "pbs_other_triage", ExecutionMode: "agent", Outcome: "resolved", StartedAt: time.Now().UTC()},
+	} {
+		if err := s.Record(ctx, r); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	runs, err := s.ListBySeriesID(ctx, "pbs_vacuum_triage", 10)
+	if err != nil {
+		t.Fatalf("ListBySeriesID: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs, want 2", len(runs))
+	}
+	for _, r := range runs {
+		if r.SeriesID != "pbs_vacuum_triage" {
+			t.Errorf("unexpected series_id %q", r.SeriesID)
+		}
+	}
+
+	// Default limit applied for out-of-range value.
+	all, err := s.ListBySeriesID(ctx, "pbs_vacuum_triage", 0)
+	if err != nil {
+		t.Fatalf("ListBySeriesID(limit=0): %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("got %d runs with limit=0, want 2", len(all))
+	}
+
+	// Unknown series returns empty slice.
+	none, err := s.ListBySeriesID(ctx, "pbs_nonexistent", 10)
+	if err != nil {
+		t.Fatalf("ListBySeriesID(empty): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("got %d runs for unknown series, want 0", len(none))
+	}
+}
+
+func TestPlaybookRunStore_ListByOutcome(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	for _, r := range []*PlaybookRun{
+		{PlaybookID: "pb_a", SeriesID: "pbs_s1", ExecutionMode: "agent", Outcome: "resolved", StartedAt: time.Now().UTC()},
+		{PlaybookID: "pb_b", SeriesID: "pbs_s1", ExecutionMode: "agent", Outcome: "resolved", StartedAt: time.Now().UTC()},
+		{PlaybookID: "pb_c", SeriesID: "pbs_s2", ExecutionMode: "agent", Outcome: "escalated", StartedAt: time.Now().UTC()},
+	} {
+		if err := s.Record(ctx, r); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	resolved, err := s.ListByOutcome(ctx, "resolved", 10)
+	if err != nil {
+		t.Fatalf("ListByOutcome(resolved): %v", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("got %d resolved runs, want 2", len(resolved))
+	}
+
+	// Default limit applied for out-of-range value.
+	all, err := s.ListByOutcome(ctx, "resolved", 0)
+	if err != nil {
+		t.Fatalf("ListByOutcome(limit=0): %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("got %d runs with limit=0, want 2", len(all))
+	}
+
+	// Unknown outcome returns empty slice.
+	none, err := s.ListByOutcome(ctx, "unknown_outcome", 10)
+	if err != nil {
+		t.Fatalf("ListByOutcome(empty): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("got %d runs for unknown outcome, want 0", len(none))
+	}
+}
+
 func TestPlaybookRunStore_Stats_EfficiencyMetrics(t *testing.T) {
 	ctx := context.Background()
 	raw, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})

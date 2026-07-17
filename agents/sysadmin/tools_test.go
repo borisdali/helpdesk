@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/infra"
 )
 
@@ -888,5 +890,116 @@ func TestResolveHost_PortFallback_NoMatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("error %q should mention 'not found'", err.Error())
+	}
+}
+
+// ── containerRuntimeBin ───────────────────────────────────────────────────────
+
+func TestContainerRuntimeBin(t *testing.T) {
+	cases := []struct {
+		runtime string
+		want    string
+		wantErr bool
+	}{
+		{"docker", "docker", false},
+		{"podman", "podman", false},
+		{"", "", false},       // systemd path — empty string, no error
+		{"lxc", "", true},     // unknown runtime
+	}
+	for _, tc := range cases {
+		h := resolvedHost{Runtime: tc.runtime}
+		got, err := containerRuntimeBin(h)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("containerRuntimeBin(%q): expected error, got nil", tc.runtime)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("containerRuntimeBin(%q): unexpected error: %v", tc.runtime, err)
+			}
+			if got != tc.want {
+				t.Errorf("containerRuntimeBin(%q) = %q, want %q", tc.runtime, got, tc.want)
+			}
+		}
+	}
+}
+
+// ── policy enforcement ────────────────────────────────────────────────────────
+
+func writeTempSysadminPolicyFile(t *testing.T, content string) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "sysadmin-policies-*.yaml")
+	if err != nil {
+		t.Fatalf("create temp policy file: %v", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatalf("write temp policy file: %v", err)
+	}
+	_ = f.Close()
+	return f.Name()
+}
+
+func withSysadminPolicyEnforcer(e *agentutil.PolicyEnforcer) func() {
+	old := policyEnforcer
+	policyEnforcer = e
+	return func() { policyEnforcer = old }
+}
+
+func newDenyHostDestructiveEnforcer(t *testing.T) *agentutil.PolicyEnforcer {
+	t.Helper()
+	const yaml = `
+version: "1"
+policies:
+  - name: deny-host-destructive
+    resources:
+      - type: host
+    rules:
+      - action: destructive
+        effect: deny
+        message: "host destructive operations are not permitted in this test"
+`
+	path := writeTempSysadminPolicyFile(t, yaml)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+func TestRestartContainer_PolicyDenied(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner("", nil)()
+	defer withSysadminPolicyEnforcer(newDenyHostDestructiveEnforcer(t))()
+
+	_, err := restartContainerImpl(context.Background(), RestartContainerArgs{
+		Target: "prod_db",
+		Reason: "test restart",
+	})
+	if err == nil {
+		t.Fatal("expected policy denial, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not permitted") {
+		t.Errorf("error %q should mention 'not permitted'", err.Error())
+	}
+}
+
+func TestRestartService_PolicyDenied(t *testing.T) {
+	withSystemdInfra(t)
+	defer withMockRunner("", nil)()
+	defer withSysadminPolicyEnforcer(newDenyHostDestructiveEnforcer(t))()
+
+	_, err := restartServiceImpl(context.Background(), RestartServiceArgs{
+		Target: "prod_db",
+		Reason: "test restart",
+	})
+	if err == nil {
+		t.Fatal("expected policy denial, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not permitted") {
+		t.Errorf("error %q should mention 'not permitted'", err.Error())
 	}
 }

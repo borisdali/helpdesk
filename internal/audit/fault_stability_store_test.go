@@ -609,6 +609,23 @@ CREATE TABLE fault_stability_cert (
 // TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent verifies that
 // calling migrate() on a fully-migrated database (all attribution columns
 // already present) does not fail.
+// TestFaultStabilityStore_MigrateSQLite_NoTable verifies that migrateSQLite is
+// a no-op when the fault_stability_cert table does not exist — the table will
+// be created by createSchema in normal flow, so this path is only reachable
+// when migrate is called directly on a raw DB that skipped createSchema.
+func TestFaultStabilityStore_MigrateSQLite_NoTable(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "notable.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrateSQLite(); err != nil {
+		t.Fatalf("migrateSQLite on empty DB: %v", err)
+	}
+}
+
 func TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent(t *testing.T) {
 	// newFaultStabilityStore calls NewFaultStabilityStore which runs createSchema+migrate.
 	store := newFaultStabilityStore(t)
