@@ -321,7 +321,7 @@ func TestSecbotHTTPPollingMode(t *testing.T) {
 // TestSecbotHTTPPollingReconnect verifies that secbot continues processing events
 // after auditd restarts. The HTTP polling retry loop should recover automatically.
 func TestSecbotHTTPPollingReconnect(t *testing.T) {
-	port := 19912
+	port := 19913
 	auditdURL := fmt.Sprintf("http://localhost:%d", port)
 	tmpDir := t.TempDir()
 	dbPath := fmt.Sprintf("%s/audit.db", tmpDir)
