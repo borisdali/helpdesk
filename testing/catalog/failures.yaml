@@ -854,6 +854,12 @@ failures:
           - "exit code"
       expected_diagnosis:
         category: "pod_crash_loop"
+        narrative: >
+          The agent should identify the pod is in CrashLoopBackOff with a
+          non-zero exit code, retrieve container logs to find the application
+          error causing repeated startup failures, and diagnose this as a
+          process-level crash — not an OOM kill (exit_code would be 137) and
+          not a resource scheduling issue (pod is assigned to a node).
     timeout: 60s
 
   - id: k8s-pending
@@ -889,6 +895,13 @@ failures:
           - "resource"
       expected_diagnosis:
         category: "pod_unschedulable"
+        narrative: >
+          The agent should find the pod is in Pending state with no node
+          assigned, check events for FailedScheduling entries citing
+          insufficient memory, confirm the pod requests 256Gi of RAM which
+          exceeds any node's available capacity, and diagnose this as an
+          unschedulable pod due to an excessive resource request — not a
+          crash, not an image issue, and not a PVC problem.
     diagnosis_playbook_series_id: pbs_k8s_pending_triage
     timeout: 60s
 
@@ -924,6 +937,13 @@ failures:
           - "manifest unknown"
       expected_diagnosis:
         category: "image_pull_failure"
+        narrative: >
+          The agent should find the pod is in ImagePullBackOff or
+          ErrImagePull state, check events for image pull errors (manifest
+          unknown, tag not found, or failed to pull image), and diagnose
+          that the container image tag does not exist in the registry —
+          not a network issue, not a registry authentication failure, and
+          not a node resource problem.
     diagnosis_playbook_series_id: pbs_k8s_image_pull_triage
     timeout: 60s
 
@@ -959,6 +979,13 @@ failures:
           - "empty"
       expected_diagnosis:
         category: "no_endpoints"
+        narrative: >
+          The agent should inspect the service and find it has no endpoint
+          addresses (empty subsets or no Endpoints object), compare the
+          service's selector against the labels on running pods to identify
+          the mismatch, and diagnose that traffic cannot reach the database
+          because no pods match the service selector — not a pod crash, not
+          a network policy issue, and not a DNS problem.
     diagnosis_playbook_series_id: pbs_k8s_no_endpoints_triage
     timeout: 60s
 
@@ -994,6 +1021,14 @@ failures:
           - "unbound"
       expected_diagnosis:
         category: "pvc_pending"
+        narrative: >
+          The agent should find the pod is in Pending state, check events
+          for PVC provisioning failures (no provisioner available, storage
+          class not found, or waiting for volume to be created), confirm the
+          PersistentVolumeClaim is also Pending (not Bound), and diagnose
+          that the pod cannot start because its PVC references a StorageClass
+          that does not exist — not a resource request problem and not a
+          node scheduling issue.
     diagnosis_playbook_series_id: pbs_k8s_pvc_triage
     timeout: 60s
 
@@ -1034,6 +1069,14 @@ failures:
           - "OOM"
       expected_diagnosis:
         category: "oom_killed"
+        narrative: >
+          The agent should identify exit_code=137 and reason=OOMKilled from
+          the pod's last termination state, inspect the container's memory
+          limit and find it is critically undersized (10Mi is insufficient
+          for PostgreSQL to initialize), and diagnose this as a resource
+          misconfiguration — not a memory leak (the pod dies immediately on
+          startup before any leak could develop) and not node memory pressure
+          (the OOMKiller targeted this specific container due to its limit).
     timeout: 60s
 
   - id: k8s-scale-to-zero
@@ -1075,6 +1118,13 @@ failures:
           - "not available"
       expected_diagnosis:
         category: "scaled_down"
+        narrative: >
+          The agent should find no running pods in the namespace, check the
+          StatefulSet and confirm replicas is set to zero (not a crash or
+          eviction — the StatefulSet itself was scaled down), and diagnose
+          this as an intentional or erroneous scale-to-zero rather than a
+          pod failure. The absence of any pod combined with replicas=0 in
+          the StatefulSet spec is the definitive signal.
     diagnosis_playbook_series_id: pbs_k8s_scale_to_zero_triage
     remediation:
       playbook_id: pbs_k8s_scale_to_zero_remediate
