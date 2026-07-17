@@ -1477,7 +1477,7 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	}
 }
 
-// vaultAccuracyAll is the no-arg mode: scans every catalog fault that has a
+// vaultAccuracyAll is the no-arg (or --ids) mode: scans catalog faults that have a
 // DiagnosisPlaybookSeriesID, fetches feedback stats for each, and prints a
 // summary table grouped by whether feedback has been submitted.
 func vaultAccuracyAll(cfg *HarnessConfig) {
@@ -1488,27 +1488,49 @@ func vaultAccuracyAll(cfg *HarnessConfig) {
 	}
 
 	type entry struct {
-		faultID                        string
-		seriesID                       string
-		atGateCount                    int
-		atGateCorrect                  int
-		postIncidentCount              int
-		postIncidentCorrect            int
-		rate                           float64
-		remediationFeedbackCount       int
-		remediationCorrectCount        int
-		remediationAccuracyRate        float64
+		faultID                  string
+		seriesID                 string
+		atGateCount              int
+		atGateCorrect            int
+		postIncidentCount        int
+		postIncidentCorrect      int
+		rate                     float64
+		remediationFeedbackCount int
+		remediationCorrectCount  int
+		remediationAccuracyRate  float64
 	}
+
+	// When --ids is given, only show those faults and skip the per-series dedup
+	// so that two faults sharing a playbook series each appear as their own row.
+	idSet := make(map[string]bool, len(cfg.FailureIDs))
+	for _, id := range cfg.FailureIDs {
+		idSet[id] = true
+	}
+	filtering := len(idSet) > 0
+
+	// Cache series API responses so shared-series faults only hit the gateway once.
+	seriesCache := make(map[string]playbookGatewayInfo)
 
 	seen := make(map[string]bool)
 	var withFeedback, withoutFeedback []entry
 	for _, f := range cat.Failures {
 		sid := f.DiagnosisPlaybookSeriesID
-		if sid == "" || seen[sid] {
+		if sid == "" {
+			continue
+		}
+		if filtering && !idSet[f.ID] {
+			continue
+		}
+		if !filtering && seen[sid] {
 			continue
 		}
 		seen[sid] = true
-		info := fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+
+		info, ok := seriesCache[sid]
+		if !ok {
+			info = fetchPlaybookInfo(cfg.GatewayURL, cfg.GatewayAPIKey, sid)
+			seriesCache[sid] = info
+		}
 		e := entry{faultID: f.ID, seriesID: sid}
 		if info.check == playbookFound {
 			e.atGateCount = info.atGateCount

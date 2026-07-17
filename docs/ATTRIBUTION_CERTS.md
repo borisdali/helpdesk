@@ -1,6 +1,6 @@
 # aiHelpDesk Attribution-Aware Stability Certs
 
-A stability cert records whether a [playbook's](PLAYBOOKS.md) *outcome* is consistent across N runs. Starting with aiHelpDesk release [v0.21.0](https://github.com/borisdali/helpdesk/releases/tag/v0.21.0), it also records whether the playbook's *conclusion* is [consistent](CONSISTENCY.md). That is, did the agent tell the same root-cause story each time or just pass the scorer by different paths? In our experience, these are distinct signals that can diverge in ways that matter for production use.
+A [stability cert](CONSISTENCY.md) records whether a [playbook's](PLAYBOOKS.md) *outcome* is consistent across N runs. Starting with aiHelpDesk release [v0.21.0](https://github.com/borisdali/helpdesk/releases/tag/v0.21.0), it also records whether the playbook's *conclusion* is consistent. That is, did the agent tell the same root-cause story each time or just pass the scorer by different paths? In our experience, these are distinct signals that can diverge in ways that matter for production use.
 
 ---
 
