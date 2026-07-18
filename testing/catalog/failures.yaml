@@ -23,7 +23,7 @@ failures:
     external_inject:
       type: shell_exec
       # Hold idle connections by piping sleep into psql — psql blocks waiting
-      # for input, producing state='idle' backends that kill_idle_connections
+      # for input, producing state='idle' backends that terminate_idle_connections
       # can terminate.  Redirecting the group to /dev/null (} >/dev/null 2>&1 &)
       # prevents FD inheritance: without it, background psql processes hold the
       # parent bash's stdout pipe open and cmd.CombinedOutput() blocks forever.

@@ -386,7 +386,7 @@ policies:
 
   # Example: redirect terminate_connection to the safer bulk alternative.
   # Operators who need to terminate a specific PID should use get_session_info
-  # first to inspect the session, then use kill_idle_connections with a filter.
+  # first to inspect the session, then use terminate_idle_connections with a filter.
   - name: restrict-terminate-connection
     description: Direct connection termination by PID is reserved for DBAs only
     priority: 85
@@ -402,10 +402,10 @@ policies:
     rules:
       - action: destructive
         effect: deny
-        message: "terminate_connection is restricted. Use kill_idle_connections or contact a DBA."
+        message: "terminate_connection is restricted. Use terminate_idle_connections or contact a DBA."
 
   # Example: block all terminate_* tools for automated service accounts.
-  # Automated services should not terminate connections; use kill_idle_connections
+  # Automated services should not terminate connections; use terminate_idle_connections
   # only with an explicit approval workflow.
   - name: no-terminate-for-automation
     description: Automated services may not use terminate_* tools

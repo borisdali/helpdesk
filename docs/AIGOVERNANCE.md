@@ -612,7 +612,7 @@ All four are evaluated before the LLM receives any result.
 
 | Guardrail | Policy condition | Applies to | Pre-exec | Post-exec |
 |-----------|-----------------|------------|----------|-----------|
-| **DB blast radius** | `max_rows_affected` | `run_query`, `cancel_query`, `terminate_connection`, `kill_idle_connections` | ✓ EXPLAIN estimate | ✓ command tag / function result |
+| **DB blast radius** | `max_rows_affected` | `run_query`, `cancel_query`, `terminate_connection`, `terminate_idle_connections` | ✓ EXPLAIN estimate | ✓ command tag / function result |
 | **K8s blast radius** | `max_pods_affected` | `delete_pod`, `restart_deployment`, `scale_deployment` | ✓ `scale_deployment` only (replica count known upfront) | ✓ `delete_pod`, `restart_deployment` (count from kubectl output) |
 | **Transaction age** | `max_xact_age_secs` | `cancel_query`, `terminate_connection` | ✓ from `inspectConnection` before action | — |
 | **Schedule** | `schedule` (days/hours/tz) | all write/destructive tools | ✓ timestamp check | — |
@@ -660,7 +660,7 @@ Post-execution:  parse command tag → deny if actual rows > limit
 ```
 
 `cancel_query` and `terminate_connection` use `parsePgFunctionResult` (boolean
-result of `pg_cancel_backend` / `pg_terminate_backend`). `kill_idle_connections`
+result of `pg_cancel_backend` / `pg_terminate_backend`). `terminate_idle_connections`
 uses `parseTerminatedCount` (integer from the `terminated | N` expanded row).
 
 ### 5.2 K8s Blast Radius (`max_pods_affected`)

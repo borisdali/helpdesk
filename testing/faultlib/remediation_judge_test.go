@@ -25,7 +25,7 @@ func basicInput(passed bool, ss []RemediationStep) RemediationJudgeInput {
 }
 
 func TestJudgeRemediation_NilCompleter(t *testing.T) {
-	result := JudgeRemediation(context.Background(), basicInput(true, steps("kill_idle_connections")), nil, "")
+	result := JudgeRemediation(context.Background(), basicInput(true, steps("terminate_idle_connections")), nil, "")
 	if !result.Skipped {
 		t.Error("expected Skipped=true when completer is nil")
 	}
@@ -40,7 +40,7 @@ func TestJudgeRemediation_NoSteps(t *testing.T) {
 
 func TestJudgeRemediation_Score3(t *testing.T) {
 	result := JudgeRemediation(context.Background(),
-		basicInput(true, steps("kill_idle_connections")),
+		basicInput(true, steps("terminate_idle_connections")),
 		mockCompleter(`{"score":3,"reasoning":"optimal approach"}`, nil), "test-model")
 	if result.Skipped {
 		t.Fatal("should not be skipped")
@@ -58,7 +58,7 @@ func TestJudgeRemediation_Score3(t *testing.T) {
 
 func TestJudgeRemediation_Score2(t *testing.T) {
 	result := JudgeRemediation(context.Background(),
-		basicInput(true, steps("get_active_connections", "kill_idle_connections")),
+		basicInput(true, steps("get_active_connections", "terminate_idle_connections")),
 		mockCompleter(`{"score":2,"reasoning":"extra read step"}`, nil), "m")
 	if result.Score != 0.67 {
 		t.Errorf("Score = %.2f, want 0.67 for score=2", result.Score)
@@ -85,7 +85,7 @@ func TestJudgeRemediation_Score0(t *testing.T) {
 
 func TestJudgeRemediation_CompleterError(t *testing.T) {
 	result := JudgeRemediation(context.Background(),
-		basicInput(true, steps("kill_idle_connections")),
+		basicInput(true, steps("terminate_idle_connections")),
 		mockCompleter("", errors.New("timeout")), "m")
 	if !result.Skipped {
 		t.Error("expected Skipped=true on completer error")
@@ -97,7 +97,7 @@ func TestJudgeRemediation_CompleterError(t *testing.T) {
 
 func TestJudgeRemediation_InvalidJSON(t *testing.T) {
 	result := JudgeRemediation(context.Background(),
-		basicInput(true, steps("kill_idle_connections")),
+		basicInput(true, steps("terminate_idle_connections")),
 		mockCompleter("sorry I cannot help with that", nil), "m")
 	if !result.Skipped {
 		t.Error("expected Skipped=true on unparseable response")
@@ -113,15 +113,15 @@ func TestJudgeRemediation_PlaybookGuidanceIncluded(t *testing.T) {
 	input := RemediationJudgeInput{
 		FaultName:        "test-fault",
 		FaultDescription: "desc",
-		PlaybookGuidance: "Always use kill_idle_connections first.",
-		Steps:            steps("kill_idle_connections"),
+		PlaybookGuidance: "Always use terminate_idle_connections first.",
+		Steps:            steps("terminate_idle_connections"),
 		Passed:           true,
 	}
 	JudgeRemediation(context.Background(), input, completer, "m") //nolint:errcheck
 	if capturedPrompt == "" {
 		t.Fatal("completer was not called")
 	}
-	if !containsStr(capturedPrompt, "Always use kill_idle_connections first.") {
+	if !containsStr(capturedPrompt, "Always use terminate_idle_connections first.") {
 		t.Error("prompt should include PlaybookGuidance")
 	}
 }
@@ -137,7 +137,7 @@ func TestJudgeRemediation_ArgsOmitConnPlumbing(t *testing.T) {
 		FaultDescription: "desc",
 		Steps: []RemediationStep{
 			{
-				Tool: "kill_idle_connections",
+				Tool: "terminate_idle_connections",
 				Args: map[string]any{
 					"connection_string": "postgres://user:pass@host/db",
 					"idle_threshold":    "5m",

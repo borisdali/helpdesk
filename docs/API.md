@@ -279,7 +279,7 @@ All tools accept `connection_string` (PostgreSQL DSN; falls back to `HELPDESK_DB
 | `explain_query` | `query` (required), `allow_dml` | `EXPLAIN (ANALYZE, BUFFERS)` output; DML wrapped in BEGIN/ROLLBACK when `allow_dml=true` |
 | `cancel_query` | `pid` (required) | `pg_cancel_backend` — **write** |
 | `terminate_connection` | `pid` (required) | `pg_terminate_backend` — **destructive** |
-| `kill_idle_connections` | `idle_threshold_seconds` | Terminate all idle connections older than threshold — **destructive** |
+| `terminate_idle_connections` | `idle_threshold_seconds` | Terminate all idle connections older than threshold — **destructive** |
 | `read_pg_log` | `lines`, `filter` | Read the tail of the most-recently-modified PostgreSQL log file via `pg_read_file()`. Requires a live DB connection and `pg_read_server_files` privilege or superuser. Returns up to 128 KB (last ~1000 lines). Use `filter` (case-insensitive substring) to focus on errors. |
 | `read_uploaded_file` | `upload_id` (required), `filter` | Read the content of a file previously uploaded by an operator via `POST /api/v1/fleet/uploads`. Use this when `read_pg_log` is not available (e.g. DB is completely down). Requires `HELPDESK_AUDIT_URL` to be configured. |
 | `get_saved_snapshots` | `tool_name` (required), `server_name`, `limit`, `since` | Retrieve previously recorded outputs of a tool from the audit history. Use when the DB is unreachable and you need a value captured in a prior run — e.g. `config_file` path or `data_directory` from a past `get_baseline`. Also useful for diffing two snapshots ("what changed?") or finding when a setting last changed. Returns up to 3 snapshots by default (max 10), capped at 32 KB total. Requires `HELPDESK_AUDIT_URL`. |

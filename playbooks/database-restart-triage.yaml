@@ -53,7 +53,7 @@ guidance: |
     → max_connections is exhausted. The database IS running. Do NOT restart —
     that would disrupt every active connection for no benefit. Check
     pg_stat_activity for idle/idle-in-transaction sessions; use
-    kill_idle_connections or terminate_connection to free slots. Set
+    terminate_idle_connections or terminate_connection to free slots. Set
     restart_safe=false and failure_type=max_connections_exceeded in FINDINGS.
   - "no pg_hba.conf entry for host" or "password authentication failed" → the
     database IS running but the connection is blocked by authentication config.

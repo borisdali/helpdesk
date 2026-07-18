@@ -23,7 +23,7 @@ inspection, replication lag, pod status, log tailing, event streams. The full se
 LLM-powered reasoning across database and Kubernetes agents is available.
 
 **What is not enabled:** Mutation tools (`cancel_query`, `terminate_connection`,
-`kill_idle_connections`, `delete_pod`, `restart_deployment`, `scale_deployment`, etc.) are
+`terminate_idle_connections`, `delete_pod`, `restart_deployment`, `scale_deployment`, etc.) are
 off by default. Audit logging, policy enforcement, approval workflows, identity/role
 checks and fleet management are all absent. The last module in this list
 is particularly important as we get many questions about it: aiHelpDesk Personal Deployment Mode

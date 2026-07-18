@@ -132,7 +132,7 @@ any combination of user, purpose, time window, or resource. A policy that says
 enforced before any tool call happens, regardless of what the LLM said.
 
 **Blast-radius limits.** Write and destructive tools have mandatory pre-flight
-checks. For example, `kill_idle_connections` counts the connections it would
+checks. For example, `terminate_idle_connections` counts the connections it would
 terminate and blocks if that number exceeds the configured limit. The LLM
 cannot override this — it is enforced in code.
 
@@ -294,7 +294,7 @@ When we are satisfied that the governance module is complete and battle-tested
 enough to be trusted with them.
 
 The diagnostic (read-only) tools are production-ready today. The mutation tools
-like `cancel_query`, `terminate_connection`,`kill_idle_connections`,`delete_pod`,
+like `cancel_query`, `terminate_connection`,`terminate_idle_connections`,`delete_pod`,
 `restart_deployment`, `scale_deployment`, etc. exist in the codebase to drive
 development and testing of the governance module. They will not carry the
 production-ready designation until the policy engine, blast-radius controls,

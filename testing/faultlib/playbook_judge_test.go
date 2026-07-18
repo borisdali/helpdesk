@@ -17,7 +17,7 @@ func makePlaybookInput() PlaybookDiffInput {
 		BeforeEscalation:  []string{"idle connections older than 10 minutes"},
 		AfterName:         "Max Connections Diagnosis",
 		AfterDescription:  "Diagnoses connection exhaustion faults",
-		AfterGuidance:     "Check pg_stat_activity; use kill_idle_connections when count exceeds max_connections*0.9.",
+		AfterGuidance:     "Check pg_stat_activity; use terminate_idle_connections when count exceeds max_connections*0.9.",
 		AfterSymptoms:     []string{"connection refused", "FATAL: remaining connection slots are reserved"},
 		AfterEscalation:   []string{"idle connections older than 10 minutes", "shared_buffers exhausted"},
 	}

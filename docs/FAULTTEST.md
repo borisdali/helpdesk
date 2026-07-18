@@ -341,7 +341,7 @@ After a successful recovery (verification SQL returns true), `faulttest` optiona
 
   Remediation feedback (optional)
   Was the remediation approach appropriate? [y/n/skip]:  y
-  Notes (optional, press Enter to skip): kill_idle_connections was the right call
+  Notes (optional, press Enter to skip): terminate_idle_connections was the right call
 ```
 
 The diagnosis answer stores a `RunFeedback` record (`feedback_type: "triage"`, `feedback_time: "post_incident"`). The remediation answer stores a second record (`feedback_type: "remediation"`, `feedback_time: "post_incident"`), anchored to the same triage run ID so it can be joined with `run_evaluation` for calibration. Both feed `vault calibration`; at-gate feedback (captured earlier at the triage→remediation gate) is treated as the higher-quality signal and preferred when both exist. Skipping or running non-interactively leaves no feedback — the run still scores normally.

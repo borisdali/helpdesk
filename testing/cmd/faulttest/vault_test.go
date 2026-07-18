@@ -880,7 +880,7 @@ func TestFetchRemediationSteps_Success(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
-			{"tool": "kill_idle_connections", "args": map[string]any{"idle_threshold": "5m"}, "status": "succeeded", "result": "20 terminated"},
+			{"tool": "terminate_idle_connections", "args": map[string]any{"idle_threshold": "5m"}, "status": "succeeded", "result": "20 terminated"},
 			{"tool": "get_active_connections", "args": map[string]any{}, "status": "succeeded", "result": "count=3"},
 		})
 	}))
@@ -890,8 +890,8 @@ func TestFetchRemediationSteps_Success(t *testing.T) {
 	if len(steps) != 2 {
 		t.Fatalf("got %d steps, want 2", len(steps))
 	}
-	if steps[0].Tool != "kill_idle_connections" {
-		t.Errorf("steps[0].Tool = %q, want kill_idle_connections", steps[0].Tool)
+	if steps[0].Tool != "terminate_idle_connections" {
+		t.Errorf("steps[0].Tool = %q, want terminate_idle_connections", steps[0].Tool)
 	}
 	if steps[0].Status != "succeeded" {
 		t.Errorf("steps[0].Status = %q, want succeeded", steps[0].Status)

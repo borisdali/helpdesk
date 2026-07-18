@@ -291,7 +291,7 @@ func TestPersistPlaybookDraft_InvalidJSON(t *testing.T) {
 // fakeStepsResponse is a minimal /v1/fleet/playbook-runs/{id}/steps response.
 const fakeStepsResponse = `{"steps":[
   {"step_index":0,"agent":"db-agent","tool":"get_active_connections","args":{},"reason":"check connections","status":"success","result":"42 connections"},
-  {"step_index":1,"agent":"db-agent","tool":"kill_idle_connections","args":{"min_idle_minutes":5},"reason":"terminate idle","status":"success","result":"terminated 8"}
+  {"step_index":1,"agent":"db-agent","tool":"terminate_idle_connections","args":{"min_idle_minutes":5},"reason":"terminate idle","status":"success","result":"terminated 8"}
 ]}`
 
 func TestHandlePlaybookFromTrace_FallsBackToStepsWhenEventsEmpty(t *testing.T) {
@@ -333,7 +333,7 @@ func TestHandlePlaybookFromTrace_FallsBackToStepsWhenEventsEmpty(t *testing.T) {
 	if !stepsEndpointCalled {
 		t.Error("expected steps endpoint to be called when audit_events is empty for plr_* trace")
 	}
-	if !strings.Contains(llmPrompt, "kill_idle_connections") {
+	if !strings.Contains(llmPrompt, "terminate_idle_connections") {
 		t.Errorf("LLM prompt should contain step tool names; got: %s", llmPrompt)
 	}
 	if !strings.Contains(llmPrompt, "tool_execution") {
@@ -400,8 +400,8 @@ func TestFetchStepsAsTraceEvents_FormatsAsToolExecutionEvents(t *testing.T) {
 	if events[0]["tool"] != "get_active_connections" {
 		t.Errorf("event[0].tool = %q, want get_active_connections", events[0]["tool"])
 	}
-	if events[1]["tool"] != "kill_idle_connections" {
-		t.Errorf("event[1].tool = %q, want kill_idle_connections", events[1]["tool"])
+	if events[1]["tool"] != "terminate_idle_connections" {
+		t.Errorf("event[1].tool = %q, want terminate_idle_connections", events[1]["tool"])
 	}
 }
 
@@ -517,7 +517,7 @@ func TestHandlePlaybookFromTrace_PreservesOperationalFieldsFromActive(t *testing
 		EscalatesTo:      []string{"pbs_sysadmin_infra"},
 		EntryPoint:       true,
 		RequiresEvidence: []string{"connection refused"},
-		PermittedTools:   []string{"get_active_connections", "kill_idle_connections"},
+		PermittedTools:   []string{"get_active_connections", "terminate_idle_connections"},
 		TargetHints:      []string{"primary"},
 		PlaybookType:     "triage",
 	}

@@ -170,7 +170,7 @@ policies:
     rules:
       - action: destructive
         effect: deny
-        message: "terminate_connection is disabled — use kill_idle_connections instead"
+        message: "terminate_connection is disabled — use terminate_idle_connections instead"
 ```
 
 ### Glob pattern match

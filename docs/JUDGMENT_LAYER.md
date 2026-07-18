@@ -130,7 +130,7 @@ See [here](BENCHMARKING_SAMPLE9.md) for the actual commands and their output use
 
 **Fault:** `db-max-connections`. PostgreSQL connection pool at 95%. Cause:
 `idle_session_timeout=0`, 200+ idle connections accumulating. Correct immediate
-action: `kill_idle_connections`. Correct long-term action: configure
+action: `terminate_idle_connections`. Correct long-term action: configure
 `idle_session_timeout`. Common misdiagnosis: recommending the long-term action
 as the primary fix.
 

@@ -586,7 +586,7 @@ TOOLS USED
 ──────────────────────────────────────────────────────────────────────────
   • get_db_info
   • get_session_info
-  • kill_idle_connections
+  • terminate_idle_connections
 
 INCIDENT LINK
 ──────────────────────────────────────────────────────────────────────────
@@ -622,7 +622,7 @@ EXECUTION TRACE
 
   "108 connections are active, 96 of them idle. The limit is 100 and we
    are already over it. Safe to terminate idle sessions older than 5 min."
-  ► kill_idle_connections                [ok]
+  ► terminate_idle_connections                [ok]
 
 FINDINGS
 ──────────────────────────────────────────────────────────────────────────

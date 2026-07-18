@@ -1562,9 +1562,9 @@ func TestHasSensitiveSensitivity_MixedContainsPii(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWithToolName_RoundTrip(t *testing.T) {
-	ctx := WithToolName(context.Background(), "kill_idle_connections")
-	if got := toolNameFromContext(ctx); got != "kill_idle_connections" {
-		t.Errorf("toolNameFromContext = %q, want kill_idle_connections", got)
+	ctx := WithToolName(context.Background(), "terminate_idle_connections")
+	if got := toolNameFromContext(ctx); got != "terminate_idle_connections" {
+		t.Errorf("toolNameFromContext = %q, want terminate_idle_connections", got)
 	}
 }
 
