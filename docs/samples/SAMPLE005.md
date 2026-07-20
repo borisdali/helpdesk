@@ -1,12 +1,12 @@
-# Benchmarking remediation sample#5 (K8s): Informed Gate & Two-layer security
+# aiHelpDesk Sample#5 (on K8s): Informed Gate & Two-layer security
 
-For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md).
+For the background on Fault Injection Testing in aiHelpDesk see [here](../FAULTTEST.md).
 
-For the background on interactive approvals see [here](PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo) and the simple interactive/approval sample running on a host/VM is available [here](BENCHMARKING_SAMPLE4.md).
+For the background on interactive approvals see [here](../PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo) and the simple interactive/approval sample running on a host/VM is available [here](SAMPLE004.md).
 
-In this document we present four (!) sample runs on K8s that demonstrate not only the interactive async approvals via the [Decision Hub](DECISIONS.md), but also the practical application of aiHelpDesk defence-in-depth as it applies to running fault injection tests.
+In this document we present four (!) sample runs on K8s that demonstrate not only the interactive async approvals via the [Decision Hub](../DECISIONS.md), but also the practical application of aiHelpDesk defence-in-depth as it applies to running fault injection tests.
 
-Similar to the previous example of running on host/VM (or from the code source), you need two terminals (or better three) for running this fault injection test on K8s. The first terminal runs `helm upgrade`. The second terminal runs `kubectl get logs`. And the third one is where you issue the `curl` commands to review and approve the authorization requests (to clear the gate and individual remediation steps - depending on the requested `approval_mode`, see [here](PLAYBOOKS.md#proceeding-through-the-gate)). You can, of course, combine the terminals two and three into one (or fold all three of the terminals into a single one by running `helm upgrade` in the background), but it may be more convenient to run them on three separate terminals (at least until you get comfortable with the process).
+Similar to the previous example of running on host/VM (or from the code source), you need two terminals (or better three) for running this fault injection test on K8s. The first terminal runs `helm upgrade`. The second terminal runs `kubectl get logs`. And the third one is where you issue the `curl` commands to review and approve the authorization requests (to clear the gate and individual remediation steps - depending on the requested `approval_mode`, see [here](../PLAYBOOKS.md#proceeding-through-the-gate)). You can, of course, combine the terminals two and three into one (or fold all three of the terminals into a single one by running `helm upgrade` in the background), but it may be more convenient to run them on three separate terminals (at least until you get comfortable with the process).
 
 So let's get started:
 
@@ -31,7 +31,7 @@ So let's get started:
     --set faulttest.approvalMode=review					<-- this is a new flag introduced in release 0.15
 ```
 
-The above command probably looks faimilar because we used it in previous examples, e.g. see [here](BENCHMARKING_SAMPLE1.md#running-on-k8s-via-a-helm-chart). But in contrast to the previous examples, there are now three additional flags here that enable interactive async approvals via a central [Decision Hub API](DECISIONS.md). All three flags are optional, but together they provide the experience of a human operator that is in full control over a test.
+The above command probably looks faimilar because we used it in previous examples, e.g. see [here](SAMPLE001.md#running-on-k8s-via-a-helm-chart). But in contrast to the previous examples, there are now three additional flags here that enable interactive async approvals via a central [Decision Hub API](../DECISIONS.md). All three flags are optional, but together they provide the experience of a human operator that is in full control over a test.
 
 In particular, we expect that many folks would prefer to stop and review the triage diagnosis before attempting any remediation steps because the latter can be destructive and so before launching them you may want to form an opinion as to whether or not the diagnosis is indeed correct and your AI is solving the right problem and following the right steps that you'd expect (and follow by yourself if you had to).
 
@@ -70,7 +70,7 @@ time=2026-06-05T16:23:43.799Z level=INFO msg="faultlib: gate poll" run_id=plr_31
 
 ```
 
-This is the [informed gate](PLAYBOOKS.md#informed-gate) in action. In this mode, a human operator is expected to review the results of the triage and, if satisfied, let aiHelpDesk proceed with actually fixing the problem (by effectively launching the remediation playbook). Please note that the gate is opt-in per-request (note `--set faulttest.gateEscalation=true`) in the above command and so if this behavior is not desired (e.g. for the fully automated CI runs), it can be skipped. See more on this point in the [last section](BENCHMARKING_SAMPLE5.md#control-surfaces).
+This is the [informed gate](../PLAYBOOKS.md#informed-gate) in action. In this mode, a human operator is expected to review the results of the triage and, if satisfied, let aiHelpDesk proceed with actually fixing the problem (by effectively launching the remediation playbook). Please note that the gate is opt-in per-request (note `--set faulttest.gateEscalation=true`) in the above command and so if this behavior is not desired (e.g. for the fully automated CI runs), it can be skipped. See more on this point in the [last section](SAMPLE005.md#control-surfaces).
 
 ## Run #1 - Terminal #3 (approval terminal):
 
@@ -427,7 +427,7 @@ We'd like to think of these two layers as a "destructive operations on PII datab
 
 ## Run #4 - A successful fault injection test:
 
-To reiterate the point of this excercise, there's no way to bypass Layer 2 security outlined above unless the `sensitivity: ["pii"]` tag is actually removed from the target database server in question (which realistically shouldn't be coupled with the `tag: ["chaos"]` anyway as this tag makes the a database server eligible for the fault injection testing in the first place). Now, the point here is that for the [enteprise deployment](DEPLOYMENT_MODES.md#mode-3--enterprise--it-hosted-full-governed) the infra.json is under the central, right IT control and aiHelpDesk in this operating mode doesn't allow running a diagnosis, let alone remedation, against arbitary database clusters that are not listed in infra.json.
+To reiterate the point of this excercise, there's no way to bypass Layer 2 security outlined above unless the `sensitivity: ["pii"]` tag is actually removed from the target database server in question (which realistically shouldn't be coupled with the `tag: ["chaos"]` anyway as this tag makes the a database server eligible for the fault injection testing in the first place). Now, the point here is that for the [enteprise deployment](../DEPLOYMENT_MODES.md#mode-3--enterprise--it-hosted-full-governed) the infra.json is under the central, right IT control and aiHelpDesk in this operating mode doesn't allow running a diagnosis, let alone remedation, against arbitary database clusters that are not listed in infra.json.
 
 Once the `sensitivty` tag is cleared, we can proceed with the full fault injection test. And this time the full flow succeeds e2e: the gate, emit-and-wait, step-by-step approvals, agent correctly identifying the full blocking chain and cascade risk. The remediation also succeeds because the governance policy `pii-data-protection` block has been removed to authorize `terminate_connection` on a target database cluster:
 
@@ -646,7 +646,7 @@ curl -X POST .../playbooks/pb_xxx/run \
   -d '{"connection_string":"prod-db", "approval_mode":"review"}'
 ```
 
-  In this mode the playbook still pauses at each destructive step (because `approval_mode=review` emits step approvals to the [Decision Hub](DECISIONS.md)).
+  In this mode the playbook still pauses at each destructive step (because `approval_mode=review` emits step approvals to the [Decision Hub](../DECISIONS.md)).
 
   Bypassing both the gate and step approvals, which amounts for the true "trust the chain" hands-free run is also easy:
 

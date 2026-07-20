@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#9 (Docker): Report Card + New Version of a Playbook (generated with human oversight)
+# aiHelpDesk Sample#9 (in Docker): Report Card + New Version of a Playbook (generated with human oversight)
 
 The sample commands presented below complements these two blog post: 
 
@@ -8,13 +8,13 @@ The sample commands presented below complements these two blog post:
 - **[Your AI SRE Tried to Improve Its Own Playbook. Here's What It Got Wrong.](https://levelup.gitconnected.com/ai-to-take-over-your-job-heres-what-happened-when-ai-sre-tried-to-improve-its-own-playbook-c7a6338fae37#59e2)**
   A case study in the limits of automated playbook tuning. And what human judgment still has to add.
 
-It all starts with the [Vault](VAULT.md). If you need a background, start there. Next, head over to [this page](VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](INCIDENTS.md) data into a learning signal.
+It all starts with the [Vault](../VAULT.md). If you need a background, start there. Next, head over to [this page](../VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](../INCIDENTS.md) data into a learning signal.
 
-For more context, aiHelpDesk Fault Injection Testing is well documented [here](FAULTTEST.md), with multiple [examples availble](FAULTTEST_SAMPLE.md) on [K8s](BENCHMARKING_SAMPLE5.md), [Docker/Podman](BENCHMARKING_SAMPLE6.md) and on a [host/VM](BENCHMARKING_SAMPLE7.md). 
+For more context, aiHelpDesk Fault Injection Testing is well documented [here](../FAULTTEST.md), with multiple [examples availble](../FAULTTEST_SAMPLE.md) on [K8s](SAMPLE005.md), [Docker/Podman](SAMPLE006.md) and on a [host/VM](SAMPLE007.md). 
 
 ---
 
-The sample commands posted below are broken into two parts and are shown for running aiHelpDesk on Docker, but similar samples of running aiHelpDesk on K8s and on a host/VM are available [here](BENCHMARKING_SAMPLE8.md) and [here](BENCHMARKING_SAMPLE7.md) respectively (although not the exact commands shown on this page).
+The sample commands posted below are broken into two parts and are shown for running aiHelpDesk on Docker, but similar samples of running aiHelpDesk on K8s and on a host/VM are available [here](SAMPLE008.md) and [here](SAMPLE007.md) respectively (although not the exact commands shown on this page).
 
 Part 1 is just the normal, previously documented workflow of reviewing the inventory (failure scenarios, content of the vault) and running a fault injection test.
 
@@ -22,7 +22,7 @@ Part 2 is different. The diagnosis for a particular test we chose and the way we
 
 ## Part 1-a: Inventory: Failure Scenarios + Vault
 
-Similar to the [previous Docker sample](BENCHMARKING_SAMPLE6.md#lets-get-started), first off fire up aiHelpDesk on Docker and optionally run `helpdesk-client` to verify the deployment. Ask some basic questions, e.g. "which of my dev databases are up, what's their uptime and average load?"
+Similar to the [previous Docker sample](SAMPLE006.md#lets-get-started), first off fire up aiHelpDesk on Docker and optionally run `helpdesk-client` to verify the deployment. Ask some basic questions, e.g. "which of my dev databases are up, what's their uptime and average load?"
 
 Next, get the inventory of the existing failure scenarios (there are presently 17 external faults and 34 total internal ones):
 
@@ -397,7 +397,7 @@ id/from lines show playbook_id and the run that generated that version
 
 ## Part 2-a: The Problem and the Two Options
 
-So here's the problem: the triage of this `max connections` fault results in the diagnosis with multiple competing hypotheses, as we saw from the failure injection test earlier. aiHelpDesk flagged this clearly at the [Informed Gate](PLAYBOOKS.md#informed-gate), which is the implementation of aiHelpDesk [Informed Consent](INFORMED_CONSENT.md) policy.
+So here's the problem: the triage of this `max connections` fault results in the diagnosis with multiple competing hypotheses, as we saw from the failure injection test earlier. aiHelpDesk flagged this clearly at the [Informed Gate](../PLAYBOOKS.md#informed-gate), which is the implementation of aiHelpDesk [Informed Consent](../INFORMED_CONSENT.md) policy.
 
 ```
   ────────────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
-# Benchmarking remediation sample#4 (host/VM): Informed Gate
+# aiHelpDesk Sample#4 (on host/VM): Informed Gate
 
-For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md).
+For the background on Fault Injection Testing in aiHelpDesk see [here](../FAULTTEST.md).
 
-For the background on interactive approvals see [here](PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
+For the background on interactive approvals see [here](../PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
 
 The examples below show how running fault injection tests (with interactive approvals and informed gates) may look like while running from source code. Other pages show similar examples for running on a host/VM, in Docker/Podman containers or on K8s.
 
@@ -60,7 +60,7 @@ time=2026-06-03T19:36:11.868-04:00 level=INFO msg="faultlib: gate poll" run_id=p
 time=2026-06-03T19:36:27.464-04:00 level=INFO msg="faultlib: gate poll" run_id=plr_38766666 outcome=gate_pending
 ```
 
-At this point this Fault Injection Test finished the diagnosis stage and reached the [Transition] Gate (see [here](DECISIONS.md) if you are not familiar with the term) and waits for a human to review. This is because the test was requested with `--approval-mode review` flag, so a human operator gets a chance to review the findings and the remediation recommendations and either approve or deny them.
+At this point this Fault Injection Test finished the diagnosis stage and reached the [Transition] Gate (see [here](../DECISIONS.md) if you are not familiar with the term) and waits for a human to review. This is because the test was requested with `--approval-mode review` flag, so a human operator gets a chance to review the findings and the remediation recommendations and either approve or deny them.
 
 ## Terminal #2 (approval terminal) - Gate approval:
 

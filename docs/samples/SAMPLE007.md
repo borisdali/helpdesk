@@ -1,14 +1,14 @@
-# Informed Consent sample#7 (on a host/VM): Part 2
+# aiHelpDesk Sample#7 (on host/VM): Informed Consent, Part 2
 
-For the concept definition see the [Informed Consent](INFORMED_CONSENT.md) page. For the background on Fault Injection Testing in aiHelpDesk see [FAULTTEST.md](FAULTTEST.md).
+For the concept definition see the [Informed Consent](../INFORMED_CONSENT.md) page. For the background on Fault Injection Testing in aiHelpDesk see [here](../FAULTTEST.md).
 
-For the background on interactive approvals see [here](PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
+For the background on interactive approvals see [here](../PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
 
-Simple interactive/approval sample running inside Docker containers is available [here](BENCHMARKING_SAMPLE6.md) and its counterpart for K8s is [here](BENCHMARKING_SAMPLE5.md).
+Simple interactive/approval sample running inside Docker containers is available [here](SAMPLE006.md) and its counterpart for K8s is [here](SAMPLE005.md).
 
-In contrast to the previous samples, this one shows aiHelpDesk running directly on a host/VM. The principles are exactly the same where depending on whether a `--emit-and-wait` parameter is request, the run is considered interactive or not. For the former, the dialog occurs in-line, while the for the latter, the approvals and prompts are presented asynchronously via the [Decision Hub](DECISIONS.md).
+In contrast to the previous samples, this one shows aiHelpDesk running directly on a host/VM. The principles are exactly the same where depending on whether a `--emit-and-wait` parameter is request, the run is considered interactive or not. For the former, the dialog occurs in-line, while the for the latter, the approvals and prompts are presented asynchronously via the [Decision Hub](../DECISIONS.md).
 
-The initial [blog post](https://medium.com/@borisdali/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) provides more color on aiHelpDesk [Informed Consent](INFORMED_CONSENT.md) and poses this question: did the AI operate with your consent? This blog post sets the stage for the commands listed below and may be a better starting point if you are less familiar with aiHelpDesk.
+The initial [blog post](https://medium.com/@borisdali/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) provides more color on aiHelpDesk [Informed Consent](../INFORMED_CONSENT.md) and poses this question: did the AI operate with your consent? This blog post sets the stage for the commands listed below and may be a better starting point if you are less familiar with aiHelpDesk.
 
 This follow up [blog post](https://medium.com/@borisdali/you-got-informed-consent-can-you-prove-the-ai-was-right-f62bda72d602) provides goes a step further and adds an additional question: when you consented, were you right to?
 
@@ -112,7 +112,7 @@ Choose a failure scenario from the above list. In the example below we use `db-t
   --approval-mode auto
 ```
 
-Note the use of the `--auto-db` and the absense of `--conn` and `infra-config` flags. For the same of simplicity, we are also not using [LLM-as-Judge](LLM_AS_JUDGE.md), but it can be easily added as we did in the previous examples.
+Note the use of the `--auto-db` and the absense of `--conn` and `infra-config` flags. For the same of simplicity, we are also not using [LLM-as-Judge](../LLM_AS_JUDGE.md), but it can be easily added as we did in the previous examples.
 
 ```
 Starting temporary PostgreSQL container (postgres:16-alpine)...		<-- that's the result of using --auto-db flag
@@ -168,7 +168,7 @@ Next section of the run is the optional, but highly recommended feedback:
   Feedback submitted (remediation/at_gate run_id=plr_16f55166)
 ```
 
-We refer to it as at-gate triage and remediation plan feedback. Here's the [page](VAULT_FEEDBACK_FLOW.md#feedback-reference) explaining different types of feedback (triage vs. remediation), the time they are requested (at gate vs. post-incident) and the their meaning.
+We refer to it as at-gate triage and remediation plan feedback. Here's the [page](../VAULT_FEEDBACK_FLOW.md#feedback-reference) explaining different types of feedback (triage vs. remediation), the time they are requested (at gate vs. post-incident) and the their meaning.
 
 And the run continues...
 

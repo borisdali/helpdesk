@@ -1,10 +1,10 @@
-# Benchmarking remediation sample#3: Interactive Approvals (aka human-in-the-loop)
+# aiHelpDesk Sample#3 (on host/VM): Interactive Approvals (aka human-in-the-loop)
 
-For the background on Fault Injection Testing in aiHelpDesk see [here](FAULTTEST.md).
+For the background on Fault Injection Testing in aiHelpDesk see [here](../FAULTTEST.md).
 
-In contrast to the previous examples (see [here](BENCHMARKING_SAMPLE1.md) and [here](BENCHMARKING_SAMPLE2.md)), in this example we are not comparing the full power of aiHelpDesk guided, structured, playbook-driven diagnosis to Crystal Ball. Instead, this example focuses on showing the power of the interactive approvals, which can be `manual` (aka step-by-step) or in `review` mode where only the destructive (or write) operations are presented to an operator to review and approve.
+In contrast to the previous examples (see [here](SAMPLE001.md) and [here](SAMPLE002.md)), in this example we are not comparing the full power of aiHelpDesk guided, structured, playbook-driven diagnosis to Crystal Ball. Instead, this example focuses on showing the power of the interactive approvals, which can be `manual` (aka step-by-step) or in `review` mode where only the destructive (or write) operations are presented to an operator to review and approve.
 
-See the background on interactive approvals [here](PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
+See the background on interactive approvals [here](../PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
 
 ## Interactive approvals: Review  mode
 

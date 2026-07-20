@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#8 (on a K8s): Triage Consistency Certification badge + AI Ledger
+# aiHelpDesk Sample#8 (on K8s): Triage Consistency Certification badge + AI Ledger
 
 The sample commands presented below complement the following two blog posts:
 
@@ -9,13 +9,13 @@ The sample commands presented below complement the following two blog posts:
   The black box is now a ledger. Don't settle for anything less than an Informed Consent and 100% auditable track record of all the AI decisions that led to a problem diagnosis and remediation
 
 
-For the background on Triage Consistency Certification see [here](CONSISTENCY.md). This Consistency Certification/Badge is part of the greater aiHelpDesk Operational SRE/DBA Flywheel - see [here](VAULT.md#the-operational-sredba-flywheel) for details.
+For the background on Triage Consistency Certification see [here](../CONSISTENCY.md). This Consistency Certification/Badge is part of the greater aiHelpDesk Operational SRE/DBA Flywheel - see [here](../VAULT.md#the-operational-sredba-flywheel) for details.
 
-The sample commands below are shown on K8s, but similar samples of running aiHelpDesk in Docker/Podman and on a host/VM are available [here](BENCHMARKING_SAMPLE6.md) and [here](BENCHMARKING_SAMPLE7.md) respectively (although not the exact commands shown here).
+The sample commands below are shown on K8s, but similar samples of running aiHelpDesk in Docker/Podman and on a host/VM are available [here](SAMPLE006.md) and [here](SAMPLE007.md) respectively (although not the exact commands shown here).
 
 ## Fault Injection Test
 
-aiHelpDesk Fault Injection Testing is [well documented](FAULTTEST.md), with multiple [examples availble](FAULTTEST_SAMPLE.md) on [K8s](BENCHMARKING_SAMPLE5.md), [Docker/Podman](BENCHMARKING_SAMPLE6.md) and on a [host/VM](BENCHMARKING_SAMPLE7.md). On K8s however we mostly showed how to run `faulttest` via Helm, while in this case we directly create a K8s Job via `kubectl`:
+aiHelpDesk Fault Injection Testing is [well documented](../FAULTTEST.md), with multiple [examples availble](../FAULTTEST_SAMPLE.md) on [K8s](SAMPLE005.md), [Docker/Podman](SAMPLE006.md) and on a [host/VM](SAMPLE007.md). On K8s however we mostly showed how to run `faulttest` via Helm, while in this case we directly create a K8s Job via `kubectl`:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.18.0-deploy/helm/helpdesk]$ kubectl run faulttest-demo \
@@ -91,7 +91,7 @@ time=2026-06-26T00:20:59.811Z level=INFO msg="faultlib: gate poll" run_id=plr_26
 time=2026-06-26T00:21:15.534Z level=INFO msg="faultlib: gate poll" run_id=plr_264f28fc outcome=gate_pending
 ```
 
-This is aiHelpDesk [Informed Gate](INFORMED_CONSENT.md). It's optional and is triggered via the `--gate-escalation` parameter. [Decision Hub](DECISIONS.md) is a central place that accumulates and tracks requests for approval. Let's assume that the diagnosis looks reasonable and os is the proposed remediation plan. Let's provide a quick feedback on the at-gate diagnosis (helps improve the triage playbooks) and approve the remediation plan:
+This is aiHelpDesk [Informed Gate](../INFORMED_CONSENT.md). It's optional and is triggered via the `--gate-escalation` parameter. [Decision Hub](../DECISIONS.md) is a central place that accumulates and tracks requests for approval. Let's assume that the diagnosis looks reasonable and os is the proposed remediation plan. Let's provide a quick feedback on the at-gate diagnosis (helps improve the triage playbooks) and approve the remediation plan:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.18.0-deploy/helm/helpdesk]$ curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_264f28fc/feedback \
@@ -182,7 +182,7 @@ Total: 1 | Passed: 1 | Failed: 0 | Rate: 100%
 LLM judge scored diagnosis for 1 fault(s). Weights: tool*0.40 + judge*0.40 + keyword*0.20.
 ```
 
-There's a lot ot unpack here, including the automatic post-incident approval (we call it [`auto-judge`](VAULT.md#vault-accuracy)) when `--aproval-mode=force` and `--judge` flags are requested togetherlike in the example above, but it's zoom-in on the Incident concept first:
+There's a lot ot unpack here, including the automatic post-incident approval (we call it [`auto-judge`](../VAULT.md#vault-accuracy)) when `--aproval-mode=force` and `--judge` flags are requested togetherlike in the example above, but it's zoom-in on the Incident concept first:
 
 ## List of Incidents (for a specific failure scenario)
 

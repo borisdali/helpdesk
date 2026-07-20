@@ -1,12 +1,12 @@
-# Informed Consent sample#6 (on Docker/Podman): Part 1
+# aiHelpDesk Sample#6 (on Docker/Podman): Informed Consent, Part 1
 
-For the concept definition see [INFORMED_CONSENT.md](INFORMED_CONSENT.md). For the background on Fault Injection Testing in aiHelpDesk see [FAULTTEST.md](FAULTTEST.md).
+For the concept definition see [Informed Consent](../INFORMED_CONSENT.md). For the background on Fault Injection Testing in aiHelpDesk see [here](../FAULTTEST.md).
 
-For the background on interactive approvals see [here](PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
+For the background on interactive approvals see [here](../PLAYBOOKS.md#interactive-approval-human-in-the-loop-demo).
 
-Simple interactive/approval sample running on a host/VM is available [here](BENCHMARKING_SAMPLE4.md) and its counterpart for K8s is [here](BENCHMARKING_SAMPLE5.md).
+Simple interactive/approval sample running on a host/VM is available [here](SAMPLE004.md) and its counterpart for K8s is [here](SAMPLE005.md).
 
-In contrast to the previous samples, this one shows aiHelpDesk in action on Docker. The principles are exactly the same, with the tty-less test runs asking for async approvals via the [Decision Hub](DECISIONS.md).
+In contrast to the previous samples, this one shows aiHelpDesk in action on Docker. The principles are exactly the same, with the tty-less test runs asking for async approvals via the [Decision Hub](../DECISIONS.md).
 
 This [blog post](https://medium.com/@borisdali/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) provides more color and sets the stage for the commands listed below and may be a better starting point if you are less familiar with aiHelpDesk.
 
@@ -93,7 +93,7 @@ The two local-access databases (`alloydb-on-vm-local` and `faulttest-db-local`) 
 [audit: check_connection (read), check_connection (read), check_connection (read), check_connection (read), check_connection (read), check_connection (read), get_status_summary (read), get_status_summary (read), get_status_summary (read), get_status_summary (read)]
 ```
 
-Note the `[trace:...]` and `[audit:...]` lines at the bottom. The trace ID can be used to check the audit and the audit line shows immediately what tools from the [Tools Registry](TOOL_REGISTRY.md) were invoked by the agents (well, just the DB Agent in this case) to answer the questions.
+Note the `[trace:...]` and `[audit:...]` lines at the bottom. The trace ID can be used to check the audit and the audit line shows immediately what tools from the [Tools Registry](../TOOL_REGISTRY.md) were invoked by the agents (well, just the DB Agent in this case) to answer the questions.
 
 
 ## List of out of the box "system" fault injection tests
@@ -193,7 +193,7 @@ Good, the triage playbook is finished, the diagnosis is presented and so is the 
 
 Review it carefully. Both. Make sure that you agree or at least are comfortable with both. The diagnosis. And the remediation plan.
 
-If you are, approve it via the [Decision Hub](DECISIONS.md). How? Well, the request ID was printed in the excerpt above (`plr_ff704f1c`) and we know the type of a request is `gate`, so the full ID is `gate:plr_ff704f1c`, but there's also a simple way to list the pending decisions in the Hub. Leave the test run pending and run this from a different terminal:
+If you are, approve it via the [Decision Hub](../DECISIONS.md). How? Well, the request ID was printed in the excerpt above (`plr_ff704f1c`) and we know the type of a request is `gate`, so the full ID is `gate:plr_ff704f1c`, but there's also a simple way to list the pending decisions in the Hub. Leave the test run pending and run this from a different terminal:
 
 ```
 [boris@ ~]$ curl -H "Authorization: Bearer $API_KEY"  'http://localhost:8080/api/v1/decisions?status=pending&type=gate' | jq '.total'
@@ -324,7 +324,7 @@ time=2026-06-13T16:36:42.276Z level=INFO msg="agent_approve: remediation complet
 
 At this point the fault injection test stops again and waits (for up to 10 min) for the optional gate-level feedback. We strongly encourage our customers to provide one. What do they think of the diagnosis. Was it clear and concise? Was the proposed remediation plan adequate? Was the human operator clear on what's about to transpire?
 
-Logistics: providing a feedback in the non-interactive run is similar to clearing a gate. In another terminal query [Decision Hub](DECISIONS.md) API to see the pending feedback requests (or just grab the feedback:plr_<XYZ> from the test run):
+Logistics: providing a feedback in the non-interactive run is similar to clearing a gate. In another terminal query [Decision Hub](../DECISIONS.md) API to see the pending feedback requests (or just grab the feedback:plr_<XYZ> from the test run):
 
 ```
 [boris@~]$ curl -H "Authorization: Bearer $API_KEY" 'http://localhost:8080/api/v1/decisions?status=pending&type=feedback' | jq '.decisions[]  | {id,status,summary}'

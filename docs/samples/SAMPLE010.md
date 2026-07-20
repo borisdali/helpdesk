@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#10 (Host/VM): Calibration Data Quality Banner + Consistency Certs Comparison + Journey's Agent Reasoning and the Chain-of-Thought
+# aiHelpDesk Sample#10 (on Host/VM): Calibration Data Quality Banner + Consistency Certs Comparison + Journey's Agent Reasoning and the Chain-of-Thought
 
 The sample commands presented below complements these two blog post: 
 
@@ -13,16 +13,16 @@ The sample commands presented below complements these two blog post:
   Those are different tests. 
   And only one of them matters when your pager goes off at 2am in the morning
 
-It all starts with the [Vault](VAULT.md). If you need a background, start there. Next, head over to [this page](VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](INCIDENTS.md) data into a learning signal.
+It all starts with the [Vault](../VAULT.md). If you need a background, start there. Next, head over to [this page](../VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](../INCIDENTS.md) data into a learning signal.
 
-For more context, aiHelpDesk Fault Injection Testing is well documented [here](FAULTTEST.md), with multiple [examples availble](FAULTTEST_SAMPLE.md) on [K8s](BENCHMARKING_SAMPLE5.md), [Docker/Podman](BENCHMARKING_SAMPLE6.md) and on a [host/VM](BENCHMARKING_SAMPLE7.md). 
+For more context, aiHelpDesk Fault Injection Testing is well documented [here](../FAULTTEST.md), with multiple [examples availble](../FAULTTEST_SAMPLE.md) on [K8s](SAMPLE005.md), [Docker/Podman](SAMPLE006.md) and on a [host/VM](SAMPLE007.md). 
 
 ---
 
-The sample commands posted below are broken into two parts and are shown for running aiHelpDesk on a host/VM, but similar samples of running aiHelpDesk on K8s and inside Docker/Podman containers are available [here](BENCHMARKING_SAMPLE8.md) and [here](BENCHMARKING_SAMPLE9.md) respectively (although not the exact commands shown on this page).
+The sample commands posted below are broken into two parts and are shown for running aiHelpDesk on a host/VM, but similar samples of running aiHelpDesk on K8s and inside Docker/Podman containers are available [here](SAMPLE008.md) and [here](SAMPLE009.md) respectively (although not the exact commands shown on this page).
 
 
-First off, as usual with running aiHelPDesk directly on a host/VM, we fire up the stack (see more on it in the [previous samples](BENCHMARKING_SAMPLE7.md) showing host/VM):
+First off, as usual with running aiHelPDesk directly on a host/VM, we fire up the stack (see more on it in the [previous samples](SAMPLE007.md) showing host/VM):
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.20.0-darwin-arm64]$ ./startall.sh --services-only --governance
@@ -48,7 +48,7 @@ Running headless (--services-only). Press Ctrl-C to stop all services.
 
 ## Calibration Data Quality Banner
 
-With no human-graded runs (`human_runs == 0`), aiHelpDesk shows a warning banner above the calibration table. See [here](VAULT.md#vault-calibration) for details:
+With no human-graded runs (`human_runs == 0`), aiHelpDesk shows a warning banner above the calibration table. See [here](../VAULT.md#vault-calibration) for details:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.20.0-darwin-arm64]$ curl -sX POST $HELPDESK-GATEWAY-URL/api/v1/fleet/playbook-runs/$RUN_ID/feedback \
@@ -87,9 +87,9 @@ Note: all 1 run(s) above use auto_judge feedback (LLM judge score ≥ 0.8, --app
 
 ## Compare Model Consistency Certs
 
-Want to upgrade the model to a new version or switch to a different model or even to a different vendor entirely? [Get the numbers first](VAULT.md#vault-cert-compare). Compares consistency certification results across two diagnosis models, fault by fault. Here's how:
+Want to upgrade the model to a new version or switch to a different model or even to a different vendor entirely? [Get the numbers first](../VAULT.md#vault-cert-compare). Compares consistency certification results across two diagnosis models, fault by fault. Here's how:
 
-Now, in reality you would run the normal fault injection tests wit the `--repeat N` parameter to earn the [Consistency Certificate] badge. We've shown this previously [here](BENCHMARKING_SAMPLE8.md#triage-consistency-certificationbadge-testing). It does take time, especially if you run the `--recertify` across a large number of tests (e.g. N>5) because each run genuinely stands up a test, runs it and tears it down, which takes time. For all faults, on an "average" machine, for 5 tests/fault, this may take half an hour. If you want to just test the banner quickly in a few minutes, seed the same data with the simple curl commands shown below:
+Now, in reality you would run the normal fault injection tests wit the `--repeat N` parameter to earn the [Consistency Certificate] badge. We've shown this previously [here](SAMPLE008.md#triage-consistency-certificationbadge-testing). It does take time, especially if you run the `--recertify` across a large number of tests (e.g. N>5) because each run genuinely stands up a test, runs it and tears it down, which takes time. For all faults, on an "average" machine, for 5 tests/fault, this may take half an hour. If you want to just test the banner quickly in a few minutes, seed the same data with the simple curl commands shown below:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.20.0-darwin-arm64]$ curl -s -X POST $HELPDESK-GATEWAY-URL/api/v1/fleet/fault-stability \
@@ -128,7 +128,7 @@ Now, in reality you would run the normal fault injection tests wit the `--repeat
 0
 ```
 
-Once the calibration data is in, we can run the model comparison, aka [`cert-compare`](VAULT.md#vault-cert-compare):
+Once the calibration data is in, we can run the model comparison, aka [`cert-compare`](../VAULT.md#vault-cert-compare):
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.20.0-darwin-arm64]$ ./faulttest vault cert-compare \
@@ -160,18 +160,18 @@ It's important to repeat, that this is not the live `faulttest` runs, just the `
    A `faulttest` run is a black box from the blog reader's perspective.
 
 2/ Reproducibility:
-   Anybody with a running Gateway can copy-paste the `curl` commands and see [`cert-compare`](VAULT.md#vault-cert-compare) work in just a few minutes.
+   Anybody with a running Gateway can copy-paste the `curl` commands and see [`cert-compare`](../VAULT.md#vault-cert-compare) work in just a few minutes.
    A real `faulttest` requires time, setup, a test DB and agent credentials.
 
 3/ The thing of interest here is the comparison, not the data generation that we've already proven to work in the previous samples.
    The `cert-compare` logic and output format is the story. 
    How the certs got there is a footnote.
 
-That being said, in production, the certs come from `faulttest run --repeat N` (see [this link](CONSISTENCY.md#52-host--vm-binary) for how it looks like on a host/VM in particular), not from the curl simulation shown above.
+That being said, in production, the certs come from `faulttest run --repeat N` (see [this link](../CONSISTENCY.md#52-host--vm-binary) for how it looks like on a host/VM in particular), not from the curl simulation shown above.
 
 ---
 
-For reference, this is the full list of presently available fault injection tests in the vault (the [pubicly avaialble](FAULTTEST.md) ones, the [internal](../testing/FAULT_INJECTION_TESTING.md) list is twice longer):
+For reference, this is the full list of presently available fault injection tests in the vault (the [pubicly avaialble](../FAULTTEST.md) ones, the [internal](../../testing/FAULT_INJECTION_TESTING.md) list is twice longer):
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.20.0-darwin-arm64]$ ./faulttest vault list \
@@ -236,7 +236,7 @@ db-checkpoint-warning            any        pbs_checkpoint_bgwriter_triage  pbs_
 
 ## Journey's Agent Reasoning and Chain-of-Thought
 
-The API endpoint to get the full agent reasoning and the chain-of-thought is `GET /api/v1/fleet/playbook-runs/{runID}/events` see [here](PLAYBOOKS.md#run-events-chain-of-thought) for details. Quoting that section directly here:
+The API endpoint to get the full agent reasoning and the chain-of-thought is `GET /api/v1/fleet/playbook-runs/{runID}/events` see [here](../PLAYBOOKS.md#run-events-chain-of-thought) for details. Quoting that section directly here:
 
 "Returns the chain-of-thought audit events for a run in chronological order — agent reasoning, tool executions, and policy decisions
 
@@ -244,9 +244,9 @@ curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/events \
   | jq '[.[] | {event_type, timestamp, output: .output.response}]'
 "
 
-Here's how this looks in practice via the CLI aka [`vault journey --detail`](VAULT.md#--detail-reasoning-interleaved-with-tool-calls):
+Here's how this looks in practice via the CLI aka [`vault journey --detail`](../VAULT.md#--detail-reasoning-interleaved-with-tool-calls):
 
-First let's get the list of last 5 journeys (and add an extra filter to limit it to the last 20 days. The important qualifier here is `--incident`, which effectively limits the [Journeys](JOURNEYS.md) to only those related to an [Incident](INCIDENTS.md):
+First let's get the list of last 5 journeys (and add an extra filter to limit it to the last 20 days. The important qualifier here is `--incident`, which effectively limits the [Journeys](../JOURNEYS.md) to only those related to an [Incident](../INCIDENTS.md):
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.20.0-darwin-arm64]$ ./faulttest vault journey \
