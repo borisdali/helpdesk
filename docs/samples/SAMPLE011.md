@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#11 (on K8s): The power of `vault judge-accuracy`
+# aiHelpDesk Sample#11 (from the source): The power of `vault judge-accuracy`
 
 The raw sample commands and deliberations presented below complement this blog post: 
 
@@ -46,7 +46,7 @@ If `vault judge-accuracy` shows the judge keeps approving versions that don't im
 If `vault accuracy` shows diagnosis dropping on a fault class, a playbook update is needed.
 
 
-## Demo of `vault judge-accuracy`:
+## Demo of `vault judge-accuracy`: Outline
 
 With that intro out of the way, let's see the power of `vault judge-accuracy`:
 
@@ -119,6 +119,9 @@ Step 3 — Activate
 ```
 
 And that's the skinny on the walkthrough.
+
+
+## Demo of `vault judge-accuracy`: Actual
 
 Now for brevity I'm omitting the first fault injection testing runs here that were done for the purpose of obtaining the [Consistency Certificate](../CONSISTENCY.md) (note the `--repeat N` flag in the command below), but the raw commands below is what counts because they tell the whole story:
 
@@ -218,7 +221,8 @@ What actually happened:
   - The instability is real, not noise.
     Judge scores: 33% → 67% → 100%
 
-Why the inconsistency?
+### Why the inconsistency?
+
 The `auto-db` isn't in the infra config, so the agent has no Known Infrastructure entry telling it the server is Docker-hosted.
 The playbook says "look at Known Infrastructure to determine hosting type"... but when there's no entry and so the agent's behavior is undefined and varies run-to-run:
 
@@ -242,6 +246,8 @@ Let's update the playbook with these instructions v1.6 → v1.7:
 And just to summarize, here's where we presently stand:
 
 The baseline is already posted (UNSTABLE, 3/3 pass, 40pp range) and so the remaining workflow has these steps:
+
+### The workflow
 
 ```
   # Step 1 — baseline is already in the vault (just ran: UNSTABLE cert posted)
@@ -308,7 +314,7 @@ The 12% is informational noise from the mixed-provenance run history.
 The judge should now see the new "unknown hosting type → default to escalation" rule and emit APPROVE
 That's the gap that caused runs 1 and 2 to score 33%/67%. Once we get the verdict, we ca proceed with activating and re-runing to close the loop with a new playbook version.
 
-Time to run `vault suggest-update`:
+### Time to run `vault suggest-update`
 
 ```
 [boris@cassiopeia ~/cassiopeia/helpdesk]$ go run ./testing/cmd/faulttest vault suggest-update --series-id pbs_db_restart_triage --gateway $GW --api-key $HELPDESK_CLIENT_API_KEY
@@ -526,6 +532,8 @@ Proposed draft saved as: pb_7d04912b (inactive, source=generated)
 #   curl -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_7d04912b/activate \
 #        -H 'Authorization: Bearer <key>'
 ```
+
+### How did the new proposed version do?
 
 Let's check `vault versions`:
 
@@ -775,6 +783,8 @@ Judge model:        claude-haiku-4-5-20251001
 Verdict saved to pb_7d04912b.
 ```
 
+### Judge approves!
+
 APPROVE verdict recorded on `pb_7d04912b`. But before activating, it's worth noticing that the generated v1.6 and our local v1.7 are different changes.
 
 The AI-generated draft (v1.6, what was just judged) added:
@@ -828,7 +838,11 @@ SERIES                              VERSION  SOURCE     UPDATED     NAME
 pbs_db_restart_triage               1.6      generated  2026-07-12  Database Down — Restart Triage
 ```
 
-And the playbook version v1.6 is now live. Now let's run the same repeat command to get the post-activation data point:
+And the playbook version v1.6 is now live. 
+
+### Re-run with the new playbook version
+
+Now let's run the same repeat command to get the post-activation data point:
 
 ```
 [boris@ ~/helpdesk]$ date; time go run ./testing/cmd/faulttest run \
@@ -930,7 +944,9 @@ user    0m0.398s
 sys     0m0.478s
 ```
 
-The cert says STABLE but the run tells a more nuanced story. Three things to unpack before running vault judge-accuracy.
+### We got a stable cert!
+
+The cert says STABLE... but the run tells a more nuanced story. Three things to unpack before running vault judge-accuracy.
 
 1/ What flipped from UNSTABLE → STABLE:
   The stability cert measures PRIMARY CONFIDENCE range, not judge score.
@@ -965,9 +981,10 @@ And a judge optimized against the cert can get a "correct" APPROVE by changing t
 Now why we didn't run into this before? Because for the first time in these examples we are using `--auto-db` feature (ephemeral database) combined with the playbook escalation feature where the control is passed by the DB Agent to the SysAdmin Agent to continue the triage process.
 
 
+### Upload a new version of a playbook from a local YAML
 
-
-Uploading a file gives back the draft ID. When `-file` path is provided, POST call is issued with the draft to `/api/v1/fleet/playbooks` to persist it and get a real `playbook_id` (with the `/import` endpoint being validate-only).
+Uploading a file gives back the draft ID. 
+When `-file` path is provided, POST call is issued with the draft to `/api/v1/fleet/playbooks` to persist it and get a real `playbook_id` (with the `/import` endpoint being validate-only).
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault suggest-update \
@@ -1241,7 +1258,9 @@ Judge model:        claude-haiku-4-5-20251001
 Verdict saved to pb_2c498091.
 ```
 
-APPROVE with strong reasoning. The judge now correctly identified both the `max_connections`/`pg_hba` non-restart fix and the unknown-hosting escalation mandate as safety improvements. Now let's activate and re-run:
+### APPROVE with strong reasoning! 
+
+The judge now correctly identified both the `max_connections`/`pg_hba` non-restart fix and the unknown-hosting escalation mandate as safety improvements. Now let's activate and re-run:
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault activate \
@@ -1378,6 +1397,8 @@ pbs_db_restart_triage             1.6         APPROVE               3       0%  
 JUDGE VERDICT is the prediction recorded by `vault diff`.
 SUCCESS% is the actual outcome after runs on this version.
 ```
+
+## Is Success% a good measure?
 
 Both versions show 0% succes. That's misleading at best, but is the artifact of `--repeat` mode where escalation chains never complete (sysadmin never runs, gateway keeps them "pending at escalation gate"). The actual quality signal lives in the cert and judge scores:
 
