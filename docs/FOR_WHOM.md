@@ -17,6 +17,8 @@ aiHelpDesk, commenting on our blog posts or comparing us to horizontal AI platfo
 agents for database and K8s incident response. Agents that are strictly and unequivocally
 accountable, not just capable.**
 
+<img width="1408" height="768" alt="aiHelpDesk_flow" src="https://github.com/user-attachments/assets/161ec1ab-94c9-4909-b4be-68cb60152a32" />
+
 The target roles are:
 
 - **DBAs and SREs** who are on-call for production PostgreSQL and K8s systems and
