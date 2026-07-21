@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#11 (on K8s): 3D Consistency Cert
+# aiHelpDesk Sample#12 (on K8s): 3D Consistency Cert
 
 The sample commands and deliberations presented below complement this two blog post: 
 
