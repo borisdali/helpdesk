@@ -23,7 +23,7 @@ The governed actuation arm — formal [tool registry](docs/TOOL_REGISTRY.md), [f
 Every resolved incident automatically proposes a playbook draft. Every successful `faulttest` remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md), which is aiHelpDesk's library of fault→remedy pairings, grows richer with every [incident](docs/INCIDENTS.md). The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking.
 
 **3. Stability certs with attribution — not just pass/fail.**
-Before a [playbook](docs/PLAYBOOKS.md) enters live rotation it is certified across [three dimensions](docs/ATTRIBUTION_CERTS.md): _outcome_ (did it pass?), _conclusion_ (did the agent reach the same diagnosis every run?) and _evaluation_ (did the judge agree with itself?). `STABLE(7) attr=oom-kill (7/7)` is a different claim from "it passed." It proves the agent doesn't just get the _right answer_. It gets it for the _right reason_, **consistently**.
+Before a [playbook](docs/PLAYBOOKS.md) enters live rotation it is certified across [three dimensions](docs/ATTRIBUTION_CERTS.md): _outcome_ (did it pass?), _conclusion_ (did the agent reach the same diagnosis every run?) and _evaluation_ (did the judge agree with itself?). `STABLE(7) attr=oom-kill (7/7)` is a different claim from "it passed." It proves the agent doesn't just get the _right answer_. It gets it for the _right reason_, [consistently](https://itnext.io/trust-has-three-dimensions-demand-from-your-ai-sre-vendor-to-show-a-cert-with-all-three-0f361a443807).
 
 ---
 Cloud DBaaS vs. Self-Service: While the cloud vendor's SaaS / DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. 
@@ -38,7 +38,9 @@ With [avalanche-like](https://medium.com/google-cloud/your-sre-on-call-runbook-i
   </a>
 </p>
 
-The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents and proposes updates when a successful incident trace suggests a better approach. See [here](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c) for the full story.
+The Flywheel is a loop that turns resolved incidents (real or injected) into better playbooks: Inject → Evaluate → Update Playbooks → Judge → Activate → Repeat.
+
+The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds every playbook, tracks their effectiveness across runs, flags regressions before they become incidents and proposes updates when a successful incident trace suggests a better approach. The Vault is a [learning signal](docs/VAULT_METRICS.md). See [here](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c) and [here](https://levelup.gitconnected.com/ai-to-take-over-your-job-heres-what-happened-when-ai-sre-tried-to-improve-its-own-playbook-c7a6338fae37) for the full story.
 
 ## Key Capabilities
 
