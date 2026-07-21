@@ -17,18 +17,18 @@ A _productivity_ agent makes your team faster. An _accountability_ agent certifi
 Three things set aiHelpDesk apart from a general-purpose AI assistant:
 
 **1. Agents that act, not just advise.**
-The governed actuation arm — formal tool registry, fleet runner, playbooks, policy engine, blast-radius guards — executes remediation steps on your real infrastructure under a tamper-proof audit trail. Every tool call is logged, every destructive action requires human approval and the governance framework enforces limits that can't be bypassed at runtime. This is Google's "Safety Trifecta" (transparency, real-time risk evaluation, progressive authorization) as a running system, not a design doc.
+The governed actuation arm — formal [tool registry](docs/TOOL_REGISTRY.md), [fleet runner](docs/FLEET.md), [playbooks](docs/PLAYBOOKS.md), [policy engine](docs/AIGOVERNANCE.md#3-policy-engine), [blast-radius guards](docs/AIGOVERNANCE.md#5-guardrails) — executes remediation steps on your real infrastructure under a tamper-proof [audit trail](docs/AUDIT.md). Every tool call is logged, every [destructive action](docs/MUTATION_TOOLS.md) requires [human approval](docs/INFORMED_CONSENT.md) and the governance framework enforces limits that can't be bypassed at runtime. This is Google's ["Safety Trifecta"](https://pub.towardsai.net/google-just-published-the-blueprint-heres-what-s-already-built-7055588c0ae4) (transparency, real-time risk evaluation, progressive authorization) as a running system, not a design doc.
 
 **2. Institutional memory that compounds.**
-Every resolved incident automatically proposes a playbook draft. Every successful faulttest remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md) — aiHelpDesk's library of fault→remedy pairings — grows richer with every incident. The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking.
+Every resolved incident automatically proposes a playbook draft. Every successful `faulttest` remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md), which is aiHelpDesk's library of fault→remedy pairings, grows richer with every [incident](docs/INCIDENTS.md). The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking.
 
 **3. Stability certs with attribution — not just pass/fail.**
-Before a playbook enters live rotation it is certified across three dimensions: _outcome_ (did it pass?), _conclusion_ (did the agent reach the same diagnosis every run?) and _evaluation_ (did the judge agree with itself?). `STABLE(7) attr=oom-kill (7/7)` is a different claim from "it passed." It proves the agent doesn't just get the right answer — it gets it for the right reason, consistently.
+Before a [playbook](docs/PLAYBOOKS.md) enters live rotation it is certified across [three dimensions](docs/ATTRIBUTION_CERTS.md): _outcome_ (did it pass?), _conclusion_ (did the agent reach the same diagnosis every run?) and _evaluation_ (did the judge agree with itself?). `STABLE(7) attr=oom-kill (7/7)` is a different claim from "it passed." It proves the agent doesn't just get the _right answer_. It gets it for the _right reason_, **consistently**.
 
 ---
-While the cloud vendor's SaaS / DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. 
-See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a) for extensive treatment of this topic and, in particular, check out the 13 specific customer expectations of the cloud provider's DBaaS and how the actual cloud DBaaS offerings mostly fail to satisfy them.
-With [avalanche-like](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c#5634) AI adoption, we expect the shift towards self-managing databases would only accelerate, pushing the products like aiHelpDesk to become more of the mainstream.
+Cloud DBaaS vs. Self-Service: While the cloud vendor's SaaS / DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. 
+See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a) for extensive treatment of this topic and the 13 specific customer expectations that the cloud DBaaS providers mostly fail to satisfy.
+With [avalanche-like](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c#5634) AI adoption, we expect the shift towards self-managing databases to only accelerate, pushing the products like aiHelpDesk into the mainstream.
 
 ## The Operational SRE/DBA Flywheel
 
@@ -49,7 +49,7 @@ The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds ever
 - **Incident diagnostics** — the incident agent collects database, K8s, OS and storage layers into a timestamped support bundle. On resolution, it automatically synthesises a playbook draft from the audit trace.
 - **A2A protocol** — built on Google ADK and the Agent-to-Agent protocol. Expert agents (Database, Kubernetes, Sysadmin, Incident, Orchestrator) can be swapped or extended independently.
 
-See [design principles](docs/PRINCIPLES.md) and the [FAQ](docs/FAQ.md) before diving in.
+See [design principles](docs/PRINCIPLES.md), the [FAQ](docs/FAQ.md) and [who is it for](docs/FOR_WHOM.md) before diving in.
 
 ---
 
