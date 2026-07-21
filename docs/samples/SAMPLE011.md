@@ -317,8 +317,12 @@ That's the gap that caused runs 1 and 2 to score 33%/67%. Once we get the verdic
 ### Time to run `vault suggest-update`
 
 ```
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ go run ./testing/cmd/faulttest vault suggest-update --series-id pbs_db_restart_triage --gateway $GW --api-key $HELPDESK_CLIENT_API_KEY
-Gateway: http://localhost:8080  ·  version: dev  ·  host: cassiopeia
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault suggest-update \
+      --series-id pbs_db_restart_triage \
+      --gateway $HELPDESK_GATEWAY_URL \
+      --api-key $HELPDESK_CLIENT_API_KEY
+
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.20.0-7-g3475cfd  ·  host: <your-host>
 
 Auto-selected trace: faulttest-c09790ce-db-connection-refused-r3
 
@@ -1275,7 +1279,7 @@ Series:    pbs_db_restart_triage
 
 faulttest vault active --gateway http://localhost:8080 --api-key <key>
 
-[boris@cassiopeia ~/cassiopeia/helpdesk]$ go run ./testing/cmd/faulttest vault active --gateway $GW --api-key $HELPDESK_CLIENT_API_KEY
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault active --gateway $GW --api-key $HELPDESK_CLIENT_API_KEY
 Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.20.0-7-g3475cfd  ·  host: <your-host>
 
 SERIES                              VERSION  SOURCE     UPDATED     NAME
@@ -1442,3 +1446,93 @@ That's the real signal right here:
 - v1.7 APPROVE → 100%, consistent with STABLE cert. The two metrics corroborate each other perfectly.
 
 
+## `vault accuracy` for `k8s-oomkilled` vs. `k8s-crashloop`
+
+### `k8s-oomkilled` first
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.21.0-deploy/helm/helpdesk]$ kubectl run vault-accuracy \
+      --image=ghcr.io/borisdali/helpdesk:v0.21.0 \
+      --image-pull-policy=Never \
+      --restart=Never \
+      --namespace=helpdesk-system \
+      --faulttest vault accuracy k8s-oomkilled \
+        --gateway $HELPDESK_GATEWAY_URL \
+        --api-key $HELPDESK_CLIENT_API_KEY \
+        --external=false
+
+pod/vault-accuracy created
+
+[boris@ /tmp/helpdesk/helpdesk-v0.21.0-deploy/helm/helpdesk]$ kubectl logs -n helpdesk-system vault-accuracy
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.21.0-bf26835  ·  host: helpdesk-gateway-78467d45c4-rjg74
+
+Diagnosis accuracy for series: pbs_k8s_pod_crash_triage
+
+  Feedback submitted : 6 runs
+  Correct diagnoses  : 5
+  Accuracy rate      : 83%
+
+  Breakdown by feedback time:
+    Post-incident (after recovery): 5 of 6 correct (83%)
+
+Triage consistency
+  Fault         : k8s-oomkilled  (OOMKilled)
+  Verdict       : STABLE
+  Runs          : 3
+  Pass rate     : 100%
+  Conf range    : 0pp  (primary hypothesis, passing runs only)
+  Playbook      : pbs_k8s_pod_crash_triage
+  Diagnosis model: claude-sonnet-4-6
+  Judge model   : claude-haiku-4-5-20251001
+  Tested at     : 2026-07-16 22:55 UTC  (0 days ago)
+
+  Attribution (taxonomy 1.0)
+  Primary class  : oom-kill
+  Consistent     : yes  (3/3 runs)
+
+[boris@ /tmp/helpdesk/helpdesk-v0.21.0-deploy/helm/helpdesk]$ k delete pod vault-accuracy -nhelpdesk-system
+pod "vault-accuracy" deleted
+```
+
+### `k8s-crashloop` next
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.21.0-deploy/helm/helpdesk]$ kubectl run vault-accuracy \
+      --image=ghcr.io/borisdali/helpdesk:v0.21.0 \
+      --image-pull-policy=Never \
+      --restart=Never \
+      --namespace=helpdesk-system \
+      --faulttest vault accuracy k8s-crashloop \
+        --gateway $HELPDESK_GATEWAY_URL \
+        --api-key $HELPDESK_CLIENT_API_KEY \
+        --external=false
+
+pod/vault-accuracy created
+
+[boris@ /tmp/helpdesk/helpdesk-v0.21.0-deploy/helm/helpdesk]$ kubectl logs -n helpdesk-system vault-accuracy
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.21.0-bf26835  ·  host: helpdesk-gateway-78467d45c4-rjg74
+
+Diagnosis accuracy for series: pbs_k8s_pod_crash_triage
+
+  Feedback submitted : 6 runs
+  Correct diagnoses  : 5
+  Accuracy rate      : 83%
+
+  Breakdown by feedback time:
+    Post-incident (after recovery): 5 of 6 correct (83%)
+
+Triage consistency
+  Fault         : k8s-crashloop  (CrashLoopBackOff)
+  Verdict       : STABLE
+  Runs          : 3
+  Pass rate     : 100%
+  Conf range    : 3pp  (primary hypothesis, passing runs only)
+  Playbook      : pbs_k8s_pod_crash_triage
+  Diagnosis model: claude-sonnet-4-6
+  Judge model   : claude-haiku-4-5-20251001
+  Tested at     : 2026-07-16 23:24 UTC  (0 days ago)
+
+  Attribution (taxonomy 1.0)
+  Primary class  : process-error
+  Consistent     : yes  (3/3 runs)
+```
