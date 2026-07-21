@@ -55,7 +55,7 @@ Whether it's being part of the design, development or production support for the
 mission critical databases, DBA's job is usually vital to ensuring that data is safe,
 secured and sound.
 
-Now, being paged for the 2am incidents is typically not the most pleasant part of the job.
+Now, being paged for the 2am [incidents](INCIDENTS.md) is typically not the most pleasant part of the job.
 Making your DBAs make critical decisions at this time is often not the best recipe
 for keeping your data safe and sound, nor does it help your DBAs been lucid the next
 day.
@@ -158,18 +158,18 @@ Horizontal AI platforms (Replit, internal agent platforms, general-purpose code/
 agents) are building the productivity layer: more code shipped, faster review cycles,
 automated support ticket triage. That's real value and we don't compete with it.
 
-aiHelpDesk is building the accountability layer for the subset of that work where
+aiHelpDesk is building the [accountability layer](https://levelup.gitconnected.com/your-ai-is-already-in-production-is-it-governed-aihelpdesk-positioning-ecc6a758695c#8d44) for the subset of that work where
 "similar quality" is not an acceptable standard: production database writes, Kubernetes
 pod terminations, connection kills, deployment restarts. Actions where the question is
 not "did the agent do something useful" but "can I defend what the agent decided, to a
-post-mortem audience, at 3am."
+postmortem audience, at 2am."
 
 The two layers are complementary. An engineering team can use a horizontal agent to move
 faster on everything and use aiHelpDesk to ensure that the AI-assisted operations on
 their most critical systems are auditable, calibrated and certifiably consistent.
 
-**The productivity agent makes your team faster. aiHelpDesk makes your production
-operations defensible.**
+**The _productivity_ agent makes your team faster. aiHelpDesk makes your production
+_operations defensible_.**
 
 ---
 
@@ -182,12 +182,12 @@ decision is time-sensitive, not evergreen.
 for incident response across engineering organisations today. Not as a pilot, as standard
 practice. In most cases these deployments have no audit trail, no step approval gate, no
 blast-radius check before a destructive action and no cert proving the agent was right the
-last five times it saw this fault class. The first serious post-mortem that asks "what did
+last five times it saw this fault class. The first serious postmortem that asks "what did
 the AI decide, who approved it and how do we know it was right?" will find nothing to show.
 The governance infrastructure that answers those questions needs to exist before the incident,
 not after.
 
-**The calibration data compounds.** A [stability cert](ATTRIBUTION_CERTS.md) backed by 3
+**The calibration data compounds.** A [stability 3D cert](ATTRIBUTION_CERTS.md) backed by 3
 runs means something. One backed by 30 means materially more. The
 [fault catalog](FAULTTEST.md), the evaluation data, the attribution history — these grow
 with every run through the [flywheel](VAULT.md#the-operational-sredba-flywheel). A team
@@ -195,7 +195,7 @@ that starts today has a 6–12 month head start on calibration depth over a team
 next year. That gap shows up directly in the cert: `STABLE(3)` vs. `STABLE(30)` is a
 different standard of proof and the difference is not something you can compress by running
 tests in a burst. Each run requires a real fault injection, a real agent diagnosis and a
-real judge evaluation. You cannot backfill operational history.
+real judge evaluation. **You cannot backfill operational history**.
 
 **Incidents keep happening.** Every production incident between now and adoption is
 diagnostic data that goes unrecorded, operational knowledge that stays in Slack threads
@@ -203,10 +203,10 @@ rather than playbooks and a MTTR that could have been minutes instead of 30–60
 The cost is not dramatic. It accrues quietly. A team that has absorbed that cost for
 three years and then starts measuring it finds it was larger than expected.
 
-**Regulatory pressure has a deadline.** AI governance requirements under DORA, SOC 2
+**Regulatory pressure has a deadline.** [AI Governance](AIGOVERNANCE.md) requirements under DORA, SOC 2
 controls on automated decision-making and financial services regulations on AI-assisted
 operations are arriving with specific implementation timelines, not open-ended horizons.
-Building the audit trail after an external deadline is harder and more expensive than
+Building the [compliance](COMPLIANCE.md) and [audit trail](AUDIT.md) after an external deadline is harder and more expensive than
 building it into the operational workflow from the start.
 
 ---
