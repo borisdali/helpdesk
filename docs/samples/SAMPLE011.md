@@ -1536,3 +1536,5 @@ Triage consistency
   Primary class  : process-error
   Consistent     : yes  (3/3 runs)
 ```
+
+Compare the Triage Consistency -> Primary Class of `oom-killed` vs. `process-error` for these two faults. The same playbook, same taxonomy, working (diagnosing) differently depending on a type of a fault. That's the power of the 3D attribution-aware cert!
