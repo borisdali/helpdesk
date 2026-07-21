@@ -1,6 +1,6 @@
 # aiHelpDesk Sample#12 (on K8s): 3D Consistency Cert
 
-The sample commands and deliberations presented below complement this two blog post: 
+The raw sample commands and deliberations presented below complement this blog post: 
 
 - **[Trust Has Three Dimensions. Demand from your AI SRE vendor to show a cert with all three.](https://itnext.io/trust-has-three-dimensions-demand-from-your-ai-sre-vendor-to-show-a-cert-with-all-three-0f361a443807#bf32)**
   Your Agent got it right. Can you prove that it knew why? The cert may be telling the truth, but does it have enough depth to back up that claim?
