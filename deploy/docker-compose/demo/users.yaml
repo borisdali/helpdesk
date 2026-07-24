@@ -1,0 +1,3 @@
+users:
+  - id: demo@aihelpdesk.biz
+    roles: [dba, sre, operator]

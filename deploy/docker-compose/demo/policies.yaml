@@ -1,0 +1,9 @@
+# Demo policy — all write and destructive actions require human approval.
+# This is what surfaces the step-approval gate in the demo.
+version: "1.0"
+policies:
+  - name: demo-approval-required
+    description: "Require approval for any write or destructive action (demo mode)"
+    rules:
+      - action_classes: [write, destructive]
+        effect: approve
