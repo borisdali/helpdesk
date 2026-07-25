@@ -16,6 +16,9 @@ bold() { printf "${BOLD}%s${RESET}\n" "$*"; }
 
 # ── config from environment ───────────────────────────────────────────────────
 GATEWAY_URL="${HELPDESK_GATEWAY_URL:-http://gateway:8080}"
+# HOST_GATEWAY_URL is the address the user's terminal can reach (port-mapped to host).
+# GATEWAY_URL is used for internal container-to-container calls; this is for printed commands.
+HOST_GATEWAY_URL="http://localhost:8180"
 API_KEY="${HELPDESK_CLIENT_API_KEY:-demo-api-key}"
 
 # ── API key guard ─────────────────────────────────────────────────────────────
@@ -520,7 +523,7 @@ run_mode_c() {
   printf "  and one field in infrastructure.json control who holds the key.\n"
   printf "\n"
   printf "  Audit trail (both runs):\n"
-  printf "    ${DIM}curl -s '${GATEWAY_URL}/api/v1/audit/events?limit=30' \\\n"
+  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/audit/events?limit=30' \\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq '.[] | {user,tool,action_class}'${RESET}\n"
   printf "\n"
   sep
@@ -621,16 +624,16 @@ main() {
   printf "  6. The full trace is now in the audit log (tamper-proof, hash-chained)\n"
   printf "\n"
   printf "  Explore the audit trail:\n"
-  printf "    ${DIM}curl -s ${GATEWAY_URL}/api/v1/audit/events?limit=5 \\\\\n"
+  printf "    ${DIM}curl -s ${HOST_GATEWAY_URL}/api/v1/audit/events?limit=5 \\\\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
   printf "\n"
   printf "  View the journey (WHAT + WHY):\n"
-  printf "    ${DIM}curl -s '${GATEWAY_URL}/api/v1/audit/journeys?run_id=${RUN_ID}' \\\\\n"
+  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/audit/journeys?run_id=${RUN_ID}' \\\\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
   printf "\n"
   printf "  Try other faults:\n"
-  printf "    ${DIM}DEMO_FAULT=db-long-running-query   docker compose --profile demo run --rm demo-runner${RESET}\n"
-  printf "    ${DIM}DEMO_FAULT=db-tx-lock-chain-blocker docker compose --profile demo run --rm demo-runner${RESET}\n"
+  printf "    ${DIM}DEMO_FAULT=db-long-running-query   docker compose -f docker-compose.demo.yaml run --rm demo-runner${RESET}\n"
+  printf "    ${DIM}DEMO_FAULT=db-tx-lock-chain-blocker docker compose -f docker-compose.demo.yaml run --rm demo-runner${RESET}\n"
   printf "\n"
   sep
 
