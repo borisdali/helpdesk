@@ -142,6 +142,8 @@ services:
     environment:
       HELPDESK_GATEWAY_URL: http://demo-gateway:8180
       HELPDESK_CLIENT_API_KEY: demo-api-key
+      # Passed in so the API key guard in run.sh can detect a missing key early.
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}}
       DEMO_CONN: "host=demo-postgres port=5432 dbname=postgres user=postgres password=demopassword sslmode=disable"
       DEMO_FAULT: ${DEMO_FAULT:-db-max-connections}
       DEMO_MODE: ${DEMO_MODE:-interactive}
