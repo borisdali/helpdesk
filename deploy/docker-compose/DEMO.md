@@ -1,7 +1,7 @@
 # aiHelpDesk: 10-Minute Demo
 
 See aiHelpDesk's governed AI incident response in action: a real [fault injected](../../docs/FAULTTEST.md)
-into a real PostgreSQL instance, an AI agent that diagnoses it, a [step-approval gate](../../docs/PLAYBOOKS.md#informed-gate)
+into a real PostgreSQL instance, an AI agent that diagnoses it, a [step-approval gate](../../docs/PLAYBOOKS.md#step-approval-gate)
 that surfaces before any destructive action and a tamper-proof [audit trail](../../docs/AUDIT.md)
 of everything that happened.
 
@@ -12,7 +12,7 @@ No configuration required beyond an LLM API key.
 ## Prerequisites
 
 - Docker Desktop (Mac/Windows) or Docker Engine + Compose plugin (Linux)
-  — OR — Podman with `podman compose` (see [Podman note](#podman-users))
+  or Podman with `podman compose` (see [Podman note](#podman-users))
 - An LLM API key (Anthropic **or** Google/Gemini — pick one)
 
 ---
@@ -40,7 +40,7 @@ To override: `export HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-
 ## 2. Start the demo stack
 
 ```bash
-docker compose --profile demo up -d
+docker compose -f docker-compose.demo.yaml up -d
 ```
 
 This starts four containers — a local Postgres (port 5434), the database agent,
@@ -49,7 +49,7 @@ Subsequent runs start in seconds.
 
 Watch readiness:
 ```bash
-docker compose --profile demo ps
+docker compose -f docker-compose.demo.yaml ps
 ```
 
 All four services should reach `healthy` within ~30 seconds.
@@ -59,13 +59,13 @@ All four services should reach `healthy` within ~30 seconds.
 ## 3. Run the demo
 
 ```bash
-docker compose --profile demo run --rm demo-runner
+docker compose -f docker-compose.demo.yaml run --rm demo-runner
 ```
 
 The demo runner:
 1. Injects the chosen fault into the local Postgres
-2. Triggers the `pbs_connection_triage` playbook (or whichever matches the fault)
-3. Streams the agent's diagnosis in real time
+2. Triggers the remediation playbook for that fault
+3. The agent inspects the database state and proposes a remediation step
 4. Pauses at the **step-approval gate** — showing the proposed action, action
    class and blast radius before anything executes
 5. Waits for your approval (interactive mode) or auto-approves after a countdown
@@ -84,13 +84,13 @@ The demo runner:
 
 ```bash
 # Connection pool exhaustion (default)
-docker compose --profile demo run --rm demo-runner
+docker compose -f docker-compose.demo.yaml run --rm demo-runner
 
 # Slow query
-DEMO_FAULT=db-long-running-query docker compose --profile demo run --rm demo-runner
+DEMO_FAULT=db-long-running-query docker compose -f docker-compose.demo.yaml run --rm demo-runner
 
 # Lock chain
-DEMO_FAULT=db-tx-lock-chain-blocker docker compose --profile demo run --rm demo-runner
+DEMO_FAULT=db-tx-lock-chain-blocker docker compose -f docker-compose.demo.yaml run --rm demo-runner
 ```
 
 ---
@@ -105,9 +105,9 @@ the agent diagnosed the fault, proposed a remediation step and now a human
 decides whether to proceed.
 
 ```bash
-docker compose --profile demo run --rm demo-runner
+docker compose -f docker-compose.demo.yaml run --rm demo-runner
 # or explicitly:
-DEMO_MODE=interactive docker compose --profile demo run --rm demo-runner
+DEMO_MODE=interactive docker compose -f docker-compose.demo.yaml run --rm demo-runner
 ```
 
 **Mode A — Auto-approve**
@@ -116,10 +116,10 @@ The gate is shown with a countdown and approved automatically. Useful for
 running the full flow unattended (CI demos, screen recordings).
 
 ```bash
-DEMO_MODE=auto docker compose --profile demo run --rm demo-runner
+DEMO_MODE=auto docker compose -f docker-compose.demo.yaml run --rm demo-runner
 
 # Adjust the countdown (default 8 seconds):
-DEMO_MODE=auto DEMO_AUTO_APPROVE_SECS=5 docker compose --profile demo run --rm demo-runner
+DEMO_MODE=auto DEMO_AUTO_APPROVE_SECS=5 docker compose -f docker-compose.demo.yaml run --rm demo-runner
 ```
 
 **Mode C — Governance bypass: force + clamping**
@@ -139,7 +139,7 @@ The governance config is one field in `infrastructure.json`:
 `"approval_override_roles": ["dba_lead"]`
 
 ```bash
-DEMO_MODE=clamping docker compose --profile demo run --rm demo-runner
+DEMO_MODE=clamping docker compose -f docker-compose.demo.yaml run --rm demo-runner
 ```
 
 This answers the question: *"what stops an on-call engineer from bypassing the gate
@@ -171,7 +171,7 @@ curl -s http://localhost:8180/api/v1/fleet/playbook-runs \
 
 ```bash
 for fault in db-max-connections db-long-running-query db-tx-lock-chain-blocker; do
-  DEMO_FAULT=$fault DEMO_MODE=auto docker compose --profile demo run --rm demo-runner
+  DEMO_FAULT=$fault DEMO_MODE=auto docker compose -f docker-compose.demo.yaml run --rm demo-runner
 done
 ```
 
@@ -180,26 +180,25 @@ done
 ## Tear down
 
 ```bash
-docker compose --profile demo down -v
+docker compose -f docker-compose.demo.yaml down -v
 ```
 
 This removes all demo containers and volumes. Your production aiHelpDesk
-deployment (if running) is unaffected — the demo profile uses separate
-containers, ports and volumes.
+deployment (if running) is unaffected — the demo uses a completely separate
+compose file, containers, ports and volumes.
 
 ---
 
 ## Podman users
 
 `podman compose` is a drop-in replacement for `docker compose` for this demo.
-The only required change: the sysadmin-agent in the production stack mounts
-`/var/run/docker.sock`, which Podman exposes at a different path. The demo
-profile does not use the sysadmin-agent, so no adjustment is needed.
+The demo stack does not use the sysadmin-agent (which mounts `/var/run/docker.sock`),
+so no socket path adjustment is needed.
 
 ```bash
 # Podman (rootless, macOS/Linux)
-podman compose --profile demo up -d
-podman compose --profile demo run --rm demo-runner
+podman compose -f docker-compose.demo.yaml up -d
+podman compose -f docker-compose.demo.yaml run --rm demo-runner
 ```
 
 If `podman compose` is not installed: `pip install podman-compose`.

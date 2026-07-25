@@ -1,0 +1,159 @@
+# aiHelpDesk — standalone demo stack.
+#
+# Completely isolated from the production compose file. No source build required.
+# All services pull from ghcr.io/borisdali/helpdesk:latest.
+#
+# Usage:
+#   export ANTHROPIC_API_KEY=sk-ant-...    # or GOOGLE_API_KEY / GEMINI_API_KEY
+#   docker compose -f docker-compose.demo.yaml up -d
+#   docker compose -f docker-compose.demo.yaml run --rm demo-runner
+#
+# Tear down (removes volumes):
+#   docker compose -f docker-compose.demo.yaml down -v
+
+services:
+
+  demo-postgres:
+    image: postgres:16
+    container_name: helpdesk-demo-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: demopassword
+      POSTGRES_DB: postgres
+    command:
+      - postgres
+      - -c
+      - max_connections=20
+      - -c
+      # Reserve slots so the agent can always connect even under saturation.
+      - superuser_reserved_connections=3
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - log_statement=all
+    ports:
+      - "5434:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  demo-auditd:
+    image: ghcr.io/borisdali/helpdesk:latest
+    container_name: helpdesk-demo-auditd
+    entrypoint: ["/bin/sh", "-c", "sleep 3 && exec /usr/local/bin/auditd"]
+    environment:
+      HELPDESK_AUDIT_ADDR: "0.0.0.0:1299"
+      HELPDESK_AUDIT_DB: /data/audit/demo-audit.db
+      HELPDESK_AUDIT_SOCKET: /data/audit/demo-audit.sock
+      HELPDESK_AUDIT_URL: http://localhost:1299
+      HELPDESK_APPROVAL_KEY: demo-api-key
+      HELPDESK_POLICY_ENABLED: "true"
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      HELPDESK_IDENTITY_PROVIDER: static
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
+    volumes:
+      - demo-audit-data:/data/audit
+      - ./demo/users.yaml:/etc/helpdesk/users.yaml:ro
+      - ./demo/policies.yaml:/etc/helpdesk/policies.yaml:ro
+      - ./demo/infrastructure.json:/etc/helpdesk/infrastructure.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:1299/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  demo-db-agent:
+    image: ghcr.io/borisdali/helpdesk:latest
+    container_name: helpdesk-demo-db-agent
+    command: ["/usr/local/bin/database-agent"]
+    environment:
+      HELPDESK_AGENT_ADDR: "0.0.0.0:1200"
+      HELPDESK_AGENT_URL: "http://demo-db-agent:1200"
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR:-anthropic}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME:-claude-haiku-4-5-20251001}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}}
+      HELPDESK_AUDIT_ENABLED: "true"
+      HELPDESK_AUDIT_URL: http://demo-auditd:1299
+      HELPDESK_AUDIT_API_KEY: demo-api-key
+      HELPDESK_IDENTITY_PROVIDER: static
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
+      HELPDESK_POLICY_ENABLED: "true"
+      HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
+      HELPDESK_APPROVAL_ENABLED: "true"
+      HELPDESK_APPROVAL_TIMEOUT: 10m
+    volumes:
+      - ./demo/users.yaml:/etc/helpdesk/users.yaml:ro
+      - ./demo/policies.yaml:/etc/helpdesk/policies.yaml:ro
+      - ./demo/infrastructure.json:/etc/helpdesk/infrastructure.json:ro
+    restart: unless-stopped
+    depends_on:
+      demo-auditd:
+        condition: service_healthy
+      demo-postgres:
+        condition: service_healthy
+
+  demo-gateway:
+    image: ghcr.io/borisdali/helpdesk:latest
+    container_name: helpdesk-demo-gateway
+    command: ["/usr/local/bin/gateway"]
+    environment:
+      HELPDESK_GATEWAY_ADDR: "0.0.0.0:8180"
+      HELPDESK_AGENT_URLS: "http://demo-db-agent:1200"
+      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR:-anthropic}
+      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME:-claude-haiku-4-5-20251001}
+      HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}}
+      HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
+      HELPDESK_AUDIT_ENABLED: "true"
+      HELPDESK_AUDIT_URL: http://demo-auditd:1299
+      HELPDESK_AUDIT_API_KEY: demo-api-key
+      HELPDESK_AGENT_API_KEY: demo-api-key
+      HELPDESK_CLIENT_API_KEY: demo-api-key
+      # static provider so X-User role checks work (required for Mode C clamping).
+      HELPDESK_IDENTITY_PROVIDER: static
+      HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
+    volumes:
+      - ./demo/infrastructure.json:/etc/helpdesk/infrastructure.json:ro
+      - ./demo/users.yaml:/etc/helpdesk/users.yaml:ro
+    ports:
+      - "8180:8180"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8180/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    depends_on:
+      demo-auditd:
+        condition: service_healthy
+      demo-db-agent:
+        condition: service_started
+
+  demo-runner:
+    image: ghcr.io/borisdali/helpdesk:latest
+    container_name: helpdesk-demo-runner
+    entrypoint: ["/bin/bash", "/demo/run.sh"]
+    environment:
+      HELPDESK_GATEWAY_URL: http://demo-gateway:8180
+      HELPDESK_CLIENT_API_KEY: demo-api-key
+      DEMO_CONN: "host=demo-postgres port=5432 dbname=postgres user=postgres password=demopassword sslmode=disable"
+      DEMO_FAULT: ${DEMO_FAULT:-db-max-connections}
+      DEMO_MODE: ${DEMO_MODE:-interactive}
+      DEMO_AUTO_APPROVE_SECS: ${DEMO_AUTO_APPROVE_SECS:-8}
+      DEMO_OPERATOR: ${DEMO_OPERATOR:-demo@aihelpdesk.biz}
+    volumes:
+      - ./demo/run.sh:/demo/run.sh:ro
+    stdin_open: true
+    tty: true
+    depends_on:
+      demo-gateway:
+        condition: service_healthy
+
+volumes:
+  demo-audit-data:
