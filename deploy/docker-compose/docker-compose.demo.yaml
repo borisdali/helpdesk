@@ -23,7 +23,7 @@ services:
     command:
       - postgres
       - -c
-      - max_connections=20
+      - max_connections=30
       - -c
       # Reserve slots so the agent can always connect even under saturation.
       - superuser_reserved_connections=3

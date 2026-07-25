@@ -134,6 +134,14 @@ inject_fault() {
   case "$FAULT" in
     db-max-connections)
       say "Injecting fault: saturating connection pool with idle sessions..."
+      # Clean up any ghost demo_fault connections left by a previous interrupted run.
+      # When the demo-runner container is SIGKILL'd, its psql clients die but PostgreSQL
+      # keeps the server-side backends until TCP keepalives fire (hours). Terminate them
+      # before counting slots so EXISTING reflects reality.
+      PGPASSWORD=demopassword psql "$CONN" \
+        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='demo_fault' AND pid <> pg_backend_pid();" \
+        >/dev/null 2>&1 || true
+      sleep 0.5
       # Read max_connections and superuser_reserved_connections, then fill the
       # remaining slots so the agent sees a saturated pool.
       MAX=$(PGPASSWORD=demopassword psql "$CONN" -t -A -c "SHOW max_connections;" 2>/dev/null | tr -d ' \n')
@@ -380,58 +388,35 @@ seed_demo_playbook() {
   local list_resp ver
   list_resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbooks?series_id=${series}&active_only=true" 2>/dev/null)
   ver=$(printf '%s' "$list_resp" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)
-  if [[ "$ver" == "1.4" ]]; then
+  # "1.5-demo" avoids colliding with the permanent system v1.5 that will be
+  # embedded in the rebuilt image. SeedSystemPlaybooks checks version equality
+  # and would skip inserting system v1.5 if a non-system v1.5 already exists.
+  if [[ "$ver" == "1.5" || "$ver" == "1.5-demo" ]]; then
     return 0  # already on the improved version
   fi
 
   # Build guidance with \n escape sequences (no jq/python needed).
-  # shellcheck disable=SC2016
-  local g
-  # Use printf %b to get a single string with literal newlines, then re-escape for JSON.
   local raw_g
-  raw_g="Step 1: Confirm the nature of the overload.
-Call get_active_connections. Count connections by state:
-- state='idle': harmless in isolation but drain slots and may indicate pool
-  misconfiguration if count is very high.
-- state='idle in transaction': holds an open transaction (and possibly locks).
-  More dangerous. These prevent VACUUM and can cause lock contention.
-- state='idle in transaction (aborted)': the transaction was rolled back but
-  the connection was never closed. Same lock-holding risk.
+  raw_g="Diagnose and remediate a connection pool overload on a single database.
 
-Step 2A — Idle connection overload (state = 'idle').
-Do NOT call get_session_info for plain idle (state='idle') connections — they hold
-no open transactions and are safe to terminate in bulk without per-session inspection.
-(get_session_info is reserved for idle-in-transaction sessions in Step 2B.)
-Call terminate_idle_connections with idle_minutes=5 (the safe default).
-Before requesting approval, state:
-- How many idle connections will be terminated
-- Current max_connections and how many slots will be freed
-If terminate_idle_connections returns 0 terminated (all connections are newly
-created, under 5 minutes old), call it again with idle_minutes=0 to terminate
-all idle connections regardless of age.
-Before requesting approval for the idle_minutes=0 call, state the count of
-idle connections and that they are under 5 minutes old.
-Do NOT use this to terminate idle-in-transaction sessions (see Step 2B).
+Step 1: Call get_active_connections. Count connections by state (idle, idle in transaction, active). Note max_connections from the result.
 
-Step 2B — Idle-in-transaction sessions.
-For each session in state='idle in transaction' or 'idle in transaction (aborted)':
-Call get_session_info with pid=<pid>. Check:
-- has_writes: if true, terminating rolls back uncommitted DML. Disclose the risk.
-- idle_secs: sessions idle > 300s with has_writes=true are especially risky.
-Call terminate_connection with pid=<pid>. Terminate longest-idle first.
+Step 2 — Idle connection overload (state = 'idle'):
+  Do NOT call get_session_info for plain idle connections. Do NOT call get_server_info, get_connection_stats, or get_pg_settings. Proceed directly.
+  Call terminate_idle_connections with idle_minutes=5.
+  In the approval request state: how many idle connections exist and what max_connections is.
+  If 0 connections terminated (all newly created), call terminate_idle_connections again with idle_minutes=0.
+  In the approval request state: count of idle connections and that they are newly created.
 
-Step 3: Verify connections freed.
-Call get_active_connections. Confirm total is below max_connections - 5.
+  For state='idle in transaction' sessions only: call get_session_info per PID to check has_writes, then terminate_connection.
 
-Step 4: Flag root cause.
-Idle connections: application pool is oversized or leaking. Review max_size/idle timeout.
-Idle-in-transaction recurrence: recommend idle_in_transaction_session_timeout."
+Step 3: Call get_active_connections. If total < max_connections - 5, the incident is resolved. State the before and after counts."
 
   # Escape newlines and double-quotes for JSON string embedding.
   g=$(printf '%s' "$raw_g" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{if (NR>1) printf "\\n"; printf "%s", $0}')
 
   local body
-  body=$(printf '{"series_id":"%s","name":"Connection Overload — Terminate Idle Sessions","version":"1.4","playbook_type":"remediation","entry_point":true,"execution_mode":"agent_approve","agent_name":"postgres_database_agent","approval_mode":"manual","problem_class":"availability","author":"aiHelpDesk","description":"Remediate connection pool exhaustion by terminating idle sessions.","guidance":"%s"}' \
+  body=$(printf '{"series_id":"%s","name":"Connection Overload — Terminate Idle Sessions","version":"1.5-demo","playbook_type":"remediation","entry_point":true,"execution_mode":"agent_approve","agent_name":"postgres_database_agent","approval_mode":"manual","problem_class":"availability","author":"aiHelpDesk","description":"Remediate connection pool exhaustion by terminating idle sessions.","guidance":"%s"}' \
     "$series" "$g")
 
   local create_resp pb_id
