@@ -41,22 +41,16 @@ if [[ -z "${HELPDESK_API_KEY:-}" ]]; then
   exit 1
 fi
 
-# Detect LLM vendor from available API keys when not explicitly set.
-# Compose passes HELPDESK_MODEL_VENDOR/NAME with Anthropic defaults; if the
-# operator set GOOGLE_API_KEY or GEMINI_API_KEY instead, override here.
+# Detect LLM vendor from API keys. Use DEMO_MODEL_* (not HELPDESK_MODEL_*) to
+# avoid bleeding the user's production env vars into the demo model selection.
 if [[ -n "${GOOGLE_API_KEY:-}${GEMINI_API_KEY:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  export HELPDESK_MODEL_VENDOR="${HELPDESK_MODEL_VENDOR:-google}"
-  export HELPDESK_MODEL_NAME="${HELPDESK_MODEL_NAME:-gemini-2.5-flash}"
-  export HELPDESK_API_KEY="${HELPDESK_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}"
-  DETECTED_VENDOR="Google (gemini-2.5-flash)"
+  DEMO_MODEL_VENDOR="${DEMO_MODEL_VENDOR:-google}"
+  DEMO_MODEL_NAME="${DEMO_MODEL_NAME:-gemini-2.5-flash}"
 elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  export HELPDESK_MODEL_VENDOR="${HELPDESK_MODEL_VENDOR:-anthropic}"
-  export HELPDESK_MODEL_NAME="${HELPDESK_MODEL_NAME:-claude-haiku-4-5-20251001}"
-  export HELPDESK_API_KEY="${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY}}"
-  DETECTED_VENDOR="Anthropic (claude-haiku-4-5-20251001)"
-else
-  DETECTED_VENDOR="${HELPDESK_MODEL_VENDOR:-anthropic} / ${HELPDESK_MODEL_NAME:-claude-haiku-4-5-20251001}"
+  DEMO_MODEL_VENDOR="${DEMO_MODEL_VENDOR:-anthropic}"
+  DEMO_MODEL_NAME="${DEMO_MODEL_NAME:-claude-haiku-4-5-20251001}"
 fi
+DETECTED_VENDOR="${DEMO_MODEL_VENDOR:-anthropic} / ${DEMO_MODEL_NAME:-claude-haiku-4-5-20251001}"
 CONN="${DEMO_CONN:-host=demo-postgres port=5432 dbname=postgres user=postgres password=demopassword sslmode=disable}"
 FAULT="${DEMO_FAULT:-db-max-connections}"
 MODE="${DEMO_MODE:-interactive}"   # "auto" or "interactive"

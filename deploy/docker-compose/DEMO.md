@@ -38,7 +38,10 @@ export GEMINI_API_KEY=AIza...
 
 The demo auto-detects which key is set and picks the right model
 (`claude-haiku-4-5-20251001` for Anthropic, `gemini-2.5-flash` for Google).
-To override: `export HELPDESK_MODEL_VENDOR=anthropic HELPDESK_MODEL_NAME=claude-sonnet-4-6`.
+To override: `export DEMO_MODEL_VENDOR=anthropic DEMO_MODEL_NAME=claude-sonnet-4-6`.
+
+> **Note:** The demo uses `DEMO_MODEL_*` variables (not `HELPDESK_MODEL_*`) so that
+> any production model settings you have exported do not bleed into the demo stack.
 
 ---
 

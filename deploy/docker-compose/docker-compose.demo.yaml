@@ -76,8 +76,9 @@ services:
       HELPDESK_AGENT_ADDR: "0.0.0.0:1200"
       HELPDESK_AGENT_URL: "http://demo-db-agent:1200"
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
-      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR:-anthropic}
-      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME:-claude-haiku-4-5-20251001}
+      # Use DEMO_MODEL_* (not HELPDESK_MODEL_*) to avoid bleeding production env vars.
+      HELPDESK_MODEL_VENDOR: ${DEMO_MODEL_VENDOR:-anthropic}
+      HELPDESK_MODEL_NAME: ${DEMO_MODEL_NAME:-claude-haiku-4-5-20251001}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}}
       HELPDESK_AUDIT_ENABLED: "true"
       HELPDESK_AUDIT_URL: http://demo-auditd:1299
@@ -106,8 +107,9 @@ services:
     environment:
       HELPDESK_GATEWAY_ADDR: "0.0.0.0:8180"
       HELPDESK_AGENT_URLS: "http://demo-db-agent:1200"
-      HELPDESK_MODEL_VENDOR: ${HELPDESK_MODEL_VENDOR:-anthropic}
-      HELPDESK_MODEL_NAME: ${HELPDESK_MODEL_NAME:-claude-haiku-4-5-20251001}
+      # Use DEMO_MODEL_* (not HELPDESK_MODEL_*) to avoid bleeding production env vars.
+      HELPDESK_MODEL_VENDOR: ${DEMO_MODEL_VENDOR:-anthropic}
+      HELPDESK_MODEL_NAME: ${DEMO_MODEL_NAME:-claude-haiku-4-5-20251001}
       HELPDESK_API_KEY: ${HELPDESK_API_KEY:-${ANTHROPIC_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}}
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
       HELPDESK_AUDIT_ENABLED: "true"
