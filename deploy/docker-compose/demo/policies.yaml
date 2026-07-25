@@ -1,9 +1,11 @@
 version: "1.0"
 policies:
   - name: demo-approval-required
-    description: "Require approval for any write or destructive action (demo mode)"
+    description: "Allow reads freely; require approval for write or destructive actions."
     resources:
       - type: database
     rules:
+      - action: [read]
+        effect: allow
       - action: [write, destructive]
         effect: require_approval
