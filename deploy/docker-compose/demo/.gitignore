@@ -1,0 +1,4 @@
+# Override the root gitignore rule: the demo infrastructure.json is safe to
+# commit — it only references the local demo-postgres container with hardcoded
+# demo credentials, not real infrastructure.
+!infrastructure.json
