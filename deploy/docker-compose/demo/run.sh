@@ -144,13 +144,17 @@ inject_fault() {
       TO_OPEN=$(( TARGET - EXISTING ))
       if (( TO_OPEN < 1 )); then TO_OPEN=1; fi
       say "  max_connections=${MAX}, superuser_reserved=${SU_RES}, opening ${TO_OPEN} idle connections..."
+      # Use tail -f /dev/null piped to psql to create persistent IDLE connections.
+      # psql reads from the pipe (which never closes), stays connected, state='idle'.
+      # application_name=demo_fault marks them for teardown without touching real sessions.
+      FAULT_CONN="${CONN} application_name=demo_fault"
       for (( i=0; i<TO_OPEN; i++ )); do
-        { PGPASSWORD=demopassword psql "$CONN" -c "SELECT pg_sleep(300);" >/dev/null 2>&1 & } 2>/dev/null
+        { tail -f /dev/null 2>/dev/null | PGPASSWORD=demopassword psql "${FAULT_CONN}" >/dev/null 2>&1 & } 2>/dev/null
       done
       sleep 1
-      ACTIVE=$(PGPASSWORD=demopassword psql "$CONN" -t -A \
-        -c "SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND state='active';" 2>/dev/null | tr -d ' \n')
-      ok "Fault active: ${ACTIVE} sleeper connections holding the pool (max=${MAX})"
+      IDLE=$(PGPASSWORD=demopassword psql "$CONN" -t -A \
+        -c "SELECT count(*) FROM pg_stat_activity WHERE application_name='demo_fault' AND state='idle';" 2>/dev/null | tr -d ' \n')
+      ok "Fault active: ${IDLE} idle connections holding the pool (max=${MAX})"
       ;;
     db-long-running-query)
       say "Injecting fault: starting a long-running query (pg_sleep 300s)..."
@@ -188,7 +192,7 @@ teardown_fault() {
   case "$FAULT" in
     db-max-connections)
       PGPASSWORD=demopassword psql "$CONN" \
-        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND pid <> pg_backend_pid();" \
+        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='demo_fault' AND pid <> pg_backend_pid();" \
         >/dev/null 2>&1 || true
       ;;
     db-long-running-query)
@@ -523,7 +527,7 @@ run_mode_c() {
   printf "  and one field in infrastructure.json control who holds the key.\n"
   printf "\n"
   printf "  Audit trail (both runs):\n"
-  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/audit/events?limit=30' \\\n"
+  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/events?limit=30' \\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq '.[] | {user,tool,action_class}'${RESET}\n"
   printf "\n"
   sep
@@ -624,11 +628,11 @@ main() {
   printf "  6. The full trace is now in the audit log (tamper-proof, hash-chained)\n"
   printf "\n"
   printf "  Explore the audit trail:\n"
-  printf "    ${DIM}curl -s ${HOST_GATEWAY_URL}/api/v1/audit/events?limit=5 \\\\\n"
+  printf "    ${DIM}curl -s ${HOST_GATEWAY_URL}/api/v1/governance/events?limit=5 \\\\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
   printf "\n"
   printf "  View the journey (WHAT + WHY):\n"
-  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/audit/journeys?run_id=${RUN_ID}' \\\\\n"
+  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/journeys?run_id=${RUN_ID}' \\\\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
   printf "\n"
   printf "  Try other faults:\n"

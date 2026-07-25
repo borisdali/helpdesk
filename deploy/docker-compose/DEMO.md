@@ -161,15 +161,15 @@ After the demo runs, the full audit trail is in the demo audit store:
 
 ```bash
 # Recent audit events (hash-chained)
-curl -s http://localhost:8180/api/v1/audit/events?limit=10 \
+curl -s 'http://localhost:8180/api/v1/governance/events?limit=10' \
      -H 'Authorization: Bearer demo-api-key' | jq .
 
 # The journey: WHAT the agent did + WHY (hypothesis, evidence, reasoning)
-curl -s 'http://localhost:8180/api/v1/audit/journeys' \
+curl -s 'http://localhost:8180/api/v1/governance/journeys' \
      -H 'Authorization: Bearer demo-api-key' | jq .
 
 # Playbook runs
-curl -s http://localhost:8180/api/v1/fleet/playbook-runs \
+curl -s 'http://localhost:8180/api/v1/fleet/playbook-runs' \
      -H 'Authorization: Bearer demo-api-key' | jq .
 ```
 
