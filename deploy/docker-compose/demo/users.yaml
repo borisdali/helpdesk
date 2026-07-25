@@ -1,3 +1,5 @@
 users:
   - id: demo@aihelpdesk.biz
-    roles: [dba, sre, operator]
+    roles: [dba, sre, operator, dba_lead]
+  - id: operator@aihelpdesk.biz
+    roles: [sre, operator]

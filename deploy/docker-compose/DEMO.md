@@ -122,6 +122,29 @@ DEMO_MODE=auto docker compose --profile demo run --rm demo-runner
 DEMO_MODE=auto DEMO_AUTO_APPROVE_SECS=5 docker compose --profile demo run --rm demo-runner
 ```
 
+**Mode C — Governance bypass: force + clamping**
+
+Runs the same playbook twice with two different user identities:
+
+1. `operator@aihelpdesk.biz` (roles: `sre`, `operator`) requests `approval_mode: force`
+   — the gateway clamps it back to `manual` (no `dba_lead` role) and the step-approval
+   gate fires anyway. The response shows `effective_approval_mode: manual` and a warning.
+   The step is denied to stop the run.
+
+2. `demo@aihelpdesk.biz` (roles: `dba`, `sre`, `operator`, `dba_lead`) requests `approval_mode: force`
+   — accepted without clamping. The step-approval gate still fires (it always does in
+   `execution_mode: agent_approve`), but the user holds the authority to approve it.
+
+The governance config is one field in `infrastructure.json`:
+`"approval_override_roles": ["dba_lead"]`
+
+```bash
+DEMO_MODE=clamping docker compose --profile demo run --rm demo-runner
+```
+
+This answers the question: *"what stops an on-call engineer from bypassing the gate
+at 3am?"* — the role restriction does. And the audit trail records the attempt either way.
+
 ---
 
 ## Explore the audit trail

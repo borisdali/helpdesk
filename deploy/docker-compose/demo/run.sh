@@ -46,10 +46,23 @@ declare -A FAULT_NAMES=(
   [db-long-running-query]="Long-running query blocking"
   [db-tx-lock-chain-blocker]="Transaction lock chain — active root blocker"
 )
-declare -A FAULT_SERIES=(
+# Triage playbooks (execution_mode: agent) — diagnosis only, no step-approval gate.
+declare -A FAULT_SERIES_TRIAGE=(
   [db-max-connections]="pbs_connection_triage"
   [db-long-running-query]="pbs_slow_query_triage"
   [db-tx-lock-chain-blocker]="pbs_lock_chain_triage"
+)
+# Remediation playbooks (execution_mode: agent_approve) — step-approval gate fires.
+declare -A FAULT_SERIES_REMEDIATE=(
+  [db-max-connections]="pbs_connection_remediate"
+  [db-long-running-query]="pbs_slow_query_remediate"
+  [db-tx-lock-chain-blocker]="pbs_lock_chain_remediate"
+)
+# Modes A and B use remediation directly so the step-approval gate actually fires.
+declare -A FAULT_SERIES=(
+  [db-max-connections]="pbs_connection_remediate"
+  [db-long-running-query]="pbs_slow_query_remediate"
+  [db-tx-lock-chain-blocker]="pbs_lock_chain_remediate"
 )
 
 if [[ -z "${FAULT_NAMES[$FAULT]:-}" ]]; then
@@ -86,7 +99,14 @@ wait_for_psql() {
 }
 
 gw() {
-  curl -sf -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" "$@"
+  curl -sf -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+       -H "X-User: ${OPERATOR}" "$@"
+}
+
+gw_as() {
+  local user="$1"; shift
+  curl -sf -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+       -H "X-User: ${user}" "$@"
 }
 
 # ── fault injection ───────────────────────────────────────────────────────────
@@ -168,10 +188,12 @@ teardown_fault() {
 }
 
 # ── playbook trigger ──────────────────────────────────────────────────────────
+# trigger_playbook [series] [approval_mode] — uses OPERATOR identity via gw()
 trigger_playbook() {
+  local series="${1:-$SERIES}" mode="${2:-review}"
   local resp run_id
-  resp=$(gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${SERIES}/run" \
-    -d "{\"connection_string\": \"${CONN}\", \"operator\": \"${OPERATOR}\", \"approval_mode\": \"agent_approve\"}" 2>&1) || {
+  resp=$(gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
+    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1) || {
     err "Failed to trigger playbook: $resp"
     exit 1
   }
@@ -181,6 +203,13 @@ trigger_playbook() {
     exit 1
   fi
   printf '%s' "$run_id"
+}
+
+# trigger_playbook_as <user> <series> <approval_mode> — returns full JSON response
+trigger_playbook_as() {
+  local user="$1" series="$2" mode="$3"
+  gw_as "$user" -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
+    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1
 }
 
 # ── poll for gate ─────────────────────────────────────────────────────────────
@@ -224,6 +253,202 @@ approve_gate() {
     >/dev/null 2>&1
 }
 
+deny_gate() {
+  local run_id="$1" step_index="${2:-1}"
+  gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}/proceed" \
+    -d "{\"resolution\":\"denied\",\"resolved_by\":\"${OPERATOR}\",\"step_index\":${step_index},\"reason\":\"Mode C demo: proving clamping — run stopped, re-running as privileged user\"}" \
+    >/dev/null 2>&1 || true
+}
+
+# ── mode C: force + clamping demonstration ───────────────────────────────────
+run_mode_c() {
+  local UNPRIVILEGED="operator@aihelpdesk.biz"   # roles: sre, operator — no dba_lead
+  local PRIVILEGED="demo@aihelpdesk.biz"          # roles: dba, sre, operator, dba_lead
+  local REMEDIATE="${FAULT_SERIES_REMEDIATE[$FAULT]}"
+
+  sep
+  printf "\n"
+  bold "  Mode C — Governance Bypass: force + approval_override_roles"
+  printf "\n"
+  printf "  Two runs. Same fault. Same playbook. Different roles.\n"
+  printf "\n"
+  printf "  Run 1: ${UNPRIVILEGED} requests force\n"
+  printf "         → clamped (no dba_lead) → gate still fires\n"
+  printf "  Run 2: ${PRIVILEGED} requests force\n"
+  printf "         → accepted (has dba_lead) → gate fires but authority is clear\n"
+  printf "\n"
+  printf "  Config: infrastructure.json sets approval_override_roles: [dba_lead]\n"
+  printf "\n"
+  sep
+  printf "\n"
+
+  say "Step 1 — Inject fault..."
+  inject_fault
+  printf "\n"
+
+  # ── Run 1: unprivileged force ─────────────────────────────────────────────
+  sep
+  bold "  ┌─────────────────────────────────────────────────────────┐"
+  bold "  │  Run 1/2 — ${UNPRIVILEGED}"
+  bold "  │  approval_mode: force    role: sre, operator (no dba_lead)"
+  bold "  └─────────────────────────────────────────────────────────┘"
+  printf "\n"
+  say "  Triggering ${REMEDIATE} as ${UNPRIVILEGED} with approval_mode=force..."
+
+  local resp1
+  resp1=$(trigger_playbook_as "$UNPRIVILEGED" "$REMEDIATE" "force") || {
+    err "Failed to trigger playbook (run 1)"; exit 1
+  }
+  local run_id1 eff1
+  run_id1=$(printf '%s' "$resp1" | grep -o '"run_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  eff1=$(printf '%s' "$resp1" | grep -o '"effective_approval_mode":"[^"]*"' | head -1 | cut -d'"' -f4)
+  local has_warn1=0
+  printf '%s' "$resp1" | grep -q '"warnings":\[' && has_warn1=1 || true
+
+  if [[ -z "$run_id1" ]]; then
+    err "No run_id in response: $resp1"; exit 1
+  fi
+
+  printf "\n"
+  printf "  Requested:          ${BOLD}force${RESET}\n"
+  if [[ "$has_warn1" -eq 1 ]]; then
+    printf "  Effective:          ${YELLOW}%s${RESET}  ← clamped\n" "${eff1:-manual}"
+    warn "  Gateway: approval_mode clamped — ${UNPRIVILEGED} lacks dba_lead"
+  else
+    printf "  Effective:          ${GREEN}%s${RESET}\n" "${eff1:-manual}"
+    warn "  No clamping detected — check approval_override_roles in infrastructure.json"
+  fi
+  printf "  Run ID:             %s\n" "$run_id1"
+  printf "\n"
+
+  say "  Polling for step-approval gate (should fire — clamping kept approval required)..."
+  local gate1 appr1
+  gate1=$(poll_for_gate "$run_id1")
+  appr1=$(printf '%s' "$gate1" | cut -d'|' -f1)
+  local action1 summary1
+  action1=$(printf '%s' "$gate1" | cut -d'|' -f3)
+  summary1=$(printf '%s' "$gate1" | cut -d'|' -f2)
+
+  if [[ "$appr1" == "COMPLETED" ]]; then
+    printf "  ${DIM}Playbook completed without gate (unexpected for agent_approve mode).${RESET}\n"
+  elif [[ "$appr1" == "FAILED" || "$appr1" == "TIMEOUT" ]]; then
+    warn "  Run timed out or failed — check: docker compose --profile demo logs demo-gateway"
+  else
+    ok "  Gate fired as expected — force was clamped, approval still required."
+    [[ -n "$summary1"   ]] && printf "  Proposed action:    %s\n" "$summary1"
+    [[ -n "$action1"    ]] && printf "  Action class:       ${YELLOW}%s${RESET}\n" "$action1"
+    printf "\n"
+    printf "  ${DIM}Denying step — this run was for proof of clamping, not remediation.${RESET}\n"
+    deny_gate "$run_id1" 1
+    ok "  Step denied. Run 1 stopped. Governance held."
+  fi
+  printf "\n"
+
+  say "  Tearing down fault before Run 2..."
+  teardown_fault 2>/dev/null || true
+  sleep 2
+
+  # ── Run 2: privileged force ───────────────────────────────────────────────
+  sep
+  bold "  ┌─────────────────────────────────────────────────────────┐"
+  bold "  │  Run 2/2 — ${PRIVILEGED}"
+  bold "  │  approval_mode: force    role: dba, sre, operator, dba_lead"
+  bold "  └─────────────────────────────────────────────────────────┘"
+  printf "\n"
+  say "  Re-injecting fault..."
+  inject_fault
+  printf "\n"
+
+  say "  Triggering ${REMEDIATE} as ${PRIVILEGED} with approval_mode=force..."
+  local resp2
+  resp2=$(trigger_playbook_as "$PRIVILEGED" "$REMEDIATE" "force") || {
+    err "Failed to trigger playbook (run 2)"; exit 1
+  }
+  local run_id2 eff2
+  run_id2=$(printf '%s' "$resp2" | grep -o '"run_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  eff2=$(printf '%s' "$resp2" | grep -o '"effective_approval_mode":"[^"]*"' | head -1 | cut -d'"' -f4)
+  local has_warn2=0
+  printf '%s' "$resp2" | grep -q '"warnings":\[' && has_warn2=1 || true
+
+  if [[ -z "$run_id2" ]]; then
+    err "No run_id in response: $resp2"; exit 1
+  fi
+
+  printf "\n"
+  printf "  Requested:          ${BOLD}force${RESET}\n"
+  if [[ "$has_warn2" -eq 0 ]]; then
+    printf "  Effective:          ${GREEN}%s${RESET}  ← accepted, no clamping\n" "${eff2:-force}"
+    ok "  Gateway accepted force — dba_lead role verified."
+  else
+    printf "  Effective:          ${YELLOW}%s${RESET}  ← unexpected clamping\n" "${eff2:-manual}"
+    warn "  Unexpected clamping for ${PRIVILEGED} — check roles in users.yaml"
+  fi
+  printf "  Run ID:             %s\n" "$run_id2"
+  printf "\n"
+
+  say "  Polling for step-approval gate..."
+  local gate2 appr2
+  gate2=$(poll_for_gate "$run_id2")
+  appr2=$(printf '%s' "$gate2" | cut -d'|' -f1)
+  local action2 summary2 blast2
+  summary2=$(printf '%s' "$gate2" | cut -d'|' -f2)
+  action2=$(printf '%s' "$gate2" | cut -d'|' -f3)
+  blast2=$(printf '%s' "$gate2" | cut -d'|' -f4)
+
+  if [[ "$appr2" == "COMPLETED" ]]; then
+    ok "  Playbook completed (agent_approve loop finished without pending steps)."
+  elif [[ "$appr2" == "FAILED" || "$appr2" == "TIMEOUT" ]]; then
+    warn "  Run timed out — check: docker compose --profile demo logs demo-gateway"
+  else
+    printf "\n"
+    bold "  ┌─────────────────────────────────────────────────────────┐"
+    bold "  │              STEP APPROVAL GATE                         │"
+    bold "  └─────────────────────────────────────────────────────────┘"
+    printf "\n"
+    [[ -n "$summary2"  ]] && printf "  Proposed action:    ${BOLD}%s${RESET}\n" "$summary2"
+    [[ -n "$action2"   ]] && printf "  Action class:       ${YELLOW}%s${RESET}\n" "$action2"
+    [[ -n "$blast2"    ]] && printf "  Blast radius:       %s connections\n" "$blast2"
+    printf "\n"
+    printf "  ${DIM}The gate fired — even with force, agent_approve always proposes steps one at a time.${RESET}\n"
+    printf "  ${DIM}The difference: this user's force request was NOT downgraded. They have the authority.${RESET}\n"
+    printf "\n"
+    printf "  Auto-approving (${PRIVILEGED} is authorized)...\n"
+    approve_gate "$appr2"
+    ok "  Step approved. Waiting for completion..."
+    printf "\n"
+    if FINAL2=$(poll_for_completion "$run_id2"); then
+      OUTCOME2=$(printf '%s' "$FINAL2" | grep -o '"outcome":"[^"]*"' | head -1 | cut -d'"' -f4)
+      ok "  Completed — outcome: ${OUTCOME2:-resolved}"
+    else
+      warn "  Run did not complete in expected window."
+    fi
+  fi
+
+  # ── Summary ───────────────────────────────────────────────────────────────
+  printf "\n"
+  sep
+  bold "  What you just saw:"
+  printf "\n"
+  printf "  Run 1 (%s)\n" "$UNPRIVILEGED"
+  printf "    requested=force  effective=%-8s  gate=fired  verdict=denied\n" "${eff1:-manual}"
+  printf "\n"
+  printf "  Run 2 (%s)\n" "$PRIVILEGED"
+  printf "    requested=force  effective=%-8s  gate=fired  verdict=approved\n" "${eff2:-force}"
+  printf "\n"
+  printf "  The gate fired in both runs — agent_approve always proposes steps one at a time.\n"
+  printf "  The only difference visible to the audit trail: one user's force request\n"
+  printf "  was silently downgraded. The other's was accepted. One line in users.yaml\n"
+  printf "  and one field in infrastructure.json control who holds the key.\n"
+  printf "\n"
+  printf "  Audit trail (both runs):\n"
+  printf "    ${DIM}curl -s '${GATEWAY_URL}/api/v1/audit/events?limit=30' \\\n"
+  printf "         -H 'Authorization: Bearer ${API_KEY}' | jq '.[] | {user,tool,action_class}'${RESET}\n"
+  printf "\n"
+  sep
+
+  teardown_fault 2>/dev/null || true
+}
+
 poll_for_completion() {
   local run_id="$1" i=0
   while (( i < 120 )); do
@@ -247,13 +472,27 @@ main() {
   sep
   printf "\n"
   printf "  Fault:     ${BOLD}%s${RESET} (%s)\n" "${FAULT_NAMES[$FAULT]}" "$FAULT"
-  printf "  Mode:      ${BOLD}%s${RESET}\n" "$([ "$MODE" = auto ] && echo 'auto-approve (mode A)' || echo 'interactive approval (mode B)')"
+  printf "  Mode:      ${BOLD}%s${RESET}\n" "$(case "$MODE" in
+    auto)      echo 'auto-approve (mode A)' ;;
+    clamping)  echo 'governance bypass demo (mode C)' ;;
+    *)         echo 'interactive approval (mode B)' ;;
+  esac)"
   printf "  Playbook:  %s\n" "$SERIES"
   printf "  Model:     %s\n" "$DETECTED_VENDOR"
   printf "  Gateway:   %s\n" "$GATEWAY_URL"
   printf "\n"
   sep
   printf "\n"
+
+  # Mode C has its own flow
+  if [[ "$MODE" == "clamping" ]]; then
+    say "Step 1/1 — Waiting for services to be ready..."
+    wait_for_psql
+    wait_for_http "${GATEWAY_URL}/health" "gateway"
+    printf "\n"
+    run_mode_c
+    return
+  fi
 
   # Step 1 — Wait for services
   say "Step 1/5 — Waiting for services to be ready..."

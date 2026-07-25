@@ -143,7 +143,7 @@ aiHelpDesk's moat is not in agent capability. Foundation models are improving fa
 general-purpose agent with `psql` access and a good prompt can approximate triage quality
 within a reasonable range. The moat is the [governance](AIGOVERNANCE.md) and [calibration](VAULT.md#vault-calibration) layer that makes
 the agent's conclusions certifiable: the [fault catalog](FAULTTEST.md), the [attribution taxonomy](ATTRIBUTION_CERTS.md#2-how-attribution-classification-works), the
-evaluation data, the [audit trail](AUDIT.md), the [step-approval gate](PLAYBOOKS.md#informed-gate). That layer cannot be replicated
+evaluation data, the [audit trail](AUDIT.md), the [step-approval gate](PLAYBOOKS.md#step-approval-gate). That layer cannot be replicated
 by a horizontal platform without making the same investment we've already made in the
 specific domain of production database and K8s operations.
 
