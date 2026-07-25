@@ -1,6 +1,6 @@
 series_id: pbs_connection_remediate
 name: Connection Overload — Terminate Idle Sessions
-version: "1.3"
+version: "1.4"
 playbook_type: remediation
 entry_point: true
 execution_mode: agent_approve
@@ -30,6 +30,9 @@ guidance: |
     the connection was never closed. Same lock-holding risk.
 
   Step 2A — Idle connection overload (state = 'idle').
+  Do NOT call get_session_info for plain idle (state='idle') connections — they hold
+  no open transactions and are safe to terminate in bulk without per-session inspection.
+  (get_session_info is reserved for idle-in-transaction sessions in Step 2B.)
   Call terminate_idle_connections with idle_minutes=5 (the safe default).
   Before requesting approval, state:
   - How many idle connections will be terminated

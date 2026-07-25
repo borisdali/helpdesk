@@ -301,11 +301,12 @@ show_gate_ui() {
 
 # run_approval_loop <initial_resp> <run_id> — drives all approve/deny rounds until complete.
 # Handles both interactive (MODE=interactive) and auto-approve (MODE=auto) flows.
+# Read actions are auto-approved silently; only write/destructive actions pause for input.
 # Returns 0 on complete/resolved, 1 on denied/error.
 run_approval_loop() {
   local resp="$1" run_id="$2" step_num=0
   while true; do
-    local status step_index
+    local status step_index action_class
     status=$(printf '%s' "$resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
     case "$status" in
       complete|resolved)
@@ -322,6 +323,22 @@ run_approval_loop() {
         (( step_num++ )) || true
         step_index=$(printf '%s' "$resp" | grep -o '"index":[0-9]*' | head -1 | cut -d':' -f2)
         step_index="${step_index:-1}"
+        action_class=$(printf '%s' "$resp" | grep -o '"action_class":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+        if [[ "$action_class" == "read" ]]; then
+          # Reads are auto-approved — they carry no blast radius risk.
+          # Show a brief inline trace so the demo log shows what the agent is doing.
+          local read_tool
+          read_tool=$(printf '%s' "$resp" | grep -o '"tool":"[^"]*"' | head -1 | cut -d'"' -f4)
+          printf "  ${DIM}agent reading: %s${RESET}\n" "${read_tool:-?}"
+          resp=$(approve_step "$run_id" "$step_index")
+          if [[ -z "$resp" ]]; then
+            err "approve_step returned empty response — check gateway logs."
+            return 1
+          fi
+          continue
+        fi
+
         show_gate_ui "$resp"
         if [[ "$MODE" == "auto" ]]; then
           printf "  ${YELLOW}Auto-approve mode: approving in %d seconds...${RESET}\n" "$AUTO_APPROVE_SECS"
@@ -350,6 +367,82 @@ run_approval_loop() {
         ;;
     esac
   done
+}
+
+# ── playbook seeder ───────────────────────────────────���──────────────────────
+# Ensure the running gateway has the v1.4 connection-remediate guidance.
+# The embedded image ships v1.3 (which causes the agent to loop per-session).
+# We POST a non-system v1.4 (identical except for the Step 2A prohibition on
+# calling get_session_info for plain idle connections) and activate it.
+# Idempotent: skipped if v1.4 is already active.
+seed_demo_playbook() {
+  local series="pbs_connection_remediate"
+  local list_resp ver
+  list_resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbooks?series_id=${series}&active_only=true" 2>/dev/null)
+  ver=$(printf '%s' "$list_resp" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ "$ver" == "1.4" ]]; then
+    return 0  # already on the improved version
+  fi
+
+  # Build guidance with \n escape sequences (no jq/python needed).
+  # shellcheck disable=SC2016
+  local g
+  # Use printf %b to get a single string with literal newlines, then re-escape for JSON.
+  local raw_g
+  raw_g="Step 1: Confirm the nature of the overload.
+Call get_active_connections. Count connections by state:
+- state='idle': harmless in isolation but drain slots and may indicate pool
+  misconfiguration if count is very high.
+- state='idle in transaction': holds an open transaction (and possibly locks).
+  More dangerous. These prevent VACUUM and can cause lock contention.
+- state='idle in transaction (aborted)': the transaction was rolled back but
+  the connection was never closed. Same lock-holding risk.
+
+Step 2A — Idle connection overload (state = 'idle').
+Do NOT call get_session_info for plain idle (state='idle') connections — they hold
+no open transactions and are safe to terminate in bulk without per-session inspection.
+(get_session_info is reserved for idle-in-transaction sessions in Step 2B.)
+Call terminate_idle_connections with idle_minutes=5 (the safe default).
+Before requesting approval, state:
+- How many idle connections will be terminated
+- Current max_connections and how many slots will be freed
+If terminate_idle_connections returns 0 terminated (all connections are newly
+created, under 5 minutes old), call it again with idle_minutes=0 to terminate
+all idle connections regardless of age.
+Before requesting approval for the idle_minutes=0 call, state the count of
+idle connections and that they are under 5 minutes old.
+Do NOT use this to terminate idle-in-transaction sessions (see Step 2B).
+
+Step 2B — Idle-in-transaction sessions.
+For each session in state='idle in transaction' or 'idle in transaction (aborted)':
+Call get_session_info with pid=<pid>. Check:
+- has_writes: if true, terminating rolls back uncommitted DML. Disclose the risk.
+- idle_secs: sessions idle > 300s with has_writes=true are especially risky.
+Call terminate_connection with pid=<pid>. Terminate longest-idle first.
+
+Step 3: Verify connections freed.
+Call get_active_connections. Confirm total is below max_connections - 5.
+
+Step 4: Flag root cause.
+Idle connections: application pool is oversized or leaking. Review max_size/idle timeout.
+Idle-in-transaction recurrence: recommend idle_in_transaction_session_timeout."
+
+  # Escape newlines and double-quotes for JSON string embedding.
+  g=$(printf '%s' "$raw_g" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{if (NR>1) printf "\\n"; printf "%s", $0}')
+
+  local body
+  body=$(printf '{"series_id":"%s","name":"Connection Overload — Terminate Idle Sessions","version":"1.4","playbook_type":"remediation","entry_point":true,"execution_mode":"agent_approve","agent_name":"postgres_database_agent","approval_mode":"manual","problem_class":"availability","author":"aiHelpDesk","description":"Remediate connection pool exhaustion by terminating idle sessions.","guidance":"%s"}' \
+    "$series" "$g")
+
+  local create_resp pb_id
+  create_resp=$(curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks" -d "$body" 2>/dev/null)
+  pb_id=$(printf '%s' "$create_resp" | grep -o '"playbook_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ -z "$pb_id" ]]; then
+    warn "Could not seed playbook v1.4 (running with v${ver:-?}): ${create_resp}"
+    return 0
+  fi
+  curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${pb_id}/activate" -d '{}' >/dev/null 2>&1 || true
+  ok "Playbook pbs_connection_remediate patched to v1.4"
 }
 
 # ── mode C: force + clamping demonstration ───────────────────────────────────
@@ -560,6 +653,7 @@ main() {
     say "Step 1/1 — Waiting for services to be ready..."
     wait_for_psql
     wait_for_http "${GATEWAY_URL}/health" "gateway"
+    seed_demo_playbook
     printf "\n"
     run_mode_c
     return
@@ -569,6 +663,7 @@ main() {
   say "Step 1/5 — Waiting for services to be ready..."
   wait_for_psql
   wait_for_http "${GATEWAY_URL}/health" "gateway"
+  seed_demo_playbook
   printf "\n"
 
   # Step 2 — Inject fault
