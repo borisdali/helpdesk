@@ -223,9 +223,11 @@ curl_gw_as() {
     "$@"
 }
 
-# trigger_playbook [series] [approval_mode] — returns run_id, prints error body on failure
+# trigger_playbook [series] [approval_mode] — returns full ApproveRunResponse JSON.
+# agent_approve: the gateway proposes step 1 synchronously; status=pending_approval
+# is in the response body — there is nothing to poll.
 trigger_playbook() {
-  local series="${1:-$SERIES}" mode="${2:-review}"
+  local series="${1:-$SERIES}" mode="${2:-manual}"
   local resp run_id
   resp=$(curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
     -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1)
@@ -234,7 +236,7 @@ trigger_playbook() {
     err "Failed to trigger playbook: $resp"
     exit 1
   fi
-  printf '%s' "$run_id"
+  printf '%s' "$resp"
 }
 
 # trigger_playbook_as <user> <series> <approval_mode> — returns full JSON response
@@ -244,61 +246,103 @@ trigger_playbook_as() {
     -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1
 }
 
-# ── poll for gate ─────────────────────────────────────────────────────────────
-# Outputs a single pipe-delimited line to stdout: approval_id|summary|class|radius|status
-# All human-readable progress goes to stderr so command substitution captures only the result.
-poll_for_gate() {
-  local run_id="$1" max="${2:-300}" i=0 last_status=""
-  printf "${CYAN}▶   Waiting for step-approval gate (run %s)...${RESET}\n" "$run_id" >&2
-  while (( i < max )); do
-    local resp status approval_id
-    resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}" 2>/dev/null)
-    if [[ -z "$resp" ]]; then
-      printf "${DIM}    [%3ds] poll error — retrying...${RESET}\n" "$i" >&2
-      sleep 2; (( i+=2 )); continue
-    fi
+# ── step approval ─────────────────────────────────────────────────────────────
+# The agent_approve flow is synchronous: POST /run returns step 1 with
+# status=pending_approval; POST /proceed executes the step and returns the next
+# step (or status=complete). No polling of GET /playbook-runs/{id} is needed.
+
+# approve_step <run_id> <step_index> — executes the step and returns next ApproveRunResponse
+approve_step() {
+  local run_id="$1" step_index="${2:-1}"
+  curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}/proceed" \
+    -d "{\"resolution\":\"approved\",\"resolved_by\":\"${OPERATOR}\",\"step_index\":${step_index},\"connection_string\":\"${CONN}\"}" 2>&1
+}
+
+# deny_step <run_id> <step_index> [reason]
+deny_step() {
+  local run_id="$1" step_index="${2:-1}" reason="${3:-denied by operator}"
+  curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}/proceed" \
+    -d "{\"resolution\":\"denied\",\"resolved_by\":\"${OPERATOR}\",\"step_index\":${step_index},\"reason\":\"${reason}\"}" \
+    2>/dev/null || true
+}
+
+# show_gate_ui <resp_json> — prints the step-approval gate box from an ApproveRunResponse
+show_gate_ui() {
+  local resp="$1"
+  local tool reason action_class approval_id
+  tool=$(printf '%s' "$resp"         | grep -o '"tool":"[^"]*"'         | head -1 | cut -d'"' -f4)
+  reason=$(printf '%s' "$resp"       | grep -o '"reason":"[^"]*"'       | head -1 | cut -d'"' -f4)
+  action_class=$(printf '%s' "$resp" | grep -o '"action_class":"[^"]*"' | head -1 | cut -d'"' -f4)
+  approval_id=$(printf '%s' "$resp"  | grep -o '"approval_id":"[^"]*"'  | head -1 | cut -d'"' -f4)
+  printf "\n"
+  bold "  ┌─────────────────────────────────────────────────────────┐"
+  bold "  │              STEP APPROVAL GATE                         │"
+  bold "  └─────────────────────────────────────────────────────────┘"
+  printf "\n"
+  printf "  ${BOLD}The AI agent has diagnosed the fault and proposes a remediation step.${RESET}\n"
+  printf "  Before executing, human approval is required.\n"
+  printf "\n"
+  [[ -n "$tool"         ]] && printf "  Proposed action:  ${BOLD}%s${RESET}\n" "$tool"
+  [[ -n "$reason"       ]] && printf "  Reasoning:        %s\n" "$reason"
+  [[ -n "$action_class" ]] && printf "  Action class:     ${YELLOW}%s${RESET}\n" "$action_class"
+  printf "  Approval ID:      %s\n" "$approval_id"
+  printf "\n"
+  printf "  ${DIM}This is aiHelpDesk's L2 autonomy gate — the agent proposed the action,${RESET}\n"
+  printf "  ${DIM}but nothing executes until a human approves it.${RESET}\n"
+  printf "\n"
+}
+
+# run_approval_loop <initial_resp> <run_id> — drives all approve/deny rounds until complete.
+# Handles both interactive (MODE=interactive) and auto-approve (MODE=auto) flows.
+# Returns 0 on complete/resolved, 1 on denied/error.
+run_approval_loop() {
+  local resp="$1" run_id="$2" step_num=0
+  while true; do
+    local status step_index
     status=$(printf '%s' "$resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-    if [[ "$status" != "$last_status" ]]; then
-      printf "${DIM}    [%3ds] status: %s${RESET}\n" "$i" "${status:-unknown}" >&2
-      last_status="$status"
-    fi
     case "$status" in
-      pending_approval|gate_pending)
-        approval_id=$(printf '%s' "$resp" | grep -o '"approval_id":"[^"]*"' | head -1 | cut -d'"' -f4)
-        local gate_summary action_class blast_radius
-        gate_summary=$(printf '%s' "$resp" | grep -o '"summary":"[^"]*"' | head -1 | cut -d'"' -f4)
-        action_class=$(printf '%s' "$resp" | grep -o '"action_class":"[^"]*"' | head -1 | cut -d'"' -f4)
-        blast_radius=$(printf '%s' "$resp" | grep -o '"blast_radius":[0-9]*' | head -1 | cut -d':' -f2)
-        printf '%s|%s|%s|%s|%s' "$approval_id" "$gate_summary" "$action_class" "$blast_radius" "$status"
+      complete|resolved)
+        local summary
+        summary=$(printf '%s' "$resp" | grep -o '"summary":"[^"]*"' | head -1 | cut -d'"' -f4)
+        ok "Playbook completed — ${summary:-resolved}"
         return 0
         ;;
-      completed|resolved)
-        printf 'COMPLETED||||||'
-        return 0
+      denied)
+        warn "Step was denied. Playbook abandoned."
+        return 1
         ;;
-      failed|error)
-        printf 'FAILED||||||'
-        return 0
+      pending_approval)
+        (( step_num++ )) || true
+        step_index=$(printf '%s' "$resp" | grep -o '"index":[0-9]*' | head -1 | cut -d':' -f2)
+        step_index="${step_index:-1}"
+        show_gate_ui "$resp"
+        if [[ "$MODE" == "auto" ]]; then
+          printf "  ${YELLOW}Auto-approve mode: approving in %d seconds...${RESET}\n" "$AUTO_APPROVE_SECS"
+          for (( i=AUTO_APPROVE_SECS; i>0; i-- )); do
+            printf "\r  ${YELLOW}  Approving in %d...${RESET}  " "$i"; sleep 1
+          done
+          printf "\r  ${GREEN}  Approving now...              ${RESET}\n"
+          ok "Gate approved automatically."
+        else
+          printf "  ${BOLD}Press ENTER to approve this action, or Ctrl-C to abort.${RESET}\n"
+          printf "\n"
+          printf "  (In production: operators use the Decision Hub, Slack, or git-branch approval flow.)\n"
+          printf "\n"
+          read -r _
+          ok "Gate approved."
+        fi
+        resp=$(approve_step "$run_id" "$step_index")
+        if [[ -z "$resp" ]]; then
+          err "approve_step returned empty response — check gateway logs."
+          return 1
+        fi
+        ;;
+      *)
+        err "Unexpected status '${status:-empty}'. Full response: ${resp}"
+        return 1
         ;;
     esac
-    sleep 2; (( i+=2 ))
   done
-  printf 'TIMEOUT||||||'
-}
-
-# ── approval ──────────────────────────────────────────────────────────────────
-approve_gate() {
-  local approval_id="$1"
-  gw -X POST "${GATEWAY_URL}/api/v1/fleet/approvals/${approval_id}/approve" \
-    -d "{\"operator\": \"${OPERATOR}\", \"verdict_notes\": \"Demo: approved via demo runner\"}" \
-    >/dev/null 2>&1
-}
-
-deny_gate() {
-  local run_id="$1" step_index="${2:-1}"
-  gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}/proceed" \
-    -d "{\"resolution\":\"denied\",\"resolved_by\":\"${OPERATOR}\",\"step_index\":${step_index},\"reason\":\"Mode C demo: proving clamping — run stopped, re-running as privileged user\"}" \
-    >/dev/null 2>&1 || true
 }
 
 # ── mode C: force + clamping demonstration ───────────────────────────────────
@@ -362,26 +406,28 @@ run_mode_c() {
   printf "  Run ID:             %s\n" "$run_id1"
   printf "\n"
 
-  say "  Polling for step-approval gate (should fire — clamping kept approval required)..."
-  local gate1 appr1
-  gate1=$(poll_for_gate "$run_id1")
-  appr1=$(printf '%s' "$gate1" | cut -d'|' -f1)
-  local action1 summary1
-  action1=$(printf '%s' "$gate1" | cut -d'|' -f3)
-  summary1=$(printf '%s' "$gate1" | cut -d'|' -f2)
+  # Gate is in the trigger response — no polling needed.
+  local status1
+  status1=$(printf '%s' "$resp1" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  local step_index1
+  step_index1=$(printf '%s' "$resp1" | grep -o '"index":[0-9]*' | head -1 | cut -d':' -f2)
+  step_index1="${step_index1:-1}"
 
-  if [[ "$appr1" == "COMPLETED" ]]; then
-    printf "  ${DIM}Playbook completed without gate (unexpected for agent_approve mode).${RESET}\n"
-  elif [[ "$appr1" == "FAILED" || "$appr1" == "TIMEOUT" ]]; then
-    warn "  Run timed out or failed — check: docker compose --profile demo logs demo-gateway"
-  else
+  if [[ "$status1" == "pending_approval" ]]; then
     ok "  Gate fired as expected — force was clamped, approval still required."
-    [[ -n "$summary1"   ]] && printf "  Proposed action:    %s\n" "$summary1"
-    [[ -n "$action1"    ]] && printf "  Action class:       ${YELLOW}%s${RESET}\n" "$action1"
+    local tool1 action1
+    tool1=$(printf '%s' "$resp1"   | grep -o '"tool":"[^"]*"'         | head -1 | cut -d'"' -f4)
+    action1=$(printf '%s' "$resp1" | grep -o '"action_class":"[^"]*"' | head -1 | cut -d'"' -f4)
+    [[ -n "$tool1"   ]] && printf "  Proposed action:    %s\n" "$tool1"
+    [[ -n "$action1" ]] && printf "  Action class:       ${YELLOW}%s${RESET}\n" "$action1"
     printf "\n"
     printf "  ${DIM}Denying step — this run was for proof of clamping, not remediation.${RESET}\n"
-    deny_gate "$run_id1" 1
+    deny_step "$run_id1" "$step_index1" "Mode C demo: proving clamping — run stopped"
     ok "  Step denied. Run 1 stopped. Governance held."
+  elif [[ "$status1" == "complete" ]]; then
+    printf "  ${DIM}Playbook completed without gate (unexpected for agent_approve mode).${RESET}\n"
+  else
+    warn "  Unexpected status '${status1}' — check: docker compose -f docker-compose.demo.yaml logs demo-gateway"
   fi
   printf "\n"
 
@@ -427,42 +473,34 @@ run_mode_c() {
   printf "  Run ID:             %s\n" "$run_id2"
   printf "\n"
 
-  say "  Polling for step-approval gate..."
-  local gate2 appr2
-  gate2=$(poll_for_gate "$run_id2")
-  appr2=$(printf '%s' "$gate2" | cut -d'|' -f1)
-  local action2 summary2 blast2
-  summary2=$(printf '%s' "$gate2" | cut -d'|' -f2)
-  action2=$(printf '%s' "$gate2" | cut -d'|' -f3)
-  blast2=$(printf '%s' "$gate2" | cut -d'|' -f4)
+  # Gate is in the trigger response — no polling needed.
+  local status2
+  status2=$(printf '%s' "$resp2" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-  if [[ "$appr2" == "COMPLETED" ]]; then
-    ok "  Playbook completed (agent_approve loop finished without pending steps)."
-  elif [[ "$appr2" == "FAILED" || "$appr2" == "TIMEOUT" ]]; then
-    warn "  Run timed out — check: docker compose --profile demo logs demo-gateway"
-  else
-    printf "\n"
-    bold "  ┌─────────────────────────────────────────────────────────┐"
-    bold "  │              STEP APPROVAL GATE                         │"
-    bold "  └─────────────────────────────────────────────────────────┘"
-    printf "\n"
-    [[ -n "$summary2"  ]] && printf "  Proposed action:    ${BOLD}%s${RESET}\n" "$summary2"
-    [[ -n "$action2"   ]] && printf "  Action class:       ${YELLOW}%s${RESET}\n" "$action2"
-    [[ -n "$blast2"    ]] && printf "  Blast radius:       %s connections\n" "$blast2"
-    printf "\n"
+  if [[ "$status2" == "pending_approval" ]]; then
+    show_gate_ui "$resp2"
     printf "  ${DIM}The gate fired — even with force, agent_approve always proposes steps one at a time.${RESET}\n"
     printf "  ${DIM}The difference: this user's force request was NOT downgraded. They have the authority.${RESET}\n"
     printf "\n"
     printf "  Auto-approving (${PRIVILEGED} is authorized)...\n"
-    approve_gate "$appr2"
-    ok "  Step approved. Waiting for completion..."
-    printf "\n"
-    if FINAL2=$(poll_for_completion "$run_id2"); then
-      OUTCOME2=$(printf '%s' "$FINAL2" | grep -o '"outcome":"[^"]*"' | head -1 | cut -d'"' -f4)
-      ok "  Completed — outcome: ${OUTCOME2:-resolved}"
+    local step_index2
+    step_index2=$(printf '%s' "$resp2" | grep -o '"index":[0-9]*' | head -1 | cut -d':' -f2)
+    step_index2="${step_index2:-1}"
+    local proceed_resp2
+    proceed_resp2=$(approve_step "$run_id2" "$step_index2")
+    local final_status2
+    final_status2=$(printf '%s' "$proceed_resp2" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [[ "$final_status2" == "complete" ]]; then
+      local summary2
+      summary2=$(printf '%s' "$proceed_resp2" | grep -o '"summary":"[^"]*"' | head -1 | cut -d'"' -f4)
+      ok "  Completed — ${summary2:-resolved}"
     else
-      warn "  Run did not complete in expected window."
+      ok "  Step approved (run_id: ${run_id2})."
     fi
+  elif [[ "$status2" == "complete" ]]; then
+    ok "  Playbook completed on first proposal (no additional steps needed)."
+  else
+    warn "  Unexpected status '${status2}' — check: docker compose -f docker-compose.demo.yaml logs demo-gateway"
   fi
 
   # ── Summary ───────────────────────────────────────────────────────────────
@@ -490,25 +528,6 @@ run_mode_c() {
   teardown_fault 2>/dev/null || true
 }
 
-poll_for_completion() {
-  local run_id="$1" max="${2:-300}" i=0 last_status=""
-  while (( i < max )); do
-    local resp status
-    resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}" 2>/dev/null)
-    if [[ -z "$resp" ]]; then sleep 2; (( i+=2 )); continue; fi
-    status=$(printf '%s' "$resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-    if [[ "$status" != "$last_status" ]]; then
-      printf "${DIM}    [%3ds] status: %s${RESET}\n" "$i" "${status:-unknown}" >&2
-      last_status="$status"
-    fi
-    case "$status" in
-      completed|resolved) printf '%s' "$resp"; return 0 ;;
-      failed|error)       printf '%s' "$resp"; return 1 ;;
-    esac
-    sleep 2; (( i+=2 ))
-  done
-  return 1
-}
 
 # ── main ──────────────────────────────────────────────────────────────────────
 main() {
@@ -558,94 +577,37 @@ main() {
      FROM pg_stat_activity;" 2>/dev/null || true
   printf "\n"
 
-  # Step 3 — Trigger playbook
+  # Step 3 — Trigger playbook (synchronous: step 1 is proposed in the response)
   sep
   say "Step 3/5 — Triggering playbook '${SERIES}'..."
-  RUN_ID=$(trigger_playbook)
+  say "  The step proposer is planning the first remediation action (15–45 seconds)..."
+  TRIGGER_RESP=$(trigger_playbook)
+  RUN_ID=$(printf '%s' "$TRIGGER_RESP" | grep -o '"run_id":"[^"]*"' | head -1 | cut -d'"' -f4)
   ok "Playbook run started: ${RUN_ID}"
-  say "  The agent is now diagnosing the fault. This takes 15–45 seconds..."
   printf "\n"
 
-  # Step 4 — Gate
+  # Step 4 — Gate + approval loop
+  # handlePlaybookRunApprove returns pending_approval synchronously in the trigger body.
+  # POST /proceed executes the step and returns the next step or status=complete.
   sep
-  say "Step 4/5 — Waiting for step-approval gate..."
-  printf "\n"
-  GATE_RESULT=$(poll_for_gate "$RUN_ID")
-  APPROVAL_ID=$(printf '%s' "$GATE_RESULT" | cut -d'|' -f1)
-  GATE_SUMMARY=$(printf '%s' "$GATE_RESULT" | cut -d'|' -f2)
-  ACTION_CLASS=$(printf '%s' "$GATE_RESULT" | cut -d'|' -f3)
-  BLAST_RADIUS=$(printf '%s' "$GATE_RESULT" | cut -d'|' -f4)
-
-  if [[ "$APPROVAL_ID" == "COMPLETED" ]]; then
-    ok "Playbook completed without a gate (approval_mode may be set to auto)."
-  elif [[ "$APPROVAL_ID" == "FAILED" || "$APPROVAL_ID" == "TIMEOUT" ]]; then
-    err "Playbook did not reach a gate in time (status: ${APPROVAL_ID})."
-    err "  Check: docker compose -f docker-compose.demo.yaml logs demo-gateway"
-    err "  Check: docker compose -f docker-compose.demo.yaml logs demo-db-agent"
-    exit 1
-  else
-    printf "\n"
-    bold "  ┌─────────────────────────────────────────────────────────┐"
-    bold "  │              STEP APPROVAL GATE                         │"
-    bold "  └─────────────────────────────────────────────────────────┘"
-    printf "\n"
-    printf "  ${BOLD}The AI agent has diagnosed the fault and proposes a remediation step.${RESET}\n"
-    printf "  Before executing, human approval is required.\n"
-    printf "\n"
-    [[ -n "$GATE_SUMMARY"   ]] && printf "  Proposed action:  ${BOLD}%s${RESET}\n" "$GATE_SUMMARY"
-    [[ -n "$ACTION_CLASS"   ]] && printf "  Action class:     ${YELLOW}%s${RESET}\n" "$ACTION_CLASS"
-    [[ -n "$BLAST_RADIUS"   ]] && printf "  Blast radius:     %s connections\n" "$BLAST_RADIUS"
-    printf "  Approval ID:      %s\n" "$APPROVAL_ID"
-    printf "\n"
-    printf "  ${DIM}This is aiHelpDesk's L2 autonomy gate — the agent proposed the action,${RESET}\n"
-    printf "  ${DIM}but nothing executes until a human approves it.${RESET}\n"
-    printf "\n"
-
-    if [[ "$MODE" == "auto" ]]; then
-      printf "  ${YELLOW}Auto-approve mode: approving in %d seconds...${RESET}\n" "$AUTO_APPROVE_SECS"
-      for (( i=AUTO_APPROVE_SECS; i>0; i-- )); do
-        printf "\r  ${YELLOW}  Approving in %d...${RESET}  " "$i"
-        sleep 1
-      done
-      printf "\r  ${GREEN}  Approving now...              ${RESET}\n"
-      approve_gate "$APPROVAL_ID"
-      ok "Gate approved automatically."
-    else
-      printf "  ${BOLD}Press ENTER to approve this action, or Ctrl-C to abort.${RESET}\n"
-      printf "\n"
-      printf "  (In production: operators use ${DIM}docker compose exec auditd approvals approve %s${RESET})\n" "$APPROVAL_ID"
-      printf "  (Or via Slack notification, webhook, or the git-branch approval flow.)\n"
-      printf "\n"
-      read -r _
-      approve_gate "$APPROVAL_ID"
-      ok "Gate approved."
-    fi
-  fi
+  say "Step 4/5 — Step-approval gate..."
+  run_approval_loop "$TRIGGER_RESP" "$RUN_ID"
   printf "\n"
 
-  # Step 5 — Resolution
+  # Step 5 — Post-remediation state
   sep
-  say "Step 5/5 — Waiting for playbook to complete..."
+  say "Step 5/5 — Remediation complete."
   printf "\n"
-  if FINAL=$(poll_for_completion "$RUN_ID"); then
-    OUTCOME=$(printf '%s' "$FINAL" | grep -o '"outcome":"[^"]*"' | head -1 | cut -d'"' -f4)
-    printf "\n"
-    bold "  ┌─────────────────────────────────────────────────────────┐"
-    bold "  │              INCIDENT RESOLVED                          │"
-    bold "  └─────────────────────────────────────────────────────────┘"
-    printf "\n"
-    ok "Playbook completed — outcome: ${OUTCOME:-resolved}"
-    printf "\n"
-    say "  Post-remediation database state:"
-    PGPASSWORD=demopassword psql "$CONN" -c \
-      "SELECT count(*) AS total_connections,
-              sum(CASE WHEN state='idle' THEN 1 ELSE 0 END) AS idle,
-              sum(CASE WHEN state='active' THEN 1 ELSE 0 END) AS active
-       FROM pg_stat_activity;" 2>/dev/null || true
-  else
-    warn "Playbook did not complete within the expected window. Check gateway logs."
-    warn "  docker compose logs gateway"
-  fi
+  bold "  ┌─────────────────────────────────────────────────────────┐"
+  bold "  │              INCIDENT RESOLVED                          │"
+  bold "  └─────────────────────────────────────────────────────────┘"
+  printf "\n"
+  say "  Post-remediation database state:"
+  PGPASSWORD=demopassword psql "$CONN" -c \
+    "SELECT count(*) AS total_connections,
+            sum(CASE WHEN state='idle' THEN 1 ELSE 0 END) AS idle,
+            sum(CASE WHEN state='active' THEN 1 ELSE 0 END) AS active
+     FROM pg_stat_activity;" 2>/dev/null || true
 
   printf "\n"
   sep
