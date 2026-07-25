@@ -245,17 +245,26 @@ trigger_playbook_as() {
 }
 
 # ── poll for gate ─────────────────────────────────────────────────────────────
+# Outputs a single pipe-delimited line to stdout: approval_id|summary|class|radius|status
+# All human-readable progress goes to stderr so command substitution captures only the result.
 poll_for_gate() {
-  local run_id="$1" i=0
-  say "  Polling for step-approval gate..."
-  while (( i < 120 )); do
+  local run_id="$1" max="${2:-300}" i=0 last_status=""
+  printf "${CYAN}▶   Waiting for step-approval gate (run %s)...${RESET}\n" "$run_id" >&2
+  while (( i < max )); do
     local resp status approval_id
-    resp=$(gw "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}" 2>/dev/null) || { sleep 2; (( i+=2 )); continue; }
+    resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}" 2>/dev/null)
+    if [[ -z "$resp" ]]; then
+      printf "${DIM}    [%3ds] poll error — retrying...${RESET}\n" "$i" >&2
+      sleep 2; (( i+=2 )); continue
+    fi
     status=$(printf '%s' "$resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [[ "$status" != "$last_status" ]]; then
+      printf "${DIM}    [%3ds] status: %s${RESET}\n" "$i" "${status:-unknown}" >&2
+      last_status="$status"
+    fi
     case "$status" in
       pending_approval|gate_pending)
         approval_id=$(printf '%s' "$resp" | grep -o '"approval_id":"[^"]*"' | head -1 | cut -d'"' -f4)
-        # Extract the gate details for display
         local gate_summary action_class blast_radius
         gate_summary=$(printf '%s' "$resp" | grep -o '"summary":"[^"]*"' | head -1 | cut -d'"' -f4)
         action_class=$(printf '%s' "$resp" | grep -o '"action_class":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -482,11 +491,16 @@ run_mode_c() {
 }
 
 poll_for_completion() {
-  local run_id="$1" i=0
-  while (( i < 120 )); do
+  local run_id="$1" max="${2:-300}" i=0 last_status=""
+  while (( i < max )); do
     local resp status
-    resp=$(gw "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}" 2>/dev/null) || { sleep 2; (( i+=2 )); continue; }
+    resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}" 2>/dev/null)
+    if [[ -z "$resp" ]]; then sleep 2; (( i+=2 )); continue; fi
     status=$(printf '%s' "$resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [[ "$status" != "$last_status" ]]; then
+      printf "${DIM}    [%3ds] status: %s${RESET}\n" "$i" "${status:-unknown}" >&2
+      last_status="$status"
+    fi
     case "$status" in
       completed|resolved) printf '%s' "$resp"; return 0 ;;
       failed|error)       printf '%s' "$resp"; return 1 ;;
@@ -565,7 +579,9 @@ main() {
   if [[ "$APPROVAL_ID" == "COMPLETED" ]]; then
     ok "Playbook completed without a gate (approval_mode may be set to auto)."
   elif [[ "$APPROVAL_ID" == "FAILED" || "$APPROVAL_ID" == "TIMEOUT" ]]; then
-    err "Playbook did not reach a gate in time. Check gateway logs."
+    err "Playbook did not reach a gate in time (status: ${APPROVAL_ID})."
+    err "  Check: docker compose -f docker-compose.demo.yaml logs demo-gateway"
+    err "  Check: docker compose -f docker-compose.demo.yaml logs demo-db-agent"
     exit 1
   else
     printf "\n"
