@@ -152,8 +152,8 @@ inject_fault() {
       done
       sleep 1
       ACTIVE=$(PGPASSWORD=demopassword psql "$CONN" -t -A \
-        -c "SELECT count(*) FROM pg_stat_activity WHERE state='idle';" 2>/dev/null | tr -d ' \n')
-      ok "Fault active: ${ACTIVE} idle connections holding the pool (max=${MAX})"
+        -c "SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND state='active';" 2>/dev/null | tr -d ' \n')
+      ok "Fault active: ${ACTIVE} sleeper connections holding the pool (max=${MAX})"
       ;;
     db-long-running-query)
       say "Injecting fault: starting a long-running query (pg_sleep 300s)..."
@@ -191,7 +191,7 @@ teardown_fault() {
   case "$FAULT" in
     db-max-connections)
       PGPASSWORD=demopassword psql "$CONN" \
-        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle' AND pid <> pg_backend_pid();" \
+        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND pid <> pg_backend_pid();" \
         >/dev/null 2>&1 || true
       ;;
     db-long-running-query)
@@ -211,18 +211,33 @@ teardown_fault() {
 }
 
 # ── playbook trigger ──────────────────────────────────────────────────────────
-# trigger_playbook [series] [approval_mode] — uses OPERATOR identity via gw()
+# curl_gw: like gw() but without -f so the response body is always captured.
+curl_gw() {
+  curl -s \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "X-User: ${OPERATOR}" \
+    "$@"
+}
+
+curl_gw_as() {
+  local user="$1"; shift
+  curl -s \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "X-User: ${user}" \
+    "$@"
+}
+
+# trigger_playbook [series] [approval_mode] — returns run_id, prints error body on failure
 trigger_playbook() {
   local series="${1:-$SERIES}" mode="${2:-review}"
   local resp run_id
-  resp=$(gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
-    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1) || {
-    err "Failed to trigger playbook: $resp"
-    exit 1
-  }
+  resp=$(curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
+    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1)
   run_id=$(printf '%s' "$resp" | grep -o '"run_id":"[^"]*"' | head -1 | cut -d'"' -f4)
   if [[ -z "$run_id" ]]; then
-    err "No run_id in response: $resp"
+    err "Failed to trigger playbook: $resp"
     exit 1
   fi
   printf '%s' "$run_id"
@@ -231,7 +246,7 @@ trigger_playbook() {
 # trigger_playbook_as <user> <series> <approval_mode> — returns full JSON response
 trigger_playbook_as() {
   local user="$1" series="$2" mode="$3"
-  gw_as "$user" -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
+  curl_gw_as "$user" -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
     -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1
 }
 
@@ -489,7 +504,6 @@ poll_for_completion() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 main() {
-  clear
   sep
   bold "  aiHelpDesk — Governed AI Incident Response Demo"
   sep
