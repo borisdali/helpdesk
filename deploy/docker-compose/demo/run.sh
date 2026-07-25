@@ -18,6 +18,29 @@ bold() { printf "${BOLD}%s${RESET}\n" "$*"; }
 GATEWAY_URL="${HELPDESK_GATEWAY_URL:-http://gateway:8080}"
 API_KEY="${HELPDESK_CLIENT_API_KEY:-demo-api-key}"
 
+# ── API key guard ─────────────────────────────────────────────────────────────
+# The db-agent receives HELPDESK_API_KEY at container start time (docker compose
+# up -d). If no key was set then, the agent is crash-looping and the gateway
+# will never become healthy. Detect this early and give actionable instructions.
+if [[ -z "${HELPDESK_API_KEY:-}" ]]; then
+  err "No LLM API key found — the db-agent likely started without one and is crash-looping."
+  printf "\n"
+  printf "  ${BOLD}Fix (takes about 30 seconds):${RESET}\n"
+  printf "\n"
+  printf "  1. Export your API key in this shell:\n"
+  printf "       export ANTHROPIC_API_KEY=sk-ant-...   ${DIM}# Anthropic${RESET}\n"
+  printf "       export GOOGLE_API_KEY=AIza...         ${DIM}# Google / Gemini${RESET}\n"
+  printf "\n"
+  printf "  2. Restart the stack so the db-agent picks up the key:\n"
+  printf "       docker compose -f docker-compose.demo.yaml down\n"
+  printf "       docker compose -f docker-compose.demo.yaml up -d\n"
+  printf "\n"
+  printf "  3. Re-run the demo once all services are healthy:\n"
+  printf "       docker compose -f docker-compose.demo.yaml run --rm demo-runner\n"
+  printf "\n"
+  exit 1
+fi
+
 # Detect LLM vendor from available API keys when not explicitly set.
 # Compose passes HELPDESK_MODEL_VENDOR/NAME with Anthropic defaults; if the
 # operator set GOOGLE_API_KEY or GEMINI_API_KEY instead, override here.

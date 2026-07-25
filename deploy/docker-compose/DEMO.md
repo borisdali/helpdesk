@@ -19,6 +19,11 @@ No configuration required beyond an LLM API key.
 
 ## 1. Set your API key
 
+> **Do this before `docker compose up`.** The db-agent receives the key at
+> container start time. If the key is missing when the stack starts, the agent
+> crash-loops and the demo won't work. The demo-runner will tell you if this
+> happened and show the exact recovery steps.
+
 **Anthropic:**
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
