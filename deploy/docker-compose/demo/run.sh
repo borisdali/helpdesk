@@ -518,31 +518,43 @@ run_mode_c() {
   local status2
   status2=$(printf '%s' "$resp2" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-  if [[ "$status2" == "pending_approval" ]]; then
-    show_gate_ui "$resp2"
-    printf "  ${DIM}The gate fired — even with force, agent_approve always proposes steps one at a time.${RESET}\n"
-    printf "  ${DIM}The difference: this user's force request was NOT downgraded. They have the authority.${RESET}\n"
-    printf "\n"
-    printf "  Auto-approving (${PRIVILEGED} is authorized)...\n"
-    local step_index2
-    step_index2=$(printf '%s' "$resp2" | grep -o '"index":[0-9]*' | head -1 | cut -d':' -f2)
-    step_index2="${step_index2:-1}"
-    local proceed_resp2
-    proceed_resp2=$(approve_step "$run_id2" "$step_index2")
-    local final_status2
-    final_status2=$(printf '%s' "$proceed_resp2" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-    if [[ "$final_status2" == "complete" ]]; then
-      local summary2
-      summary2=$(printf '%s' "$proceed_resp2" | grep -o '"summary":"[^"]*"' | head -1 | cut -d'"' -f4)
-      ok "  Completed — ${summary2:-resolved}"
-    else
-      ok "  Step approved (run_id: ${run_id2})."
-    fi
-  elif [[ "$status2" == "complete" ]]; then
-    ok "  Playbook completed on first proposal (no additional steps needed)."
-  else
-    warn "  Unexpected status '${status2}' — check: docker compose -f docker-compose.demo.yaml logs demo-gateway"
-  fi
+  # Run 2: loop through all steps — auto-approve reads silently, show gate for
+  # writes/destructive but approve immediately (the clamping point is already made).
+  local r2="$resp2" r2_first=1 r2_step r2_status r2_action r2_tool r2_idx
+  while true; do
+    r2_status=$(printf '%s' "$r2" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+    case "$r2_status" in
+      complete|resolved)
+        local r2_summary
+        r2_summary=$(printf '%s' "$r2" | grep -o '"summary":"[^"]*"' | head -1 | cut -d'"' -f4)
+        ok "  Completed — ${r2_summary:-resolved}"
+        break ;;
+      denied)
+        warn "  Run 2 step denied unexpectedly."; break ;;
+      pending_approval)
+        r2_idx=$(printf '%s' "$r2" | grep -o '"index":[0-9]*' | head -1 | cut -d':' -f2)
+        r2_idx="${r2_idx:-1}"
+        r2_action=$(printf '%s' "$r2" | grep -o '"action_class":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [[ "$r2_action" == "read" ]]; then
+          r2_tool=$(printf '%s' "$r2" | grep -o '"tool":"[^"]*"' | head -1 | cut -d'"' -f4)
+          printf "  ${DIM}agent reading: %s${RESET}\n" "${r2_tool:-?}"
+        else
+          if [[ "$r2_first" -eq 1 ]]; then
+            show_gate_ui "$r2"
+            printf "  ${DIM}The gate fired — even with force, agent_approve always proposes steps one at a time.${RESET}\n"
+            printf "  ${DIM}The difference: this user's force request was NOT downgraded. They have the authority.${RESET}\n"
+            printf "\n"
+            r2_first=0
+          else
+            show_gate_ui "$r2"
+          fi
+          printf "  Auto-approving (${PRIVILEGED} is authorized)...\n"
+        fi
+        r2=$(approve_step "$run_id2" "$r2_idx")
+        ;;
+      *) warn "  Unexpected status '${r2_status:-empty}'."; break ;;
+    esac
+  done
 
   # ── Summary ───────────────────────────────────────────────────────────────
   printf "\n"
