@@ -179,18 +179,15 @@ inject_fault() {
       ;;
     db-tx-lock-chain-blocker)
       say "Injecting fault: creating a transaction lock chain..."
-      # Session 1: hold a lock by leaving a transaction open
-      { PGPASSWORD=demopassword psql "$CONN" <<'SQL' >/dev/null 2>&1 &
-BEGIN;
-CREATE TABLE IF NOT EXISTS demo_lock_target (id int);
-INSERT INTO demo_lock_target VALUES (1);
-SELECT pg_sleep(300);
-SQL
-      } 2>/dev/null
-      sleep 2
-      # Session 2: try to lock the same table (will block)
+      # Session 1: acquire advisory lock 42 and hold it open (never commit).
+      # pg_advisory_xact_lock is released only when the transaction ends.
       { PGPASSWORD=demopassword psql "$CONN" \
-          -c "BEGIN; LOCK TABLE demo_lock_target IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(300);" \
+          -c "BEGIN; SELECT pg_advisory_xact_lock(42); SELECT pg_sleep(300);" \
+          >/dev/null 2>&1 & } 2>/dev/null
+      sleep 2
+      # Session 2: request the same advisory lock — blocks until session 1 ends.
+      { PGPASSWORD=demopassword psql "$CONN" \
+          -c "BEGIN; SELECT pg_advisory_xact_lock(42); SELECT pg_sleep(300);" \
           >/dev/null 2>&1 & } 2>/dev/null
       sleep 1
       BLOCKERS=$(PGPASSWORD=demopassword psql "$CONN" -t -A \
@@ -214,10 +211,7 @@ teardown_fault() {
       ;;
     db-tx-lock-chain-blocker)
       PGPASSWORD=demopassword psql "$CONN" \
-        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid();" \
-        >/dev/null 2>&1 || true
-      PGPASSWORD=demopassword psql "$CONN" \
-        -c "DROP TABLE IF EXISTS demo_lock_target;" \
+        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%advisory_xact_lock%' AND pid <> pg_backend_pid();" \
         >/dev/null 2>&1 || true
       ;;
   esac
