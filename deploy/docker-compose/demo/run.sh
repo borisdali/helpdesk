@@ -582,6 +582,9 @@ run_mode_c() {
   printf "\n"
   say "  Re-injecting fault..."
   inject_fault
+  # Let both sessions establish their lock contention before the agent runs.
+  say "  Letting the lock chain settle (5s)..."
+  sleep 5
   printf "\n"
 
   say "  Triggering ${REMEDIATE} as ${PRIVILEGED} with approval_mode=force..."
@@ -656,6 +659,12 @@ run_mode_c() {
   printf "  The only difference visible to the audit trail: one user's force request\n"
   printf "  was silently downgraded. The other's was accepted. One line in users.yaml\n"
   printf "  and one field in infrastructure.json control who holds the key.\n"
+  printf "\n"
+  printf "  Journeys (WHAT + WHY):\n"
+  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/journeys?run_id=${run_id1}' \\\n"
+  printf "         -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
+  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/journeys?run_id=${run_id2}' \\\n"
+  printf "         -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
   printf "\n"
   printf "  Audit trail (both runs):\n"
   printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/events?limit=30' \\\n"
