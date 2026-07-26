@@ -625,10 +625,17 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 	}
 	// run_id translates a plr_* playbook run ID to its trace_id so callers can
 	// navigate directly from an incident to its journey.
+	// If the run doesn't exist or has no trace, return [] rather than all journeys.
 	if v := q.Get("run_id"); v != "" && opts.TraceID == "" {
-		if traceID, err := s.store.GetTraceIDByRunID(r.Context(), v); err == nil && traceID != "" {
-			opts.TraceID = traceID
+		traceID, err := s.store.GetTraceIDByRunID(r.Context(), v)
+		if err != nil || traceID == "" {
+			w.Header().Set("Content-Type", "application/json")
+			if encErr := json.NewEncoder(w).Encode([]any{}); encErr != nil {
+				slog.Warn("failed to encode empty journeys response", "err", encErr)
+			}
+			return
 		}
+		opts.TraceID = traceID
 	}
 
 	journeys, err := s.store.QueryJourneys(r.Context(), opts)

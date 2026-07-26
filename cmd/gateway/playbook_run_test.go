@@ -524,6 +524,70 @@ func TestHandlePlaybookRun_AgentApproveMode(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_AgentApproveMode_AnchorEventEmitted verifies that a
+// gateway_request anchor event with empty tool_name is emitted when an
+// agent_approve-mode playbook run starts. This anchor is what QueryJourneys
+// Q1 uses to discover the run as a Journey.
+func TestHandlePlaybookRun_AgentApproveMode_AnchorEventEmitted(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_anchor_test",
+		SeriesID:      "pbs_connection_remediate",
+		Name:          "Connection Overload — Terminate Idle Sessions",
+		Guidance:      "Step 1: terminate idle connections.",
+		ExecutionMode: "agent_approve",
+		PlaybookType:  "remediation",
+		IsActive:      true,
+	}
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(pb) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_anchor01", "approval_id": "apr_anchor01"}) //nolint:errcheck
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	llmFn := func(_ context.Context, _ string) (string, error) {
+		return `{"action":"execute_step","agent":"database","tool":"terminate_idle_connections","args":{},"reason":"terminate idle"}`, nil
+	}
+
+	ta := &testAuditor{}
+	gw := makePlaybookRunGateway(auditSrv.URL, llmFn)
+	gw.auditor = audit.NewGatewayAuditor(ta)
+
+	rec := postPlaybookRun(t, gw, "pb_anchor_test",
+		`{"connection_string":"host=prod-db port=5432 dbname=postgres"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	// Find the anchor: a gateway_request event with no tool.
+	var anchor *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeGatewayRequest && e.Tool == nil {
+			anchor = e
+			break
+		}
+	}
+	if anchor == nil {
+		t.Fatal("no gateway_request anchor event emitted for agent_approve run — QueryJourneys will return []")
+	}
+	if anchor.TraceID == "" {
+		t.Error("anchor event has empty TraceID")
+	}
+	// UserQuery should default to pb.Name when no TriggerContext is provided.
+	if anchor.Input.UserQuery != pb.Name {
+		t.Errorf("anchor event UserQuery = %q, want %q (pb.Name)", anchor.Input.UserQuery, pb.Name)
+	}
+}
+
 func TestHandlePlaybookRun_FleetMode_RequiresEvidenceWarning(t *testing.T) {
 	pb := &audit.Playbook{
 		PlaybookID:       "pb_cfg01",
