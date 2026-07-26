@@ -387,6 +387,30 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if pb.ExecutionMode == "agent_approve" {
+		// Emit a gateway_request anchor event so this run appears as a Journey.
+		// The db-agent is never called as an LLM session here (each /proceed call
+		// invokes a single tool directly), so no anchor event is emitted by the
+		// agent middleware. We emit it here under startTraceID so QueryJourneys Q1
+		// can discover the trace. All /proceed tool events share this same trace.
+		if startTraceID != "" {
+			userQuery := req.TriggerContext
+			if userQuery == "" {
+				userQuery = pb.Name
+			}
+			g.recordAudit(r.Context(), &audit.GatewayRequest{
+				RequestID: "pbr_" + runID,
+				TraceID:   startTraceID,
+				Endpoint:  r.URL.Path,
+				Method:    r.Method,
+				Agent:     pb.AgentName,
+				ToolName:  "",
+				Message:   userQuery,
+				StartTime: time.Now(),
+				Status:    "ok",
+				Principal: operator,
+				Purpose:   pb.PlaybookType,
+			})
+		}
 		g.handlePlaybookRunApprove(w, r, pb, req, runID, warnings)
 		return
 	}

@@ -152,6 +152,12 @@ func localHandleJourneys(store *audit.Store) http.HandlerFunc {
 		if v := q.Get("trace_id"); v != "" {
 			opts.TraceID = v
 		}
+		// run_id translates a plr_* playbook run ID to its trace_id.
+		if v := q.Get("run_id"); v != "" && opts.TraceID == "" {
+			if traceID, err := store.GetTraceIDByRunID(r.Context(), v); err == nil && traceID != "" {
+				opts.TraceID = traceID
+			}
+		}
 		if v := q.Get("user"); v != "" {
 			opts.UserID = v
 		}

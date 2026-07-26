@@ -708,7 +708,7 @@ main() {
   printf "  6. The full trace is now in the audit log (tamper-proof, hash-chained)\n"
   printf "\n"
   printf "  Explore the audit trail:\n"
-  printf "    ${DIM}curl -s ${HOST_GATEWAY_URL}/api/v1/governance/events?limit=5 \\\\\n"
+  printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/events?limit=5' \\\\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
   printf "\n"
   printf "  View the journey (WHAT + WHY):\n"

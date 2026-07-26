@@ -623,6 +623,13 @@ func (s *server) handleQueryJourneys(w http.ResponseWriter, r *http.Request) {
 	if q.Get("incident_only") == "true" {
 		opts.IncidentOnly = true
 	}
+	// run_id translates a plr_* playbook run ID to its trace_id so callers can
+	// navigate directly from an incident to its journey.
+	if v := q.Get("run_id"); v != "" && opts.TraceID == "" {
+		if traceID, err := s.store.GetTraceIDByRunID(r.Context(), v); err == nil && traceID != "" {
+			opts.TraceID = traceID
+		}
+	}
 
 	journeys, err := s.store.QueryJourneys(r.Context(), opts)
 	if err != nil {
