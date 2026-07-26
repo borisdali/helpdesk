@@ -480,9 +480,17 @@ run_mode_c() {
   printf "\n"
   say "  Re-injecting fault..."
   inject_fault
-  # Let both sessions establish their lock contention before the agent runs.
-  say "  Letting the lock chain settle (5s)..."
-  sleep 5
+  # Poll until session 2 is actually waiting on the lock (up to 15s).
+  say "  Waiting for lock chain to establish..."
+  local waiters=0 _i
+  for _i in $(seq 1 15); do
+    waiters=$(PGPASSWORD=demopassword psql "$CONN" -t -A \
+      -c "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock';" \
+      2>/dev/null | tr -d ' \n')
+    [[ "${waiters:-0}" -gt 0 ]] && break
+    sleep 1
+  done
+  ok "  Lock chain confirmed (${waiters} session(s) waiting)"
   printf "\n"
 
   say "  Triggering ${REMEDIATE} as ${PRIVILEGED} with approval_mode=force..."
