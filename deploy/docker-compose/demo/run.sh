@@ -172,6 +172,10 @@ inject_fault() {
         -c "SELECT pid FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND state='active' LIMIT 1;" \
         2>/dev/null | tr -d ' \n')
       ok "Fault active: long-running query pid=${PID} (pg_sleep 300s)"
+      # Let the query age so the agent sees it as long-running (> 30s threshold).
+      # The planner + auto-approved reads take ~10-15s; 25s here gives ~35-40s total.
+      say "  Letting the fault age so the agent sees it as long-running (25s)..."
+      sleep 25
       ;;
     db-tx-lock-chain-blocker)
       say "Injecting fault: creating a transaction lock chain..."
@@ -430,6 +434,55 @@ Step 3: Call get_active_connections. If total < max_connections - 5, the inciden
   ok "Playbook pbs_connection_remediate patched to v1.4"
 }
 
+# The embedded image ships v1.0 (which leads with get_slow_queries — requires
+# pg_stat_statements — instead of get_active_connections). We POST v1.1 and
+# activate it. Idempotent: skipped if v1.1 is already active.
+seed_slow_query_playbook() {
+  local series="pbs_slow_query_remediate"
+  local list_resp ver
+  list_resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbooks?series_id=${series}&active_only=true" 2>/dev/null)
+  ver=$(printf '%s' "$list_resp" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ "$ver" == "1.1" || "$ver" == "1.1-demo" ]]; then
+    return 0  # already on the corrected version
+  fi
+
+  local raw_g
+  raw_g="Step 1: Identify the target session.
+Call get_active_connections first. Any session in state='active' with query_seconds > 30 is a long-running query candidate. Note the pid, query text, and query_seconds. A pg_sleep session represents a stuck application connection and is a valid cancellation target regardless of query content.
+Call get_blocking_queries to find sessions holding locks that block others. A blocking session is a higher priority target than a slow query that is not blocking anyone.
+Optionally call get_slow_queries for historical execution statistics if pg_stat_statements is available — it provides aggregate data but is not required to identify a currently-running long query.
+
+Select the primary target: the blocking session or the session with the longest query_seconds in state='active' (whichever is higher priority).
+
+Step 2: Inspect the target session.
+Call get_session_info with pid=<target_pid>. Confirm: state: 'active' or 'idle in transaction'. has_writes: if true, termination will roll back uncommitted DML — disclose this. wait_event: if waiting on a lock itself, this session is a victim, not the root.
+
+Step 3A — Try cancel first (state='active' queries only).
+Call cancel_query with pid=<target_pid>. Before requesting approval, state: query text, duration, and estimated blast radius (how many sessions are unblocked if this query is cancelled). After cancel, re-call get_blocking_queries to confirm the blockage cleared. If the lock chain persists, proceed to Step 3B.
+
+Step 3B — Terminate if cancel was insufficient.
+Call terminate_connection with pid=<target_pid>. Before requesting approval, disclose: whether has_writes=true (uncommitted DML will be lost) and how many downstream sessions will be unblocked.
+
+Step 4: Verify the blockage cleared.
+Call get_blocking_queries. Confirm no sessions remain waiting on locks from the terminated session. If additional blockers remain, repeat from Step 1."
+
+  g=$(printf '%s' "$raw_g" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{if (NR>1) printf "\\n"; printf "%s", $0}')
+
+  local body
+  body=$(printf '{"series_id":"%s","name":"Slow Query / Lock Contention — Cancel or Terminate Blocking Session","version":"1.1-demo","playbook_type":"remediation","entry_point":true,"execution_mode":"agent_approve","agent_name":"postgres_database_agent","approval_mode":"manual","problem_class":"performance","author":"aiHelpDesk","description":"Cancel or terminate a long-running query or the session holding a lock that is blocking other operations.","guidance":"%s"}' \
+    "$series" "$g")
+
+  local create_resp pb_id
+  create_resp=$(curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks" -d "$body" 2>/dev/null)
+  pb_id=$(printf '%s' "$create_resp" | grep -o '"playbook_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ -z "$pb_id" ]]; then
+    warn "Could not seed slow-query playbook v1.1 (running with v${ver:-?}): ${create_resp}"
+    return 0
+  fi
+  curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${pb_id}/activate" -d '{}' >/dev/null 2>&1 || true
+  ok "Playbook pbs_slow_query_remediate patched to v1.1"
+}
+
 # ── mode C: force + clamping demonstration ───────────────────────────────────
 run_mode_c() {
   local UNPRIVILEGED="operator@aihelpdesk.biz"   # roles: sre, operator — no dba_lead
@@ -639,6 +692,7 @@ main() {
     wait_for_psql
     wait_for_http "${GATEWAY_URL}/health" "gateway"
     seed_demo_playbook
+    seed_slow_query_playbook
     printf "\n"
     run_mode_c
     return
@@ -649,6 +703,7 @@ main() {
   wait_for_psql
   wait_for_http "${GATEWAY_URL}/health" "gateway"
   seed_demo_playbook
+  seed_slow_query_playbook
   printf "\n"
 
   # Step 2 — Inject fault
