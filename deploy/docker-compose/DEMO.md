@@ -74,11 +74,14 @@ The demo runner:
 1. Injects the chosen fault into the local Postgres
 2. Triggers the remediation playbook for that fault
 3. The agent inspects the database state and proposes a remediation step
-4. Pauses at the **step-approval gate** — showing the proposed action, action
+4. Pauses at the **INFORMED CONSENT GATE** — showing the proposed action, action
    class and blast radius before anything executes
 5. Waits for your approval (interactive mode) or auto-approves after a countdown
 6. Executes the remediation and shows the post-recovery state
-7. Prints the audit trail commands to explore
+7. Prints the Right IV calibration record: playbook track record, resolution rate,
+   and fault stability cert (when populated by faulttest)
+8. Prints the Bill of Rights outro: which rights were exercised this run and
+   how to verify them
 
 ---
 
@@ -107,7 +110,7 @@ DEMO_FAULT=db-tx-lock-chain-blocker docker compose -f docker-compose.demo.yaml r
 
 **Mode B — Interactive (default)**
 
-The demo pauses at the step-approval gate and waits for you to press Enter.
+The demo pauses at the INFORMED CONSENT GATE and waits for you to press Enter.
 This is the most faithful representation of how aiHelpDesk works in production:
 the agent diagnosed the fault, proposed a remediation step and now a human
 decides whether to proceed.
@@ -152,6 +155,20 @@ DEMO_MODE=clamping docker compose -f docker-compose.demo.yaml run --rm demo-runn
 
 This answers the question: *"what stops an on-call engineer from bypassing the gate
 at 3am?"* — the role restriction does. And the audit trail records the attempt either way.
+
+---
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DEMO_FAULT` | `db-max-connections` | Fault to inject (see fault table above) |
+| `DEMO_MODE` | `interactive` | Approval mode: `interactive`, `auto`, `clamping` |
+| `DEMO_AUTO_APPROVE_SECS` | `8` | Countdown before auto-approve in `auto` mode |
+| `DEMO_OPERATOR` | `demo@aihelpdesk.biz` | Identity used for the playbook run |
+| `DEMO_VAULT_SEED` | `true` | Set to `false` to suppress the vault coda (calibration record). Useful when demoing on a fresh install with no run history. |
+| `DEMO_MODEL_VENDOR` | _(auto-detected)_ | `anthropic` or `google` |
+| `DEMO_MODEL_NAME` | _(vendor default)_ | Override the model, e.g. `claude-sonnet-4-6` |
 
 ---
 
@@ -220,8 +237,9 @@ If `podman compose` is not installed: `pip install podman-compose`.
        ↓
   agent diagnoses            (reads pg_stat_activity, identifies idle blocker)
        ↓
-  step-approval gate         (blast radius: N connections; action class: destructive)
-       ↓
+  INFORMED CONSENT GATE      (blast radius: N connections; action class: destructive)
+       ↓                     Right I: nothing executes until you have reviewed
+       ↓                     action, reasoning, and blast radius
   human approves             (you pressed Enter — or auto-approved after countdown)
        ↓
   agent executes             (terminate_idle_connections runs)
@@ -229,14 +247,20 @@ If `podman compose` is not installed: `pip install podman-compose`.
   agent verifies recovery    (confirms connection count dropped below threshold)
        ↓
   audit trail sealed         (hash-chained, tamper-proof, queryable)
+       ↓
+  calibration record         (Right IV: playbook track record, resolution rate,
+       ↓                      fault stability cert — accumulates with every run)
+  Bill of Rights outro       (which rights were exercised; how to verify them)
 ```
 
 This is aiHelpDesk's L2 autonomy model: the agent handles diagnosis and proposes
 the action; a human controls execution. Every step is recorded.
 
-The audit trail that just ran is the same infrastructure that satisfies
-[Right III (The Right to the Full Audit Trail)](../../docs/CUSTOMER_RIGHTS.md)
-in the aiHelpDesk Customer Bill of Rights.
+The gate is named the **INFORMED CONSENT GATE** because it is an entitlement, not a
+configuration option — [Right I](../../docs/CUSTOMER_RIGHTS.md#i-the-right-to-informed-consent)
+guarantees it cannot be configured away. Rights III and IV also run in every demo:
+the audit trail that just ran is [Right III](../../docs/CUSTOMER_RIGHTS.md#iii-the-right-to-the-full-audit-trail),
+and the calibration record is [Right IV](../../docs/CUSTOMER_RIGHTS.md#iv-the-right-to-know-the-grade).
 
 ---
 

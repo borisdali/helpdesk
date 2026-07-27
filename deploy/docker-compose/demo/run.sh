@@ -289,7 +289,7 @@ show_gate_ui() {
   approval_id=$(printf '%s' "$resp"  | grep -o '"approval_id":"[^"]*"'  | head -1 | cut -d'"' -f4)
   printf "\n"
   bold "  ┌─────────────────────────────────────────────────────────┐"
-  bold "  │              STEP APPROVAL GATE                         │"
+  bold "  │              INFORMED CONSENT GATE                      │"
   bold "  └─────────────────────────────────────────────────────────┘"
   printf "\n"
   printf "  ${BOLD}The AI agent has diagnosed the fault and proposes a remediation step.${RESET}\n"
@@ -300,8 +300,8 @@ show_gate_ui() {
   [[ -n "$action_class" ]] && printf "  Action class:     ${YELLOW}%s${RESET}\n" "$action_class"
   printf "  Approval ID:      %s\n" "$approval_id"
   printf "\n"
-  printf "  ${DIM}This is aiHelpDesk's L2 autonomy gate — the agent proposed the action,${RESET}\n"
-  printf "  ${DIM}but nothing executes until a human approves it.${RESET}\n"
+  printf "  ${DIM}Right I: nothing executes until you have reviewed action, reasoning, and blast radius.${RESET}\n"
+  printf "  ${DIM}This is your entitlement — not a default that can be configured away.${RESET}\n"
   printf "\n"
 }
 
@@ -373,6 +373,89 @@ run_approval_loop() {
         ;;
     esac
   done
+}
+
+# show_vault_coda <series_id> <fault_id> — displays Right IV calibration record.
+# Skipped entirely when DEMO_VAULT_SEED=false.
+# Calls two gateway endpoints; each is silently skipped on error or empty response.
+show_vault_coda() {
+  [[ "${DEMO_VAULT_SEED:-true}" == "false" ]] && return 0
+  local series="$1" fault_id="$2"
+
+  # ── Aggregate stats from version-stats endpoint ──────────────────────────
+  local vstats total_runs resolved resolution_pct pb_ver
+  vstats=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/series/${series}/version-stats" 2>/dev/null)
+  # Sum total_runs and resolved across all versions.
+  total_runs=$(printf '%s' "$vstats" | grep -o '"total_runs":[0-9]*' | awk -F: '{s+=$2} END{print s+0}')
+  resolved=$(printf '%s' "$vstats" | grep -o '"resolved":[0-9]*' | awk -F: '{s+=$2} END{print s+0}')
+  pb_ver=$(printf '%s' "$vstats" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ "${total_runs:-0}" -gt 0 && "${resolved:-0}" -gt 0 ]]; then
+    resolution_pct=$(( resolved * 100 / total_runs ))
+  fi
+
+  # ── Fault stability cert (optional — populated by faulttest) ─────────────
+  local cert_line=""
+  local fcert is_stable n_cert pass_rate conf_range diag_model
+  fcert=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/fault-stability/${fault_id}" 2>/dev/null)
+  if printf '%s' "$fcert" | grep -q '"is_stable"'; then
+    is_stable=$(printf '%s' "$fcert" | grep -o '"is_stable":[a-z]*' | cut -d':' -f2)
+    n_cert=$(printf '%s' "$fcert" | grep -o '"n_runs":[0-9]*' | cut -d':' -f2)
+    pass_rate=$(printf '%s' "$fcert" | grep -o '"pass_rate":[0-9.]*' | cut -d':' -f2)
+    conf_range=$(printf '%s' "$fcert" | grep -o '"conf_range_pp":[0-9.]*' | cut -d':' -f2)
+    diag_model=$(printf '%s' "$fcert" | grep -o '"diagnosis_model":"[^"]*"' | cut -d'"' -f4)
+    local pass_int conf_int stable_label
+    pass_int=$(printf '%.0f' "${pass_rate:-0}" 2>/dev/null || echo "?")
+    conf_int=$(printf '%.0f' "${conf_range:-0}" 2>/dev/null || echo "?")
+    if [[ "$is_stable" == "true" ]]; then
+      stable_label="${GREEN}STABLE(${n_cert:-?})${RESET}"
+    else
+      stable_label="${YELLOW}UNSTABLE(${n_cert:-?})${RESET}"
+    fi
+    cert_line="  Fault cert:   ${stable_label} @ model: ${diag_model:-?}  pass: ${pass_int}% ±${conf_int}pp"
+  fi
+
+  # ── Display ───────────────────────────────────────────────────────────────
+  printf "\n"
+  sep
+  bold "  Calibration record (Right IV — The Grade):"
+  printf "\n"
+  printf "  Playbook:     %s  %s\n" "$series" "${pb_ver:+v${pb_ver}}"
+  printf "  This run:     #%s  outcome: resolved\n" "${total_runs:-?}"
+  if [[ "${total_runs:-0}" -ge 3 ]]; then
+    printf "  Track record: %s prior run(s)  resolution rate: %s%%\n" \
+      "$(( total_runs - 1 ))" "${resolution_pct:-?}"
+  else
+    printf "  Track record: %s run(s) recorded — pass rate displays after 3+\n" "${total_runs:-1}"
+  fi
+  [[ -n "$cert_line" ]] && printf "%b\n" "$cert_line"
+  printf "\n"
+  printf "  ${DIM}vault accuracy %s   # full breakdown${RESET}\n" "$series"
+  printf "\n"
+  sep
+}
+
+# show_rights_exercised <run_id> — prints the Bill of Rights outro.
+show_rights_exercised() {
+  local run_id="$1"
+  printf "\n"
+  sep
+  bold "  Rights exercised in this run:"
+  printf "\n"
+  printf "  ${GREEN}[+]${RESET} Right I   — Informed Consent\n"
+  printf "      Nothing executed until you approved action + reasoning + blast radius.\n"
+  printf "\n"
+  printf "  ${GREEN}[+]${RESET} Right III — Full Audit Trail\n"
+  printf "      Every tool call, approval, and reasoning chain is hash-chained.\n"
+  printf "      ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/journeys?run_id=${run_id}' \\\n"
+  printf "           -H 'Authorization: Bearer ${API_KEY}' | jq .${RESET}\n"
+  printf "\n"
+  printf "  ${GREEN}[+]${RESET} Right IV  — The Grade\n"
+  printf "      Calibration record above. Accumulates with every run; queryable at any time.\n"
+  printf "\n"
+  printf "  ${DIM}[ ] Right II  — Second Opinion      run: faulttest --judge${RESET}\n"
+  printf "  ${DIM}[ ] Right VIII — Switch Models       set: ANTHROPIC_MODEL= in .env${RESET}\n"
+  printf "\n"
+  sep
 }
 
 # ── mode C: force + clamping demonstration ───────────────────────────────────
@@ -555,6 +638,7 @@ run_mode_c() {
       *) warn "  Unexpected status '${r2_status:-empty}'."; break ;;
     esac
   done
+  show_vault_coda "$REMEDIATE" "$FAULT"
 
   # ── Summary ───────────────────────────────────────────────────────────────
   printf "\n"
@@ -582,7 +666,7 @@ run_mode_c() {
   printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/events?limit=30' \\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq '.[] | {user,tool,action_class}'${RESET}\n"
   printf "\n"
-  sep
+  show_rights_exercised "$run_id2"
 
   teardown_fault 2>/dev/null || true
 }
@@ -603,6 +687,7 @@ main() {
   printf "  Playbook:  %s\n" "$SERIES"
   printf "  Model:     %s\n" "$DETECTED_VENDOR"
   printf "  Gateway:   %s\n" "$GATEWAY_URL"
+  printf "  Rights:    ${DIM}I (Consent) · III (Audit Trail) · IV (Grade)${RESET}\n"
   printf "\n"
   sep
   printf "\n"
@@ -652,6 +737,7 @@ main() {
   say "Step 4/5 — Step-approval gate..."
   run_approval_loop "$TRIGGER_RESP" "$RUN_ID"
   printf "\n"
+  show_vault_coda "$SERIES" "$FAULT"
 
   # Step 5 — Post-remediation state
   sep
@@ -691,7 +777,7 @@ main() {
   printf "    ${DIM}DEMO_FAULT=db-long-running-query   docker compose -f docker-compose.demo.yaml run --rm demo-runner${RESET}\n"
   printf "    ${DIM}DEMO_FAULT=db-tx-lock-chain-blocker docker compose -f docker-compose.demo.yaml run --rm demo-runner${RESET}\n"
   printf "\n"
-  sep
+  show_rights_exercised "$RUN_ID"
 
   # Clean up injected connections
   teardown_fault 2>/dev/null || true

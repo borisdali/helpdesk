@@ -17,6 +17,10 @@ aiHelpDesk applies the same framework to AI-driven database and infrastructure o
 
 ### Part 1: Informed
 
+> In the demo runner and in production terminal UI, the gate is labelled the
+> **INFORMED CONSENT GATE** — the name signals that this is an entitlement
+> (Right I), not a feature that can be configured away.
+
 Before any remediation step executes, the agent presents everything it knows:
 
 - Root-cause hypothesis with supporting evidence (active locks, waiting sessions, slow query plans, pod restart history)
@@ -101,3 +105,4 @@ See also the [Operational Guide](VAULT_FEEDBACK_FLOW.md) on how we turn Informed
 - [DECISIONS.md](DECISIONS.md) — Decision Hub reference
 - [MUTATION_TOOLS.md §2](MUTATION_TOOLS.md#2-two-step-review-and-confirm-process) — two-step review-and-confirm for mutation tools
 - [BENCHMARKING_SAMPLE6.md](BENCHMARKING_SAMPLE6.md) — end-to-end walkthrough on Docker/Podman
+- [DEMO.md](../deploy/docker-compose/DEMO.md) — the 10-minute demo surfaces the INFORMED CONSENT GATE interactively, followed by a Right IV calibration record and Bill of Rights outro
