@@ -103,7 +103,7 @@ demoed live. See [here](JUDGMENT_LAYER.md) for the mechanism.
 
 ## What you can verify today, in five minutes
 
-This is not a slide. Every stage above is something you can go watch happen against a
+This is not a slide. Every stage above is something you can [go watch happen](../deploy/docker-compose/DEMO.md) against a
 real injected fault on your own machine:
 
 ```bash
@@ -144,10 +144,8 @@ instrumentation. See [here](CONSISTENCY.md) for the full mechanism and [this pos
 
 3D stability cert doesn't require a second demo. It's the same loop, run N times instead of once and it
 shows up as a second, dimmer line in the same calibration section with the format of
-`Fault cert: STABLE(N) @ model: <model>  pass: X% ±Ypp`, not a separate flow. As of this
-writing no cert has been generated for any of the three demo faults yet (that line is
-currently absent from the section); the command below generates real ones, whatever they
-turn out to be. To populate it for the demo's own faults:
+`Fault cert: STABLE(N) @ model: <model>  pass: X% ±Ypp`, not a separate flow. To populate
+it for the demo's own faults:
 
 ```bash
 cd ~/cassiopeia/helpdesk
@@ -156,10 +154,33 @@ go run ./testing/cmd/faulttest run \
   --repeat 5 \
   --external \
   --conn "host=localhost port=5434 dbname=postgres user=postgres password=demopassword sslmode=disable" \
+  --agent-conn "host=demo-postgres port=5432 dbname=postgres user=postgres password=demopassword sslmode=disable" \
   --gateway http://localhost:8180 \
   --api-key demo-api-key \
   --agent-model claude-haiku-4-5-20251001
 ```
+
+`--conn` is what `faulttest` uses locally to inject the fault (reachable from the host via
+the Docker-published port); `--agent-conn` is what gets sent to the agent (the internal
+Docker DNS name the agent's own infrastructure registry actually has on file). They have
+to differ because `faulttest` runs outside the compose network and the agent runs inside
+it — see the note further down if you're wondering why that split exists.
+
+Real certs, generated for this demo's three faults on 2026-07-28:
+
+| Fault | Verdict | Pass rate | Confidence range | Attribution |
+|---|---|---|---|---|
+| `db-max-connections` | STABLE(5) | 100% | ±4pp | `idle-connection-accumulation` (5/5, consistent) |
+| `db-long-running-query` | STABLE(5) | 100% | ±4pp | `lock-contention-blocking-queries` (5/5, consistent) |
+| `db-tx-lock-chain-blocker` | STABLE(5) | 100% | ±5pp | `active-long-running-statement-blocker` (4/5) + `cascaded-lock-chain` (1/5) |
+
+`db-max-connections` is worth calling out specifically: the first attempt at generating
+this cert (without `--agent-conn`) also came back `STABLE(5)`, but with attribution
+`connection-pool-saturation (3/5), consistent: no (split), UNKNOWN: 2` — the agent was
+intermittently failing a registry lookup unrelated to the fault itself and reporting that
+failure as a finding. Same fault, same model, same 5 reps; fixing the connection-string
+split alone took it from a 3/5 split to a clean 5/5. That's the stability cert doing
+exactly its job: catching noise in the measurement, not just the outcome.
 
 `--agent-model` must match the model the demo actually runs because the cert is deliberately model-scoped
 (Right VIII), so a mismatched model produces a cert that never shows up in this demo's
@@ -177,4 +198,4 @@ section.
 | [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md) | Outcome / conclusion / evaluation, in full |
 | [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) | The judge review → version bump stage of the loop |
 | [SECOND_OPINION.md](SECOND_OPINION.md) | The independent-check layers behind Right II |
-| [../deploy/docker-compose/DEMO.md](../deploy/docker-compose/DEMO.md) | How to run the demo referenced above |
+| [DEMO.md](../deploy/docker-compose/DEMO.md) | How to run the demo referenced above |
