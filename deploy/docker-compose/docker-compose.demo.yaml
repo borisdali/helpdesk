@@ -151,6 +151,7 @@ services:
       DEMO_MODE: ${DEMO_MODE:-interactive}
       DEMO_AUTO_APPROVE_SECS: ${DEMO_AUTO_APPROVE_SECS:-8}
       DEMO_OPERATOR: ${DEMO_OPERATOR:-demo@aihelpdesk.biz}
+      DEMO_VAULT_SEED: ${DEMO_VAULT_SEED:-true}
     volumes:
       - ./demo/run.sh:/demo/run.sh:ro
     stdin_open: true

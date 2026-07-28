@@ -20,6 +20,11 @@ GATEWAY_URL="${HELPDESK_GATEWAY_URL:-http://gateway:8080}"
 # GATEWAY_URL is used for internal container-to-container calls; this is for printed commands.
 HOST_GATEWAY_URL="http://localhost:8180"
 API_KEY="${HELPDESK_CLIENT_API_KEY:-demo-api-key}"
+# AUDITD_URL: seed_vault_history talks to auditd directly because POST
+# /v1/fleet/playbooks/{id}/runs (raw run creation) is not proxied through the
+# gateway's /api/v1 surface — only the trigger ("/run") and read paths are.
+# demo-runner shares the compose network with demo-auditd, so this resolves.
+AUDITD_URL="${HELPDESK_AUDIT_URL:-http://demo-auditd:1299}"
 
 # ── API key guard ─────────────────────────────────────────────────────────────
 # The db-agent receives HELPDESK_API_KEY at container start time (docker compose
@@ -236,6 +241,17 @@ curl_gw_as() {
     "$@"
 }
 
+# curl_auditd: like curl_gw but targets auditd directly (see AUDITD_URL above).
+# The demo-runner service account (Bearer demo-api-key) is defined in
+# demo/users.yaml, the same file mounted into both auditd and the gateway.
+curl_auditd() {
+  curl -s \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "X-User: ${OPERATOR}" \
+    "$@"
+}
+
 # trigger_playbook [series] [approval_mode] — returns full ApproveRunResponse JSON.
 # agent_approve: the gateway proposes step 1 synchronously; status=pending_approval
 # is in the response body — there is nothing to poll.
@@ -375,6 +391,45 @@ run_approval_loop() {
   done
 }
 
+# seed_vault_history <series_id> — pre-seeds 2 synthetic resolved runs so the
+# calibration coda has a track record to show on a fresh vault, instead of
+# printing "displays after 3+" on every first-ever demo run.
+# No-op when DEMO_VAULT_SEED=false, or when the series already has >=2 runs
+# recorded (real runs accumulate in the persistent demo-audit-data volume
+# across demo-runner invocations, so this only fires once per fresh volume).
+# Seeded runs are clearly tagged (operator + "[seeded]" findings prefix) so
+# they're never mistaken for real remediation history when inspected directly.
+seed_vault_history() {
+  [[ "${DEMO_VAULT_SEED:-true}" == "false" ]] && return 0
+  local series="$1"
+
+  local vstats total_runs
+  vstats=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/series/${series}/version-stats" 2>/dev/null)
+  total_runs=$(printf '%s' "$vstats" | grep -o '"total_runs":[0-9]*' | awk -F: '{s+=$2} END{print s+0}')
+  if [[ "${total_runs:-0}" -ge 2 ]]; then
+    return 0
+  fi
+
+  local list_resp playbook_id
+  list_resp=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/playbooks?series_id=${series}&active_only=true" 2>/dev/null)
+  playbook_id=$(printf '%s' "$list_resp" | grep -o '"playbook_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ -z "$playbook_id" ]]; then
+    warn "Vault seed skipped — could not resolve active playbook for ${series}."
+    return 0
+  fi
+
+  local now offset started completed body
+  now=$(date -u +%s)
+  for offset in 7200 3600; do
+    started=$(date -u -d "@$((now - offset))" +%Y-%m-%dT%H:%M:%SZ)
+    completed=$(date -u -d "@$((now - offset + 60))" +%Y-%m-%dT%H:%M:%SZ)
+    body=$(printf '{"operator":"demo-seed@aihelpdesk.biz","outcome":"resolved","findings_summary":"[seeded] Connection overload remediation complete — idle sessions terminated, pool recovered.","started_at":"%s","completed_at":"%s"}' \
+      "$started" "$completed")
+    curl_auditd -X POST "${AUDITD_URL}/v1/fleet/playbooks/${playbook_id}/runs" -d "$body" >/dev/null 2>&1 || true
+  done
+  ok "Vault seeded — 2 prior resolved run(s) for ${series}."
+}
+
 # show_vault_coda <series_id> <fault_id> — displays Right IV calibration record.
 # Skipped entirely when DEMO_VAULT_SEED=false.
 # Calls two gateway endpoints; each is silently skipped on error or empty response.
@@ -479,6 +534,8 @@ run_mode_c() {
   printf "\n"
   sep
   printf "\n"
+
+  seed_vault_history "$REMEDIATE"
 
   say "Step 1 — Inject fault..."
   inject_fault
@@ -706,6 +763,7 @@ main() {
   say "Step 1/5 — Waiting for services to be ready..."
   wait_for_psql
   wait_for_http "${GATEWAY_URL}/health" "gateway"
+  seed_vault_history "$SERIES"
   printf "\n"
 
   # Step 2 — Inject fault

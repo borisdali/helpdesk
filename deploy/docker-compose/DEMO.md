@@ -166,7 +166,7 @@ at 3am?"* — the role restriction does. And the audit trail records the attempt
 | `DEMO_MODE` | `interactive` | Approval mode: `interactive`, `auto`, `clamping` |
 | `DEMO_AUTO_APPROVE_SECS` | `8` | Countdown before auto-approve in `auto` mode |
 | `DEMO_OPERATOR` | `demo@aihelpdesk.biz` | Identity used for the playbook run |
-| `DEMO_VAULT_SEED` | `true` | Set to `false` to suppress the vault coda (calibration record). Useful when demoing on a fresh install with no run history. |
+| `DEMO_VAULT_SEED` | `true` | Pre-seeds 2 synthetic resolved runs (tagged `[seeded]`, operator `demo-seed@aihelpdesk.biz`) on a fresh vault so the calibration coda shows a track record on the very first demo run, instead of "displays after 3+". No-op once real runs push the count past 2. Set to `false` to disable seeding and suppress the coda entirely. |
 | `DEMO_MODEL_VENDOR` | _(auto-detected)_ | `anthropic` or `google` |
 | `DEMO_MODEL_NAME` | _(vendor default)_ | Override the model, e.g. `claude-sonnet-4-6` |
 
