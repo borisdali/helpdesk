@@ -405,7 +405,10 @@ seed_vault_history() {
 
   local vstats total_runs
   vstats=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/series/${series}/version-stats" 2>/dev/null)
-  total_runs=$(printf '%s' "$vstats" | grep -o '"total_runs":[0-9]*' | awk -F: '{s+=$2} END{print s+0}')
+  # grep -o exits 1 when a fresh series has no "total_runs" field at all (empty
+  # versions array) — under `set -o pipefail` that would otherwise abort the
+  # whole script via set -e. The `|| true` keeps awk's correctly-computed "0".
+  total_runs=$(printf '%s' "$vstats" | grep -o '"total_runs":[0-9]*' | awk -F: '{s+=$2} END{print s+0}') || true
   if [[ "${total_runs:-0}" -ge 2 ]]; then
     return 0
   fi
@@ -423,7 +426,7 @@ seed_vault_history() {
   for offset in 7200 3600; do
     started=$(date -u -d "@$((now - offset))" +%Y-%m-%dT%H:%M:%SZ)
     completed=$(date -u -d "@$((now - offset + 60))" +%Y-%m-%dT%H:%M:%SZ)
-    body=$(printf '{"operator":"demo-seed@aihelpdesk.biz","outcome":"resolved","findings_summary":"[seeded] Connection overload remediation complete — idle sessions terminated, pool recovered.","started_at":"%s","completed_at":"%s"}' \
+    body=$(printf '{"operator":"demo-seed@aihelpdesk.biz","outcome":"resolved","findings_summary":"[seeded] Remediation completed successfully.","started_at":"%s","completed_at":"%s"}' \
       "$started" "$completed")
     curl_auditd -X POST "${AUDITD_URL}/v1/fleet/playbooks/${playbook_id}/runs" -d "$body" >/dev/null 2>&1 || true
   done
@@ -441,8 +444,12 @@ show_vault_coda() {
   local vstats total_runs resolved resolution_pct pb_ver
   vstats=$(curl_gw "${GATEWAY_URL}/api/v1/fleet/series/${series}/version-stats" 2>/dev/null)
   # Sum total_runs and resolved across all versions.
-  total_runs=$(printf '%s' "$vstats" | grep -o '"total_runs":[0-9]*' | awk -F: '{s+=$2} END{print s+0}')
-  resolved=$(printf '%s' "$vstats" | grep -o '"resolved":[0-9]*' | awk -F: '{s+=$2} END{print s+0}')
+  # `|| true` guards against grep's exit-1-on-no-match under pipefail (see
+  # seed_vault_history) — harmless here today since this always runs after a
+  # real trigger, but kept for the same reason: don't let a silent set -e
+  # kill the script on a series with zero recorded runs.
+  total_runs=$(printf '%s' "$vstats" | grep -o '"total_runs":[0-9]*' | awk -F: '{s+=$2} END{print s+0}') || true
+  resolved=$(printf '%s' "$vstats" | grep -o '"resolved":[0-9]*' | awk -F: '{s+=$2} END{print s+0}') || true
   pb_ver=$(printf '%s' "$vstats" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)
   if [[ "${total_runs:-0}" -gt 0 && "${resolved:-0}" -gt 0 ]]; then
     resolution_pct=$(( resolved * 100 / total_runs ))
