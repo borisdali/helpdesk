@@ -89,6 +89,14 @@ declare -A FAULT_SERIES=(
   [db-long-running-query]="pbs_slow_query_remediate"
   [db-tx-lock-chain-blocker]="pbs_lock_chain_remediate"
 )
+# Synthetic monitoring alert text sent as trigger_context — demonstrates Right IX
+# (the original claim that started the run is stored alongside the diagnosis, so
+# you can compare what monitoring reported to what aiHelpDesk found).
+declare -A FAULT_ALERT_CONTEXT=(
+  [db-max-connections]="PagerDuty P1: demo-postgres connections at 26/30 (87%) — pool near exhaustion, threshold monitor fired 2 min ago."
+  [db-long-running-query]="PagerDuty P2: query on demo-postgres has been running 45s+ (threshold: 30s) — flagged by slow-query monitor."
+  [db-tx-lock-chain-blocker]="PagerDuty P1: lock wait timeout exceeded on demo-postgres — sessions queued behind an advisory lock for 60s+."
+)
 
 if [[ -z "${FAULT_NAMES[$FAULT]:-}" ]]; then
   err "Unknown fault '${FAULT}'. Valid values: ${!FAULT_NAMES[*]}"
@@ -257,9 +265,9 @@ curl_auditd() {
 # is in the response body — there is nothing to poll.
 trigger_playbook() {
   local series="${1:-$SERIES}" mode="${2:-manual}"
-  local resp run_id
+  local resp run_id ctx="${FAULT_ALERT_CONTEXT[$FAULT]:-}"
   resp=$(curl_gw -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
-    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1)
+    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\", \"trigger_context\": \"${ctx}\"}" 2>&1)
   run_id=$(printf '%s' "$resp" | grep -o '"run_id":"[^"]*"' | head -1 | cut -d'"' -f4)
   if [[ -z "$run_id" ]]; then
     err "Failed to trigger playbook: $resp"
@@ -271,8 +279,9 @@ trigger_playbook() {
 # trigger_playbook_as <user> <series> <approval_mode> — returns full JSON response
 trigger_playbook_as() {
   local user="$1" series="$2" mode="$3"
+  local ctx="${FAULT_ALERT_CONTEXT[$FAULT]:-}"
   curl_gw_as "$user" -X POST "${GATEWAY_URL}/api/v1/fleet/playbooks/${series}/run" \
-    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\"}" 2>&1
+    -d "{\"connection_string\": \"${CONN}\", \"approval_mode\": \"${mode}\", \"trigger_context\": \"${ctx}\"}" 2>&1
 }
 
 # ── step approval ─────────────────────────────────────────────────────────────
@@ -496,9 +505,12 @@ show_vault_coda() {
   sep
 }
 
-# show_rights_exercised <run_id> — prints the Bill of Rights outro.
+# show_rights_exercised <run_id> [denied] — prints the Bill of Rights outro.
+# denied=1 marks Right V as exercised (a gate was actually denied this run —
+# true today only for Mode C's Run 1). Right IX is always [+] since every
+# trigger call now sends trigger_context (see FAULT_ALERT_CONTEXT).
 show_rights_exercised() {
-  local run_id="$1"
+  local run_id="$1" denied="${2:-0}"
   printf "\n"
   sep
   bold "  Rights exercised in this run:"
@@ -513,6 +525,20 @@ show_rights_exercised() {
   printf "\n"
   printf "  ${GREEN}[+]${RESET} Right IV  — The Grade\n"
   printf "      Calibration record above. Accumulates with every run; queryable at any time.\n"
+  printf "\n"
+  if [[ "$denied" -eq 1 ]]; then
+    printf "  ${GREEN}[+]${RESET} Right V   — The Right to Refuse\n"
+    printf "      A gate was denied above. The denial is permanently recorded — not erased,\n"
+    printf "      not overridden.\n"
+  else
+    printf "  ${DIM}[ ] Right V   — The Right to Refuse   try: DEMO_MODE=clamping (Mode C denies a gate)${RESET}\n"
+  fi
+  printf "\n"
+  printf "  ${GREEN}[+]${RESET} Right IX  — The Original Claim\n"
+  printf "      This run's trigger_context (the alert that started it) is stored on the\n"
+  printf "      run record, not just passed to the agent:\n"
+  printf "      ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/fleet/playbook-runs/${run_id}' \\\n"
+  printf "           -H 'Authorization: Bearer ${API_KEY}' | jq .trigger_context${RESET}\n"
   printf "\n"
   printf "  ${DIM}[ ] Right II  — Second Opinion      run: faulttest --judge${RESET}\n"
   printf "  ${DIM}[ ] Right VIII — Switch Models       set: ANTHROPIC_MODEL= in .env${RESET}\n"
@@ -730,7 +756,7 @@ run_mode_c() {
   printf "    ${DIM}curl -s '${HOST_GATEWAY_URL}/api/v1/governance/events?limit=30' \\\n"
   printf "         -H 'Authorization: Bearer ${API_KEY}' | jq '.[] | {user,tool,action_class}'${RESET}\n"
   printf "\n"
-  show_rights_exercised "$run_id2"
+  show_rights_exercised "$run_id2" 1
 
   teardown_fault 2>/dev/null || true
 }
@@ -751,7 +777,7 @@ main() {
   printf "  Playbook:  %s\n" "$SERIES"
   printf "  Model:     %s\n" "$DETECTED_VENDOR"
   printf "  Gateway:   %s\n" "$GATEWAY_URL"
-  printf "  Rights:    ${DIM}I (Consent) · III (Audit Trail) · IV (Grade)${RESET}\n"
+  printf "  Rights:    ${DIM}I (Consent) · III (Audit Trail) · IV (Grade) · IX (Original Claim)${RESET}\n"
   printf "\n"
   sep
   printf "\n"
