@@ -246,4 +246,5 @@ system is not yet complete.
 
 *See [SECOND_OPINION.md](SECOND_OPINION.md) for the technical detail behind Right II.
 See [INFORMED_CONSENT.md](INFORMED_CONSENT.md) for the technical detail behind Rights I and V.
-See [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) for the technical detail behind Right VI.*
+See [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) for the technical detail behind Right VI.
+See [RIGHTS_AND_THE_FLYWHEEL.md](RIGHTS_AND_THE_FLYWHEEL.md) for all ten rights mapped onto the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel), with commands to verify each stage against the live demo.*

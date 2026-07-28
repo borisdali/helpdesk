@@ -273,3 +273,5 @@ and the calibration record is [Right IV](../../docs/CUSTOMER_RIGHTS.md#iv-the-ri
   scenarios with injection specs and playbooks
 - **Governance reference:** [docs/AIGOVERNANCE.md](../../docs/AIGOVERNANCE.md)
 - **Who this is for:** [docs/FOR_WHOM.md](../../docs/FOR_WHOM.md)
+- **How this run fits the bigger loop:** [docs/RIGHTS_AND_THE_FLYWHEEL.md](../../docs/RIGHTS_AND_THE_FLYWHEEL.md) —
+  every Right shown above, mapped onto the Operational SRE/DBA Flywheel
