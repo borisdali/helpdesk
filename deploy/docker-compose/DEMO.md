@@ -281,6 +281,11 @@ and the calibration record is [Right IV](../../docs/CUSTOMER_RIGHTS.md#iv-the-ri
 
 ## Next steps
 
+- **Ready to go further than the demo?** [docs/FROM_DEMO_TO_PRODUCTION.md](../../docs/FROM_DEMO_TO_PRODUCTION.md) —
+  the sequenced path: pick a deployment mode, point read-only at something real, let the
+  Vault build a genuine track record, then graduate to write access
+- **Which deployment mode fits you:** [docs/DEPLOYMENT_MODES.md](../../docs/DEPLOYMENT_MODES.md) —
+  Personal, Enterprise Read-Only Governed, or Enterprise Full
 - **Connect to your own database:** set `DEMO_CONN` to your connection string
   and run the demo-runner against real infrastructure
 - **Full deployment:** see [README.md](README.md) for production setup
