@@ -14,6 +14,21 @@ No configuration required beyond an LLM API key.
 - Docker Desktop (Mac/Windows) or Docker Engine + Compose plugin (Linux)
   or Podman with `podman compose` (see [Podman note](#podman-users))
 - An LLM API key (Anthropic **or** Google/Gemini — pick one)
+- Git (to fetch the demo files below)
+
+---
+
+## 0. Get the code
+
+The demo pulls a pre-built image (no local build required), but it needs the compose
+file and the small `demo/` config directory from this repo:
+
+```bash
+git clone https://github.com/borisdali/helpdesk.git
+cd helpdesk/deploy/docker-compose
+```
+
+All commands below assume you're in this directory.
 
 ---
 

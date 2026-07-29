@@ -71,6 +71,23 @@ Solid path = one full turn of the loop, provable in a single demo run. The botto
 (judge review → version bump) needs accumulated data over time; it is explained here, not
 demoed live. See [here](JUDGMENT_LAYER.md) for the mechanism.
 
+Rendered version, same loop (GitHub renders this natively):
+
+```mermaid
+flowchart TD
+    A["Incident / Alert fires<br/>trigger_context captured — Right IX"] --> B["Agent Diagnosis<br/>hypothesis + confidence"]
+    B --> C["Consent Gate<br/>action + reasoning + blast radius — Right I"]
+    C -->|approved| D[Execution]
+    C -->|denied| G["Denial recorded — Right V<br/>not erased, not overridden"]
+    D --> E["Outcome recorded<br/>hash-chained audit — Right III"]
+    G --> E
+    E --> F["Vault / Calibration updates<br/>track record — Right IV<br/>judge-checked — Right II"]
+    F -->|enough runs accumulate| H["Judge reviews proposed<br/>playbook improvements — Right VI"]
+    H --> I[Playbook version bumps]
+    I -.->|next incident, better-calibrated| A
+    F -.->|next incident, same version| A
+```
+
 ---
 
 ## Walking the loop
