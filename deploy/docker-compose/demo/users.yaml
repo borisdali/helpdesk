@@ -1,0 +1,12 @@
+users:
+  - id: demo@aihelpdesk.biz
+    roles: [dba, sre, operator, dba_lead]
+  - id: operator@aihelpdesk.biz
+    roles: [sre, operator]
+
+# Service account for the demo-runner (curl calls via Bearer demo-api-key).
+# The X-User header on each request records the human operator identity alongside it.
+service_accounts:
+  - id: demo-runner
+    api_key_hash: "$argon2id$v=19$m=65536,t=3,p=4$21vlaa7wt5umez3HR9K19A$f/QGymTjunlUqGwD73K4Y6LVnyMXKw+XNhxtZ+zPHi8"
+    roles: [sre, operator]

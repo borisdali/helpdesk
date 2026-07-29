@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2aclient"
 
@@ -470,5 +471,101 @@ func TestHandleQuery_TraceIDSetBeforeRouting(t *testing.T) {
 	}
 	if !strings.HasPrefix(traceID, "tr_") {
 		t.Errorf("X-Trace-ID = %q, want tr_ prefix", traceID)
+	}
+}
+
+// TestLocalHandleJourneys_RunIDFilter verifies that ?run_id=plr_* translates to
+// the run's stored trace_id and returns the matching journey. This is the user-
+// facing path for navigating from an incident (plr_*) to its audit Journey.
+func TestLocalHandleJourneys_RunIDFilter(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "audit.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Insert a gateway_request anchor event under tr_remediation.
+	// This is the anchor emitted by handlePlaybookRun for agent_approve runs.
+	if err := store.Record(ctx, &audit.Event{
+		EventID:   "anchor_rem1",
+		Timestamp: base,
+		EventType: audit.EventTypeGatewayRequest,
+		TraceID:   "tr_remediation",
+		Session:   audit.Session{ID: "sess_rem", UserID: "ops@example.com"},
+		Input:     audit.Input{UserQuery: "Connection Overload — Terminate Idle Sessions"},
+		Tool:      nil, // empty tool_name — required for Q1 to pick this up as a journey anchor
+	}); err != nil {
+		t.Fatalf("record anchor: %v", err)
+	}
+
+	// Insert a tool execution event under the same trace.
+	if err := store.Record(ctx, &audit.Event{
+		EventID:   "tool_rem1",
+		Timestamp: base.Add(time.Second),
+		EventType: audit.EventTypeToolExecution,
+		TraceID:   "tr_remediation",
+		Session:   audit.Session{ID: "sess_rem"},
+		Tool:      &audit.ToolExecution{Name: "terminate_idle_connections"},
+		Outcome:   &audit.Outcome{Status: "success"},
+	}); err != nil {
+		t.Fatalf("record tool event: %v", err)
+	}
+
+	// Register the playbook run so ?run_id= can be translated to the trace_id.
+	prs, err := audit.NewPlaybookRunStore(store.DB(), false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	if err := prs.Record(ctx, &audit.PlaybookRun{
+		RunID:      "plr_rem01",
+		PlaybookID: "pb_conn_v15",
+		SeriesID:   "pbs_connection_remediate",
+		TraceID:    "tr_remediation",
+		Operator:   "ops@example.com",
+		StartedAt:  base,
+	}); err != nil {
+		t.Fatalf("insert playbook run: %v", err)
+	}
+
+	handler := localHandleJourneys(store)
+
+	// ?run_id= should return the journey for tr_remediation.
+	req := httptest.NewRequest(http.MethodGet, "/v1/journeys?run_id=plr_rem01", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var journeys []audit.JourneySummary
+	if err := json.NewDecoder(rec.Body).Decode(&journeys); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("got %d journeys, want 1; body: %s", len(journeys), rec.Body.String())
+	}
+	if journeys[0].TraceID != "tr_remediation" {
+		t.Errorf("TraceID = %q, want tr_remediation", journeys[0].TraceID)
+	}
+	if journeys[0].IncidentRunID != "plr_rem01" {
+		t.Errorf("IncidentRunID = %q, want plr_rem01", journeys[0].IncidentRunID)
+	}
+
+	// Unknown run_id should return an empty list, not an error.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/journeys?run_id=plr_notexist", nil)
+	rec2 := httptest.NewRecorder()
+	handler(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("unknown run_id: status = %d, want 200", rec2.Code)
+	}
+	var empty []audit.JourneySummary
+	if err := json.NewDecoder(rec2.Body).Decode(&empty); err != nil {
+		t.Fatalf("decode empty response: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("unknown run_id returned %d journeys, want 0", len(empty))
 	}
 }

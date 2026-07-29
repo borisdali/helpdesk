@@ -2382,3 +2382,42 @@ func TestQueryJourneys_IncidentRunID(t *testing.T) {
 		t.Errorf("tr_adhoc IncidentRunID = %q, want empty (no associated run)", got)
 	}
 }
+
+// TestGetTraceIDByRunID verifies that GetTraceIDByRunID translates a plr_* run ID
+// to its stored trace_id, and returns "" for unknown run IDs.
+func TestGetTraceIDByRunID(t *testing.T) {
+	store := newJourneyStore(t)
+	ctx := context.Background()
+
+	prs, err := NewPlaybookRunStore(store.db, false)
+	if err != nil {
+		t.Fatalf("NewPlaybookRunStore: %v", err)
+	}
+	if err := prs.Record(ctx, &PlaybookRun{
+		RunID:      "plr_trace01",
+		PlaybookID: "pb_conn_v1",
+		SeriesID:   "pbs_connection_remediate",
+		TraceID:    "tr_conn_abc",
+		Operator:   "ops@example.com",
+		StartedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("insert playbook run: %v", err)
+	}
+
+	got, err := store.GetTraceIDByRunID(ctx, "plr_trace01")
+	if err != nil {
+		t.Fatalf("GetTraceIDByRunID: %v", err)
+	}
+	if got != "tr_conn_abc" {
+		t.Errorf("GetTraceIDByRunID(%q) = %q, want tr_conn_abc", "plr_trace01", got)
+	}
+
+	// Unknown run ID returns empty string, not an error.
+	got, err = store.GetTraceIDByRunID(ctx, "plr_does_not_exist")
+	if err != nil {
+		t.Fatalf("GetTraceIDByRunID(unknown): unexpected error %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetTraceIDByRunID(unknown) = %q, want empty string", got)
+	}
+}

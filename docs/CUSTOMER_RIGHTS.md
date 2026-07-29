@@ -42,9 +42,11 @@ results.
 
 *Mechanism:* [Second Opition](SECOND_OPINION.md): five layers, each documented with its
 verification mechanism.
-*Status:* Mostly solid. Three gaps being closed in v0.20.0: model-specific calibration
+*Status:* Solid. The three gaps that used to sit here — model-specific calibration
 (Right IV), alert capture for diagnosis comparison (Right IX) and judge track record
-measurement.
+measurement — all closed in v0.20.0. Judge track record is queryable via
+`faulttest vault judge-accuracy`, which compares recorded judge verdicts to actual run
+outcomes.
 
 ---
 
@@ -76,12 +78,12 @@ accuracy is improving across playbook versions. All three are queryable at any t
 the live audit store.
 
 *Mechanism:* `vault calibration`, `vault accuracy`, `vault versions` in [Vault](VAULT.md).
-*Gap (v0.20.0):* Calibration data is currently blended across model versions (model cert PK
-not yet in schema — see [Consistency](CONSISTENCY.md)). Calibration also currently reflects
-LLM self-consistency when human feedback is sparse; the output warns you when this is the
-case and `vault feedback` will provide a first-class path to submit human verdicts.
-Both are being fixed in v0.20.0. Until then: check the `Sources:` line and `diagnosis_model`
-field in `vault accuracy` output.
+*Status:* Solid. `diagnosis_model` is part of the fault stability cert's primary key
+(`fault_id, diagnosis_model`), so certs no longer blend across model versions — a new
+model gets its own cert rather than overwriting the old one. When human feedback is
+sparse, `vault accuracy` prints a data-quality banner and the `Sources:` line reporting
+the human-verdict vs. auto-judge split; `vault feedback <run-id>` submits a human verdict
+directly.
 
 ---
 
@@ -147,10 +149,9 @@ explicit: `STABLE(5) [claude-sonnet-4-6]` is a different cert from `STABLE(5)
 silently.
 
 *Mechanism:* [Consistency](CONSISTENCY.md), [Principles](PRINCIPLES.md#11-model-neutral-by-design).
-*Gap (v0.20.0):* Model identifier is stored as an annotation but is not yet part of the
-cert primary key. Running with a new model currently overwrites the old cert. Fix ships
-in v0.20.0 item #1. Until then: `diagnosis_model` field in `vault accuracy` shows which
-model the current cert was issued against.
+*Status:* Solid. `diagnosis_model` is a real primary-key column on the fault stability
+cert (`PRIMARY KEY (fault_id, diagnosis_model)`), not just an annotation. Running with a
+new model creates a new cert; the old one is untouched and remains queryable.
 
 ---
 
@@ -165,9 +166,9 @@ line that prompted the investigation — is stored alongside the run record and 
 is visible.
 
 *Mechanism:* `trigger_context` field on `PlaybookRun`, surfaced in `vault incidents`.
-*Gap (v0.20.0):* `trigger_context` is not yet persisted — it is passed to the agent but
-not stored. Fix ships in v0.20.0 item #2. Until then: the `context` field in the run
-request is available in the agent transcript (accessible via `vault journey`).
+*Status:* Solid. `trigger_context` is a persisted column on `playbook_runs`, accepted as
+a field on the trigger request and stored at run start — not just passed through to the
+agent transcript.
 
 ---
 
@@ -218,7 +219,7 @@ curl $GW/api/v1/fleet/playbooks/$PB_ID -H "Authorization: Bearer $KEY" \
 faulttest vault accuracy db-max-connections --gateway $GW --api-key $KEY
 # → "Diagnosis model: claude-sonnet-4-6" appears in output
 
-# Right IX — trigger_context on runs (v0.20.0)
+# Right IX — trigger_context on runs
 curl $GW/api/v1/fleet/playbook-runs/$RUN_ID -H "Authorization: Bearer $KEY" \
   | jq '.trigger_context'
 # → alert text that initiated the run
@@ -228,12 +229,15 @@ curl $GW/api/v1/fleet/playbook-runs/$RUN_ID -H "Authorization: Bearer $KEY" \
 
 ## The Commitment
 
-Rights I, III, V, VI, VII and X are solid today. Rights II, IV, VIII and IX have named
-gaps with named fixes in v0.20.0.
+All ten rights are solid today. Rights II, IV, VIII and IX carried named gaps through
+v0.20.0 (model-specific calibration, `trigger_context` persistence, judge track record
+measurement); all four closed as of that release.
 
-Publishing the gaps is the commitment. A vendor who claims all ten rights without
-qualification is making claims they cannot verify. At aiHelpDesk we prefer to tell you exactly which
-rights are fully implemented, which have known gaps and when those gaps close.
+That doesn't mean this document stops changing. Publishing the gaps — and updating this
+page the moment a gap closes — is the commitment. A vendor who claims all ten rights
+without qualification is making claims they cannot verify. At aiHelpDesk we prefer to
+tell you exactly which rights are fully implemented, which have known gaps and when those
+gaps close.
 
 That honesty is itself a right. You are entitled to a vendor who tells you where the
 system is not yet complete.
@@ -242,4 +246,5 @@ system is not yet complete.
 
 *See [SECOND_OPINION.md](SECOND_OPINION.md) for the technical detail behind Right II.
 See [INFORMED_CONSENT.md](INFORMED_CONSENT.md) for the technical detail behind Rights I and V.
-See [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) for the technical detail behind Right VI.*
+See [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) for the technical detail behind Right VI.
+See [RIGHTS_AND_THE_FLYWHEEL.md](RIGHTS_AND_THE_FLYWHEEL.md) for all ten rights mapped onto the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel), with commands to verify each stage against the live demo.*

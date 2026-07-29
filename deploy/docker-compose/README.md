@@ -1,6 +1,6 @@
 # aiHelpDesk: Deployment for VM-based (non-K8s) databases
 
-If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best. Coming from the [10-minute demo](DEMO.md)? See [docs/FROM_DEMO_TO_PRODUCTION.md](../../docs/FROM_DEMO_TO_PRODUCTION.md) for the sequenced path — this page covers step 2 of that sequence (installation mechanics).
 
 This guide covers running aiHelpDesk on a host inside the Docker containers (orchestrated via Docker Compose). This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM (no Docker) or on K8s.
 

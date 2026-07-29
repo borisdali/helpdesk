@@ -28,7 +28,13 @@ See Playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk rec
    - [faulttest flags](#faulttest-flags)
    - [Gate notifications](#gate-notifications)
    - [Git opt-in](#git-opt-in)
-4. [API](#api)
+4. [Step-approval gate](#step-approval-gate)
+   - [When it fires](#when-it-fires)
+   - [`pending_approval` response](#pending_approval-response)
+   - [Approving or denying a step](#approving-or-denying-a-step)
+   - [Bypassing the gate with `approval_mode: force`](#bypassing-the-gate-with-approval_mode-force)
+   - [Non-TTY environments](#non-tty-environments)
+5. [API](#api)
    - [List Playbooks](#list-playbooks)
    - [Get a Playbook](#get-a-playbook)
    - [Create a Playbook](#create-a-playbook)
@@ -456,6 +462,174 @@ approved/gate/{runID}   → approved
 ```
 
 Register `POST /api/v1/webhooks/git` as a webhook in your git provider and set `HELPDESK_GIT_WEBHOOK_SECRET`. Works with GitHub, GitLab, Gitea, and any provider that sends merge events. See [docs/DECISIONS.md — Git webhook adapter](DECISIONS.md#git-webhook-adapter-opt-in) for full setup.
+
+---
+
+## Step-approval gate
+
+The step-approval gate is a per-action checkpoint **within** a running playbook. Where the [informed gate](#informed-gate) sits at the macro boundary between a triage playbook and its remediation counterpart, the step-approval gate sits inside the remediation playbook itself — pausing before each consequential tool call and requiring explicit human sign-off before the agent proceeds.
+
+The two gates are complementary: the informed gate controls whether remediation starts at all; the step-approval gate controls which individual actions execute once it has.
+
+### When it fires
+
+The step-approval gate is active when a playbook runs in `execution_mode: agent_approve`. In that mode, the re-planning LLM proposes one action at a time. Each proposal is compared against the active policy. If the proposed action's class (`read`, `write`, or `destructive`) matches a policy rule with `effect: approve`, the gateway holds the action and returns HTTP 202 with `"status": "pending_approval"`.
+
+Read-class actions pass through automatically in `review` mode; write and destructive actions always require explicit approval. In `manual` mode every step — including reads — requires approval.
+
+```yaml
+# policies.yaml — surfaces the step-approval gate for write and destructive actions
+policies:
+  - name: require-approval
+    rules:
+      - action_classes: [write, destructive]
+        effect: approve
+```
+
+Enable agent_approve mode per-request:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_connection_remediate/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string": "prod-primary",
+    "approval_mode":     "review"
+  }'
+```
+
+Or set `HELPDESK_APPROVAL_ENABLED=true` on the agent to make `review` the default for all runs through that agent.
+
+### `pending_approval` response
+
+```json
+{
+  "run_id":                 "plr_c4d9e2f1",
+  "status":                 "pending_approval",
+  "approval_id":            "apr_7a3b1c8d",
+  "effective_approval_mode": "review",
+  "step": {
+    "index":        1,
+    "agent":        "db-agent",
+    "tool":         "terminate_idle_connections",
+    "args":         { "connection_string": "prod-primary", "max_idle_secs": 300 },
+    "reason":       "17 connections idle > 5 min are saturating the pool; terminating them will free capacity immediately.",
+    "action_class": "destructive"
+  }
+}
+```
+
+`step.tool` — the exact tool that will run.
+`step.action_class` — `"read"`, `"write"`, or `"destructive"`. Destructive actions have no automatic rollback.
+`step.reason` — the re-planner's explanation for why this step is needed at this point.
+`approval_id` — reference key for the Decision Hub and audit trail.
+
+The approval record is also queryable immediately:
+
+```bash
+curl -s http://localhost:8080/api/v1/decisions/step_approval:plr_c4d9e2f1 \
+     -H 'Authorization: Bearer <api-key>' | jq '.extra'
+```
+
+### Approving or denying a step
+
+Call `POST /api/v1/fleet/playbook-runs/{runID}/proceed`:
+
+```bash
+# Approve — agent executes the step and proposes the next one
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_c4d9e2f1/proceed \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resolution":  "approved",
+    "resolved_by": "alice",
+    "step_index":  1,
+    "reason":      "Confirmed: connections are idle, no uncommitted writes."
+  }'
+
+# Deny — the run is marked denied and stops immediately
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_c4d9e2f1/proceed \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resolution":  "denied",
+    "resolved_by": "alice",
+    "step_index":  1,
+    "reason":      "Session 42 has uncommitted writes from a migration — do not terminate."
+  }'
+```
+
+On `approved`, the gateway executes the tool call, records the result, and immediately returns the next `pending_approval` response (or `"status": "complete"` if the playbook is done). The loop continues until completion or denial.
+
+On `denied`, the run stops. No further steps execute. The denial and reason are recorded in the audit trail and surfaced in the Decision Hub.
+
+`step_index` must match the `step.index` in the `pending_approval` response. Stale approvals (wrong index) are rejected — this prevents a race where an operator approves a step that the agent has already moved past.
+
+### Bypassing the gate with `approval_mode: force`
+
+`approval_mode: force` is the highest-privilege approval mode. Its effect depends on the playbook's `execution_mode`:
+
+- **`execution_mode: agent`** (triage, diagnostics): `force` allows all tool calls — including write and destructive — to execute without the policy-level `pending_approval` pause. No step-approval gate fires.
+- **`execution_mode: agent_approve`** (remediation): `force` does **not** skip the per-step approval loop. The re-planning LLM still proposes one action at a time and each requires an explicit `/proceed` call. What `force` adds here is the ability to chain through `approval_mode: manual` playbooks that `auto` cannot reach (see `canAutoChain`).
+
+In both modes, `force` is subject to clamping via `approval_override_roles` (see below).
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_connection_remediate/run \
+  -H "Content-Type: application/json" \
+  -H "X-User: alice@example.com" \
+  -d '{
+    "connection_string": "prod-primary",
+    "approval_mode":     "force"
+  }'
+```
+
+The `effective_approval_mode` field in the response reflects the mode that actually ran — always check it rather than assuming your requested mode was accepted.
+
+**`force` does not bypass the [informed gate](#informed-gate).** If `gate_escalation: true` is also set, the phase-boundary gate still fires and waits for `proceed-escalation` before remediation starts. The step-approval gate inside the remediation playbook is then skipped, but the operator still reviewed the triage findings first.
+
+#### Clamping
+
+If `approval_override_roles` is configured on the target database entry in `infrastructure.json`, the gateway silently clamps the requested mode back to the playbook's declared mode when the caller lacks one of those roles:
+
+```json
+{
+  "db_servers": {
+    "prod-primary": {
+      "connection_string": "...",
+      "approval_override_roles": ["dba_lead", "oncall_senior"]
+    }
+  }
+}
+```
+
+A caller without `dba_lead` or `oncall_senior` who requests `force` (or any mode stricter than the playbook's floor) receives the clamped mode with a warning in the response:
+
+```json
+{
+  "effective_approval_mode": "review",
+  "warnings": [
+    "approval_mode clamped to \"review\": override to \"force\" requires one of roles [dba_lead oncall_senior] (caller: bob@example.com)"
+  ]
+}
+```
+
+The run still proceeds — clamping is non-fatal. When `approval_override_roles` is absent or empty on the db entry, there is no clamping and any caller can request `force`.
+
+In faulttest, pass `--approval-mode force` and `--operator alice@example.com` (sets the `X-User` header). Alice must carry the required role in `users.yaml` to avoid being clamped.
+
+### Non-TTY environments
+
+In Kubernetes Jobs, CI pipelines, or Docker containers there is no terminal for interactive prompts. Pass `--emit-and-wait` to faulttest (or set `emit_and_wait: true` in the harness config) to switch to HTTP long-poll mode:
+
+```bash
+go run ./testing/cmd/faulttest run \
+  --ids db-tx-lock-chain-blocker --external --conn faulttest-db \
+  --via-gateway --gateway http://localhost:8080 \
+  --remediate --approval-mode review --emit-and-wait \
+  --audit-url http://localhost:7070
+# → logs "Step approval pending — approval_id=apr_7a3b1c8d" and polls auditd
+#   until an external actor calls /proceed
+```
+
+The `--emit-and-wait` flag also applies to [informed gate](#informed-gate) polling (`--gate-escalation`). Both flags can be combined.
 
 ---
 

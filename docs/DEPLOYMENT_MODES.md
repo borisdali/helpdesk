@@ -218,3 +218,7 @@ governance architecture, and [IDENTITY.md](IDENTITY.md) for setting up users and
 
 Do not enable a governed mode on a personal deployment unless you intend to run the
 full governance stack. The agents will refuse to start without it.
+
+See [FROM_DEMO_TO_PRODUCTION.md](FROM_DEMO_TO_PRODUCTION.md) for the full sequenced path
+from the [10-minute demo](../deploy/docker-compose/DEMO.md) through to graduating a mode
+2 deployment to mode 3.

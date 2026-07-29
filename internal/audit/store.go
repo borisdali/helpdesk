@@ -993,6 +993,20 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	return summaries, nil
 }
 
+// GetTraceIDByRunID returns the trace_id stored on a playbook run, or "" if the
+// run does not exist or has no trace. Used to translate a plr_* run ID into a
+// trace_id so that QueryJourneys can locate the journey for that run.
+func (s *Store) GetTraceIDByRunID(ctx context.Context, runID string) (string, error) {
+	var traceID string
+	err := s.db.QueryRowContext(ctx,
+		rebind(s.isPostgres, "SELECT COALESCE(trace_id, '') FROM playbook_runs WHERE run_id = ? LIMIT 1"),
+		runID).Scan(&traceID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return traceID, err
+}
+
 // outcomePriority returns the severity rank for a journey outcome string.
 // Higher priority outcomes win when aggregating events within a trace.
 //

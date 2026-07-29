@@ -1,6 +1,6 @@
 series_id: pbs_slow_query_remediate
 name: Slow Query / Lock Contention — Cancel or Terminate Blocking Session
-version: "1.0"
+version: "1.1"
 playbook_type: remediation
 entry_point: true
 execution_mode: agent_approve
@@ -21,15 +21,19 @@ symptoms:
   - "pg_locks shows ungranted locks waiting on a single session"
 guidance: |
   Step 1: Identify the target session.
-  Call get_slow_queries to find long-running active queries (state='active',
-  duration > threshold). Note the pid, query text, and duration.
+  Call get_active_connections first. Any session in state='active' with
+  query_seconds > 30 is a long-running query candidate. Note the pid, query
+  text, and query_seconds. A pg_sleep session represents a stuck application
+  connection and is a valid cancellation target regardless of query content.
   Call get_blocking_queries to find sessions holding locks that block others.
-  A session blocking others is a higher priority target than a slow query that
-  is not blocking anyone.
+  A blocking session is a higher priority target than a slow query that is not
+  blocking anyone.
+  Optionally call get_slow_queries for historical execution statistics if
+  pg_stat_statements is available — it provides aggregate data but is not
+  required to identify a currently-running long query.
 
-  Select the primary target: the session with the longest duration that is also
-  blocking the most downstream sessions (or the longest single slow query if no
-  lock chain exists).
+  Select the primary target: the blocking session or the session with the
+  longest query_seconds in state='active' (whichever is higher priority).
 
   Step 2: Inspect the target session.
   Call get_session_info with pid=<target_pid>. Confirm:

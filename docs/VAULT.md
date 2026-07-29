@@ -100,6 +100,8 @@ See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a full walkthrou
 
 The Vault is the mechanism that makes this second point real. Without it, every operator repeats the same diagnostic steps from scratch. And in a different way, with the different mistakes. With it, the hard-won knowledge of how to fix `db-max-connections` or `db-lock-contention` formally accumulates in one place, versioned, with a known track record — and with a measurable diagnosis accuracy rate that tells you not just whether the system is *fixing* problems but whether it is *understanding* them correctly.
 
+See [RIGHTS_AND_THE_FLYWHEEL.md](RIGHTS_AND_THE_FLYWHEEL.md) for this loop mapped stage-by-stage onto the [Customer Bill of Rights](CUSTOMER_RIGHTS.md), with the exact commands to verify each stage yourself against the live demo.
+
 ---
 
 ## How Artifacts Enter the Vault

@@ -1,0 +1,15 @@
+version: "1.0"
+policies:
+  - name: demo-governance
+    description: |
+      Allow all database actions. Step approval is enforced by the gateway's
+      agent_approve execution mode (human presses Enter before any destructive
+      tool executes). The policy require_approval effect is a separate mechanism
+      for direct tool calls that bypass the gateway; using it here would create
+      a second invisible approval gate inside the db-agent that conflicts with
+      the agent_approve flow.
+    resources:
+      - type: database
+    rules:
+      - action: [read, write, destructive]
+        effect: allow
