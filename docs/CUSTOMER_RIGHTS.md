@@ -9,8 +9,8 @@ is a liability pass-off. "You are entitled to a complete, tamper-proof, human-re
 audit trail of every action the system took, at any time, for any run, without
 configuration" is a commitment.
 
-Ten rights. For each: the entitlement, the mechanism that makes it real and — where the
-mechanism has a current gap — an honest statement of what is pending and when it ships.
+Ten rights. For each: the entitlement, the mechanism that makes it real and, in case
+there are gaps, an honest statement of what is pending and when it ships.
 
 ---
 
