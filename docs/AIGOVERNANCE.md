@@ -17,6 +17,7 @@ dedicated to aiHelpDesk's critical subsystem that we refer to as AI Governance.
    - [3.3 Environment Variables](#33-environment-variables)
    - [3.4 Implementation](#34-implementation)
    - [3.5 Agent Integration](#35-agent-integration)
+     - [3.5.4 Fail-Closed on Unregistered Targets](#354-fail-closed-on-unregistered-targets)
 4. [Approval Workflows](#4-approval-workflows)
    - [4.1 Flow](#41-flow)
    - [4.2 Implementation](#42-implementation)
@@ -135,7 +136,7 @@ aiHelpDesk addresses this through two independent detection layers:
 
 Every mutation tool independently re-reads the target state after the write to
 confirm the change took effect. The database agent re-queries `pg_stat_activity`
-after terminating a connection; the Kubernetes agent re-queries the deployment
+after terminating a connection; the K8s agent re-queries the deployment
 spec after a restart. This catches silent failures (permission denied, already
 gone, partial apply) that would otherwise produce a false-success response.
 
@@ -473,7 +474,7 @@ if policyEnforcer != nil {
     }
 }
 
-// Kubernetes agent example - before executing kubectl
+// K8s agent example - before executing kubectl
 if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
     return result, fmt.Errorf("policy denied: %w", err)
 }
@@ -506,6 +507,40 @@ When an agent receives a request for `prod-db`, it:
 2. Extracts tags (`["production", "critical"]`)
 3. Checks policy with those tags
 4. If allowed, executes the operation
+
+### 3.5.4 Fail-Closed on Unregistered Targets
+
+Tags are how the policy engine decides what an agent is allowed to do. A target with no
+tags has nothing for a policy rule to match against. And so an agent must never be allowed
+to quietly operate on a database or namespace it can't tag. Both agents enforce this the
+same way: when `HELPDESK_INFRA_CONFIG` is set, any connection string or namespace that
+doesn't resolve to a registered entry is a **hard reject**, before any tool executes.
+
+Resolution is attempted in order: an exact connection-string match, a fuzzy match on
+core fields (host/port/dbname/user, ignoring `password`/`sslmode`/etc.), the host field
+treated as a registered alias, then the ephemeral registry (`--auto-db` registrations).
+Only if none of those match does the agent refuse the call:
+
+```
+database not registered in infrastructure config; contact your IT administrator
+to add it. Known databases: <comma-separated list>
+```
+
+The K8s agent applies the identical pattern to namespaces (`agents/k8s/tools.go`,
+`resolveNamespaceInfo`) — a namespace with no path back to a registered database or
+cluster entry in `infrastructure.json` is rejected the same way, with the same message
+shape.
+
+This is conditional, not absolute: **the guarantee only holds when
+`HELPDESK_INFRA_CONFIG` is actually configured on the agent.** With no infra config set
+at all, an agent runs in "dev mode" — any connection string is accepted and policy
+evaluates with an empty tag set (which most policies should be written to deny by
+default for write/destructive actions, but that's a policy authoring choice, not a
+guarantee this check makes on its own). Production deployments should always set
+`HELPDESK_INFRA_CONFIG`.
+
+*Implementation:* `resolveDatabaseInfo` in `agents/database/tools.go`;
+`resolveNamespaceInfo` in `agents/k8s/tools.go`.
 
 ---
 
@@ -665,7 +700,7 @@ uses `parseTerminatedCount` (integer from the `terminated | N` expanded row).
 
 ### 5.2 K8s Blast Radius (`max_pods_affected`)
 
-Caps resources affected by a single Kubernetes operation. `scale_deployment`
+Caps resources affected by a single K8s operation. `scale_deployment`
 enforces pre-execution only (replica count is known from `args.Replicas` before
 kubectl runs). `delete_pod` and `restart_deployment` enforce post-execution
 (count parsed from kubectl confirmation lines: `pod "x" deleted`,
@@ -881,7 +916,7 @@ For deployment-specific instructions see:
 
 The `govbot` is a one-shot compliance reporter that queries the Gateway's
 governance API endpoints and produces a structured compliance snapshot. It
-is designed to run on-demand or on a schedule (daily cron / Kubernetes CronJob)
+is designed to run on-demand or on a schedule (daily cron / K8s CronJob)
 and optionally post a summary to a Slack webhook.
 
 ```
@@ -952,7 +987,7 @@ go run ./cmd/govbot/ -gateway http://localhost:8080 \
 # Docker Compose (governance profile)
 docker compose --profile governance run govbot
 
-# Kubernetes — trigger a one-off run outside the CronJob schedule
+# K8s — trigger a one-off run outside the CronJob schedule
 kubectl create job govbot-manual --from=cronjob/helpdesk-govbot
 ```
 

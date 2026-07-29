@@ -177,10 +177,14 @@ Real certs, generated for this demo's three faults on 2026-07-28:
 `db-max-connections` is worth calling out specifically: the first attempt at generating
 this cert (without `--agent-conn`) also came back `STABLE(5)`, but with attribution
 `connection-pool-saturation (3/5), consistent: no (split), UNKNOWN: 2` — the agent was
-intermittently failing a registry lookup unrelated to the fault itself and reporting that
-failure as a finding. Same fault, same model, same 5 reps; fixing the connection-string
-split alone took it from a 3/5 split to a clean 5/5. That's the stability cert doing
-exactly its job: catching noise in the measurement, not just the outcome.
+intermittently hitting the [fail-closed check on unregistered
+databases](AIGOVERNANCE.md#354-fail-closed-on-unregistered-targets) — the same security
+control that stops an agent from operating on any database it can't tag for policy —
+tripped here by a connection-string mismatch unrelated to the fault itself, and reporting
+that rejection as a finding. Same fault, same model, same 5 reps; fixing the
+connection-string split alone took it from a 3/5 split to a clean 5/5. That's the
+stability cert doing exactly its job: catching noise in the measurement, not just the
+outcome.
 
 `--agent-model` must match the model the demo actually runs because the cert is deliberately model-scoped
 (Right VIII), so a mismatched model produces a cert that never shows up in this demo's
