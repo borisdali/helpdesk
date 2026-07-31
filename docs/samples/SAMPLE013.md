@@ -15,6 +15,8 @@ That's the question that [this doc page](../RIGHTS_AND_THE_FLYWHEEL.md) the blog
 
 ---
 
+If you are new to aiHelpDesk Demo, please review [this page](../../deploy/docker-compose/DEMO.md) first.
+
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This one happened to be running on Docker, but see [here](SAMPLE010.md), [here](SAMPLE011.md) and [here](SAMPLE012.md) for VM/Bare Metal, the source and K8s respectively (although not the exact commands shown on this page).
 
 The tests below were conducted on Ubuntu 26.04 LTS (Resolute Raccoon): 

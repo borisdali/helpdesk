@@ -46,64 +46,73 @@ aiHelpDesk is the second kind, exclusively.
 
 ## 2. Does aiHelpDesk Replace DBAs and SREs?
 
-No. And the framing of the question is also not right. Here's why:
+No. But the framing of the question is also wrong in a specific way worth naming, because
+it's the same fear every DBA and SRE brings to this evaluation, usually unspoken: *if the
+AI can diagnose and fix this, what's left for me?*
 
 Not every shop has DBAs and DBA teams. If yours does, it's likely that you are an
-enterprise customer with the decent number and sizes of your database fleet.
-If so, DBAs typically play important, often critical, role in your overall IT organization. 
-Whether it's being part of the design, development or production support for the 
-mission critical databases, DBA's job is usually vital to ensuring that data is safe,
-secured and sound.
+enterprise customer with a decent number and size of database fleet and DBAs typically
+play an important, often critical, role in your overall IT organization. Being paged for
+2am [incidents](INCIDENTS.md) is typically not the most pleasant part of that job and
+making critical decisions at 2am is not the best recipe for keeping data safe, nor does it
+help anyone be lucid the next day. Offload that function. Incident management, real and
+proactive, is better handled by AI — but not any AI. Responsible, accountable AI, trusted
+not blindly but on a track record you can inspect yourself, see the
+[Bill of Rights](CUSTOMER_RIGHTS.md).
 
-Now, being paged for the 2am [incidents](INCIDENTS.md) is typically not the most pleasant part of the job.
-Making your DBAs make critical decisions at this time is often not the best recipe
-for keeping your data safe and sound, nor does it help your DBAs been lucid the next
-day.
+That much is the reassuring answer. Here's the more specific one, because "focus on
+higher-value work" is the sentence every automation vendor says and it usually means
+"fewer of you, eventually." We think the honest version is more concrete than that:
 
-Offload that function. Incident management, real and proactive is better handled by AI.
-But not any AI. Responsible and accountable AI. AI that you trust. Not blindly trust,
-but trust based on the previous track record. Based on transparency. Based on the fact
-that you can review that AI-based system's code (because it's OSS).
+- **As a database SME, you become the custodian of institutional memory, not its casualty.** Every CRITICAL
+  paragraph in a [playbook](PLAYBOOKS.md), every explicit prohibition, every decision
+  table that eliminates a branch point — those are written by someone who understood the
+  failure mode at a level the AI could not reach from an incident trace alone. Before
+  aiHelpDesk, that knowledge is tribal memory that walks out the door when you change
+  jobs. After, it's durable, versioned, human-readable YAML you own outright
+  ([Right VII](CUSTOMER_RIGHTS.md#vii-the-right-to-own-your-knowledge)). The "don't do X,
+  Y, Z because of what happened in 2019" knowledge that used to live only in your head now outlives any one
+  person's tenure, with your name on the commit.
+- **You move from firefighter to fire marshal.** Manually SSHing into one box at 2am
+  doesn't scale past the first incident. The policy engine, blast-radius guardrails and
+  `approval_override_roles` are fleet-wide controls — you're setting the rules the AI
+  operates under across every database you're responsible for, not reacting to one at a
+  time.
+- **You become the auditor of the AI, not a competitor to it.** Submitting and safekeeping
+  the [`vault feedback`](VAULT_FEEDBACK_FLOW.md#feedback-reference), deciding whether a diagnosis was actually right, knowing when to
+  override a confident-sounding wrong answer
+  ([Right VI](CUSTOMER_RIGHTS.md#vi-the-right-to-override)) — that's a senior review
+  function, not a redundant one. A reviewer is not less senior than the person whose work
+  they're reviewing.
 
-Not blind trust. Trust that's been earned. Earned through testing and track record, see
-the [Bill of Rights](CUSTOMER_RIGHTS.md).
+We won't pretend that our reframe dissolves the whole fear. Automation does change headcount
+trajectories in aggregate, over time and if you've sat through a few vendor pitches
+you've heard "you'll be elevated, not replaced" before — sometimes from people who didn't
+mean it. What we can promise is narrower and more testable: the part of the job that made
+you senior — the judgment, not the toil — is structurally the part this system cannot
+take, because [the incident trace does not contain it](JUDGMENT_LAYER.md). There is a
+specific class of decisions — knowing which recommendations to prohibit and why, encoding
+those prohibitions as CRITICAL paragraphs, measuring whether the prohibitions hold under
+repeated fault injection — that requires operational experience the AI cannot synthesise
+from traces. Not in principle, in practice: a trace doesn't contain the knowledge that one
+recommendation belongs to a different time horizon than another or that encoding a
+distinction as a prohibition is more effective than encoding it as elaboration.
 
-> aiHelpDesk is DBA and SRE trusted partner. Not a replacement. With aiHelpDesk, your
-> operational staff can focus on the tasks that are important to the business, not toil.
-
-aiHelpDesk doesn't make the role of a DBA obsolete. There's no replacement of sound human
-judgement, see [here](JUDGMENT_LAYER.md) for in depth coverage of this point, but TL;DR is
-this:
-there is a specific class of decisions — knowing which recommendations to prohibit and
-why, encoding those prohibitions as CRITICAL paragraphs in a playbook, measuring whether
-the prohibitions hold under repeated fault injection — that requires operational
-experience the AI _cannot synthesise from incident traces alone_. Not in principle, in
-practice: the trace does not contain the knowledge that one recommendation belongs to a
-different time horizon than another and that encoding the distinction as a prohibition
-is more effective than encoding it as elaboration.
-
-As such, we propose a different framing of this question: **which parts of DBA and SRE work compound into better AI and
-which parts require irreplaceable human judgment?**
-
+So the question worth asking isn't "does this replace me," it's: **which parts of DBA and
+SRE work compound into better AI and which parts require irreplaceable human judgment?**
 From the aiHelpDesk [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel):
+the AI handles pattern recognition at scale. That is, across 20 runs of the same fault, it
+identifies failure modes faster than a human reviewing 20 incident reports and
+synthesises proposed fixes without anyone writing a script to extract the signal. The DBA
+handles the judgment layer, e.g. knowing the specific trap by name, writing the prohibition
+that forecloses it, measuring over subsequent runs whether the prohibition held. The
+flywheel works when the judgment layer activates infrequently, but decisively and when
+your operational experience is encoded as durable prohibition instead of memory that
+retires when you do.
 
-- The AI handles pattern recognition at scale: across 20 runs of the same fault, it
-  identifies failure modes faster than a human reviewing 20 incident reports and
-  synthesises proposed fixes without requiring anyone to write a script to extract the
-  signal.
-- The DBA handles the judgment layer: knowing the specific trap by name, writing the
-  prohibition that forecloses it and measuring over subsequent runs whether the
-  prohibition held.
-
-Every CRITICAL paragraph in a [playbook](PLAYBOOKS.md), every explicit prohibition, every decision table
-that eliminates a branch point — those were written by someone who understood the failure
-mode at a level the AI could not reach from traces alone. That knowledge compounds. The
-flywheel works when the judgment layer activates infrequently but decisively and when
-the DBA's operational experience is encoded in the playbook as durable prohibition rather
-than tribal memory that walks out the door.
-
-**The self-driving SRE is not the right goal. The accountable SRE, whose AI
-co-pilot can be audited, certified and corrected when wrong, is.**
+**The self-driving SRE is not the right goal. The accountable SRE, whose AI co-pilot can
+be audited, certified and corrected when wrong — and whose judgment becomes the system's
+permanent record instead of its blind spot — is.**
 
 ---
 
