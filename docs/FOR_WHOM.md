@@ -1,6 +1,6 @@
 # Who aiHelpDesk Is For
 
-This document answers three questions that come up repeatedly from people evaluating
+This document answers five questions that come up repeatedly from people evaluating
 aiHelpDesk, commenting on our blog posts or comparing us to horizontal AI platforms:
 
 1. [Who is the target audience?](#1-who-this-is-for)
@@ -78,7 +78,7 @@ higher-value work" is the sentence every automation vendor says and it usually m
   `approval_override_roles` are fleet-wide controls — you're setting the rules the AI
   operates under across every database you're responsible for, not reacting to one at a
   time.
-- **You become the auditor of the AI, not a competitor to it.** Submitting and safekeeping
+- **You become the policy maker and the auditor of the AI, not a competitor to it.** Submitting and safekeeping
   the [`vault feedback`](VAULT_FEEDBACK_FLOW.md#feedback-reference), deciding whether a diagnosis was actually right, knowing when to
   override a confident-sounding wrong answer
   ([Right VI](CUSTOMER_RIGHTS.md#vi-the-right-to-override)) — that's a senior review
