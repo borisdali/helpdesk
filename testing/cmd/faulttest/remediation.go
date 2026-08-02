@@ -937,11 +937,15 @@ func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout
 }
 
 // resolvedConnStr resolves cfg.ConnStr through the infrastructure config so
-// that named aliases are expanded to a real DSN before being passed to psql.
+// that named aliases — or a raw DSN matching an entry's connection_string —
+// are expanded to a real DSN (with password_env applied) before being passed
+// to psql. Uses FindDBByConnStr rather than a literal map-key lookup because
+// --conn is documented as the literal injection DSN, not necessarily an infra
+// config key (see Injector.resolvedConnEnv in testing/faultlib/injector.go).
 func (r *Remediator) resolvedConnStr() string {
 	if r.cfg.InfraConfigPath != "" {
 		if cfg, err := infra.Load(r.cfg.InfraConfigPath); err == nil {
-			if db, ok := cfg.DBServers[r.cfg.ConnStr]; ok {
+			if db, _, ok := cfg.FindDBByConnStr(r.cfg.ConnStr); ok {
 				return db.ResolvedConnectionString()
 			}
 		}
