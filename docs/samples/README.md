@@ -4,7 +4,7 @@
 The samples presented here can be used standalone or as the complementary material to our blog posts. The table below helps establish the correspondence between the samples and the posts (for a complete list of all aiHelpDesk blog post, please visit [aiHelpdEsk.biz](https://aiHelpdEsk.biz)):
 
 
-| N | Blog Title | Blog Sub Title | Blog Link | Sample file name | Platform |
+| N | Blog Title | Blog Short Description | Blog Link | Sample file name | Platform |
 | --|-----------|------------------|----------|------------------|----------|
 | 009 | AI Database Troubleshooting: the PostgreSQL Stat That Looks Like Good News (But Ain’t) | What a bgwriter incident taught us about the difference between reading data and understanding it | [link](https://medium.com/google-cloud/ai-database-troubleshooting-the-postgresql-stat-that-looks-like-good-news-and-aint-16f1b52143ec) | [SAMPLE001.md](SAMPLE001.md) | source |
 | 011 | Your AI troubleshooted and “fixed” a database pileup. The locks didn’t care | It’s the story that shows that the model wasn’t bad at reasoning. But it reasoned without the right knowledge | [link](https://medium.com/google-cloud/ai-troubleshooted-db-pile-up-and-reported-success-the-locks-didnt-care-d8c06faded82) | [SAMPLE002.md](SAMPLE002.md) | source |

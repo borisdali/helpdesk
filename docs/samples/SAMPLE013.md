@@ -11,7 +11,7 @@ Next, review another aiHelpDesk pioneering concept: the [Operational SRE/DBA Fly
 
 Finally, the question arises as to how the former (entitlements) map to the latter (the flywheel, which is essentially a loop)?
 
-That's the question that [this doc page](../RIGHTS_AND_THE_FLYWHEEL.md) the blog post attempt to address: the mapping.
+That's the question that [this doc page](../RIGHTS_AND_THE_FLYWHEEL.md) and the blog post attempt to address: the mapping.
 
 ---
 
@@ -19,7 +19,7 @@ If you are new to aiHelpDesk Demo, please review [this page](../../deploy/docker
 
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This one happened to be running on Docker, but see [here](SAMPLE010.md), [here](SAMPLE011.md) and [here](SAMPLE012.md) for VM/Bare Metal, the source and K8s respectively (although not the exact commands shown on this page).
 
-The tests below were conducted on Ubuntu 26.04 LTS (Resolute Raccoon): 
+The tests below were conducted on Ubuntu 26.04 LTS (Resolute Raccoon) and Mac Tahoe 26.5: 
 
 ## Demo Test#1: Mode B (the default: interactive approval) + max connections exhausted (the default) fault
 
@@ -242,7 +242,7 @@ Let's list a few audit events:
 ...
 ```
 
-... and the journey:
+... and the summary of the audit in the form of a journey:
 
 ```
 [boris@ ~/helpdesk/deploy/docker-compose]$ curl -s 'http://localhost:8180/api/v1/governance/journeys?run_id=plr_e922cf32' \
@@ -442,8 +442,11 @@ Let's get the journey for this demo run:
 Let's review because all three elements came together in this run:
 
 1/ Query aged to 34s (with the 25s sleep, which gave it time past the threshold before the agent checked).
+
 2/ Agent used `get_active_connections` first and not `get_slow_queries`. Then it found the `pg_sleep` correctly and flagged it "valid cancellation target per guidance". Good!
+
 3/ Gate fired on `cancel_query`, auto-approved as requested by Mode A and the cancel confirmed.
+
 4/ Journey returned with `incident_run_id: "plr_efb2a2d5"`an both directions of the Journey↔Incident linkage work as expected.
 
 The db-long-running-query fault is clean e2e: fault injected, gate fired twice, tools executed, recovery verified, audit trail queryable, journey linked to incident. The demo output is exactly right. W00t!
@@ -778,13 +781,13 @@ Container docker-compose-demo-runner-run-127ee27d628d Created
 
 That's the complete Mode C story:
 
-Lock chain established — both runs confirm "1 session(s) waiting".
+Lock chain established! Both runs confirm "1 session(s) waiting".
 The teardown only kills the two advisory lock sessions rather than all backends (which was disrupting the db-agent's connection pool). Advisory locks show up in `pg_blocking_pids()` so `get_blocking_queries` finds them and propose `terminate_connection` on the root blocker. The diff between the two runs:
 
   - Run 1: force clamped → gate fired → denied. Governance held.
   - Run 2: force accepted → reads silently approved → `terminate_connection` gate fires (destructive) → approved → root blocker PID 4984 terminated → verified cleared.
 
-The agent's reasoning in the gate is clean: identifies the root blocker (blocking_pid=NULL), notes both sessions are read-only (`has_writes=false`, rollback instant), proposes `terminate_connection`, and post-verification confirms the cascade cleared.
+The agent's reasoning in the gate is clean: identifies the root blocker (blocking_pid=NULL), notes both sessions are read-only (`has_writes=false`, rollback instant), proposes `terminate_connection` and post-verification confirms the cascade cleared.
 
 
 
@@ -792,6 +795,8 @@ The agent's reasoning in the gate is clean: identifies the root blocker (blockin
 
 
 ## Triage Consistency Cert
+
+Let's see if all three failure scenarios offered in a demo, earn their 3D stability badge:
 
 ```
 [boris@ ~/helpdesk]$ date; time go run ./testing/cmd/faulttest run \
@@ -1166,11 +1171,6 @@ Run faulttest with --gateway and submit feedback via `vault incidents` to popula
 `vault versions`:
 
 ```
-[boris@ ~/helpdesk/deploy/docker-compose]$ docker compose exec -T demo-gateway faulttest vault versions --gateway http://localhost:8180 --api-key demo-api-key
-Gateway: http://localhost:8180  ·  version: v0.21.1-f48baab  ·  host: 39d766687d20
-
-Usage: faulttest vault versions <fault-id or series-id> [--gateway ...] [--api-key ...]
-
 [boris@ ~/helpdesk/deploy/docker-compose]$ docker compose exec -T demo-gateway faulttest vault versions db-long-running-query --gateway http://localhost:8180 --api-key demo-api-key
 Gateway: http://localhost:8180  ·  version: v0.21.1-f48baab  ·  host: 39d766687d20
 
