@@ -121,7 +121,7 @@ func (i *Injector) resolvedConnStr() string {
 func (i *Injector) resolvedReplicaConnStr() string {
 	if i.cfg.InfraConfigPath != "" && i.cfg.ReplicaConnStr != "" {
 		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
-			if db, ok := cfg.DBServers[i.cfg.ReplicaConnStr]; ok {
+			if db, _, ok := cfg.FindDBByConnStr(i.cfg.ReplicaConnStr); ok {
 				return db.ResolvedConnectionString()
 			}
 		}
@@ -221,6 +221,10 @@ func (i *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	if pgpassword != "" {
 		env = append(env, "PGPASSWORD="+pgpassword)
 	}
+	// Expose the infra config's container_name so scripts (e.g.
+	// db-connection-refused's "docker stop $FAULTTEST_CONTAINER") never need
+	// to hardcode a name.
+	env = append(env, "FAULTTEST_CONTAINER="+i.resolvedContainerName())
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -231,14 +235,17 @@ func (i *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 }
 
 // resolvedConnEnv returns the libpq connection string and, separately, the
-// password to set as PGPASSWORD. When cfg.ConnStr is a named infra key, the
-// entry's ResolvedConnectionString() is used and its password_env value is
-// read from the environment. Falls back to cfg.ConnStr / "" when the key is
-// not found or no infra config is configured.
+// password to set as PGPASSWORD. --conn (cfg.ConnStr) is documented as the
+// literal injection DSN, not necessarily an infra config key — so lookup
+// uses FindDBByConnStr, which matches by config key, display name, or full/
+// endpoint connection string, not a literal map-key lookup. The entry's
+// ResolvedConnectionString() is used and its password_env value is read from
+// the environment when a match is found. Falls back to cfg.ConnStr / "" when
+// no match is found or no infra config is configured.
 func (i *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 	if i.cfg.InfraConfigPath != "" {
 		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
-			if db, ok := cfg.DBServers[i.cfg.ConnStr]; ok {
+			if db, _, ok := cfg.FindDBByConnStr(i.cfg.ConnStr); ok {
 				pw := ""
 				if db.PasswordEnv != "" {
 					pw = os.Getenv(db.PasswordEnv)
@@ -248,6 +255,22 @@ func (i *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 		}
 	}
 	return i.cfg.ConnStr, ""
+}
+
+// resolvedContainerName returns the container name for the current injection
+// target, matched via FindDBByConnStr against the --conn DSN (key, name, or
+// connection-string match — see resolvedConnEnv). Exposed as
+// $FAULTTEST_CONTAINER to shell_exec inject/teardown scripts so they never
+// need to hardcode a name. Returns "" when no infra config match is found.
+func (i *Injector) resolvedContainerName() string {
+	if i.cfg.InfraConfigPath != "" {
+		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
+			if db, _, ok := cfg.FindDBByConnStr(i.cfg.ConnStr); ok {
+				return db.ContainerName
+			}
+		}
+	}
+	return ""
 }
 
 // execSSH runs a script on a remote host via SSH.

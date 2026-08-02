@@ -238,14 +238,17 @@ func (inj *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 }
 
 // resolvedConnEnv returns the libpq connection string and, separately, the
-// password to set as PGPASSWORD. When cfg.ConnStr is a named infra key, the
-// entry's ResolvedConnectionString() is used and its password_env value is
-// read from the environment. Falls back to cfg.ConnStr / "" when the key is
-// not found or no infra config is configured.
+// password to set as PGPASSWORD. --conn (cfg.ConnStr) is documented as the
+// literal injection DSN, not necessarily an infra config key — so lookup
+// uses FindDBByConnStr, which matches by config key, display name, or full/
+// endpoint connection string, not a literal map-key lookup. The entry's
+// ResolvedConnectionString() is used and its password_env value is read from
+// the environment when a match is found. Falls back to cfg.ConnStr / "" when
+// no match is found or no infra config is configured.
 func (inj *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 	if inj.cfg.InfraConfigPath != "" {
 		if cfg, err := infra.Load(inj.cfg.InfraConfigPath); err == nil {
-			if db, ok := cfg.DBServers[inj.cfg.ConnStr]; ok {
+			if db, _, ok := cfg.FindDBByConnStr(inj.cfg.ConnStr); ok {
 				pw := ""
 				if db.PasswordEnv != "" {
 					pw = os.Getenv(db.PasswordEnv)
@@ -258,13 +261,15 @@ func (inj *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 }
 
 // resolvedContainerName returns the container name for the current injection
-// target. Checked in order: (1) infra config container_name for the --conn key,
-// (2) AutoDBContainerName when --auto-db is active. Exposed as $FAULTTEST_CONTAINER
-// to shell_exec inject/teardown scripts so they never need to hardcode a name.
+// target. Checked in order: (1) infra config container_name matched via
+// FindDBByConnStr against the --conn DSN (key, name, or connection-string
+// match — see resolvedConnEnv), (2) AutoDBContainerName when --auto-db is
+// active. Exposed as $FAULTTEST_CONTAINER to shell_exec inject/teardown
+// scripts so they never need to hardcode a name.
 func (inj *Injector) resolvedContainerName() string {
 	if inj.cfg.InfraConfigPath != "" {
 		if cfg, err := infra.Load(inj.cfg.InfraConfigPath); err == nil {
-			if db, ok := cfg.DBServers[inj.cfg.ConnStr]; ok {
+			if db, _, ok := cfg.FindDBByConnStr(inj.cfg.ConnStr); ok {
 				return db.ContainerName
 			}
 		}
