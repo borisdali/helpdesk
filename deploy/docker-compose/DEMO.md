@@ -66,7 +66,21 @@ To override: `export DEMO_MODEL_VENDOR=anthropic DEMO_MODEL_NAME=claude-sonnet-4
 docker compose -f docker-compose.demo.yaml up -d
 ```
 
-This starts four containers — a local Postgres (port 5434), the database agent,
+Or, if to avoid typing -`docker-compose.demo.yaml` all the time, set an env var for it (although keep in mind that this doesn't work for the legacy `docker-compose`... which you shouldn't be using anyway):
+
+```
+export COMPOSE_FILE=docker-compose.demo.yaml
+```
+
+... which then simplifies the command to start the stack to just this:
+
+```
+docker compose up -d
+```
+
+The same applies to the rest of the commands in this tutorial.
+Either way, this command starts the stack of four containers:
+a local Postgres (port 5434), the database agent,
 the gateway (port 8180) and the audit daemon. First run pulls images (~150 MB).
 Subsequent runs start in seconds.
 

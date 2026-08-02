@@ -778,7 +778,7 @@ func (g *Gateway) fetchApprovalSession(ctx context.Context, sessionID string) (*
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
 	resp, err := http.DefaultClient.Do(req)

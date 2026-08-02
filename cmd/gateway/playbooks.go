@@ -967,7 +967,7 @@ func (g *Gateway) fetchPlaybookBySeriesID(ctx context.Context, seriesID string) 
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
 
@@ -1543,7 +1543,11 @@ func assembleCrystalBallPrompt(req PlaybookRunRequest, serverTypeHint string) st
 // and returns the active version.
 func (g *Gateway) fetchPlaybook(ctx context.Context, id string) (*audit.Playbook, error) {
 	base := strings.TrimSuffix(g.auditURL, "/")
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// This function makes up to two sequential round trips to auditd (direct
+	// lookup by ID, then a fallback list query for series IDs) sharing this
+	// one deadline — give it extra headroom over the other single-call
+	// gateway->auditd timeouts below.
+	ctx2, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	doGet := func(url string) (*audit.Playbook, int, error) {
@@ -1671,7 +1675,7 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
 
@@ -1727,7 +1731,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
 
@@ -1788,7 +1792,7 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
 	resp, err := http.DefaultClient.Do(req)
@@ -1835,7 +1839,7 @@ func (g *Gateway) postAtGateFeedback(ctx context.Context, runID, operator string
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
 	resp, err := http.DefaultClient.Do(req)
@@ -1879,7 +1883,7 @@ func (g *Gateway) submitDenialFeedback(ctx context.Context, runID, seriesID, ope
 	if g.auditAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
 	}
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx2)
 	resp, err := http.DefaultClient.Do(req)
