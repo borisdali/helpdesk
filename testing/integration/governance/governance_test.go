@@ -18,18 +18,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 const (
 	auditdAddr  = "http://localhost:19901"
 	auditdAddr2 = "http://localhost:19902" // for policy-enabled instance (HELPDESK_POLICY_ENABLED=true)
 	auditdAddr3 = "http://localhost:19903" // for default-config instance (HELPDESK_POLICY_FILE set, HELPDESK_POLICY_ENABLED absent)
+	gatewayAddr = "http://localhost:19910" // real gateway pointed at the primary auditd instance
 )
 
 // auditdBin is the path to the compiled auditd binary, set in TestMain.
@@ -37,6 +41,7 @@ var (
 	auditdBin  string
 	auditorBin string
 	secbotBin  string
+	gatewayBin string
 )
 
 func TestMain(m *testing.M) {
@@ -52,6 +57,7 @@ func TestMain(m *testing.M) {
 		"helpdesk/cmd/auditd":  &auditdBin,
 		"helpdesk/cmd/auditor": &auditorBin,
 		"helpdesk/cmd/secbot":  &secbotBin,
+		"helpdesk/cmd/gateway": &gatewayBin,
 	}
 	for pkg, dest := range bins {
 		bin := filepath.Join(tmpDir, filepath.Base(pkg))
@@ -83,10 +89,67 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
+	// Start a real gateway pointed at the primary auditd instance, so
+	// incident-narrative tests exercise the actual HTTP → gateway → auditd
+	// path instead of a mocked auditd. Gateway requires HELPDESK_AGENT_URLS
+	// to resolve at startup (agent discovery) even though these tests never
+	// call any agent-backed endpoint, so it's pointed at a throwaway stub
+	// that satisfies discovery.Discover's two probes and is closed as soon
+	// as discovery succeeds.
+	stubAgent := newStubAgentServer()
+	gwProc := exec.Command(gatewayBin)
+	gwProc.Env = append(os.Environ(),
+		"HELPDESK_GATEWAY_ADDR=localhost:19910",
+		"HELPDESK_AGENT_URLS="+stubAgent.URL,
+		"HELPDESK_DISCOVERY_TIMEOUT=5s",
+		"HELPDESK_AUDIT_URL="+auditdAddr,
+	)
+	gwProc.Stderr = os.Stderr
+	if err := gwProc.Start(); err != nil {
+		proc.Process.Kill()
+		fmt.Fprintln(os.Stderr, "SKIP: failed to start gateway:", err)
+		os.Exit(0)
+	}
+	gwReady := waitForReady(gatewayAddr+"/health", 15*time.Second)
+	stubAgent.Close() // discovery only happens once, at gateway startup
+	if !gwReady {
+		gwProc.Process.Kill()
+		proc.Process.Kill()
+		fmt.Fprintln(os.Stderr, "SKIP: gateway did not become ready within 15s")
+		os.Exit(0)
+	}
+
 	code := m.Run()
+	gwProc.Process.Kill()
+	gwProc.Wait()
 	proc.Process.Kill()
 	proc.Wait()
 	os.Exit(code)
+}
+
+// newStubAgentServer returns a minimal HTTP server satisfying
+// discovery.Discover's two probes (agent-card + schemas), just enough for
+// gateway's startup discovery to succeed immediately. The gateway process
+// only needs this once, at startup; it is not used by any test in this
+// package since none of them exercise agent-backed tool endpoints.
+func newStubAgentServer() *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(a2a.AgentCard{ //nolint:errcheck
+			Name:        "stub-agent",
+			Description: "stub agent for gateway discovery in integration tests",
+			URL:         "http://should-be-overridden/invoke",
+			Skills: []a2a.AgentSkill{
+				{ID: "stub-skill", Name: "stub", Description: "stub skill"},
+			},
+		})
+	})
+	mux.HandleFunc("/schemas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{}")) //nolint:errcheck
+	})
+	return httptest.NewServer(mux)
 }
 
 // startAuditdWithPolicy starts a second auditd on auditdAddr2 with the given

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -384,6 +385,180 @@ func TestHandleGetIncident_ThreeHopEscalation(t *testing.T) {
 	}
 }
 
+// TestHandleGetIncident_FourHopTwoEscalations verifies the actual motivating
+// scenario — a chain that crosses two agent boundaries before remediation
+// (e.g. database agent -> sysadmin agent -> k8s agent -> remediation) — is
+// walked and classified completely at the handler level, not just by the
+// pure buildJourneyRefs function in isolation.
+func TestHandleGetIncident_FourHopTwoEscalations(t *testing.T) {
+	triage := &audit.PlaybookRun{
+		RunID:       "plr_h1",
+		SeriesID:    "pbs_connection_triage",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		TraceID:     "trace-h1",
+		StartedAt:   time.Now().Add(-4 * time.Minute).UTC(),
+	}
+	esc1 := &audit.PlaybookRun{
+		RunID:       "plr_h2",
+		SeriesID:    "pbs_sysadmin_docker_inspect",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_k8s_pod_crash_triage",
+		PriorRunID:  "plr_h1",
+		TraceID:     "trace-h2",
+		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
+	}
+	esc2 := &audit.PlaybookRun{
+		RunID:          "plr_h3",
+		SeriesID:       "pbs_k8s_pod_crash_triage",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_k8s_pod_crash_remediate",
+		PriorRunID:     "plr_h2",
+		TraceID:        "trace-h3",
+		StartedAt:      time.Now().Add(-2 * time.Minute).UTC(),
+	}
+	remHop := &audit.PlaybookRun{
+		RunID:       "plr_h4",
+		SeriesID:    "pbs_k8s_pod_crash_remediate",
+		Outcome:     audit.OutcomeResolved,
+		PriorRunID:  "plr_h3",
+		TraceID:     "trace-h4",
+		StartedAt:   time.Now().Add(-1 * time.Minute).UTC(),
+		CompletedAt: time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: triage,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{
+			"plr_h1": esc1,
+			"plr_h2": esc2,
+			"plr_h3": remHop,
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_h1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(n.Escalations) != 2 {
+		t.Fatalf("Escalations len = %d, want 2; got %+v", len(n.Escalations), n.Escalations)
+	}
+	if n.Escalations[0].RunID != "plr_h2" {
+		t.Errorf("Escalations[0].RunID = %q, want plr_h2", n.Escalations[0].RunID)
+	}
+	if n.Escalations[1].RunID != "plr_h3" {
+		t.Errorf("Escalations[1].RunID = %q, want plr_h3", n.Escalations[1].RunID)
+	}
+	if n.Remediation == nil || n.Remediation.RunID != "plr_h4" {
+		t.Fatalf("Remediation = %+v, want run_id=plr_h4 (the true terminal hop)", n.Remediation)
+	}
+	if len(n.Journeys) != 4 {
+		t.Fatalf("Journeys len = %d, want 4; got %v", len(n.Journeys), n.Journeys)
+	}
+	wantPhases := []string{"triage", "escalation:1", "escalation:2", "remediation"}
+	for i, want := range wantPhases {
+		if n.Journeys[i].Phase != want {
+			t.Errorf("Journeys[%d].Phase = %q, want %q", i, n.Journeys[i].Phase, want)
+		}
+	}
+}
+
+// TestHandleGetIncident_RemediationSuccessorIgnored locks in the documented
+// v1 scope boundary: a remediation run that itself has a successor (e.g. it
+// further escalates) is not solved by this fix. fetchEscalationHops walks
+// blindly and will fetch that successor over the network, but the
+// classification loop stops at the first TRANSITION_TO hop, so the successor
+// is silently absent from the narrative rather than misclassified or
+// causing an error. If this behavior is intentionally extended later, this
+// test should be updated, not just deleted.
+func TestHandleGetIncident_RemediationSuccessorIgnored(t *testing.T) {
+	triage := &audit.PlaybookRun{
+		RunID:       "plr_s1",
+		SeriesID:    "pbs_connection_triage",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		TraceID:     "trace-s1",
+		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
+	}
+	esc := &audit.PlaybookRun{
+		RunID:          "plr_s2",
+		SeriesID:       "pbs_sysadmin_docker_inspect",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_k8s_pod_crash_remediate",
+		PriorRunID:     "plr_s1",
+		TraceID:        "trace-s2",
+		StartedAt:      time.Now().Add(-2 * time.Minute).UTC(),
+	}
+	remHop := &audit.PlaybookRun{
+		RunID:       "plr_s3",
+		SeriesID:    "pbs_k8s_pod_crash_remediate",
+		Outcome:     audit.OutcomeEscalated, // remediation itself escalated further — unusual, out of scope
+		EscalatedTo: "pbs_some_other_series",
+		PriorRunID:  "plr_s2",
+		TraceID:     "trace-s3",
+		StartedAt:   time.Now().Add(-1 * time.Minute).UTC(),
+	}
+	// plr_s3 (the remediation hop) has its own successor — should be fetched
+	// by fetchEscalationHops but never classified or surfaced.
+	successor := &audit.PlaybookRun{
+		RunID:      "plr_s4",
+		SeriesID:   "pbs_some_other_series",
+		Outcome:    audit.OutcomeResolved,
+		PriorRunID: "plr_s3",
+		TraceID:    "trace-s4",
+		StartedAt:  time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: triage,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{
+			"plr_s1": esc,
+			"plr_s2": remHop,
+			"plr_s3": successor,
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(n.Escalations) != 1 || n.Escalations[0].RunID != "plr_s2" {
+		t.Fatalf("Escalations = %+v, want exactly [plr_s2]", n.Escalations)
+	}
+	if n.Remediation == nil || n.Remediation.RunID != "plr_s3" {
+		t.Fatalf("Remediation = %+v, want run_id=plr_s3", n.Remediation)
+	}
+	// plr_s4 must not appear anywhere — not as an escalation, not as remediation.
+	for _, e := range n.Escalations {
+		if e.RunID == "plr_s4" {
+			t.Errorf("plr_s4 (remediation's successor) should not appear in Escalations")
+		}
+	}
+	if n.Remediation.RunID == "plr_s4" {
+		t.Errorf("plr_s4 (remediation's successor) should not have overwritten Remediation")
+	}
+	for _, j := range n.Journeys {
+		if j.TraceID == "trace-s4" {
+			t.Errorf("Journeys should not reference plr_s4's trace, got %+v", n.Journeys)
+		}
+	}
+	if len(n.Journeys) != 3 {
+		t.Errorf("Journeys len = %d, want 3 (triage, escalation:1, remediation) — plr_s4 excluded", len(n.Journeys))
+	}
+}
+
 // TestFetchEscalationHops_CycleGuard verifies that a cyclic prior_run_id
 // chain (a data anomaly that should never happen in practice) doesn't hang
 // the walk — it stops and returns what was collected before the cycle.
@@ -413,6 +588,56 @@ func TestFetchEscalationHops_CycleGuard(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("fetchEscalationHops did not return — cycle guard failed to stop the walk")
+	}
+}
+
+// TestFetchEscalationHops_MaxHopsBound verifies the *other* way the walk can
+// stop: a long, strictly acyclic chain (every run ID distinct — the cycle
+// guard never fires) that exceeds maxEscalationHops. The walk must stop at
+// exactly maxEscalationHops hops, not overrun it and not return one short.
+func TestFetchEscalationHops_MaxHopsBound(t *testing.T) {
+	const chainLen = maxEscalationHops + 5 // deliberately longer than the bound
+
+	next := map[string]*audit.PlaybookRun{}
+	for i := 0; i < chainLen; i++ {
+		runID := fmt.Sprintf("plr_long%d", i+1)
+		priorID := fmt.Sprintf("plr_long%d", i)
+		if i == 0 {
+			priorID = "plr_long0" // triage run's own ID
+		}
+		next[priorID] = &audit.PlaybookRun{
+			RunID:      runID,
+			SeriesID:   fmt.Sprintf("pbs_long%d", i+1),
+			Outcome:    audit.OutcomeEscalated,
+			PriorRunID: priorID,
+			StartedAt:  time.Now().UTC(),
+		}
+	}
+	mock := &mockIncidentAuditd{
+		triageRun:        &audit.PlaybookRun{RunID: "plr_long0", SeriesID: "pbs_long0"},
+		nextRunByPriorID: next,
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	done := make(chan []*audit.PlaybookRun, 1)
+	go func() {
+		done <- gw.fetchEscalationHops(context.Background(), "plr_long0")
+	}()
+
+	select {
+	case hops := <-done:
+		if len(hops) != maxEscalationHops {
+			t.Fatalf("hops len = %d, want exactly maxEscalationHops (%d)", len(hops), maxEscalationHops)
+		}
+		if hops[0].RunID != "plr_long1" {
+			t.Errorf("hops[0].RunID = %q, want plr_long1", hops[0].RunID)
+		}
+		if want := fmt.Sprintf("plr_long%d", maxEscalationHops); hops[len(hops)-1].RunID != want {
+			t.Errorf("last hop RunID = %q, want %q (stopped exactly at the bound)", hops[len(hops)-1].RunID, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetchEscalationHops did not return — max-hops bound failed to stop the walk")
 	}
 }
 

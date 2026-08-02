@@ -1305,6 +1305,139 @@ func TestFetchIncidentNarrative_SendsAuth(t *testing.T) {
 	}
 }
 
+// ── fetchNextHop / walkToRemediation ─────────────────────────────────────
+
+// mockPriorRunIDServer serves GET .../playbook-runs?prior_run_id=<id>&limit=1
+// from a map, mirroring auditd's raw {"runs":[...]} response shape. Missing
+// keys return an empty runs array (no successor for that hop).
+func mockPriorRunIDServer(t *testing.T, next map[string]incidentRun) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		priorID := r.URL.Query().Get("prior_run_id")
+		runs := []incidentRun{}
+		if hop, ok := next[priorID]; ok {
+			runs = []incidentRun{hop}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestFetchNextHop_Success(t *testing.T) {
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect"},
+	})
+	hop := fetchNextHop(srv.URL, "", "plr_t1")
+	if hop == nil || hop.RunID != "plr_e1" {
+		t.Fatalf("fetchNextHop = %+v, want run_id=plr_e1", hop)
+	}
+}
+
+func TestFetchNextHop_NoSuccessor(t *testing.T) {
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{})
+	hop := fetchNextHop(srv.URL, "", "plr_t1")
+	if hop != nil {
+		t.Errorf("fetchNextHop = %+v, want nil (no successor)", hop)
+	}
+}
+
+// TestWalkToRemediation_TwoHopTransition verifies the simple case: triage's
+// only successor was reached via TRANSITION_TO, so it is the remediation run.
+func TestWalkToRemediation_TwoHopTransition(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", TransitionedTo: "pbs_lock_remediate"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_r1", SeriesID: "pbs_lock_remediate", Outcome: "resolved"},
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem == nil || rem.RunID != "plr_r1" {
+		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1", rem)
+	}
+}
+
+// TestWalkToRemediation_EscalationOnly verifies that a successor reached via
+// ESCALATE_TO (not TRANSITION_TO) is not treated as remediation — the same
+// misclassification this whole fix closes, exercised against the
+// independently-implemented table-view walker.
+func TestWalkToRemediation_EscalationOnly(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "escalated"},
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem != nil {
+		t.Errorf("walkToRemediation = %+v, want nil (successor was ESCALATE_TO, not TRANSITION_TO)", rem)
+	}
+}
+
+// TestWalkToRemediation_ThreeHopChain verifies the walk continues past an
+// escalation hop to find the true, terminal remediation hop — not the
+// middle one.
+func TestWalkToRemediation_ThreeHopChain(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "transitioned", TransitionedTo: "pbs_k8s_pod_crash_remediate"},
+		"plr_e1": {RunID: "plr_r1", SeriesID: "pbs_k8s_pod_crash_remediate", Outcome: "resolved"},
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem == nil || rem.RunID != "plr_r1" {
+		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1 (the terminal hop, not plr_e1)", rem)
+	}
+}
+
+// TestWalkToRemediation_CycleGuard verifies a cyclic prior_run_id chain
+// doesn't hang the table view's walker.
+func TestWalkToRemediation_CycleGuard(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_a", EscalatedTo: "pbs_b"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_a": {RunID: "plr_b", SeriesID: "pbs_b", EscalatedTo: "pbs_a"},
+		"plr_b": {RunID: "plr_a", SeriesID: "pbs_a"}, // cycle back to the start
+	})
+
+	done := make(chan *incidentRun, 1)
+	go func() { done <- walkToRemediation(srv.URL, "", triage) }()
+
+	select {
+	case rem := <-done:
+		if rem != nil {
+			t.Errorf("walkToRemediation = %+v, want nil (cyclic chain never transitions)", rem)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walkToRemediation did not return — cycle guard failed to stop the walk")
+	}
+}
+
+// TestWalkToRemediation_MaxHopsBound verifies the walker gives up after
+// maxEscalationHops on a long, strictly acyclic chain that never transitions,
+// rather than walking forever.
+func TestWalkToRemediation_MaxHopsBound(t *testing.T) {
+	const chainLen = maxEscalationHops + 5
+	next := map[string]incidentRun{}
+	for i := 0; i < chainLen; i++ {
+		runID := fmt.Sprintf("plr_long%d", i+1)
+		priorID := fmt.Sprintf("plr_long%d", i)
+		if i == 0 {
+			priorID = "plr_long0"
+		}
+		next[priorID] = incidentRun{RunID: runID, SeriesID: fmt.Sprintf("pbs_long%d", i+1), EscalatedTo: fmt.Sprintf("pbs_long%d", i+2)}
+	}
+	srv := mockPriorRunIDServer(t, next)
+	triage := &incidentRun{RunID: "plr_long0", EscalatedTo: "pbs_long1"}
+
+	done := make(chan *incidentRun, 1)
+	go func() { done <- walkToRemediation(srv.URL, "", triage) }()
+
+	select {
+	case rem := <-done:
+		if rem != nil {
+			t.Errorf("walkToRemediation = %+v, want nil (chain never reaches a TRANSITION_TO within the bound)", rem)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walkToRemediation did not return — max-hops bound failed to stop the walk")
+	}
+}
+
 // TestFetchIncidentNarrative_DecodesEscalations verifies that the
 // escalations[] array from a multi-hop incident narrative decodes correctly
 // into narrativeEscalationHop, and that the terminal remediation hop (which
