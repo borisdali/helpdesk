@@ -1611,6 +1611,13 @@ func TestWordWrap(t *testing.T) {
 			"  ",
 			"superlongwordthatexceedswidth",
 		},
+		{
+			"irregular whitespace within maxWidth is normalized",
+			"safe to      restart",
+			70,
+			"  ",
+			"safe to restart",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -4488,10 +4488,14 @@ func wrapLines(text string, maxWidth int) []string {
 }
 
 func wordWrap(text string, maxWidth int, indent string) string {
-	if len(text) <= maxWidth {
-		return text
-	}
 	words := strings.Fields(text)
+	if len(words) == 0 {
+		return ""
+	}
+	normalized := strings.Join(words, " ")
+	if len(normalized) <= maxWidth {
+		return normalized
+	}
 	var lines []string
 	current := ""
 	for _, w := range words {

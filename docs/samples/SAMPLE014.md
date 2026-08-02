@@ -2,11 +2,18 @@
 
 Please skip this sample page if you run on modern 64-bit platforms. But if you have the old 32-bit and it's not capable of running 64-bit apps natively, consider this walkaround of using the QEMU emulator.
 
-First things first though, [here]() is the official doc for our 10 minutes demo and [here](SAMPLE013.md)'s the sample commands that show what comes out when you run it.
+First things first though, [here](../../deploy/docker-compose/DEMO.md) is the official doc for our 10 minutes demo and [here](SAMPLE013.md) is the sample commands that show what comes out when you run it.
 
 If i386 is your only option, these notes may help (but also please reach out to us and we can help with the private i386 image):
 
+This particular test was conducted on old 32-bit i386 machine hosting Debian 12:
 ```
+boris@ ~/helpdesk/deploy/docker-compose$ dpkg --print-architecture
+i386
+
+boris@ ~/helpdesk/deploy/docker-compose$ uname -r
+6.1.0-49-686-pae
+
 boris@ ~/helpdesk/deploy/docker-compose$ sudo apt install qemu-user-static binfmt-support
 
 boris@ ~/helpdesk/deploy/docker-compose$ docker-compose -f docker-compose.demo.yaml ps
@@ -48,10 +55,11 @@ qemu-x86_64 (enabled):
 
 boris@ ~/helpdesk/deploy/docker-compose$ docker run --rm --platform linux/amd64 debian:bookworm-slim uname -m
 x86_64
+```
 
-boris@ ~/helpdesk/deploy/docker-compose$ docker run --rm --platform linux/amd64 debian:bookworm-slim uname -m
-x86_64
+Good, now that we got the 64-bit working via QEMU, let's run the demo:
 
+```
 boris@ ~/helpdesk/deploy/docker-compose$ docker-compose -f docker-compose.demo.yaml up -d
 helpdesk-demo-auditd is up-to-date
 helpdesk-demo-postgres is up-to-date
