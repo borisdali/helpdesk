@@ -105,6 +105,9 @@ func (i *Injector) execSQL(ctx context.Context, spec InjectSpec) error {
 	}
 	if spec.Script != "" {
 		scriptPath := filepath.Join(i.cfg.TestingDir, spec.Script)
+		if spec.ExecVia == "pgloader" {
+			return testutil.RunSQLViaPgloader(ctx, scriptPath)
+		}
 		return testutil.RunSQL(ctx, connStr, scriptPath)
 	}
 	return nil
@@ -159,30 +162,20 @@ func (i *Injector) execDockerExec(ctx context.Context, spec InjectSpec) error {
 }
 
 func (i *Injector) execKustomize(ctx context.Context, spec InjectSpec) error {
-	overlayPath := filepath.Join(i.cfg.TestingDir, spec.Overlay)
-	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-k", overlayPath, "--context", i.cfg.KubeContext)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply: %v\n%s", err, output)
-	}
-	return nil
+	overlayDir := filepath.Join(i.cfg.TestingDir, spec.Overlay)
+	return testutil.KustomizeApply(ctx, overlayDir, i.cfg.KubeContext)
 }
 
 func (i *Injector) execKustomizeDelete(ctx context.Context, spec InjectSpec) error {
-	overlayPath := filepath.Join(i.cfg.TestingDir, spec.Overlay)
-	cmd := exec.CommandContext(ctx, "kubectl", "delete", "-k", overlayPath, "--context", i.cfg.KubeContext, "--ignore-not-found")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		slog.Warn("kubectl delete failed", "err", err, "output", string(output))
+	overlayDir := filepath.Join(i.cfg.TestingDir, spec.Overlay)
+	if err := testutil.KustomizeDelete(ctx, overlayDir, i.cfg.KubeContext); err != nil {
+		return err
 	}
 
 	// If restore is specified, re-apply the base.
 	if restore, ok := spec.Restore.(string); ok && restore != "" {
-		restorePath := filepath.Join(i.cfg.TestingDir, restore)
-		cmd := exec.CommandContext(ctx, "kubectl", "apply", "-k", restorePath, "--context", i.cfg.KubeContext)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("kubectl apply restore: %v\n%s", err, output)
-		}
+		restoreDir := filepath.Join(i.cfg.TestingDir, restore)
+		return testutil.KustomizeApply(ctx, restoreDir, i.cfg.KubeContext)
 	}
 	return nil
 }
@@ -225,6 +218,9 @@ func (i *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	// db-connection-refused's "docker stop $FAULTTEST_CONTAINER") never need
 	// to hardcode a name.
 	env = append(env, "FAULTTEST_CONTAINER="+i.resolvedContainerName())
+	if i.cfg.KubeContext != "" {
+		env = append(env, "FAULTTEST_K8S_CONTEXT="+i.cfg.KubeContext)
+	}
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -258,10 +254,11 @@ func (i *Injector) resolvedConnEnv() (connStr, pgpassword string) {
 }
 
 // resolvedContainerName returns the container name for the current injection
-// target, matched via FindDBByConnStr against the --conn DSN (key, name, or
-// connection-string match — see resolvedConnEnv). Exposed as
-// $FAULTTEST_CONTAINER to shell_exec inject/teardown scripts so they never
-// need to hardcode a name. Returns "" when no infra config match is found.
+// target. Checked in order: (1) infra config container_name matched via
+// FindDBByConnStr against the --conn DSN (key, name, or connection-string
+// match — see resolvedConnEnv), (2) AutoDBContainerName when --auto-db is
+// active. Exposed as $FAULTTEST_CONTAINER to shell_exec/ssh_exec
+// inject/teardown scripts so they never need to hardcode a name.
 func (i *Injector) resolvedContainerName() string {
 	if i.cfg.InfraConfigPath != "" {
 		if cfg, err := infra.Load(i.cfg.InfraConfigPath); err == nil {
@@ -270,7 +267,7 @@ func (i *Injector) resolvedContainerName() string {
 			}
 		}
 	}
-	return ""
+	return i.cfg.AutoDBContainerName
 }
 
 // execSSH runs a script on a remote host via SSH.
@@ -306,6 +303,23 @@ func (i *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
 	default:
 		return fmt.Errorf("ssh_exec: script or script_inline is required")
 	}
+
+	// Prepend a profile source + variable exports so the remote script can use
+	// $FAULTTEST_CONN and $FAULTTEST_CONTAINER without requiring the SSH server
+	// to accept env vars. Non-interactive bash -s sessions don't load ~/.bashrc
+	// or ~/.profile, so docker/kubectl may not be in PATH without this.
+	connStr, _ := i.resolvedConnEnv()
+	var preamble strings.Builder
+	// Extend PATH to cover common Docker/kubectl install locations.
+	// Non-interactive SSH sessions on macOS/Linux start with a minimal PATH
+	// (/usr/bin:/bin) — Docker Desktop, Homebrew, and nvm all install outside
+	// that. We extend rather than replace so any existing entries are kept.
+	preamble.WriteString(`export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"` + "\n")
+	fmt.Fprintf(&preamble, "export FAULTTEST_CONN=%q\n", connStr)
+	if containerName := i.resolvedContainerName(); containerName != "" {
+		fmt.Fprintf(&preamble, "export FAULTTEST_CONTAINER=%q\n", containerName)
+	}
+	scriptContent = append([]byte(preamble.String()), scriptContent...)
 
 	args := []string{"-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"}
 	if i.cfg.SSHKeyPath != "" {
