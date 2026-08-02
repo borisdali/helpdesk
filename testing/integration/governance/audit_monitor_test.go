@@ -133,7 +133,11 @@ func freeTCPAddr(t *testing.T) string {
 // Regression test for: auditor given an emptyDir volume that cannot be shared
 // across pods on Kubernetes — the Unix socket created by auditd is unreachable.
 func TestAuditorHTTPPollingMode(t *testing.T) {
-	auditdURL, _ := startAuditdOnPort(t, 19910)
+	// Port 19910 is claimed for the package's TestMain-managed gateway
+	// process (see gatewayAddr in governance_test.go) and lives for the
+	// whole test binary — using it here collided with that gateway and
+	// failed with "bind: address already in use".
+	auditdURL, _ := startAuditdOnPort(t, 19914)
 
 	// Webhook receiver: auditor POSTs alerts here. Buffer generously so the
 	// default branch never drops a delivery (auditor may send INFO/WARN alerts
