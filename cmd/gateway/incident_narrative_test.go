@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,9 +16,13 @@ import (
 // endpoints needed by handleGetIncident. Each field controls the response for
 // one sub-request; nil means "return 404 / empty".
 type mockIncidentAuditd struct {
-	triageRun   *audit.PlaybookRun
+	triageRun    *audit.PlaybookRun
 	feedbackRecs []audit.RunFeedback
-	evaluation  *audit.RunEvaluation
+	evaluation   *audit.RunEvaluation
+	// nextRunByPriorID maps a run's RunID to the run that recorded it as
+	// PriorRunID — i.e. what GET .../playbook-runs?prior_run_id=<key> should
+	// return. Absent key ⇒ empty runs array (no successor for that hop).
+	nextRunByPriorID map[string]*audit.PlaybookRun
 }
 
 func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
@@ -39,9 +44,15 @@ func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
 			}
 			json.NewEncoder(w).Encode(m.triageRun) //nolint:errcheck
 
-		// Remediation run lookup: prior_run_id query param.
+		// Next-hop lookup: prior_run_id query param. Walked repeatedly by
+		// fetchEscalationHops, once per hop in the chain.
 		case strings.Contains(path, "/playbook-runs") && r.URL.Query().Get("prior_run_id") != "":
-			json.NewEncoder(w).Encode(map[string]any{"runs": []any{}}) //nolint:errcheck
+			priorID := r.URL.Query().Get("prior_run_id")
+			runs := []any{}
+			if next, ok := m.nextRunByPriorID[priorID]; ok {
+				runs = []any{next}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
 
 		// Gate event lookup.
 		case strings.Contains(path, "/events"):
@@ -236,5 +247,272 @@ func TestHandleGetIncident_NotFound(t *testing.T) {
 	rec := getIncident(t, gw, "plr_ghost")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestHandleGetIncident_EscalationOnly verifies that a successor run reached
+// via ESCALATE_TO (not TRANSITION_TO) is classified as an escalation hop, not
+// remediation — the exact case that was silently mislabeled before this fix,
+// even at just 2 hops.
+func TestHandleGetIncident_EscalationOnly(t *testing.T) {
+	triage := &audit.PlaybookRun{
+		RunID:       "plr_esc01",
+		SeriesID:    "pbs_connection_triage",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		Operator:    "alice",
+		TraceID:     "trace-triage",
+		StartedAt:   time.Now().UTC(),
+	}
+	hop := &audit.PlaybookRun{
+		RunID:      "plr_esc02",
+		SeriesID:   "pbs_sysadmin_docker_inspect",
+		Outcome:    audit.OutcomeEscalated,
+		PriorRunID: "plr_esc01",
+		TraceID:    "trace-hop",
+		StartedAt:  time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun:        triage,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{"plr_esc01": hop},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_esc01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if n.Remediation != nil {
+		t.Errorf("Remediation should be nil (successor was ESCALATE_TO, not TRANSITION_TO), got %+v", n.Remediation)
+	}
+	if len(n.Escalations) != 1 {
+		t.Fatalf("Escalations len = %d, want 1", len(n.Escalations))
+	}
+	if n.Escalations[0].RunID != "plr_esc02" {
+		t.Errorf("Escalations[0].RunID = %q, want plr_esc02", n.Escalations[0].RunID)
+	}
+	if len(n.Journeys) != 2 {
+		t.Fatalf("Journeys len = %d, want 2; got %v", len(n.Journeys), n.Journeys)
+	}
+	if n.Journeys[1].Phase != "escalation:1" {
+		t.Errorf("Journeys[1].Phase = %q, want escalation:1", n.Journeys[1].Phase)
+	}
+}
+
+// TestHandleGetIncident_ThreeHopEscalation verifies a full 3-hop chain —
+// triage escalates once, then transitions into remediation — is walked and
+// classified completely: the middle hop lands in Escalations, the terminal
+// (transitioned-into) hop becomes Remediation, and Journeys reflects all
+// three phases in order.
+func TestHandleGetIncident_ThreeHopEscalation(t *testing.T) {
+	triage := &audit.PlaybookRun{
+		RunID:       "plr_t1",
+		SeriesID:    "pbs_connection_triage",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		TraceID:     "trace-t1",
+		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
+	}
+	escHop := &audit.PlaybookRun{
+		RunID:          "plr_e1",
+		SeriesID:       "pbs_sysadmin_docker_inspect",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_k8s_pod_crash_remediate",
+		PriorRunID:     "plr_t1",
+		TraceID:        "trace-e1",
+		StartedAt:      time.Now().Add(-2 * time.Minute).UTC(),
+	}
+	remHop := &audit.PlaybookRun{
+		RunID:       "plr_r1",
+		SeriesID:    "pbs_k8s_pod_crash_remediate",
+		Outcome:     audit.OutcomeResolved,
+		PriorRunID:  "plr_e1",
+		TraceID:     "trace-r1",
+		StartedAt:   time.Now().Add(-1 * time.Minute).UTC(),
+		CompletedAt: time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: triage,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{
+			"plr_t1": escHop,
+			"plr_e1": remHop,
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_t1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(n.Escalations) != 1 {
+		t.Fatalf("Escalations len = %d, want 1", len(n.Escalations))
+	}
+	if n.Escalations[0].RunID != "plr_e1" {
+		t.Errorf("Escalations[0].RunID = %q, want plr_e1", n.Escalations[0].RunID)
+	}
+	if n.Remediation == nil {
+		t.Fatal("Remediation should be populated (chain reached a TRANSITION_TO)")
+	}
+	if n.Remediation.RunID != "plr_r1" {
+		t.Errorf("Remediation.RunID = %q, want plr_r1 (the terminal, transitioned-into hop)", n.Remediation.RunID)
+	}
+	if len(n.Journeys) != 3 {
+		t.Fatalf("Journeys len = %d, want 3; got %v", len(n.Journeys), n.Journeys)
+	}
+	wantPhases := []string{"triage", "escalation:1", "remediation"}
+	for i, want := range wantPhases {
+		if n.Journeys[i].Phase != want {
+			t.Errorf("Journeys[%d].Phase = %q, want %q", i, n.Journeys[i].Phase, want)
+		}
+	}
+	if n.DurationSec <= 0 {
+		t.Errorf("DurationSec should be computed from the terminal hop, got %v", n.DurationSec)
+	}
+}
+
+// TestFetchEscalationHops_CycleGuard verifies that a cyclic prior_run_id
+// chain (a data anomaly that should never happen in practice) doesn't hang
+// the walk — it stops and returns what was collected before the cycle.
+func TestFetchEscalationHops_CycleGuard(t *testing.T) {
+	a := &audit.PlaybookRun{RunID: "plr_a", SeriesID: "pbs_a", Outcome: audit.OutcomeEscalated, StartedAt: time.Now().UTC()}
+	b := &audit.PlaybookRun{RunID: "plr_b", SeriesID: "pbs_b", Outcome: audit.OutcomeEscalated, PriorRunID: "plr_a", StartedAt: time.Now().UTC()}
+	// plr_b's "successor" is plr_a again — a cycle.
+	mock := &mockIncidentAuditd{
+		triageRun: a,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{
+			"plr_a": b,
+			"plr_b": a,
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	done := make(chan []*audit.PlaybookRun, 1)
+	go func() {
+		done <- gw.fetchEscalationHops(context.Background(), "plr_a")
+	}()
+
+	select {
+	case hops := <-done:
+		if len(hops) != 1 || hops[0].RunID != "plr_b" {
+			t.Errorf("hops = %v, want exactly [plr_b] (stopped before the cycle repeats)", hops)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetchEscalationHops did not return — cycle guard failed to stop the walk")
+	}
+}
+
+// TestBuildJourneyRefs directly exercises the phase-labeling/merge logic
+// without going through HTTP, covering 0/1/N-hop cases and the trace-ID merge.
+func TestBuildJourneyRefs(t *testing.T) {
+	run := func(runID, traceID, transitionedTo string) *audit.PlaybookRun {
+		return &audit.PlaybookRun{RunID: runID, TraceID: traceID, TransitionedTo: transitionedTo}
+	}
+
+	tests := []struct {
+		name string
+		run  *audit.PlaybookRun
+		hops []*audit.PlaybookRun
+		want []audit.IncidentJourneyRef
+	}{
+		{
+			name: "no hops, no trace",
+			run:  run("t", "", ""),
+			hops: nil,
+			want: nil,
+		},
+		{
+			name: "no hops, with trace",
+			run:  run("t", "trace-t", ""),
+			hops: nil,
+			want: []audit.IncidentJourneyRef{{Phase: "triage", TraceID: "trace-t"}},
+		},
+		{
+			name: "one hop via transition, distinct traces",
+			run:  run("t", "trace-t", "pbs_remediate"),
+			hops: []*audit.PlaybookRun{run("r", "trace-r", "")},
+			want: []audit.IncidentJourneyRef{
+				{Phase: "triage", TraceID: "trace-t"},
+				{Phase: "remediation", TraceID: "trace-r"},
+			},
+		},
+		{
+			name: "one hop via transition, shared trace merges",
+			run:  run("t", "trace-shared", "pbs_remediate"),
+			hops: []*audit.PlaybookRun{run("r", "trace-shared", "")},
+			want: []audit.IncidentJourneyRef{
+				{Phase: "triage+remediation", TraceID: "trace-shared"},
+			},
+		},
+		{
+			name: "one hop via escalation only (no transition)",
+			run:  run("t", "trace-t", ""), // triage escalated, did not transition
+			hops: []*audit.PlaybookRun{run("e", "trace-e", "")},
+			want: []audit.IncidentJourneyRef{
+				{Phase: "triage", TraceID: "trace-t"},
+				{Phase: "escalation:1", TraceID: "trace-e"},
+			},
+		},
+		{
+			name: "three hops: escalation, then transition",
+			run:  run("t", "trace-t", ""),
+			hops: []*audit.PlaybookRun{
+				run("e", "trace-e", "pbs_remediate"), // this hop transitions -> next hop is remediation
+				run("r", "trace-r", ""),
+			},
+			want: []audit.IncidentJourneyRef{
+				{Phase: "triage", TraceID: "trace-t"},
+				{Phase: "escalation:1", TraceID: "trace-e"},
+				{Phase: "remediation", TraceID: "trace-r"},
+			},
+		},
+		{
+			name: "mid-chain merge: two escalation hops share a trace",
+			run:  run("t", "trace-t", ""),
+			hops: []*audit.PlaybookRun{
+				run("e1", "trace-shared", ""),
+				run("e2", "trace-shared", ""),
+			},
+			want: []audit.IncidentJourneyRef{
+				{Phase: "triage", TraceID: "trace-t"},
+				{Phase: "escalation:1+escalation:2", TraceID: "trace-shared"},
+			},
+		},
+		{
+			name: "hop with empty trace_id is skipped",
+			run:  run("t", "trace-t", ""),
+			hops: []*audit.PlaybookRun{run("e", "", "")},
+			want: []audit.IncidentJourneyRef{
+				{Phase: "triage", TraceID: "trace-t"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildJourneyRefs(tc.run, tc.hops)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("[%d] got %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
 	}
 }

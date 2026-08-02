@@ -564,6 +564,43 @@ curl "http://localhost:8080/api/v1/incidents/plr_a3f7c1b2" | jq '.journeys'
 
 When triage and remediation share the same session (the agent ran both in one trace), the phase is `"triage+remediation"` with a single `trace_id`.
 
+**Multi-hop escalations:**
+
+An agent that can't reach a diagnosis can hand off to another agent (for example, a database
+agent escalating to a sysadmin agent) via `ESCALATE_TO`. Each hop is a separate `PlaybookRun`,
+linked to the one before it. The incident narrative walks the full chain, however many hops deep,
+and classifies each hop by the signal its *predecessor* emitted — not by where it falls in the
+chain: a hop reached via `ESCALATE_TO` is another diagnosis hop (`escalations[]`); a hop reached
+via `TRANSITION_TO` is the remediation — singular, wherever it occurs. `remediation` is `nil` if
+the chain hasn't reached a transition yet, even when escalation hops exist.
+
+```bash
+curl "http://localhost:8080/api/v1/incidents/plr_t1" | jq '.escalations, .remediation, .journeys'
+```
+
+```json
+[
+  {"run_id": "plr_e1", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "transitioned",
+   "findings": "dmesg shows OOM-killer event"}
+]
+{"run_id": "plr_r1", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved"}
+[
+  {"phase": "triage",       "trace_id": "tr_9a4f2b1e"},
+  {"phase": "escalation:1", "trace_id": "tr_5c1d8f22"},
+  {"phase": "remediation",  "trace_id": "tr_c8d3e7f2"}
+]
+```
+
+`faulttest vault incidents <run_id>` renders an `ESCALATION` section for each intermediate hop,
+between `GATE` and `REMEDIATION`.
+
+This is a different mechanism from the `chain[]` array returned by
+`POST /api/v1/fleet/playbooks/{id}/run` — that one is a *live*, single-request auto-escalation
+sequence, gated by `approval_mode` and bounded by a fixed depth. `escalations[]` here is the
+*historical* replay of however many separate `PlaybookRun`s actually happened, assembled at `GET`
+time from the stored `prior_run_id` chain. Both describe "a playbook escalated to another
+playbook," which is why the naming is deliberately different — don't conflate the two.
+
 Navigate from an incident to the full audit trail:
 
 ```bash

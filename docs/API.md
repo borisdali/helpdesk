@@ -238,6 +238,45 @@ curl http://localhost:8080/api/v1/incidents
 
 ---
 
+### `GET /api/v1/incidents/{runID}`
+
+A different, unrelated resource from the two endpoints above despite the shared path prefix: this
+one assembles the unified narrative (triage → gate → escalation hops → remediation) for a single
+**Playbook run**, keyed by its `plr_*` run ID — not an incident bundle created via
+`POST /api/v1/incidents`.
+
+`escalations[]` holds every intermediate hop reached via `ESCALATE_TO` (further diagnosis,
+possibly on a different agent); `remediation` is populated only once the chain reaches an explicit
+`TRANSITION_TO` — it can be `null` even when escalation hops exist, if the incident hasn't been
+remediated yet. See [JOURNEYS.md §7.2](JOURNEYS.md#72-incident--journey-cross-links) for the full
+walkthrough, including how this differs from the *live* `chain[]` array returned by
+`POST /api/v1/fleet/playbooks/{id}/run`.
+
+```bash
+curl -s http://localhost:8080/api/v1/incidents/plr_t1 \
+  | jq '{triage, escalations, remediation, journeys}'
+```
+
+```json
+{
+  "triage": {"run_id": "plr_t1", "playbook": "pbs_connection_triage"},
+  "escalations": [
+    {"run_id": "plr_e1", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "transitioned",
+     "findings": "dmesg shows OOM-killer event"}
+  ],
+  "remediation": {"run_id": "plr_r1", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved"},
+  "journeys": [
+    {"phase": "triage",       "trace_id": "tr_9a4f2b1e"},
+    {"phase": "escalation:1", "trace_id": "tr_5c1d8f22"},
+    {"phase": "remediation",  "trace_id": "tr_c8d3e7f2"}
+  ]
+}
+```
+
+Returns `404` if the run ID is not found.
+
+---
+
 ### `POST /api/v1/db/{tool}`
 
 Invoke a specific database agent tool directly by name. The body is a JSON object of tool parameters. Use `GET /api/v1/tools` to discover valid tool names and their parameter schemas.

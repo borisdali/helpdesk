@@ -262,7 +262,6 @@ func TestPlaybookRunStore_GetByRunID_NotFound(t *testing.T) {
 	}
 }
 
-
 func TestPlaybookRunStore_DiagnosticReport_RoundTrip(t *testing.T) {
 	s := newPlaybookRunStore(t)
 	ctx := context.Background()
@@ -277,13 +276,13 @@ func TestPlaybookRunStore_DiagnosticReport_RoundTrip(t *testing.T) {
 	}
 
 	run := &PlaybookRun{
-		PlaybookID:      "pb_diag_test",
-		SeriesID:        "pbs_diag_test",
-		ExecutionMode:   "agent",
-		Outcome:         "resolved",
+		PlaybookID:       "pb_diag_test",
+		SeriesID:         "pbs_diag_test",
+		ExecutionMode:    "agent",
+		Outcome:          "resolved",
 		DiagnosticReport: report,
-		Operator:        "test",
-		StartedAt:       time.Now().UTC(),
+		Operator:         "test",
+		StartedAt:        time.Now().UTC(),
 	}
 	if err := s.Record(ctx, run); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -439,6 +438,82 @@ func TestPlaybookRunStore_ListByPriorRunID(t *testing.T) {
 	}
 	if len(none) != 0 {
 		t.Errorf("want 0 runs for unknown prior_run_id, got %d", len(none))
+	}
+}
+
+// TestPlaybookRunStore_ListByPriorRunID_MultiHopChain formalizes a 3-hop
+// escalation chain — e.g. a database agent escalating to a sysadmin agent,
+// which escalates to a k8s agent — and confirms ListByPriorRunID can walk
+// every hop, one prior_run_id lookup at a time. This is the exact scenario
+// verified by hand during scoping of the incident-narrative multi-hop fix.
+func TestPlaybookRunStore_ListByPriorRunID_MultiHopChain(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	hop1 := &PlaybookRun{ // database agent triage — escalates
+		PlaybookID:    "pb_db1",
+		SeriesID:      "pbs_connection_triage",
+		ExecutionMode: "agent",
+		Outcome:       "escalated",
+		EscalatedTo:   "pbs_sysadmin_docker_inspect",
+		Operator:      "alice",
+		StartedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.Record(ctx, hop1); err != nil {
+		t.Fatalf("Record hop1: %v", err)
+	}
+
+	hop2 := &PlaybookRun{ // sysadmin agent — escalates further
+		PlaybookID:    "pb_sysadmin1",
+		SeriesID:      "pbs_sysadmin_docker_inspect",
+		ExecutionMode: "agent",
+		Outcome:       "escalated",
+		EscalatedTo:   "pbs_k8s_pod_crash_triage",
+		PriorRunID:    hop1.RunID,
+		Operator:      "alice",
+		StartedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.Record(ctx, hop2); err != nil {
+		t.Fatalf("Record hop2: %v", err)
+	}
+
+	hop3 := &PlaybookRun{ // k8s agent — reaches a conclusion
+		PlaybookID:     "pb_k8s1",
+		SeriesID:       "pbs_k8s_pod_crash_triage",
+		ExecutionMode:  "agent",
+		Outcome:        "transitioned",
+		TransitionedTo: "pbs_k8s_pod_crash_remediate",
+		PriorRunID:     hop2.RunID,
+		Operator:       "alice",
+		StartedAt:      time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.Record(ctx, hop3); err != nil {
+		t.Fatalf("Record hop3: %v", err)
+	}
+
+	children1, err := s.ListByPriorRunID(ctx, hop1.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListByPriorRunID(hop1): %v", err)
+	}
+	if len(children1) != 1 || children1[0].RunID != hop2.RunID {
+		t.Fatalf("ListByPriorRunID(hop1) = %v, want [%s]", children1, hop2.RunID)
+	}
+
+	children2, err := s.ListByPriorRunID(ctx, hop2.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListByPriorRunID(hop2): %v", err)
+	}
+	if len(children2) != 1 || children2[0].RunID != hop3.RunID {
+		t.Fatalf("ListByPriorRunID(hop2) = %v, want [%s]", children2, hop3.RunID)
+	}
+
+	// The terminal hop has no successor yet.
+	children3, err := s.ListByPriorRunID(ctx, hop3.RunID, 10)
+	if err != nil {
+		t.Fatalf("ListByPriorRunID(hop3): %v", err)
+	}
+	if len(children3) != 0 {
+		t.Fatalf("ListByPriorRunID(hop3) = %v, want none (terminal hop)", children3)
 	}
 }
 

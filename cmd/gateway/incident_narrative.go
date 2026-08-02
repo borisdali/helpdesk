@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,24 +16,33 @@ import (
 // IncidentNarrative is the unified timeline view for a single triage incident:
 // triage → operator gate → remediation, with evaluation scores and all feedback slots.
 type IncidentNarrative struct {
-	IncidentID     string                `json:"incident_id"`               // triage run_id
-	StartedAt      time.Time             `json:"started_at"`
-	ResolvedAt     *time.Time            `json:"resolved_at,omitempty"`
-	DurationSec    float64               `json:"duration_sec,omitempty"`
-	Operator       string                `json:"operator"`
-	TriggerContext string                `json:"trigger_context,omitempty"` // original alert text that initiated the run
-	Triage      TriageChapter         `json:"triage"`
-	Gate        *GateChapter          `json:"gate,omitempty"`
-	Remediation *RemediationChapter   `json:"remediation,omitempty"`
+	IncidentID     string        `json:"incident_id"` // triage run_id
+	StartedAt      time.Time     `json:"started_at"`
+	ResolvedAt     *time.Time    `json:"resolved_at,omitempty"`
+	DurationSec    float64       `json:"duration_sec,omitempty"`
+	Operator       string        `json:"operator"`
+	TriggerContext string        `json:"trigger_context,omitempty"` // original alert text that initiated the run
+	Triage         TriageChapter `json:"triage"`
+	Gate           *GateChapter  `json:"gate,omitempty"`
+	// Escalations holds every intermediate hop reached via an explicit
+	// ESCALATE_TO signal — further diagnosis, possibly on a different agent —
+	// strictly between the triage chapter and the (optional) terminal
+	// Remediation chapter. Most incidents have zero entries here.
+	Escalations []EscalationHop `json:"escalations,omitempty"`
+	// Remediation is populated only when the chain reached an explicit
+	// TRANSITION_TO signal — it is not simply "whatever run followed triage."
+	// A successor run reached via ESCALATE_TO is an escalation, not a
+	// remediation, and appears in Escalations instead.
+	Remediation *RemediationChapter `json:"remediation,omitempty"`
 	// Feedback holds all operator feedback records for this incident (up to four:
 	// triage/at_gate, triage/post_incident, remediation/at_gate, remediation/post_incident).
-	Feedback    []audit.RunFeedback   `json:"feedback,omitempty"`
+	Feedback []audit.RunFeedback `json:"feedback,omitempty"`
 	// Evaluation holds automated faulttest eval scores for the triage run.
-	Evaluation  *audit.RunEvaluation  `json:"evaluation,omitempty"`
+	Evaluation *audit.RunEvaluation `json:"evaluation,omitempty"`
 	// Journeys links each phase of this incident to its audit Journey trace.
 	// Triage = the WHY (reasoning chain, hypothesis building).
 	// Remediation = the WHAT (tool calls, approvals, blast-radius decisions).
-	Journeys    []audit.IncidentJourneyRef `json:"journeys,omitempty"`
+	Journeys []audit.IncidentJourneyRef `json:"journeys,omitempty"`
 }
 
 // TriageChapter holds the investigative phase of the incident.
@@ -46,11 +56,11 @@ type TriageChapter struct {
 
 // GateChapter holds the operator approval decision.
 type GateChapter struct {
-	ApprovedBy   string    `json:"approved_by,omitempty"`
+	ApprovedBy     string    `json:"approved_by,omitempty"`
 	AcknowledgedAt time.Time `json:"acknowledged_at,omitempty"`
-	Resolution   string    `json:"resolution"` // "approved" | "denied"
-	Reason       string    `json:"reason,omitempty"`
-	ApprovalMode string    `json:"approval_mode,omitempty"`
+	Resolution     string    `json:"resolution"` // "approved" | "denied"
+	Reason         string    `json:"reason,omitempty"`
+	ApprovalMode   string    `json:"approval_mode,omitempty"`
 }
 
 // RemediationChapter holds the remediation playbook run.
@@ -61,6 +71,25 @@ type RemediationChapter struct {
 	Steps      []*audit.PlaybookRunStep `json:"steps,omitempty"`
 	Findings   string                   `json:"findings,omitempty"`
 	Transcript string                   `json:"transcript,omitempty"`
+}
+
+// EscalationHop is one intermediate playbook run reached via ESCALATE_TO,
+// strictly between the triage chapter and the (optional) terminal
+// remediation chapter. Most incidents have zero entries here — they only
+// appear when an agent can't reach a diagnosis and hands off to another
+// agent (e.g. a database agent escalating to a sysadmin agent).
+type EscalationHop struct {
+	RunID            string                   `json:"run_id"`
+	Playbook         string                   `json:"playbook"` // series_id
+	Outcome          string                   `json:"outcome"`
+	EscalatedTo      string                   `json:"escalated_to,omitempty"`
+	Findings         string                   `json:"findings,omitempty"`
+	DiagnosticReport *audit.DiagnosticReport  `json:"diagnostic_report,omitempty"`
+	Steps            []*audit.PlaybookRunStep `json:"steps,omitempty"`
+	Transcript       string                   `json:"transcript,omitempty"`
+	TraceID          string                   `json:"trace_id,omitempty"`
+	StartedAt        time.Time                `json:"started_at"`
+	CompletedAt      *time.Time               `json:"completed_at,omitempty"`
 }
 
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
@@ -132,49 +161,71 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		narrative.Gate = gate
 	}
 
-	// 3. Remediation run — the run that has this run as prior_run_id.
-	if remRun := g.fetchRemediationRun(r.Context(), runID); remRun != nil {
-		steps, _ := g.fetchRunSteps(r.Context(), remRun.RunID)
-		narrative.Remediation = &RemediationChapter{
-			RunID:      remRun.RunID,
-			Playbook:   remRun.SeriesID,
-			Outcome:    remRun.Outcome,
-			Steps:      steps,
-			Findings:   remRun.FindingsSummary,
-			Transcript: remRun.AgentTranscript,
-		}
-		if !remRun.CompletedAt.IsZero() {
-			t := remRun.CompletedAt
-			narrative.ResolvedAt = &t
-			narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
-		}
-		// Journey refs: triage trace = WHY, remediation trace = WHAT.
-		if run.TraceID != "" && remRun.TraceID != "" && run.TraceID == remRun.TraceID {
-			narrative.Journeys = []audit.IncidentJourneyRef{
-				{Phase: "triage+remediation", TraceID: run.TraceID},
+	// 3. Escalation hops — every run that followed the triage run, walked to
+	// completion (not just one hop). Each hop is classified by the signal
+	// its PREDECESSOR emitted, not by chain position: a hop reached because
+	// the predecessor's EscalatedTo was set is another diagnosis hop
+	// (Escalations); a hop reached because the predecessor's TransitionedTo
+	// was set is the remediation — singular, wherever it falls in the chain.
+	// Classification stops at the first remediation hop found; a remediation
+	// run that itself further escalates is out of scope for now.
+	hops := g.fetchEscalationHops(r.Context(), runID)
+
+	var classified []*audit.PlaybookRun
+	predecessor := run
+	for _, hop := range hops {
+		classified = append(classified, hop)
+		if predecessor.TransitionedTo != "" {
+			steps, _ := g.fetchRunSteps(r.Context(), hop.RunID)
+			narrative.Remediation = &RemediationChapter{
+				RunID:      hop.RunID,
+				Playbook:   hop.SeriesID,
+				Outcome:    hop.Outcome,
+				Steps:      steps,
+				Findings:   hop.FindingsSummary,
+				Transcript: hop.AgentTranscript,
 			}
-		} else {
-			if run.TraceID != "" {
-				narrative.Journeys = append(narrative.Journeys,
-					audit.IncidentJourneyRef{Phase: "triage", TraceID: run.TraceID})
-			}
-			if remRun.TraceID != "" {
-				narrative.Journeys = append(narrative.Journeys,
-					audit.IncidentJourneyRef{Phase: "remediation", TraceID: remRun.TraceID})
-			}
+			predecessor = hop
+			break
 		}
-	} else {
-		if !run.CompletedAt.IsZero() && run.Outcome != audit.OutcomeGatePending {
-			t := run.CompletedAt
-			narrative.ResolvedAt = &t
-			narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
+
+		// Escalation hop: predecessor.EscalatedTo != "", or neither signal
+		// set (defensive default — never guess a hop into Remediation
+		// without an explicit TRANSITION_TO).
+		hopSteps, _ := g.fetchRunSteps(r.Context(), hop.RunID)
+		eh := EscalationHop{
+			RunID:            hop.RunID,
+			Playbook:         hop.SeriesID,
+			Outcome:          hop.Outcome,
+			EscalatedTo:      hop.EscalatedTo,
+			Findings:         hop.FindingsSummary,
+			DiagnosticReport: hop.DiagnosticReport,
+			Steps:            hopSteps,
+			Transcript:       hop.AgentTranscript,
+			TraceID:          hop.TraceID,
+			StartedAt:        hop.StartedAt,
 		}
-		if run.TraceID != "" {
-			narrative.Journeys = []audit.IncidentJourneyRef{
-				{Phase: "triage", TraceID: run.TraceID},
-			}
+		if !hop.CompletedAt.IsZero() {
+			t := hop.CompletedAt
+			eh.CompletedAt = &t
 		}
+		narrative.Escalations = append(narrative.Escalations, eh)
+		predecessor = hop
 	}
+
+	if len(classified) > 0 {
+		terminal := classified[len(classified)-1]
+		if !terminal.CompletedAt.IsZero() {
+			t := terminal.CompletedAt
+			narrative.ResolvedAt = &t
+			narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
+		}
+	} else if !run.CompletedAt.IsZero() && run.Outcome != audit.OutcomeGatePending {
+		t := run.CompletedAt
+		narrative.ResolvedAt = &t
+		narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
+	}
+	narrative.Journeys = buildJourneyRefs(run, classified)
 
 	// 4. Feedback — all operator feedback slots for this incident.
 	narrative.Feedback = g.fetchAllRunFeedback(r.Context(), runID)
@@ -210,12 +261,24 @@ func (g *Gateway) fetchGateAcknowledgedEvent(ctx context.Context, runID string) 
 	return &events[0]
 }
 
-// fetchRemediationRun finds the remediation run that followed a triage run.
-func (g *Gateway) fetchRemediationRun(ctx context.Context, triageRunID string) *audit.PlaybookRun {
+// maxEscalationHops bounds how many prior_run_id hops handleGetIncident will
+// walk when assembling an incident narrative. This is a read-path
+// runaway/cycle guard only — it is intentionally independent of, and larger
+// than, playbooks.go's maxChainDepth (5), which is a live auto-chaining
+// *policy* enforced during a single POST /playbooks/{id}/run request. This
+// endpoint must be able to fully replay any historical incident even if that
+// policy value changes in the future, so the two constants are deliberately
+// unrelated.
+const maxEscalationHops = 20
+
+// fetchNextHop finds the run whose prior_run_id equals runID — i.e. the run
+// that runID escalated or transitioned into — or nil if none exists (yet).
+// This is the single-hop primitive fetchEscalationHops uses to walk forward.
+func (g *Gateway) fetchNextHop(ctx context.Context, runID string) *audit.PlaybookRun {
 	if g.auditURL == "" {
 		return nil
 	}
-	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + triageRunID + "&limit=1"
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs?prior_run_id=" + runID + "&limit=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil
@@ -239,6 +302,75 @@ func (g *Gateway) fetchRemediationRun(ctx context.Context, triageRunID string) *
 		return nil
 	}
 	return result.Runs[0]
+}
+
+// fetchEscalationHops walks the prior_run_id chain starting from triageRunID,
+// returning every subsequent PlaybookRun in chronological order: hops[0] is
+// the immediate escalation from triage, hops[len(hops)-1] is the last run
+// found. Returns an empty slice when the triage run has no follow-on runs.
+// Stops early (logging a warning) on a detected cycle or once
+// maxEscalationHops is reached, returning whatever was collected so far
+// rather than failing the whole request.
+func (g *Gateway) fetchEscalationHops(ctx context.Context, triageRunID string) []*audit.PlaybookRun {
+	var hops []*audit.PlaybookRun
+	seen := map[string]bool{triageRunID: true}
+	cursor := triageRunID
+	for i := 0; i < maxEscalationHops; i++ {
+		next := g.fetchNextHop(ctx, cursor)
+		if next == nil {
+			return hops
+		}
+		if seen[next.RunID] {
+			slog.Warn("fetchEscalationHops: cycle detected, stopping walk",
+				"triage_run_id", triageRunID, "repeated_run_id", next.RunID)
+			return hops
+		}
+		seen[next.RunID] = true
+		hops = append(hops, next)
+		cursor = next.RunID
+	}
+	slog.Warn("fetchEscalationHops: hit maxEscalationHops without reaching a terminal run",
+		"triage_run_id", triageRunID, "max_hops", maxEscalationHops)
+	return hops
+}
+
+// buildJourneyRefs assembles one audit.IncidentJourneyRef per phase of the
+// incident: triage, any intermediate escalation hops, and the terminal
+// remediation hop (if the chain reached one). Intermediate hops are labeled
+// "escalation:1", "escalation:2", etc.; the hop produced by an explicit
+// TRANSITION_TO is labeled "remediation" regardless of its position in the
+// chain. Adjacent phases that share a non-empty trace_id (the agent handled
+// both in a single session) are merged into one "phaseA+phaseB" entry,
+// generalizing the historical "triage+remediation" merge to N-hop chains.
+func buildJourneyRefs(run *audit.PlaybookRun, hops []*audit.PlaybookRun) []audit.IncidentJourneyRef {
+	type labeled struct{ phase, traceID string }
+	all := []labeled{{phase: "triage", traceID: run.TraceID}}
+
+	predecessor := run
+	escalationNum := 0
+	for _, hop := range hops {
+		phase := "remediation"
+		if predecessor.TransitionedTo == "" {
+			escalationNum++
+			phase = fmt.Sprintf("escalation:%d", escalationNum)
+		}
+		all = append(all, labeled{phase: phase, traceID: hop.TraceID})
+		predecessor = hop
+	}
+
+	var refs []audit.IncidentJourneyRef
+	for i := 0; i < len(all); i++ {
+		if all[i].traceID == "" {
+			continue
+		}
+		phase, trace := all[i].phase, all[i].traceID
+		for i+1 < len(all) && all[i+1].traceID == trace {
+			phase += "+" + all[i+1].phase
+			i++
+		}
+		refs = append(refs, audit.IncidentJourneyRef{Phase: phase, TraceID: trace})
+	}
+	return refs
 }
 
 // fetchAllRunFeedback fetches all operator feedback records for a run (up to four:
@@ -293,4 +425,3 @@ func (g *Gateway) fetchRunEvaluation(ctx context.Context, runID string) *audit.R
 	}
 	return &ev
 }
-
