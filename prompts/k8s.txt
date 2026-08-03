@@ -97,6 +97,19 @@ For LoadBalancer services, pay attention to:
 - Port mappings between the service and target pods
 - Endpoint health
 
+## Node-level diagnostics (dmesg)
+
+If `get_node_status` shows a node condition (MemoryPressure, DiskPressure) or
+`get_events` shows node-level warnings that pod/container-level tools
+(`get_pod_logs`, `read_pod_file`, `get_pod_resources`) cannot explain, call
+`debug_node_dmesg` with the node name (from a prior `get_pods`/`describe_pod`
+result — both include the node) to pull the node's kernel ring buffer. This
+creates a short-lived privileged debug pod on the node, cleaned up
+automatically after the call — do not call it repeatedly in a tight loop.
+Start with the default line count; only increase it if the relevant kernel
+messages (e.g. "Out of memory: Killed process", I/O or NIC/driver errors)
+aren't in the tail.
+
 ## Audit trail
 
 Before calling any tool, emit one sentence stating what you expect to find and why. This ensures the audit trail captures your reasoning at each decision point, not just the outcome.

@@ -45,11 +45,11 @@ func main() {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
 			dbKeys := make([]string, 0, len(infraConfig.DBServers))
-		for k := range infraConfig.DBServers {
-			dbKeys = append(dbKeys, k)
-		}
-		sort.Strings(dbKeys)
-		slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
+			for k := range infraConfig.DBServers {
+				dbKeys = append(dbKeys, k)
+			}
+			sort.Strings(dbKeys)
+			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
 		}
 	}
 
@@ -149,19 +149,20 @@ func main() {
 		Version:  buildinfo.Version,
 		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
 		SkillTags: map[string][]string{
-			"k8s_agent":                       {"kubernetes", "infrastructure", "diagnostics"},
-			"k8s_agent-get_pods":              {"kubernetes", "pods", "workloads"},
-			"k8s_agent-get_service":           {"kubernetes", "services", "networking"},
-			"k8s_agent-describe_service":      {"kubernetes", "services", "networking"},
-			"k8s_agent-get_endpoints":         {"kubernetes", "endpoints", "networking"},
-			"k8s_agent-get_events":            {"kubernetes", "events", "cluster"},
-			"k8s_agent-get_pod_logs":          {"kubernetes", "logs", "debugging"},
-			"k8s_agent-read_pod_file":         {"kubernetes", "logs", "debugging"},
-			"k8s_agent-describe_pod":          {"kubernetes", "pods", "debugging"},
-			"k8s_agent-get_nodes":             {"kubernetes", "nodes", "cluster"},
-			"k8s_agent-delete_pod":            {"kubernetes", "pods", "remediation"},
-			"k8s_agent-restart_deployment":    {"kubernetes", "deployments", "remediation"},
-			"k8s_agent-scale_deployment":      {"kubernetes", "deployments", "remediation"},
+			"k8s_agent":                    {"kubernetes", "infrastructure", "diagnostics"},
+			"k8s_agent-get_pods":           {"kubernetes", "pods", "workloads"},
+			"k8s_agent-get_service":        {"kubernetes", "services", "networking"},
+			"k8s_agent-describe_service":   {"kubernetes", "services", "networking"},
+			"k8s_agent-get_endpoints":      {"kubernetes", "endpoints", "networking"},
+			"k8s_agent-get_events":         {"kubernetes", "events", "cluster"},
+			"k8s_agent-get_pod_logs":       {"kubernetes", "logs", "debugging"},
+			"k8s_agent-read_pod_file":      {"kubernetes", "logs", "debugging"},
+			"k8s_agent-describe_pod":       {"kubernetes", "pods", "debugging"},
+			"k8s_agent-get_nodes":          {"kubernetes", "nodes", "cluster"},
+			"k8s_agent-delete_pod":         {"kubernetes", "pods", "remediation"},
+			"k8s_agent-restart_deployment": {"kubernetes", "deployments", "remediation"},
+			"k8s_agent-scale_deployment":   {"kubernetes", "deployments", "remediation"},
+			"k8s_agent-debug_node_dmesg":   {"kubernetes", "nodes", "diagnostics"},
 		},
 		SkillExamples: map[string][]string{
 			"k8s_agent-get_pods":      {"List all pods in the database namespace"},
@@ -292,6 +293,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	debugNodeDmesgToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "debug_node_dmesg",
+		Description: "Pull the kernel ring buffer (dmesg) from a Kubernetes worker node via a short-lived debug pod. Use when node-level pressure (MemoryPressure, DiskPressure from get_node_status, or node warnings from get_events) can't be explained by pod/container-level tools. Node name comes from a prior get_pods or describe_pod call.",
+	}, debugNodeDmesgTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		getPodsToolDef,
 		getServiceToolDef,
@@ -307,6 +316,7 @@ func createTools() ([]tool.Tool, error) {
 		scaleDeploymentToolDef,
 		getPodResourcesToolDef,
 		getNodeStatusToolDef,
+		debugNodeDmesgToolDef,
 	}, nil
 }
 

@@ -26,6 +26,7 @@ var expectedK8sTools = []string{
 	"scale_deployment",
 	"get_pod_resources",
 	"get_node_status",
+	"debug_node_dmesg",
 }
 
 func TestK8sDirectRegistry_AllToolsRegistered(t *testing.T) {

@@ -31,21 +31,23 @@ type mockK8sToolContext struct {
 	context.Context
 }
 
-func (mockK8sToolContext) UserContent() *genai.Content                                          { return nil }
-func (mockK8sToolContext) InvocationID() string                                                 { return "test-invocation" }
-func (mockK8sToolContext) AgentName() string                                                    { return "k8s_agent" }
-func (mockK8sToolContext) ReadonlyState() session.ReadonlyState                                 { return nil }
-func (mockK8sToolContext) UserID() string                                                       { return "test-user" }
-func (mockK8sToolContext) AppName() string                                                      { return "test-app" }
-func (mockK8sToolContext) SessionID() string                                                    { return "test-session" }
-func (mockK8sToolContext) Branch() string                                                       { return "" }
-func (mockK8sToolContext) Artifacts() agent.Artifacts                                           { return nil }
-func (mockK8sToolContext) State() session.State                                                 { return nil }
-func (mockK8sToolContext) FunctionCallID() string                                               { return "test-call-id" }
-func (mockK8sToolContext) Actions() *session.EventActions                                       { return nil }
-func (mockK8sToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) { return nil, nil }
-func (mockK8sToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation                 { return nil }
-func (mockK8sToolContext) RequestConfirmation(string, any) error                                { return nil }
+func (mockK8sToolContext) UserContent() *genai.Content          { return nil }
+func (mockK8sToolContext) InvocationID() string                 { return "test-invocation" }
+func (mockK8sToolContext) AgentName() string                    { return "k8s_agent" }
+func (mockK8sToolContext) ReadonlyState() session.ReadonlyState { return nil }
+func (mockK8sToolContext) UserID() string                       { return "test-user" }
+func (mockK8sToolContext) AppName() string                      { return "test-app" }
+func (mockK8sToolContext) SessionID() string                    { return "test-session" }
+func (mockK8sToolContext) Branch() string                       { return "" }
+func (mockK8sToolContext) Artifacts() agent.Artifacts           { return nil }
+func (mockK8sToolContext) State() session.State                 { return nil }
+func (mockK8sToolContext) FunctionCallID() string               { return "test-call-id" }
+func (mockK8sToolContext) Actions() *session.EventActions       { return nil }
+func (mockK8sToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+func (mockK8sToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (mockK8sToolContext) RequestConfirmation(string, any) error                { return nil }
 
 func newK8sTestContext() tool.Context {
 	return mockK8sToolContext{context.Background()}
@@ -155,6 +157,63 @@ policies:
       - type: kubernetes
     rules:
       - action: destructive
+        effect: allow
+        conditions:
+          max_pods_affected: %d
+`, maxPods)
+	path := writeTempK8sPolicyFile(t, yamlContent)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "deny",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+// newDenyK8sWriteEnforcer creates a PolicyEnforcer that denies write k8s operations.
+// Mirrors newDenyK8sDestructiveEnforcer but for action: write, since
+// debug_node_dmesg is classified ActionWrite, not ActionDestructive.
+func newDenyK8sWriteEnforcer(t *testing.T) *agentutil.PolicyEnforcer {
+	t.Helper()
+	const yaml = `
+version: "1"
+policies:
+  - name: deny-k8s-write
+    resources:
+      - type: kubernetes
+    rules:
+      - action: write
+        effect: deny
+        message: "write kubernetes operations are not permitted in this test"
+`
+	path := writeTempK8sPolicyFile(t, yaml)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+// newK8sWriteBlastRadiusEnforcer creates a PolicyEnforcer that allows write ops
+// but limits the number of pods affected. Mirrors newK8sBlastRadiusEnforcer but
+// for action: write.
+func newK8sWriteBlastRadiusEnforcer(t *testing.T, maxPods int) *agentutil.PolicyEnforcer {
+	t.Helper()
+	yamlContent := fmt.Sprintf(`
+version: "1"
+policies:
+  - name: k8s-write-blast-radius
+    resources:
+      - type: kubernetes
+    rules:
+      - action: write
         effect: allow
         conditions:
           max_pods_affected: %d
@@ -425,7 +484,7 @@ func TestDeletePodTool_VerificationWarning_PodStillTerminating(t *testing.T) {
 	// Level-2 verification fires because kubectl get pod returns exit 0.
 	defer withZeroVerifyConfig()()
 	defer withMockKubectlSequence(
-		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil},                          // delete accepted
+		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil},                            // delete accepted
 		kubectlResponse{out: "NAME      READY   STATUS\nstuck-pod 0/1     Terminating\n", err: nil}, // pod still visible
 	)()
 
@@ -622,9 +681,9 @@ func TestScaleDeploymentTool_CapturesPreState(t *testing.T) {
 	defer func() { toolAuditor = origAuditor }()
 
 	defer withMockKubectlSequence(
-		kubectlResponse{out: "3", err: nil},                                    // pre-state read → previous = 3
+		kubectlResponse{out: "3", err: nil},                                   // pre-state read → previous = 3
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // scale
-		kubectlResponse{out: "5", err: nil},                                    // verify
+		kubectlResponse{out: "5", err: nil},                                   // verify
 	)()
 
 	ctx := newK8sTestContext()
@@ -666,9 +725,9 @@ func TestScaleDeploymentTool_CapturesPreState(t *testing.T) {
 func TestScaleDeploymentTool_PreStateReadFailure_ToolStillRuns(t *testing.T) {
 	// If the pre-state kubectl read fails, the scale must still proceed.
 	defer withMockKubectlSequence(
-		kubectlResponse{out: "", err: fmt.Errorf("connection refused")},        // pre-state read fails
+		kubectlResponse{out: "", err: fmt.Errorf("connection refused")},       // pre-state read fails
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // scale
-		kubectlResponse{out: "2", err: nil},                                    // verify
+		kubectlResponse{out: "2", err: nil},                                   // verify
 	)()
 
 	ctx := newK8sTestContext()
@@ -860,9 +919,9 @@ func TestScaleDeploymentTool_Level2_RetryApplySucceeds(t *testing.T) {
 	//   call #4: verify → "5" (correct) → resolved
 	defer withMockKubectlSequence(
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // initial scale
-		kubectlResponse{out: "3", err: nil},                                    // verify #1: wrong
+		kubectlResponse{out: "3", err: nil},                                   // verify #1: wrong
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // re-apply
-		kubectlResponse{out: "5", err: nil},                                    // verify #2: correct
+		kubectlResponse{out: "5", err: nil},                                   // verify #2: correct
 	)()
 	old := verifyRetryConfig
 	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
@@ -1400,5 +1459,198 @@ func TestGetNodeStatus_MemoryPressure_IncludesMessage(t *testing.T) {
 	}
 	if memCond.Message == "" {
 		t.Error("MemoryPressure condition should have Message set when Status=True")
+	}
+}
+
+// =============================================================================
+// debugNodeDmesgTool
+// =============================================================================
+
+// withKeyedMockKubectl replaces runKubectl with a mock keyed by the first
+// argument (the kubectl subcommand: "debug", "get", "logs", "delete"),
+// recording every call's full args slice. Unlike withMockKubectlSequence,
+// this lets tests assert that a specific step (e.g. the cleanup delete) was
+// actually invoked, not just tolerate it being skipped.
+func withKeyedMockKubectl(responses map[string]kubectlResponse) (calls *[][]string, cleanup func()) {
+	orig := runKubectl
+	recorded := make([][]string, 0)
+	runKubectl = func(_ context.Context, _ string, args ...string) (string, error) {
+		recorded = append(recorded, append([]string(nil), args...))
+		if len(args) == 0 {
+			return "", nil
+		}
+		r, ok := responses[args[0]]
+		if !ok {
+			return "", nil
+		}
+		return r.out, r.err
+	}
+	return &recorded, func() { runKubectl = orig }
+}
+
+// calledWith reports whether any recorded call's first arg equals subcommand.
+func calledWith(calls [][]string, subcommand string) bool {
+	for _, c := range calls {
+		if len(c) > 0 && c[0] == subcommand {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDebugNodeDmesgTool_Success(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":  {out: `pod/debug-node-dmesg-worker-1-12345 created` + "\n"},
+		"get":    {out: "Running"},
+		"logs":   {out: "[12345.678901] Out of memory: Killed process 4242 (stress)\n"},
+		"delete": {out: `pod "debug-node-dmesg-worker-1-12345" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "Out of memory") {
+		t.Errorf("debugNodeDmesgTool() output = %q, want to contain dmesg text", result.Output)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("debugNodeDmesgTool() VerifyStatus = %q, want %q", result.VerifyStatus, "ok")
+	}
+	if !calledWith(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete — debug pod not cleaned up")
+	}
+}
+
+func TestDebugNodeDmesgTool_PodNeverReady(t *testing.T) {
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 2, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":  {out: `pod/debug-node-dmesg-worker-1-12345 created` + "\n"},
+		"get":    {out: "Pending"}, // never leaves Pending
+		"delete": {out: `pod "debug-node-dmesg-worker-1-12345" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("debugNodeDmesgTool() VerifyStatus = %q, want %q", result.VerifyStatus, "warning")
+	}
+	if !calledWith(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete after verification timeout — debug pod not cleaned up")
+	}
+	if calledWith(*calls, "logs") {
+		t.Error("debugNodeDmesgTool() should not fetch logs when the pod never became ready")
+	}
+}
+
+func TestDebugNodeDmesgTool_CleanupOnLogsError(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":  {out: `pod/debug-node-dmesg-worker-1-12345 created` + "\n"},
+		"get":    {out: "Running"},
+		"logs":   {out: "", err: fmt.Errorf(`kubectl failed: exit status 1\nOutput: Error from server (NotFound): pods "debug-node-dmesg-worker-1-12345" not found`)},
+		"delete": {out: `pod "debug-node-dmesg-worker-1-12345" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR fetching output") {
+		t.Errorf("debugNodeDmesgTool() output = %q, want to contain 'ERROR fetching output'", result.Output)
+	}
+	if !calledWith(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete after logs error — debug pod not cleaned up")
+	}
+}
+
+func TestDebugNodeDmesgTool_CleanupOnCreateError(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug": {out: "", err: fmt.Errorf(`kubectl failed: exit status 1\nOutput: Error from server (NotFound): nodes "bad-node" not found`)},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "bad-node"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR:") {
+		t.Errorf("debugNodeDmesgTool() output = %q, want to contain 'ERROR:'", result.Output)
+	}
+	if !calledWith(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete after create error — should still attempt idempotent cleanup")
+	}
+	if calledWith(*calls, "get") || calledWith(*calls, "logs") {
+		t.Error("debugNodeDmesgTool() should not poll or fetch logs after a create error")
+	}
+}
+
+func TestDebugNodeDmesgTool_PolicyDenied(t *testing.T) {
+	defer withK8sPolicyEnforcer(newDenyK8sWriteEnforcer(t))()
+	kubectlCalled := false
+	orig := runKubectl
+	runKubectl = func(context.Context, string, ...string) (string, error) {
+		kubectlCalled = true
+		return "", nil
+	}
+	defer func() { runKubectl = orig }()
+
+	ctx := newK8sTestContext()
+	_, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err == nil {
+		t.Fatal("debugNodeDmesgTool() expected error when write policy denies")
+	}
+	if !strings.Contains(err.Error(), "policy denied") {
+		t.Errorf("debugNodeDmesgTool() error = %v, want 'policy denied'", err)
+	}
+	if kubectlCalled {
+		t.Error("debugNodeDmesgTool() called kubectl despite pre-execution policy denial")
+	}
+}
+
+func TestDebugNodeDmesgTool_BlastRadiusDenied(t *testing.T) {
+	// internal/policy/engine.go:328 gates the max_pods_affected condition on
+	// `> 0`, so max_pods_affected: 0 is treated as "unset" (no limit), not
+	// "deny anything" — and this tool's real create step always affects
+	// exactly 1 pod, so there is no valid *real* threshold below that to
+	// trigger a denial. To still exercise the post-exec wiring (that
+	// checkK8sPolicyResult runs against the create step's raw output, before
+	// polling/logs proceed), use an active threshold (max=1) against a mock
+	// create-output containing two "created" lines — this is an honest test
+	// of the plumbing even though a real debug_node_dmesg call never affects
+	// more than one pod.
+	defer withK8sPolicyEnforcer(newK8sWriteBlastRadiusEnforcer(t, 1))()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":  {out: "pod/debug-node-dmesg-worker-1-12345 created\npod/unexpected-extra created\n"},
+		"delete": {out: `pod "debug-node-dmesg-worker-1-12345" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	_, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err == nil {
+		t.Fatal("debugNodeDmesgTool() expected error when blast-radius post-exec check (2 > 1) fires")
+	}
+	if !strings.Contains(err.Error(), "policy denied after execution") {
+		t.Errorf("debugNodeDmesgTool() error = %v, want 'policy denied after execution'", err)
+	}
+	if !calledWith(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete after blast-radius denial — debug pod not cleaned up")
+	}
+	if calledWith(*calls, "get") || calledWith(*calls, "logs") {
+		t.Error("debugNodeDmesgTool() should not poll or fetch logs after a post-create policy denial")
 	}
 }

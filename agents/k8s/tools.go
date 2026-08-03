@@ -897,10 +897,10 @@ func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
 
 // DeletePodArgs defines arguments for the delete_pod tool.
 type DeletePodArgs struct {
-	Context          string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
-	Namespace        string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the pod."`
-	PodName          string `json:"pod_name" jsonschema:"required,The exact pod name to delete. Use get_pods to find the name."`
-	GracePeriodSeconds int  `json:"grace_period_seconds,omitempty" jsonschema:"Seconds for graceful termination (default: pod's terminationGracePeriodSeconds). Use 0 for immediate deletion."`
+	Context            string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace          string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the pod."`
+	PodName            string `json:"pod_name" jsonschema:"required,The exact pod name to delete. Use get_pods to find the name."`
+	GracePeriodSeconds int    `json:"grace_period_seconds,omitempty" jsonschema:"Seconds for graceful termination (default: pod's terminationGracePeriodSeconds). Use 0 for immediate deletion."`
 }
 
 func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, error) {
@@ -1212,6 +1212,166 @@ func getNodeStatusTool(ctx tool.Context, args GetNodeStatusArgs) (GetNodeStatusR
 	return getNodeStatusImpl(ctx, args)
 }
 
+const (
+	// debugPodNamespace is the fixed namespace debug_node_dmesg (and any future
+	// node-debug tool built on runNodeDebugCommand) creates its debug pod in.
+	debugPodNamespace = "default"
+	// defaultDmesgLines/maxDmesgLines bound the dmesg tail requested per call —
+	// dmesg on a busy node can be huge, and the tool's caller controls only the
+	// line count, never the underlying command.
+	defaultDmesgLines = 200
+	maxDmesgLines     = 2000
+)
+
+// DebugNodeDmesgArgs defines arguments for the debug_node_dmesg tool.
+type DebugNodeDmesgArgs struct {
+	Context  string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	NodeName string `json:"node_name" jsonschema:"required,The exact node name to pull dmesg from. Use get_nodes, get_node_status, or the 'node' field returned by get_pods/describe_pod to find it."`
+	Lines    int    `json:"lines,omitempty" jsonschema:"Number of most recent dmesg lines to return (default 200, max 2000)."`
+}
+
+// resolveDmesgLines applies the default/cap bounds to a caller-supplied line count.
+func resolveDmesgLines(lines int) int {
+	if lines <= 0 {
+		return defaultDmesgLines
+	}
+	if lines > maxDmesgLines {
+		return maxDmesgLines
+	}
+	return lines
+}
+
+// buildDebugPodName derives a deterministic, DNS-label-safe debug pod name for
+// nodeName, with a short time-based suffix so concurrent or retried calls
+// against the same node don't collide.
+func buildDebugPodName(nodeName string) string {
+	safe := strings.ToLower(nodeName)
+	safe = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return '-'
+	}, safe)
+	if len(safe) > 40 {
+		safe = safe[:40]
+	}
+	return fmt.Sprintf("debug-node-dmesg-%s-%d", safe, time.Now().UnixNano()%100000)
+}
+
+// runNodeDebugCommand creates a short-lived debug pod on the given node via
+// `kubectl debug node/<name>`, runs hostCommand chroot'd into the node's
+// filesystem, captures its output, and always deletes the debug pod
+// afterward regardless of outcome. toolName is used for audit logging on the
+// mutating create step. Callers own the actual policy decisions (which
+// action class, which tags) — this helper only handles the kubectl
+// mechanics, so future node-diagnostic tools (e.g. disk usage, memory) can
+// reuse it with their own fixed hostCommand and policy calls.
+//
+// postCreateCheck runs immediately after the create step succeeds, with that
+// step's raw kubectl output (the "pod/x created" confirmation line, not the
+// final captured output) — this is the correct point and payload for a
+// post-execution blast-radius check (see checkK8sPolicyResult /
+// parsePodsAffected, which parses exactly this kind of confirmation line). If
+// postCreateCheck returns an error, runNodeDebugCommand aborts before
+// polling/fetching output and returns that error — the deferred cleanup still
+// runs. Pass nil to skip this check.
+func runNodeDebugCommand(ctx context.Context, kubeContext, toolName, nodeName, hostCommand string, postCreateCheck func(createOutput string) error) (KubectlResult, error) {
+	debugPodName := buildDebugPodName(nodeName)
+
+	// Cleanup is deferred immediately, before anything else can fail. It is
+	// idempotent (--ignore-not-found) and safe to run even if create never
+	// succeeded, guaranteeing no privileged debug pod is ever leaked.
+	defer func() {
+		_, _ = runKubectl(context.WithoutCancel(ctx), kubeContext,
+			"delete", "pod", debugPodName, "-n", debugPodNamespace,
+			"--ignore-not-found", "--wait=false")
+	}()
+
+	createOutput, err := runKubectlWithToolName(ctx, kubeContext, toolName,
+		"debug", "node/"+nodeName,
+		"--image=busybox:1.36",
+		"--profile=legacy",
+		"--attach=false",
+		"--quiet",
+		"-n", debugPodNamespace,
+		"--name="+debugPodName,
+		"--", "chroot", "/host", "sh", "-c", hostCommand,
+	)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
+	}
+
+	if postCreateCheck != nil {
+		if err := postCreateCheck(createOutput); err != nil {
+			return KubectlResult{}, err
+		}
+	}
+
+	// Poll until the debug pod leaves Pending.
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			out, err := runKubectl(ctx, kubeContext, "get", "pod", debugPodName,
+				"-n", debugPodNamespace, "-o", "jsonpath={.status.phase}")
+			phase := strings.TrimSpace(out)
+			return err == nil && (phase == "Running" || phase == "Succeeded"), nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, toolName, attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	if !resolved {
+		if toolAuditor != nil {
+			toolAuditor.RecordToolVerification(ctx, toolName, "warning")
+		}
+		return KubectlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION WARNING: debug pod %q on node %q did not become Running/Succeeded after %d check(s).\n\n"+
+					"--- Create result ---\n%s",
+				debugPodName, nodeName, attempts, createOutput),
+			VerifyStatus: "warning",
+			RetryCount:   retryCount,
+		}, nil
+	}
+
+	logs, err := runKubectl(ctx, kubeContext, "logs", debugPodName, "-n", debugPodNamespace)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR fetching output: %v", err)}, nil
+	}
+	if strings.TrimSpace(logs) == "" {
+		return KubectlResult{Output: "No output captured.", VerifyStatus: "ok", RetryCount: retryCount}, nil
+	}
+	return KubectlResult{Output: logs, VerifyStatus: "ok", RetryCount: retryCount}, nil
+}
+
+func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {
+	kubeContext := resolveContext(args.Context)
+	lines := resolveDmesgLines(args.Lines)
+
+	if err := checkK8sPolicy(ctx, args.NodeName, policy.ActionWrite, nil); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	postCreateCheck := func(createOutput string) error {
+		if postErr := checkK8sPolicyResult(ctx, args.NodeName, policy.ActionWrite, nil, createOutput, nil); postErr != nil {
+			return fmt.Errorf("policy denied after execution: %w", postErr)
+		}
+		return nil
+	}
+
+	return runNodeDebugCommand(ctx, kubeContext, "debug_node_dmesg", args.NodeName,
+		fmt.Sprintf("dmesg 2>&1 | tail -n %d", lines), postCreateCheck)
+}
+
+func debugNodeDmesgTool(ctx tool.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {
+	return debugNodeDmesgImpl(ctx, args)
+}
+
 // k8sArgsToStruct converts a map[string]any to a typed struct via JSON round-trip.
 func k8sArgsToStruct[T any](args map[string]any) (T, error) {
 	var zero T
@@ -1354,6 +1514,18 @@ func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := deletePodImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("debug_node_dmesg", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[DebugNodeDmesgArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := debugNodeDmesgImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}
