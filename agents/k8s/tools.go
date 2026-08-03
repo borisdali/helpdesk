@@ -1241,21 +1241,52 @@ func resolveDmesgLines(lines int) int {
 	return lines
 }
 
-// buildDebugPodName derives a deterministic, DNS-label-safe debug pod name for
-// nodeName, with a short time-based suffix so concurrent or retried calls
-// against the same node don't collide.
-func buildDebugPodName(nodeName string) string {
-	safe := strings.ToLower(nodeName)
-	safe = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		return '-'
-	}, safe)
-	if len(safe) > 40 {
-		safe = safe[:40]
+// debugPodNamePrefix returns the name prefix kubectl assigns to the pod
+// created by `kubectl debug node/<nodeName>`. Verified against kubectl
+// v1.32.2: there is no --name flag for this command (--copy-to exists but is
+// pod-copy-only, not applicable to node targets), so kubectl always
+// auto-generates a name of the form node-debugger-<node>-<random-suffix>
+// (e.g. "node-debugger-minikube-4gstw"). nodeName is used as-is, not
+// sanitized — K8s node names are already-validated RFC1123 DNS labels, and
+// this must match exactly what kubectl itself derives the prefix from.
+func debugPodNamePrefix(nodeName string) string {
+	return "node-debugger-" + nodeName + "-"
+}
+
+// listPodNamesByPrefix lists pod names in namespace whose name starts with
+// prefix, in ascending creation-time order (oldest first). Used both to
+// discover the pod kubectl debug just created (take the last/newest entry)
+// and to sweep every matching pod for cleanup.
+func listPodNamesByPrefix(ctx context.Context, kubeContext, namespace, prefix string) ([]string, error) {
+	out, err := runKubectl(ctx, kubeContext, "get", "pods", "-n", namespace,
+		"-o", "name", "--sort-by=.metadata.creationTimestamp")
+	if err != nil {
+		return nil, err
 	}
-	return fmt.Sprintf("debug-node-dmesg-%s-%d", safe, time.Now().UnixNano()%100000)
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		name := strings.TrimPrefix(strings.TrimSpace(line), "pod/")
+		if name != "" && strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// deleteDebugPodsByPrefix deletes every pod in debugPodNamespace whose name
+// starts with prefix. Used for the deferred cleanup in runNodeDebugCommand:
+// since kubectl assigns the debug pod's name itself (see
+// debugPodNamePrefix), cleanup sweeps by the known naming convention rather
+// than an exact name — which also mops up anything orphaned by a previous
+// failed run for this node. Errors are swallowed (best-effort, mirrors the
+// original single-name --ignore-not-found delete this replaces).
+func deleteDebugPodsByPrefix(ctx context.Context, kubeContext, prefix string) {
+	names, err := listPodNamesByPrefix(ctx, kubeContext, debugPodNamespace, prefix)
+	if err != nil || len(names) == 0 {
+		return
+	}
+	args := append([]string{"delete", "pod", "-n", debugPodNamespace, "--ignore-not-found", "--wait=false"}, names...)
+	_, _ = runKubectl(ctx, kubeContext, args...)
 }
 
 // runNodeDebugCommand creates a short-lived debug pod on the given node via
@@ -1267,45 +1298,57 @@ func buildDebugPodName(nodeName string) string {
 // mechanics, so future node-diagnostic tools (e.g. disk usage, memory) can
 // reuse it with their own fixed hostCommand and policy calls.
 //
-// postCreateCheck runs immediately after the create step succeeds, with that
-// step's raw kubectl output (the "pod/x created" confirmation line, not the
-// final captured output) — this is the correct point and payload for a
-// post-execution blast-radius check (see checkK8sPolicyResult /
-// parsePodsAffected, which parses exactly this kind of confirmation line). If
-// postCreateCheck returns an error, runNodeDebugCommand aborts before
-// polling/fetching output and returns that error — the deferred cleanup still
-// runs. Pass nil to skip this check.
-func runNodeDebugCommand(ctx context.Context, kubeContext, toolName, nodeName, hostCommand string, postCreateCheck func(createOutput string) error) (KubectlResult, error) {
-	debugPodName := buildDebugPodName(nodeName)
+// The debug pod's name is not caller-controlled — verified against kubectl
+// v1.32.2, `kubectl debug node/X` has no --name flag — so this discovers the
+// name kubectl assigned via a list+prefix-filter immediately after create
+// (kubectl's create call is synchronous against the API server, so the pod
+// object already exists by the time it returns) rather than parsing
+// kubectl's human-readable "Creating debugging pod X ..." status line, whose
+// exact wording is not a stable contract.
+//
+// --profile=general (kubectl's suggested replacement for the now-deprecated
+// --profile=legacy) was tried and rejected: `dmesg` inside the chroot fails
+// with "Operation not permitted" under that profile — it lacks the
+// kernel-log-read capability this tool needs. --profile=sysadmin grants it
+// and is not deprecated.
+//
+// Callers must do their own blast-radius accounting before calling this —
+// deliberately not attempted here from the create step's output. kubectl's
+// real message ("Creating debugging pod X with container Y on node Z.")
+// does not end in " created" the way parsePodsAffected's suffix heuristic
+// expects, so text-based detection would silently read PodsAffected=0 for
+// every call. Since `kubectl debug node/X` always creates exactly one pod —
+// a known constant of the operation, not something that varies per call —
+// callers should check blast radius pre-execution with that literal 1
+// (see checkK8sBlastRadiusPreExec), not attempt to parse it from output here.
+func runNodeDebugCommand(ctx context.Context, kubeContext, toolName, nodeName, hostCommand string) (KubectlResult, error) {
+	prefix := debugPodNamePrefix(nodeName)
 
-	// Cleanup is deferred immediately, before anything else can fail. It is
-	// idempotent (--ignore-not-found) and safe to run even if create never
-	// succeeded, guaranteeing no privileged debug pod is ever leaked.
-	defer func() {
-		_, _ = runKubectl(context.WithoutCancel(ctx), kubeContext,
-			"delete", "pod", debugPodName, "-n", debugPodNamespace,
-			"--ignore-not-found", "--wait=false")
-	}()
+	// Cleanup is deferred immediately, before anything else can fail. It's a
+	// prefix sweep, not a single named delete, so it doesn't depend on ever
+	// successfully discovering the pod's exact name — it cleans up
+	// regardless of where in the sequence something goes wrong.
+	defer deleteDebugPodsByPrefix(context.WithoutCancel(ctx), kubeContext, prefix)
 
 	createOutput, err := runKubectlWithToolName(ctx, kubeContext, toolName,
 		"debug", "node/"+nodeName,
 		"--image=busybox:1.36",
-		"--profile=legacy",
+		"--profile=sysadmin",
 		"--attach=false",
-		"--quiet",
 		"-n", debugPodNamespace,
-		"--name="+debugPodName,
 		"--", "chroot", "/host", "sh", "-c", hostCommand,
 	)
 	if err != nil {
 		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
 	}
 
-	if postCreateCheck != nil {
-		if err := postCreateCheck(createOutput); err != nil {
-			return KubectlResult{}, err
-		}
+	matches, err := listPodNamesByPrefix(ctx, kubeContext, debugPodNamespace, prefix)
+	if err != nil || len(matches) == 0 {
+		return KubectlResult{Output: fmt.Sprintf(
+			"ERROR: created debug pod but could not identify it (list error: %v).\n\n--- Create result ---\n%s",
+			err, createOutput)}, nil
 	}
+	debugPodName := matches[len(matches)-1] // newest, per ascending creation-time sort
 
 	// Poll until the debug pod leaves Pending.
 	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
@@ -1357,15 +1400,24 @@ func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlRe
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
-	postCreateCheck := func(createOutput string) error {
-		if postErr := checkK8sPolicyResult(ctx, args.NodeName, policy.ActionWrite, nil, createOutput, nil); postErr != nil {
-			return fmt.Errorf("policy denied after execution: %w", postErr)
-		}
-		return nil
+	// Blast radius is a known constant (1) for this operation — see
+	// runNodeDebugCommand's doc comment for why this is checked
+	// pre-execution with a literal 1 rather than parsed from output.
+	//
+	// NOTE: internal/policy/engine.go:328 gates the max_pods_affected
+	// condition on `> 0`, treating max_pods_affected: 0 as "unset" (no
+	// limit) rather than "deny anything". Since this call's PodsAffected is
+	// always exactly 1, no valid threshold can ever satisfy `1 > N` for
+	// N >= 1 either — so as currently implemented, no policy can actually
+	// deny this call via max_pods_affected. This check is kept for
+	// consistency with other mutating k8s tools and in case the engine's
+	// zero-semantics are fixed later; it is not currently enforceable.
+	if err := checkK8sBlastRadiusPreExec(ctx, args.NodeName, policy.ActionWrite, nil, 1); err != nil {
+		return KubectlResult{}, fmt.Errorf("blast radius check denied: %w", err)
 	}
 
 	return runNodeDebugCommand(ctx, kubeContext, "debug_node_dmesg", args.NodeName,
-		fmt.Sprintf("dmesg 2>&1 | tail -n %d", lines), postCreateCheck)
+		fmt.Sprintf("dmesg 2>&1 | tail -n %d", lines))
 }
 
 func debugNodeDmesgTool(ctx tool.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {

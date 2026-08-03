@@ -116,10 +116,11 @@ func TestK8sDirectRegistry_ToolCallable(t *testing.T) {
 func TestK8sDirectRegistry_DebugNodeDmesgCallable(t *testing.T) {
 	defer withZeroVerifyConfig()()
 	_, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
-		"debug":  {out: `pod/debug-node-dmesg-worker-1-12345 created` + "\n"},
-		"get":    {out: "Running"},
-		"logs":   {out: "kernel log line\n"},
-		"delete": {out: `pod "debug-node-dmesg-worker-1-12345" deleted` + "\n"},
+		"debug":    {out: "Creating debugging pod node-debugger-worker-1-abc12 with container debugger on node worker-1.\n"},
+		"get pods": {out: "pod/node-debugger-worker-1-abc12\n"},
+		"get pod":  {out: "Running"},
+		"logs":     {out: "kernel log line\n"},
+		"delete":   {out: `pod "node-debugger-worker-1-abc12" deleted` + "\n"},
 	})
 	defer cleanup()
 

@@ -352,6 +352,7 @@ All tools accept `context` (kubeconfig context name; defaults to current context
 | `scale_deployment` | `namespace` (required), `deployment_name` (required), `replicas` (required) | Scale a deployment — **destructive** |
 | `restart_deployment` | `namespace` (required), `deployment_name` (required) | Rolling restart — **destructive** |
 | `delete_pod` | `namespace` (required), `pod_name` (required) | Delete a pod — **destructive** |
+| `debug_node_dmesg` | `node_name` (required), `lines` | Pull the kernel ring buffer from a worker node via a short-lived debug pod (auto-cleaned up) — **write** |
 
 ---
 

@@ -14,11 +14,11 @@ architecture see [here](AIGOVERNANCE.md). For AI Governance Policy Engine's
 decision history see [here](GOVEXPLAIN.md).
 For AI Governance Compliance sub-module see [here](COMPLIANCE.md).
 
-> **Important:** The three database-agent mutation tools and three K8s-agent mutation tools
+> **Important:** The three database-agent mutation tools and four K8s-agent mutation tools
 > documented here are presented solely for the purpose of testing aiHelpDesk
 > AI Governance features.
 >
-> Specifically and crucially, **these six tools are not ready for PROD use yet!!!**
+> Specifically and crucially, **these seven tools are not ready for PROD use yet!!!**
 >
 > Please wait until we are fully comfortable with the AI Governance module
 > to release these — and many more — mutation tools to you.
@@ -31,8 +31,8 @@ databases or your infra.
 
 1. [Tools](#1-tools)
    - [Database agent (1.1–1.4)](#database-agent)
-   - [Kubernetes agent (1.5–1.8)](#kubernetes-agent)
-   - [SysAdmin agent (1.9–1.10)](#sysadmin-agent)
+   - [Kubernetes agent (1.5–1.9)](#kubernetes-agent)
+   - [SysAdmin agent (1.10–1.11)](#sysadmin-agent)
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm-process)
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
 4. [Safeguards and Automatic Recovery](#4-safeguards-and-automatic-recovery)
@@ -286,13 +286,81 @@ touching running pods.
 
 ---
 
+#### 1.9 `debug_node_dmesg` — worker-node kernel log pull
+
+**Action class**: `write` (policy pre-check + pre-execution blast-radius check)
+
+```
+context     string   optional
+node_name   string   required — exact node name; use get_nodes, get_node_status,
+                      or the 'node' field from get_pods/describe_pod
+lines       int      optional — most recent dmesg lines to return (default 200, max 2000)
+```
+
+The only tool in the K8s agent that can reach a worker node's OS-level logs —
+every other K8s tool operates on Kubernetes API objects (pods, deployments,
+services), not the node's own kernel state. Runs
+`kubectl debug node/<name> --image=busybox:1.36 --profile=sysadmin
+--attach=false -- chroot /host sh -c "dmesg | tail -n <lines>"`, which creates
+a short-lived, privileged pod running in the node's host namespaces with the
+node's filesystem mounted at `/host`. Use when node-level pressure
+(`MemoryPressure`/`DiskPressure` from `get_node_status`, or node warnings from
+`get_events`) can't be explained by pod/container-level tools — e.g. a pod was
+evicted or OOM-killed not because of its own memory limit but because
+something else on the node exhausted memory (a "noisy neighbor").
+
+Unlike the other three K8s mutation tools, this one is diagnostic, not
+remedial — its only side effect is the debug pod itself, which the tool
+always deletes before returning.
+
+**Execution sequence**:
+
+1. Policy pre-check (`ActionWrite`) — may trigger approval workflow
+2. Pre-execution blast-radius check with a hardcoded `PodsAffected: 1` — see
+   note below on why this isn't derived from kubectl's output the way the
+   other three K8s tools' post-execution checks are
+3. Execute `kubectl debug node/<name> ...` to create the debug pod (no
+   `--name` flag exists for this kubectl subcommand — verified against
+   kubectl v1.32.2 — so the pod name is not caller-chosen)
+4. Discover the pod name kubectl assigned (`node-debugger-<node>-<random>`)
+   via `kubectl get pods -o name --sort-by=.metadata.creationTimestamp`,
+   filtered by that prefix, taking the newest match
+5. **Level 2 safeguard + automatic recovery**: poll `kubectl get pod <name>
+   -o jsonpath={.status.phase}` until `Running`/`Succeeded`. Re-poll on the
+   same `WaitUntilResolved` loop as the other K8s tools; returns
+   `VERIFICATION WARNING` only after all attempts exhausted. See
+   [§4](#4-safeguards-and-automatic-recovery).
+6. Fetch output via `kubectl logs <name>`
+7. **Always** delete every pod matching the `node-debugger-<node>-` prefix in
+   the `default` namespace (a sweep, not a single named delete — see below),
+   regardless of which step above succeeded or failed
+8. Return kubectl output to the orchestrator
+
+**Why blast radius is checked pre-execution with a hardcoded count, not
+parsed from output**: `kubectl debug node/X`'s real create-step output is
+human-readable prose — `"Creating debugging pod X with container Y on node
+Z."` — which does not end in `" created"` the way the blast-radius parser
+(`parsePodsAffected`) expects for the other three K8s tools' `kubectl
+delete`/`rollout restart`/`scale` output. Since this operation always
+creates exactly one pod (a known constant, not something that varies per
+call), the count is passed directly rather than parsed from a string that
+was never going to match.
+
+**Why cleanup is a prefix sweep, not a delete of one caller-known name**:
+because there's no `--name` flag, the pod's name is only known after the
+fact — but the sweep runs from a `defer` registered before the create step
+even executes, so it still fires unconditionally on every exit path (create
+failure, discovery failure, verification timeout, logs-fetch failure,
+policy denial, success). As a side effect it also cleans up anything
+orphaned by a previous failed run for the same node.
+
 ---
 
 ### SysAdmin agent
 
 The SysAdmin agent operates at the OS and container-runtime level. Its two mutation tools restart a database process rather than operating on data. The severity is different from database mutations — a restart is recoverable and leaves data intact — but the policy and audit enforcement is identical. See [SYSADMIN_AGENT.md](SYSADMIN_AGENT.md) for the agent's full documentation including the server ID resolution model and the remediation permission tiers.
 
-#### 1.9 `restart_container` — container restart
+#### 1.10 `restart_container` — container restart
 
 **Action class**: `destructive` (policy pre-check, full audit record)
 
@@ -316,7 +384,7 @@ Calls `docker restart <container_name>` (or `podman restart`) for the container 
 
 ---
 
-#### 1.10 `restart_service` — systemd service restart
+#### 1.11 `restart_service` — systemd service restart
 
 **Action class**: `destructive` (policy pre-check, full audit record)
 
@@ -328,11 +396,11 @@ Calls `systemctl restart <systemd_unit>` for the systemd unit associated with th
 
 Applies only to hosts where the database runs directly under systemd (not containerised). If the server's `host` block has `container_runtime` set, this tool returns an error — use `restart_container` instead.
 
-**Execution sequence**: identical to `restart_container` (§1.9) with `systemctl restart` substituted for `docker restart`. The same safeguards, policy pre-check, audit recording, and `auto_remediation_eligible` flag apply.
+**Execution sequence**: identical to `restart_container` (§1.10) with `systemctl restart` substituted for `docker restart`. The same safeguards, policy pre-check, audit recording, and `auto_remediation_eligible` flag apply.
 
 ---
 
-## 1.11 Rollback capability per tool
+## 1.12 Rollback capability per tool
 
 Every mutation tool captures state before it executes so the operation can be reversed via the rollback API. Reversibility depends on the tool. Here are a few examples:
 
@@ -341,6 +409,7 @@ Every mutation tool captures state before it executes so the operation can be re
 | `scale_deployment` | **Yes** | Captures `previous_replicas` before scaling; inverse = scale back |
 | `delete_pod` | **Partial** | Pod is recreated by the controller automatically; rollback plan is informational |
 | `restart_deployment` | **No** | Already happened; image rollback is a separate deployment concern |
+| `debug_node_dmesg` | **N/A** | Self-cleaning diagnostic action — the debug pod it creates is deleted automatically before the tool returns; no persistent state change to roll back |
 | `cancel_query` | **No** | Query cancellation is instantaneous; `get_session_info` pre-flight surfaces cost before execution |
 | `terminate_connection` | **No** | Connection closure is irreversible; `get_session_info` pre-flight surfaces cost before execution |
 | `terminate_idle_connections` | **No** | Same as above — pre-flight assessment is the control |
@@ -555,6 +624,7 @@ Level 2.
 | `delete_pod` | kubectl exits non-zero | error text propagated |
 | `restart_deployment` | kubectl exits non-zero | error text propagated |
 | `scale_deployment` | kubectl exits non-zero | error text propagated |
+| `debug_node_dmesg` | `kubectl debug` create step exits non-zero | error text propagated |
 
 Level 1 failures are **not retried** — a `false` return from
 `pg_cancel_backend` indicates the backend is already gone or the role lacks
@@ -572,6 +642,7 @@ confirm the mutation took effect:
 | `delete_pod` | `kubectl get pod <name> -n <ns>` | command exits non-zero (not found) |
 | `restart_deployment` | `kubectl get deployment <name> -o jsonpath={.spec.template.metadata.annotations}` | output contains `restartedAt` |
 | `scale_deployment` | `kubectl get deployment <name> -o jsonpath={.spec.replicas}` | value matches requested count |
+| `debug_node_dmesg` | `kubectl get pod <discovered-name> -o jsonpath={.status.phase}` | phase is `Running` or `Succeeded` |
 
 ### Automatic recovery: `WaitUntilResolved`
 
@@ -647,6 +718,7 @@ is an annotation for observability.
 | `delete_pod` | Pod stuck in `Terminating` (finalizer blocking) | Re-poll `kubectl get pod` until not found | `"warning"` | `kubectl delete pod --force --grace-period=0` + `kubectl patch` to remove finalizers |
 | `restart_deployment` | `restartedAt` annotation missing (API lag) | Re-poll deployment annotations | `"warning"` | `kubectl rollout status deployment/<name>` |
 | `scale_deployment` | `spec.replicas` mismatch (controller lag) | Re-apply `kubectl scale` (idempotent; existing approval covers retry), then re-poll | `"failed"` | `kubectl get deployment <name>` |
+| `debug_node_dmesg` | Debug pod stuck in `Pending` (image pull delay, scheduling) | Re-poll pod phase | `"warning"` | `kubectl describe pod <name> -n default` to inspect why scheduling is stalled; the pod is still cleaned up automatically regardless |
 
 ### Audit trail for retries
 
@@ -806,12 +878,30 @@ buffered channel and assert on the JSON structure.
 | `TestScaleDeploymentTool_ScaleToZero` | `--replicas=0` accepted and passed through |
 | `TestScaleDeploymentTool_Failure` | kubectl not-found error propagated |
 | `TestScaleDeploymentTool_PolicyDenied` | Pre-check denial blocks kubectl execution |
+| `TestDebugNodeDmesgTool_Success` | Full sequence (create → discover → poll → logs → cleanup) returns dmesg output, `VerifyStatus:"ok"` |
+| `TestDebugNodeDmesgTool_CommandConstruction` | Exact kubectl args for every step — `--profile=sysadmin`, `-n default`, `tail -n N` substitution, no `--name=` (regression guard — kubectl v1.32.2 has no such flag for `debug node/X`) — and the discovered pod name threads consistently through poll/logs/delete |
+| `TestDebugNodeDmesgTool_PodNeverReady` | Poll never leaves `Pending` → `VerifyStatus:"warning"`, delete still called, logs never fetched |
+| `TestDebugNodeDmesgTool_CleanupOnLogsError` | `logs` call errors after successful poll → error surfaces in output, delete still called |
+| `TestDebugNodeDmesgTool_CleanupOnCreateError` | `debug` create step itself fails → the cleanup *sweep* still runs and removes a simulated orphaned pod from a previous failed run |
+| `TestDebugNodeDmesgTool_PolicyDenied` | Pre-check denial blocks kubectl execution entirely |
 
 Tests use `withMockKubectlSequence` (a sequential mock that returns a different
 response per successive `runKubectl` call — mutation call first, verification
 call second) and `withK8sPolicyEnforcer` / `newDenyK8sDestructiveEnforcer` for
 policy fixture setup. The older `withMockKubectl` single-response helper is still
 used for error and denial tests that don't reach the verification step.
+`debug_node_dmesg`'s tests use `withKeyedMockKubectl` instead, keyed on the
+kubectl subcommand (`"get pods"` vs `"get pod"` are distinguished, since this
+tool issues both a list call for pod discovery/cleanup and a singular get for
+the status poll) — see `agents/k8s/tools_test.go` for details. There is
+deliberately no `TestDebugNodeDmesgTool_BlastRadiusDenied`: this tool checks
+blast radius pre-execution with a hardcoded `PodsAffected: 1` (see
+[§1.9](#19-debug_node_dmesg--worker-node-kernel-log-pull)), and
+`internal/policy/engine.go`'s `max_pods_affected` condition is gated on `> 0`
+— `max_pods_affected: 0` is treated as "unset", not "deny anything" — so no
+valid threshold can ever deny a call whose count is always exactly `1`. This
+is a pre-existing policy-engine limitation, not something introduced or fixed
+by this tool.
 
 #### 1c: Post-execution verification safeguards
 
