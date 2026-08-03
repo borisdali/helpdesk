@@ -1,12 +1,13 @@
 # aiHelpDesk Sample#14 (on Docker): Demo on legacy i386 platforms
 
-Please skip this sample page if you run on modern 64-bit platforms. But if you have the old 32-bit and it's not capable of running 64-bit apps natively, consider this walkaround of using the QEMU emulator.
+Please skip this sample page if you run on modern 64-bit platforms. But if your *only option* the old 32-bit one and it's not capable of running 64-bit apps natively, consider this walkaround of using the QEMU emulator.
 
-First things first though, [here](../../deploy/docker-compose/DEMO.md) is the official doc for our 10 minutes demo and [here](SAMPLE013.md) is the sample commands that show what comes out when you run it.
+First things first though, [here](../../deploy/docker-compose/DEMO.md) is the official doc for our 10 minutes demo and [here](SAMPLE013.md) is the sample commands that show what comes out when you run it. This is the recommended and tested route.
 
-If i386 is your only option, these notes may help (but also please reach out to us and we can help with the private i386 image):
+If i386 is your only option, these notes may help (but also please reach out to us and we can help with the i386 image with more generous context timeout thresholds that are likely needed for slow HW/emulation):
 
-This particular test was conducted on old 32-bit i386 machine hosting Debian 12:
+This particular test was conducted on the old 32-bit i386 machine hosting Debian 12:
+
 ```
 boris@ ~/helpdesk/deploy/docker-compose$ dpkg --print-architecture
 i386
