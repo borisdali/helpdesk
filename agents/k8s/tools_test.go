@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
@@ -1466,6 +1467,71 @@ func TestGetNodeStatus_MemoryPressure_IncludesMessage(t *testing.T) {
 // debugNodeDmesgTool
 // =============================================================================
 
+func TestResolveDmesgLines(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines int
+		want  int
+	}{
+		{"unset defaults to 200", 0, defaultDmesgLines},
+		{"negative defaults to 200", -5, defaultDmesgLines},
+		{"under cap passes through", 500, 500},
+		{"exactly at cap passes through", maxDmesgLines, maxDmesgLines},
+		{"over cap clamps to 2000", 5000, maxDmesgLines},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveDmesgLines(tt.lines); got != tt.want {
+				t.Errorf("resolveDmesgLines(%d) = %d, want %d", tt.lines, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildDebugPodName(t *testing.T) {
+	tests := []struct {
+		name     string
+		nodeName string
+		wantHas  string // substring the result must contain
+	}{
+		{"simple name lowercased", "Worker-1", "debug-node-dmesg-worker-1-"},
+		{"dotted cloud-style node name sanitized", "ip-10-0-1-2.ec2.internal", "debug-node-dmesg-ip-10-0-1-2-ec2-internal-"},
+		{"underscores and spaces sanitized", "my_node name", "debug-node-dmesg-my-node-name-"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildDebugPodName(tt.nodeName)
+			if !strings.HasPrefix(got, tt.wantHas) {
+				t.Errorf("buildDebugPodName(%q) = %q, want prefix %q", tt.nodeName, got, tt.wantHas)
+			}
+			for _, r := range got {
+				if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+					t.Errorf("buildDebugPodName(%q) = %q contains invalid DNS-label character %q", tt.nodeName, got, r)
+				}
+			}
+		})
+	}
+
+	t.Run("long node name truncated to 40 chars before suffix", func(t *testing.T) {
+		longName := strings.Repeat("a", 80)
+		got := buildDebugPodName(longName)
+		// "debug-node-dmesg-" (18) + 40 sanitized chars + "-" + numeric suffix.
+		prefix := "debug-node-dmesg-" + strings.Repeat("a", 40) + "-"
+		if !strings.HasPrefix(got, prefix) {
+			t.Errorf("buildDebugPodName(80-char name) = %q, want prefix %q (40-char truncation)", got, prefix)
+		}
+	})
+
+	t.Run("suffix varies to avoid collisions on repeated calls", func(t *testing.T) {
+		a := buildDebugPodName("worker-1")
+		time.Sleep(time.Millisecond) // ensure UnixNano() advances past the modulo window
+		b := buildDebugPodName("worker-1")
+		if a == b {
+			t.Errorf("buildDebugPodName called twice for the same node produced identical names: %q", a)
+		}
+	})
+}
+
 // withKeyedMockKubectl replaces runKubectl with a mock keyed by the first
 // argument (the kubectl subcommand: "debug", "get", "logs", "delete"),
 // recording every call's full args slice. Unlike withMockKubectlSequence,
@@ -1498,6 +1564,17 @@ func calledWith(calls [][]string, subcommand string) bool {
 	return false
 }
 
+// firstCallArgs returns the full args slice of the first recorded call whose
+// first arg equals subcommand, or nil if none is found.
+func firstCallArgs(calls [][]string, subcommand string) []string {
+	for _, c := range calls {
+		if len(c) > 0 && c[0] == subcommand {
+			return c
+		}
+	}
+	return nil
+}
+
 func TestDebugNodeDmesgTool_Success(t *testing.T) {
 	defer withZeroVerifyConfig()()
 	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
@@ -1521,6 +1598,75 @@ func TestDebugNodeDmesgTool_Success(t *testing.T) {
 	}
 	if !calledWith(*calls, "delete") {
 		t.Error("debugNodeDmesgTool() did not call delete — debug pod not cleaned up")
+	}
+}
+
+// TestDebugNodeDmesgTool_CommandConstruction inspects the exact kubectl args
+// built for the create and delete steps — every other test keys mocks by
+// subcommand only and never checks the surrounding flags, so a typo in
+// --profile, --name, -n, or the tail -n N substitution would otherwise go
+// uncaught by any test.
+func TestDebugNodeDmesgTool_CommandConstruction(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":  {out: `pod/debug-node-dmesg-worker-1-12345 created` + "\n"},
+		"get":    {out: "Running"},
+		"logs":   {out: "kernel log line\n"},
+		"delete": {out: `pod "debug-node-dmesg-worker-1-12345" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	if _, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1", Lines: 500}); err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+
+	create := firstCallArgs(*calls, "debug")
+	if create == nil {
+		t.Fatal("no 'debug' call recorded")
+	}
+	createStr := strings.Join(create, " ")
+	wantSubstrings := []string{
+		"node/worker-1",
+		"--image=busybox:1.36",
+		"--profile=legacy",
+		"--attach=false",
+		"-n default",
+		"--name=debug-node-dmesg-worker-1-",
+		"chroot /host sh -c",
+		"tail -n 500",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(createStr, want) {
+			t.Errorf("debug command = %q, want it to contain %q", createStr, want)
+		}
+	}
+
+	del := firstCallArgs(*calls, "delete")
+	if del == nil {
+		t.Fatal("no 'delete' call recorded")
+	}
+	delStr := strings.Join(del, " ")
+	for _, want := range []string{"pod", "-n default", "--ignore-not-found", "--wait=false"} {
+		if !strings.Contains(delStr, want) {
+			t.Errorf("delete command = %q, want it to contain %q", delStr, want)
+		}
+	}
+	// The delete target must be the exact pod name the create step used, not
+	// a re-derived/independently-generated name (which would silently leak
+	// the real debug pod while "cleaning up" a nonexistent one).
+	createPodName := ""
+	for _, a := range create {
+		if strings.HasPrefix(a, "--name=") {
+			createPodName = strings.TrimPrefix(a, "--name=")
+			break
+		}
+	}
+	if createPodName == "" {
+		t.Fatal("could not extract pod name from create command")
+	}
+	if !strings.Contains(delStr, createPodName) {
+		t.Errorf("delete command = %q, want it to target the same pod name %q used in create", delStr, createPodName)
 	}
 }
 
