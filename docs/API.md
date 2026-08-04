@@ -181,9 +181,16 @@ Send a natural-language question to an agent.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `agent` | string | no | `database` (`db`), `k8s`, `sysadmin` (`host`), `incident`, `research`. When omitted the gateway uses LLM routing to select the best agent automatically (requires `HELPDESK_MODEL_VENDOR`/`HELPDESK_MODEL_NAME`/`HELPDESK_API_KEY`). |
+| `agent` | string | no | `database` (`db`), `k8s`, `sysadmin` (`host`), `incident`, `research`. When omitted, the gateway auto-routes the request — see **Automatic routing and playbook selection** below. Setting `agent` explicitly always proxies straight to that agent and skips routing/playbook selection entirely. |
 | `message` | string | yes | The question or instruction (`query` is accepted as an alias) |
 | `context_id` | string | no | Resume an existing agent session. Pass the `context_id` returned by a previous response to continue a multi-turn conversation. Omit (or pass `""`) to start a new session. |
+
+**Automatic routing and playbook selection** (when `agent` is omitted): the gateway tries three tiers, in order, stopping at the first that applies —
+1. **Keyword pre-filter** — the message is matched against the `symptoms` list of every active, `entry_point: true` triage playbook. A strong, unambiguous match (see `matchPlaybookByKeywords` in `cmd/gateway/router.go`) selects that playbook directly, with no LLM call at all.
+2. **LLM routing** — if no keyword match is strong enough, an LLM call picks the best agent for the message (requires `HELPDESK_MODEL_VENDOR`/`HELPDESK_MODEL_NAME`/`HELPDESK_API_KEY`) and may *also* select a playbook from the same candidate list, if the message clearly matches one.
+3. **Direct agent proxy** — if neither tier selects a playbook, the request proxies straight to the LLM-chosen agent, exactly as routing worked before playbook selection existed.
+
+When a playbook is selected (tier 1 or 2), the query runs through that playbook's triage flow (`POST /api/v1/fleet/playbooks/{id}/run` under the hood) with `approval_mode` pinned to `"manual"` — an auto-selected query can never silently authorize a write/destructive tool call. The routing decision (including which playbook, if any, and why) is recorded in the `delegation_decision` audit event.
 
 The response includes `context_id` alongside the agent's reply:
 
@@ -687,6 +694,7 @@ Optional request body:
 | Field | Description |
 |---|---|
 | `connection_string` | PostgreSQL DSN for the target database |
+| `namespace` | Kubernetes namespace for the target — analogous to `connection_string`, for playbooks whose `agent_name` is `k8s_agent`. Forcibly injected into every proposed tool call's args in `agent_approve` mode rather than left to the agent to infer (see [agent_approve execution mode](PLAYBOOKS.md#agent_approve-execution-mode)). |
 | `context` | Free-form operator context: server name, symptoms, log lines, recent changes. Used to evaluate `requires_evidence` patterns. |
 | `context_id` | A2A session ID to resume a multi-turn session |
 | `prior_run_id` | `plr_*` run ID of a prior investigation; its `findings_summary` is injected into the prompt for continuity |

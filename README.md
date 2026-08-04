@@ -128,7 +128,9 @@ aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two gu
 ## Gateway REST API
 
 ```bash
-# Query the system
+# Query the system — omit "agent" to let the gateway auto-route the request
+# (keyword match against playbook symptoms, then LLM routing); see API.md
+# for the full three-tier selection flow.
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{"agent": "database", "message": "What is the server uptime?"}'

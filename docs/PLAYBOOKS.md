@@ -103,7 +103,7 @@ Every Playbook carries two classes of fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `problem_class` | string | `performance` \| `availability` \| `capacity` \| `data_integrity` \| `security` |
-| `symptoms` | []string | Observable indicators that should trigger this Playbook |
+| `symptoms` | []string | Observable indicators that should trigger this Playbook. For `entry_point: true` playbooks, these are also matched against free-text queries to `POST /api/v1/query` (no `agent` specified) for automatic playbook selection — a strong keyword match selects the playbook directly; otherwise an LLM routing call considers the same symptom text. See [API.md](API.md#post-apiv1query). Write symptom text as a human would describe the problem, not as internal jargon — that's what the matcher and the LLM both see. |
 | `guidance` | string | Expert reasoning injected into the planner prompt at run time |
 | `escalation` | []string | Conditions under which the agent must stop and escalate to a human |
 | `related_playbooks` | []string | `pb_*` IDs of related Playbooks |
@@ -825,6 +825,7 @@ Optional request body:
 | Field | Description |
 |---|---|
 | `connection_string` | PostgreSQL DSN for the target database |
+| `namespace` | Kubernetes namespace for the target — analogous to `connection_string`, for playbooks whose `agent_name` is `k8s_agent`. In `agent_approve` mode this value is forcibly injected into every proposed tool call's `args.namespace`, overriding whatever the agent proposes — the target is authoritative from the request, never inferred from free text. |
 | `context` | Free-form operator context (server name, symptoms, recent changes, relevant log lines) |
 | `context_id` | A2A session ID for multi-turn continuity within an existing session |
 | `prior_run_id` | `plr_*` run ID of a previous investigation to continue from (see [Continuity threading](#continuity-threading)) |
@@ -2445,7 +2446,7 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `name` | string | Human-readable name |
 | `description` | string | Planner intent — passed verbatim at run time |
 | `problem_class` | string | `performance` \| `availability` \| `capacity` \| `data_integrity` \| `security` |
-| `symptoms` | []string | Observable indicators that should trigger this Playbook |
+| `symptoms` | []string | Observable indicators that should trigger this Playbook. Used for automatic playbook selection on `entry_point` playbooks — see the field reference above. |
 | `guidance` | string | Expert reasoning injected into the planner prompt |
 | `escalation` | []string | Conditions requiring human escalation |
 | `target_hints` | []string | Tag names or server name patterns for target resolution |
