@@ -64,6 +64,13 @@ type RemediationSpec struct {
 	AgentName string `yaml:"agent_name,omitempty"`
 	// AgentPrompt is the prompt sent to the agent for remediation.
 	AgentPrompt string `yaml:"agent_prompt,omitempty"`
+	// Namespace is the target Kubernetes namespace for k8s-agent playbook
+	// remediation — analogous to a connection string for DB remediation.
+	// Sent as the authoritative namespace on the playbook run request; the
+	// gateway forces it into every tool call's args rather than relying on
+	// the remediation LLM to parse it out of free-text triage findings
+	// (that proved unreliable — see cmd/gateway/step_proposer.go).
+	Namespace string `yaml:"namespace,omitempty"`
 	// VerifySQL is the SQL query run to confirm recovery (default: "SELECT 1").
 	VerifySQL string `yaml:"verify_sql,omitempty"`
 	// VerifyTimeout is the max time to wait for recovery (default: "120s").

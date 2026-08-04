@@ -98,6 +98,7 @@ func toLFFailure(f Failure) faultlib.Failure {
 			PlaybookID:    f.Remediation.PlaybookID,
 			AgentName:     f.Remediation.AgentName,
 			AgentPrompt:   f.Remediation.AgentPrompt,
+			Namespace:     f.Remediation.Namespace,
 			VerifySQL:     f.Remediation.VerifySQL,
 			VerifyTimeout: f.Remediation.VerifyTimeout,
 		},

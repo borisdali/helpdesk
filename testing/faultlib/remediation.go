@@ -110,7 +110,7 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 	var triggerErr error
 	if spec.PlaybookID != "" {
 		method = "playbook"
-		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
+		triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID, spec.Namespace)
 	} else if spec.AgentPrompt != "" {
 		method = "agent_prompt"
 		agentName := spec.AgentName
@@ -194,7 +194,7 @@ func (r *Remediator) resolvePlaybookID(ctx context.Context, seriesID string) (st
 // RunPlaybook resolves seriesID to a versioned playbook_id, POSTs to /run, and
 // returns the raw gateway response. It does NOT handle pending_approval —
 // callers are responsible for driving any approval loop.
-func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID string) (*ApproveRunResponse, error) {
+func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID, namespace string) (*ApproveRunResponse, error) {
 	if r.cfg.GatewayURL == "" {
 		return nil, fmt.Errorf("gateway URL is required for playbook remediation (--gateway)")
 	}
@@ -209,6 +209,9 @@ func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID strin
 		connStr = r.cfg.AgentConnStr
 	}
 	reqBody := map[string]any{"connection_string": connStr}
+	if namespace != "" {
+		reqBody["namespace"] = namespace
+	}
 	if r.cfg.ApprovalMode != "" {
 		reqBody["approval_mode"] = r.cfg.ApprovalMode
 	}
@@ -257,8 +260,8 @@ func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID strin
 
 // triggerPlaybook calls RunPlaybook and drives a headless approval loop
 // (auto-approve all steps) when the run returns pending_approval.
-func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) error {
-	runResp, err := r.RunPlaybook(ctx, seriesID, priorRunID)
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID, namespace string) error {
+	runResp, err := r.RunPlaybook(ctx, seriesID, priorRunID, namespace)
 	if err != nil {
 		return err
 	}

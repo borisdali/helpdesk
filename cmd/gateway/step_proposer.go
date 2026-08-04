@@ -27,23 +27,25 @@ type StepProposal struct {
 }
 
 // stepProposerResult is the raw LLM output before index assignment.
+// Deliberately has no Agent field: the target agent is the playbook's own
+// agent_name, known authoritatively server-side — asking the LLM to also
+// report it just invites a mismatched, misrouted tool call (see proposeNextStep).
 type stepProposerResult struct {
-	Action  string         `json:"action"`  // "execute_step" | "complete"
-	Agent   string         `json:"agent"`
+	Action  string         `json:"action"` // "execute_step" | "complete"
 	Tool    string         `json:"tool"`
 	Args    map[string]any `json:"args"`
 	Reason  string         `json:"reason"`
 	Summary string         `json:"summary"` // when action=complete
 }
 
-const stepProposerPromptTemplate = `You are executing a database remediation playbook step-by-step.
+const stepProposerPromptTemplate = `You are executing a remediation playbook step-by-step.
 
 PLAYBOOK: %s
 GUIDANCE:
 %s
 
 TARGET: %s
-%s
+%s%s
 TOOL CALLS EXECUTED SO FAR (in order):
 %s
 
@@ -59,7 +61,6 @@ Only return action=complete when ALL goals in the guidance have been achieved (i
 Respond with JSON only, no other text:
 {
   "action": "execute_step",
-  "agent": "database",
   "tool": "<tool_name>",
   "args": {},
   "reason": "<one sentence shown to the operator explaining why>"
@@ -73,9 +74,21 @@ OR when done:
 // proposeNextStep calls the planner LLM to propose the single next remediation
 // action given the playbook guidance and history of already-executed steps.
 // Returns (proposal, isDone, summary, error).
-func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connStr, priorFindings string, history []*audit.PlaybookRunStep) (*StepProposal, bool, string, error) {
+func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connStr, namespace, priorFindings string, history []*audit.PlaybookRunStep) (*StepProposal, bool, string, error) {
 	if g.plannerLLM == nil {
 		return nil, false, "", fmt.Errorf("planner LLM not configured")
+	}
+
+	// namespaceSection surfaces the K8s target namespace as an explicit,
+	// authoritative prompt field — analogous to TARGET for connection
+	// strings. This is a secondary defense only: the actual correctness
+	// guarantee is the forced args["namespace"] override applied by the
+	// caller after every proposal (see handlePlaybookRunApprove /
+	// handlePlaybookRunProceed) — free-text FINDINGS parsing alone proved
+	// unreliable even with strongly-worded guidance.
+	namespaceSection := ""
+	if namespace != "" {
+		namespaceSection = fmt.Sprintf("\nNAMESPACE: %s\nALWAYS use this exact namespace for every tool call that takes a namespace argument. Do NOT use \"default\" or guess — this value is authoritative.\n", namespace)
 	}
 
 	priorFindingsSection := ""
@@ -99,6 +112,7 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 		pb.Name,
 		pb.Guidance,
 		connStr,
+		namespaceSection,
 		priorFindingsSection,
 		historyStr,
 		toolCatalog,
@@ -131,15 +145,18 @@ func (g *Gateway) proposeNextStep(ctx context.Context, pb *audit.Playbook, connS
 		actionClass = string(audit.ActionUnknown)
 	}
 	proposal := &StepProposal{
-		Index:       nextIdx,
-		Agent:       result.Agent,
+		Index: nextIdx,
+		// Agent is always the playbook's own resolved target agent (agentName,
+		// computed above from pb.AgentName), never taken from the LLM's
+		// response — the playbook is single-agent-scoped by design, and
+		// trusting a self-reported agent field risks a mismatched tool call
+		// routed to the wrong agent's endpoint (e.g. a k8s tool name sent to
+		// the database agent, which returns a confusing "unknown tool" error).
+		Agent:       agentName,
 		Tool:        result.Tool,
 		Args:        result.Args,
 		Reason:      result.Reason,
 		ActionClass: actionClass,
-	}
-	if proposal.Agent == "" {
-		proposal.Agent = "database"
 	}
 	if proposal.Args == nil {
 		proposal.Args = map[string]any{}

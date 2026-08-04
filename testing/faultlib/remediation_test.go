@@ -119,7 +119,7 @@ func TestTriggerPlaybook_Success(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err != nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_restart", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if gotPath != "/api/v1/fleet/playbooks/pb_restart/run" {
@@ -141,14 +141,14 @@ func TestTriggerPlaybook_ServerError(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err == nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_restart", "", ""); err == nil {
 		t.Error("expected error for 500 response, got nil")
 	}
 }
 
 func TestTriggerPlaybook_NoGateway(t *testing.T) {
 	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
-	if err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err == nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_restart", "", ""); err == nil {
 		t.Error("expected error when GatewayURL is empty, got nil")
 	}
 }
@@ -164,7 +164,7 @@ func TestTriggerPlaybook_SendsXTraceID(t *testing.T) {
 
 	r := newTestRemediator(t, srv.URL)
 	ctx := WithFaultTraceID(context.Background(), "trace-rem01")
-	if err := r.triggerPlaybook(ctx, "pbs_test", ""); err != nil {
+	if err := r.triggerPlaybook(ctx, "pbs_test", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if gotTraceID != "trace-rem01" {
@@ -187,7 +187,7 @@ func TestRunPlaybook_UsesAgentConnStr(t *testing.T) {
 		ConnStr:      "host=primary",
 		AgentConnStr: "host=replica",
 	})
-	if _, err := r.RunPlaybook(context.Background(), "pbs_test", ""); err != nil {
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
 		t.Fatalf("RunPlaybook: %v", err)
 	}
 	if gotBody["connection_string"] != "host=replica" {
@@ -210,11 +210,58 @@ func TestRunPlaybook_FallsBackToConnStr(t *testing.T) {
 		ConnStr:      "host=primary",
 		// AgentConnStr intentionally empty
 	})
-	if _, err := r.RunPlaybook(context.Background(), "pbs_test", ""); err != nil {
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
 		t.Fatalf("RunPlaybook: %v", err)
 	}
 	if gotBody["connection_string"] != "host=primary" {
 		t.Errorf("connection_string = %v, want host=primary (ConnStr fallback)", gotBody["connection_string"])
+	}
+}
+
+// TestRunPlaybook_SendsNamespace verifies namespace flows into the request
+// body when set — the fix for a real bug found via manual verification
+// where K8s remediation had no reliable way to learn its target namespace.
+func TestRunPlaybook_SendsNamespace(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := resolveServer(t, "pb_test", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	})
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "test-key",
+	})
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", "helpdesk-test"); err != nil {
+		t.Fatalf("RunPlaybook: %v", err)
+	}
+	if gotBody["namespace"] != "helpdesk-test" {
+		t.Errorf("namespace = %v, want helpdesk-test", gotBody["namespace"])
+	}
+}
+
+// TestRunPlaybook_OmitsNamespaceWhenEmpty verifies the namespace field is
+// omitted (not sent as "") for DB faults that have no K8s namespace concept.
+func TestRunPlaybook_OmitsNamespaceWhenEmpty(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := resolveServer(t, "pb_test", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	})
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "test-key",
+	})
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
+		t.Fatalf("RunPlaybook: %v", err)
+	}
+	if _, ok := gotBody["namespace"]; ok {
+		t.Errorf("namespace key should be absent when empty, got: %v", gotBody["namespace"])
 	}
 }
 
@@ -230,7 +277,7 @@ func TestTriggerPlaybook_SendsPriorRunID(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_test", "plr_triage01"); err != nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_test", "plr_triage01", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if gotBody["prior_run_id"] != "plr_triage01" {
@@ -248,7 +295,7 @@ func TestTriggerPlaybook_OmitsPriorRunIDWhenEmpty(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_test", ""); err != nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if _, present := gotBody["prior_run_id"]; present {
@@ -584,7 +631,7 @@ func TestTriggerPlaybook_PendingGateDispatchesToRunGateLoop(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_triage", ""); err != nil {
+	if err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_triage", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if !proceedCalled {

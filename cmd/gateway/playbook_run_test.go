@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -969,7 +970,6 @@ func TestRecordEscalationDecision_NilAuditor(t *testing.T) {
 		identity.ResolvedPrincipal{}, pb, "pbs_next", "", false)
 }
 
-
 // ─── parseDiagnosticReport tests ─────────────────────────────────────────────
 
 func TestParseDiagnosticReport_FullResponse(t *testing.T) {
@@ -1085,14 +1085,14 @@ func makeContextTestInfra() *infra.Config {
 	return &infra.Config{
 		DBServers: map[string]infra.DBServer{
 			"test-pg": {
-				Name:          "Test Postgres",
+				Name:             "Test Postgres",
 				ConnectionString: "host=localhost port=5433 dbname=postgres",
-				VMName:        "test-host",
+				VMName:           "test-host",
 			},
 			"pg-cluster-minikube": {
-				Name:       "PG Cluster Minikube",
+				Name:             "PG Cluster Minikube",
 				ConnectionString: "host=pg-cluster-minikube port=5432 dbname=postgres",
-				K8sCluster: "minikube",
+				K8sCluster:       "minikube",
 			},
 			"standalone-db": {
 				Name:             "Standalone DB",
@@ -1868,8 +1868,8 @@ func TestHandlePlaybookRun_ApprovalOverrideClamped(t *testing.T) {
 		{Name: "get_blocking_queries", Agent: "database", ActionClass: "read"},
 	})
 	gw := &Gateway{
-		agents:       make(map[string]*discovery.Agent),
-		clients:      make(map[string]*a2aclient.Client),
+		agents:  make(map[string]*discovery.Agent),
+		clients: make(map[string]*a2aclient.Client),
 		infra: &infra.Config{
 			DBServers: map[string]infra.DBServer{
 				"restricted-db": {
@@ -2690,5 +2690,200 @@ func TestHandlePlaybookRun_GateEscalation_NoSignal_NoRemediationTarget(t *testin
 	}
 	if resp["status"] == "pending_gate" {
 		t.Error("gate fired without remediation_series_id — should not create a synthetic gate")
+	}
+}
+
+// ── runQueryViaPlaybook ───────────────────────────────────────────────────
+
+// mockA2AServerCapturingText is like mockA2AServerWithText but also records
+// the raw request bytes it receives, so tests can assert what prompt/message
+// text was actually sent to the agent.
+func mockA2AServerCapturingText(t *testing.T, agentName string) (*a2a.AgentCard, func() string) {
+	t.Helper()
+	var mu sync.Mutex
+	var lastBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		lastBody = string(raw)
+		mu.Unlock()
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(raw, &req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-runq-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": "ok"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return card, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastBody
+	}
+}
+
+// TestRunQueryViaPlaybook_BuildsCorrectSyntheticRequest verifies that the
+// query message flows through as both Context and TriggerContext, and that
+// approval_mode is pinned to "manual" regardless of the playbook's own
+// default — an auto-selected query must never silently authorize a
+// write/destructive tool call.
+func TestRunQueryViaPlaybook_BuildsCorrectSyntheticRequest(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_node_pressure01",
+		SeriesID:      "pbs_k8s_node_pressure_triage",
+		Name:          "K8s Node Memory Pressure — Triage",
+		Guidance:      "Investigate node memory pressure.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameK8s,
+		ApprovalMode:  "auto", // deliberately permissive default; runQueryViaPlaybook must override it
+		IsActive:      true,
+	}
+	card, capturedBody := mockA2AServerCapturingText(t, agentNameK8s)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditSrv := mockAuditdForPlaybookSelection(t, []*audit.Playbook{pb})
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{agentNameK8s: client}
+
+	const message = "node memory-pressure alert for the node hosting postgres"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/query", strings.NewReader(`{}`))
+	req.Header.Set("X-User", "ops@example.com")
+	rec := httptest.NewRecorder()
+
+	gw.runQueryViaPlaybook(rec, req, "pbs_k8s_node_pressure_triage", message, "ctx-123", agentNameK8s)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if body := capturedBody(); !strings.Contains(body, message) {
+		t.Errorf("agent did not receive the query message in its prompt; body sent to agent: %s", body)
+	}
+}
+
+// TestRunQueryViaPlaybook_UnknownSeriesID_FallsBackToProxyToAgent verifies
+// that a series_id that fails to resolve degrades silently to an ordinary
+// agent proxy — never a user-facing error.
+func TestRunQueryViaPlaybook_UnknownSeriesID_FallsBackToProxyToAgent(t *testing.T) {
+	card, capturedBody := mockA2AServerCapturingText(t, agentNameK8s)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	// auditd has no playbooks at all — fetchPlaybookBySeriesID will fail.
+	auditSrv := mockAuditdForPlaybookSelection(t, nil)
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{agentNameK8s: client}
+
+	const message = "some query that matched a since-deleted playbook"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/query", strings.NewReader(`{}`))
+	req.Header.Set("X-User", "ops@example.com")
+	rec := httptest.NewRecorder()
+
+	gw.runQueryViaPlaybook(rec, req, "pbs_deleted_playbook", message, "", agentNameK8s)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (fallback to proxyToAgent); body: %s", rec.Code, rec.Body.String())
+	}
+	if body := capturedBody(); !strings.Contains(body, message) {
+		t.Errorf("fallback proxy did not send the original message to the agent; body: %s", body)
+	}
+}
+
+// TestIsAllowedNextPlaybook_NodePressureTriage_TransitionsToRemediate verifies
+// that the node-pressure triage playbook's declared transitions_to allow-list
+// accepts its own remediation playbook as a TRANSITION_TO target (not coerced
+// to requires_operator_approval), and rejects anything else.
+func TestIsAllowedNextPlaybook_NodePressureTriage_TransitionsToRemediate(t *testing.T) {
+	pb := &audit.Playbook{
+		SeriesID:      "pbs_k8s_node_pressure_triage",
+		TransitionsTo: []string{"pbs_k8s_node_pressure_remediate"},
+	}
+
+	if !isAllowedNextPlaybook(pb, "pbs_k8s_node_pressure_remediate", directiveTransition) {
+		t.Error("declared transitions_to target should be allowed")
+	}
+	if isAllowedNextPlaybook(pb, "pbs_some_other_playbook", directiveTransition) {
+		t.Error("a series_id not in transitions_to should be rejected")
+	}
+}
+
+// TestHandlePlaybookRunApprove_NamespaceForceOverridden verifies the fix for
+// the second real bug found via manual verification: the step proposer LLM
+// reliably guessed/defaulted the K8s namespace to "default" instead of the
+// ticket's real namespace, even with strongly-worded playbook guidance
+// asking it not to. The gateway must force the request's authoritative
+// Namespace into the proposed step's args, exactly as it already does for
+// ConnectionString, regardless of what the LLM proposed.
+func TestHandlePlaybookRunApprove_NamespaceForceOverridden(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_node_pressure_rem01",
+		SeriesID:      "pbs_k8s_node_pressure_remediate",
+		Name:          "K8s Node Memory Pressure — Remediation",
+		Guidance:      "Verify postgres is healthy.",
+		ExecutionMode: "agent_approve",
+		AgentName:     "k8s_agent",
+		IsActive:      true,
+	}
+	auditSrv := mockAuditdPlaybook(t, pb)
+
+	llmFn := func(ctx context.Context, prompt string) (string, error) {
+		// Simulate exactly the observed failure mode: the LLM proposes a real
+		// k8s tool call but guesses the wrong namespace.
+		return `{"action":"execute_step","tool":"get_pods","args":{"namespace":"default"}}`, nil
+	}
+
+	reg := makeRegistryWithTools([]toolregistry.ToolEntry{
+		{Name: "get_pods", Agent: "k8s", ActionClass: "read"},
+	})
+	gw := &Gateway{
+		agents:       make(map[string]*discovery.Agent),
+		clients:      make(map[string]*a2aclient.Client),
+		toolRegistry: reg,
+		plannerLLM:   llmFn,
+		auditURL:     auditSrv.URL,
+	}
+	rec := postPlaybookRun(t, gw, "pb_node_pressure_rem01", `{"namespace":"helpdesk-test"}`)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 200 or 202; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp ApproveRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp.Status != "pending_approval" {
+		t.Fatalf("status = %q, want pending_approval; body: %s", resp.Status, rec.Body.String())
+	}
+	if resp.Step == nil {
+		t.Fatal("Step is nil")
+	}
+	if got, _ := resp.Step.Args["namespace"].(string); got != "helpdesk-test" {
+		t.Errorf("Step.Args[namespace] = %q, want the forced authoritative value %q (not the LLM's guessed %q)",
+			got, "helpdesk-test", "default")
 	}
 }

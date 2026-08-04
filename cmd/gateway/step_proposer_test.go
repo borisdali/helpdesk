@@ -103,7 +103,7 @@ func TestProposeNextStep_NoLLM(t *testing.T) {
 	gw := &Gateway{plannerLLM: nil}
 	pb := &audit.Playbook{Name: "Test", Guidance: "Step 1: do X"}
 
-	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
+	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", "", nil)
 	if err == nil {
 		t.Error("expected error when plannerLLM is nil")
 	}
@@ -117,7 +117,7 @@ func TestProposeNextStep_Complete(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "Idle Blocker Remediate", Guidance: "Terminate root blocker."}
 
-	proposal, done, summary, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
+	proposal, done, summary, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", "", nil)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestProposeNextStep_ExecuteStep(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "Idle Blocker Remediate", Guidance: "Terminate root blocker."}
 
-	proposal, done, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
+	proposal, done, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", "", nil)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
@@ -175,12 +175,46 @@ func TestProposeNextStep_DefaultsAgentToDatabaseWhenEmpty(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "p", Guidance: "g"}
 
-	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
+	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", "", nil)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
 	if proposal.Agent != "database" {
 		t.Errorf("agent = %q, want database (default)", proposal.Agent)
+	}
+}
+
+// TestProposeNextStep_AgentAlwaysFromPlaybook_NeverFromLLM verifies the fix
+// for a real bug found via manual verification: proposeNextStep must always
+// route to the playbook's own agent_name, never to a value the LLM echoes
+// back in its JSON response. Before the fix, an LLM response carrying a
+// stray "agent" field (e.g. copied from the prompt's own JSON example,
+// which used to hardcode "agent": "database") would silently misroute a
+// k8s-agent playbook's tool call to the database agent's HTTP endpoint,
+// producing a confusing "unknown tool" error instead of executing the
+// intended k8s tool.
+func TestProposeNextStep_AgentAlwaysFromPlaybook_NeverFromLLM(t *testing.T) {
+	gw := &Gateway{
+		plannerLLM: func(_ context.Context, _ string) (string, error) {
+			// Simulate a model that (incorrectly) echoes an "agent" field —
+			// stepProposerResult has no Agent field at all, so this key is
+			// simply ignored during JSON decoding; this test proves it can't
+			// influence proposal.Agent even if the model attempts it.
+			return `{"action":"execute_step","agent":"database","tool":"get_pods","args":{"namespace":"helpdesk-test"}}`, nil
+		},
+	}
+	pb := &audit.Playbook{Name: "K8s Node Pressure Remediation", Guidance: "g", AgentName: "k8s_agent"}
+
+	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("proposeNextStep: %v", err)
+	}
+	if proposal.Agent != "k8s" {
+		t.Errorf("Agent = %q, want %q (the playbook's own agent_name, not the LLM's echoed value)",
+			proposal.Agent, "k8s")
+	}
+	if proposal.Tool != "get_pods" {
+		t.Errorf("Tool = %q, want get_pods", proposal.Tool)
 	}
 }
 
@@ -196,7 +230,7 @@ func TestProposeNextStep_IndexIncrementsByHistory(t *testing.T) {
 		{StepIndex: 2, Tool: "another_tool", Result: "done"},
 	}
 
-	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", history)
+	proposal, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", "", history)
 	if err != nil {
 		t.Fatalf("proposeNextStep: %v", err)
 	}
@@ -213,7 +247,7 @@ func TestProposeNextStep_BadJSON(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "p", Guidance: "g"}
 
-	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
+	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", "", nil)
 	if err == nil {
 		t.Error("expected error for non-JSON LLM response")
 	}
@@ -227,7 +261,7 @@ func TestProposeNextStep_EmptyToolName(t *testing.T) {
 	}
 	pb := &audit.Playbook{Name: "p", Guidance: "g"}
 
-	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", nil)
+	_, _, _, err := gw.proposeNextStep(context.Background(), pb, "host=localhost", "", "", nil)
 	if err == nil {
 		t.Error("expected error for empty tool name")
 	}
@@ -246,7 +280,7 @@ func TestProposeNextStep_HistoryAppearsInPrompt(t *testing.T) {
 		{StepIndex: 1, Tool: "get_blocking_queries", Args: map[string]any{}, Result: "blocker found pid=9999"},
 	}
 
-	gw.proposeNextStep(context.Background(), pb, "host=prod", "", history) //nolint:errcheck
+	gw.proposeNextStep(context.Background(), pb, "host=prod", "", "", history) //nolint:errcheck
 
 	if !strings.Contains(capturedPrompt, "blocker found pid=9999") {
 		t.Error("history result should appear in the LLM prompt")

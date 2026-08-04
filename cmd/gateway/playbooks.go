@@ -256,11 +256,19 @@ type approvalContext struct {
 // and context are injected into the triage prompt.
 type PlaybookRunRequest struct {
 	ConnectionString string `json:"connection_string,omitempty"`
-	Context          string `json:"context,omitempty"`          // operator-supplied context (server name, symptoms, etc.)
-	TriggerContext   string `json:"trigger_context,omitempty"`  // original alert text / monitoring signal that initiated the run; persisted on PlaybookRun
-	ContextID        string `json:"context_id,omitempty"`       // A2A session ID for multi-turn continuity
-	PriorRunID       string `json:"prior_run_id,omitempty"`     // run_id of prior investigation for continuity threading
-	PriorFindings    string `json:"-"`                          // populated at runtime from prior run; not from body
+	// Namespace is the target Kubernetes namespace for k8s-agent playbooks —
+	// analogous to ConnectionString for database playbooks. Forcibly injected
+	// into every proposed tool call's args in agent_approve mode (see
+	// handlePlaybookRunApprove/handlePlaybookRunProceed) rather than trusted
+	// from free-text FINDINGS parsing, which is not reliable enough for a
+	// value load-bearing for correctness (a wrong namespace either finds
+	// nothing or, worse, acts on the wrong workload).
+	Namespace        string `json:"namespace,omitempty"`
+	Context          string `json:"context,omitempty"`         // operator-supplied context (server name, symptoms, etc.)
+	TriggerContext   string `json:"trigger_context,omitempty"` // original alert text / monitoring signal that initiated the run; persisted on PlaybookRun
+	ContextID        string `json:"context_id,omitempty"`      // A2A session ID for multi-turn continuity
+	PriorRunID       string `json:"prior_run_id,omitempty"`    // run_id of prior investigation for continuity threading
+	PriorFindings    string `json:"-"`                         // populated at runtime from prior run; not from body
 
 	// ApprovalMode controls when approval is required for write/destructive operations
 	// and which playbooks are eligible for auto-chaining.
@@ -269,7 +277,7 @@ type PlaybookRunRequest struct {
 	//   "manual"  — agent-mode runs are read-only (no write/destructive proxied); no chaining.
 	//   "force"   — like "auto" for tools, but also chains through manual-gated playbooks.
 	//              Use when deliberately authorising the full diagnosis-to-remediation path.
-	ApprovalMode    string `json:"approval_mode,omitempty"`
+	ApprovalMode string `json:"approval_mode,omitempty"`
 	// ApprovalSession is the session ID for "session" mode. Required when ApprovalMode="session".
 	ApprovalSession string `json:"approval_session,omitempty"`
 
@@ -379,7 +387,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
 		startTraceID = audit.NewTraceID()
 	}
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, startTraceID, req.PriorRunID, req.TriggerContext, operator)
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, startTraceID, req.PriorRunID, req.TriggerContext, operator)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -930,6 +938,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 
 	chainReq := PlaybookRunRequest{
 		ConnectionString: req.ConnectionString,
+		Namespace:        req.Namespace,
 		Context:          req.Context,
 		PriorRunID:       primary.runID,
 		ApprovalMode:     req.ApprovalMode,
@@ -942,7 +951,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		}
 	}
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -993,6 +1002,57 @@ func (g *Gateway) fetchPlaybookBySeriesID(ctx context.Context, seriesID string) 
 		return nil, fmt.Errorf("not found")
 	}
 	return result.Playbooks[0], nil
+}
+
+// runQueryViaPlaybook runs a free-text query through an auto-selected
+// entry-point triage playbook instead of proxying directly to an agent.
+// It builds a synthetic POST /api/v1/fleet/playbooks/{id}/run request and
+// delegates to handlePlaybookRun, reusing that path's full execution,
+// audit, and gate-handling logic rather than duplicating any of it.
+//
+// approvalFallbackAgent is the agent name to proxy to (via proxyToAgent) if
+// the series_id fails to resolve to a real playbook — this keeps a
+// renamed/deleted playbook from ever surfacing as a user-facing error; the
+// query just degrades to ordinary agent routing.
+func (g *Gateway) runQueryViaPlaybook(w http.ResponseWriter, r *http.Request, seriesID, message, contextID string, approvalFallbackAgent string) {
+	pb, err := g.fetchPlaybookBySeriesID(r.Context(), seriesID)
+	if err != nil {
+		slog.Warn("runQueryViaPlaybook: could not resolve playbook series_id; falling back to agent proxy",
+			"series_id", seriesID, "err", err)
+		g.proxyToAgent(w, r, approvalFallbackAgent, contextID, message)
+		return
+	}
+
+	// approval_mode is deliberately pinned to "manual" regardless of the
+	// playbook's own default: an auto-triggered free-text query must never
+	// silently authorize a write/destructive tool call on the caller's behalf.
+	body := PlaybookRunRequest{
+		Context:        message,
+		TriggerContext: message,
+		ContextID:      contextID,
+		ApprovalMode:   "manual",
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		slog.Warn("runQueryViaPlaybook: failed to marshal synthetic request body; falling back to agent proxy",
+			"series_id", seriesID, "err", err)
+		g.proxyToAgent(w, r, approvalFallbackAgent, contextID, message)
+		return
+	}
+
+	syntheticReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		"/api/v1/fleet/playbooks/"+pb.PlaybookID+"/run", bytes.NewReader(bodyJSON))
+	if err != nil {
+		slog.Warn("runQueryViaPlaybook: failed to build synthetic request; falling back to agent proxy",
+			"series_id", seriesID, "err", err)
+		g.proxyToAgent(w, r, approvalFallbackAgent, contextID, message)
+		return
+	}
+	syntheticReq.Header = r.Header.Clone()
+	syntheticReq.Header.Set("Content-Type", "application/json")
+	syntheticReq.SetPathValue("playbookID", pb.PlaybookID)
+
+	g.handlePlaybookRun(w, syntheticReq)
 }
 
 // buildSuggestedNext constructs the suggested_next response field that operators
@@ -1051,11 +1111,12 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 // ProceedEscalationRequest is the request body for POST
 // /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
 type ProceedEscalationRequest struct {
-	Resolution       string `json:"resolution"`               // "approved" | "denied"
+	Resolution       string `json:"resolution"` // "approved" | "denied"
 	ResolvedBy       string `json:"resolved_by,omitempty"`
-	ApprovalMode     string `json:"approval_mode,omitempty"`  // "manual"|"review"|"auto"|"session"|"force"
+	ApprovalMode     string `json:"approval_mode,omitempty"` // "manual"|"review"|"auto"|"session"|"force"
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
+	Namespace        string `json:"namespace,omitempty"`         // K8s target namespace, forwarded to the remediation playbook (analogous to ConnectionString)
 	Reason           string `json:"reason,omitempty"`            // optional operator rationale
 	// At-gate feedback — captured before remediation runs, while the hypothesis
 	// is fresh. Stored as (feedback_type="triage", feedback_time="at_gate").
@@ -1157,16 +1218,21 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		})
 	}
 
-	// Build the remediation request. Prefer connection_string from the resolve
-	// request body; fall back to the one stored on the triage run so operators
-	// don't need to re-supply it when approving a gate.
+	// Build the remediation request. Prefer connection_string/namespace from
+	// the resolve request body; fall back to what's stored on the triage run
+	// so operators don't need to re-supply it when approving a gate.
 	connStr := req.ConnectionString
 	if connStr == "" {
 		connStr = run.ConnectionString
 	}
+	namespace := req.Namespace
+	if namespace == "" {
+		namespace = run.Namespace
+	}
 
 	remReq := PlaybookRunRequest{
 		ConnectionString: connStr,
+		Namespace:        namespace,
 		PriorRunID:       runID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
@@ -1187,7 +1253,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, remStartTraceID, runID, "", resolvedBy)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, remStartTraceID, runID, "", resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -1703,7 +1769,7 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, traceID, priorRunID, triggerContext, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, traceID, priorRunID, triggerContext, operator string) string {
 	if g.auditURL == "" {
 		return ""
 	}
@@ -1713,6 +1779,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		ExecutionMode:    pb.ExecutionMode,
 		ContextID:        contextID,
 		ConnectionString: connStr,
+		Namespace:        namespace,
 		TraceID:          traceID,
 		PriorRunID:       priorRunID,
 		TriggerContext:   triggerContext,
@@ -2519,12 +2586,12 @@ func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since
 }
 
 // targetMatches returns true when:
-//  - actual == intended (exact), or
-//  - intended appears as a field value in actual (short name, e.g. intended="test-pg",
-//    actual="host=test-pg dbname=postgres"), or
-//  - intended is a connection string whose fields are all present with equal values
-//    in actual (actual may carry additional fields such as user= or password= that
-//    were added by the agent at runtime and are absent from the infra config entry).
+//   - actual == intended (exact), or
+//   - intended appears as a field value in actual (short name, e.g. intended="test-pg",
+//     actual="host=test-pg dbname=postgres"), or
+//   - intended is a connection string whose fields are all present with equal values
+//     in actual (actual may carry additional fields such as user= or password= that
+//     were added by the agent at runtime and are absent from the infra config entry).
 func targetMatches(intended, actual string) bool {
 	if intended == actual {
 		return true
@@ -2570,22 +2637,23 @@ func parseConnFields(s string) map[string]string {
 
 // ApproveRunResponse is returned by POST /run (agent_approve) and POST /proceed.
 type ApproveRunResponse struct {
-	RunID                string        `json:"run_id"`
-	Status               string        `json:"status"`                          // "pending_approval" | "complete" | "denied"
-	Step                 *StepProposal `json:"step,omitempty"`
-	ApprovalID           string        `json:"approval_id,omitempty"`
-	Summary              string        `json:"summary,omitempty"`
-	Warnings             []string      `json:"warnings,omitempty"`
-	EffectiveApprovalMode string       `json:"effective_approval_mode,omitempty"` // resolved mode after clamping; use instead of requested mode
+	RunID                 string        `json:"run_id"`
+	Status                string        `json:"status"` // "pending_approval" | "complete" | "denied"
+	Step                  *StepProposal `json:"step,omitempty"`
+	ApprovalID            string        `json:"approval_id,omitempty"`
+	Summary               string        `json:"summary,omitempty"`
+	Warnings              []string      `json:"warnings,omitempty"`
+	EffectiveApprovalMode string        `json:"effective_approval_mode,omitempty"` // resolved mode after clamping; use instead of requested mode
 }
 
 // ProceedRequest is the body for POST /api/v1/fleet/playbook-runs/{runID}/proceed.
 type ProceedRequest struct {
-	Resolution       string `json:"resolution"`                  // "approved" | "denied"
+	Resolution       string `json:"resolution"` // "approved" | "denied"
 	ResolvedBy       string `json:"resolved_by,omitempty"`
 	Reason           string `json:"reason,omitempty"`
 	StepIndex        int    `json:"step_index"`
 	ConnectionString string `json:"connection_string,omitempty"` // injected into tool args and re-planner context
+	Namespace        string `json:"namespace,omitempty"`         // K8s target namespace, injected into tool args and re-planner context
 }
 
 // handlePlaybookRunApprove handles POST /run for execution_mode=agent_approve.
@@ -2597,7 +2665,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Propose the first step (no history yet).
-	proposal, done, summary, err := g.proposeNextStep(r.Context(), pb, req.ConnectionString, req.PriorFindings, nil)
+	proposal, done, summary, err := g.proposeNextStep(r.Context(), pb, req.ConnectionString, req.Namespace, req.PriorFindings, nil)
 	if err != nil {
 		slog.Error("handlePlaybookRunApprove: step proposal failed", "playbook", pb.SeriesID, "err", err)
 		writeError(w, http.StatusInternalServerError, "step proposal failed: "+err.Error())
@@ -2612,14 +2680,20 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Inject connection_string into the proposed args so the DB agent has a target.
-	// Always override — the re-planning LLM may extract a raw DSN from prior
-	// findings text rather than using the registered symbolic name.
-	if req.ConnectionString != "" {
+	// Inject connection_string/namespace into the proposed args so the agent
+	// has a target. Always override — the re-planning LLM may extract a raw
+	// DSN from prior findings text, or guess a wrong/default namespace,
+	// rather than using the registered authoritative value.
+	if req.ConnectionString != "" || req.Namespace != "" {
 		if proposal.Args == nil {
 			proposal.Args = map[string]any{}
 		}
-		proposal.Args["connection_string"] = req.ConnectionString
+		if req.ConnectionString != "" {
+			proposal.Args["connection_string"] = req.ConnectionString
+		}
+		if req.Namespace != "" {
+			proposal.Args["namespace"] = req.Namespace
+		}
 	}
 
 	// Persist the proposed step to auditd.
@@ -2641,11 +2715,11 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	approvalID := g.createStepApproval(r.Context(), runID, proposal, r.Header.Get("X-User"))
 
 	resp := ApproveRunResponse{
-		RunID:                runID,
-		Status:               "pending_approval",
-		Step:                 proposal,
-		ApprovalID:           approvalID,
-		Warnings:             warnings,
+		RunID:                 runID,
+		Status:                "pending_approval",
+		Step:                  proposal,
+		ApprovalID:            approvalID,
+		Warnings:              warnings,
 		EffectiveApprovalMode: req.ApprovalMode,
 	}
 	writeJSON(w, http.StatusAccepted, resp)
@@ -2713,15 +2787,19 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	// Mark step as executing.
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "executing", pendingStep.ApprovalID, "", "")
 
-	// Always override connection_string with the run's authoritative value.
-	// The stored step args may carry a raw DSN that the re-planning LLM extracted
-	// from prior findings text; force the registered symbolic name instead.
+	// Always override connection_string/namespace with the run's authoritative
+	// value. The stored step args may carry a raw DSN the re-planning LLM
+	// extracted from prior findings text, or a guessed/default namespace;
+	// force the registered authoritative values instead.
 	args := pendingStep.Args
 	if args == nil {
 		args = map[string]any{}
 	}
 	if run.ConnectionString != "" {
 		args["connection_string"] = run.ConnectionString
+	}
+	if run.Namespace != "" {
+		args["namespace"] = run.Namespace
 	}
 
 	// Prefer the run's stored trace_id (set at run-start for agent_approve runs)
@@ -2788,7 +2866,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, priorFindings, history)
+	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, run.Namespace, priorFindings, history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil)
@@ -2802,14 +2880,20 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Inject connection_string into next proposal's args if we know it.
-	// Always override — the re-planning LLM may extract a raw DSN from prior
-	// findings text rather than using the registered symbolic name.
-	if connStr != "" {
+	// Inject connection_string/namespace into next proposal's args if we know
+	// them. Always override — the re-planning LLM may extract a raw DSN from
+	// prior findings text, or a guessed/default namespace, rather than using
+	// the registered authoritative values.
+	if connStr != "" || run.Namespace != "" {
 		if nextProposal.Args == nil {
 			nextProposal.Args = map[string]any{}
 		}
-		nextProposal.Args["connection_string"] = connStr
+		if connStr != "" {
+			nextProposal.Args["connection_string"] = connStr
+		}
+		if run.Namespace != "" {
+			nextProposal.Args["namespace"] = run.Namespace
+		}
 	}
 
 	// Persist next proposed step.
@@ -2963,12 +3047,12 @@ func (g *Gateway) createStepApproval(ctx context.Context, runID string, proposal
 		requestedBy = "gateway"
 	}
 	approval := audit.StoredApproval{
-		ActionClass:  "destructive",
-		ToolName:     proposal.Tool,
-		AgentName:    proposal.Agent,
-		RequestedBy:  requestedBy,
-		Status:       "pending",
-		TraceID:      runID,
+		ActionClass: "destructive",
+		ToolName:    proposal.Tool,
+		AgentName:   proposal.Agent,
+		RequestedBy: requestedBy,
+		Status:      "pending",
+		TraceID:     runID,
 		RequestContext: map[string]any{
 			"run_id":       runID,
 			"step_index":   proposal.Index,

@@ -56,6 +56,9 @@ type RemediationSpec struct {
 	PlaybookID    string `yaml:"playbook_id,omitempty"`
 	AgentName     string `yaml:"agent_name,omitempty"`
 	AgentPrompt   string `yaml:"agent_prompt,omitempty"`
+	// Namespace is the target Kubernetes namespace for k8s-agent playbook
+	// remediation — analogous to a connection string for DB remediation.
+	Namespace     string `yaml:"namespace,omitempty"`
 	VerifySQL     string `yaml:"verify_sql,omitempty"`
 	VerifyTimeout string `yaml:"verify_timeout,omitempty"`
 }

@@ -50,20 +50,21 @@ type Gateway struct {
 	clients          map[string]*a2aclient.Client
 	infra            *infra.Config
 	auditor          *audit.GatewayAuditor
-	auditURL         string                  // URL to auditd service for governance queries
-	auditAPIKey      string                  // Bearer token for authenticating proxy requests to auditd
-	baseURL          string                  // Gateway's own public base URL (for building absolute links in notifications)
-	identityProvider identity.Provider       // resolves caller identity on every request
-	authzr           *authz.Authorizer       // central per-route authorizer (nil = no authz)
-	operatingMode    string                  // "readonly" or "fix"
-	agentAPIKey      string                  // Bearer token sent to agent POST /tool/{name} endpoints
-	toolRegistry     *toolregistry.Registry  // catalog of discovered tools
+	auditURL         string                                                   // URL to auditd service for governance queries
+	auditAPIKey      string                                                   // Bearer token for authenticating proxy requests to auditd
+	baseURL          string                                                   // Gateway's own public base URL (for building absolute links in notifications)
+	identityProvider identity.Provider                                        // resolves caller identity on every request
+	authzr           *authz.Authorizer                                        // central per-route authorizer (nil = no authz)
+	operatingMode    string                                                   // "readonly" or "fix"
+	agentAPIKey      string                                                   // Bearer token sent to agent POST /tool/{name} endpoints
+	toolRegistry     *toolregistry.Registry                                   // catalog of discovered tools
 	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
-	usersFile        string                  // path to users.yaml; empty = dev/no-auth mode
-	metrics          *GatewayMetrics         // Prometheus-compatible metrics endpoint
-	crystalBall       bool                    // when true, bypass playbook guidance/chaining — for demo/comparison only
-	decisionNotifier *decisions.DecisionNotifier // nil = notifications disabled
+	usersFile        string                                                   // path to users.yaml; empty = dev/no-auth mode
+	metrics          *GatewayMetrics                                          // Prometheus-compatible metrics endpoint
+	crystalBall      bool                                                     // when true, bypass playbook guidance/chaining — for demo/comparison only
+	decisionNotifier *decisions.DecisionNotifier                              // nil = notifications disabled
 	gitWebhookCfg    GitWebhookConfig
+	entryPointCache  entryPointPlaybookCache // cached list for query-time playbook auto-selection
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -529,17 +530,43 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 	r.Header.Set("X-Trace-ID", traceID)
 
 	var agentName string
+	var playbookSeriesID string
 
 	if req.Agent == "" {
-		// No agent specified: use LLM routing. Requires plannerLLM to be configured.
-		decision, err := g.routeWithLLM(r.Context(), req.Message)
-		if err != nil {
-			writeError(w, http.StatusServiceUnavailable, "agent routing failed: "+err.Error()+
-				" — set \"agent\" explicitly or configure HELPDESK_MODEL_VENDOR/HELPDESK_MODEL_NAME/HELPDESK_API_KEY")
-			return
+		// No agent specified: try a deterministic keyword pre-filter against
+		// entry-point playbook symptoms first (cheap, no LLM call); fall back
+		// to LLM routing, which also considers playbooks. Requires plannerLLM
+		// to be configured for the LLM fallback.
+		pbs, pbErr := g.entryPointPlaybooks(r.Context())
+		if pbErr != nil {
+			// auditd unreachable/unconfigured: treat as "no playbooks
+			// available" and proceed exactly as before — never a hard failure.
+			pbs = nil
+		}
+
+		var decision *RoutingDecision
+		if pb, symptom, score, ok := matchPlaybookByKeywords(req.Message, pbs); ok {
+			decision = &RoutingDecision{
+				Agent:              pb.AgentName,
+				RequestCategory:    categoryForAgent(pb.AgentName),
+				Confidence:         score,
+				UserIntent:         req.Message,
+				ReasoningChain:     []string{"keyword pre-filter matched symptom: " + symptom},
+				PlaybookSeriesID:   pb.SeriesID,
+				PlaybookConfidence: score,
+			}
+		} else {
+			var err error
+			decision, err = g.routeWithLLM(r.Context(), req.Message, pbs)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "agent routing failed: "+err.Error()+
+					" — set \"agent\" explicitly or configure HELPDESK_MODEL_VENDOR/HELPDESK_MODEL_NAME/HELPDESK_API_KEY")
+				return
+			}
 		}
 
 		agentName = decision.Agent
+		playbookSeriesID = decision.PlaybookSeriesID
 
 		// Record the routing decision as a delegation_decision audit event.
 		resolvedPrincipal, _, _, _, _ := g.resolveRequest(r, "", "")
@@ -549,10 +576,12 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 			"agent", decision.Agent,
 			"confidence", decision.Confidence,
 			"category", decision.RequestCategory,
+			"playbook_series_id", decision.PlaybookSeriesID,
 			"trace_id", traceID,
 		)
 	} else {
-		// Explicit agent: resolve via alias table.
+		// Explicit agent: resolve via alias table. Playbook selection never
+		// applies here — an explicit agent request always proxies directly.
 		var ok bool
 		agentName, ok = agentAliases[req.Agent]
 		if !ok {
@@ -561,6 +590,10 @@ func (g *Gateway) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if playbookSeriesID != "" {
+		g.runQueryViaPlaybook(w, r, playbookSeriesID, req.Message, req.ContextID, agentName)
+		return
+	}
 	g.proxyToAgent(w, r, agentName, req.ContextID, req.Message)
 }
 
@@ -634,10 +667,10 @@ func (g *Gateway) handleListRoles(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	type agentInfo struct {
-		Name        string          `json:"name"`
-		InvokeURL   string          `json:"invoke_url"`
-		Description string          `json:"description,omitempty"`
-		Version     string          `json:"version,omitempty"`
+		Name        string           `json:"name"`
+		InvokeURL   string           `json:"invoke_url"`
+		Description string           `json:"description,omitempty"`
+		Version     string           `json:"version,omitempty"`
 		Skills      []a2a.AgentSkill `json:"skills,omitempty"`
 	}
 

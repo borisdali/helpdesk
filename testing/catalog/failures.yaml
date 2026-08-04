@@ -1802,6 +1802,174 @@ failures:
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
 
+  - id: k8s-node-memory-pressure
+    name: "Noisy neighbor exhausts node memory — node under memory pressure"
+    category: kubernetes
+    severity: medium
+    external_compat: true  # injects via kubectl apply/exec — no Docker required; required for --repeat certification eligibility
+    prerequisites: |
+      Requires the target cluster's kubelet to have a memory eviction-hard
+      threshold configured. Check first, don't assume:
+
+        kubectl get --raw /api/v1/nodes/<node>/proxy/configz | jq .kubeletconfig.evictionHard
+
+      Most distros (kind, EKS, GKE, AKS) ship the upstream kubelet default
+      (memory.available<100Mi) already active. minikube is a known
+      exception — it disables memory-based eviction by default
+      (mergeDefaultEvictionSettings: false, no memory.available key). If
+      the check shows memory.available is absent on minikube, fix with:
+
+        minikube start --extra-config=kubelet.eviction-hard="memory.available<10%"
+
+      (minikube-specific command — kind's equivalent is a KubeletConfiguration
+      patch in the cluster config, not covered here.) Without this, the fault
+      will not trigger a clean kubelet eviction — it will either time out or
+      run until the kernel's global OOM killer intervenes directly, producing
+      a raw-OOM signature instead of a clean node-pressure eviction.
+    description: >
+      A "noisy neighbor" pod on the same node as postgres consumes memory
+      until the node crosses kubelet's hard eviction threshold. Kubelet's
+      node-pressure eviction manager evicts the noisy pod
+      (status.reason=Evicted) to relieve the pressure — postgres itself is
+      not evicted (its own memory usage-over-request is far smaller than
+      the noisy pod's, so it is never the top-ranked eviction candidate)
+      but experiences a transient node MemoryPressure window. Distinct
+      from k8s-oomkilled: here postgres's own container memory limit is
+      untouched and postgres is never restarted — the signal is a
+      node-level pressure event from a different pod, not postgres's own
+      limit being undersized.
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS="helpdesk-test"
+
+        NODE=$(kubectl $CTX_ARG get pod postgres-0 -n "$NS" -o jsonpath='{.spec.nodeName}')
+        [ -z "$NODE" ] && { echo "Could not resolve postgres-0's node" >&2; exit 1; }
+
+        # allocatable.memory is usually reported with a Ki suffix, but some
+        # kubelet versions report a plain byte count with no suffix — handle both.
+        RAW=$(kubectl $CTX_ARG get node "$NODE" -o jsonpath='{.status.allocatable.memory}')
+        [ -z "$RAW" ] && { echo "Could not read node allocatable memory" >&2; exit 1; }
+        if [[ "$RAW" == *Ki ]]; then
+          ALLOC_MI=$(( ${RAW%Ki} / 1024 ))
+        else
+          ALLOC_MI=$(( RAW / 1024 / 1024 ))
+        fi
+        # Target just above the node's eviction-hard threshold rather than a
+        # blind percentage of allocatable — avoids overshooting by gigabytes
+        # on larger nodes while still reliably crossing the threshold.
+        TARGET_MI=$(( ALLOC_MI - 700 ))
+        [ "$TARGET_MI" -le 0 ] && { echo "Node too small for this fault (allocatable ${ALLOC_MI}Mi)" >&2; exit 1; }
+
+        # Unique name per invocation — Kubernetes retains Events for ~1h by
+        # default, so a fixed pod name would let a later run's event lookup
+        # match a PRIOR run's stale Evicted event and return a false positive
+        # before the new pod has even finished ramping.
+        POD_NAME="noisy-neighbor-$(date +%s)"
+
+        kubectl $CTX_ARG apply -f - <<EOF
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: $POD_NAME
+          namespace: $NS
+          labels: {app: noisy-neighbor, faulttest: k8s-node-memory-pressure}
+        spec:
+          restartPolicy: Never
+          nodeName: $NODE
+          containers:
+            - name: hog
+              image: busybox:1.36
+              command: ["sh", "-c"]
+              args:
+                - |
+                  mkdir -p /mem; i=0; total=0
+                  while [ "\$total" -lt "$TARGET_MI" ]; do
+                    dd if=/dev/zero of=/mem/block_\$i bs=1M count=16 2>/dev/null
+                    i=\$((i+1)); total=\$((total+16)); sleep 3
+                  done
+                  sleep 300
+              resources:
+                requests: {memory: "100Mi"}
+              volumeMounts: [{name: mem, mountPath: /mem}]
+          volumes:
+            - name: mem
+              emptyDir: {medium: Memory, sizeLimit: "${TARGET_MI}Mi"}
+        EOF
+
+        # Ramp is deliberately gentle (16Mi/3s) — empirically confirmed to
+        # produce a clean kubelet Evicted event rather than a raw OOM kill.
+        # Reaching the threshold takes roughly 10-15 minutes at this rate.
+        DEADLINE=$(( $(date +%s) + 900 ))
+        EVICTED=""
+        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+          EVICTED=$(kubectl $CTX_ARG get events -n "$NS" \
+            --field-selector reason=Evicted,involvedObject.name=$POD_NAME \
+            -o jsonpath='{.items[0].reason}' 2>/dev/null || true)
+          [ -n "$EVICTED" ] && break
+          sleep 5
+        done
+
+        kubectl $CTX_ARG delete pod -l app=noisy-neighbor -n "$NS" --ignore-not-found --wait=false
+
+        [ -z "$EVICTED" ] && { echo "TIMEOUT: $POD_NAME was not evicted within budget" >&2; exit 1; }
+
+        echo "Confirmed: $POD_NAME evicted due to node memory pressure (postgres-0 unaffected)"
+      wait: 15s
+    teardown:
+      type: shell_exec
+      script_inline: |
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        # postgres is never disrupted by this fault, so teardown only needs to
+        # clean up the noisy pod — it's an idempotent safety net for aborted runs.
+        # Pod names are unique per inject run (see inject script), so clean up by label.
+        kubectl $CTX_ARG delete pod -l app=noisy-neighbor -n helpdesk-test --ignore-not-found --wait=false
+    diagnosis_playbook_series_id: pbs_k8s_node_pressure_triage
+    prompt: >
+      We received a node memory-pressure alert for the node hosting the
+      postgres pod in namespace helpdesk-test a few minutes ago. Please
+      investigate what happened and assess whether the database was
+      affected.
+    evaluation:
+      expected_tools:
+        - get_pods
+        - get_events
+        - get_node_status
+        - debug_node_dmesg
+      expected_keywords:
+        any_of:
+          - "Evicted"
+          - "evicted"
+          - "memory pressure"
+          - "MemoryPressure"
+          - "node memory"
+          - "noisy neighbor"
+      expected_diagnosis:
+        category: "node_memory_pressure"
+        narrative: >
+          The agent should find an Evicted event for a different pod
+          (noisy-neighbor) on postgres's node, check get_node_status for a
+          MemoryPressure condition around the time of the event, and
+          identify that another pod's memory usage — not postgres's own
+          container limit — drove the node into pressure. It should also
+          confirm postgres-0 itself was never evicted or restarted (still
+          Running throughout). Distinct from k8s-oomkilled: there
+          postgres's own memory limit (10Mi) was undersized and the OOM
+          killer targeted that specific container; here postgres's limit
+          is untouched and unaffected — a different pod's memory usage
+          drove the node into pressure and kubelet evicted that pod
+          instead.
+    timeout: 90s
+    remediation:
+      playbook_id: pbs_k8s_node_pressure_remediate
+      namespace: helpdesk-test
+      verify_sql: "SELECT 1"
+      verify_timeout: "60s"
+
   - id: db-wal-stale-slot
     name: "WAL accumulation — stale replication slot"
     category: database

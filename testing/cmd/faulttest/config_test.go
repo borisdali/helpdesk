@@ -11,7 +11,7 @@ import (
 	"helpdesk/playbooks"
 )
 
-const builtinMinimum = 32
+const builtinMinimum = 33
 
 func TestLoadCatalog_Valid(t *testing.T) {
 	// Load the real catalog and verify structure.
@@ -323,10 +323,10 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 		t.Errorf("database category count = %d, want >= 16", len(dbFailures))
 	}
 
-	// Filter by kubernetes category should return at least 8 failures.
+	// Filter by kubernetes category should return at least 9 failures.
 	k8sFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"kubernetes"}})
-	if len(k8sFailures) < 8 {
-		t.Errorf("kubernetes category count = %d, want >= 8", len(k8sFailures))
+	if len(k8sFailures) < 9 {
+		t.Errorf("kubernetes category count = %d, want >= 9", len(k8sFailures))
 	}
 
 	// Filter by host category should return at least 2 failures.

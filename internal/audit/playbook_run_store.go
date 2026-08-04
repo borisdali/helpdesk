@@ -35,6 +35,7 @@ type PlaybookRun struct {
 	DiagnosticReport *DiagnosticReport  `json:"diagnostic_report,omitempty"` // structured hypotheses when agent emits HYPOTHESIS_N: lines
 	ContextID        string             `json:"context_id,omitempty"`      // A2A session ID
 	ConnectionString string             `json:"connection_string,omitempty"` // target DB/service; forwarded to chained runs
+	Namespace        string             `json:"namespace,omitempty"`         // target K8s namespace; forwarded to chained runs, analogous to ConnectionString for non-DB agents
 	TraceID          string             `json:"trace_id,omitempty"`        // X-Trace-ID of the originating request; links to audit events
 	AgentTranscript  string             `json:"agent_transcript,omitempty"` // full agent response text — the chain-of-thought narrative
 	PriorRunID       string             `json:"prior_run_id,omitempty"`    // triage run_id that preceded this remediation run
@@ -176,6 +177,7 @@ func (s *PlaybookRunStore) migrate() error {
 		{"agent_transcript", `ALTER TABLE playbook_runs ADD COLUMN agent_transcript TEXT NOT NULL DEFAULT ''`},
 		{"prior_run_id", `ALTER TABLE playbook_runs ADD COLUMN prior_run_id TEXT NOT NULL DEFAULT ''`},
 		{"trigger_context", `ALTER TABLE playbook_runs ADD COLUMN trigger_context TEXT NOT NULL DEFAULT ''`},
+		{"namespace", `ALTER TABLE playbook_runs ADD COLUMN namespace TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite says "duplicate column name: X"; Postgres says
@@ -215,12 +217,12 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 		`INSERT INTO playbook_runs
 		    (run_id, playbook_id, series_id, execution_mode, outcome,
 		     escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		     context_id, connection_string, trace_id, prior_run_id, trigger_context,
+		     context_id, connection_string, namespace, trace_id, prior_run_id, trigger_context,
 		     operator, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.PlaybookID, r.SeriesID, r.ExecutionMode, outcome,
 		r.EscalatedTo, r.TransitionedTo, r.FindingsSummary, diagJSON,
-		r.ContextID, r.ConnectionString, r.TraceID, r.PriorRunID, r.TriggerContext,
+		r.ContextID, r.ConnectionString, r.Namespace, r.TraceID, r.PriorRunID, r.TriggerContext,
 		r.Operator,
 		r.StartedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(r.CompletedAt),
@@ -350,7 +352,7 @@ func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*Playb
 	row := s.db.QueryRowContext(ctx, `
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE run_id = ?`, runID)
@@ -365,7 +367,7 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE playbook_id = ?
@@ -387,7 +389,7 @@ func (s *PlaybookRunStore) ListByPriorRunID(ctx context.Context, priorRunID stri
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE prior_run_id = ?
@@ -408,7 +410,7 @@ func (s *PlaybookRunStore) ListBySeriesID(ctx context.Context, seriesID string, 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE series_id = ?
@@ -428,7 +430,7 @@ func (s *PlaybookRunStore) ListByOutcome(ctx context.Context, outcome string, li
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE outcome = ?
@@ -463,7 +465,7 @@ func scanPlaybookRun(s playbookRunScanner) (*PlaybookRun, error) {
 	if err := s.Scan(
 		&r.RunID, &r.PlaybookID, &r.SeriesID, &r.ExecutionMode, &r.Outcome,
 		&r.EscalatedTo, &r.TransitionedTo, &r.FindingsSummary, &diagJSON,
-		&r.ContextID, &r.ConnectionString, &r.TraceID, &r.PriorRunID, &r.AgentTranscript,
+		&r.ContextID, &r.ConnectionString, &r.Namespace, &r.TraceID, &r.PriorRunID, &r.AgentTranscript,
 		&r.TriggerContext, &r.Operator, &startedStr, &completedStr,
 	); err != nil {
 		return nil, err

@@ -787,6 +787,7 @@ These faults target PostgreSQL running in Kubernetes and require kubectl access 
 | `k8s-oomkilled` | Pod OOMKilled | critical | Patches the container memory limit to 10Mi — too low for PostgreSQL to start; pod enters OOMKilled restart loop |
 | `k8s-scale-to-zero` | Deployment scaled to zero | high | Patches replicas to 0; k8s agent must scale back up |
 | `db-wal-disk-full-k8s` | WAL disk full — writes failing (Kubernetes) | critical | Writes fake PANIC lines to the container's stderr via `kubectl exec`, then kills the postmaster with SIGABRT (exitcode=134, not OOMKilled). Pod auto-restarts clean; PANIC lines visible in `kubectl logs --previous`. |
+| `k8s-node-memory-pressure` | Noisy neighbor exhausts node memory | medium | Deploys a memory-hogging pod on postgres's node until kubelet's eviction-hard threshold is crossed; kubelet evicts the noisy pod (not postgres). Requires the cluster to have memory-based eviction configured — see the fault's `prerequisites` text. |
 
 ### 6.5 Remediation specs
 

@@ -1,0 +1,106 @@
+series_id: pbs_k8s_node_pressure_remediate
+name: "K8s Node Memory Pressure — Remediation"
+version: "1.0"
+playbook_type: remediation
+entry_point: false
+execution_mode: agent_approve
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Verify recovery after a node memory-pressure event near a PostgreSQL pod,
+  based on triage findings. In the common case postgres was never affected
+  and this playbook only confirms that. If postgres itself was evicted and
+  has not automatically recovered, it forces a StatefulSet reschedule.
+  No tool exists to automatically apply resource limits or anti-affinity
+  to the offending workload — that is always a manual follow-up.
+symptoms:
+  - "triage identified a node-level memory pressure event"
+  - "postgres pod status needs to be reconfirmed after a node eviction event"
+  - "StatefulSet postgres pod not yet confirmed Running after node pressure"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  Do NOT operate on other namespaces.
+
+  Step 0 — Parse the triage FINDINGS line to determine the namespace and branch:
+    namespace=<name>       → the ticket namespace for every tool call below.
+                              This is REQUIRED before calling any tool. NEVER
+                              use "default" as a fallback or guess — a wrong
+                              namespace will either find nothing or, worse,
+                              act on the wrong cluster's workloads.
+                              If FINDINGS genuinely has no namespace field,
+                              STOP: do not call any tool. Output FINDINGS:
+                              action=none; outcome=escalated with a note that
+                              triage did not report a namespace, and escalate
+                              for operator input instead of guessing.
+    postgres_restarted=no  → proceed to Step 1 (common case: verify only)
+    postgres_restarted=yes → proceed to Step 2 (real incident: verify recovery,
+                              force reschedule only if needed)
+  If FINDINGS also shows memory_pressure=True on a fresh recheck (Step 3),
+  treat that as Step 3 regardless of which branch you took.
+
+  Step 1 — Verify no action needed (postgres_restarted=no).
+  This is the common case: the noisy neighbor pod was evicted, not postgres.
+
+  1a. Call get_pods for the ticket namespace. Confirm the postgres pod is
+  Running and READY, and that its restart count matches what triage
+  observed (no new restarts since the alert).
+
+  1b. Call get_node_status for the node named in triage FINDINGS. Confirm
+  the MemoryPressure condition is now False (or its message no longer
+  references low memory).
+
+  1c. State explicitly that no remediation action was required — postgres
+  was never impacted. If triage's FINDINGS showed action=resource_limits or
+  action=anti_affinity, restate it as a manual follow-up recommendation for
+  the operator: there is no tool available to patch resource requests/limits
+  or add anti-affinity/PriorityClass rules automatically. Do NOT attempt to
+  work around this by deleting or scaling unrelated pods.
+
+  1d. Proceed to the final output — no write action is taken in this branch.
+
+  Step 2 — Verify or force recovery (postgres_restarted=yes).
+  This is the real-incident case: triage found postgres's own pod was
+  evicted. postgres runs as a StatefulSet, which self-heals a deleted or
+  evicted pod automatically — unlike a Deployment, restart_deployment does
+  NOT apply here.
+
+  2a. Call get_pods for the ticket namespace every 30 seconds (up to 3
+  checks) waiting for the postgres pod to reach Running with READY=1/1.
+
+  2b. If the pod is Running and stable after any of these checks, skip to
+  Step 2d — no write action needed, the StatefulSet controller already
+  recovered it on its own.
+
+  2c. If the pod is still not Running after 3 checks (90 seconds), call
+  delete_pod on the specific postgres pod name to force the StatefulSet
+  controller to recreate it. Before requesting approval, state:
+  - The triage finding (node, evicted_pod, memory_pressure state)
+  - That the StatefulSet did not self-heal within the expected window
+  - The expected outcome (pod is recreated and returns to Running)
+  After approval and delete, repeat Step 2a's polling once more to confirm
+  recovery.
+
+  2d. Call get_node_status for the node to confirm MemoryPressure is now
+  False, corroborating that the underlying pressure has cleared.
+
+  Step 3 — Escalate: recurring pressure (memory_pressure=True on recheck).
+  If MemoryPressure is still True after Step 1b or Step 2d, do not attempt
+  any further automated action. State to the operator:
+  - The node is still under memory pressure after the initial event
+  - This suggests either a persistent noisy neighbor or the node itself is
+    undersized for its current workload
+  - Recommended manual next steps: identify the top memory consumers on the
+    node (kubectl top pod --sort-by=memory -n <namespace> across all
+    namespaces on that node), and consider resource limits, anti-affinity,
+    or node capacity planning
+  This playbook does not perform capacity planning changes.
+
+  Final step: after your remediation summary, output exactly one line in
+  this format (no markdown, no extra text on the line):
+  FINDINGS: action=<none|pod_deleted_for_reschedule|escalated_capacity>; pod=<name>; outcome=<confirmed_unaffected|recovered|escalated>; follow_up=<none|apply_resource_limits_manually|apply_anti_affinity_manually|capacity_planning>
+escalation:
+  - "MemoryPressure is still True after verification — recurring pressure requires capacity planning, not further automated action"
+  - "postgres pod does not return to Running after delete_pod — a different root cause may now be present"
+target_hints: []

@@ -167,6 +167,71 @@ func TestRunViaPlaybook_SendsAuthAndPurpose(t *testing.T) {
 	}
 }
 
+// TestRunViaPlaybook_OmitsConnectionStringForKubernetesFaults verifies the
+// fix for a real bug found via manual verification: --conn (supplied so a
+// remediation playbook's verify_sql can reach a real database) must NOT be
+// threaded into a kubernetes-category fault's triage request as
+// connection_string. Doing so caused the gateway to resolve it against
+// infrastructure.json, match an unrelated Docker-hosted entry, and inject a
+// "context mentions pod but this server is docker-hosted" warning into the
+// prompt that derailed the K8s agent into refusing the investigation.
+func TestRunViaPlaybook_OmitsConnectionStringForKubernetesFaults(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_x"}},
+			})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true) // ConnStr: "test-db"
+	f := Failure{
+		ID: "test", Prompt: "p", Timeout: "30s", Category: "kubernetes",
+		DiagnosisPlaybookSeriesID: "pbs_x",
+	}
+	r.runViaPlaybook(context.Background(), f)
+
+	if _, ok := gotBody["connection_string"]; ok {
+		t.Errorf("connection_string should be omitted for kubernetes-category faults, got: %v", gotBody["connection_string"])
+	}
+}
+
+// TestRunViaPlaybook_SendsConnectionStringForNonKubernetesFaults is the
+// counterpart regression guard: non-kubernetes faults must still get
+// connection_string as before.
+func TestRunViaPlaybook_SendsConnectionStringForNonKubernetesFaults(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_x"}},
+			})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true) // ConnStr: "test-db"
+	f := Failure{
+		ID: "test", Prompt: "p", Timeout: "30s", Category: "database",
+		DiagnosisPlaybookSeriesID: "pbs_x",
+	}
+	r.runViaPlaybook(context.Background(), f)
+
+	if gotBody["connection_string"] != "test-db" {
+		t.Errorf("connection_string = %v, want test-db", gotBody["connection_string"])
+	}
+}
+
 func TestRunViaPlaybook_RunIDPopulated(t *testing.T) {
 	srv := playbookServer(t, "pbs_lock_chain_triage", "pb_abc",
 		map[string]any{"text": "result", "run_id": "run_xyz789"})
