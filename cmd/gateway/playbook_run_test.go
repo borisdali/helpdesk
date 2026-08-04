@@ -2190,6 +2190,65 @@ func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
 	}
 }
 
+// TestHandleProceedEscalation_NamespaceFallsBackToTriageRun verifies the
+// informed-gate flow (used with --gate-escalation, distinct from faulttest's
+// default direct-remediation path already covered by
+// TestHandlePlaybookRunApprove/ProceedNamespaceForceOverridden): when the
+// operator's proceed-escalation request doesn't specify a namespace, the
+// chained remediation run must fall back to the one stored on the triage
+// run rather than starting the remediation playbook with no namespace at all.
+func TestHandleProceedEscalation_NamespaceFallsBackToTriageRun(t *testing.T) {
+	var runStartBody string
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate_ns01",
+		Outcome:         audit.OutcomeGatePending,
+		TransitionedTo:  "pbs_k8s_node_pressure_remediate",
+		FindingsSummary: "namespace=helpdesk-test; postgres_restarted=no",
+		Namespace:       "helpdesk-test",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_node_pressure_rem01",
+		SeriesID:      "pbs_k8s_node_pressure_remediate",
+		Name:          "K8s Node Memory Pressure — Remediation",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	runData, _ := json.Marshal(run)
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			b, _ := io.ReadAll(r.Body)
+			runStartBody = string(b)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem_ns01"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	// No "namespace" field in the request body — must fall back to run.Namespace.
+	rec := postProceedEscalation(t, gw, "plr_gate_ns01",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	// No A2A client → 502, confirming the agent chain path was reached.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(runStartBody, `"namespace":"helpdesk-test"`) {
+		t.Errorf("recordPlaybookRunStart body should carry namespace=helpdesk-test (fallback from the triage run), got: %s", runStartBody)
+	}
+}
+
 // --- gate_escalation intercept tests ---
 
 // mockA2AServerWithText starts a minimal JSON-RPC A2A server that returns responseText
@@ -2884,6 +2943,106 @@ func TestHandlePlaybookRunApprove_NamespaceForceOverridden(t *testing.T) {
 	}
 	if got, _ := resp.Step.Args["namespace"].(string); got != "helpdesk-test" {
 		t.Errorf("Step.Args[namespace] = %q, want the forced authoritative value %q (not the LLM's guessed %q)",
+			got, "helpdesk-test", "default")
+	}
+}
+
+func postProceed(t *testing.T, gw *Gateway, runID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/fleet/playbook-runs/"+runID+"/proceed",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestHandlePlaybookRunProceed_NamespaceForceOverridden covers the second
+// half of the namespace force-override fix: handlePlaybookRunApprove (tested
+// above) only covers the FIRST proposed step. Every subsequent step goes
+// through handlePlaybookRunProceed instead, which has its own separate
+// override logic — this was the exact code path that executed step 2
+// (get_node_status) during live manual verification, and had no direct
+// regression coverage before this test.
+func TestHandlePlaybookRunProceed_NamespaceForceOverridden(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_node_pressure_rem01",
+		SeriesID:      "pbs_k8s_node_pressure_remediate",
+		Name:          "K8s Node Memory Pressure — Remediation",
+		Guidance:      "Verify node status.",
+		ExecutionMode: "agent_approve",
+		AgentName:     "k8s_agent",
+		IsActive:      true,
+	}
+	run := &audit.PlaybookRun{
+		RunID:      "plr_test01",
+		PlaybookID: pb.PlaybookID,
+		SeriesID:   pb.SeriesID,
+		Namespace:  "helpdesk-test",
+	}
+	// Stale/wrong namespace stored on the pending step from an earlier
+	// proposal — the fix must override this, not trust it.
+	pendingStep := &audit.PlaybookRunStep{
+		RunID:     run.RunID,
+		StepIndex: 1,
+		Agent:     "k8s",
+		Tool:      "get_node_status",
+		Args:      map[string]any{"namespace": "default", "node_name": "faulttest-eviction"},
+		Status:    "proposed",
+	}
+
+	var gotToolArgs map[string]any
+	agentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Args map[string]any `json:"args"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		gotToolArgs = req.Args
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"output": "MemoryPressure: False"}) //nolint:errcheck
+	}))
+	defer agentSrv.Close()
+
+	runData, _ := json.Marshal(run)
+	pbData, _ := json.Marshal(pb)
+	stepData, _ := json.Marshal(pendingStep)
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/pending-step"):
+			w.Write(stepData) //nolint:errcheck
+		case strings.HasSuffix(r.URL.Path, "/steps"):
+			w.Write([]byte(`{"steps":[]}`)) //nolint:errcheck
+		case strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case strings.Contains(r.URL.Path, "/playbooks/"):
+			w.Write(pbData) //nolint:errcheck
+		default:
+			w.Write([]byte("{}")) //nolint:errcheck
+		}
+	}))
+	defer auditSrv.Close()
+
+	gw := &Gateway{
+		agents:   map[string]*discovery.Agent{agentNameK8s: {Name: agentNameK8s, InvokeURL: agentSrv.URL + "/invoke"}},
+		auditURL: auditSrv.URL,
+		plannerLLM: func(_ context.Context, _ string) (string, error) {
+			// Re-planning call after this step executes; declare done so the
+			// handler returns without needing a second tool round trip.
+			return `{"action":"complete","summary":"verification complete"}`, nil
+		},
+	}
+
+	rec := postProceed(t, gw, run.RunID, `{"resolution":"approved"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := gotToolArgs["namespace"].(string); got != "helpdesk-test" {
+		t.Errorf("tool call args[namespace] = %q, want the forced authoritative value %q (not the stale %q stored on the step)",
 			got, "helpdesk-test", "default")
 	}
 }
