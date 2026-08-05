@@ -1739,6 +1739,13 @@ func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries 
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbook-runs/"):
+			// fetchPlaybookRun — used for PriorFindings continuity threading.
+			runID := strings.TrimPrefix(r.URL.Path, "/v1/fleet/playbook-runs/")
+			json.NewEncoder(w).Encode(&audit.PlaybookRun{ //nolint:errcheck
+				RunID:           runID,
+				FindingsSummary: "stub prior findings for " + runID,
+			})
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
 			m.mu.Lock()
 			m.nextRunID++
@@ -1859,6 +1866,162 @@ func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal(t *testing.T) {
 	}
 	if got := patch["transitioned_to"]; got != "" && got != nil {
 		t.Errorf("primary run's persisted transitioned_to = %v, want empty — the primary run itself emitted ESCALATE_TO, not TRANSITION_TO; a later hop's TRANSITION_TO must not leak onto the primary's own record", got)
+	}
+}
+
+// promptCapture records the raw request body of the most recent A2A call to
+// a mock agent, thread-safe for concurrent test use.
+type promptCapture struct {
+	mu   sync.Mutex
+	body string
+}
+
+func (c *promptCapture) get() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.body
+}
+
+// mockA2AServerCapturing is mockA2AServerWithText plus request-body capture,
+// so a test can assert on the actual prompt text the gateway sent to this
+// agent — not just the mocked response.
+func mockA2AServerCapturing(t *testing.T, agentName, responseText string, capture *promptCapture) (*httptest.Server, *a2a.AgentCard) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capture.mu.Lock()
+		capture.body = string(body)
+		capture.mu.Unlock()
+
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(body, &req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-capture-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": responseText},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return srv, card
+}
+
+// TestHandlePlaybookRun_AutoChain_IsTransitionFraming is a regression test
+// for the third bug found during live 3-hop escalation-chain verification:
+// PriorFindings was threaded correctly (data-plumbing was never broken), but
+// the prompt text unconditionally said "investigate further" regardless of
+// whether the continuation was a cross-domain ESCALATE_TO (should verify
+// with its own tools) or a same-domain TRANSITION_TO (should treat the
+// diagnosis as settled and proceed to remediation). This drives the same
+// 3-playbook auto-chain as the sibling test above, but captures the actual
+// prompt sent to each chained agent and asserts the framing differs
+// correctly by hop type — proving the wiring at the chainEscalation call
+// site (not just assembleTriagePrompt's branching logic in isolation).
+func TestHandlePlaybookRun_AutoChain_IsTransitionFraming(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_frametest_triage",
+		SeriesID:      "pbs_frametest_triage",
+		Name:          "Frame Test Triage",
+		ExecutionMode: "agent",
+		AgentName:     "frame_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_frametest_sysadmin",
+		SeriesID:      "pbs_frametest_sysadmin",
+		Name:          "Frame Test Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "frame_sysadmin_agent",
+		IsActive:      true,
+	}
+	pbRemediate := &audit.Playbook{
+		PlaybookID:    "pb_frametest_remediate",
+		SeriesID:      "pbs_frametest_remediate",
+		Name:          "Frame Test Remediate",
+		ExecutionMode: "agent",
+		AgentName:     "frame_remediate_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_frametest_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_frametest_sysadmin":  pbSysadmin,
+			"pbs_frametest_remediate": pbRemediate,
+		})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+
+	var sysadminCapture, remediateCapture promptCapture
+	_, dbCard := mockA2AServerWithText(t, "frame_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_frametest_sysadmin\n")
+	_, sysadminCard := mockA2AServerCapturing(t, "frame_sysadmin_agent",
+		"FINDINGS: actually a container issue\nTRANSITION_TO: pbs_frametest_remediate\n", &sysadminCapture)
+	_, remediateCard := mockA2AServerCapturing(t, "frame_remediate_agent",
+		"FINDINGS: restarted and confirmed healthy\n", &remediateCapture)
+	for name, card := range map[string]*a2a.AgentCard{
+		"frame_db_agent":        dbCard,
+		"frame_sysadmin_agent":  sysadminCard,
+		"frame_remediate_agent": remediateCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Hop 2 (sysadmin) was reached via triage's ESCALATE_TO — a cross-domain
+	// handoff. It must be told to verify with its own tools, not treat the
+	// prior diagnosis as settled.
+	sysadminPrompt := sysadminCapture.get()
+	if sysadminPrompt == "" {
+		t.Fatal("sysadmin agent never received a request")
+	}
+	if !strings.Contains(sysadminPrompt, "verify it with your own domain-specific tools") {
+		t.Error("sysadmin (escalation hop) prompt should tell the agent to verify with its own tools")
+	}
+	if strings.Contains(sysadminPrompt, "Treat this diagnosis as settled") {
+		t.Error("sysadmin (escalation hop) prompt should NOT say the diagnosis is settled — it's a different domain/agent")
+	}
+
+	// Hop 3 (remediate) was reached via sysadmin's TRANSITION_TO — a
+	// same-domain handoff. It must be told to treat the diagnosis as
+	// settled, not re-investigate from scratch.
+	remediatePrompt := remediateCapture.get()
+	if remediatePrompt == "" {
+		t.Fatal("remediate agent never received a request")
+	}
+	if !strings.Contains(remediatePrompt, "Treat this diagnosis as settled") {
+		t.Error("remediate (transition hop) prompt should tell the agent the diagnosis is settled")
+	}
+	if strings.Contains(remediatePrompt, "verify it with your own domain-specific tools") {
+		t.Error("remediate (transition hop) prompt should NOT tell the agent to verify with its own tools — it's the same agent continuing")
 	}
 }
 

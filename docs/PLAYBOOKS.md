@@ -1242,10 +1242,20 @@ pbs_db_restart_triage  (entry_point: true)
         │
         ├─ K8s: logs show corrupt/missing files → pbs_db_pitr_recovery
         │
-        └─ Docker-hosted DB (agent cannot read docker logs)
+        └─ Docker-hosted DB, or hosting type unknown
+           (agent cannot read docker logs)
                                           → pbs_sysadmin_docker_inspect
-                                              (sysadmin agent reads container
-                                               state + logs, revises hypothesis)
+                                              (sysadmin agent calls check_host,
+                                               reads the `runtime` field first)
+                                                    │
+                                                    ├─ runtime=kubectl (target is actually
+                                                    │  K8s-managed, not Docker/Podman)
+                                                    │       → pbs_k8s_pod_crash_triage
+                                                    │           (K8s agent diagnoses from
+                                                    │            pod state + on-disk logs)
+                                                    │                 │
+                                                    │                 └─ TRANSITION_TO
+                                                    │                     → pbs_k8s_pod_crash_remediate
                                                     │
                                                     ├─ exitcode=0, clean shutdown
                                                     │       → pbs_db_restart_action [manual]
@@ -1256,11 +1266,18 @@ pbs_db_restart_triage  (entry_point: true)
                                                                then restart)
 ```
 
+This is the deepest path in the graph: two cross-domain escalations (DB agent → sysadmin agent
+→ K8s agent) followed by a same-domain transition (K8s triage → K8s remediation). It is
+live-verified end-to-end against a real cluster with the `db-wal-disk-full-k8s` fault (see
+[FAULTTEST.md](FAULTTEST.md)) — not just unit-tested with synthetic run data.
+
 The agent is prompted with the escalation paths at run time:
 
 > "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`, `pbs_sysadmin_docker_inspect`"
 
 For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised, or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
+
+If instead `check_host` reports `runtime=kubectl`, the target is Kubernetes-managed rather than a plain Docker/Podman container — the sysadmin agent's docker-oriented tools (`get_host_logs` in container mode, `check_memory`, `restart_container`) do not apply, since the workload runs in a pod on a cluster, not on the host the sysadmin agent has shell access to. It escalates a third time, to `pbs_k8s_pod_crash_triage`, which has the Kubernetes-native tools (`get_pods`, `describe_pod`, `get_pod_logs`, `read_pod_file`) to diagnose the pod directly. That playbook's exit-code and OOM semantics are Kubernetes-specific and distinct from Docker's — the K8s agent does not reuse the sysadmin agent's `exitcode=`/`oomkilled=` reasoning to interpret them.
 
 ### Requires-evidence warnings
 

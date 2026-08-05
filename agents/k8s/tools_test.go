@@ -1309,6 +1309,45 @@ func TestGetPodsTool_InfraEnforced_Rejected(t *testing.T) {
 	}
 }
 
+// TestGetPodsTool_AmbiguousCluster_Rejected is a regression test proving the
+// resolveKubeContext ambiguity check (unit-tested in isolation above) is
+// actually wired into a real tool call — reproducing the exact live bug: the
+// namespace resolves fine (it's a registered DB's K8sNamespace, so
+// resolveNamespaceInfo succeeds), but which of two distinct, registered
+// cluster contexts it belongs to is genuinely ambiguous. Before this fix,
+// getPodsTool would have silently used kubeconfig's ambient current-context;
+// it must now return an error instead of guessing.
+func TestGetPodsTool_AmbiguousCluster_Rejected(t *testing.T) {
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"faulttest-db": {
+				Name:         "faulttest-db",
+				K8sNamespace: "helpdesk-test",
+				// No K8sCluster set — matches the real bug shape.
+				Tags: []string{"development"},
+			},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"minikube-cluster":   {Name: "minikube", Context: "minikube", Tags: []string{"development"}},
+			"faulttest-eviction": {Name: "eviction", Context: "faulttest-eviction", Tags: []string{"development"}},
+		},
+	}
+	defer withK8sInfraConfig(cfg)()
+	defer withMockKubectl("", nil)() // should not be reached — must fail before any cluster call
+
+	ctx := newK8sTestContext()
+	_, err := getPodsTool(ctx, GetPodsArgs{Namespace: "helpdesk-test"})
+	if err == nil {
+		t.Fatal("getPodsTool() expected an ambiguous-cluster error, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple Kubernetes clusters are registered") {
+		t.Errorf("getPodsTool() error = %v, want ambiguous-cluster message", err)
+	}
+	if !strings.Contains(err.Error(), "minikube") || !strings.Contains(err.Error(), "faulttest-eviction") {
+		t.Errorf("getPodsTool() error = %v, want both known contexts listed", err)
+	}
+}
+
 // --- get_pod_resources tests ---
 
 // injectFakeClientset injects cs under the given context key and returns cleanup.
