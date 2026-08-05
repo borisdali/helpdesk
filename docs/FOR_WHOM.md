@@ -125,7 +125,7 @@ management capability.
 
 **What "deeper" means concretely:**
 
-- More fault scenarios in the [catalog](FAULTTEST.md) (currently 32; targeting coverage
+- More fault scenarios in the [catalog](FAULTTEST.md) (currently 33; targeting coverage
   of every class of production failure a DBA or SRE encounters in the first year of
   on-call).
 - More attribution dimensions in the [stability cert](ATTRIBUTION_CERTS.md): the v0.21.0
@@ -137,6 +137,12 @@ management capability.
   where the human feedback fraction is visible, queryable and growing.
 - More governance surface: blast-radius enforcement for Kubernetes, host-level sysadmin
   operations and cross-domain failure propagation reasoning.
+- Monitoring intake: webhook ingestion from Prometheus, Datadog and PagerDuty so
+  [automatic playbook selection](API.md#automatic-routing-and-playbook-selection) is
+  triggered by the raw signal itself, not by a human framing it as a query first.
+  Selection (shipped) solves matching a query to the right encoded knowledge; this
+  closes the remaining gap between an alert firing and that knowledge activating with
+  nobody in the loop to type it up.
 
 **What "broader" would look like — and why we're not going there:**
 
