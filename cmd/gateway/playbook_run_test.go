@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1655,6 +1656,165 @@ func TestAppendChainedText_ChainedError(t *testing.T) {
 
 	if primary.body.String() != before {
 		t.Error("primary body was modified when chained returned an error")
+	}
+}
+
+// mockChainAuditd starts a mock auditd that supports a full multi-hop
+// auto-chain: primary playbook fetch by ID, chained playbook fetch by
+// series_id, run creation (unique run_id per call), and run completion
+// (PATCH bodies captured, keyed by run_id, for later assertion).
+type mockChainAuditd struct {
+	*httptest.Server
+	mu        sync.Mutex
+	nextRunID int
+	patches   map[string]map[string]any
+}
+
+func (m *mockChainAuditd) patchFor(runID string) map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.patches[runID]
+}
+
+func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries map[string]*audit.Playbook) *mockChainAuditd {
+	t.Helper()
+	m := &mockChainAuditd{patches: make(map[string]map[string]any)}
+	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet/playbooks":
+			if pb, ok := bySeries[r.URL.Query().Get("series_id")]; ok {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{pb}}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks/"):
+			id := strings.TrimPrefix(r.URL.Path, "/v1/fleet/playbooks/")
+			if pb, ok := byID[id]; ok {
+				json.NewEncoder(w).Encode(pb) //nolint:errcheck
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			m.mu.Lock()
+			m.nextRunID++
+			runID := fmt.Sprintf("plr_chaintest%02d", m.nextRunID)
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": runID}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			runID := strings.TrimPrefix(r.URL.Path, "/v1/fleet/playbook-runs/")
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			m.mu.Lock()
+			m.patches[runID] = body
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			// Prior-findings lookups, delegation-verification event queries, etc.
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(m.Server.Close)
+	return m
+}
+
+// TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal is a regression
+// test for a real bug found during live 3-hop escalation-chain verification:
+// the primary/entry-point run's OWN escalated_to/transitioned_to fields were
+// being overwritten with the LAST hop's signal in a multi-hop auto-chain,
+// making the incident-narrative walker (handleGetIncident, which starts its
+// classification from the triage run's own fields) misclassify the second
+// hop as the terminal remediation and stop walking early — even though the
+// chain had, e.g., escalated twice before transitioning. The primary run's
+// persisted record must reflect what IT ITSELF decided (ESCALATE_TO here),
+// not what the chain eventually resolved to.
+func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_bugtest_triage",
+		SeriesID:      "pbs_bugtest_triage",
+		Name:          "Bug Test Triage",
+		ExecutionMode: "agent",
+		AgentName:     "test_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_bugtest_sysadmin",
+		SeriesID:      "pbs_bugtest_sysadmin",
+		Name:          "Bug Test Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "test_sysadmin_agent",
+		IsActive:      true,
+	}
+	pbRemediate := &audit.Playbook{
+		PlaybookID:    "pb_bugtest_remediate",
+		SeriesID:      "pbs_bugtest_remediate",
+		Name:          "Bug Test Remediate",
+		ExecutionMode: "agent",
+		AgentName:     "test_remediate_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_bugtest_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_bugtest_sysadmin":  pbSysadmin,
+			"pbs_bugtest_remediate": pbRemediate,
+		})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "test_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_bugtest_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "test_sysadmin_agent",
+		"FINDINGS: actually a container issue\nTRANSITION_TO: pbs_bugtest_remediate\n")
+	_, remediateCard := mockA2AServerWithText(t, "test_remediate_agent",
+		"FINDINGS: restarted and confirmed healthy\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"test_db_agent":        dbCard,
+		"test_sysadmin_agent":  sysadminCard,
+		"test_remediate_agent": remediateCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+
+	// recordPlaybookRunComplete for the primary run is fired via `go` — poll
+	// briefly for the async PATCH to land.
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+
+	if got := patch["escalated_to"]; got != "pbs_bugtest_sysadmin" {
+		t.Errorf("primary run's persisted escalated_to = %v, want 'pbs_bugtest_sysadmin' (its own signal, not the last hop's)", got)
+	}
+	if got := patch["transitioned_to"]; got != "" && got != nil {
+		t.Errorf("primary run's persisted transitioned_to = %v, want empty — the primary run itself emitted ESCALATE_TO, not TRANSITION_TO; a later hop's TRANSITION_TO must not leak onto the primary's own record", got)
 	}
 }
 

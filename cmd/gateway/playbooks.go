@@ -263,12 +263,12 @@ type PlaybookRunRequest struct {
 	// from free-text FINDINGS parsing, which is not reliable enough for a
 	// value load-bearing for correctness (a wrong namespace either finds
 	// nothing or, worse, acts on the wrong workload).
-	Namespace        string `json:"namespace,omitempty"`
-	Context          string `json:"context,omitempty"`         // operator-supplied context (server name, symptoms, etc.)
-	TriggerContext   string `json:"trigger_context,omitempty"` // original alert text / monitoring signal that initiated the run; persisted on PlaybookRun
-	ContextID        string `json:"context_id,omitempty"`      // A2A session ID for multi-turn continuity
-	PriorRunID       string `json:"prior_run_id,omitempty"`    // run_id of prior investigation for continuity threading
-	PriorFindings    string `json:"-"`                         // populated at runtime from prior run; not from body
+	Namespace      string `json:"namespace,omitempty"`
+	Context        string `json:"context,omitempty"`         // operator-supplied context (server name, symptoms, etc.)
+	TriggerContext string `json:"trigger_context,omitempty"` // original alert text / monitoring signal that initiated the run; persisted on PlaybookRun
+	ContextID      string `json:"context_id,omitempty"`      // A2A session ID for multi-turn continuity
+	PriorRunID     string `json:"prior_run_id,omitempty"`    // run_id of prior investigation for continuity threading
+	PriorFindings  string `json:"-"`                         // populated at runtime from prior run; not from body
 
 	// ApprovalMode controls when approval is required for write/destructive operations
 	// and which playbooks are eligible for auto-chaining.
@@ -807,9 +807,19 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		finalOutcome = "escalated+resolved"
 		if chained.findings != "" {
 			finalFindings = chained.findings
-			finalEscalatedTo = chained.escalatedTo
-			finalTransitionedTo = chained.transitionTo
 		}
+		// finalEscalatedTo/finalTransitionedTo intentionally stay as primary's
+		// own original signal (set before this loop) rather than being
+		// overwritten with each chained hop's — these get persisted onto the
+		// PRIMARY run's own record via recordPlaybookRunComplete below, and
+		// must reflect what the primary run itself decided, not the last hop
+		// in the chain. handleGetIncident's escalation-hop classification
+		// walks prior_run_id links and relies on each run's own
+		// escalated_to/transitioned_to accurately describing its own
+		// immediate handoff; overwriting them here previously corrupted that
+		// walk (the primary run's record would claim TRANSITION_TO when it
+		// actually emitted ESCALATE_TO, making the walker misclassify the
+		// second hop as the remediation and stop early).
 		extra["diagnostic_report"] = finalReport
 		extra["chained_run_id"] = chained.runID
 		if chained.findings != "" {

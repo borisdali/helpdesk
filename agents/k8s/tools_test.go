@@ -1175,6 +1175,116 @@ func TestResolveNamespaceInfo_InfraPermissive_UnknownNamespace(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// resolveKubeContext tests
+// =============================================================================
+
+func TestResolveKubeContext_ExplicitContextWins(t *testing.T) {
+	cfg := makeK8sTestInfraConfig()
+	cfg.K8sClusters["other-cluster"] = infra.K8sCluster{Name: "other", Context: "gke_staging", Tags: []string{"staging"}}
+	defer withK8sInfraConfig(cfg)()
+
+	got, err := resolveKubeContext("prod-namespace", "gke_staging")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil for explicit context", err)
+	}
+	if got != "gke_staging" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_staging'", got)
+	}
+}
+
+func TestResolveKubeContext_SoleClusterNoAmbiguity(t *testing.T) {
+	// Only one cluster registered — no context needed, resolves to it.
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+
+	got, err := resolveKubeContext("prod-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil with sole cluster", err)
+	}
+	if got != "gke_prod" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_prod'", got)
+	}
+}
+
+func TestResolveKubeContext_MultipleClustersSameContext_NoAmbiguity(t *testing.T) {
+	// Two registered clusters that happen to share the same kubeconfig context
+	// (e.g. two logical names for the same physical cluster) — not ambiguous.
+	cfg := makeK8sTestInfraConfig()
+	cfg.K8sClusters["prod-cluster-alias"] = infra.K8sCluster{Name: "alias", Context: "gke_prod", Tags: []string{"production"}}
+	defer withK8sInfraConfig(cfg)()
+
+	got, err := resolveKubeContext("any-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil when all clusters share one context", err)
+	}
+	if got != "gke_prod" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_prod'", got)
+	}
+}
+
+func TestResolveKubeContext_MultipleClusters_DisambiguatedByNamespace(t *testing.T) {
+	// Two distinct clusters registered; the namespace matches a DB entry that
+	// explicitly names its cluster — resolves without needing an explicit context.
+	cfg := makeK8sTestInfraConfig()
+	cfg.K8sClusters["other-cluster"] = infra.K8sCluster{Name: "other", Context: "gke_staging", Tags: []string{"staging"}}
+	defer withK8sInfraConfig(cfg)()
+
+	got, err := resolveKubeContext("prod-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil when namespace uniquely maps to a cluster", err)
+	}
+	if got != "gke_prod" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_prod'", got)
+	}
+}
+
+func TestResolveKubeContext_MultipleClusters_AmbiguousNamespace_Errors(t *testing.T) {
+	// Reproduces the real bug found during 3-hop live verification: two distinct
+	// clusters registered, the namespace matches a DB entry via K8sNamespace but
+	// that DB entry does NOT name a K8sCluster, and no explicit context is passed.
+	// Must error rather than silently falling back to kubeconfig's ambient
+	// current-context (which could be an unrelated cluster).
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"faulttest-db": {
+				Name:         "faulttest-db",
+				K8sNamespace: "helpdesk-test",
+				// No K8sCluster set — this is the exact shape that triggered
+				// the bug.
+				Tags: []string{"development"},
+			},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"minikube-cluster":   {Name: "minikube", Context: "minikube", Tags: []string{"development"}},
+			"faulttest-eviction": {Name: "eviction", Context: "faulttest-eviction", Tags: []string{"development"}},
+		},
+	}
+	defer withK8sInfraConfig(cfg)()
+
+	_, err := resolveKubeContext("helpdesk-test", "")
+	if err == nil {
+		t.Fatal("resolveKubeContext() error = nil, want ambiguity error when namespace doesn't uniquely resolve across multiple distinct-context clusters")
+	}
+	if !strings.Contains(err.Error(), "multiple Kubernetes clusters are registered") {
+		t.Errorf("resolveKubeContext() error = %q, want ambiguity message naming multiple clusters", err.Error())
+	}
+	if !strings.Contains(err.Error(), "minikube") || !strings.Contains(err.Error(), "faulttest-eviction") {
+		t.Errorf("resolveKubeContext() error = %q, want both known contexts listed", err.Error())
+	}
+}
+
+func TestResolveKubeContext_NoInfraConfig_DevMode(t *testing.T) {
+	defer withK8sInfraConfig(nil)()
+
+	got, err := resolveKubeContext("any-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil in dev mode (no infra config)", err)
+	}
+	if got != "" {
+		t.Errorf("resolveKubeContext() = %q, want empty (ambient context) in dev mode", got)
+	}
+}
+
 func TestGetPodsTool_InfraEnforced_Rejected(t *testing.T) {
 	// infraConfig is set with multiple clusters; namespace is not registered and
 	// context doesn't match any cluster → tool returns access denied.

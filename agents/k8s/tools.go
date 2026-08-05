@@ -134,6 +134,59 @@ func resolveContext(contextOrDBName string) string {
 	return contextOrDBName
 }
 
+// resolveKubeContext determines which kubeconfig context a tool call should
+// use. If contextOrDBName resolves to an explicit context (literal or via a
+// registered DB name), that wins. Otherwise, when the infra config registers
+// more than one distinct cluster context, an unresolved namespace is
+// ambiguous — silently falling back to kubeconfig's ambient current-context
+// risks diagnosing the wrong cluster entirely, so this returns an error
+// instead of guessing. namespace may be empty for cluster-scoped tools.
+func resolveKubeContext(namespace, contextOrDBName string) (string, error) {
+	resolvedCtx := resolveContext(contextOrDBName)
+	if resolvedCtx != "" {
+		return resolvedCtx, nil
+	}
+	if infraConfig == nil || len(infraConfig.K8sClusters) == 0 {
+		return "", nil // dev mode / no clusters registered — use ambient context
+	}
+
+	distinct := make(map[string]bool)
+	for _, c := range infraConfig.K8sClusters {
+		distinct[c.Context] = true
+	}
+	if len(distinct) <= 1 {
+		// All registered clusters share one context (or there's only one) —
+		// no real ambiguity.
+		for ctx := range distinct {
+			return ctx, nil
+		}
+		return "", nil
+	}
+
+	// More than one distinct cluster context is registered. Try to
+	// disambiguate via a DB entry that names both this namespace and an
+	// explicit cluster.
+	if namespace != "" {
+		for _, db := range infraConfig.DBServers {
+			if db.K8sNamespace == namespace && db.K8sCluster != "" {
+				if cluster, ok := infraConfig.K8sClusters[db.K8sCluster]; ok {
+					return cluster.Context, nil
+				}
+			}
+		}
+	}
+
+	known := make([]string, 0, len(distinct))
+	for ctx := range distinct {
+		known = append(known, ctx)
+	}
+	sort.Strings(known)
+	return "", fmt.Errorf(
+		"multiple Kubernetes clusters are registered (contexts: %s) and this request does not "+
+			"unambiguously resolve to one of them; pass an explicit context (one of: %s)",
+		strings.Join(known, ", "), strings.Join(known, ", "))
+}
+
 // diagnoseKubectlError examines kubectl output for common failure patterns and returns
 // a clear, actionable error message alongside the raw output.
 func diagnoseKubectlError(output string) string {
@@ -383,7 +436,10 @@ func getPodsImpl(ctx context.Context, args GetPodsArgs) (GetPodsResult, error) {
 		return GetPodsResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetPodsResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -426,7 +482,10 @@ func getServiceImpl(ctx context.Context, args GetServiceArgs) (GetServiceResult,
 		return GetServiceResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetServiceResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -464,7 +523,10 @@ func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (Kubectl
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -571,7 +633,10 @@ func getEndpointsImpl(ctx context.Context, args GetEndpointsArgs) (GetEndpointsR
 		return GetEndpointsResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetEndpointsResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -609,7 +674,10 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 		return GetEventsResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetEventsResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -650,7 +718,10 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -725,7 +796,10 @@ func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, 
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -809,7 +883,10 @@ func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, 
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -872,7 +949,10 @@ type GetNodesArgs struct {
 }
 
 func getNodesImpl(ctx context.Context, args GetNodesArgs) (GetNodesResult, error) {
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext("", args.Context)
+	if err != nil {
+		return GetNodesResult{}, err
+	}
 
 	// Nodes are cluster-scoped; use "cluster" as the sentinel resource_name.
 	if err := checkK8sPolicy(ctx, "cluster", policy.ActionRead, nil); err != nil {
@@ -909,7 +989,10 @@ func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, erro
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -983,7 +1066,10 @@ func restartDeploymentImpl(ctx context.Context, args RestartDeploymentArgs) (Kub
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -1053,7 +1139,10 @@ func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (Kubectl
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -1158,7 +1247,10 @@ func getPodResourcesImpl(ctx context.Context, args GetPodResourcesArgs) (GetPodR
 		return GetPodResourcesResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetPodResourcesResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return GetPodResourcesResult{}, fmt.Errorf("policy denied: %w", err)
@@ -1188,7 +1280,10 @@ type GetNodeStatusArgs struct {
 }
 
 func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext("", args.Context)
+	if err != nil {
+		return GetNodeStatusResult{}, err
+	}
 
 	// Nodes are cluster-scoped (no namespace); use the sentinel "cluster" so the
 	// policy check request carries a non-empty resource_name.
@@ -1393,7 +1488,10 @@ func runNodeDebugCommand(ctx context.Context, kubeContext, toolName, nodeName, h
 }
 
 func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext("", args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 	lines := resolveDmesgLines(args.Lines)
 
 	if err := checkK8sPolicy(ctx, args.NodeName, policy.ActionWrite, nil); err != nil {
