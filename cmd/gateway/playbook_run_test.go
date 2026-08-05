@@ -334,6 +334,50 @@ func TestAssembleTriagePrompt_PriorFindings(t *testing.T) {
 	}
 }
 
+// TestAssembleTriagePrompt_PriorFindings_Transition verifies that a
+// same-domain TRANSITION_TO continuation (e.g. triage→remediate by the same
+// agent) is told to treat the prior diagnosis as settled rather than
+// re-investigate from scratch. Regression test for a bug found during live
+// 3-hop escalation-chain verification: the prompt previously said "investigate
+// further" unconditionally, so remediation playbooks re-derived their own
+// diagnosis instead of building on triage's — and were exposed to the same
+// misleading signals (e.g. an irrelevant connection-string port) a second time.
+func TestAssembleTriagePrompt_PriorFindings_Transition(t *testing.T) {
+	pb := &audit.Playbook{Name: "K8s Pod Crash — Remediation"}
+	req := PlaybookRunRequest{
+		PriorFindings: "WAL disk full; PANIC at pg_wal write.",
+		IsTransition:  true,
+	}
+	prompt := assembleTriagePrompt(pb, req, "")
+
+	if !strings.Contains(prompt, "settled") {
+		t.Error("transition prompt should tell the agent to treat the prior diagnosis as settled")
+	}
+	if strings.Contains(prompt, "investigate further") {
+		t.Error("transition prompt should NOT tell the agent to investigate further — it should confirm and remediate")
+	}
+}
+
+// TestAssembleTriagePrompt_PriorFindings_Escalation verifies that a
+// cross-domain ESCALATE_TO continuation (a different agent picking up the
+// investigation) is still told to verify with its own tools, since the prior
+// agent could not see into this agent's domain.
+func TestAssembleTriagePrompt_PriorFindings_Escalation(t *testing.T) {
+	pb := &audit.Playbook{Name: "K8s Pod Crash — Diagnosis"}
+	req := PlaybookRunRequest{
+		PriorFindings: "Container runtime is Kubernetes; pod in restart loop.",
+		IsTransition:  false,
+	}
+	prompt := assembleTriagePrompt(pb, req, "")
+
+	if !strings.Contains(prompt, "verify it with your own domain-specific tools") {
+		t.Error("escalation prompt should tell the agent to verify the prior findings with its own tools")
+	}
+	if strings.Contains(prompt, "settled") {
+		t.Error("escalation prompt should not claim the prior diagnosis is settled — a different domain/agent must still verify")
+	}
+}
+
 func TestAssembleTriagePrompt_NoPriorFindings(t *testing.T) {
 	pb := &audit.Playbook{Name: "Restart Triage"}
 	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")

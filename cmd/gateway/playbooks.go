@@ -269,6 +269,16 @@ type PlaybookRunRequest struct {
 	ContextID      string `json:"context_id,omitempty"`      // A2A session ID for multi-turn continuity
 	PriorRunID     string `json:"prior_run_id,omitempty"`    // run_id of prior investigation for continuity threading
 	PriorFindings  string `json:"-"`                         // populated at runtime from prior run; not from body
+	// IsTransition distinguishes a same-domain TRANSITION_TO continuation
+	// (this run's own prior playbook, e.g. triage→remediate by the same
+	// agent) from a cross-domain ESCALATE_TO continuation (a different
+	// agent picking up where another left off). Populated at runtime from
+	// the prior run's own signal; not from the request body. Determines how
+	// assembleTriagePrompt frames PriorFindings: a transition should treat
+	// the prior diagnosis as settled and proceed to confirm/remediate; an
+	// escalation should treat it as a starting point for this agent's own,
+	// domain-specific investigation.
+	IsTransition bool `json:"-"`
 
 	// ApprovalMode controls when approval is required for write/destructive operations
 	// and which playbooks are eligible for auto-chaining.
@@ -373,6 +383,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if req.PriorRunID != "" {
 		if prior, err := g.fetchPlaybookRun(r.Context(), req.PriorRunID); err == nil {
 			req.PriorFindings = prior.FindingsSummary
+			req.IsTransition = prior.TransitionedTo == pb.SeriesID
 		} else {
 			slog.Warn("handlePlaybookRun: could not fetch prior run for continuity", "prior_run_id", req.PriorRunID, "err", err)
 		}
@@ -953,6 +964,10 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		PriorRunID:       primary.runID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
+		// primary.transitionTo != "" means THIS hop was reached via primary's
+		// own TRANSITION_TO (same-domain, same-agent handoff) rather than
+		// ESCALATE_TO (cross-domain handoff to a different agent).
+		IsTransition: primary.transitionTo != "",
 	}
 	// Fetch prior findings for continuity threading.
 	if chainReq.PriorRunID != "" {
@@ -1198,7 +1213,8 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// "transitioned" but with nothing actually running.
 	nextSeriesID := run.EscalatedTo
 	approvedOutcome := audit.OutcomeEscalated
-	if run.TransitionedTo != "" {
+	isTransition := run.TransitionedTo != ""
+	if isTransition {
 		nextSeriesID = run.TransitionedTo
 		approvedOutcome = audit.OutcomeTransitioned
 	}
@@ -1246,6 +1262,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		PriorRunID:       runID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
+		IsTransition:     isTransition,
 	}
 	if remReq.ApprovalMode == "" {
 		remReq.ApprovalMode = nextPB.ApprovalMode
@@ -1541,7 +1558,12 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	}
 
 	if req.PriorFindings != "" {
-		fmt.Fprintf(&b, "## Prior Investigation Findings\nA previous investigation reached the following conclusion:\n%s\n\nContinue from this context and investigate further.\n\n", req.PriorFindings)
+		if req.IsTransition {
+			fmt.Fprintf(&b, "## Prior Investigation Findings\nThe triage phase (same agent, same domain) already diagnosed this incident:\n%s\n\nTreat this diagnosis as settled — do NOT re-run the full investigation from scratch. "+
+				"Confirm the current state only where the Expert Guidance below explicitly calls for a pre-remediation check, then proceed directly to describing the remediation.\n\n", req.PriorFindings)
+		} else {
+			fmt.Fprintf(&b, "## Prior Investigation Findings\nA previous investigation (different agent/domain) reached the following conclusion:\n%s\n\nUse this as a starting point, but verify it with your own domain-specific tools — the prior agent could not see into your domain.\n\n", req.PriorFindings)
+		}
 	}
 
 	b.WriteString("## Constraints\n")
