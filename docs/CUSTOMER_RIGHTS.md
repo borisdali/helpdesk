@@ -191,7 +191,8 @@ documented schemas.
 ## How to Verify Each Right
 
 You should not take these commitments on faith. Here is how to test each one against a
-running deployment:
+running deployment. If you don't have aiHelpDesk installed yet, consider this 
+[10-minute demo](../deploy/docker-compose/DEMO.md) instead:
 
 ```bash
 # Right I — the gate exists and is mandatory

@@ -1,0 +1,20 @@
+{
+  "_comment": "Sysadmin-agent-only view of the helpdesk-test K8s 3-hop escalation demo target. Deliberately NOT shared with the DB agent's or the gateway's own infrastructure.json: the DB agent must see this server as unregistered (no docker/K8s hint) so it takes its existing 'unknown hosting -> escalate to sysadmin' branch, and the gateway must never resolve this connection_string at all (buildServerTypeHint would otherwise inject a 'do NOT use kubectl' hint into every hop's prompt, including the K8s agent's). This file gives the sysadmin agent the CMDB-depth view — k8s_cluster/k8s_pod_selector — that lets check_host actually reach the pod once it decides to look deeper. See docs/RIGHTS_AND_THE_FLYWHEEL.md and the 3-hop escalation chain plan for the full narrative.",
+  "db_servers": {
+    "helpdesk_test_postgres": {
+      "name": "helpdesk-test PostgreSQL (K8s)",
+      "connection_string": "host=127.0.0.1 port=5433 dbname=testdb user=postgres password=testpass sslmode=disable",
+      "k8s_cluster": "demo_minikube",
+      "k8s_namespace": "helpdesk-test",
+      "k8s_pod_selector": "app=postgres",
+      "tags": ["demo", "kubernetes"]
+    }
+  },
+  "k8s_clusters": {
+    "demo_minikube": {
+      "name": "Demo Minikube Cluster",
+      "context": "minikube",
+      "tags": ["demo"]
+    }
+  }
+}

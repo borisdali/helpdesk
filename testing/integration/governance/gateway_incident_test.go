@@ -176,3 +176,118 @@ func TestIntegration_GatewayIncident_EscalationOnly(t *testing.T) {
 		t.Errorf("remediation = %v, want nil (successor was reached via ESCALATE_TO, not TRANSITION_TO)", remediation)
 	}
 }
+
+// TestIntegration_GatewayIncident_FourHopTwoEscalations seeds a real 4-hop
+// chain — triage (ESCALATE_TO) → sysadmin diagnostic hop (ESCALATE_TO) →
+// K8s diagnostic hop (TRANSITION_TO) → remediation — matching the new
+// pbs_db_restart_triage → pbs_sysadmin_docker_inspect → pbs_k8s_pod_crash_triage
+// → pbs_k8s_pod_crash_remediate live escalation chain (DB agent → sysadmin
+// agent → K8s agent, 2 escalations + 1 transition, spanning 3 distinct
+// agents). TestHandleGetIncident_FourHopTwoEscalations (unit-level, mocked
+// auditd, generic series IDs) already proves the walking algorithm
+// generalizes to N hops; this proves it generalizes for THIS chain's actual
+// series IDs against a real auditd HTTP path — a regression guard
+// independent of the live, agent-driven demo run.
+func TestIntegration_GatewayIncident_FourHopTwoEscalations(t *testing.T) {
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
+		"outcome":          "escalated",
+		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"findings_summary": "connection refused; no known infrastructure entry for this server",
+		"trace_id":         "trace-4hop-" + suffix + "-triage",
+		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+	})
+
+	sysadminRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+		"prior_run_id":     triageRunID,
+		"outcome":          "escalated",
+		"escalated_to":     "pbs_k8s_pod_crash_triage",
+		"findings_summary": "check_host runtime=kubectl — target is Kubernetes-managed, not docker/podman",
+		"trace_id":         "trace-4hop-" + suffix + "-escalate1",
+		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+	})
+
+	k8sTriageRunID := recordRun(t, "pbs_k8s_pod_crash_triage", map[string]any{
+		"prior_run_id":     sysadminRunID,
+		"outcome":          "transitioned",
+		"transitioned_to":  "pbs_k8s_pod_crash_remediate",
+		"findings_summary": "exit_code=0 reason=Completed; root_cause=WAL disk full (PANIC in on-disk log)",
+		"trace_id":         "trace-4hop-" + suffix + "-escalate2",
+		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+	})
+
+	remediationRunID := recordRun(t, "pbs_k8s_pod_crash_remediate", map[string]any{
+		"prior_run_id":     k8sTriageRunID,
+		"outcome":          "resolved",
+		"findings_summary": "pod already Running and stable — StatefulSet controller auto-restarted",
+		"trace_id":         "trace-4hop-" + suffix + "-remediate",
+		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+	})
+
+	narrative := getIncidentFromGateway(t, triageRunID)
+
+	// Triage chapter.
+	triage, _ := narrative["triage"].(map[string]any)
+	if triage == nil {
+		t.Fatal("narrative missing triage chapter")
+	}
+	if triage["run_id"] != triageRunID {
+		t.Errorf("triage.run_id = %v, want %s", triage["run_id"], triageRunID)
+	}
+
+	// Escalations: exactly two entries, in order — sysadmin hop, then K8s hop.
+	escalations, _ := narrative["escalations"].([]any)
+	if len(escalations) != 2 {
+		t.Fatalf("escalations count = %d, want 2; escalations=%v", len(escalations), escalations)
+	}
+	hop1, _ := escalations[0].(map[string]any)
+	if hop1 == nil {
+		t.Fatal("escalations[0] is not an object")
+	}
+	if hop1["run_id"] != sysadminRunID {
+		t.Errorf("escalations[0].run_id = %v, want %s", hop1["run_id"], sysadminRunID)
+	}
+	if hop1["playbook"] != "pbs_sysadmin_docker_inspect" {
+		t.Errorf("escalations[0].playbook = %v, want pbs_sysadmin_docker_inspect", hop1["playbook"])
+	}
+	hop2, _ := escalations[1].(map[string]any)
+	if hop2 == nil {
+		t.Fatal("escalations[1] is not an object")
+	}
+	if hop2["run_id"] != k8sTriageRunID {
+		t.Errorf("escalations[1].run_id = %v, want %s", hop2["run_id"], k8sTriageRunID)
+	}
+	if hop2["playbook"] != "pbs_k8s_pod_crash_triage" {
+		t.Errorf("escalations[1].playbook = %v, want pbs_k8s_pod_crash_triage", hop2["playbook"])
+	}
+
+	// Remediation: the fourth hop, NOT either escalation hop.
+	remediation, _ := narrative["remediation"].(map[string]any)
+	if remediation == nil {
+		t.Fatal("narrative missing remediation chapter")
+	}
+	if remediation["run_id"] != remediationRunID {
+		t.Errorf("remediation.run_id = %v, want %s (must not be an escalation hop)",
+			remediation["run_id"], remediationRunID)
+	}
+	if remediation["playbook"] != "pbs_k8s_pod_crash_remediate" {
+		t.Errorf("remediation.playbook = %v, want pbs_k8s_pod_crash_remediate", remediation["playbook"])
+	}
+
+	// Journeys should list four phases in order: triage, escalation:1, escalation:2, remediation.
+	journeys, _ := narrative["journeys"].([]any)
+	if len(journeys) != 4 {
+		t.Fatalf("journeys count = %d, want 4; journeys=%v", len(journeys), journeys)
+	}
+	wantPhases := []string{"triage", "escalation:1", "escalation:2", "remediation"}
+	for i, want := range wantPhases {
+		j, _ := journeys[i].(map[string]any)
+		if j == nil || j["phase"] != want {
+			t.Errorf("journeys[%d].phase = %v, want %q", i, j["phase"], want)
+		}
+	}
+
+	t.Logf("4-hop, 2-escalation chain OK: triage=%s escalation1=%s escalation2=%s remediation=%s",
+		triageRunID, sysadminRunID, k8sTriageRunID, remediationRunID)
+}

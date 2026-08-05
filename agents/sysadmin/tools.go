@@ -239,22 +239,9 @@ func execInProcess(ctx context.Context, host resolvedHost, cmd []string) (string
 
 	case host.K8sPodSelector != "":
 		// Resolve the pod name from the selector first.
-		getPodArgs := []string{
-			"get", "pod",
-			"-l", host.K8sPodSelector,
-			"-n", host.K8sNamespace,
-			"-o", "jsonpath={.items[0].metadata.name}",
-		}
-		if host.K8sContext != "" {
-			getPodArgs = append([]string{"--context", host.K8sContext}, getPodArgs...)
-		}
-		podName, err := cmdRunner.Run(ctx, "kubectl", getPodArgs, nil)
+		podName, err := resolveK8sPodName(ctx, host)
 		if err != nil {
-			return "", fmt.Errorf("kubectl get pod: %w: %s", err, podName)
-		}
-		podName = strings.TrimSpace(podName)
-		if podName == "" {
-			return "", fmt.Errorf("no pod found for selector %q in namespace %q", host.K8sPodSelector, host.K8sNamespace)
+			return "", err
 		}
 		execArgs := []string{"exec", podName, "-n", host.K8sNamespace}
 		if host.K8sContext != "" {
@@ -280,6 +267,130 @@ func containerRuntimeBin(host resolvedHost) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown runtime %q (supported: docker, podman, or empty for systemd)", host.Runtime)
 	}
+}
+
+// resolveK8sPodName resolves host.K8sPodSelector to a concrete pod name via
+// "kubectl get pod -l <selector> -n <namespace>". Shared by execInProcess and
+// checkHostK8s so both use identical pod-resolution logic.
+func resolveK8sPodName(ctx context.Context, host resolvedHost) (string, error) {
+	getPodArgs := []string{
+		"get", "pod",
+		"-l", host.K8sPodSelector,
+		"-n", host.K8sNamespace,
+		"-o", "jsonpath={.items[0].metadata.name}",
+	}
+	if host.K8sContext != "" {
+		getPodArgs = append([]string{"--context", host.K8sContext}, getPodArgs...)
+	}
+	podName, err := cmdRunner.Run(ctx, "kubectl", getPodArgs, nil)
+	if err != nil {
+		return "", fmt.Errorf("kubectl get pod: %w: %s", err, podName)
+	}
+	podName = strings.TrimSpace(podName)
+	if podName == "" {
+		return "", fmt.Errorf("no pod found for selector %q in namespace %q", host.K8sPodSelector, host.K8sNamespace)
+	}
+	return podName, nil
+}
+
+// k8sContainerStatusJSON is one entry of `kubectl get pod -o json`'s
+// status.containerStatuses array — named (not anonymous) so it can be
+// referenced by type in checkHostK8s without duplicating the field list.
+type k8sContainerStatusJSON struct {
+	Ready        bool `json:"ready"`
+	RestartCount int  `json:"restartCount"`
+	State        struct {
+		Waiting *struct {
+			Reason string `json:"reason"`
+		} `json:"waiting"`
+	} `json:"state"`
+	LastState struct {
+		Terminated *struct {
+			Reason   string `json:"reason"`
+			ExitCode int    `json:"exitCode"`
+		} `json:"terminated"`
+	} `json:"lastState"`
+}
+
+// k8sPodStatusJSON is the minimal subset of `kubectl get pod -o json` output
+// checkHostK8s needs.
+type k8sPodStatusJSON struct {
+	Status struct {
+		Phase             string                   `json:"phase"`
+		ContainerStatuses []k8sContainerStatusJSON `json:"containerStatuses"`
+	} `json:"status"`
+}
+
+// checkHostK8s handles check_host for a Kubernetes-resolved target. There is
+// no local docker/podman/systemd process to inspect here — the workload runs
+// in a pod on a cluster. Rather than misbehave via the systemd branch (empty
+// SystemdUnit — see checkHostImpl's dispatch), this surfaces real pod
+// status/restart/last-termination fields, and makes the "this is Kubernetes,
+// not Docker" signal unambiguous via Runtime="kubectl" — the field
+// playbooks/sysadmin-docker-inspect.yaml's guidance checks first to decide
+// whether to escalate to the K8s agent instead of continuing its
+// docker-oriented steps.
+func checkHostK8s(ctx context.Context, target string, host resolvedHost) (CheckHostResult, error) {
+	podName, err := resolveK8sPodName(ctx, host)
+	if err != nil {
+		return CheckHostResult{}, fmt.Errorf("check_host: %w", err)
+	}
+
+	getArgs := []string{"get", "pod", podName, "-n", host.K8sNamespace, "-o", "json"}
+	if host.K8sContext != "" {
+		getArgs = append([]string{"--context", host.K8sContext}, getArgs...)
+	}
+	out, runErr := cmdRunner.Run(ctx, "kubectl", getArgs, nil)
+	if runErr != nil {
+		return CheckHostResult{
+			ServerID: target,
+			Runtime:  "kubectl",
+			Status:   "error",
+			Details:  fmt.Sprintf("%v: %s", runErr, strings.TrimSpace(out)),
+		}, nil
+	}
+
+	var pod k8sPodStatusJSON
+	if err := json.Unmarshal([]byte(out), &pod); err != nil {
+		return CheckHostResult{}, fmt.Errorf("check_host: parsing kubectl output for pod %q: %w", podName, err)
+	}
+
+	var cs *k8sContainerStatusJSON
+	if len(pod.Status.ContainerStatuses) > 0 {
+		cs = &pod.Status.ContainerStatuses[0]
+	}
+
+	phase := pod.Status.Phase
+	status := "unknown"
+	switch {
+	case cs != nil && cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff":
+		status = "restarting"
+	case phase == "Running" && cs != nil && cs.Ready:
+		status = "running"
+	case phase == "Failed" || phase == "Succeeded":
+		status = "stopped"
+	}
+
+	lastReason, lastExit := "none", -1
+	restartCount := 0
+	if cs != nil {
+		restartCount = cs.RestartCount
+		if cs.LastState.Terminated != nil {
+			lastReason = cs.LastState.Terminated.Reason
+			lastExit = cs.LastState.Terminated.ExitCode
+		}
+	}
+
+	details := fmt.Sprintf(
+		"pod=%s phase=%s restart_count=%d last_termination_reason=%s last_termination_exitcode=%d",
+		podName, phase, restartCount, lastReason, lastExit)
+
+	return CheckHostResult{
+		ServerID: target,
+		Runtime:  "kubectl", // the definitive "this is K8s, not docker/podman/systemd" signal
+		Status:   status,
+		Details:  details,
+	}, nil
 }
 
 // ── register_infra_db ─────────────────────────────────────────────────────────
@@ -352,6 +463,16 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 	host, err := resolveHost(args.Target)
 	if err != nil {
 		return CheckHostResult{}, err
+	}
+
+	// Kubernetes-resolved hosts have no docker/podman/systemd runtime to
+	// inspect locally — the workload runs in a pod on a cluster. Check this
+	// FIRST: containerRuntimeBin only distinguishes docker/podman from ""
+	// (systemd), and resolveHost never populates Runtime on the K8s path —
+	// without this branch a K8s-resolved host would silently fall into the
+	// systemd path below with an empty SystemdUnit.
+	if host.K8sPodSelector != "" {
+		return checkHostK8s(ctx, args.Target, host)
 	}
 
 	runtime, err := containerRuntimeBin(host)
