@@ -98,7 +98,18 @@ func TestMain(m *testing.M) {
 	// as discovery succeeds.
 	stubAgent := newStubAgentServer()
 	gwProc := exec.Command(gatewayBin)
-	gwProc.Env = append(os.Environ(),
+	// TestIntegration_GatewayQuery_UnmatchedQuery_FallsThroughToLLMRouting
+	// depends on this gateway process having NO LLM configured, so that
+	// routeWithLLM fails immediately with 503 rather than actually routing.
+	// Appending os.Environ() inherits the parent shell's full environment —
+	// if the developer running `go test`/`make integration` happens to have
+	// HELPDESK_MODEL_VENDOR/HELPDESK_API_KEY exported (common while
+	// dogfooding this same product live), the LLM would be unexpectedly
+	// configured and the test's distinguishing signal breaks. Strip the LLM
+	// config vars explicitly rather than relying on their ambient absence —
+	// appending "KEY=" overrides after os.Environ() is not a safe substitute,
+	// since exec.Cmd does not guarantee "last duplicate wins" behavior.
+	gwProc.Env = append(envWithout(os.Environ(), "HELPDESK_MODEL_VENDOR", "HELPDESK_MODEL_NAME", "HELPDESK_API_KEY"),
 		"HELPDESK_GATEWAY_ADDR=localhost:19910",
 		"HELPDESK_AGENT_URLS="+stubAgent.URL,
 		"HELPDESK_DISCOVERY_TIMEOUT=5s",
@@ -182,6 +193,25 @@ func startAuditdWithPolicy(t *testing.T, policyPath string) {
 	if !waitForReady(auditdAddr2+"/health", 10*time.Second) {
 		t.Fatal("policy auditd did not become ready within 10s")
 	}
+}
+
+// envWithout returns env with any entries for the given keys removed —
+// used to guarantee a subprocess does NOT inherit specific ambient
+// environment variables from the parent shell, regardless of what else is
+// appended afterward.
+func envWithout(env []string, keys ...string) []string {
+	strip := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		strip[k] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if !strip[name] {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // waitForReady polls url until it returns 200 or timeout elapses.
