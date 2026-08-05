@@ -103,7 +103,7 @@ Every Playbook carries two classes of fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `problem_class` | string | `performance` \| `availability` \| `capacity` \| `data_integrity` \| `security` |
-| `symptoms` | []string | Observable indicators that should trigger this Playbook. For `entry_point: true` playbooks, these are also matched against free-text queries to `POST /api/v1/query` (no `agent` specified) for automatic playbook selection — a strong keyword match selects the playbook directly; otherwise an LLM routing call considers the same symptom text. See [API.md](API.md#post-apiv1query). Write symptom text as a human would describe the problem, not as internal jargon — that's what the matcher and the LLM both see. |
+| `symptoms` | []string | Observable indicators that should trigger this Playbook. For `entry_point: true` playbooks, these are also matched against free-text queries to `POST /api/v1/query` (no `agent` specified) for automatic playbook selection — a strong keyword match selects the playbook directly; otherwise an LLM routing call considers the same symptom text. See [Automatic routing and playbook selection](API.md#automatic-routing-and-playbook-selection). Write symptom text as a human would describe the problem, not as internal jargon — that's what the matcher and the LLM both see. |
 | `guidance` | string | Expert reasoning injected into the planner prompt at run time |
 | `escalation` | []string | Conditions under which the agent must stop and escalate to a human |
 | `related_playbooks` | []string | `pb_*` IDs of related Playbooks |

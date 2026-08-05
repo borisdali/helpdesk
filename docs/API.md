@@ -185,7 +185,9 @@ Send a natural-language question to an agent.
 | `message` | string | yes | The question or instruction (`query` is accepted as an alias) |
 | `context_id` | string | no | Resume an existing agent session. Pass the `context_id` returned by a previous response to continue a multi-turn conversation. Omit (or pass `""`) to start a new session. |
 
-**Automatic routing and playbook selection** (when `agent` is omitted): the gateway tries three tiers, in order, stopping at the first that applies —
+#### Automatic routing and playbook selection
+
+When `agent` is omitted, the gateway tries three tiers, in order, stopping at the first that applies —
 1. **Keyword pre-filter** — the message is matched against the `symptoms` list of every active, `entry_point: true` triage playbook. A strong, unambiguous match (see `matchPlaybookByKeywords` in `cmd/gateway/router.go`) selects that playbook directly, with no LLM call at all.
 2. **LLM routing** — if no keyword match is strong enough, an LLM call picks the best agent for the message (requires `HELPDESK_MODEL_VENDOR`/`HELPDESK_MODEL_NAME`/`HELPDESK_API_KEY`) and may *also* select a playbook from the same candidate list, if the message clearly matches one.
 3. **Direct agent proxy** — if neither tier selects a playbook, the request proxies straight to the LLM-chosen agent, exactly as routing worked before playbook selection existed.
