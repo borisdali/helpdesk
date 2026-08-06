@@ -1766,7 +1766,7 @@ func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries 
 			w.Write([]byte("[]")) //nolint:errcheck
 		}
 	}))
-	t.Cleanup(m.Server.Close)
+	t.Cleanup(m.Close)
 	return m
 }
 
