@@ -249,13 +249,15 @@ func TestFaultInjection(t *testing.T) {
 			// Save original conn string for config-override failures.
 			origConn := cfg.ConnStr
 
-			// 1. Inject failure.
-			t.Log("Injecting failure...")
-			if err := injector.Inject(ctx, f); err != nil {
-				t.Fatalf("Injection failed: %v", err)
-			}
-
-			// 2. Ensure teardown happens.
+			// 1. Ensure teardown happens — registered BEFORE Inject runs, not
+			// after, so a t.Fatalf on injection failure (which calls
+			// runtime.Goexit and unwinds the goroutine immediately) still
+			// runs teardown for whatever the failed injection already
+			// created. A defer registered after the Inject call is never
+			// reached at all when Inject itself fails, silently stranding
+			// resources — confirmed live: a failed k8s-node-memory-pressure
+			// injection left a noisy-neighbor pod running on the cluster for
+			// 36+ minutes until manually deleted.
 			defer func() {
 				t.Log("Tearing down...")
 				cfg.ConnStr = origConn
@@ -263,6 +265,12 @@ func TestFaultInjection(t *testing.T) {
 					t.Errorf("Teardown failed: %v", err)
 				}
 			}()
+
+			// 2. Inject failure.
+			t.Log("Injecting failure...")
+			if err := injector.Inject(ctx, f); err != nil {
+				t.Fatalf("Injection failed: %v", err)
+			}
 
 			// 3. Send prompt to agent (or gateway playbook when ViaGateway is set).
 			t.Log("Sending prompt to agent...")

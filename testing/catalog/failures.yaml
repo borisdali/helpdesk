@@ -1938,7 +1938,12 @@ failures:
           sleep 5
         done
 
-        kubectl $CTX_ARG delete pod -l app=noisy-neighbor -n "$NS" --ignore-not-found --wait=false
+        # Best-effort — the separate teardown phase does this exact same
+        # idempotent delete regardless of inject's outcome, so a transient
+        # API server hiccup here (e.g. TLS handshake timeout) must not abort
+        # the whole script under `set -e` and discard a run that otherwise
+        # completed successfully after up to ~20+ minutes of waiting.
+        kubectl $CTX_ARG delete pod -l app=noisy-neighbor -n "$NS" --ignore-not-found --wait=false || true
 
         [ -z "$EVICTED" ] && { echo "TIMEOUT: $POD_NAME was not evicted within budget" >&2; exit 1; }
 

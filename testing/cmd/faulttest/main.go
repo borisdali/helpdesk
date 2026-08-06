@@ -441,6 +441,15 @@ func cmdRun(args []string) {
 					Error:       fmt.Sprintf("injection failed: %v", err),
 				})
 				cfg.ConnStr = origConn
+				// Tear down whatever the failed injection already created —
+				// an injection can fail partway through (e.g. a resource was
+				// created, then a later step in the same script failed) and
+				// without this, that resource is silently stranded. Confirmed
+				// live: a failed k8s-node-memory-pressure injection left a
+				// noisy-neighbor pod running on the cluster for 36+ minutes.
+				if tdErr := injector.Teardown(ctx, f); tdErr != nil {
+					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", tdErr)
+				}
 				break // abort remaining reps for this fault
 			}
 
