@@ -1849,6 +1849,21 @@ failures:
         NODE=$(kubectl $CTX_ARG get pod postgres-0 -n "$NS" -o jsonpath='{.spec.nodeName}')
         [ -z "$NODE" ] && { echo "Could not resolve postgres-0's node" >&2; exit 1; }
 
+        # Pre-flight: this fault requires the node's kubelet to have a
+        # memory-based eviction-hard threshold configured (see this fault's
+        # `prerequisites` text). Without it, no eviction will ever fire —
+        # fail fast with an actionable message instead of deploying the
+        # noisy pod and polling for up to 15 minutes for an event that
+        # provably cannot happen on this cluster.
+        EVICTION_HARD=$(kubectl $CTX_ARG get --raw "/api/v1/nodes/$NODE/proxy/configz" 2>/dev/null \
+          | jq -r '.kubeletconfig.evictionHard["memory.available"] // empty' 2>/dev/null)
+        if [ -z "$EVICTION_HARD" ]; then
+          echo "SKIP: node $NODE has no memory.available eviction-hard threshold configured." >&2
+          echo "This fault cannot trigger a clean kubelet eviction on this cluster — see this fault's prerequisites." >&2
+          echo "Fix (minikube): minikube start --extra-config=kubelet.eviction-hard=\"memory.available<10%\"" >&2
+          exit 1
+        fi
+
         # allocatable.memory is usually reported with a Ki suffix, but some
         # kubelet versions report a plain byte count with no suffix — handle both.
         RAW=$(kubectl $CTX_ARG get node "$NODE" -o jsonpath='{.status.allocatable.memory}')

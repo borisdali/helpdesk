@@ -139,7 +139,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.SysadminAgentURL, "sysadmin-agent", "", "Sysadmin agent A2A URL")
 	fs.StringVar(&cfg.SysadminAPIKey, "sysadmin-api-key", os.Getenv("FAULTTEST_SYSADMIN_API_KEY"), "Bearer token for sysadmin agent /tool/ endpoint (required when HELPDESK_USERS_FILE is set on the sysadmin agent)")
 	fs.StringVar(&cfg.OrchestratorURL, "orchestrator", "", "Orchestrator agent A2A URL")
-	fs.StringVar(&cfg.KubeContext, "context", "", "Kubernetes context")
+	fs.StringVar(&cfg.KubeContext, "context", os.Getenv("FAULTTEST_KUBE_CONTEXT"), "Kubernetes context")
 
 	var categories, ids string
 	fs.StringVar(&categories, "categories", "", "Comma-separated categories to test (database,kubernetes,compound)")
