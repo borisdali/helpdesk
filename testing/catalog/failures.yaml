@@ -1917,8 +1917,18 @@ failures:
 
         # Ramp is deliberately gentle (16Mi/3s) — empirically confirmed to
         # produce a clean kubelet Evicted event rather than a raw OOM kill.
-        # Reaching the threshold takes roughly 10-15 minutes at this rate.
-        DEADLINE=$(( $(date +%s) + 900 ))
+        # The deadline scales with the actual fill time this node's
+        # TARGET_MI requires at that fixed rate, plus a buffer for kubelet's
+        # eviction manager to notice and act — a fixed assumption (e.g. 900s)
+        # only holds on nodes with roughly the allocatable memory this fault
+        # was originally tuned against; larger nodes need proportionally
+        # longer to fill the same *relative* threshold at a fixed *absolute*
+        # rate. Speeding up the ramp instead is NOT a safe substitute — a
+        # faster rate risks a raw OOM kill rather than the clean kubelet
+        # eviction this fault is specifically testing for.
+        FILL_SECS=$(( (TARGET_MI / 16) * 3 ))
+        BUFFER_SECS=300
+        DEADLINE=$(( $(date +%s) + FILL_SECS + BUFFER_SECS ))
         EVICTED=""
         while [ "$(date +%s)" -lt "$DEADLINE" ]; do
           EVICTED=$(kubectl $CTX_ARG get events -n "$NS" \

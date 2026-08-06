@@ -141,9 +141,10 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.OrchestratorURL, "orchestrator", "", "Orchestrator agent A2A URL")
 	fs.StringVar(&cfg.KubeContext, "context", os.Getenv("FAULTTEST_KUBE_CONTEXT"), "Kubernetes context")
 
-	var categories, ids string
+	var categories, ids, excludeIDs string
 	fs.StringVar(&categories, "categories", "", "Comma-separated categories to test (database,kubernetes,compound)")
 	fs.StringVar(&ids, "ids", "", "Comma-separated failure IDs to test")
+	fs.StringVar(&excludeIDs, "exclude-ids", "", "Comma-separated failure IDs to skip (denylist, applied after --categories/--ids)")
 
 	// External PG mode.
 	fs.BoolVar(&cfg.External, "external", false, "Only run external_compat faults using libpq (no Docker/OS access needed)")
@@ -215,6 +216,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	}
 	if ids != "" {
 		cfg.FailureIDs = strings.Split(ids, ",")
+	}
+	if excludeIDs != "" {
+		cfg.ExcludeIDs = strings.Split(excludeIDs, ",")
 	}
 
 	// Auto-detect filesystem mode: if the catalog file exists on disk, use it.

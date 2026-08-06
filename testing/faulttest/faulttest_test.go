@@ -19,6 +19,10 @@
 //   - FAULTTEST_KUBE_CONTEXT: Kubernetes context (optional)
 //   - FAULTTEST_CATEGORIES: Comma-separated categories to test (optional)
 //   - FAULTTEST_IDS: Comma-separated failure IDs to test (optional)
+//   - FAULTTEST_EXCLUDE_IDS: Comma-separated failure IDs to skip (optional) —
+//     a denylist, applied after FAULTTEST_CATEGORIES/FAULTTEST_IDS; useful
+//     for excluding one slow fault from a routine run without having to
+//     enumerate every other fault ID
 //   - FAULTTEST_GATEWAY_URL: Gateway base URL (e.g., http://localhost:8080)
 //   - FAULTTEST_VIA_GATEWAY: Set to "true" to route diagnosis through gateway playbooks
 //   - FAULTTEST_APPROVAL_MODE: Override playbook approval_mode (use "force" for automated runs)
@@ -73,7 +77,7 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		ApprovalMode:     approvalMode,
 		RemediateEnabled: os.Getenv("FAULTTEST_REMEDIATE") == "true",
 		// Audit service — enables structured tool evidence and emit-and-wait step approvals.
-		AuditURL:  os.Getenv("FAULTTEST_AUDIT_URL"),
+		AuditURL: os.Getenv("FAULTTEST_AUDIT_URL"),
 		// Operator identity sent as X-User on gateway requests.
 		OperatorID: os.Getenv("FAULTTEST_OPERATOR"),
 		// Gate and emit-and-wait options (K8s/Docker safe; safe with approval_mode=force).
@@ -86,6 +90,9 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 	}
 	if ids := os.Getenv("FAULTTEST_IDS"); ids != "" {
 		cfg.FailureIDs = strings.Split(ids, ",")
+	}
+	if excludeIDs := os.Getenv("FAULTTEST_EXCLUDE_IDS"); excludeIDs != "" {
+		cfg.ExcludeIDs = strings.Split(excludeIDs, ",")
 	}
 
 	// Find the testing directory and resolve paths relative to it.

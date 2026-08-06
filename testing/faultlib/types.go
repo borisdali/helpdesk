@@ -160,6 +160,13 @@ type HarnessConfig struct {
 	KubeContext      string
 	Categories       []string
 	FailureIDs       []string
+	// ExcludeIDs removes specific failure IDs from the run, applied after
+	// Categories/FailureIDs filtering. Unlike FailureIDs (an allowlist),
+	// this is a denylist — useful for "run everything except this one slow
+	// fault" without having to enumerate every other fault ID, which would
+	// silently drift out of date whenever a new fault is added to the
+	// catalog.
+	ExcludeIDs []string
 
 	// External enables external PG mode: only external_compat faults are run,
 	// and ExternalInject/ExternalTeardown specs are used instead of Inject/Teardown.
