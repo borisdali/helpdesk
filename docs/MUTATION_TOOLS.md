@@ -37,6 +37,7 @@ databases or your infra.
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
 4. [Safeguards and Automatic Recovery](#4-safeguards-and-automatic-recovery)
 5. [Delegation Verification](#5-delegation-verification-zero-trust-in-agent-outcome)
+   - [Target-Scope Drift Detection (5.6)](#56-target-scope-drift-detection-checktargetscope)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -836,6 +837,74 @@ This prevents the sub-agent from re-asking for confirmation in a loop (see
 
 For the investigation workflow and root-cause guide, see
 [JOURNEYS.md — §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection).
+
+---
+
+### 5.6 Target-Scope Drift Detection (`checkTargetScope`)
+
+§5's delegation verification answers "did the agent call a tool of the
+right *class*?" It does not ask whether that tool was pointed at the
+*right target*. An agent can genuinely execute `check_connection` or
+`get_session_info` — no fabrication, no missing audit event — against a
+server that has nothing to do with the incident, and delegation
+verification will report a clean, verified result.
+
+`checkTargetScope` (`cmd/gateway/playbooks.go`) closes that specific gap
+for playbook runs. After an agent-mode playbook run completes, it:
+
+1. Fetches every `tool_execution` audit event recorded for the run's
+   `trace_id`.
+2. Reads the `connection_string` parameter off each tool call.
+3. Compares each one against the `connection_string` the playbook run
+   was actually invoked with (`intendedTarget`), resolving short server
+   names (e.g. `"test-pg"`) to their canonical connection string via
+   infra config first, so a server referenced by name in the request and
+   by full DSN in the tool call isn't flagged as a false positive.
+4. Returns the distinct set of connection strings the agent used that
+   don't match, sorted, as `target_drift` in the run's HTTP response.
+
+This check is **unconditional** — it runs before the crystal-ball branch
+in `handlePlaybookRunAsAgent`, so it fires the same way whether or not
+playbook guidance and escalation chaining are in effect. It is purely an
+audit-trail read; nothing about it depends on, or can be influenced by,
+the agent's own response text.
+
+**Example** (crystal-ball mode, `db-wal-disk-full-k8s` fault): the agent
+was asked to investigate `host=127.0.0.1 port=5433 ...`, an intentionally
+unregistered target. Its final answer confidently diagnosed a "port
+misconfiguration" and recommended connecting to port `15432` instead —
+built entirely from real data it pulled from an unrelated database it
+found by name in infra config. `target_drift` on that same response:
+
+```json
+"target_drift": [
+  "host=host.docker.internal port=15432 dbname=testdb user=postgres password=***",
+  "host=localhost port=15432 dbname=testdb user=postgres password=***"
+]
+```
+
+The mismatch between the confident text and the target the agent actually
+queried was fully captured, automatically, in the same API call — no
+manual comparison of tool logs against the model's prose was needed to
+catch it.
+
+**Limitation — not persisted.** Unlike §5's `delegation_verification`,
+`target_drift` is not written to the audit store and does not elevate a
+journey's `outcome`. It exists only in the extra fields of the triggering
+run's own HTTP response (`extra["target_drift"]`). There is currently no
+`GET /v1/journeys?outcome=...` equivalent for it — a drifted run that
+nobody happens to inspect the raw response of leaves no queryable trace.
+Promoting it to a persisted audit event with journey-outcome integration,
+mirroring `unverified_claim`, is a known follow-up (tracked, not yet
+scheduled).
+
+**Test coverage**: `cmd/gateway/playbook_run_test.go` —
+`TestCheckTargetScope_NoDrift`, `TestCheckTargetScope_Drift`,
+`TestCheckTargetScope_ShortNameNoInfra_Skipped`,
+`TestCheckTargetScope_ResolvedViaInfraConfig`,
+`TestCheckTargetScope_ResolvedPlusUnintendedServer`,
+`TestCheckTargetScope_FullConnStringMatchesShortName`,
+`TestCheckTargetScope_EmptyIntendedTarget`, `TestCheckTargetScope_NoAuditURL`.
 
 ---
 
