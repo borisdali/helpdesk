@@ -257,30 +257,47 @@ one assembles the unified narrative (triage → gate → escalation hops → rem
 `escalations[]` holds every intermediate hop reached via `ESCALATE_TO` (further diagnosis,
 possibly on a different agent); `remediation` is populated only once the chain reaches an explicit
 `TRANSITION_TO` — it can be `null` even when escalation hops exist, if the incident hasn't been
-remediated yet. See [JOURNEYS.md §7.2](JOURNEYS.md#72-incident--journey-cross-links) for the full
-walkthrough, including how this differs from the *live* `chain[]` array returned by
+remediated yet. `escalations[]` is not limited to one hop — a chain can cross multiple agent
+domains before it reaches remediation. See [JOURNEYS.md §7.2](JOURNEYS.md#72-incident--journey-cross-links)
+for the full walkthrough, including how this differs from the *live* `chain[]` array returned by
 `POST /api/v1/fleet/playbooks/{id}/run`.
 
+**Multi-hop example** — a DB-shaped symptom (connection refused) that turns out to be a
+Kubernetes-managed pod crash, crossing three agents (database → sysadmin → k8s) before
+remediation:
+
 ```bash
-curl -s http://localhost:8080/api/v1/incidents/plr_t1 \
+curl -s http://localhost:8080/api/v1/incidents/plr_h1 \
   | jq '{triage, escalations, remediation, journeys}'
 ```
 
 ```json
 {
-  "triage": {"run_id": "plr_t1", "playbook": "pbs_connection_triage"},
+  "triage": {"run_id": "plr_h1", "playbook": "pbs_db_restart_triage",
+             "findings": "Connection refused; no infra entry for this target"},
   "escalations": [
-    {"run_id": "plr_e1", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "transitioned",
-     "findings": "dmesg shows OOM-killer event"}
+    {"run_id": "plr_h2", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "escalated",
+     "escalated_to": "pbs_k8s_pod_crash_triage",
+     "findings": "check_host runtime=kubectl — target is Kubernetes-managed, not Docker/Podman"},
+    {"run_id": "plr_h3", "playbook": "pbs_k8s_pod_crash_triage", "outcome": "transitioned",
+     "findings": "exitcode=0, reason=Completed — on-disk log shows PANIC + controlled shutdown (WAL disk full)"}
   ],
-  "remediation": {"run_id": "plr_r1", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved"},
+  "remediation": {"run_id": "plr_h4", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved"},
   "journeys": [
-    {"phase": "triage",       "trace_id": "tr_9a4f2b1e"},
-    {"phase": "escalation:1", "trace_id": "tr_5c1d8f22"},
-    {"phase": "remediation",  "trace_id": "tr_c8d3e7f2"}
+    {"phase": "triage",       "trace_id": "tr_h1"},
+    {"phase": "escalation:1", "trace_id": "tr_h2"},
+    {"phase": "escalation:2", "trace_id": "tr_h3"},
+    {"phase": "remediation",  "trace_id": "tr_h4"}
   ]
 }
 ```
+
+Each escalation hop's `outcome` is either `"escalated"` (handed off again, `escalated_to` names
+the next playbook) or `"transitioned"` (handed off to remediation within the same investigation).
+`journeys[]` numbers escalation phases in hop order (`escalation:1`, `escalation:2`, ...) so a
+chain of any length maps cleanly to its audit trail — see
+`TestHandleGetIncident_FourHopTwoEscalations` (`cmd/gateway/incident_narrative_test.go`) for the
+full behavior this example is drawn from.
 
 Returns `404` if the run ID is not found.
 
